@@ -133,7 +133,9 @@ impl AgentLauncher for ClaudeCodeLauncher {
             .env_remove("CLAUDE_CODE")
             .env_remove("CLAUDECODE")
             // Tell edda hooks to use conductor-optimized injection
-            .env("EDDA_CONDUCTOR_MODE", "1");
+            .env("EDDA_CONDUCTOR_MODE", "1")
+            // Propagate session_id so agent-spawned `edda decide` etc. can resolve identity
+            .env("EDDA_SESSION_ID", session_id);
 
         // Optional: per-phase budget
         if let Some(budget) = phase.budget_usd {

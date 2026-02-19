@@ -588,6 +588,55 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
     peers
 }
 
+/// Infer the current session from heartbeat files.
+///
+/// If exactly one non-stale session exists for the project, returns
+/// `Some((session_id, label))`. Otherwise returns `None` (ambiguous or no context).
+///
+/// Used by CLI commands (`edda decide`, etc.) to resolve session identity
+/// when `EDDA_SESSION_ID` env var is not set.
+pub fn infer_session_id(project_id: &str) -> Option<(String, String)> {
+    let state_dir = edda_store::project_dir(project_id).join("state");
+    let stale_threshold = stale_secs();
+    let now = parse_rfc3339_to_epoch(&now_rfc3339()).unwrap_or(0);
+
+    let entries = match fs::read_dir(&state_dir) {
+        Ok(e) => e,
+        Err(_) => return None,
+    };
+
+    let mut active: Vec<(String, String)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("session.") || !name.ends_with(".json") {
+            continue;
+        }
+
+        let content = match fs::read_to_string(entry.path()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let hb: SessionHeartbeat = match serde_json::from_str(&content) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+
+        let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
+        let age = if now > hb_epoch { now - hb_epoch } else { 0 };
+
+        if age <= stale_threshold {
+            active.push((hb.session_id, hb.label));
+        }
+    }
+
+    if active.len() == 1 {
+        Some(active.remove(0))
+    } else {
+        None
+    }
+}
+
 // ── Directive Renderer ──
 
 /// Render the full coordination protocol section for SessionStart injection.
@@ -1302,6 +1351,108 @@ mod tests {
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── infer_session_id tests ──
+
+    #[test]
+    fn infer_session_no_heartbeats() {
+        let pid = "test_infer_none";
+        let _ = edda_store::ensure_dirs(pid);
+
+        let result = infer_session_id(pid);
+        assert!(result.is_none(), "no heartbeats → None");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn infer_session_one_active() {
+        let pid = "test_infer_one";
+        let _ = edda_store::ensure_dirs(pid);
+
+        write_heartbeat(pid, "sess-abc", &SessionSignals::default(), Some("auth"));
+
+        let result = infer_session_id(pid);
+        assert_eq!(result, Some(("sess-abc".into(), "auth".into())));
+
+        remove_heartbeat(pid, "sess-abc");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn infer_session_two_active_is_ambiguous() {
+        let pid = "test_infer_two";
+        let _ = edda_store::ensure_dirs(pid);
+
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+
+        let result = infer_session_id(pid);
+        assert!(result.is_none(), "two active → ambiguous → None");
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn infer_session_one_active_one_stale() {
+        let pid = "test_infer_stale";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Write one fresh heartbeat
+        write_heartbeat(pid, "fresh", &SessionSignals::default(), Some("frontend"));
+
+        // Write a stale heartbeat by manually setting old timestamp
+        let stale_path = heartbeat_path(pid, "stale");
+        let stale_hb = serde_json::json!({
+            "session_id": "stale",
+            "started_at": "2020-01-01T00:00:00Z",
+            "last_heartbeat": "2020-01-01T00:00:00Z",
+            "label": "old",
+            "focus_files": [],
+            "active_tasks": [],
+            "files_modified_count": 0,
+            "total_edits": 0,
+            "recent_commits": []
+        });
+        let _ = fs::create_dir_all(stale_path.parent().unwrap());
+        let _ = fs::write(&stale_path, serde_json::to_string_pretty(&stale_hb).unwrap());
+
+        let result = infer_session_id(pid);
+        assert_eq!(result, Some(("fresh".into(), "frontend".into())));
+
+        remove_heartbeat(pid, "fresh");
+        remove_heartbeat(pid, "stale");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn infer_session_only_stale() {
+        let pid = "test_infer_all_stale";
+        let _ = edda_store::ensure_dirs(pid);
+
+        let stale_path = heartbeat_path(pid, "old-session");
+        let stale_hb = serde_json::json!({
+            "session_id": "old-session",
+            "started_at": "2020-01-01T00:00:00Z",
+            "last_heartbeat": "2020-01-01T00:00:00Z",
+            "label": "old",
+            "focus_files": [],
+            "active_tasks": [],
+            "files_modified_count": 0,
+            "total_edits": 0,
+            "recent_commits": []
+        });
+        let _ = fs::create_dir_all(stale_path.parent().unwrap());
+        let _ = fs::write(&stale_path, serde_json::to_string_pretty(&stale_hb).unwrap());
+
+        let result = infer_session_id(pid);
+        assert!(result.is_none(), "only stale heartbeats → None");
+
+        remove_heartbeat(pid, "old-session");
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }

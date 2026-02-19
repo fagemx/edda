@@ -51,6 +51,9 @@ enum Command {
         /// Reason for the decision
         #[arg(long)]
         reason: Option<String>,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Query workspace decisions by keyword
     Query {
@@ -333,6 +336,9 @@ enum BridgeClaudeCmd {
         /// File path patterns this scope covers (e.g. "src/auth/*")
         #[arg(long)]
         paths: Vec<String>,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Record a binding decision for all sessions
     Decide {
@@ -341,6 +347,9 @@ enum BridgeClaudeCmd {
         /// Reason for the decision
         #[arg(long)]
         reason: Option<String>,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Send a request to another session
     Request {
@@ -348,6 +357,9 @@ enum BridgeClaudeCmd {
         to: String,
         /// Request message
         message: String,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
     },
 }
 
@@ -682,7 +694,7 @@ fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Command::Init => cmd_init::execute(&repo_root),
         Command::Note { text, role, tags } => cmd_note::execute(&repo_root, &text, &role, &tags),
-        Command::Decide { decision, reason } => cmd_bridge::decide(&repo_root, &decision, reason.as_deref()),
+        Command::Decide { decision, reason, session } => cmd_bridge::decide(&repo_root, &decision, reason.as_deref(), session.as_deref()),
         Command::Query { query, limit, json, all } => cmd_query::execute(&repo_root, &query, limit, json, all),
         Command::Run { argv } => cmd_run::execute(&repo_root, &argv),
         Command::Status => cmd_status::execute(&repo_root),
@@ -796,14 +808,14 @@ fn main() -> anyhow::Result<()> {
                     cmd_bridge::digest(&repo_root, session.as_deref(), all)
                 }
                 BridgeClaudeCmd::Peers => cmd_bridge::peers(&repo_root),
-                BridgeClaudeCmd::Claim { label, paths } => {
-                    cmd_bridge::claim(&repo_root, &label, &paths)
+                BridgeClaudeCmd::Claim { label, paths, session } => {
+                    cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref())
                 }
-                BridgeClaudeCmd::Decide { decision, reason } => {
-                    cmd_bridge::decide(&repo_root, &decision, reason.as_deref())
+                BridgeClaudeCmd::Decide { decision, reason, session } => {
+                    cmd_bridge::decide(&repo_root, &decision, reason.as_deref(), session.as_deref())
                 }
-                BridgeClaudeCmd::Request { to, message } => {
-                    cmd_bridge::request(&repo_root, &to, &message)
+                BridgeClaudeCmd::Request { to, message, session } => {
+                    cmd_bridge::request(&repo_root, &to, &message, session.as_deref())
                 }
             },
             BridgeCmd::Openclaw { cmd } => match cmd {

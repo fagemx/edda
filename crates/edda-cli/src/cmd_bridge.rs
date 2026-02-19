@@ -122,9 +122,9 @@ pub fn peers(repo_root: &Path) -> anyhow::Result<()> {
 }
 
 /// `edda bridge claude claim <label>` — claim a coordination scope
-pub fn claim(repo_root: &Path, label: &str, paths: &[String]) -> anyhow::Result<()> {
+pub fn claim(repo_root: &Path, label: &str, paths: &[String], cli_session: Option<&str>) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
-    let session_id = resolve_session_id(label);
+    let (session_id, _) = resolve_session_id(cli_session, &project_id, label);
 
     edda_bridge_claude::peers::write_claim(&project_id, &session_id, label, paths);
     println!("Claimed scope: {label}");
@@ -140,7 +140,7 @@ pub fn claim(repo_root: &Path, label: &str, paths: &[String]) -> anyhow::Result<
 /// Writes to both:
 /// 1. Peers `coordination.jsonl` — real-time broadcast to active peers
 /// 2. Workspace ledger — permanent record visible to all sessions
-pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>) -> anyhow::Result<()> {
+pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>, cli_session: Option<&str>) -> anyhow::Result<()> {
     let (key, value) = decision
         .split_once('=')
         .ok_or_else(|| anyhow::anyhow!("decision must be in key=value format (e.g. \"auth.method=JWT RS256\")"))?;
@@ -149,8 +149,7 @@ pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>) -> anyhow:
     let value = value.trim();
 
     let project_id = edda_store::project_id(repo_root);
-    let session_id = resolve_session_id("cli");
-    let label = std::env::var("EDDA_SESSION_LABEL").unwrap_or_else(|_| "cli".to_string());
+    let (session_id, label) = resolve_session_id(cli_session, &project_id, "cli");
 
     // 1. Broadcast to peers (real-time)
     edda_bridge_claude::peers::write_binding(&project_id, &session_id, &label, key, value);
@@ -167,7 +166,9 @@ pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>) -> anyhow:
     let parent_hash = ledger.last_event_hash()?;
 
     // Build event with structured decision fields alongside text
-    let mut event = edda_core::event::new_note_event(&branch, parent_hash.as_deref(), "system", &text, &tags)?;
+    // Use resolved label as actor (not hardcoded "system")
+    let actor = if session_id.starts_with("cli-") { "system" } else { &label };
+    let mut event = edda_core::event::new_note_event(&branch, parent_hash.as_deref(), actor, &text, &tags)?;
 
     // Inject structured decision object into payload
     let decision_obj = match reason {
@@ -198,10 +199,9 @@ pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>) -> anyhow:
 }
 
 /// `edda bridge claude request <to> <message>` — send cross-agent request
-pub fn request(repo_root: &Path, to: &str, message: &str) -> anyhow::Result<()> {
+pub fn request(repo_root: &Path, to: &str, message: &str, cli_session: Option<&str>) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
-    let session_id = resolve_session_id("cli");
-    let from_label = std::env::var("EDDA_SESSION_LABEL").unwrap_or_else(|_| "cli".to_string());
+    let (session_id, from_label) = resolve_session_id(cli_session, &project_id, "cli");
 
     edda_bridge_claude::peers::write_request(&project_id, &session_id, &from_label, to, message);
     println!("Request sent to [{to}]: \"{message}\"");
@@ -246,12 +246,43 @@ fn find_prior_decision(
         })
 }
 
-/// Resolve session ID from env or generate a deterministic placeholder.
-fn resolve_session_id(fallback_label: &str) -> String {
-    std::env::var("EDDA_SESSION_ID")
+/// Resolve session identity via 4-tier fallback:
+///
+/// 1. `--session` CLI flag (explicit override)
+/// 2. `EDDA_SESSION_ID` env var (conductor path, user override)
+/// 3. Heartbeat inference (auto-detect sole active session)
+/// 4. `"cli-{fallback_label}"` (genuine CLI usage)
+fn resolve_session_id(
+    cli_session: Option<&str>,
+    project_id: &str,
+    fallback_label: &str,
+) -> (String, String) {
+    let env_label = std::env::var("EDDA_SESSION_LABEL")
         .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("cli-{fallback_label}"))
+        .filter(|v| !v.is_empty());
+
+    // Tier 1: explicit --session flag
+    if let Some(sid) = cli_session.filter(|s| !s.is_empty()) {
+        let label = env_label.unwrap_or_else(|| fallback_label.to_string());
+        return (sid.to_string(), label);
+    }
+
+    // Tier 2: EDDA_SESSION_ID env var
+    if let Ok(sid) = std::env::var("EDDA_SESSION_ID") {
+        if !sid.is_empty() {
+            let label = env_label.unwrap_or_else(|| fallback_label.to_string());
+            return (sid, label);
+        }
+    }
+
+    // Tier 3: heartbeat inference (sole active session)
+    if let Some((sid, label)) = edda_bridge_claude::peers::infer_session_id(project_id) {
+        return (sid, label);
+    }
+
+    // Tier 4: fallback
+    let label = env_label.unwrap_or_else(|| fallback_label.to_string());
+    (format!("cli-{fallback_label}"), label)
 }
 
 /// `edda bridge claude digest --session <id>` or `--all`
