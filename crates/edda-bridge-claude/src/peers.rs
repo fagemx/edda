@@ -592,7 +592,7 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
 
 /// Render the full coordination protocol section for SessionStart injection.
 /// Returns None if no active peers (Solo mode).
-pub(crate) fn render_coordination_protocol(
+pub fn render_coordination_protocol(
     project_id: &str,
     session_id: &str,
     _cwd: &str,

@@ -678,17 +678,19 @@ pub fn show(repo_root: &Path, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn list(repo_root: &Path) -> anyhow::Result<()> {
+pub fn list(repo_root: &Path, json: bool) -> anyhow::Result<()> {
     let ledger = Ledger::open(repo_root)?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let dir = &ledger.paths.drafts_dir;
     if !dir.exists() {
-        println!("No drafts.");
+        if !json {
+            println!("No drafts.");
+        }
         return Ok(());
     }
 
-    let mut entries: Vec<(String, String, String, String, String)> = Vec::new();
+    let mut drafts: Vec<CommitDraftV1> = Vec::new();
 
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -698,39 +700,79 @@ pub fn list(repo_root: &Path) -> anyhow::Result<()> {
         }
         let content = std::fs::read_to_string(entry.path())?;
         if let Ok(draft) = serde_json::from_str::<CommitDraftV1>(&content) {
-            entries.push((
-                draft.draft_id,
-                draft.created_at,
-                draft.branch,
-                draft.title,
-                draft.status,
-            ));
+            drafts.push(draft);
         }
     }
 
-    if entries.is_empty() {
-        println!("No drafts.");
+    if drafts.is_empty() {
+        if !json {
+            println!("No drafts.");
+        }
         return Ok(());
     }
 
-    entries.sort_by(|a, b| a.1.cmp(&b.1));
-    for (id, ts, branch, title, status) in &entries {
-        println!("- {id} [{ts}] {branch} ({status}) — {title}");
+    drafts.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    if json {
+        for draft in &drafts {
+            let obj = serde_json::json!({
+                "draft_id": draft.draft_id,
+                "created_at": draft.created_at,
+                "branch": draft.branch,
+                "title": draft.title,
+                "status": draft.status,
+                "purpose": draft.purpose,
+                "labels": draft.labels,
+                "evidence_count": draft.evidence.len(),
+                "policy_require_approval": draft.policy_require_approval,
+                "route_rule_id": draft.route_rule_id,
+                "stages": draft.stages.iter().map(|s| serde_json::json!({
+                    "stage_id": s.stage_id,
+                    "role": s.role,
+                    "status": s.status,
+                    "min_approvals": s.min_approvals,
+                    "approved_by": s.approved_by,
+                    "assignees": s.assignees,
+                })).collect::<Vec<_>>(),
+                "approvals": draft.approvals.iter().map(|a| serde_json::json!({
+                    "actor": a.actor,
+                    "decision": a.decision,
+                    "ts": a.ts,
+                    "stage_id": a.stage_id,
+                })).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string(&obj)?);
+        }
+    } else {
+        for draft in &drafts {
+            println!(
+                "- {} [{}] {} ({}) — {}",
+                draft.draft_id, draft.created_at, draft.branch, draft.status, draft.title
+            );
+        }
     }
     Ok(())
 }
 
-pub fn inbox(repo_root: &Path, by: Option<&str>, role: Option<&str>) -> anyhow::Result<()> {
+pub fn inbox(
+    repo_root: &Path,
+    by: Option<&str>,
+    role: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
     let ledger = Ledger::open(repo_root)?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let dir = &ledger.paths.drafts_dir;
     if !dir.exists() {
-        println!("No pending items.");
+        if !json {
+            println!("No pending items.");
+        }
         return Ok(());
     }
 
-    let mut items: Vec<(String, String, String, String, usize)> = Vec::new();
+    let mut items: Vec<(String, String, String, String, String, usize, usize, Vec<String>)> =
+        Vec::new();
 
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -763,20 +805,43 @@ pub fn inbox(repo_root: &Path, by: Option<&str>, role: Option<&str>) -> anyhow::
             items.push((
                 draft.draft_id.clone(),
                 draft.title.clone(),
+                draft.branch.clone(),
                 stage.stage_id.clone(),
                 stage.role.clone(),
-                stage.min_approvals.saturating_sub(stage.approved_by.len()),
+                stage.min_approvals,
+                stage.approved_by.len(),
+                stage.assignees.clone(),
             ));
         }
     }
 
     if items.is_empty() {
-        println!("No pending items.");
+        if !json {
+            println!("No pending items.");
+        }
         return Ok(());
     }
 
-    for (did, title, sid, role, needed) in &items {
-        println!("{did} | {title} | {sid} | {role} | approvals needed: {needed}");
+    if json {
+        for (did, title, branch, sid, role, min_approvals, current, assignees) in &items {
+            let obj = serde_json::json!({
+                "draft_id": did,
+                "title": title,
+                "branch": branch,
+                "stage_id": sid,
+                "role": role,
+                "min_approvals": min_approvals,
+                "current_approvals": current,
+                "approvals_needed": min_approvals.saturating_sub(*current),
+                "assignees": assignees,
+            });
+            println!("{}", serde_json::to_string(&obj)?);
+        }
+    } else {
+        for (did, title, _branch, sid, role, min, current, _assignees) in &items {
+            let needed = min.saturating_sub(*current);
+            println!("{did} | {title} | {sid} | {role} | approvals needed: {needed}");
+        }
     }
     Ok(())
 }

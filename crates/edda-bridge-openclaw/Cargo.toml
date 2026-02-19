@@ -1,0 +1,19 @@
+[package]
+name = "edda-bridge-openclaw"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edda-core = { path = "../edda-core" }
+edda-store = { path = "../edda-store" }
+edda-ledger = { path = "../edda-ledger" }
+edda-derive = { path = "../edda-derive" }
+edda-bridge-claude = { path = "../edda-bridge-claude" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

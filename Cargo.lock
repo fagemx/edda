@@ -424,6 +424,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "edda-bridge-openclaw"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "edda-bridge-claude",
+ "edda-core",
+ "edda-derive",
+ "edda-ledger",
+ "edda-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+]
+
+[[package]]
 name = "edda-cli"
 version = "0.1.0"
 dependencies = [
@@ -431,6 +448,7 @@ dependencies = [
  "clap",
  "ctrlc",
  "edda-bridge-claude",
+ "edda-bridge-openclaw",
  "edda-conductor",
  "edda-core",
  "edda-derive",

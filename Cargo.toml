@@ -6,6 +6,7 @@ members = [
     "crates/edda-derive",
     "crates/edda-store",
     "crates/edda-bridge-claude",
+    "crates/edda-bridge-openclaw",
     "crates/edda-transcript",
     "crates/edda-index",
     "crates/edda-pack",
