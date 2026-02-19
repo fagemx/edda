@@ -2067,4 +2067,220 @@ mod tests {
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
+
+    // ── Issue #148 Gap 3: Cross-session binding visibility via dispatch ──
+
+    #[test]
+    fn cross_session_binding_visible_via_user_prompt_submit() {
+        let pid = "test_xsess_bind_vis";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+        std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+        std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
+
+        // Create temp cwd (no .edda/ — workspace section will be None)
+        let cwd = std::env::temp_dir().join("edda_xsess_vis_cwd");
+        let _ = fs::create_dir_all(&cwd);
+
+        // Multi-session: write heartbeats for s1 and s2
+        let signals = crate::signals::SessionSignals::default();
+        crate::peers::write_heartbeat(pid, "s1", &signals, Some("auth"));
+        crate::peers::write_heartbeat(pid, "s2", &signals, Some("billing"));
+
+        // Session A (s1) writes a binding
+        crate::peers::write_binding(pid, "s1", "auth", "db.engine", "postgres");
+
+        // Session B (s2) dispatches UserPromptSubmit — should see the binding
+        let result = dispatch_user_prompt_submit(pid, "s2", "", cwd.to_str().unwrap()).unwrap();
+        assert!(result.stdout.is_some(), "should return output (not dedup-skipped)");
+
+        let output: serde_json::Value =
+            serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+        let ctx = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or("");
+        assert!(ctx.contains("db.engine"), "should contain binding key, got:\n{ctx}");
+        assert!(ctx.contains("postgres"), "should contain binding value, got:\n{ctx}");
+
+        crate::peers::remove_heartbeat(pid, "s1");
+        crate::peers::remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn user_prompt_submit_dedup_skips_identical_state() {
+        let pid = "test_ups_dedup";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+        std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+        std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
+
+        let cwd = std::env::temp_dir().join("edda_dedup_cwd");
+        let _ = fs::create_dir_all(&cwd);
+
+        // Write a binding so there's something to inject
+        crate::peers::write_binding(pid, "s1", "auth", "cache.backend", "redis");
+
+        // First call — should produce output
+        let r1 = dispatch_user_prompt_submit(pid, "dedup-sess", "", cwd.to_str().unwrap()).unwrap();
+        assert!(r1.stdout.is_some(), "first call should return output");
+
+        // Second call with identical state — should be dedup-skipped
+        let r2 = dispatch_user_prompt_submit(pid, "dedup-sess", "", cwd.to_str().unwrap()).unwrap();
+        assert!(r2.stdout.is_none(), "second call should be dedup-skipped (empty)");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    // ── Issue #148 Gap 5: Solo session binding visibility ──
+
+    #[test]
+    fn solo_session_still_sees_bindings_via_prompt_submit() {
+        let pid = "test_solo_bind_vis";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+        std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+        std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
+
+        let cwd = std::env::temp_dir().join("edda_solo_vis_cwd");
+        let _ = fs::create_dir_all(&cwd);
+
+        // Write binding — no heartbeats (solo mode)
+        crate::peers::write_binding(pid, "solo-s", "solo", "api.style", "GraphQL");
+
+        let result = dispatch_user_prompt_submit(pid, "solo-s", "", cwd.to_str().unwrap()).unwrap();
+        assert!(result.stdout.is_some(), "solo session should see bindings");
+        let output: serde_json::Value =
+            serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+        let ctx = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or("");
+        assert!(ctx.contains("GraphQL"), "solo session should see binding value, got:\n{ctx}");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    // ── Issue #148 Gap 5: Solo → multi-session transition ──
+
+    #[test]
+    fn solo_to_multi_session_transition() {
+        let pid = "test_solo_multi_trans";
+        // Clean slate to avoid interference from other tests
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let _ = fs::create_dir_all(&state_dir);
+
+        // Phase 1: Only own heartbeat → solo (no active peers)
+        let own_hb = state_dir.join("session.s1.json");
+        fs::write(&own_hb, r#"{"session_id":"s1"}"#).unwrap();
+        assert!(
+            !has_active_peers(pid, "s1"),
+            "should be solo with only own heartbeat"
+        );
+
+        // Phase 2: Peer appears → multi-session
+        let peer_hb = state_dir.join("session.s2.json");
+        fs::write(&peer_hb, r#"{"session_id":"s2"}"#).unwrap();
+        assert!(
+            has_active_peers(pid, "s1"),
+            "should detect peer after heartbeat written"
+        );
+
+        // Phase 3: Peer goes stale → back to solo
+        // Sleep to ensure file mtime is in the past, then set threshold to 0
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::env::set_var("EDDA_PEER_STALE_SECS", "0");
+        assert!(
+            !has_active_peers(pid, "s1"),
+            "peer should be stale after threshold=0 with old mtime"
+        );
+        std::env::remove_var("EDDA_PEER_STALE_SECS");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Issue #148 Gap 7: SessionEnd unclaim gating ──
+
+    #[test]
+    fn session_end_unclaim_only_with_active_peers() {
+        let pid = "test_se_unclaim_gate";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+        std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+        std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
+
+        let cwd = std::env::temp_dir().join("edda_se_unclaim_cwd");
+        let _ = fs::create_dir_all(&cwd);
+
+        // Write claims for two sessions
+        crate::peers::write_claim(pid, "s1", "auth", &["src/auth.rs".into()]);
+        crate::peers::write_claim(pid, "s2", "billing", &["src/bill.rs".into()]);
+
+        // SessionEnd with peers_active=false — should NOT write unclaim
+        let _ = dispatch_session_end(pid, "s1", "", cwd.to_str().unwrap(), false);
+
+        // Read coordination.jsonl and check no unclaim for s1
+        let coord_path = edda_store::project_dir(pid).join("state").join("coordination.jsonl");
+        let content = fs::read_to_string(&coord_path).unwrap_or_default();
+        let unclaim_count = content.lines()
+            .filter(|l| l.contains("\"unclaim\"") && l.contains("s1"))
+            .count();
+        assert_eq!(unclaim_count, 0, "no unclaim when peers_active=false");
+
+        // Write fresh claim for s3 and end with peers_active=true — SHOULD write unclaim
+        crate::peers::write_claim(pid, "s3", "infra", &["infra/main.tf".into()]);
+        let _ = dispatch_session_end(pid, "s3", "", cwd.to_str().unwrap(), true);
+
+        let content2 = fs::read_to_string(&coord_path).unwrap_or_default();
+        let unclaim_s3 = content2.lines()
+            .filter(|l| l.contains("\"unclaim\"") && l.contains("s3"))
+            .count();
+        assert!(unclaim_s3 > 0, "should have unclaim when peers_active=true");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn session_end_reads_counters_before_cleanup() {
+        let pid = "test_se_counters";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+        let sid = "counter-sess";
+        std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+        std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
+
+        let cwd = std::env::temp_dir().join("edda_se_counter_cwd");
+        let _ = fs::create_dir_all(&cwd);
+
+        // Set up counters
+        increment_counter(pid, sid, "decide_count");
+        increment_counter(pid, sid, "decide_count");
+        increment_counter(pid, sid, "decide_count");
+        increment_counter(pid, sid, "nudge_count");
+        increment_counter(pid, sid, "nudge_count");
+        increment_counter(pid, sid, "signal_count");
+
+        // Verify counters exist before SessionEnd
+        let state_dir = edda_store::project_dir(pid).join("state");
+        assert!(state_dir.join(format!("decide_count.{sid}")).exists());
+        assert!(state_dir.join(format!("nudge_count.{sid}")).exists());
+        assert!(state_dir.join(format!("signal_count.{sid}")).exists());
+
+        // SessionEnd should read counters then clean them up
+        let result = dispatch_session_end(pid, sid, "", cwd.to_str().unwrap(), false);
+        assert!(result.is_ok(), "session_end should not error");
+
+        // Counter files should be cleaned up
+        assert!(!state_dir.join(format!("decide_count.{sid}")).exists(), "decide_count should be cleaned");
+        assert!(!state_dir.join(format!("nudge_count.{sid}")).exists(), "nudge_count should be cleaned");
+        assert!(!state_dir.join(format!("signal_count.{sid}")).exists(), "signal_count should be cleaned");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = fs::remove_dir_all(&cwd);
+    }
 }
