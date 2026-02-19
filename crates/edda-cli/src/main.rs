@@ -298,6 +298,11 @@ enum BridgeCmd {
         #[command(subcommand)]
         cmd: BridgeClaudeCmd,
     },
+    /// OpenClaw bridge operations
+    Openclaw {
+        #[command(subcommand)]
+        cmd: BridgeOpenclawCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -347,15 +352,44 @@ enum BridgeClaudeCmd {
 }
 
 #[derive(Subcommand)]
+enum BridgeOpenclawCmd {
+    /// Install edda OpenClaw plugin
+    Install {
+        /// Custom target directory (default: ~/.openclaw/extensions/edda-bridge/)
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Uninstall edda OpenClaw plugin
+    Uninstall {
+        /// Custom target directory
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Manually digest a session into workspace ledger
+    Digest {
+        /// Session ID to digest
+        #[arg(long)]
+        session: Option<String>,
+        /// Digest all pending sessions
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum HookCmd {
     /// Claude Code hook entrypoint (reads stdin JSON)
     Claude,
+    /// OpenClaw hook entrypoint (reads stdin JSON)
+    Openclaw,
 }
 
 #[derive(Subcommand)]
 enum DoctorCmd {
     /// Check Claude Code bridge health
     Claude,
+    /// Check OpenClaw bridge health
+    Openclaw,
 }
 
 #[derive(Subcommand)]
@@ -458,7 +492,11 @@ enum DraftCmd {
         id: String,
     },
     /// List all drafts
-    List,
+    List {
+        /// Output as JSON lines (one object per draft)
+        #[arg(long)]
+        json: bool,
+    },
     /// Apply a draft commit to the ledger (with rebase)
     Apply {
         /// Draft ID (drf_*)
@@ -511,6 +549,9 @@ enum DraftCmd {
         /// Filter by role
         #[arg(long)]
         role: Option<String>,
+        /// Output as JSON lines (one object per item)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -724,7 +765,7 @@ fn main() -> anyhow::Result<()> {
                 max_evidence,
             }),
             DraftCmd::Show { id } => cmd_draft::show(&repo_root, &id),
-            DraftCmd::List => cmd_draft::list(&repo_root),
+            DraftCmd::List { json } => cmd_draft::list(&repo_root, json),
             DraftCmd::Apply {
                 id,
                 dry_run,
@@ -743,8 +784,8 @@ fn main() -> anyhow::Result<()> {
                 note,
                 stage,
             } => cmd_draft::reject(&repo_root, &id, &by, &note, stage.as_deref()),
-            DraftCmd::Inbox { by, role } => {
-                cmd_draft::inbox(&repo_root, by.as_deref(), role.as_deref())
+            DraftCmd::Inbox { by, role, json } => {
+                cmd_draft::inbox(&repo_root, by.as_deref(), role.as_deref(), json)
             }
         },
         Command::Bridge { cmd } => match cmd {
@@ -765,12 +806,25 @@ fn main() -> anyhow::Result<()> {
                     cmd_bridge::request(&repo_root, &to, &message)
                 }
             },
+            BridgeCmd::Openclaw { cmd } => match cmd {
+                BridgeOpenclawCmd::Install { target } => {
+                    cmd_bridge::install_openclaw(target.as_deref().map(std::path::Path::new))
+                }
+                BridgeOpenclawCmd::Uninstall { target } => {
+                    cmd_bridge::uninstall_openclaw(target.as_deref().map(std::path::Path::new))
+                }
+                BridgeOpenclawCmd::Digest { session, all } => {
+                    cmd_bridge::digest(&repo_root, session.as_deref(), all)
+                }
+            },
         },
         Command::Hook { cmd } => match cmd {
             HookCmd::Claude => cmd_bridge::hook_claude(),
+            HookCmd::Openclaw => cmd_bridge::hook_openclaw(),
         },
         Command::Doctor { cmd } => match cmd {
             DoctorCmd::Claude => cmd_bridge::doctor(&repo_root),
+            DoctorCmd::Openclaw => cmd_bridge::doctor_openclaw(),
         },
         Command::Config { cmd } => match cmd {
             ConfigCmd::Set { key, value } => cmd_config::set(&repo_root, &key, &value),
