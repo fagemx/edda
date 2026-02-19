@@ -151,6 +151,15 @@ pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>, cli_sessio
     let project_id = edda_store::project_id(repo_root);
     let (session_id, label) = resolve_session_id(cli_session, &project_id, "cli");
 
+    // L2 conflict check (coordination.jsonl) — before writing
+    if let Some(conflict) = edda_bridge_claude::peers::find_binding_conflict(&project_id, key, value) {
+        eprintln!(
+            "\u{26a0} Conflict: key \"{key}\" already decided as \"{}\" by {} ({})",
+            conflict.existing_value, conflict.by_label, conflict.ts
+        );
+        eprintln!("  Recording your decision \"{key}={value}\" — consider resolving with the other agent.");
+    }
+
     // 1. Broadcast to peers (real-time)
     edda_bridge_claude::peers::write_binding(&project_id, &session_id, &label, key, value);
 
@@ -178,8 +187,17 @@ pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>, cli_sessio
     event.payload["decision"] = decision_obj;
 
     // Check for prior decision with same key → supersede via provenance
-    let prior_event_id = find_prior_decision(&ledger, &branch, key);
-    if let Some(prior_id) = &prior_event_id {
+    let prior = find_prior_decision(&ledger, &branch, key);
+    if let Some((prior_id, prior_value)) = &prior {
+        // L1 conflict warning: different value in workspace ledger
+        if let Some(pv) = prior_value {
+            if pv != value {
+                eprintln!(
+                    "\u{26a0} Conflict: key \"{key}\" previously decided as \"{pv}\" in this workspace"
+                );
+                eprintln!("  Recording new value \"{value}\" (supersedes prior decision)");
+            }
+        }
         event.refs.provenance.push(edda_core::types::Provenance {
             target: prior_id.clone(),
             rel: edda_core::types::rel::SUPERSEDES.to_string(),
@@ -209,12 +227,12 @@ pub fn request(repo_root: &Path, to: &str, message: &str, cli_session: Option<&s
 }
 
 /// Find the most recent decision event with the same key on the given branch.
-/// Returns the event_id of the prior decision, or None if no match.
+/// Returns `(event_id, value)` of the prior decision, or None if no match.
 fn find_prior_decision(
     ledger: &edda_ledger::Ledger,
     branch: &str,
     key: &str,
-) -> Option<String> {
+) -> Option<(String, Option<String>)> {
     let events = ledger.iter_events().ok()?;
     events
         .iter()
@@ -239,7 +257,13 @@ fn find_prior_decision(
                     text.split_once(": ").map(|(k, _)| k)
                 });
             if event_key == Some(key) {
-                Some(e.event_id.clone())
+                let event_value = e
+                    .payload
+                    .get("decision")
+                    .and_then(|d| d.get("value"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Some((e.event_id.clone(), event_value))
             } else {
                 None
             }
@@ -444,4 +468,218 @@ pub fn hook_openclaw() -> anyhow::Result<()> {
 /// `edda doctor openclaw`
 pub fn doctor_openclaw() -> anyhow::Result<()> {
     edda_bridge_openclaw::doctor()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn setup_workspace() -> (std::path::PathBuf, edda_ledger::Ledger) {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp = std::env::temp_dir().join(format!(
+            "edda_bridge_test_{}_{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let paths = edda_ledger::EddaPaths::discover(&tmp);
+        edda_ledger::ledger::init_workspace(&paths).unwrap();
+        edda_ledger::ledger::init_head(&paths, "main").unwrap();
+        edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
+        let ledger = edda_ledger::Ledger::open(&tmp).unwrap();
+        (tmp, ledger)
+    }
+
+    #[test]
+    fn find_prior_decision_returns_value() {
+        let (tmp, ledger) = setup_workspace();
+        let branch = ledger.head_branch().unwrap();
+        let parent_hash = ledger.last_event_hash().unwrap();
+
+        // Write a decision event with structured fields
+        let tags = vec!["decision".to_string()];
+        let mut event = edda_core::event::new_note_event(
+            &branch, parent_hash.as_deref(), "system", "db.engine: postgres", &tags,
+        ).unwrap();
+        event.payload["decision"] = serde_json::json!({"key": "db.engine", "value": "postgres"});
+        edda_core::event::finalize_event(&mut event);
+        ledger.append_event(&event, false).unwrap();
+
+        let result = find_prior_decision(&ledger, &branch, "db.engine");
+        assert!(result.is_some(), "should find prior decision");
+        let (event_id, value) = result.unwrap();
+        assert!(!event_id.is_empty());
+        assert_eq!(value, Some("postgres".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_prior_decision_no_match() {
+        let (tmp, ledger) = setup_workspace();
+        let branch = ledger.head_branch().unwrap();
+
+        let result = find_prior_decision(&ledger, &branch, "nonexistent.key");
+        assert!(result.is_none(), "should not find anything");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Integration: decide() end-to-end (Issue #148 Gaps 1, 2) ──
+
+    #[test]
+    fn decide_writes_binding_to_coordination_log() {
+        let (tmp, _ledger) = setup_workspace();
+        let pid = edda_store::project_id(&tmp);
+        let _ = edda_store::ensure_dirs(&pid);
+        // Clean coordination log
+        let state_dir = edda_store::project_dir(&pid).join("state");
+        let _ = std::fs::remove_file(state_dir.join("coordination.jsonl"));
+
+        std::env::set_var("EDDA_SESSION_ID", "test-decide-bind-s1");
+        std::env::set_var("EDDA_SESSION_LABEL", "auth");
+
+        decide(&tmp, "db.engine=postgres", Some("need JSONB"), None).unwrap();
+
+        // Verify binding was written via L2 conflict check API
+        let conflict = edda_bridge_claude::peers::find_binding_conflict(&pid, "db.engine", "OTHER");
+        assert!(conflict.is_some(), "should find existing binding via conflict check");
+        let c = conflict.unwrap();
+        assert_eq!(c.existing_value, "postgres");
+        // Verify no conflict with same value (idempotent)
+        let no_conflict = edda_bridge_claude::peers::find_binding_conflict(&pid, "db.engine", "postgres");
+        assert!(no_conflict.is_none(), "same value should not conflict");
+
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
+    }
+
+    #[test]
+    fn decide_writes_structured_ledger_event() {
+        let (tmp, ledger) = setup_workspace();
+        let pid = edda_store::project_id(&tmp);
+        let _ = edda_store::ensure_dirs(&pid);
+
+        std::env::set_var("EDDA_SESSION_ID", "test-decide-ledger-s2");
+        std::env::set_var("EDDA_SESSION_LABEL", "billing");
+
+        decide(&tmp, "auth.method=JWT RS256", Some("stateless auth"), None).unwrap();
+
+        let events = ledger.iter_events().unwrap();
+        assert_eq!(events.len(), 1, "should have 1 event");
+        let e = &events[0];
+        assert_eq!(e.event_type, "note");
+
+        // Tags
+        let tags = e.payload.get("tags").and_then(|v| v.as_array()).unwrap();
+        assert!(tags.iter().any(|t| t.as_str() == Some("decision")));
+
+        // Structured decision object
+        let dec = e.payload.get("decision").unwrap();
+        assert_eq!(dec["key"].as_str().unwrap(), "auth.method");
+        assert_eq!(dec["value"].as_str().unwrap(), "JWT RS256");
+        assert_eq!(dec["reason"].as_str().unwrap(), "stateless auth");
+
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
+    }
+
+    #[test]
+    fn decide_supersedes_prior_decision_same_key() {
+        let (tmp, ledger) = setup_workspace();
+        let pid = edda_store::project_id(&tmp);
+        let _ = edda_store::ensure_dirs(&pid);
+
+        std::env::set_var("EDDA_SESSION_ID", "test-decide-super-s3");
+        std::env::set_var("EDDA_SESSION_LABEL", "infra");
+
+        decide(&tmp, "db.engine=SQLite", None, None).unwrap();
+        decide(&tmp, "db.engine=PostgreSQL", Some("need JSONB"), None).unwrap();
+
+        let events = ledger.iter_events().unwrap();
+        assert_eq!(events.len(), 2, "should have 2 events");
+
+        let first_id = &events[0].event_id;
+        let second = &events[1];
+
+        // Second event should supersede the first
+        assert!(
+            !second.refs.provenance.is_empty(),
+            "second event should have provenance"
+        );
+        let prov = &second.refs.provenance[0];
+        assert_eq!(prov.target, *first_id, "should point to first event");
+        assert_eq!(prov.rel, edda_core::types::rel::SUPERSEDES);
+
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
+    }
+
+    // ── Integration: resolve_session_id 4-tier fallback (Issue #148 Gap 4) ──
+
+    #[test]
+    fn resolve_session_id_tiers() {
+        let pid = "test_resolve_sid_tiers";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Clear env to avoid interference
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+
+        // Tier 1: explicit cli_session
+        let (sid, label) = resolve_session_id(Some("explicit-sid"), pid, "cli");
+        assert_eq!(sid, "explicit-sid");
+        assert_eq!(label, "cli");
+
+        // Tier 2: EDDA_SESSION_ID env
+        std::env::set_var("EDDA_SESSION_ID", "env-sid");
+        let (sid, _) = resolve_session_id(None, pid, "cli");
+        assert_eq!(sid, "env-sid");
+        std::env::remove_var("EDDA_SESSION_ID");
+
+        // Tier 3: heartbeat inference (single active session)
+        // Manually create a heartbeat file (write_heartbeat is pub(crate))
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let _ = std::fs::create_dir_all(&state_dir);
+        let hb = serde_json::json!({
+            "session_id": "inferred-sess",
+            "started_at": "2026-02-20T00:00:00Z",
+            "last_heartbeat": "2026-02-20T00:00:00Z",
+            "label": "worker",
+            "focus_files": [],
+            "active_tasks": [],
+            "files_modified_count": 0,
+            "total_edits": 0,
+            "recent_commits": []
+        });
+        std::fs::write(
+            state_dir.join("session.inferred-sess.json"),
+            serde_json::to_string_pretty(&hb).unwrap(),
+        ).unwrap();
+        let (sid, label) = resolve_session_id(None, pid, "cli");
+        assert_eq!(sid, "inferred-sess", "should infer from sole heartbeat");
+        assert_eq!(label, "worker", "should use heartbeat label");
+        let _ = std::fs::remove_file(state_dir.join("session.inferred-sess.json"));
+
+        // Tier 4: fallback (no heartbeats, no env)
+        let (sid, label) = resolve_session_id(None, pid, "cli");
+        assert_eq!(sid, "cli-cli");
+        assert_eq!(label, "cli");
+
+        // Tier 1 wins over Tier 2
+        std::env::set_var("EDDA_SESSION_ID", "env-sid");
+        let (sid, _) = resolve_session_id(Some("explicit-wins"), pid, "cli");
+        assert_eq!(sid, "explicit-wins", "tier 1 should beat tier 2");
+        std::env::remove_var("EDDA_SESSION_ID");
+
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+    }
 }

@@ -118,6 +118,15 @@ pub struct PeerSummary {
     pub claimed_paths: Vec<String>,
 }
 
+/// Conflict info when a binding with the same key but different value exists.
+#[derive(Debug, Clone)]
+pub struct BindingConflict {
+    pub existing_value: String,
+    pub by_session: String,
+    pub by_label: String,
+    pub ts: String,
+}
+
 // ── Path Helpers ──
 
 fn heartbeat_path(project_id: &str, session_id: &str) -> PathBuf {
@@ -303,6 +312,29 @@ pub fn write_request(
         }),
     };
     append_coord_event(project_id, &event);
+}
+
+/// Check if a binding conflict exists for the given key in coordination.jsonl.
+///
+/// Returns `Some(BindingConflict)` if a binding with the same key but a
+/// different value already exists. Returns `None` if no existing binding
+/// or the value is identical (idempotent re-decide).
+pub fn find_binding_conflict(
+    project_id: &str,
+    key: &str,
+    new_value: &str,
+) -> Option<BindingConflict> {
+    let board = compute_board_state(project_id);
+    let existing = board.bindings.iter().find(|b| b.key == key)?;
+    if existing.value == new_value {
+        return None; // idempotent — same value, no conflict
+    }
+    Some(BindingConflict {
+        existing_value: existing.value.clone(),
+        by_session: existing.by_session.clone(),
+        by_label: existing.by_label.clone(),
+        ts: existing.ts.clone(),
+    })
 }
 
 // ── Board State Computation ──
@@ -1444,6 +1476,51 @@ mod tests {
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 
+    // ── find_binding_conflict tests (issue #121) ──
+
+    #[test]
+    fn binding_conflict_detects_different_value() {
+        let pid = "test_conflict_different";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_binding(pid, "s1", "auth", "db.engine", "postgres");
+
+        let conflict = find_binding_conflict(pid, "db.engine", "mysql");
+        assert!(conflict.is_some(), "should detect conflict");
+        let c = conflict.unwrap();
+        assert_eq!(c.existing_value, "postgres");
+        assert_eq!(c.by_label, "auth");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn binding_conflict_same_value_no_conflict() {
+        let pid = "test_conflict_same";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_binding(pid, "s1", "auth", "db.engine", "postgres");
+
+        let conflict = find_binding_conflict(pid, "db.engine", "postgres");
+        assert!(conflict.is_none(), "same value should not conflict");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn binding_conflict_no_existing_binding() {
+        let pid = "test_conflict_none";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let conflict = find_binding_conflict(pid, "db.engine", "postgres");
+        assert!(conflict.is_none(), "no existing binding should not conflict");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
     // ── infer_session_id tests ──
 
     #[test]
@@ -1543,6 +1620,70 @@ mod tests {
         assert!(result.is_none(), "only stale heartbeats → None");
 
         remove_heartbeat(pid, "old-session");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Issue #148 Gap 6: Cross-session decision conflict ──
+
+    #[test]
+    fn cross_session_binding_conflict_last_write_wins() {
+        let pid = "test_cross_sess_conflict";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Session A decides db.engine=postgres
+        write_binding(pid, "s1", "auth", "db.engine", "postgres");
+        // Session B decides db.engine=mysql (conflict — last write wins)
+        write_binding(pid, "s2", "billing", "db.engine", "mysql");
+
+        let board = compute_board_state(pid);
+        assert_eq!(board.bindings.len(), 1, "should have 1 binding (deduped by key)");
+        assert_eq!(board.bindings[0].value, "mysql", "last write should win");
+        assert_eq!(board.bindings[0].by_session, "s2");
+
+        // Both sessions see the latest value via render_peer_updates
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+
+        let updates_s1 = render_peer_updates(pid, "s1").unwrap();
+        assert!(updates_s1.contains("mysql"), "Session A should see latest binding, got:\n{updates_s1}");
+
+        let updates_s2 = render_peer_updates(pid, "s2").unwrap();
+        assert!(updates_s2.contains("mysql"), "Session B should see latest binding, got:\n{updates_s2}");
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn cross_session_different_keys_both_visible() {
+        let pid = "test_cross_sess_diff_keys";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Session A decides db.engine=postgres
+        write_binding(pid, "s1", "auth", "db.engine", "postgres");
+        // Session B decides auth.method=JWT (different key — no conflict)
+        write_binding(pid, "s2", "billing", "auth.method", "JWT");
+
+        let board = compute_board_state(pid);
+        assert_eq!(board.bindings.len(), 2, "should have 2 bindings (different keys)");
+
+        // Both sessions see both bindings
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+
+        let updates_s1 = render_peer_updates(pid, "s1").unwrap();
+        assert!(updates_s1.contains("postgres"), "s1 should see db.engine binding");
+        assert!(updates_s1.contains("JWT"), "s1 should see auth.method binding");
+
+        let updates_s2 = render_peer_updates(pid, "s2").unwrap();
+        assert!(updates_s2.contains("postgres"), "s2 should see db.engine binding");
+        assert!(updates_s2.contains("JWT"), "s2 should see auth.method binding");
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }
