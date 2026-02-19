@@ -640,20 +640,37 @@ pub fn infer_session_id(project_id: &str) -> Option<(String, String)> {
 // ── Directive Renderer ──
 
 /// Render the full coordination protocol section for SessionStart injection.
-/// Returns None if no active peers (Solo mode).
+///
+/// - Multi-session: full protocol (peers, claims, bindings, commits, requests).
+/// - Solo with bindings: "## Binding Decisions" section only.
+/// - Solo without bindings: returns None.
 pub fn render_coordination_protocol(
     project_id: &str,
     session_id: &str,
     _cwd: &str,
 ) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);
+    let board = compute_board_state(project_id);
+    let budget = protocol_budget();
+
     if peers.is_empty() {
-        return None;
+        // Solo mode: only render bindings (if any exist)
+        if board.bindings.is_empty() {
+            return None;
+        }
+        let mut lines = vec!["## Binding Decisions".to_string()];
+        for d in board.bindings.iter().rev().take(5) {
+            lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
+        }
+        let result = lines.join("\n");
+        return Some(if result.len() > budget {
+            truncate_to_budget(&result, budget)
+        } else {
+            result
+        });
     }
 
-    let board = compute_board_state(project_id);
     let my_claim = board.claims.iter().find(|c| c.session_id == session_id);
-    let budget = protocol_budget();
 
     let mut lines = Vec::new();
 
@@ -757,13 +774,30 @@ pub fn render_coordination_protocol(
 }
 
 /// Render lightweight peer updates for UserPromptSubmit (only new bindings/requests).
+///
+/// - Multi-session: peers header + tasks + bindings + requests.
+/// - Solo with bindings: binding lines only (no header).
+/// - Solo without bindings: returns None.
 pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);
-    if peers.is_empty() {
-        return None;
-    }
-
     let board = compute_board_state(project_id);
+
+    if peers.is_empty() {
+        // Solo mode: only render bindings (if any)
+        if board.bindings.is_empty() {
+            return None;
+        }
+        let mut lines = Vec::new();
+        for d in board.bindings.iter().rev().take(3) {
+            lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
+        }
+        let result = lines.join("\n");
+        return Some(if result.len() > 300 {
+            truncate_to_budget(&result, 300)
+        } else {
+            result
+        });
+    }
 
     let mut lines = vec![format!("## Peers ({} active)", peers.len())];
 
@@ -1014,12 +1048,13 @@ mod tests {
     }
 
     #[test]
-    fn render_protocol_solo_returns_none() {
+    fn render_protocol_solo_no_bindings_returns_none() {
         let pid = "test_peers_solo";
         let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
 
         let result = render_coordination_protocol(pid, "only-session", ".");
-        assert!(result.is_none());
+        assert!(result.is_none(), "solo with no bindings should return None");
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1173,13 +1208,16 @@ mod tests {
         assert!(updates.contains("Peers"));
         assert!(updates.contains("Export BillingPlan"));
 
-        // Solo session should get None
+        // Solo session should still see bindings (but not peer sections)
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
         remove_heartbeat(pid, "s3");
         remove_heartbeat(pid, "s4");
-        let solo = render_coordination_protocol(pid, "s5", ".");
-        assert!(solo.is_none());
+        let solo = render_coordination_protocol(pid, "s5", ".").unwrap();
+        assert!(solo.contains("Binding Decisions"), "solo should show bindings");
+        assert!(solo.contains("JWT RS256"), "solo should show binding value");
+        assert!(!solo.contains("Coordination Protocol"), "solo should NOT show coordination header");
+        assert!(!solo.contains("Peers Working On"), "solo should NOT show peer sections");
 
         // discover_all_sessions returns nothing after cleanup
         let all = discover_all_sessions(pid);
@@ -1351,6 +1389,58 @@ mod tests {
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Solo binding visibility tests (issue #147) ──
+
+    #[test]
+    fn render_protocol_solo_with_bindings() {
+        let pid = "test_peers_solo_bindings";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // No heartbeats (solo), but write bindings
+        write_binding(pid, "s1", "auth", "auth.method", "JWT RS256");
+        write_binding(pid, "s1", "auth", "db.engine", "PostgreSQL");
+
+        let result = render_coordination_protocol(pid, "solo-session", ".").unwrap();
+        assert!(result.contains("Binding Decisions"), "should have binding header, got:\n{result}");
+        assert!(result.contains("JWT RS256"), "should show binding value, got:\n{result}");
+        assert!(result.contains("PostgreSQL"), "should show second binding, got:\n{result}");
+        assert!(!result.contains("Coordination Protocol"), "should NOT have coordination header, got:\n{result}");
+        assert!(!result.contains("Peers Working On"), "should NOT have peer sections, got:\n{result}");
+        assert!(!result.contains("Off-limits"), "should NOT have off-limits, got:\n{result}");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_peer_updates_solo_with_bindings() {
+        let pid = "test_peers_updates_solo_bindings";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // No heartbeats (solo), but write bindings
+        write_binding(pid, "s1", "auth", "auth.method", "JWT RS256");
+
+        let result = render_peer_updates(pid, "solo-session").unwrap();
+        assert!(result.contains("JWT RS256"), "should show binding, got:\n{result}");
+        assert!(!result.contains("Peers"), "should NOT have peers header, got:\n{result}");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_peer_updates_solo_no_bindings() {
+        let pid = "test_peers_updates_solo_none";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // No heartbeats, no bindings
+        let result = render_peer_updates(pid, "solo-session");
+        assert!(result.is_none(), "solo with no bindings should return None");
+
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 
