@@ -1,0 +1,28 @@
+name: deploy-service
+context:
+  environment: staging
+  service_name: auth-api
+phases:
+  - id: build
+    prompt: "Build the ${{ context.service_name }} for ${{ context.environment }}"
+    check:
+      - cmd_succeeds: "cargo build --release"
+      - file_exists: target/release/auth-api
+
+  - id: deploy
+    prompt: "Deploy to ${{ context.environment }}"
+    depends_on: [build]
+    check:
+      - cmd_succeeds: "kubectl apply -f k8s/"
+
+  - id: verify
+    prompt: "Verify the deployment is healthy"
+    depends_on: [deploy]
+    check:
+      - type: wait_until
+        check:
+          type: cmd_succeeds
+          cmd: "curl -sf http://localhost:8080/health"
+        interval_sec: 5
+        timeout_sec: 120
+    tags: [deploy, staging]

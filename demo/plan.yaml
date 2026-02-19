@@ -1,0 +1,87 @@
+name: api-decisions
+description: |
+  Demo: Build a REST API project. Agents make architectural decisions along the way.
+  Designed to showcase edda recording decisions across multiple agents.
+cwd: "."
+max_attempts: 2
+timeout_sec: 300
+
+phases:
+  - id: scaffold
+    prompt: |
+      Create a Python REST API project. Set up:
+      1. Create pyproject.toml with fastapi, uvicorn, pytest as dependencies
+      2. Create src/main.py with a basic FastAPI app (one health check endpoint)
+      3. Create src/models.py with a User pydantic model (id, name, email)
+      4. Create tests/test_health.py with a test for the health endpoint
+      
+      Decision context: We chose FastAPI over Flask because it has built-in OpenAPI docs,
+      async support, and Pydantic validation. Record this reasoning in comments.
+    check:
+      - type: file_exists
+        path: pyproject.toml
+      - type: file_exists
+        path: src/main.py
+      - type: file_contains
+        path: src/main.py
+        pattern: "FastAPI"
+
+  - id: endpoints
+    prompt: |
+      In this FastAPI project, add CRUD endpoints in src/routes.py:
+      - GET /users — list all users (in-memory list for now)
+      - POST /users — create user
+      - GET /users/{id} — get one user
+      - DELETE /users/{id} — delete user
+      
+      Wire the router into src/main.py.
+      
+      Decision context: We're using in-memory storage for the demo, not a database.
+      For production we'd use PostgreSQL. Add a comment noting this decision.
+    depends_on: [scaffold]
+    check:
+      - type: file_exists
+        path: src/routes.py
+      - type: file_contains
+        path: src/routes.py
+        pattern: "def "
+
+  - id: tests
+    prompt: |
+      Add comprehensive tests in tests/test_api.py:
+      - Test POST /users creates a user and returns 201
+      - Test GET /users returns list
+      - Test GET /users/{id} returns 404 for missing user
+      - Test DELETE /users/{id} works
+      
+      Use httpx.AsyncClient with FastAPI's TestClient pattern.
+      Add httpx to pyproject.toml dev dependencies.
+      
+      Make sure the tests would pass syntactically (imports correct, 
+      async test functions properly decorated).
+    depends_on: [endpoints]
+    check:
+      - type: file_exists
+        path: tests/test_api.py
+      - type: file_contains
+        path: tests/test_api.py
+        pattern: "test_"
+
+  - id: docs
+    prompt: |
+      Create a README.md for this API project. Include:
+      - Project name: "Demo REST API" 
+      - Tech stack: FastAPI + Pydantic + pytest
+      - Key decisions made (FastAPI over Flask, in-memory storage, etc.)
+      - Setup instructions (pip install, uvicorn run)
+      - API endpoints table
+      - Testing instructions
+      
+      Make it look professional. Use proper markdown.
+    depends_on: [endpoints]
+    check:
+      - type: file_exists
+        path: README.md
+      - type: file_contains
+        path: README.md
+        pattern: "FastAPI"

@@ -1,0 +1,13 @@
+[package]
+name = "edda-ledger"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edda-core = { path = "../edda-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+fs2.workspace = true
+time.workspace = true

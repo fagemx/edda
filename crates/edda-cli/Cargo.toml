@@ -1,0 +1,36 @@
+[package]
+name = "edda-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "edda"
+path = "src/main.rs"
+
+[dependencies]
+edda-core = { path = "../edda-core" }
+edda-ledger = { path = "../edda-ledger" }
+edda-derive = { path = "../edda-derive" }
+edda-store = { path = "../edda-store" }
+edda-bridge-claude = { path = "../edda-bridge-claude" }
+edda-transcript = { path = "../edda-transcript" }
+edda-index = { path = "../edda-index" }
+edda-pack = { path = "../edda-pack" }
+edda-mcp = { path = "../edda-mcp" }
+edda-search-fts = { path = "../edda-search-fts" }
+edda-conductor = { path = "../edda-conductor" }
+clap.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio-util = "0.7"
+ctrlc = "3"
+anyhow.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+sha2.workspace = true
+hex.workspace = true
+ulid.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,22 @@
+name: add-auth-module
+phases:
+  - id: schema
+    prompt: "Create the database schema for user authentication in migrations/"
+    check:
+      - file_exists: migrations/001_auth.sql
+      - type: file_contains
+        path: migrations/001_auth.sql
+        pattern: "CREATE TABLE"
+
+  - id: api
+    prompt: "Implement the authentication API routes"
+    depends_on: [schema]
+    check:
+      - cmd_succeeds: "cargo test auth"
+    max_attempts: 3
+
+  - id: integration
+    prompt: "Write integration tests for the auth flow"
+    depends_on: [api]
+    check:
+      - cmd_succeeds: "cargo test --test integration_auth"

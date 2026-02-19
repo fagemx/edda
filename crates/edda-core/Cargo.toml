@@ -1,0 +1,14 @@
+[package]
+name = "edda-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+ulid.workspace = true
+time.workspace = true

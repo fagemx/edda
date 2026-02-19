@@ -1,0 +1,6 @@
+name: dup-test
+phases:
+  - id: step1
+    prompt: "First step"
+  - id: step1
+    prompt: "Duplicate ID"

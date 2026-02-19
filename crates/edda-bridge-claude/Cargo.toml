@@ -1,0 +1,25 @@
+[package]
+name = "edda-bridge-claude"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edda-core = { path = "../edda-core" }
+edda-store = { path = "../edda-store" }
+edda-transcript = { path = "../edda-transcript" }
+edda-index = { path = "../edda-index" }
+edda-pack = { path = "../edda-pack" }
+edda-ledger = { path = "../edda-ledger" }
+edda-derive = { path = "../edda-derive" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+ulid.workspace = true
+globset.workspace = true
+dirs.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

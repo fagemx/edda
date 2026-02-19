@@ -1,0 +1,15 @@
+[package]
+name = "edda-transcript"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edda-store = { path = "../edda-store" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+fs2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

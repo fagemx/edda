@@ -1,0 +1,1307 @@
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::Write;
+use std::path::PathBuf;
+
+use crate::parse::now_rfc3339;
+use crate::signals::{SessionSignals, TaskSnapshot};
+
+// ── Configuration ──
+
+/// Staleness threshold: peers not heard from in this many seconds are considered dead.
+fn stale_secs() -> u64 {
+    std::env::var("EDDA_PEER_STALE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120)
+}
+
+/// Maximum chars for the coordination protocol section.
+fn protocol_budget() -> usize {
+    std::env::var("EDDA_PEERS_BUDGET_CHARS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600)
+}
+
+/// Session label from env var (set before launching Claude Code).
+fn env_label() -> Option<String> {
+    std::env::var("EDDA_SESSION_LABEL")
+        .ok()
+        .filter(|v| !v.is_empty())
+}
+
+// ── Data Structures ──
+
+/// Per-session heartbeat file.
+/// Location: ~/.edda/projects/{pid}/state/session.{sid}.json
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SessionHeartbeat {
+    pub session_id: String,
+    pub started_at: String,
+    pub last_heartbeat: String,
+    pub label: String,
+    pub focus_files: Vec<String>,
+    pub active_tasks: Vec<TaskSnapshot>,
+    pub files_modified_count: usize,
+    pub total_edits: usize,
+    pub recent_commits: Vec<String>,
+}
+
+/// Append-only coordination event.
+/// Location: ~/.edda/projects/{pid}/state/coordination.jsonl
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CoordEvent {
+    pub ts: String,
+    pub session_id: String,
+    pub event_type: CoordEventType,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CoordEventType {
+    Claim,
+    Unclaim,
+    #[serde(alias = "decision")]
+    Binding,
+    Request,
+}
+
+/// A scope claim by a session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ClaimEntry {
+    pub session_id: String,
+    pub label: String,
+    pub paths: Vec<String>,
+    pub ts: String,
+}
+
+/// A binding entry in the coordination log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BindingEntry {
+    pub key: String,
+    pub value: String,
+    pub by_session: String,
+    pub by_label: String,
+    pub ts: String,
+}
+
+/// A cross-agent request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct RequestEntry {
+    pub from_session: String,
+    pub from_label: String,
+    pub to_label: String,
+    pub message: String,
+    pub ts: String,
+}
+
+/// Computed board state from coordination.jsonl.
+#[derive(Debug, Default)]
+pub(crate) struct BoardState {
+    pub claims: Vec<ClaimEntry>,
+    pub bindings: Vec<BindingEntry>,
+    pub requests: Vec<RequestEntry>,
+}
+
+/// Summary of a peer session for rendering.
+#[derive(Debug, Clone)]
+pub struct PeerSummary {
+    pub session_id: String,
+    pub label: String,
+    pub age_secs: u64,
+    pub focus_files: Vec<String>,
+    pub task_subjects: Vec<String>,
+    pub files_modified_count: usize,
+    pub recent_commits: Vec<String>,
+    pub claimed_paths: Vec<String>,
+}
+
+// ── Path Helpers ──
+
+fn heartbeat_path(project_id: &str, session_id: &str) -> PathBuf {
+    edda_store::project_dir(project_id)
+        .join("state")
+        .join(format!("session.{session_id}.json"))
+}
+
+fn coordination_path(project_id: &str) -> PathBuf {
+    let dir = edda_store::project_dir(project_id).join("state");
+    let new_path = dir.join("coordination.jsonl");
+    // One-time migration: rename legacy decisions.jsonl → coordination.jsonl
+    if !new_path.exists() {
+        let old_path = dir.join("decisions.jsonl");
+        if old_path.exists() {
+            let _ = fs::rename(&old_path, &new_path);
+        }
+    }
+    new_path
+}
+
+// ── Heartbeat Write/Read ──
+
+/// Write a full heartbeat (called from ingest_and_build_pack after signal extraction).
+pub(crate) fn write_heartbeat(
+    project_id: &str,
+    session_id: &str,
+    signals: &SessionSignals,
+    label: Option<&str>,
+) {
+    let now = now_rfc3339();
+    let path = heartbeat_path(project_id, session_id);
+
+    // Preserve started_at from existing heartbeat, or use now
+    let started_at = read_heartbeat(project_id, session_id)
+        .map(|h| h.started_at)
+        .unwrap_or_else(|| now.clone());
+
+    let derived_label = label
+        .map(|s| s.to_string())
+        .or_else(env_label)
+        .unwrap_or_else(|| auto_label(signals));
+
+    let heartbeat = SessionHeartbeat {
+        session_id: session_id.to_string(),
+        started_at,
+        last_heartbeat: now,
+        label: derived_label,
+        focus_files: signals
+            .files_modified
+            .iter()
+            .take(5)
+            .map(|f| f.path.clone())
+            .collect(),
+        active_tasks: signals.tasks.clone(),
+        files_modified_count: signals.files_modified.len(),
+        total_edits: signals.files_modified.iter().map(|f| f.count).sum(),
+        recent_commits: signals
+            .commits
+            .iter()
+            .rev()
+            .take(3)
+            .map(|c| format!("{} {}", &c.hash[..7.min(c.hash.len())], c.message))
+            .collect(),
+    };
+
+    let data = match serde_json::to_string_pretty(&heartbeat) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let _ = edda_store::write_atomic(&path, data.as_bytes());
+}
+
+/// Lightweight heartbeat touch: only update last_heartbeat timestamp.
+pub(crate) fn touch_heartbeat(project_id: &str, session_id: &str) {
+    let path = heartbeat_path(project_id, session_id);
+    if let Some(mut hb) = read_heartbeat(project_id, session_id) {
+        hb.last_heartbeat = now_rfc3339();
+        if let Ok(data) = serde_json::to_string_pretty(&hb) {
+            let _ = edda_store::write_atomic(&path, data.as_bytes());
+        }
+    }
+    // If no existing heartbeat, skip touch (write_heartbeat will create it)
+}
+
+/// Remove heartbeat on SessionEnd.
+pub(crate) fn remove_heartbeat(project_id: &str, session_id: &str) {
+    let _ = fs::remove_file(heartbeat_path(project_id, session_id));
+}
+
+/// Read a single session's heartbeat file.
+fn read_heartbeat(project_id: &str, session_id: &str) -> Option<SessionHeartbeat> {
+    let path = heartbeat_path(project_id, session_id);
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+// ── Coordination Events (append-only log) ──
+
+/// Append a coordination event to coordination.jsonl.
+pub(crate) fn append_coord_event(project_id: &str, event: &CoordEvent) {
+    let path = coordination_path(project_id);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let line = match serde_json::to_string(event) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    let mut file = match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let _ = writeln!(file, "{line}");
+}
+
+/// Write a claim event.
+pub fn write_claim(project_id: &str, session_id: &str, label: &str, paths: &[String]) {
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: session_id.to_string(),
+        event_type: CoordEventType::Claim,
+        payload: serde_json::json!({
+            "label": label,
+            "paths": paths,
+        }),
+    };
+    append_coord_event(project_id, &event);
+}
+
+/// Write an unclaim event (on session end).
+pub(crate) fn write_unclaim(project_id: &str, session_id: &str) {
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: session_id.to_string(),
+        event_type: CoordEventType::Unclaim,
+        payload: serde_json::json!({}),
+    };
+    append_coord_event(project_id, &event);
+}
+
+/// Write a binding event to the coordination log.
+pub fn write_binding(
+    project_id: &str,
+    session_id: &str,
+    label: &str,
+    key: &str,
+    value: &str,
+) {
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: session_id.to_string(),
+        event_type: CoordEventType::Binding,
+        payload: serde_json::json!({
+            "key": key,
+            "value": value,
+            "by_label": label,
+        }),
+    };
+    append_coord_event(project_id, &event);
+}
+
+/// Write a cross-agent request event.
+pub fn write_request(
+    project_id: &str,
+    session_id: &str,
+    from_label: &str,
+    to_label: &str,
+    message: &str,
+) {
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: session_id.to_string(),
+        event_type: CoordEventType::Request,
+        payload: serde_json::json!({
+            "from_label": from_label,
+            "to_label": to_label,
+            "message": message,
+        }),
+    };
+    append_coord_event(project_id, &event);
+}
+
+// ── Board State Computation ──
+
+/// Read coordination.jsonl and compute current board state.
+pub(crate) fn compute_board_state(project_id: &str) -> BoardState {
+    let path = coordination_path(project_id);
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return BoardState::default(),
+    };
+
+    let mut claims: std::collections::HashMap<String, ClaimEntry> =
+        std::collections::HashMap::new();
+    let mut bindings: Vec<BindingEntry> = Vec::new();
+    let mut requests: Vec<RequestEntry> = Vec::new();
+
+    for line in content.lines() {
+        let event: CoordEvent = match serde_json::from_str(line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        match event.event_type {
+            CoordEventType::Claim => {
+                let label = event.payload["label"].as_str().unwrap_or("").to_string();
+                let paths: Vec<String> = event.payload["paths"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                claims.insert(
+                    event.session_id.clone(),
+                    ClaimEntry {
+                        session_id: event.session_id,
+                        label,
+                        paths,
+                        ts: event.ts,
+                    },
+                );
+            }
+            CoordEventType::Unclaim => {
+                claims.remove(&event.session_id);
+            }
+            CoordEventType::Binding => {
+                let key = event.payload["key"].as_str().unwrap_or("").to_string();
+                let value = event.payload["value"].as_str().unwrap_or("").to_string();
+                let by_label = event.payload["by_label"].as_str().unwrap_or("").to_string();
+                // Dedup: newer binding with same key replaces older
+                bindings.retain(|d| d.key != key);
+                bindings.push(BindingEntry {
+                    key,
+                    value,
+                    by_session: event.session_id,
+                    by_label,
+                    ts: event.ts,
+                });
+            }
+            CoordEventType::Request => {
+                let from_label = event.payload["from_label"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let to_label = event.payload["to_label"].as_str().unwrap_or("").to_string();
+                let message = event.payload["message"].as_str().unwrap_or("").to_string();
+                requests.push(RequestEntry {
+                    from_session: event.session_id,
+                    from_label,
+                    to_label,
+                    message,
+                    ts: event.ts,
+                });
+            }
+        }
+    }
+
+    BoardState {
+        claims: claims.into_values().collect(),
+        bindings,
+        requests,
+    }
+}
+
+/// Compact coordination.jsonl: compute current state and return as JSONL lines.
+/// Used by GC to shrink the append-only log.
+pub fn compute_board_state_for_compaction(project_id: &str) -> Vec<String> {
+    let board = compute_board_state(project_id);
+    let mut lines = Vec::new();
+
+    for claim in &board.claims {
+        let event = CoordEvent {
+            ts: claim.ts.clone(),
+            session_id: claim.session_id.clone(),
+            event_type: CoordEventType::Claim,
+            payload: serde_json::json!({
+                "label": claim.label,
+                "paths": claim.paths,
+            }),
+        };
+        if let Ok(line) = serde_json::to_string(&event) {
+            lines.push(line);
+        }
+    }
+
+    for binding in &board.bindings {
+        let event = CoordEvent {
+            ts: binding.ts.clone(),
+            session_id: binding.by_session.clone(),
+            event_type: CoordEventType::Binding,
+            payload: serde_json::json!({
+                "key": binding.key,
+                "value": binding.value,
+                "by_label": binding.by_label,
+            }),
+        };
+        if let Ok(line) = serde_json::to_string(&event) {
+            lines.push(line);
+        }
+    }
+
+    for request in &board.requests {
+        let event = CoordEvent {
+            ts: request.ts.clone(),
+            session_id: request.from_session.clone(),
+            event_type: CoordEventType::Request,
+            payload: serde_json::json!({
+                "from_label": request.from_label,
+                "to_label": request.to_label,
+                "message": request.message,
+            }),
+        };
+        if let Ok(line) = serde_json::to_string(&event) {
+            lines.push(line);
+        }
+    }
+
+    lines
+}
+
+// ── Peer Discovery ──
+
+/// Discover active peer sessions (excluding current session and stale ones).
+pub(crate) fn discover_active_peers(
+    project_id: &str,
+    current_session_id: &str,
+) -> Vec<PeerSummary> {
+    let state_dir = edda_store::project_dir(project_id).join("state");
+    let stale_threshold = stale_secs();
+    let now = parse_rfc3339_to_epoch(&now_rfc3339()).unwrap_or(0);
+
+    let board = compute_board_state(project_id);
+
+    let entries = match fs::read_dir(&state_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut peers = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("session.") || !name.ends_with(".json") {
+            continue;
+        }
+        let sid = name
+            .strip_prefix("session.")
+            .and_then(|s| s.strip_suffix(".json"))
+            .unwrap_or("");
+        if sid.is_empty() || sid == current_session_id {
+            continue;
+        }
+
+        let content = match fs::read_to_string(entry.path()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let hb: SessionHeartbeat = match serde_json::from_str(&content) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+
+        let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
+        let age = if now > hb_epoch { now - hb_epoch } else { 0 };
+
+        if age > stale_threshold {
+            continue;
+        }
+
+        let claimed_paths = board
+            .claims
+            .iter()
+            .find(|c| c.session_id == hb.session_id)
+            .map(|c| c.paths.clone())
+            .unwrap_or_default();
+
+        let task_subjects: Vec<String> = hb
+            .active_tasks
+            .iter()
+            .filter(|t| t.status == "in_progress")
+            .take(2)
+            .map(|t| t.subject.clone())
+            .collect();
+
+        peers.push(PeerSummary {
+            session_id: hb.session_id,
+            label: hb.label,
+            age_secs: age,
+            focus_files: hb.focus_files,
+            task_subjects,
+            files_modified_count: hb.files_modified_count,
+            recent_commits: hb.recent_commits,
+            claimed_paths,
+        });
+    }
+
+    // Sort by most recently active
+    peers.sort_by_key(|p| p.age_secs);
+    peers
+}
+
+/// Discover ALL sessions (including current one), for CLI display.
+pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
+    let state_dir = edda_store::project_dir(project_id).join("state");
+    let now = parse_rfc3339_to_epoch(&now_rfc3339()).unwrap_or(0);
+    let board = compute_board_state(project_id);
+
+    let entries = match fs::read_dir(&state_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut peers = Vec::new();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("session.") || !name.ends_with(".json") {
+            continue;
+        }
+
+        let content = match fs::read_to_string(entry.path()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let hb: SessionHeartbeat = match serde_json::from_str(&content) {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+
+        let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
+        let age = if now > hb_epoch { now - hb_epoch } else { 0 };
+
+        let claimed_paths = board
+            .claims
+            .iter()
+            .find(|c| c.session_id == hb.session_id)
+            .map(|c| c.paths.clone())
+            .unwrap_or_default();
+
+        let task_subjects: Vec<String> = hb
+            .active_tasks
+            .iter()
+            .filter(|t| t.status == "in_progress")
+            .take(2)
+            .map(|t| t.subject.clone())
+            .collect();
+
+        peers.push(PeerSummary {
+            session_id: hb.session_id,
+            label: hb.label,
+            age_secs: age,
+            focus_files: hb.focus_files,
+            task_subjects,
+            files_modified_count: hb.files_modified_count,
+            recent_commits: hb.recent_commits,
+            claimed_paths,
+        });
+    }
+
+    peers.sort_by_key(|p| p.age_secs);
+    peers
+}
+
+// ── Directive Renderer ──
+
+/// Render the full coordination protocol section for SessionStart injection.
+/// Returns None if no active peers (Solo mode).
+pub(crate) fn render_coordination_protocol(
+    project_id: &str,
+    session_id: &str,
+    _cwd: &str,
+) -> Option<String> {
+    let peers = discover_active_peers(project_id, session_id);
+    if peers.is_empty() {
+        return None;
+    }
+
+    let board = compute_board_state(project_id);
+    let my_claim = board.claims.iter().find(|c| c.session_id == session_id);
+    let budget = protocol_budget();
+
+    let mut lines = Vec::new();
+
+    lines.push(format!(
+        "## Coordination Protocol\nYou are one of {} agents working simultaneously.",
+        peers.len() + 1
+    ));
+
+    // My scope
+    if let Some(claim) = my_claim {
+        lines.push(format!(
+            "Your scope: **{}** ({})",
+            claim.label,
+            claim.paths.join(", ")
+        ));
+    }
+
+    // Peer activity (tasks + focus files)
+    let active_peers: Vec<&PeerSummary> = peers
+        .iter()
+        .filter(|p| !p.task_subjects.is_empty() || !p.focus_files.is_empty())
+        .collect();
+    if !active_peers.is_empty() {
+        lines.push("### Peers Working On".to_string());
+        for p in active_peers.iter().take(5) {
+            let age = format_age(p.age_secs);
+            if !p.task_subjects.is_empty() {
+                for t in p.task_subjects.iter().take(2) {
+                    lines.push(format!("- {} ({age}): {t}", p.label));
+                }
+            } else if !p.focus_files.is_empty() {
+                let files: Vec<&str> = p.focus_files.iter().take(2).map(|f| {
+                    f.rsplit(['/', '\\']).next().unwrap_or(f.as_str())
+                }).collect();
+                lines.push(format!("- {} ({age}): editing {}", p.label, files.join(", ")));
+            }
+        }
+    }
+
+    // Off-limits
+    let peer_claims: Vec<&PeerSummary> = peers.iter().filter(|p| !p.claimed_paths.is_empty()).collect();
+    if !peer_claims.is_empty() {
+        lines.push("### Off-limits (other agents active)".to_string());
+        for p in peer_claims.iter().take(5) {
+            let age = format_age(p.age_secs);
+            lines.push(format!(
+                "- {} → Agent {} ({age})",
+                p.claimed_paths.join(", "),
+                p.label
+            ));
+        }
+    }
+
+    // Binding decisions
+    if !board.bindings.is_empty() {
+        lines.push("### Binding Decisions".to_string());
+        for d in board.bindings.iter().rev().take(5) {
+            lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
+        }
+    }
+
+    // Recent commits from peers (sourced from heartbeat, not coordination log)
+    let peer_commits: Vec<(&str, &str)> = peers
+        .iter()
+        .flat_map(|p| {
+            p.recent_commits
+                .iter()
+                .map(move |c| (p.label.as_str(), c.as_str()))
+        })
+        .take(5)
+        .collect();
+    if !peer_commits.is_empty() {
+        lines.push("### Recent Peer Commits".to_string());
+        for (label, commit) in &peer_commits {
+            lines.push(format!("- {commit} ({label})"));
+        }
+    }
+
+    // Requests to me
+    let my_label = my_claim.map(|c| c.label.as_str()).unwrap_or("");
+    let my_requests: Vec<&RequestEntry> = board
+        .requests
+        .iter()
+        .filter(|r| r.to_label == my_label && !my_label.is_empty())
+        .collect();
+    if !my_requests.is_empty() {
+        lines.push("### Requests to you".to_string());
+        for r in my_requests.iter().take(3) {
+            lines.push(format!("- Agent {}: \"{}\"", r.from_label, r.message));
+        }
+    }
+
+    let result = lines.join("\n");
+
+    // Apply budget
+    if result.len() > budget {
+        Some(truncate_to_budget(&result, budget))
+    } else {
+        Some(result)
+    }
+}
+
+/// Render lightweight peer updates for UserPromptSubmit (only new bindings/requests).
+pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<String> {
+    let peers = discover_active_peers(project_id, session_id);
+    if peers.is_empty() {
+        return None;
+    }
+
+    let board = compute_board_state(project_id);
+
+    let mut lines = vec![format!("## Peers ({} active)", peers.len())];
+
+    // Peer activity (tasks)
+    for p in peers.iter().take(3) {
+        if !p.task_subjects.is_empty() {
+            for t in p.task_subjects.iter().take(1) {
+                lines.push(format!("- {}: {t}", p.label));
+            }
+        }
+    }
+
+    // Latest bindings (max 3)
+    if !board.bindings.is_empty() {
+        for d in board.bindings.iter().rev().take(3) {
+            lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
+        }
+    }
+
+    // Requests to current session
+    let my_claim = board.claims.iter().find(|c| c.session_id == session_id);
+    let my_label = my_claim.map(|c| c.label.as_str()).unwrap_or("");
+    let my_requests: Vec<&RequestEntry> = board
+        .requests
+        .iter()
+        .filter(|r| r.to_label == my_label && !my_label.is_empty())
+        .collect();
+    if !my_requests.is_empty() {
+        for r in my_requests.iter().take(2) {
+            lines.push(format!("- Request from {}: \"{}\"", r.from_label, r.message));
+        }
+    }
+
+    let result = lines.join("\n");
+    if result.len() > 300 {
+        Some(truncate_to_budget(&result, 300))
+    } else {
+        Some(result)
+    }
+}
+
+// ── Helpers ──
+
+/// Auto-derive a label from session signals (focus files).
+fn auto_label(signals: &SessionSignals) -> String {
+    if signals.files_modified.is_empty() {
+        return String::new();
+    }
+
+    // Try to extract crate/module name from the most-edited file
+    let top_file = signals
+        .files_modified
+        .iter()
+        .max_by_key(|f| f.count)
+        .map(|f| f.path.as_str())
+        .unwrap_or("");
+
+    let normalized = top_file.replace('\\', "/");
+    let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+
+    // Look for crate name pattern: crates/{name}/src/...
+    if let Some(pos) = segments.iter().position(|&s| s == "crates") {
+        if let Some(name) = segments.get(pos + 1) {
+            return name.to_string();
+        }
+    }
+
+    // Look for src/{name}/...
+    if let Some(pos) = segments.iter().position(|&s| s == "src") {
+        if let Some(name) = segments.get(pos + 1) {
+            if !name.contains('.') {
+                return name.to_string();
+            }
+        }
+    }
+
+    // Fall back to parent directory of top file
+    if segments.len() >= 2 {
+        return segments[segments.len() - 2].to_string();
+    }
+
+    String::new()
+}
+
+/// Format age in human-readable form.
+pub fn format_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else {
+        format!("{}h ago", secs / 3600)
+    }
+}
+
+/// Truncate content to budget, cutting at last newline before budget.
+fn truncate_to_budget(content: &str, budget: usize) -> String {
+    if content.len() <= budget {
+        return content.to_string();
+    }
+    let truncated = &content[..budget.min(content.len())];
+    // Cut at last newline for clean truncation
+    if let Some(pos) = truncated.rfind('\n') {
+        truncated[..pos].to_string()
+    } else {
+        truncated.to_string()
+    }
+}
+
+/// Parse RFC3339 timestamp to Unix epoch seconds (basic parser).
+fn parse_rfc3339_to_epoch(ts: &str) -> Option<u64> {
+    // Format: 2026-02-16T10:05:23+00:00 or 2026-02-16T10:05:23Z
+    // Simple approach: parse with chrono-like logic manually
+    // We only need relative comparison, so parsing the digits is enough
+    let ts = ts.trim();
+    if ts.len() < 19 {
+        return None;
+    }
+
+    let year: u64 = ts[0..4].parse().ok()?;
+    let month: u64 = ts[5..7].parse().ok()?;
+    let day: u64 = ts[8..10].parse().ok()?;
+    let hour: u64 = ts[11..13].parse().ok()?;
+    let min: u64 = ts[14..16].parse().ok()?;
+    let sec: u64 = ts[17..19].parse().ok()?;
+
+    // Approximate epoch (good enough for relative age computation)
+    // Days since epoch (1970-01-01), ignoring leap seconds
+    let days_in_year = 365;
+    let years_since_1970 = year.saturating_sub(1970);
+    let leap_years = (year.saturating_sub(1969)) / 4 - (year.saturating_sub(1901)) / 100
+        + (year.saturating_sub(1601)) / 400;
+
+    let month_days: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut total_days = years_since_1970 * days_in_year + leap_years;
+    for m in 0..(month.saturating_sub(1) as usize).min(11) {
+        total_days += month_days[m];
+    }
+    // Add leap day for current year if applicable
+    if month > 2 && (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) {
+        total_days += 1;
+    }
+    total_days += day.saturating_sub(1);
+
+    Some(total_days * 86400 + hour * 3600 + min * 60 + sec)
+}
+
+// ── Tests ──
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::signals::{CommitInfo, FileEditCount};
+
+    #[test]
+    fn heartbeat_write_read_roundtrip() {
+        let pid = "test_peers_hb_roundtrip";
+        let sid = "test-session-001";
+        let _ = edda_store::ensure_dirs(pid);
+
+        let signals = SessionSignals {
+            tasks: vec![TaskSnapshot {
+                id: "1".into(),
+                subject: "Implement auth".into(),
+                status: "in_progress".into(),
+            }],
+            files_modified: vec![
+                FileEditCount {
+                    path: "src/auth/mod.rs".into(),
+                    count: 5,
+                },
+                FileEditCount {
+                    path: "src/auth/jwt.rs".into(),
+                    count: 3,
+                },
+            ],
+            commits: vec![CommitInfo {
+                hash: "abc1234".into(),
+                message: "feat: add JWT auth".into(),
+            }],
+            failed_commands: vec![],
+        };
+
+        write_heartbeat(pid, sid, &signals, Some("auth"));
+        let hb = read_heartbeat(pid, sid).expect("should read heartbeat");
+
+        assert_eq!(hb.session_id, sid);
+        assert_eq!(hb.label, "auth");
+        assert_eq!(hb.files_modified_count, 2);
+        assert_eq!(hb.total_edits, 8);
+        assert_eq!(hb.active_tasks.len(), 1);
+        assert_eq!(hb.recent_commits.len(), 1);
+        assert!(hb.recent_commits[0].contains("JWT auth"));
+
+        // Cleanup
+        remove_heartbeat(pid, sid);
+        assert!(read_heartbeat(pid, sid).is_none());
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn coord_event_append_and_board_state() {
+        let pid = "test_peers_board_state";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Clean up any existing decisions file
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+        write_claim(pid, "s2", "billing", &["src/billing/*".into()]);
+        write_binding(pid, "s1", "auth", "auth.method", "JWT RS256");
+        write_request(pid, "s2", "billing", "auth", "Export AuthToken type");
+
+        let board = compute_board_state(pid);
+        assert_eq!(board.claims.len(), 2);
+        assert_eq!(board.bindings.len(), 1);
+        assert_eq!(board.bindings[0].key, "auth.method");
+        assert_eq!(board.bindings[0].value, "JWT RS256");
+        assert_eq!(board.requests.len(), 1);
+        assert_eq!(board.requests[0].to_label, "auth");
+
+        // Unclaim should remove
+        write_unclaim(pid, "s1");
+        let board2 = compute_board_state(pid);
+        assert_eq!(board2.claims.len(), 1);
+        assert_eq!(board2.claims[0].label, "billing");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn discover_peers_excludes_self() {
+        let pid = "test_peers_discover";
+        let _ = edda_store::ensure_dirs(pid);
+
+        let signals = SessionSignals::default();
+        write_heartbeat(pid, "self-session", &signals, Some("self"));
+        write_heartbeat(pid, "peer-session", &signals, Some("peer"));
+
+        let peers = discover_active_peers(pid, "self-session");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].label, "peer");
+
+        remove_heartbeat(pid, "self-session");
+        remove_heartbeat(pid, "peer-session");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_protocol_solo_returns_none() {
+        let pid = "test_peers_solo";
+        let _ = edda_store::ensure_dirs(pid);
+
+        let result = render_coordination_protocol(pid, "only-session", ".");
+        assert!(result.is_none());
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_protocol_multi_session() {
+        let pid = "test_peers_multi";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let signals = SessionSignals::default();
+        write_heartbeat(pid, "s1", &signals, Some("auth"));
+        write_heartbeat(pid, "s2", &signals, Some("billing"));
+        write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+        write_claim(pid, "s2", "billing", &["src/billing/*".into()]);
+        write_binding(pid, "s1", "auth", "auth.method", "JWT RS256");
+
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(result.contains("Coordination Protocol"));
+        assert!(result.contains("Off-limits"));
+        assert!(result.contains("auth"));
+        assert!(result.contains("Binding Decisions"));
+        assert!(result.contains("JWT RS256"));
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn auto_label_from_crate_path() {
+        let signals = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "crates/edda-bridge-claude/src/peers.rs".into(),
+                count: 10,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(auto_label(&signals), "edda-bridge-claude");
+    }
+
+    #[test]
+    fn auto_label_from_src_module() {
+        let signals = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "src/auth/jwt.rs".into(),
+                count: 5,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(auto_label(&signals), "auth");
+    }
+
+    #[test]
+    fn format_age_display() {
+        assert_eq!(format_age(30), "30s ago");
+        assert_eq!(format_age(90), "1m ago");
+        assert_eq!(format_age(3700), "1h ago");
+    }
+
+    #[test]
+    fn parse_rfc3339_basic() {
+        let epoch = parse_rfc3339_to_epoch("2026-02-16T10:05:23Z").unwrap();
+        assert!(epoch > 0);
+
+        // Two timestamps 60 seconds apart should differ by ~60
+        let a = parse_rfc3339_to_epoch("2026-02-16T10:05:00Z").unwrap();
+        let b = parse_rfc3339_to_epoch("2026-02-16T10:06:00Z").unwrap();
+        assert_eq!(b - a, 60);
+    }
+
+    #[test]
+    fn compaction_preserves_current_state() {
+        let pid = "test_peers_compaction";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Write a bunch of events including overrides
+        write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+        write_claim(pid, "s2", "billing", &["src/billing/*".into()]);
+        write_binding(pid, "s1", "auth", "db.engine", "SQLite");
+        write_binding(pid, "s1", "auth", "db.engine", "PostgreSQL"); // override
+        write_request(pid, "s2", "billing", "auth", "Export AuthToken");
+        write_unclaim(pid, "s1"); // removes s1 claim
+
+        // Compact
+        let lines = compute_board_state_for_compaction(pid);
+        // Should have: 1 claim (s2), 1 decision (PostgreSQL), 1 request
+        assert_eq!(lines.len(), 3);
+
+        // Verify by parsing
+        let board_before = compute_board_state(pid);
+        assert_eq!(board_before.claims.len(), 1);
+        assert_eq!(board_before.claims[0].label, "billing");
+        assert_eq!(board_before.bindings.len(), 1);
+        assert_eq!(board_before.bindings[0].value, "PostgreSQL");
+
+        // Write compacted back
+        let path = coordination_path(pid);
+        let content = lines.join("\n");
+        fs::write(&path, format!("{content}\n")).unwrap();
+
+        // Verify same state after compaction
+        let board_after = compute_board_state(pid);
+        assert_eq!(board_after.claims.len(), 1);
+        assert_eq!(board_after.claims[0].label, "billing");
+        assert_eq!(board_after.bindings.len(), 1);
+        assert_eq!(board_after.bindings[0].value, "PostgreSQL");
+        assert_eq!(board_after.requests.len(), 1);
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn full_lifecycle_multi_session() {
+        let pid = "test_peers_lifecycle";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Simulate 4 sessions starting
+        let signals = SessionSignals::default();
+        write_heartbeat(pid, "s1", &signals, Some("auth"));
+        write_heartbeat(pid, "s2", &signals, Some("billing"));
+        write_heartbeat(pid, "s3", &signals, Some("api"));
+        write_heartbeat(pid, "s4", &signals, Some("frontend"));
+
+        // Claims
+        write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+        write_claim(pid, "s2", "billing", &["src/billing/*".into()]);
+        write_claim(pid, "s3", "api", &["src/api/*".into()]);
+        write_claim(pid, "s4", "frontend", &["src/ui/*".into()]);
+
+        // s1 makes a decision
+        write_binding(pid, "s1", "auth", "auth.method", "JWT RS256");
+
+        // s3 sends request to s2
+        write_request(pid, "s3", "api", "billing", "Export BillingPlan type");
+
+        // Verify s3 sees coordination protocol
+        let proto = render_coordination_protocol(pid, "s3", ".").unwrap();
+        assert!(proto.contains("Coordination Protocol"));
+        assert!(proto.contains("4")); // 3 peers + self = 4 agents
+        assert!(proto.contains("JWT RS256"));
+
+        // Verify s2 sees the request
+        let proto_s2 = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(proto_s2.contains("Export BillingPlan type"));
+
+        // s2 sees peer updates (lightweight)
+        let updates = render_peer_updates(pid, "s2").unwrap();
+        assert!(updates.contains("Peers"));
+        assert!(updates.contains("Export BillingPlan"));
+
+        // Solo session should get None
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        remove_heartbeat(pid, "s3");
+        remove_heartbeat(pid, "s4");
+        let solo = render_coordination_protocol(pid, "s5", ".");
+        assert!(solo.is_none());
+
+        // discover_all_sessions returns nothing after cleanup
+        let all = discover_all_sessions(pid);
+        assert!(all.is_empty());
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn binding_dedup_in_board() {
+        let pid = "test_peers_decision_dedup";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_binding(pid, "s1", "auth", "db.engine", "SQLite");
+        write_binding(pid, "s1", "auth", "db.engine", "PostgreSQL");
+
+        let board = compute_board_state(pid);
+        assert_eq!(board.bindings.len(), 1);
+        assert_eq!(board.bindings[0].value, "PostgreSQL");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn migration_renames_decisions_to_coordination() {
+        let pid = "test_peers_migration";
+        let _ = edda_store::ensure_dirs(pid);
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let _ = fs::create_dir_all(&state_dir);
+
+        // Create legacy decisions.jsonl with content
+        let old_path = state_dir.join("decisions.jsonl");
+        let new_path = state_dir.join("coordination.jsonl");
+        let _ = fs::remove_file(&old_path);
+        let _ = fs::remove_file(&new_path);
+        fs::write(&old_path, "{\"test\":true}\n").unwrap();
+
+        // Calling coordination_path triggers migration
+        let result = coordination_path(pid);
+        assert_eq!(result, new_path);
+        assert!(new_path.exists(), "coordination.jsonl should exist after migration");
+        assert!(!old_path.exists(), "decisions.jsonl should be removed after migration");
+        let content = fs::read_to_string(&new_path).unwrap();
+        assert!(content.contains("test"), "content should be preserved");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn migration_skips_if_coordination_exists() {
+        let pid = "test_peers_migration_skip";
+        let _ = edda_store::ensure_dirs(pid);
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let _ = fs::create_dir_all(&state_dir);
+
+        // Both files exist — should NOT migrate (coordination.jsonl takes priority)
+        let old_path = state_dir.join("decisions.jsonl");
+        let new_path = state_dir.join("coordination.jsonl");
+        fs::write(&old_path, "old\n").unwrap();
+        fs::write(&new_path, "new\n").unwrap();
+
+        let _ = coordination_path(pid);
+        // coordination.jsonl should keep its original content
+        let content = fs::read_to_string(&new_path).unwrap();
+        assert_eq!(content, "new\n");
+        // decisions.jsonl should still exist (not deleted when coordination.jsonl exists)
+        assert!(old_path.exists());
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn serde_backward_compat_decision_deserializes_as_binding() {
+        // Old coordination logs have event_type: "decision". Verify they deserialize as Binding.
+        let json = r#"{"ts":"2026-02-18T00:00:00Z","session_id":"s1","event_type":"decision","payload":{"key":"db","value":"pg","by_label":"auth"}}"#;
+        let event: CoordEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event_type, CoordEventType::Binding);
+    }
+
+    #[test]
+    fn serde_new_binding_serializes_as_binding() {
+        let event = CoordEvent {
+            ts: "2026-02-18T00:00:00Z".to_string(),
+            session_id: "s1".to_string(),
+            event_type: CoordEventType::Binding,
+            payload: serde_json::json!({"key": "db"}),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"binding\""), "new events should serialize as 'binding', got: {json}");
+    }
+
+    #[test]
+    fn render_protocol_shows_peer_tasks() {
+        let pid = "test_peers_tasks_render";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let signals_with_task = SessionSignals {
+            tasks: vec![TaskSnapshot {
+                id: "1".into(),
+                subject: "Implement auth flow".into(),
+                status: "in_progress".into(),
+            }],
+            files_modified: vec![FileEditCount {
+                path: "crates/edda-auth/src/lib.rs".into(),
+                count: 3,
+            }],
+            ..Default::default()
+        };
+        write_heartbeat(pid, "s1", &signals_with_task, Some("auth"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(result.contains("Peers Working On"), "should have working-on section, got:\n{result}");
+        assert!(result.contains("Implement auth flow"), "should show task subject, got:\n{result}");
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_protocol_shows_focus_files_when_no_tasks() {
+        let pid = "test_peers_focus_render";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Session with files but no in_progress tasks
+        let signals = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "crates/edda-auth/src/lib.rs".into(),
+                count: 5,
+            }],
+            ..Default::default()
+        };
+        write_heartbeat(pid, "s1", &signals, Some("auth"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(result.contains("Peers Working On"), "should have working-on section, got:\n{result}");
+        assert!(result.contains("editing"), "should show focus files, got:\n{result}");
+        assert!(result.contains("lib.rs"), "should show file basename, got:\n{result}");
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_peer_updates_shows_tasks() {
+        let pid = "test_peers_updates_tasks";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let signals = SessionSignals {
+            tasks: vec![TaskSnapshot {
+                id: "1".into(),
+                subject: "Fix billing bug".into(),
+                status: "in_progress".into(),
+            }],
+            ..Default::default()
+        };
+        write_heartbeat(pid, "s1", &signals, Some("billing"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+
+        let result = render_peer_updates(pid, "s2").unwrap();
+        assert!(result.contains("Fix billing bug"), "should show peer task, got:\n{result}");
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+}
