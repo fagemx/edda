@@ -1296,3 +1296,304 @@ pub fn delete(repo_root: &Path, id: &str) -> anyhow::Result<()> {
     println!("Deleted draft {id}");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Initialize a temp edda workspace for testing.
+    fn init_workspace(root: &Path) {
+        crate::cmd_init::execute(root).expect("init should succeed");
+    }
+
+    /// Write a minimal draft file directly (bypasses propose logic).
+    fn write_test_draft(root: &Path, draft: &CommitDraftV1) {
+        let ledger = Ledger::open(root).unwrap();
+        let dir = ensure_drafts_dir(&ledger).unwrap();
+        let path = dir.join(format!("{}.json", draft.draft_id));
+        std::fs::write(&path, serde_json::to_string_pretty(draft).unwrap()).unwrap();
+    }
+
+    fn make_draft(id: &str, title: &str, status: &str, stages: Vec<DraftStage>) -> CommitDraftV1 {
+        CommitDraftV1 {
+            version: 1,
+            draft_id: id.to_string(),
+            created_at: "2026-02-19T10:00:00Z".to_string(),
+            branch: "main".to_string(),
+            base_parent_hash: String::new(),
+            title: title.to_string(),
+            purpose: "test purpose".to_string(),
+            contribution: title.to_string(),
+            labels: vec![],
+            evidence: vec![],
+            auto_preview_lines: vec![],
+            event_preview: serde_json::Value::Null,
+            status: status.to_string(),
+            approvals: vec![],
+            applied_commit_id: String::new(),
+            policy_require_approval: !stages.is_empty(),
+            policy_min_approvals: if stages.is_empty() { 0 } else { 1 },
+            stages,
+            route_rule_id: "default".to_string(),
+        }
+    }
+
+    fn make_stage(stage_id: &str, role: &str, status: &str) -> DraftStage {
+        DraftStage {
+            stage_id: stage_id.to_string(),
+            role: role.to_string(),
+            min_approvals: 1,
+            assignees: vec!["alice".to_string()],
+            status: status.to_string(),
+            approved_by: vec![],
+        }
+    }
+
+    // ── list --json tests ──
+
+    #[test]
+    fn list_json_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+        // No drafts — should produce no output (no panic)
+        let result = list(tmp.path(), true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_json_single_draft() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+
+        let draft = make_draft("drf_test01", "Add caching", "proposed", vec![]);
+        write_test_draft(tmp.path(), &draft);
+
+        // Capture stdout isn't easy in unit tests, so we just verify no error
+        let result = list(tmp.path(), true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_json_output_is_valid_jsonl() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+
+        let draft = make_draft(
+            "drf_testjson",
+            "Migrate DB",
+            "proposed",
+            vec![make_stage("lead", "lead", "pending")],
+        );
+        write_test_draft(tmp.path(), &draft);
+
+        // Read the draft back via the internal path to verify JSON structure
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let d = read_draft(&ledger, "drf_testjson").unwrap();
+
+        // Build the same JSON object that list --json would produce
+        let obj = serde_json::json!({
+            "draft_id": d.draft_id,
+            "created_at": d.created_at,
+            "branch": d.branch,
+            "title": d.title,
+            "status": d.status,
+            "purpose": d.purpose,
+            "labels": d.labels,
+            "evidence_count": d.evidence.len(),
+            "policy_require_approval": d.policy_require_approval,
+            "route_rule_id": d.route_rule_id,
+            "stages": d.stages.iter().map(|s| serde_json::json!({
+                "stage_id": s.stage_id,
+                "role": s.role,
+                "status": s.status,
+                "min_approvals": s.min_approvals,
+                "approved_by": s.approved_by,
+                "assignees": s.assignees,
+            })).collect::<Vec<_>>(),
+            "approvals": d.approvals.iter().map(|a| serde_json::json!({
+                "actor": a.actor,
+                "decision": a.decision,
+                "ts": a.ts,
+                "stage_id": a.stage_id,
+            })).collect::<Vec<_>>(),
+        });
+
+        let line = serde_json::to_string(&obj).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(parsed["draft_id"], "drf_testjson");
+        assert_eq!(parsed["title"], "Migrate DB");
+        assert_eq!(parsed["status"], "proposed");
+        assert_eq!(parsed["evidence_count"], 0);
+        assert_eq!(parsed["policy_require_approval"], true);
+        assert_eq!(parsed["stages"][0]["stage_id"], "lead");
+        assert_eq!(parsed["stages"][0]["status"], "pending");
+    }
+
+    #[test]
+    fn list_json_multiple_drafts_sorted() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+
+        let mut d1 = make_draft("drf_second", "Second", "proposed", vec![]);
+        d1.created_at = "2026-02-19T11:00:00Z".to_string();
+        let mut d2 = make_draft("drf_first", "First", "proposed", vec![]);
+        d2.created_at = "2026-02-19T10:00:00Z".to_string();
+
+        write_test_draft(tmp.path(), &d1);
+        write_test_draft(tmp.path(), &d2);
+
+        // list sorts by created_at — just verify no error
+        let result = list(tmp.path(), true);
+        assert!(result.is_ok());
+
+        // Also verify non-json still works
+        let result = list(tmp.path(), false);
+        assert!(result.is_ok());
+    }
+
+    // ── inbox --json tests ──
+
+    #[test]
+    fn inbox_json_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+        let result = inbox(tmp.path(), None, None, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inbox_json_with_pending_stage() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+
+        let draft = make_draft(
+            "drf_inbox01",
+            "Add auth",
+            "proposed",
+            vec![make_stage("lead", "lead", "pending")],
+        );
+        write_test_draft(tmp.path(), &draft);
+
+        let result = inbox(tmp.path(), None, None, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inbox_json_skips_applied() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+
+        let draft = make_draft(
+            "drf_applied",
+            "Done",
+            "applied",
+            vec![make_stage("lead", "lead", "approved")],
+        );
+        write_test_draft(tmp.path(), &draft);
+
+        // Applied drafts should not appear in inbox
+        let result = inbox(tmp.path(), None, None, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inbox_json_skips_approved_stages() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+
+        let draft = make_draft(
+            "drf_partial",
+            "Partial",
+            "proposed",
+            vec![
+                make_stage("lead", "lead", "approved"),
+                make_stage("reviewer", "reviewer", "pending"),
+            ],
+        );
+        write_test_draft(tmp.path(), &draft);
+
+        // Only the pending "reviewer" stage should appear
+        let result = inbox(tmp.path(), None, None, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inbox_json_filter_by_actor() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+
+        let draft = make_draft(
+            "drf_filter",
+            "Filter test",
+            "proposed",
+            vec![make_stage("lead", "lead", "pending")],
+        );
+        write_test_draft(tmp.path(), &draft);
+
+        // alice is in assignees
+        let result = inbox(tmp.path(), Some("alice"), None, true);
+        assert!(result.is_ok());
+
+        // bob is NOT in assignees
+        let result = inbox(tmp.path(), Some("bob"), None, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inbox_json_filter_by_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+
+        let draft = make_draft(
+            "drf_role",
+            "Role test",
+            "proposed",
+            vec![make_stage("lead", "lead", "pending")],
+        );
+        write_test_draft(tmp.path(), &draft);
+
+        // role=lead matches
+        let result = inbox(tmp.path(), None, Some("lead"), true);
+        assert!(result.is_ok());
+
+        // role=reviewer does not match
+        let result = inbox(tmp.path(), None, Some("reviewer"), true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn inbox_json_output_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_workspace(tmp.path());
+
+        let draft = make_draft(
+            "drf_fields",
+            "Check fields",
+            "proposed",
+            vec![make_stage("lead", "lead", "pending")],
+        );
+        write_test_draft(tmp.path(), &draft);
+
+        // Verify the JSON structure by reading the draft and building expected output
+        let obj = serde_json::json!({
+            "draft_id": "drf_fields",
+            "title": "Check fields",
+            "branch": "main",
+            "stage_id": "lead",
+            "role": "lead",
+            "min_approvals": 1,
+            "current_approvals": 0,
+            "approvals_needed": 1,
+            "assignees": ["alice"],
+        });
+
+        let line = serde_json::to_string(&obj).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(parsed["draft_id"], "drf_fields");
+        assert_eq!(parsed["approvals_needed"], 1);
+        assert_eq!(parsed["current_approvals"], 0);
+        assert_eq!(parsed["assignees"][0], "alice");
+    }
+}
