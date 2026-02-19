@@ -100,10 +100,14 @@ pub fn run(plan_file: &Path, cwd_override: Option<&Path>, dry_run: bool, verbose
 }
 
 /// Execute `edda conduct status [plan-name]`
-pub fn status(repo_root: &Path, plan_name: Option<&str>) -> Result<()> {
+pub fn status(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<()> {
     let conductor_dir = repo_root.join(".edda").join("conductor");
     if !conductor_dir.exists() {
-        println!("No conductor state found.");
+        if json {
+            println!("[]");
+        } else {
+            println!("No conductor state found.");
+        }
         return Ok(());
     }
 
@@ -125,15 +129,36 @@ pub fn status(repo_root: &Path, plan_name: Option<&str>) -> Result<()> {
     };
 
     if plans.is_empty() {
-        println!("No plans found.");
+        if json {
+            println!("[]");
+        } else {
+            println!("No plans found.");
+        }
         return Ok(());
     }
 
-    for name in &plans {
-        let state = load_state(repo_root, name)?;
-        match state {
-            Some(s) => print_status(&s),
-            None => println!("Plan \"{name}\": no state file found"),
+    if json {
+        let states: Vec<PlanState> = plans
+            .iter()
+            .filter_map(|name| load_state(repo_root, name).ok().flatten())
+            .collect();
+        // Single plan name specified: output object directly; otherwise array
+        if plan_name.is_some() {
+            if let Some(s) = states.into_iter().next() {
+                println!("{}", serde_json::to_string_pretty(&s)?);
+            } else {
+                println!("null");
+            }
+        } else {
+            println!("{}", serde_json::to_string_pretty(&states)?);
+        }
+    } else {
+        for name in &plans {
+            let state = load_state(repo_root, name)?;
+            match state {
+                Some(s) => print_status(&s),
+                None => println!("Plan \"{name}\": no state file found"),
+            }
         }
     }
 

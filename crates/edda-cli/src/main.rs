@@ -660,6 +660,9 @@ enum ConductCmd {
     Status {
         /// Plan name (auto-detects if only one)
         plan_name: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Reset a failed/stale phase to Pending
     Retry {
@@ -887,8 +890,8 @@ fn main() -> anyhow::Result<()> {
                 dry_run,
                 !quiet,
             ),
-            ConductCmd::Status { plan_name } => {
-                cmd_conduct::status(&repo_root, plan_name.as_deref())
+            ConductCmd::Status { plan_name, json } => {
+                cmd_conduct::status(&repo_root, plan_name.as_deref(), json)
             }
             ConductCmd::Retry { phase_id, plan } => {
                 cmd_conduct::retry(&repo_root, &phase_id, plan.as_deref())
