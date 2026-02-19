@@ -5,7 +5,3 @@ CLAUDE.md
 docs/
 /tmp/
 nul
-
-# Orchestrator (TypeScript)
-orchestrator/node_modules/
-orchestrator/dist/

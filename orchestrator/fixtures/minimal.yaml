@@ -1,7 +1,0 @@
-name: minimal-test
-phases:
-  - id: hello
-    prompt: "Create a file called hello.txt with the content 'Hello, World!'"
-    check:
-      - type: file_exists
-        path: hello.txt
