@@ -13,6 +13,7 @@ edda-ledger = { path = "../edda-ledger" }
 edda-derive = { path = "../edda-derive" }
 edda-store = { path = "../edda-store" }
 edda-bridge-claude = { path = "../edda-bridge-claude" }
+edda-bridge-openclaw = { path = "../edda-bridge-openclaw" }
 edda-transcript = { path = "../edda-transcript" }
 edda-index = { path = "../edda-index" }
 edda-pack = { path = "../edda-pack" }

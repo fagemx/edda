@@ -1,0 +1,7 @@
+{
+  "name": "@edda/openclaw-bridge",
+  "version": "0.1.0",
+  "openclaw": {
+    "extensions": [{ "entry": "index.js" }]
+  }
+}

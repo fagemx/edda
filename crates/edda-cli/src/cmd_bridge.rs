@@ -359,3 +359,58 @@ pub fn index_verify(
     println!("OK: {checked} index records verified, 0 mismatches");
     Ok(())
 }
+
+// ── OpenClaw Bridge ──
+
+/// `edda bridge openclaw install`
+pub fn install_openclaw(target: Option<&Path>) -> anyhow::Result<()> {
+    edda_bridge_openclaw::install(target)
+}
+
+/// `edda bridge openclaw uninstall`
+pub fn uninstall_openclaw(target: Option<&Path>) -> anyhow::Result<()> {
+    edda_bridge_openclaw::uninstall(target)
+}
+
+/// `edda hook openclaw` — read stdin, dispatch hook
+pub fn hook_openclaw() -> anyhow::Result<()> {
+    let mut stdin_buf = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
+        debug_log(&format!("OPENCLAW STDIN READ ERROR: {e}"));
+        return Ok(());
+    }
+
+    debug_log(&format!(
+        "OPENCLAW STDIN({} bytes): {}",
+        stdin_buf.len(),
+        &stdin_buf[..stdin_buf.len().min(200)]
+    ));
+
+    match edda_bridge_openclaw::hook_entrypoint_from_stdin(&stdin_buf) {
+        Ok(result) => {
+            if let Some(output) = &result.stdout {
+                debug_log(&format!("OPENCLAW OK output({} bytes)", output.len()));
+                print!("{output}");
+            }
+            if let Some(warning) = &result.stderr {
+                debug_log(&format!("OPENCLAW WARNING: {warning}"));
+                eprintln!("{warning}");
+                std::process::exit(1);
+            }
+            if result.stdout.is_none() && result.stderr.is_none() {
+                debug_log("OPENCLAW OK (no output)");
+            }
+            Ok(())
+        }
+        Err(e) => {
+            debug_log(&format!("OPENCLAW ERROR: {e}"));
+            // Exit 0 on internal errors — never block the host agent
+            Ok(())
+        }
+    }
+}
+
+/// `edda doctor openclaw`
+pub fn doctor_openclaw() -> anyhow::Result<()> {
+    edda_bridge_openclaw::doctor()
+}
