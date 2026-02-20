@@ -179,6 +179,9 @@ pub async fn run_plan(
         let plan_context = build_plan_context_with_edda(plan, state, &phase_id, cwd);
         let session_id = phase_session_id_attempt(&plan.name, &phase_id, attempt).to_string();
 
+        // Auto-claim scope for this phase (so peers can see it and send requests)
+        write_phase_claim(cwd, &session_id, &phase_id);
+
         let result = launcher
             .run_phase(
                 phase,
@@ -496,11 +499,12 @@ fn build_phase_prompt(
         prompt.push_str("\n\nYour previous changes are still on disk. Fix the issues above.");
     }
 
-    // Layer 3: write-back reminder for decision recording
+    // Layer 3: write-back reminder for decision recording + cross-phase messaging
     prompt.push_str("\n\n## Decision Write-Back\n");
     prompt.push_str(
         "Record architectural decisions from this phase: \
-         `edda decide \"key=value\" --reason \"why\"`\n",
+         `edda decide \"key=value\" --reason \"why\"`\n\
+         Message another phase: `edda request \"phase-label\" \"message\"`\n",
     );
 
     prompt
@@ -608,6 +612,30 @@ fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
+}
+
+/// Write a claim event to coordination.jsonl for a conductor phase.
+/// Written directly (no edda-bridge-claude dependency) since the format is simple.
+fn write_phase_claim(cwd: &Path, session_id: &str, phase_id: &str) {
+    let project_id = edda_store::project_id(cwd);
+    let state_dir = edda_store::project_dir(&project_id).join("state");
+    let coord_path = state_dir.join("coordination.jsonl");
+    let event = serde_json::json!({
+        "ts": now_rfc3339(),
+        "session_id": session_id,
+        "event_type": "claim",
+        "payload": { "label": phase_id, "paths": serde_json::Value::Array(vec![]) }
+    });
+    if let Ok(line) = serde_json::to_string(&event) {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&coord_path)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -981,6 +1009,7 @@ phases:
         let prompt = build_phase_prompt(&plan.phases[0], None);
         assert!(prompt.contains("Decision Write-Back"));
         assert!(prompt.contains("edda decide"));
+        assert!(prompt.contains("edda request"));
     }
 
     // ── Event log integration tests ──

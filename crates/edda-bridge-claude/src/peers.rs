@@ -703,6 +703,16 @@ pub fn render_coordination_protocol(
     }
 
     let my_claim = board.claims.iter().find(|c| c.session_id == session_id);
+    let my_heartbeat = read_heartbeat(project_id, session_id);
+
+    // Resolve identity: explicit claim wins, heartbeat label is fallback
+    let my_label: &str = if let Some(claim) = my_claim {
+        claim.label.as_str()
+    } else if let Some(ref hb) = my_heartbeat {
+        hb.label.as_str()
+    } else {
+        ""
+    };
 
     let mut lines = Vec::new();
 
@@ -711,6 +721,13 @@ pub fn render_coordination_protocol(
         peers.len() + 1
     ));
 
+    // L2 command instructions (compact)
+    lines.push(
+        "Claim your scope: `edda claim \"label\" --paths \"src/scope/*\"`\n\
+         Message a peer: `edda request \"peer-label\" \"your message\"`"
+            .to_string(),
+    );
+
     // My scope
     if let Some(claim) = my_claim {
         lines.push(format!(
@@ -718,6 +735,8 @@ pub fn render_coordination_protocol(
             claim.label,
             claim.paths.join(", ")
         ));
+    } else if !my_label.is_empty() {
+        lines.push(format!("Your scope: **{my_label}**"));
     }
 
     // Peer activity (tasks + focus files)
@@ -781,8 +800,7 @@ pub fn render_coordination_protocol(
         }
     }
 
-    // Requests to me
-    let my_label = my_claim.map(|c| c.label.as_str()).unwrap_or("");
+    // Requests to me (using resolved my_label from claim or heartbeat fallback)
     let my_requests: Vec<&RequestEntry> = board
         .requests
         .iter()
@@ -849,9 +867,16 @@ pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<
         }
     }
 
-    // Requests to current session
+    // Requests to current session (claim label → heartbeat label fallback)
     let my_claim = board.claims.iter().find(|c| c.session_id == session_id);
-    let my_label = my_claim.map(|c| c.label.as_str()).unwrap_or("");
+    let my_heartbeat = read_heartbeat(project_id, session_id);
+    let my_label: &str = if let Some(ref claim) = my_claim {
+        claim.label.as_str()
+    } else if let Some(ref hb) = my_heartbeat {
+        hb.label.as_str()
+    } else {
+        ""
+    };
     let my_requests: Vec<&RequestEntry> = board
         .requests
         .iter()
@@ -1681,6 +1706,200 @@ mod tests {
         let updates_s2 = render_peer_updates(pid, "s2").unwrap();
         assert!(updates_s2.contains("postgres"), "s2 should see db.engine binding");
         assert!(updates_s2.contains("JWT"), "s2 should see auth.method binding");
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Heartbeat label fallback tests (#146) ──
+
+    #[test]
+    fn request_delivered_via_heartbeat_label_no_claim() {
+        let pid = "test_hb_fallback_request";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Two sessions: s1 (peer) and s2 (me) — both have heartbeats, no claims
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+
+        // s1 sends request to "billing" (s2's heartbeat label)
+        write_request(pid, "s1", "auth", "billing", "please expose /api/users");
+
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(
+            result.contains("Requests to you"),
+            "request to heartbeat label should appear, got:\n{result}"
+        );
+        assert!(
+            result.contains("please expose /api/users"),
+            "request message should appear, got:\n{result}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn explicit_claim_wins_over_heartbeat_for_requests() {
+        let pid = "test_claim_wins_request";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // s2 has heartbeat "auth" but claim "backend"
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+        write_claim(pid, "s2", "backend", &[]);
+
+        // Request to "backend" (claim label) should arrive
+        write_request(pid, "s1", "peer", "backend", "need backend help");
+        // Request to "auth" (heartbeat label) should NOT arrive (claim overrides)
+        write_request(pid, "s1", "peer", "auth", "wrong target");
+
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(
+            result.contains("need backend help"),
+            "request to claim label should appear, got:\n{result}"
+        );
+        assert!(
+            !result.contains("wrong target"),
+            "request to heartbeat label should NOT appear when claim exists, got:\n{result}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn no_heartbeat_no_claim_no_requests() {
+        let pid = "test_no_identity_request";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // s1 is peer, s2 has no heartbeat and no claim
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
+        write_request(pid, "s1", "auth", "ghost", "hello ghost");
+
+        // s2 renders — should not see the request (no identity)
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(
+            !result.contains("Requests to you"),
+            "agent with no identity should see no requests, got:\n{result}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn heartbeat_scope_display_without_claim() {
+        let pid = "test_hb_scope_display";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(
+            result.contains("Your scope: **auth**"),
+            "should show heartbeat-derived scope, got:\n{result}"
+        );
+        // Should NOT have paths (no claim, just heartbeat)
+        assert!(
+            !result.contains("Your scope: **auth** ("),
+            "heartbeat scope should not have paths, got:\n{result}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn claim_scope_display_with_paths() {
+        let pid = "test_claim_scope_display";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+        write_claim(pid, "s2", "backend", &["src/api/*".into()]);
+
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(
+            result.contains("Your scope: **backend** (src/api/*)"),
+            "claim scope should show label + paths, got:\n{result}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn multi_session_shows_l2_instructions() {
+        let pid = "test_l2_instructions";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(
+            result.contains("edda claim"),
+            "multi-session should contain claim instruction, got:\n{result}"
+        );
+        assert!(
+            result.contains("edda request"),
+            "multi-session should contain request instruction, got:\n{result}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn solo_mode_no_l2_instructions() {
+        let pid = "test_solo_no_l2_instr";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Solo with binding (renders "## Binding Decisions" only)
+        write_binding(pid, "s1", "auth", "db.engine", "postgres");
+        let result = render_coordination_protocol(pid, "solo", ".").unwrap();
+        assert!(
+            !result.contains("edda claim"),
+            "solo mode should NOT contain claim instruction, got:\n{result}"
+        );
+        assert!(
+            !result.contains("edda request"),
+            "solo mode should NOT contain request instruction, got:\n{result}"
+        );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn peer_updates_request_via_heartbeat_fallback() {
+        let pid = "test_peer_updates_hb_req";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+        write_request(pid, "s1", "auth", "billing", "need billing API");
+
+        let result = render_peer_updates(pid, "s2").unwrap();
+        assert!(
+            result.contains("need billing API"),
+            "peer_updates should route request via heartbeat label, got:\n{result}"
+        );
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
