@@ -351,12 +351,33 @@ fn dispatch_with_workspace_only(
         .unwrap_or(2500);
     let mut ws = render_workspace_section(cwd, workspace_budget);
 
-    // Append lightweight peer updates (decisions + requests)
-    if let Some(updates) = crate::peers::render_peer_updates(project_id, session_id) {
-        ws = Some(match ws {
-            Some(w) => format!("{w}\n{updates}"),
-            None => updates,
-        });
+    // Detect solo → multi-session transition for late peer detection (#11).
+    // On 0→N transition, inject the full coordination protocol instead of
+    // lightweight peer updates so the agent learns L2 commands and sees
+    // peer scope claims.
+    let peers = crate::peers::discover_active_peers(project_id, session_id);
+    let prev_count = read_peer_count(project_id, session_id);
+    let first_peers = prev_count == 0 && !peers.is_empty();
+    write_peer_count(project_id, session_id, peers.len());
+
+    if first_peers {
+        // First time seeing peers — inject full coordination protocol
+        if let Some(coord) =
+            crate::peers::render_coordination_protocol(project_id, session_id, cwd)
+        {
+            ws = Some(match ws {
+                Some(w) => format!("{w}\n\n{coord}"),
+                None => coord,
+            });
+        }
+    } else {
+        // Normal: lightweight peer updates
+        if let Some(updates) = crate::peers::render_peer_updates(project_id, session_id) {
+            ws = Some(match ws {
+                Some(w) => format!("{w}\n{updates}"),
+                None => updates,
+            });
+        }
     }
 
     if let Some(ws) = ws {
@@ -605,6 +626,30 @@ fn write_inject_hash(project_id: &str, session_id: &str, content: &str) {
     let _ = fs::write(&path, hash);
 }
 
+// ── Peer Count Tracking (Late Peer Detection) ──
+
+/// Path to the peer count state file for a given session.
+fn peer_count_path(project_id: &str, session_id: &str) -> PathBuf {
+    edda_store::project_dir(project_id)
+        .join("state")
+        .join(format!("peer_count.{session_id}"))
+}
+
+/// Read the previously recorded peer count for this session (defaults to 0).
+fn read_peer_count(project_id: &str, session_id: &str) -> usize {
+    let path = peer_count_path(project_id, session_id);
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Write the current peer count for this session.
+fn write_peer_count(project_id: &str, session_id: &str, count: usize) {
+    let path = peer_count_path(project_id, session_id);
+    let _ = fs::write(&path, count.to_string());
+}
+
 /// Dispatch UserPromptSubmit — compact-aware.
 ///
 /// Normal case: inject lightweight workspace context (~2K).
@@ -682,6 +727,8 @@ fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool)
     let _ = fs::remove_file(state_dir.join(format!("nudge_count.{session_id}")));
     let _ = fs::remove_file(state_dir.join(format!("decide_count.{session_id}")));
     let _ = fs::remove_file(state_dir.join(format!("signal_count.{session_id}")));
+    // Late peer detection counter (#11)
+    let _ = fs::remove_file(state_dir.join(format!("peer_count.{session_id}")));
     // Peer heartbeat + unclaim (L2 — keep remove_heartbeat unconditional as idempotent cleanup)
     crate::peers::remove_heartbeat(project_id, session_id);
     if peers_active {
@@ -2372,5 +2419,135 @@ mod tests {
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
         let _ = fs::remove_dir_all(&cwd);
+    }
+
+    // ── Issue #11: Late Peer Detection ──
+
+    #[test]
+    fn late_peer_detection_injects_full_protocol() {
+        let pid = "test_late_peer_full";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+        std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+        std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
+
+        let cwd = std::env::temp_dir().join("edda_late_peer_full_cwd");
+        let _ = fs::create_dir_all(&cwd);
+
+        let sid = "solo-sess";
+        // No peer_count file yet (virgin session) → prev_count = 0
+        // Create a peer heartbeat to simulate a second agent joining
+        let signals = crate::signals::SessionSignals::default();
+        crate::peers::write_heartbeat(pid, "peer-a", &signals, Some("billing"));
+
+        let result = dispatch_with_workspace_only(pid, sid, cwd.to_str().unwrap(), "UserPromptSubmit").unwrap();
+        assert!(result.stdout.is_some(), "should return output");
+
+        let output: serde_json::Value =
+            serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+        let ctx = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            ctx.contains("Coordination Protocol") || ctx.contains("edda claim"),
+            "should contain full coordination protocol on first peer detection, got:\n{ctx}"
+        );
+
+        // Verify peer_count state file was written
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let count_file = state_dir.join(format!("peer_count.{sid}"));
+        assert!(count_file.exists(), "peer_count file should be created");
+        let count: usize = fs::read_to_string(&count_file).unwrap().trim().parse().unwrap();
+        assert_eq!(count, 1, "peer_count should be 1");
+
+        crate::peers::remove_heartbeat(pid, "peer-a");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn subsequent_prompts_use_lightweight_updates() {
+        let pid = "test_late_peer_subsequent";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+        std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+        std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
+
+        let cwd = std::env::temp_dir().join("edda_late_peer_subseq_cwd");
+        let _ = fs::create_dir_all(&cwd);
+
+        let sid = "known-peers-sess";
+        // Pre-set peer_count to 1 (peer already known from previous prompt)
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let _ = fs::create_dir_all(&state_dir);
+        fs::write(state_dir.join(format!("peer_count.{sid}")), "1").unwrap();
+
+        // Peer heartbeat still active
+        let signals = crate::signals::SessionSignals::default();
+        crate::peers::write_heartbeat(pid, "peer-b", &signals, Some("auth"));
+
+        let result = dispatch_with_workspace_only(pid, sid, cwd.to_str().unwrap(), "UserPromptSubmit").unwrap();
+        assert!(result.stdout.is_some(), "should return output");
+
+        let output: serde_json::Value =
+            serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+        let ctx = output["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap_or("");
+        // Should have lightweight peer updates, not full protocol
+        assert!(
+            ctx.contains("## Peers"),
+            "should contain lightweight peer header, got:\n{ctx}"
+        );
+
+        crate::peers::remove_heartbeat(pid, "peer-b");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn solo_session_writes_zero_peer_count() {
+        let pid = "test_late_peer_solo";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+        std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+        std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
+
+        let cwd = std::env::temp_dir().join("edda_late_peer_solo_cwd");
+        let _ = fs::create_dir_all(&cwd);
+
+        let sid = "solo-only";
+        // No peers — dispatch should still work, writing peer_count = 0
+        let _ = dispatch_with_workspace_only(pid, sid, cwd.to_str().unwrap(), "UserPromptSubmit");
+
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let count_file = state_dir.join(format!("peer_count.{sid}"));
+        assert!(count_file.exists(), "peer_count file should be created even for solo");
+        let count: usize = fs::read_to_string(&count_file).unwrap().trim().parse().unwrap();
+        assert_eq!(count, 0, "peer_count should be 0 for solo session");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn peer_count_cleaned_on_session_end() {
+        let pid = "test_peer_count_clean";
+        let _ = edda_store::ensure_dirs(pid);
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let _ = fs::create_dir_all(&state_dir);
+
+        let sid = "clean-sess";
+        fs::write(state_dir.join(format!("peer_count.{sid}")), "2").unwrap();
+        assert!(state_dir.join(format!("peer_count.{sid}")).exists());
+
+        cleanup_session_state(pid, sid, false);
+
+        assert!(
+            !state_dir.join(format!("peer_count.{sid}")).exists(),
+            "peer_count should be cleaned on session end"
+        );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }
