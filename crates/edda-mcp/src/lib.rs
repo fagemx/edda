@@ -10,7 +10,8 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use edda_core::event::new_note_event;
+use edda_core::event::{finalize_event, new_note_event};
+use edda_core::types::{rel, Provenance};
 use edda_derive::{rebuild_branch, render_context, DeriveOptions};
 use edda_ledger::lock::WorkspaceLock;
 use edda_ledger::Ledger;
@@ -31,6 +32,66 @@ struct NoteParams {
 struct ContextParams {
     /// Number of recent commits/signals to show (default: 5)
     depth: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct DecideParams {
+    /// Decision in key=value format (e.g. "db.engine=postgres")
+    decision: String,
+    /// Reason for the decision
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct QueryParams {
+    /// Search keyword (case-insensitive, matches decision key/value/reason)
+    query: String,
+    /// Maximum number of results (default: 20)
+    limit: Option<usize>,
+    /// Include superseded decisions (default: false)
+    include_superseded: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct LogParams {
+    /// Filter by event type (e.g. "note", "cmd", "commit")
+    event_type: Option<String>,
+    /// Case-insensitive keyword search in event payload
+    keyword: Option<String>,
+    /// Only events after this date (ISO 8601 prefix, e.g. "2026-02")
+    after: Option<String>,
+    /// Only events before this date
+    before: Option<String>,
+    /// Maximum events to return (default: 50)
+    limit: Option<usize>,
+}
+
+// --- Minimal draft structs for inbox display ---
+
+#[derive(Debug, Deserialize)]
+struct MinimalDraft {
+    #[serde(default)]
+    draft_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    stages: Vec<MinimalStage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MinimalStage {
+    #[serde(default)]
+    stage_id: String,
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    min_approvals: usize,
+    #[serde(default)]
+    approved_by: Vec<String>,
+    #[serde(default)]
+    status: String,
 }
 
 // --- MCP Server ---
@@ -119,6 +180,330 @@ impl EddaServer {
 
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
+
+    /// Record a binding decision (key=value) with optional reason and auto-supersede
+    #[tool(description = "Record a binding decision (key=value) with optional reason and auto-supersede detection")]
+    async fn edda_decide(
+        &self,
+        Parameters(params): Parameters<DecideParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (key, value) = params.decision.split_once('=').ok_or_else(|| {
+            McpError::invalid_params(
+                "decision must be in key=value format (e.g. \"db.engine=postgres\")",
+                None,
+            )
+        })?;
+        let key = key.trim();
+        let value = value.trim();
+
+        let ledger = self.open_ledger()?;
+        let _lock = WorkspaceLock::acquire(&ledger.paths).map_err(to_mcp_err)?;
+
+        let branch = ledger.head_branch().map_err(to_mcp_err)?;
+        let parent_hash = ledger.last_event_hash().map_err(to_mcp_err)?;
+
+        let text = match &params.reason {
+            Some(r) => format!("{key}: {value} — {r}"),
+            None => format!("{key}: {value}"),
+        };
+        let tags = vec!["decision".to_string()];
+
+        let mut event =
+            new_note_event(&branch, parent_hash.as_deref(), "system", &text, &tags)
+                .map_err(to_mcp_err)?;
+
+        // Inject structured decision object into payload
+        let decision_obj = match &params.reason {
+            Some(r) => serde_json::json!({"key": key, "value": value, "reason": r}),
+            None => serde_json::json!({"key": key, "value": value}),
+        };
+        event.payload["decision"] = decision_obj;
+
+        // Auto-supersede: find prior decision with same key
+        let prior = find_prior_decision(&ledger, &branch, key);
+        let mut supersede_info = String::new();
+        if let Some((prior_id, prior_value)) = &prior {
+            if prior_value.as_deref() != Some(value) {
+                supersede_info = format!(
+                    " (supersedes {} which was \"{}\")",
+                    prior_id,
+                    prior_value.as_deref().unwrap_or("?")
+                );
+            }
+            event.refs.provenance.push(Provenance {
+                target: prior_id.clone(),
+                rel: rel::SUPERSEDES.to_string(),
+                note: Some(format!("key '{}' re-decided", key)),
+            });
+        }
+
+        // Re-finalize after payload/refs mutation
+        finalize_event(&mut event);
+        ledger.append_event(&event, false).map_err(to_mcp_err)?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Decision recorded: {key} = {value} [{}]{supersede_info}",
+            event.event_id
+        ))]))
+    }
+
+    /// Search decisions by keyword (case-insensitive match on key/value/reason)
+    #[tool(description = "Search decisions by keyword (case-insensitive match on key/value/reason)")]
+    async fn edda_query(
+        &self,
+        Parameters(params): Parameters<QueryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ledger = self.open_ledger()?;
+        let head = ledger.head_branch().map_err(to_mcp_err)?;
+        let events = ledger.iter_events().map_err(to_mcp_err)?;
+        let limit = params.limit.unwrap_or(20);
+        let include_superseded = params.include_superseded.unwrap_or(false);
+        let query_lower = params.query.to_lowercase();
+
+        // Collect decision events on this branch
+        let decisions: Vec<_> = events
+            .iter()
+            .filter(|e| e.branch == head && e.event_type == "note")
+            .filter(|e| {
+                e.payload
+                    .get("tags")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        // Build superseded set from provenance links
+        let mut superseded_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for e in &decisions {
+            for prov in &e.refs.provenance {
+                if prov.rel == rel::SUPERSEDES {
+                    superseded_ids.insert(&prov.target);
+                }
+            }
+        }
+
+        // Filter by keyword match + supersede status, newest first
+        let results: Vec<_> = decisions
+            .iter()
+            .rev()
+            .filter(|e| {
+                if !include_superseded && superseded_ids.contains(e.event_id.as_str()) {
+                    return false;
+                }
+                // Match against key, value, reason, or text
+                let text = e
+                    .payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let dec_key = e
+                    .payload
+                    .get("decision")
+                    .and_then(|d| d.get("key"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let dec_value = e
+                    .payload
+                    .get("decision")
+                    .and_then(|d| d.get("value"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let dec_reason = e
+                    .payload
+                    .get("decision")
+                    .and_then(|d| d.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                text.to_lowercase().contains(&query_lower)
+                    || dec_key.to_lowercase().contains(&query_lower)
+                    || dec_value.to_lowercase().contains(&query_lower)
+                    || dec_reason.to_lowercase().contains(&query_lower)
+            })
+            .take(limit)
+            .collect();
+
+        if results.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "No decisions matching \"{}\"",
+                params.query
+            ))]));
+        }
+
+        let lines: Vec<String> = results
+            .iter()
+            .map(|e| {
+                let ts_short = e.ts.get(..10).unwrap_or(&e.ts);
+                let key = e
+                    .payload
+                    .get("decision")
+                    .and_then(|d| d.get("key"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let value = e
+                    .payload
+                    .get("decision")
+                    .and_then(|d| d.get("value"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let reason = e
+                    .payload
+                    .get("decision")
+                    .and_then(|d| d.get("reason"))
+                    .and_then(|v| v.as_str());
+                let superseded = if superseded_ids.contains(e.event_id.as_str()) {
+                    " [SUPERSEDED]"
+                } else {
+                    ""
+                };
+                match reason {
+                    Some(r) => format!("[{ts_short}] {key} = {value}{superseded}\n  {r}"),
+                    None => format!("[{ts_short}] {key} = {value}{superseded}"),
+                }
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            lines.join("\n"),
+        )]))
+    }
+
+    /// Query the event log with optional filters (type, keyword, date range)
+    #[tool(description = "Query the event log with optional filters (type, keyword, date range)")]
+    async fn edda_log(
+        &self,
+        Parameters(params): Parameters<LogParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ledger = self.open_ledger()?;
+        let head = ledger.head_branch().map_err(to_mcp_err)?;
+        let events = ledger.iter_events().map_err(to_mcp_err)?;
+        let limit = params.limit.unwrap_or(50);
+
+        let results: Vec<_> = events
+            .iter()
+            .rev()
+            .filter(|e| e.branch == head)
+            .filter(|e| {
+                if let Some(ref et) = params.event_type {
+                    if e.event_type != *et {
+                        return false;
+                    }
+                }
+                if let Some(ref kw) = params.keyword {
+                    let payload_str = e.payload.to_string().to_lowercase();
+                    if !payload_str.contains(&kw.to_lowercase()) {
+                        return false;
+                    }
+                }
+                if let Some(ref after) = params.after {
+                    if e.ts.as_str() < after.as_str() {
+                        return false;
+                    }
+                }
+                if let Some(ref before) = params.before {
+                    if e.ts.as_str() > before.as_str() {
+                        return false;
+                    }
+                }
+                true
+            })
+            .take(limit)
+            .collect();
+
+        if results.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No events match the given filters.",
+            )]));
+        }
+
+        let lines: Vec<String> = results
+            .iter()
+            .map(|e| {
+                let ts_short = e.ts.get(..19).unwrap_or(&e.ts);
+                let id_short = e.event_id.get(..12).unwrap_or(&e.event_id);
+                let detail = e
+                    .payload
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| e.payload.get("title").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                format!(
+                    "[{ts_short}] {} {} {id_short} {detail}",
+                    e.event_type, e.branch
+                )
+            })
+            .collect();
+
+        Ok(CallToolResult::success(vec![Content::text(
+            lines.join("\n"),
+        )]))
+    }
+
+    /// List pending draft approval items (read-only governance inbox)
+    #[tool(description = "List pending draft approval items (read-only governance inbox)")]
+    async fn edda_draft_inbox(&self) -> Result<CallToolResult, McpError> {
+        let ledger = self.open_ledger()?;
+        let drafts_dir = &ledger.paths.drafts_dir;
+
+        if !drafts_dir.exists() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No pending items.",
+            )]));
+        }
+
+        let entries = std::fs::read_dir(drafts_dir).map_err(|e| to_mcp_err(e.into()))?;
+        let mut items = Vec::new();
+
+        for entry in entries {
+            let entry = entry.map_err(|e| to_mcp_err(e.into()))?;
+            let path = entry.path();
+
+            // Skip non-JSON and latest.json
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            if path.file_stem().and_then(|s| s.to_str()) == Some("latest") {
+                continue;
+            }
+
+            let content = std::fs::read_to_string(&path).map_err(|e| to_mcp_err(e.into()))?;
+            let draft: MinimalDraft = match serde_json::from_str(&content) {
+                Ok(d) => d,
+                Err(_) => continue, // skip malformed files
+            };
+
+            if draft.status == "applied" {
+                continue;
+            }
+
+            for stage in &draft.stages {
+                if stage.status != "pending" {
+                    continue;
+                }
+                let current = stage.approved_by.len();
+                items.push(format!(
+                    "{} | {} | stage: {} ({}) | approvals: {}/{}",
+                    draft.draft_id,
+                    draft.title,
+                    stage.stage_id,
+                    stage.role,
+                    current,
+                    stage.min_approvals,
+                ));
+            }
+        }
+
+        if items.is_empty() {
+            return Ok(CallToolResult::success(vec![Content::text(
+                "No pending items.",
+            )]));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(
+            items.join("\n"),
+        )]))
+    }
 }
 
 #[tool_handler]
@@ -204,6 +589,49 @@ impl ServerHandler for EddaServer {
     }
 }
 
+/// Find the most recent decision event with the same key on the given branch.
+fn find_prior_decision(
+    ledger: &Ledger,
+    branch: &str,
+    key: &str,
+) -> Option<(String, Option<String>)> {
+    let events = ledger.iter_events().ok()?;
+    events
+        .iter()
+        .rev()
+        .filter(|e| e.branch == branch && e.event_type == "note")
+        .filter(|e| {
+            e.payload
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
+                .unwrap_or(false)
+        })
+        .find_map(|e| {
+            // Prefer structured decision.key, fall back to text parse
+            let event_key = e
+                .payload
+                .get("decision")
+                .and_then(|d| d.get("key"))
+                .and_then(|k| k.as_str())
+                .or_else(|| {
+                    let text = e.payload.get("text")?.as_str()?;
+                    text.split_once(": ").map(|(k, _)| k)
+                });
+            if event_key == Some(key) {
+                let event_value = e
+                    .payload
+                    .get("decision")
+                    .and_then(|d| d.get("value"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Some((e.event_id.clone(), event_value))
+            } else {
+                None
+            }
+        })
+}
+
 fn to_mcp_err(e: anyhow::Error) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
@@ -257,5 +685,385 @@ mod tests {
     fn open_ledger_fails_for_invalid_path() {
         let server = EddaServer::new(PathBuf::from("/nonexistent/path"));
         assert!(server.open_ledger().is_err());
+    }
+
+    // --- edda_decide tests ---
+
+    #[tokio::test]
+    async fn test_decide_basic() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root.clone());
+
+        let result = server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.engine=postgres".to_string(),
+                reason: Some("JSONB support".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("Decision recorded: db.engine = postgres"));
+        assert!(text.contains("evt_"));
+
+        // Verify event in ledger
+        let ledger = Ledger::open(&root).unwrap();
+        let events = ledger.iter_events().unwrap();
+        let dec = events.iter().find(|e| {
+            e.payload
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
+                .unwrap_or(false)
+        });
+        assert!(dec.is_some());
+        let dec = dec.unwrap();
+        assert_eq!(
+            dec.payload["decision"]["key"].as_str().unwrap(),
+            "db.engine"
+        );
+        assert_eq!(
+            dec.payload["decision"]["value"].as_str().unwrap(),
+            "postgres"
+        );
+        assert_eq!(
+            dec.payload["decision"]["reason"].as_str().unwrap(),
+            "JSONB support"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_decide_auto_supersede() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root.clone());
+
+        // First decision
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.engine=sqlite".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+
+        // Second decision with same key, different value
+        let result = server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.engine=postgres".to_string(),
+                reason: Some("need JSONB".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("supersedes"));
+
+        // Verify provenance link in ledger
+        let ledger = Ledger::open(&root).unwrap();
+        let events = ledger.iter_events().unwrap();
+        let last_dec = events
+            .iter()
+            .rev()
+            .find(|e| {
+                e.payload
+                    .get("decision")
+                    .and_then(|d| d.get("value"))
+                    .and_then(|v| v.as_str())
+                    == Some("postgres")
+            })
+            .unwrap();
+        assert_eq!(last_dec.refs.provenance.len(), 1);
+        assert_eq!(last_dec.refs.provenance[0].rel, "supersedes");
+    }
+
+    #[tokio::test]
+    async fn test_decide_invalid_format() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        let result = server
+            .edda_decide(Parameters(DecideParams {
+                decision: "no-equals-sign".to_string(),
+                reason: None,
+            }))
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    // --- edda_query tests ---
+
+    #[tokio::test]
+    async fn test_query_finds_decisions() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.engine=postgres".to_string(),
+                reason: Some("JSONB support".to_string()),
+            }))
+            .await
+            .unwrap();
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "auth.method=JWT".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .edda_query(Parameters(QueryParams {
+                query: "postgres".to_string(),
+                limit: None,
+                include_superseded: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("db.engine = postgres"));
+        assert!(!text.contains("auth.method"));
+    }
+
+    #[tokio::test]
+    async fn test_query_supersede_filter() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.engine=sqlite".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.engine=postgres".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+
+        // Default: superseded hidden
+        let result = server
+            .edda_query(Parameters(QueryParams {
+                query: "db".to_string(),
+                limit: None,
+                include_superseded: None,
+            }))
+            .await
+            .unwrap();
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("postgres"));
+        assert!(!text.contains("sqlite"));
+
+        // With include_superseded
+        let result = server
+            .edda_query(Parameters(QueryParams {
+                query: "db".to_string(),
+                limit: None,
+                include_superseded: Some(true),
+            }))
+            .await
+            .unwrap();
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("postgres"));
+        assert!(text.contains("sqlite"));
+        assert!(text.contains("[SUPERSEDED]"));
+    }
+
+    #[tokio::test]
+    async fn test_query_no_results() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        let result = server
+            .edda_query(Parameters(QueryParams {
+                query: "nonexistent".to_string(),
+                limit: None,
+                include_superseded: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("No decisions matching"));
+    }
+
+    // --- edda_log tests ---
+
+    #[tokio::test]
+    async fn test_log_filter_by_type() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        // Add a note
+        server
+            .edda_note(Parameters(NoteParams {
+                text: "test note".to_string(),
+                role: None,
+                tags: None,
+            }))
+            .await
+            .unwrap();
+
+        // Add a decision (also type=note)
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "key=value".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .edda_log(Parameters(LogParams {
+                event_type: Some("note".to_string()),
+                keyword: None,
+                after: None,
+                before: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        // Both are notes, should appear
+        assert!(text.contains("note"));
+    }
+
+    #[tokio::test]
+    async fn test_log_filter_by_keyword() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        server
+            .edda_note(Parameters(NoteParams {
+                text: "authentication flow".to_string(),
+                role: None,
+                tags: None,
+            }))
+            .await
+            .unwrap();
+
+        server
+            .edda_note(Parameters(NoteParams {
+                text: "database schema".to_string(),
+                role: None,
+                tags: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .edda_log(Parameters(LogParams {
+                event_type: None,
+                keyword: Some("auth".to_string()),
+                after: None,
+                before: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("authentication"));
+        assert!(!text.contains("database"));
+    }
+
+    #[tokio::test]
+    async fn test_log_date_filter() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        server
+            .edda_note(Parameters(NoteParams {
+                text: "some note".to_string(),
+                role: None,
+                tags: None,
+            }))
+            .await
+            .unwrap();
+
+        // Filter with future date should show nothing
+        let result = server
+            .edda_log(Parameters(LogParams {
+                event_type: None,
+                keyword: None,
+                after: Some("2099-01-01".to_string()),
+                before: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("No events match"));
+
+        // Filter with past date should show the event
+        let result = server
+            .edda_log(Parameters(LogParams {
+                event_type: None,
+                keyword: None,
+                after: Some("2020-01-01".to_string()),
+                before: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("some note"));
+    }
+
+    // --- edda_draft_inbox tests ---
+
+    #[tokio::test]
+    async fn test_draft_inbox_empty() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        let result = server.edda_draft_inbox().await.unwrap();
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert_eq!(text, "No pending items.");
+    }
+
+    #[tokio::test]
+    async fn test_draft_inbox_with_pending() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root.clone());
+
+        // Create a mock draft file
+        let drafts_dir = root.join(".edda").join("drafts");
+        let draft_json = serde_json::json!({
+            "version": 1,
+            "draft_id": "drf_test123",
+            "title": "Add auth module",
+            "status": "proposed",
+            "stages": [
+                {
+                    "stage_id": "lead",
+                    "role": "lead",
+                    "min_approvals": 1,
+                    "approved_by": [],
+                    "status": "pending"
+                }
+            ]
+        });
+        std::fs::write(
+            drafts_dir.join("drf_test123.json"),
+            serde_json::to_string_pretty(&draft_json).unwrap(),
+        )
+        .unwrap();
+
+        let result = server.edda_draft_inbox().await.unwrap();
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("drf_test123"));
+        assert!(text.contains("Add auth module"));
+        assert!(text.contains("stage: lead"));
+        assert!(text.contains("approvals: 0/1"));
     }
 }
