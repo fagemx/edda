@@ -5,7 +5,7 @@ use serde_json::Value;
 
 /// A detected decision signal from a PostToolUse event.
 #[derive(Debug, PartialEq)]
-pub(crate) enum NudgeSignal {
+pub enum NudgeSignal {
     /// Agent committed code. Contains short commit message.
     Commit(String),
     /// Agent added a dependency. Contains package name.
@@ -21,7 +21,7 @@ pub(crate) enum NudgeSignal {
 }
 
 /// Scan PostToolUse `raw` payload for decision-like signals.
-pub(crate) fn detect_signal(raw: &Value) -> Option<NudgeSignal> {
+pub fn detect_signal(raw: &Value) -> Option<NudgeSignal> {
     let tool_name = raw.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
 
     if tool_name == "Bash" {
@@ -108,7 +108,7 @@ fn is_module_entry(path: &str) -> bool {
 ///
 /// When `decide_count` is 0 (no decisions recorded yet this session), the
 /// message is stronger — an explicit warning instead of a gentle suggestion.
-pub(crate) fn format_nudge(signal: &NudgeSignal, decide_count: u64) -> String {
+pub fn format_nudge(signal: &NudgeSignal, decide_count: u64) -> String {
     if decide_count == 0 {
         format_nudge_strong(signal)
     } else {
@@ -236,7 +236,7 @@ fn extract_quoted_or_heredoc(s: &str) -> String {
 }
 
 /// Extract package name from cargo add / npm install / pnpm add commands.
-pub(crate) fn extract_dependency_add(command: &str) -> Option<String> {
+pub fn extract_dependency_add(command: &str) -> Option<String> {
     // cargo add <pkg>
     if let Some(idx) = command.find("cargo add ") {
         let after = &command[idx + "cargo add ".len()..];

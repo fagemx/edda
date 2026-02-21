@@ -307,7 +307,7 @@ pub fn write_claim(project_id: &str, session_id: &str, label: &str, paths: &[Str
 }
 
 /// Write an unclaim event (on session end).
-pub(crate) fn write_unclaim(project_id: &str, session_id: &str) {
+pub fn write_unclaim(project_id: &str, session_id: &str) {
     let event = CoordEvent {
         ts: now_rfc3339(),
         session_id: session_id.to_string(),
@@ -519,10 +519,7 @@ pub fn compute_board_state_for_compaction(project_id: &str) -> Vec<String> {
 // ── Peer Discovery ──
 
 /// Discover active peer sessions (excluding current session and stale ones).
-pub(crate) fn discover_active_peers(
-    project_id: &str,
-    current_session_id: &str,
-) -> Vec<PeerSummary> {
+pub fn discover_active_peers(project_id: &str, current_session_id: &str) -> Vec<PeerSummary> {
     let state_dir = edda_store::project_dir(project_id).join("state");
     let stale_threshold = stale_secs();
     let now = parse_rfc3339_to_epoch(&now_rfc3339()).unwrap_or(0);
