@@ -215,6 +215,21 @@ pub fn touch_heartbeat(project_id: &str, session_id: &str) {
     // If no existing heartbeat, skip touch (write_heartbeat will create it)
 }
 
+/// Ensure a heartbeat file exists for this session.
+/// If one already exists (e.g. written by `ingest_and_build_pack`), it is preserved.
+/// If none exists, writes a minimal heartbeat with empty signals so that other
+/// sessions can discover this peer via `discover_active_peers` immediately.
+///
+/// This is needed because `ingest_and_build_pack` skips when the transcript file
+/// doesn't exist yet — which is the normal case for brand-new SessionStart events
+/// (Claude Code creates the transcript *after* the hook fires).
+pub(crate) fn ensure_heartbeat_exists(project_id: &str, session_id: &str) {
+    if read_heartbeat(project_id, session_id).is_some() {
+        return;
+    }
+    write_heartbeat(project_id, session_id, &SessionSignals::default(), None);
+}
+
 /// Remove heartbeat on SessionEnd.
 pub fn remove_heartbeat(project_id: &str, session_id: &str) {
     let _ = fs::remove_file(heartbeat_path(project_id, session_id));

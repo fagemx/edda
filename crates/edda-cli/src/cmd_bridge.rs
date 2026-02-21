@@ -761,4 +761,90 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }
+
+    // ── Render & Heartbeat CLI tests (Issue #15) ──
+
+    #[test]
+    fn render_writeback_contains_protocol() {
+        let output = edda_bridge_claude::render::writeback();
+        assert!(output.contains("Write-Back Protocol"), "should contain header");
+        assert!(output.contains("edda decide"), "should teach edda decide");
+        assert!(output.contains("edda note"), "should teach edda note");
+    }
+
+    #[test]
+    fn render_workspace_with_ledger() {
+        let (tmp, _ledger) = setup_workspace();
+        let cwd = tmp.to_str().unwrap();
+        let result = edda_bridge_claude::render::workspace(cwd, 2500);
+        assert!(result.is_some(), "workspace with ledger should produce output");
+        let text = result.unwrap();
+        assert!(text.contains("Project") || text.contains("Branch"), "should contain workspace sections");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn render_workspace_no_ledger() {
+        let result = edda_bridge_claude::render::workspace("/nonexistent/path", 2500);
+        assert!(result.is_none(), "no workspace should return None");
+    }
+
+    #[test]
+    fn render_coordination_solo_no_bindings() {
+        let pid = "test_render_coord_solo";
+        let _ = edda_store::ensure_dirs(pid);
+        let result = edda_bridge_claude::render::coordination(pid, "solo-session");
+        // Solo with no bindings → None
+        assert!(result.is_none(), "solo session with no bindings should return None");
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_pack_no_pack_file() {
+        let pid = "test_render_pack_empty";
+        let _ = edda_store::ensure_dirs(pid);
+        let result = edda_bridge_claude::render::pack(pid);
+        assert!(result.is_none(), "no hot.md should return None");
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn heartbeat_write_touch_remove_lifecycle() {
+        let pid = "test_hb_lifecycle";
+        let sid = "sess-lifecycle-1";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Write
+        edda_bridge_claude::peers::write_heartbeat_minimal(pid, sid, "worker");
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let hb_path = state_dir.join(format!("session.{sid}.json"));
+        assert!(hb_path.exists(), "heartbeat file should exist after write");
+
+        // Verify label
+        let content: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&hb_path).unwrap()
+        ).unwrap();
+        assert_eq!(content["label"].as_str().unwrap(), "worker");
+        assert_eq!(content["session_id"].as_str().unwrap(), sid);
+
+        // Touch
+        let mtime_before = std::fs::metadata(&hb_path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        edda_bridge_claude::peers::touch_heartbeat(pid, sid);
+        let content_after: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&hb_path).unwrap()
+        ).unwrap();
+        // last_heartbeat string should have changed
+        assert_ne!(
+            content["last_heartbeat"].as_str().unwrap(),
+            content_after["last_heartbeat"].as_str().unwrap(),
+            "touch should update last_heartbeat"
+        );
+
+        // Remove
+        edda_bridge_claude::peers::remove_heartbeat(pid, sid);
+        assert!(!hb_path.exists(), "heartbeat file should be gone after remove");
+
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+    }
 }
