@@ -7,9 +7,6 @@ use edda_core::types::{Digest, Event, Provenance, Refs};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 
-/// Schema version for migration tracking.
-const SCHEMA_VERSION: &str = "1";
-
 const SCHEMA_SQL: &str = "
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -49,6 +46,37 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 );
 ";
 
+const SCHEMA_V2_SQL: &str = "
+CREATE TABLE IF NOT EXISTS decisions (
+    event_id TEXT PRIMARY KEY REFERENCES events(event_id),
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    domain TEXT NOT NULL DEFAULT '',
+    branch TEXT NOT NULL,
+    supersedes_id TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_key ON decisions(key);
+CREATE INDEX IF NOT EXISTS idx_decisions_domain ON decisions(domain);
+CREATE INDEX IF NOT EXISTS idx_decisions_active ON decisions(is_active) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_decisions_branch_key ON decisions(branch, key);
+";
+
+/// A row from the `decisions` table.
+#[derive(Debug, Clone)]
+pub struct DecisionRow {
+    pub event_id: String,
+    pub key: String,
+    pub value: String,
+    pub reason: String,
+    pub domain: String,
+    pub branch: String,
+    pub supersedes_id: Option<String>,
+    pub is_active: bool,
+    pub ts: Option<String>,
+}
+
 /// SQLite-backed storage engine.
 pub struct SqliteStore {
     conn: Connection,
@@ -85,17 +113,126 @@ impl SqliteStore {
     }
 
     fn apply_schema(&self) -> anyhow::Result<()> {
+        // Always apply v1 base schema (idempotent via IF NOT EXISTS)
         self.conn.execute_batch(SCHEMA_SQL)?;
+
+        // Bootstrap version if not set
         self.conn.execute(
-            "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', ?1)",
-            params![SCHEMA_VERSION],
+            "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '1')",
+            [],
         )?;
+
+        // Migrate to v2 if needed
+        let current = self.schema_version()?;
+        if current < 2 {
+            self.migrate_v1_to_v2()?;
+        }
+
+        Ok(())
+    }
+
+    fn schema_version(&self) -> anyhow::Result<u32> {
+        let version_str: String = self
+            .conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "1".to_string());
+        Ok(version_str.parse().unwrap_or(1))
+    }
+
+    fn set_schema_version(&self, version: u32) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?1)",
+            params![version.to_string()],
+        )?;
+        Ok(())
+    }
+
+    fn migrate_v1_to_v2(&self) -> anyhow::Result<()> {
+        // Create decisions table + indexes
+        self.conn.execute_batch(SCHEMA_V2_SQL)?;
+
+        // Backfill: scan existing events for decisions
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, branch, payload, refs_provenance FROM events
+             WHERE event_type = 'note' ORDER BY rowid",
+        )?;
+        let rows: Vec<(String, String, String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (event_id, _ts, branch, payload_str, prov_str) in &rows {
+            let payload: serde_json::Value = match serde_json::from_str(payload_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if !is_decision_payload(&payload) {
+                continue;
+            }
+
+            let (key, value, reason) = extract_decision_from_payload(&payload);
+            if key.is_empty() && value.is_empty() {
+                continue;
+            }
+            let domain = extract_domain(&key);
+
+            let provenance: Vec<Provenance> =
+                serde_json::from_str(prov_str).unwrap_or_default();
+            let supersedes_id = provenance
+                .iter()
+                .find(|p| p.rel == "supersedes")
+                .map(|p| p.target.as_str());
+
+            self.conn.execute(
+                "INSERT OR IGNORE INTO decisions
+                 (event_id, key, value, reason, domain, branch, supersedes_id, is_active)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, TRUE)",
+                params![event_id, key, value, reason, domain, branch, supersedes_id],
+            )?;
+        }
+
+        // Fix is_active: deactivate decisions that have been superseded
+        self.conn.execute(
+            "UPDATE decisions SET is_active = FALSE
+             WHERE event_id IN (
+                 SELECT d_old.event_id FROM decisions d_old
+                 JOIN decisions d_new ON d_new.supersedes_id = d_old.event_id
+             )",
+            [],
+        )?;
+
+        // Also deactivate by key+branch: for each (key, branch), only the latest is active
+        // This handles cases where supersedes_id wasn't set (legacy events)
+        self.conn.execute_batch(
+            "UPDATE decisions SET is_active = FALSE
+             WHERE rowid NOT IN (
+                 SELECT MAX(d.rowid) FROM decisions d
+                 GROUP BY d.key, d.branch
+             ) AND is_active = TRUE",
+        )?;
+
+        self.set_schema_version(2)?;
         Ok(())
     }
 
     // ── Events ──────────────────────────────────────────────────────
 
     /// Append an event. Append-only (CONTRACT LEDGER-02).
+    ///
+    /// If the event is a decision (note with `"decision"` tag), the `decisions`
+    /// table is also updated atomically within the same transaction.
     pub fn append_event(&self, event: &Event) -> anyhow::Result<()> {
         let payload = serde_json::to_string(&event.payload)?;
         let refs_blobs = serde_json::to_string(&event.refs.blobs)?;
@@ -103,7 +240,9 @@ impl SqliteStore {
         let refs_provenance = serde_json::to_string(&event.refs.provenance)?;
         let digests = serde_json::to_string(&event.digests)?;
 
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+
+        tx.execute(
             "INSERT INTO events (
                 event_id, ts, event_type, branch, parent_hash, hash,
                 payload, refs_blobs, refs_events, refs_provenance,
@@ -126,6 +265,44 @@ impl SqliteStore {
                 event.event_level,
             ],
         )?;
+
+        // Materialize decision if applicable
+        if is_decision_event(event) {
+            let (key, value, reason) = extract_decision_from_payload(&event.payload);
+            if !key.is_empty() || !value.is_empty() {
+                let domain = extract_domain(&key);
+                let supersedes_id = event
+                    .refs
+                    .provenance
+                    .iter()
+                    .find(|p| p.rel == "supersedes")
+                    .map(|p| p.target.as_str());
+
+                // Deactivate prior decision with same key on same branch
+                tx.execute(
+                    "UPDATE decisions SET is_active = FALSE
+                     WHERE key = ?1 AND branch = ?2 AND is_active = TRUE",
+                    params![key, event.branch],
+                )?;
+
+                tx.execute(
+                    "INSERT INTO decisions
+                     (event_id, key, value, reason, domain, branch, supersedes_id, is_active)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, TRUE)",
+                    params![
+                        event.event_id,
+                        key,
+                        value,
+                        reason,
+                        domain,
+                        event.branch,
+                        supersedes_id
+                    ],
+                )?;
+            }
+        }
+
+        tx.commit()?;
         Ok(())
     }
 
@@ -228,6 +405,92 @@ impl SqliteStore {
         )?;
         Ok(())
     }
+
+    // ── Decisions ───────────────────────────────────────────────────
+
+    /// Query active decisions, optionally filtered by domain or key prefix.
+    pub fn active_decisions(
+        &self,
+        domain: Option<&str>,
+        key_pattern: Option<&str>,
+    ) -> anyhow::Result<Vec<DecisionRow>> {
+        let sql = match (domain, key_pattern) {
+            (Some(_), _) => {
+                "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                        d.supersedes_id, d.is_active, e.ts
+                 FROM decisions d JOIN events e ON d.event_id = e.event_id
+                 WHERE d.is_active = TRUE AND d.domain = ?1
+                 ORDER BY d.domain, d.key"
+            }
+            (_, Some(_)) => {
+                "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                        d.supersedes_id, d.is_active, e.ts
+                 FROM decisions d JOIN events e ON d.event_id = e.event_id
+                 WHERE d.is_active = TRUE AND (d.key LIKE ?1 OR d.value LIKE ?1)
+                 ORDER BY d.domain, d.key"
+            }
+            (None, None) => {
+                "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                        d.supersedes_id, d.is_active, e.ts
+                 FROM decisions d JOIN events e ON d.event_id = e.event_id
+                 WHERE d.is_active = TRUE
+                 ORDER BY d.domain, d.key"
+            }
+        };
+
+        let param: String = match (domain, key_pattern) {
+            (Some(d), _) => d.to_string(),
+            (_, Some(k)) => format!("%{k}%"),
+            _ => String::new(),
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = if domain.is_some() || key_pattern.is_some() {
+            stmt.query_map(params![param], map_decision_row)?
+        } else {
+            stmt.query_map([], map_decision_row)?
+        };
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("decision query failed: {e}"))
+    }
+
+    /// All decisions for a key (active + superseded), ordered by time.
+    pub fn decision_timeline(&self, key: &str) -> anyhow::Result<Vec<DecisionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                    d.supersedes_id, d.is_active, e.ts
+             FROM decisions d JOIN events e ON d.event_id = e.event_id
+             WHERE d.key = ?1
+             ORDER BY e.ts",
+        )?;
+        let rows = stmt.query_map(params![key], map_decision_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("decision timeline query failed: {e}"))
+    }
+
+    /// Find the active decision for a specific key on a branch.
+    pub fn find_active_decision(
+        &self,
+        branch: &str,
+        key: &str,
+    ) -> anyhow::Result<Option<DecisionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                    d.supersedes_id, d.is_active, e.ts
+             FROM decisions d JOIN events e ON d.event_id = e.event_id
+             WHERE d.key = ?1 AND d.branch = ?2 AND d.is_active = TRUE
+             LIMIT 1",
+        )?;
+        let result = stmt
+            .query_map(params![key, branch], map_decision_row)?
+            .next();
+        match result {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(anyhow::anyhow!("decision query failed: {e}")),
+            None => Ok(None),
+        }
+    }
 }
 
 impl Drop for SqliteStore {
@@ -237,6 +500,84 @@ impl Drop for SqliteStore {
             .conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
+}
+
+// ── Decision helpers ────────────────────────────────────────────────
+
+/// Check if an event is a decision (note with "decision" tag).
+fn is_decision_event(event: &Event) -> bool {
+    event.event_type == "note"
+        && event
+            .payload
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
+            .unwrap_or(false)
+}
+
+/// Check if a payload JSON contains a "decision" tag.
+fn is_decision_payload(payload: &serde_json::Value) -> bool {
+    payload
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
+        .unwrap_or(false)
+}
+
+/// Extract (key, value, reason) from a payload.
+/// Prefers structured `payload.decision`, falls back to text parse.
+fn extract_decision_from_payload(payload: &serde_json::Value) -> (String, String, String) {
+    if let Some(d) = payload.get("decision") {
+        let key = d
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let value = d
+            .get("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let reason = d
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return (key, value, reason);
+    }
+    // Fallback: parse text "key: value — reason"
+    let text = payload
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let (key, rest) = match text.split_once(": ") {
+        Some((k, r)) => (k.to_string(), r),
+        None => return (String::new(), text.to_string(), String::new()),
+    };
+    let (value, reason) = match rest.split_once(" — ") {
+        Some((v, r)) => (v.to_string(), r.to_string()),
+        None => (rest.to_string(), String::new()),
+    };
+    (key, value, reason)
+}
+
+/// Extract domain from a decision key: "db.engine" → "db".
+fn extract_domain(key: &str) -> String {
+    key.split('.').next().unwrap_or(key).to_string()
+}
+
+fn map_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRow> {
+    Ok(DecisionRow {
+        event_id: row.get(0)?,
+        key: row.get(1)?,
+        value: row.get(2)?,
+        reason: row.get(3)?,
+        domain: row.get(4)?,
+        branch: row.get(5)?,
+        supersedes_id: row.get(6)?,
+        is_active: row.get(7)?,
+        ts: row.get(8)?,
+    })
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
@@ -533,6 +874,286 @@ mod tests {
         assert_eq!(store2.head_branch().unwrap(), "main");
         drop(store2);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Decision tests ──────────────────────────────────────────────
+
+    fn make_decision_event(
+        branch: &str,
+        key: &str,
+        value: &str,
+        reason: Option<&str>,
+        supersedes: Option<&str>,
+    ) -> Event {
+        use edda_core::event::finalize_event;
+
+        let text = match reason {
+            Some(r) => format!("{key}: {value} — {r}"),
+            None => format!("{key}: {value}"),
+        };
+        let tags = vec!["decision".to_string()];
+        let mut event = new_note_event(branch, None, "system", &text, &tags).unwrap();
+
+        // Inject structured decision object
+        let decision_obj = match reason {
+            Some(r) => serde_json::json!({"key": key, "value": value, "reason": r}),
+            None => serde_json::json!({"key": key, "value": value}),
+        };
+        event.payload["decision"] = decision_obj;
+
+        if let Some(target) = supersedes {
+            event.refs.provenance.push(Provenance {
+                target: target.to_string(),
+                rel: "supersedes".to_string(),
+                note: Some(format!("key '{key}' re-decided")),
+            });
+        }
+
+        finalize_event(&mut event);
+        event
+    }
+
+    #[test]
+    fn decision_materialized_on_append() {
+        let (dir, store) = tmp_db();
+        let e = make_decision_event("main", "db.engine", "postgres", Some("JSONB support"), None);
+        store.append_event(&e).unwrap();
+
+        let active = store.active_decisions(None, None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].key, "db.engine");
+        assert_eq!(active[0].value, "postgres");
+        assert_eq!(active[0].reason, "JSONB support");
+        assert_eq!(active[0].domain, "db");
+        assert_eq!(active[0].branch, "main");
+        assert!(active[0].is_active);
+        assert!(active[0].supersedes_id.is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn supersede_deactivates_prior() {
+        let (dir, store) = tmp_db();
+        let d1 = make_decision_event("main", "db.engine", "mysql", None, None);
+        let d1_id = d1.event_id.clone();
+        store.append_event(&d1).unwrap();
+
+        let d2 = make_decision_event("main", "db.engine", "postgres", Some("JSONB"), Some(&d1_id));
+        store.append_event(&d2).unwrap();
+
+        let active = store.active_decisions(None, None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].value, "postgres");
+        assert_eq!(active[0].supersedes_id.as_deref(), Some(d1_id.as_str()));
+
+        // Timeline should show both
+        let timeline = store.decision_timeline("db.engine").unwrap();
+        assert_eq!(timeline.len(), 2);
+        assert!(!timeline[0].is_active); // mysql deactivated
+        assert!(timeline[1].is_active); // postgres active
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn domain_auto_extracted() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event("main", "db.engine", "postgres", None, None))
+            .unwrap();
+        store
+            .append_event(&make_decision_event("main", "db.pool_size", "10", None, None))
+            .unwrap();
+        store
+            .append_event(&make_decision_event("main", "auth.method", "JWT", None, None))
+            .unwrap();
+
+        let db_decisions = store.active_decisions(Some("db"), None).unwrap();
+        assert_eq!(db_decisions.len(), 2);
+
+        let auth_decisions = store.active_decisions(Some("auth"), None).unwrap();
+        assert_eq!(auth_decisions.len(), 1);
+        assert_eq!(auth_decisions[0].key, "auth.method");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn legacy_text_only_decision() {
+        let (dir, store) = tmp_db();
+        // Old-format event: no payload.decision field, only text
+        use edda_core::event::finalize_event;
+
+        let tags = vec!["decision".to_string()];
+        let mut event =
+            new_note_event("main", None, "system", "orm: sqlx — compile-time checks", &tags)
+                .unwrap();
+        // Do NOT add payload.decision — simulate legacy format
+        // Remove it if new_note_event somehow adds it (it doesn't)
+        event.payload.as_object_mut().unwrap().remove("decision");
+        finalize_event(&mut event);
+        store.append_event(&event).unwrap();
+
+        let active = store.active_decisions(None, None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].key, "orm");
+        assert_eq!(active[0].value, "sqlx");
+        assert_eq!(active[0].reason, "compile-time checks");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn active_decisions_key_pattern_search() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event("main", "db.engine", "postgres", None, None))
+            .unwrap();
+        store
+            .append_event(&make_decision_event("main", "auth.method", "JWT", None, None))
+            .unwrap();
+        store
+            .append_event(&make_decision_event("main", "cache.driver", "redis", None, None))
+            .unwrap();
+
+        // Search by key/value pattern
+        let results = store.active_decisions(None, Some("postgres")).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "db.engine");
+
+        let results = store.active_decisions(None, Some("auth")).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "auth.method");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn find_active_decision_by_branch_key() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event("main", "db.engine", "postgres", None, None))
+            .unwrap();
+
+        let found = store.find_active_decision("main", "db.engine").unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().value, "postgres");
+
+        let not_found = store.find_active_decision("main", "db.pool_size").unwrap();
+        assert!(not_found.is_none());
+
+        let wrong_branch = store.find_active_decision("dev", "db.engine").unwrap();
+        assert!(wrong_branch.is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn branch_scoped_supersession() {
+        let (dir, store) = tmp_db();
+        // Same key on different branches — both should stay active
+        store
+            .append_event(&make_decision_event("main", "db.engine", "postgres", None, None))
+            .unwrap();
+        store
+            .append_event(&make_decision_event("dev", "db.engine", "sqlite", None, None))
+            .unwrap();
+
+        let all = store.active_decisions(None, None).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let main = store.find_active_decision("main", "db.engine").unwrap().unwrap();
+        assert_eq!(main.value, "postgres");
+
+        let dev = store.find_active_decision("dev", "db.engine").unwrap().unwrap();
+        assert_eq!(dev.value, "sqlite");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_migration_v1_to_v2() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("edda_sqlite_migrate_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+
+        // Create a v1 database manually (only base schema)
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            conn.execute(
+                "INSERT INTO schema_meta (key, value) VALUES ('version', '1')",
+                [],
+            )
+            .unwrap();
+
+            // Insert a decision event directly into v1 events table
+            conn.execute(
+                "INSERT INTO events (event_id, ts, event_type, branch, hash, payload, schema_version)
+                 VALUES ('evt_v1', '2026-01-01T00:00:00Z', 'note', 'main', 'abc', ?1, 1)",
+                params![serde_json::to_string(&serde_json::json!({
+                    "role": "system",
+                    "text": "db.engine: postgres — need JSONB",
+                    "tags": ["decision"],
+                    "decision": {"key": "db.engine", "value": "postgres", "reason": "need JSONB"}
+                })).unwrap()],
+            ).unwrap();
+        }
+
+        // Open with open_or_create — should trigger v1→v2 migration
+        let store = SqliteStore::open_or_create(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 2);
+
+        // Verify decisions table was populated by backfill
+        let active = store.active_decisions(None, None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].key, "db.engine");
+        assert_eq!(active[0].value, "postgres");
+        assert_eq!(active[0].domain, "db");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_decision_event_not_materialized() {
+        let (dir, store) = tmp_db();
+        // Regular note (no decision tag)
+        let e = new_note_event("main", None, "system", "just a note", &["todo".into()]).unwrap();
+        store.append_event(&e).unwrap();
+
+        let active = store.active_decisions(None, None).unwrap();
+        assert!(active.is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decisions_table_in_schema() {
+        let (dir, store) = tmp_db();
+        let tables: Vec<String> = store
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(tables.contains(&"decisions".to_string()));
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

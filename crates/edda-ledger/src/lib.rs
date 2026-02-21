@@ -12,6 +12,7 @@ pub use blob_store::{
     blob_put_classified, blob_remove, blob_size, BlobInfo,
 };
 pub use ledger::Ledger;
+pub use sqlite_store::DecisionRow;
 pub use lock::WorkspaceLock;
 pub use paths::EddaPaths;
 pub use tombstone::{append_tombstone, list_tombstones, make_tombstone, DeleteReason, Tombstone};

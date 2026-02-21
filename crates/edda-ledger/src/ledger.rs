@@ -1,5 +1,5 @@
 use crate::paths::EddaPaths;
-use crate::sqlite_store::SqliteStore;
+use crate::sqlite_store::{DecisionRow, SqliteStore};
 use edda_core::Event;
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -151,6 +151,42 @@ impl Ledger {
             serde_json::to_string_pretty(value)?,
         )?;
         Ok(())
+    }
+
+    // ── Decisions ───────────────────────────────────────────────────
+
+    /// Query active decisions, optionally filtered by domain or key pattern.
+    ///
+    /// For JSONL backend, returns empty (decisions table not available).
+    pub fn active_decisions(
+        &self,
+        domain: Option<&str>,
+        key_pattern: Option<&str>,
+    ) -> anyhow::Result<Vec<DecisionRow>> {
+        if let Some(store) = &self.sqlite {
+            return store.active_decisions(domain, key_pattern);
+        }
+        Ok(Vec::new())
+    }
+
+    /// All decisions for a key (active + superseded), ordered by time.
+    pub fn decision_timeline(&self, key: &str) -> anyhow::Result<Vec<DecisionRow>> {
+        if let Some(store) = &self.sqlite {
+            return store.decision_timeline(key);
+        }
+        Ok(Vec::new())
+    }
+
+    /// Find the active decision for a specific key on a branch.
+    pub fn find_active_decision(
+        &self,
+        branch: &str,
+        key: &str,
+    ) -> anyhow::Result<Option<DecisionRow>> {
+        if let Some(store) = &self.sqlite {
+            return store.find_active_decision(branch, key);
+        }
+        Ok(None)
     }
 }
 
