@@ -2,6 +2,17 @@ use edda_ledger::Ledger;
 use std::collections::HashSet;
 use std::path::Path;
 
+/// Unified decision result for display (works with both SQLite and JSONL paths).
+struct DecisionResult {
+    event_id: String,
+    key: String,
+    value: String,
+    reason: String,
+    ts: String,
+    branch: String,
+    is_superseded: bool,
+}
+
 /// `edda query <text>` — search workspace decisions and transcripts by keyword.
 pub fn execute(
     repo_root: &Path,
@@ -11,53 +22,13 @@ pub fn execute(
     all: bool,
 ) -> anyhow::Result<()> {
     let ledger = Ledger::open(repo_root)?;
-    let events = ledger.iter_events()?;
-
-    let query_lower = query_str.to_lowercase();
 
     // --- Source 1: Ledger decisions ---
-    let all_decisions: Vec<_> = events
-        .iter()
-        .rev() // newest first
-        .filter(|e| {
-            if e.event_type != "note" {
-                return false;
-            }
-            let has_decision_tag = e
-                .payload
-                .get("tags")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
-                .unwrap_or(false);
-            if !has_decision_tag {
-                return false;
-            }
-            let text = e.payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            text.to_lowercase().contains(&query_lower)
-        })
-        .collect();
-
-    // Build superseded set from provenance links.
-    // NOTE: scoped to query-matched decisions only — if a non-matching decision
-    // supersedes a matching one, the matching one still appears as active.
-    let superseded: HashSet<&str> = all_decisions
-        .iter()
-        .flat_map(|e| {
-            e.refs
-                .provenance
-                .iter()
-                .filter(|p| p.rel == "supersedes")
-                .map(|p| p.target.as_str())
-        })
-        .collect();
-
-    // Filter: apply supersession unless --all
-    let decisions: Vec<_> = all_decisions
-        .iter()
-        .filter(|e| all || !superseded.contains(e.event_id.as_str()))
-        .take(limit)
-        .copied()
-        .collect();
+    let decisions = if ledger.is_sqlite() {
+        query_decisions_sqlite(&ledger, query_str, limit, all)?
+    } else {
+        query_decisions_jsonl(&ledger, query_str, limit, all)?
+    };
 
     // --- Source 2: Transcript turns (FTS5) ---
     let conversations = search_transcripts(repo_root, query_str, limit);
@@ -70,18 +41,16 @@ pub fn execute(
     if json {
         let mut results: Vec<serde_json::Value> = Vec::new();
 
-        for e in &decisions {
-            let (key, value, reason) = extract_decision_fields(e);
-            let is_superseded = superseded.contains(e.event_id.as_str());
+        for d in &decisions {
             results.push(serde_json::json!({
                 "source": "decision",
-                "event_id": e.event_id,
-                "key": key,
-                "value": value,
-                "reason": reason,
-                "ts": e.ts,
-                "branch": e.branch,
-                "superseded": is_superseded,
+                "event_id": d.event_id,
+                "key": d.key,
+                "value": d.value,
+                "reason": d.reason,
+                "ts": d.ts,
+                "branch": d.branch,
+                "superseded": d.is_superseded,
             }));
         }
 
@@ -99,30 +68,29 @@ pub fn execute(
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
         if !decisions.is_empty() {
-            println!("Decisions ({}):\n", decisions.len(),);
-            for e in &decisions {
-                let (key, value, reason) = extract_decision_fields(e);
-                let date = if e.ts.len() >= 10 { &e.ts[..10] } else { &e.ts };
-                let superseded_marker = if superseded.contains(e.event_id.as_str()) {
+            println!("Decisions ({}):\n", decisions.len());
+            for d in &decisions {
+                let date = if d.ts.len() >= 10 { &d.ts[..10] } else { &d.ts };
+                let superseded_marker = if d.is_superseded {
                     " [superseded]"
                 } else {
                     ""
                 };
 
-                if key.is_empty() {
-                    println!("  [{date}] {value}{superseded_marker}");
+                if d.key.is_empty() {
+                    println!("  [{date}] {}{superseded_marker}", d.value);
                 } else {
-                    println!("  [{date}] {key} = {value}{superseded_marker}");
+                    println!("  [{date}] {} = {}{superseded_marker}", d.key, d.value);
                 }
-                if !reason.is_empty() {
-                    println!("    {reason}");
+                if !d.reason.is_empty() {
+                    println!("    {}", d.reason);
                 }
                 println!();
             }
         }
 
         if !conversations.is_empty() {
-            println!("Conversations ({}):\n", conversations.len(),);
+            println!("Conversations ({}):\n", conversations.len());
             for r in &conversations {
                 let date = if r.ts.len() >= 10 { &r.ts[..10] } else { &r.ts };
                 let sid_short = &r.session_id[..r.session_id.len().min(8)];
@@ -133,6 +101,129 @@ pub fn execute(
     }
 
     Ok(())
+}
+
+/// SQLite fast path: query the decisions table directly.
+fn query_decisions_sqlite(
+    ledger: &Ledger,
+    query_str: &str,
+    limit: usize,
+    all: bool,
+) -> anyhow::Result<Vec<DecisionResult>> {
+    // active_decisions returns only is_active=TRUE with LIKE search on key/value
+    let active = ledger.active_decisions(None, Some(query_str))?;
+    let mut results: Vec<DecisionResult> = active
+        .into_iter()
+        .take(limit)
+        .map(|r| DecisionResult {
+            event_id: r.event_id,
+            key: r.key,
+            value: r.value,
+            reason: r.reason,
+            ts: r.ts.unwrap_or_default(),
+            branch: r.branch,
+            is_superseded: false,
+        })
+        .collect();
+
+    // If --all, also include superseded decisions (from JSONL fallback path)
+    if all {
+        // Fall back to event scan for superseded decisions when --all is requested
+        let events = ledger.iter_events()?;
+        let active_ids: HashSet<String> = results.iter().map(|r| r.event_id.clone()).collect();
+        let query_lower = query_str.to_lowercase();
+        for e in events.iter().rev() {
+            if active_ids.contains(&e.event_id) {
+                continue;
+            }
+            if !is_decision_event(e) {
+                continue;
+            }
+            let text = e.payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            if !text.to_lowercase().contains(&query_lower) {
+                continue;
+            }
+            let (key, value, reason) = extract_decision_fields(e);
+            results.push(DecisionResult {
+                event_id: e.event_id.clone(),
+                key,
+                value,
+                reason,
+                ts: e.ts.clone(),
+                branch: e.branch.clone(),
+                is_superseded: true,
+            });
+            if results.len() >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Legacy JSONL path: scan events and build superseded set in memory.
+fn query_decisions_jsonl(
+    ledger: &Ledger,
+    query_str: &str,
+    limit: usize,
+    all: bool,
+) -> anyhow::Result<Vec<DecisionResult>> {
+    let events = ledger.iter_events()?;
+    let query_lower = query_str.to_lowercase();
+
+    let all_decisions: Vec<_> = events
+        .iter()
+        .rev()
+        .filter(|e| {
+            if !is_decision_event(e) {
+                return false;
+            }
+            let text = e.payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            text.to_lowercase().contains(&query_lower)
+        })
+        .collect();
+
+    let superseded: HashSet<&str> = all_decisions
+        .iter()
+        .flat_map(|e| {
+            e.refs
+                .provenance
+                .iter()
+                .filter(|p| p.rel == "supersedes")
+                .map(|p| p.target.as_str())
+        })
+        .collect();
+
+    let results = all_decisions
+        .iter()
+        .filter(|e| all || !superseded.contains(e.event_id.as_str()))
+        .take(limit)
+        .map(|e| {
+            let (key, value, reason) = extract_decision_fields(e);
+            DecisionResult {
+                event_id: e.event_id.clone(),
+                key,
+                value,
+                reason,
+                ts: e.ts.clone(),
+                branch: e.branch.clone(),
+                is_superseded: superseded.contains(e.event_id.as_str()),
+            }
+        })
+        .collect();
+
+    Ok(results)
+}
+
+fn is_decision_event(event: &edda_core::Event) -> bool {
+    event.event_type == "note"
+        && event
+            .payload
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
+            .unwrap_or(false)
 }
 
 /// Extract (key, value, reason) from a decision event.

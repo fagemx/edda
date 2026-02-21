@@ -211,19 +211,18 @@ pub fn decide(
     event.payload["decision"] = decision_obj;
 
     // Check for prior decision with same key → supersede via provenance
-    let prior = find_prior_decision(&ledger, &branch, key);
-    if let Some((prior_id, prior_value)) = &prior {
+    let prior = ledger.find_active_decision(&branch, key)?;
+    if let Some(prior_row) = &prior {
         // L1 conflict warning: different value in workspace ledger
-        if let Some(pv) = prior_value {
-            if pv != value {
-                eprintln!(
-                    "\u{26a0} Conflict: key \"{key}\" previously decided as \"{pv}\" in this workspace"
-                );
-                eprintln!("  Recording new value \"{value}\" (supersedes prior decision)");
-            }
+        if prior_row.value != value {
+            eprintln!(
+                "\u{26a0} Conflict: key \"{key}\" previously decided as \"{}\" in this workspace",
+                prior_row.value
+            );
+            eprintln!("  Recording new value \"{value}\" (supersedes prior decision)");
         }
         event.refs.provenance.push(edda_core::types::Provenance {
-            target: prior_id.clone(),
+            target: prior_row.event_id.clone(),
             rel: edda_core::types::rel::SUPERSEDES.to_string(),
             note: Some(format!("key '{}' re-decided", key)),
         });
@@ -253,50 +252,6 @@ pub fn request(
     edda_bridge_claude::peers::write_request(&project_id, &session_id, &from_label, to, message);
     println!("Request sent to [{to}]: \"{message}\"");
     Ok(())
-}
-
-/// Find the most recent decision event with the same key on the given branch.
-/// Returns `(event_id, value)` of the prior decision, or None if no match.
-fn find_prior_decision(
-    ledger: &edda_ledger::Ledger,
-    branch: &str,
-    key: &str,
-) -> Option<(String, Option<String>)> {
-    let events = ledger.iter_events().ok()?;
-    events
-        .iter()
-        .rev()
-        .filter(|e| e.branch == branch && e.event_type == "note")
-        .filter(|e| {
-            e.payload
-                .get("tags")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
-                .unwrap_or(false)
-        })
-        .find_map(|e| {
-            // Prefer structured field, fall back to text parse
-            let event_key = e
-                .payload
-                .get("decision")
-                .and_then(|d| d.get("key"))
-                .and_then(|k| k.as_str())
-                .or_else(|| {
-                    let text = e.payload.get("text")?.as_str()?;
-                    text.split_once(": ").map(|(k, _)| k)
-                });
-            if event_key == Some(key) {
-                let event_value = e
-                    .payload
-                    .get("decision")
-                    .and_then(|d| d.get("value"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                Some((e.event_id.clone(), event_value))
-            } else {
-                None
-            }
-        })
 }
 
 /// Resolve session identity via 4-tier fallback:
@@ -605,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn find_prior_decision_returns_value() {
+    fn find_active_decision_returns_value() {
         let (tmp, ledger) = setup_workspace();
         let branch = ledger.head_branch().unwrap();
         let parent_hash = ledger.last_event_hash().unwrap();
@@ -624,21 +579,21 @@ mod tests {
         edda_core::event::finalize_event(&mut event);
         ledger.append_event(&event, false).unwrap();
 
-        let result = find_prior_decision(&ledger, &branch, "db.engine");
-        assert!(result.is_some(), "should find prior decision");
-        let (event_id, value) = result.unwrap();
-        assert!(!event_id.is_empty());
-        assert_eq!(value, Some("postgres".to_string()));
+        let result = ledger.find_active_decision(&branch, "db.engine").unwrap();
+        assert!(result.is_some(), "should find active decision");
+        let row = result.unwrap();
+        assert!(!row.event_id.is_empty());
+        assert_eq!(row.value, "postgres");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn find_prior_decision_no_match() {
+    fn find_active_decision_no_match() {
         let (tmp, ledger) = setup_workspace();
         let branch = ledger.head_branch().unwrap();
 
-        let result = find_prior_decision(&ledger, &branch, "nonexistent.key");
+        let result = ledger.find_active_decision(&branch, "nonexistent.key").unwrap();
         assert!(result.is_none(), "should not find anything");
 
         let _ = std::fs::remove_dir_all(&tmp);
