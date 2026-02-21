@@ -3,6 +3,7 @@ pub mod pattern;
 pub mod peers;
 pub mod redact;
 pub mod render;
+pub mod state;
 
 mod admin;
 mod dispatch;

@@ -1,6 +1,6 @@
 use std::fs;
-use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
+
+use edda_bridge_claude::{render, state};
 
 use crate::parse::*;
 
@@ -28,56 +28,6 @@ impl HookResult {
     pub fn empty() -> Self {
         Self::default()
     }
-}
-
-// ── Context Boundary ──
-
-const EDDA_BOUNDARY_START: &str = "<!-- edda:start -->";
-const EDDA_BOUNDARY_END: &str = "<!-- edda:end -->";
-
-const DEFAULT_MAX_CONTEXT_CHARS: usize = 8000;
-
-fn wrap_context_boundary(content: &str) -> String {
-    format!("{EDDA_BOUNDARY_START}\n{content}\n{EDDA_BOUNDARY_END}")
-}
-
-fn context_budget(workspace_dir: &str) -> usize {
-    std::env::var("EDDA_MAX_CONTEXT_CHARS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .or_else(|| read_workspace_config_usize(workspace_dir, "bridge.max_context_chars"))
-        .unwrap_or(DEFAULT_MAX_CONTEXT_CHARS)
-}
-
-fn apply_context_budget(content: &str, budget: usize) -> String {
-    if content.len() <= budget {
-        return content.to_string();
-    }
-    let cut = content.len().min(budget.saturating_sub(50));
-    let safe = content.floor_char_boundary(cut);
-    format!(
-        "{}\n\n... (truncated to {} char budget)",
-        &content[..safe],
-        budget
-    )
-}
-
-// ── Write-Back Protocol ──
-
-fn render_write_back_protocol() -> String {
-    "## Write-Back Protocol\n\
-     Record architectural decisions with: `edda decide \"domain.aspect=value\" --reason \"justification\"`\n\
-     \n\
-     Examples:\n  \
-     `edda decide \"db.engine=postgres\" --reason \"need JSONB for flexible metadata\"`\n  \
-     `edda decide \"auth.method=JWT\" --reason \"stateless, scales horizontally\"`\n  \
-     `edda decide \"api.style=REST\" --reason \"client SDK compatibility\"`\n\
-     \n\
-     Do NOT record: formatting changes, test fixes, minor refactors, dependency bumps.\n\
-     \n\
-     Before ending a session, summarize open context:\n  \
-     `edda note \"completed X; decided Y; next: Z\" --tag session`"
-        .to_string()
 }
 
 // ── Hook dispatch ──
@@ -171,25 +121,29 @@ fn dispatch_before_agent_start(
     let _digest_warning = run_auto_digest(project_id, session_id, cwd);
 
     // Check compact recovery flag
-    let post_compact = take_compact_pending(project_id);
+    let post_compact = state::take_compact_pending(project_id);
 
     // ── Build body (truncatable) ──
     let mut body_parts: Vec<String> = Vec::new();
 
     // Workspace context (decisions, notes, recent commits)
-    if let Some(ws) = render_workspace_section(cwd) {
+    let workspace_budget: usize = std::env::var("EDDA_WORKSPACE_BUDGET_CHARS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2500);
+    if let Some(ws) = render::workspace(cwd, workspace_budget) {
         body_parts.push(ws);
     }
 
     // Hot pack (recent turns summary) — include on first turn or post-compact
     if post_compact {
-        if let Some(pack) = edda_bridge_claude::render::pack(project_id) {
+        if let Some(pack) = render::pack(project_id) {
             body_parts.push(pack);
         }
     }
 
     // Active plan excerpt
-    if let Some(plan) = edda_bridge_claude::render::plan(Some(project_id)) {
+    if let Some(plan) = render::plan(Some(project_id)) {
         body_parts.push(plan);
     }
 
@@ -200,7 +154,7 @@ fn dispatch_before_agent_start(
 
     // Write-back protocol (always)
     tail.push_str("\n\n");
-    tail.push_str(&render_write_back_protocol());
+    tail.push_str(&render::writeback());
 
     // Coordination protocol
     if let Some(coord) =
@@ -210,9 +164,9 @@ fn dispatch_before_agent_start(
     }
 
     // ── Budget: body gets (total - tail), tail appended unconditionally ──
-    let total_budget = context_budget(cwd);
+    let total_budget = render::context_budget(cwd);
     let body_budget = total_budget.saturating_sub(tail.len());
-    let budgeted_body = apply_context_budget(&body, body_budget);
+    let budgeted_body = render::apply_budget(&body, body_budget);
 
     let content = if tail.is_empty() {
         budgeted_body
@@ -220,14 +174,14 @@ fn dispatch_before_agent_start(
         format!("{budgeted_body}{tail}")
     };
 
-    let wrapped = wrap_context_boundary(&content);
+    let wrapped = render::wrap_boundary(&content);
 
     // Dedup: skip if identical to last injection
-    if !session_id.is_empty() && is_same_as_last_inject(project_id, session_id, &wrapped) {
+    if !session_id.is_empty() && state::is_same_as_last_inject(project_id, session_id, &wrapped) {
         return Ok(HookResult::output(r#"{"ok":true}"#.to_string()));
     }
     if !session_id.is_empty() {
-        write_inject_hash(project_id, session_id, &wrapped);
+        state::write_inject_hash(project_id, session_id, &wrapped);
     }
 
     let output = serde_json::json!({ "prependContext": wrapped });
@@ -235,9 +189,6 @@ fn dispatch_before_agent_start(
 }
 
 // ── after_tool_call ──
-
-/// Default cooldown between nudges (seconds).
-const NUDGE_COOLDOWN_SECS: i64 = 180;
 
 /// Handle post-tool-call: detect decision signals and nudge.
 fn dispatch_after_tool_call(
@@ -271,29 +222,29 @@ fn dispatch_after_tool_call(
     };
 
     // Track signal
-    increment_counter(project_id, session_id, "signal_count");
+    state::increment_counter(project_id, session_id, "signal_count");
 
     // Self-record: agent called `edda decide` — just count, no nudge
     if signal == edda_bridge_claude::nudge::NudgeSignal::SelfRecord {
-        increment_counter(project_id, session_id, "decide_count");
+        state::increment_counter(project_id, session_id, "decide_count");
         return Ok(ok_json());
     }
 
     // Check cooldown
-    if !should_nudge(project_id, session_id) {
+    if !state::should_nudge(project_id, session_id) {
         return Ok(ok_json());
     }
 
     // Format nudge
-    let decide_count = read_counter(project_id, session_id, "decide_count");
+    let decide_count = state::read_counter(project_id, session_id, "decide_count");
     let nudge_text = edda_bridge_claude::nudge::format_nudge(&signal, decide_count);
     if nudge_text.is_empty() {
         return Ok(ok_json());
     }
 
     // Mark sent + count
-    mark_nudge_sent(project_id, session_id);
-    increment_counter(project_id, session_id, "nudge_count");
+    state::mark_nudge_sent(project_id, session_id);
+    state::increment_counter(project_id, session_id, "nudge_count");
 
     let output = serde_json::json!({ "additionalContext": nudge_text });
     Ok(HookResult::output(serde_json::to_string(&output)?))
@@ -313,7 +264,7 @@ fn normalize_tool_name(name: &str) -> &str {
 
 /// Handle pre-compaction: set flag for full re-injection on next turn.
 fn dispatch_before_compaction(project_id: &str) -> anyhow::Result<HookResult> {
-    set_compact_pending(project_id);
+    state::set_compact_pending(project_id);
     Ok(ok_json())
 }
 
@@ -332,7 +283,7 @@ fn dispatch_message_sent(
         .unwrap_or("");
 
     if text.contains("edda decide") {
-        increment_counter(project_id, session_id, "decide_count");
+        state::increment_counter(project_id, session_id, "decide_count");
     }
 
     Ok(ok_json())
@@ -401,122 +352,12 @@ fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool)
     }
 }
 
-// ── Compact Pending Flag ──
-
-fn compact_pending_path(project_id: &str) -> PathBuf {
-    edda_store::project_dir(project_id)
-        .join("state")
-        .join("compact_pending")
-}
-
-fn set_compact_pending(project_id: &str) {
-    let path = compact_pending_path(project_id);
-    let _ = fs::write(&path, b"1");
-}
-
-fn take_compact_pending(project_id: &str) -> bool {
-    let path = compact_pending_path(project_id);
-    if path.exists() {
-        let _ = fs::remove_file(&path);
-        true
-    } else {
-        false
-    }
-}
-
-// ── Nudge State ──
-
-fn nudge_cooldown_secs() -> i64 {
-    std::env::var("EDDA_NUDGE_COOLDOWN_SECS")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(NUDGE_COOLDOWN_SECS)
-}
-
-fn should_nudge(project_id: &str, session_id: &str) -> bool {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("nudge_ts.{session_id}"));
-    match fs::read_to_string(&path) {
-        Ok(ts) => {
-            let last = time::OffsetDateTime::parse(
-                ts.trim(),
-                &time::format_description::well_known::Rfc3339,
-            )
-            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-            let elapsed = time::OffsetDateTime::now_utc() - last;
-            elapsed.whole_seconds() >= nudge_cooldown_secs()
-        }
-        Err(_) => true,
-    }
-}
-
-fn mark_nudge_sent(project_id: &str, session_id: &str) {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("nudge_ts.{session_id}"));
-    let _ = fs::write(&path, now_rfc3339());
-}
-
-// ── Counters ──
-
-fn increment_counter(project_id: &str, session_id: &str, name: &str) {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("{name}.{session_id}"));
-    let current: u64 = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-    let _ = fs::write(&path, (current + 1).to_string());
-}
-
-fn read_counter(project_id: &str, session_id: &str, name: &str) -> u64 {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("{name}.{session_id}"));
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
-}
-
-// ── Injection Dedup ──
-
-fn inject_hash_path(project_id: &str, session_id: &str) -> PathBuf {
-    edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("inject_hash.{session_id}"))
-}
-
-fn content_hash(s: &str) -> u64 {
-    let mut hasher = std::hash::DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
-}
-
-fn is_same_as_last_inject(project_id: &str, session_id: &str, content: &str) -> bool {
-    let path = inject_hash_path(project_id, session_id);
-    let current = format!("{:016x}", content_hash(content));
-    match fs::read_to_string(&path) {
-        Ok(stored) => stored.trim() == current,
-        Err(_) => false,
-    }
-}
-
-fn write_inject_hash(project_id: &str, session_id: &str, content: &str) {
-    let path = inject_hash_path(project_id, session_id);
-    let hash = format!("{:016x}", content_hash(content));
-    let _ = fs::write(&path, hash);
-}
-
-
 // ── Auto-digest ──
 
 fn run_auto_digest(project_id: &str, current_session_id: &str, cwd: &str) -> Option<String> {
     let enabled = match std::env::var("EDDA_BRIDGE_AUTO_DIGEST") {
         Ok(val) => val != "0",
-        Err(_) => read_workspace_config_bool(cwd, "bridge.auto_digest").unwrap_or(true),
+        Err(_) => render::config_bool(cwd, "bridge.auto_digest").unwrap_or(true),
     };
     if !enabled {
         return None;
@@ -529,7 +370,7 @@ fn run_auto_digest(project_id: &str, current_session_id: &str, cwd: &str) -> Opt
 
     let digest_failed_cmds = match std::env::var("EDDA_BRIDGE_DIGEST_FAILED_CMDS") {
         Ok(val) => val != "0",
-        Err(_) => read_workspace_config_bool(cwd, "bridge.digest_failed_cmds").unwrap_or(true),
+        Err(_) => render::config_bool(cwd, "bridge.digest_failed_cmds").unwrap_or(true),
     };
 
     match edda_bridge_claude::digest::digest_previous_sessions_with_opts(
@@ -546,119 +387,6 @@ fn run_auto_digest(project_id: &str, current_session_id: &str, cwd: &str) -> Opt
         edda_bridge_claude::digest::DigestResult::PermanentFailure(warning) => Some(warning),
         _ => None,
     }
-}
-
-// ── Workspace Context ──
-
-/// Render workspace context section from the `.edda/` ledger.
-fn render_workspace_section(cwd: &str) -> Option<String> {
-    if cwd.is_empty() {
-        return None;
-    }
-    let cwd_path = Path::new(cwd);
-    let root = edda_ledger::EddaPaths::find_root(cwd_path)?;
-    let ledger = edda_ledger::Ledger::open(&root).ok()?;
-    let branch = ledger.head_branch().unwrap_or_else(|_| "main".to_string());
-
-    let workspace_budget: usize = std::env::var("EDDA_WORKSPACE_BUDGET_CHARS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2500);
-
-    let max_depth: usize = std::env::var("EDDA_WORKSPACE_DEPTH")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3);
-
-    for d in (1..=max_depth).rev() {
-        let opt = edda_derive::DeriveOptions { depth: d };
-        if let Ok(raw) = edda_derive::render_context(&ledger, &branch, opt) {
-            let mut section = transform_context_to_section(&raw);
-            supplement_git_commits(&mut section, cwd_path, d);
-            if section.len() <= workspace_budget {
-                return Some(section);
-            }
-        }
-    }
-    None
-}
-
-/// Transform `render_context` output into a pack-embeddable section.
-fn transform_context_to_section(raw: &str) -> String {
-    let mut out = String::new();
-    out.push_str("## Workspace Context\n\n");
-    let mut skip_header = true;
-    let mut skip_cite = false;
-    for line in raw.lines() {
-        if skip_header && line.starts_with("# CONTEXT SNAPSHOT") {
-            skip_header = false;
-            continue;
-        }
-        if line.starts_with("## How to cite evidence") {
-            skip_cite = true;
-            continue;
-        }
-        if skip_cite {
-            continue;
-        }
-        skip_header = false;
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-/// If the workspace section has empty "Recent Commits", supplement with `git log --oneline`.
-fn supplement_git_commits(section: &mut String, cwd: &Path, depth: usize) {
-    let empty_marker = format!("## Recent Commits (last {depth})\n- (none)\n");
-    if !section.contains(&empty_marker) {
-        return;
-    }
-    let Ok(output) = std::process::Command::new("git")
-        .args(["log", "--oneline", &format!("-{depth}")])
-        .current_dir(cwd)
-        .output()
-    else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let text = text.trim();
-    if text.is_empty() {
-        return;
-    }
-    let formatted: String = text.lines().map(|l| format!("- {l}\n")).collect();
-    let replacement = format!("## Recent Commits (last {depth})\n{formatted}");
-    *section = section.replace(&empty_marker, &replacement);
-}
-
-// ── Config helpers ──
-
-fn read_workspace_config_bool(cwd: &str, key: &str) -> Option<bool> {
-    read_workspace_config_value(cwd, key)?.as_bool()
-}
-
-fn read_workspace_config_usize(cwd: &str, key: &str) -> Option<usize> {
-    read_workspace_config_value(cwd, key)?
-        .as_u64()
-        .map(|v| v as usize)
-}
-
-fn read_workspace_config_value(cwd: &str, key: &str) -> Option<serde_json::Value> {
-    if cwd.is_empty() {
-        return None;
-    }
-    let root = edda_ledger::EddaPaths::find_root(Path::new(cwd))?;
-    let config_path = root.join(".edda").join("config.json");
-    let content = fs::read_to_string(&config_path).ok()?;
-    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let mut current = val;
-    for part in key.split('.') {
-        current = current.get(part)?.clone();
-    }
-    Some(current)
 }
 
 #[cfg(test)]
@@ -724,10 +452,13 @@ mod tests {
             "should contain decide instruction"
         );
         assert!(
-            ctx.contains(EDDA_BOUNDARY_START),
+            ctx.contains(render::BOUNDARY_START),
             "should have boundary start"
         );
-        assert!(ctx.contains(EDDA_BOUNDARY_END), "should have boundary end");
+        assert!(
+            ctx.contains(render::BOUNDARY_END),
+            "should have boundary end"
+        );
 
         std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     }
@@ -786,7 +517,7 @@ mod tests {
     #[test]
     fn context_budget_truncates() {
         let content = "x".repeat(10000);
-        let result = apply_context_budget(&content, 500);
+        let result = render::apply_budget(&content, 500);
         assert!(result.len() <= 550);
         assert!(result.contains("truncated"));
     }
@@ -794,9 +525,9 @@ mod tests {
     #[test]
     fn context_boundary_wraps() {
         let content = "hello";
-        let wrapped = wrap_context_boundary(content);
-        assert!(wrapped.starts_with(EDDA_BOUNDARY_START));
-        assert!(wrapped.ends_with(EDDA_BOUNDARY_END));
+        let wrapped = render::wrap_boundary(content);
+        assert!(wrapped.starts_with(render::BOUNDARY_START));
+        assert!(wrapped.ends_with(render::BOUNDARY_END));
         assert!(wrapped.contains("hello"));
     }
 
@@ -889,8 +620,8 @@ mod tests {
         assert!(ctx.contains("add auth"), "nudge should mention commit msg");
 
         // Verify counters
-        assert_eq!(read_counter(pid, sid, "signal_count"), 1);
-        assert_eq!(read_counter(pid, sid, "nudge_count"), 1);
+        assert_eq!(state::read_counter(pid, sid, "signal_count"), 1);
+        assert_eq!(state::read_counter(pid, sid, "nudge_count"), 1);
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -920,8 +651,8 @@ mod tests {
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
         assert_eq!(output["ok"], true);
 
-        assert_eq!(read_counter(pid, sid, "decide_count"), 1);
-        assert_eq!(read_counter(pid, sid, "signal_count"), 1);
+        assert_eq!(state::read_counter(pid, sid, "decide_count"), 1);
+        assert_eq!(state::read_counter(pid, sid, "signal_count"), 1);
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -949,7 +680,7 @@ mod tests {
         let output: serde_json::Value =
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
         assert_eq!(output["ok"], true);
-        assert_eq!(read_counter(pid, sid, "signal_count"), 0);
+        assert_eq!(state::read_counter(pid, sid, "signal_count"), 0);
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -979,12 +710,15 @@ mod tests {
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
         assert_eq!(output["ok"], true);
 
-        assert!(compact_pending_path(pid).exists(), "flag should be set");
-        assert!(take_compact_pending(pid), "take should return true");
+        let cp_path = edda_store::project_dir(pid)
+            .join("state")
+            .join("compact_pending");
+        assert!(cp_path.exists(), "flag should be set");
         assert!(
-            !compact_pending_path(pid).exists(),
-            "flag should be cleared"
+            state::take_compact_pending(pid),
+            "take should return true"
         );
+        assert!(!cp_path.exists(), "flag should be cleared");
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1013,7 +747,7 @@ mod tests {
         let output: serde_json::Value =
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
         assert_eq!(output["ok"], true);
-        assert_eq!(read_counter(pid, sid, "decide_count"), 1);
+        assert_eq!(state::read_counter(pid, sid, "decide_count"), 1);
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1037,7 +771,7 @@ mod tests {
         };
 
         let _ = dispatch_message_sent(pid, &envelope);
-        assert_eq!(read_counter(pid, sid, "decide_count"), 0);
+        assert_eq!(state::read_counter(pid, sid, "decide_count"), 0);
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1096,10 +830,10 @@ mod tests {
         let _ = edda_store::ensure_dirs(pid);
 
         let content = "test content for dedup";
-        assert!(!is_same_as_last_inject(pid, sid, content));
-        write_inject_hash(pid, sid, content);
-        assert!(is_same_as_last_inject(pid, sid, content));
-        assert!(!is_same_as_last_inject(pid, sid, "different content"));
+        assert!(!state::is_same_as_last_inject(pid, sid, content));
+        state::write_inject_hash(pid, sid, content);
+        assert!(state::is_same_as_last_inject(pid, sid, content));
+        assert!(!state::is_same_as_last_inject(pid, sid, "different content"));
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1208,11 +942,14 @@ mod tests {
             }),
         };
         let _ = dispatch_message_sent(pid, &env4);
-        assert_eq!(read_counter(pid, sid, "decide_count"), 1);
+        assert_eq!(state::read_counter(pid, sid, "decide_count"), 1);
 
         // 5. before_compaction → flag set
         let _ = dispatch_before_compaction(pid);
-        assert!(compact_pending_path(pid).exists());
+        let cp_path = edda_store::project_dir(pid)
+            .join("state")
+            .join("compact_pending");
+        assert!(cp_path.exists());
 
         // 6. session_end → state cleaned
         let env6 = OpenClawEnvelope {

@@ -1,9 +1,10 @@
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::parse::*;
+use crate::render;
 use crate::signals::*;
+use crate::state;
 
 // ── Hook Result ──
 
@@ -49,41 +50,23 @@ impl From<Option<String>> for HookResult {
     }
 }
 
-// ── Context Boundary ──
+// ── Context Boundary (delegates to render module) ──
 
-const EDDA_BOUNDARY_START: &str = "<!-- edda:start -->";
-const EDDA_BOUNDARY_END: &str = "<!-- edda:end -->";
+#[cfg(test)]
+const EDDA_BOUNDARY_START: &str = render::BOUNDARY_START;
+#[cfg(test)]
+const EDDA_BOUNDARY_END: &str = render::BOUNDARY_END;
 
-/// Default max context chars (~2000 tokens). Overridable via
-/// `EDDA_MAX_CONTEXT_CHARS` env var or `bridge.max_context_chars` in config.
-const DEFAULT_MAX_CONTEXT_CHARS: usize = 8000;
-
-/// Wrap context content with edda boundary markers for multi-plugin coexistence.
 fn wrap_context_boundary(content: &str) -> String {
-    format!("{EDDA_BOUNDARY_START}\n{content}\n{EDDA_BOUNDARY_END}")
+    render::wrap_boundary(content)
 }
 
-/// Resolve the context char budget from env or config.
 fn context_budget(cwd: &str) -> usize {
-    std::env::var("EDDA_MAX_CONTEXT_CHARS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .or_else(|| read_workspace_config_usize(cwd, "bridge.max_context_chars"))
-        .unwrap_or(DEFAULT_MAX_CONTEXT_CHARS)
+    render::context_budget(cwd)
 }
 
-/// Truncate content to fit within the char budget, preserving UTF-8 boundaries.
 fn apply_context_budget(content: &str, budget: usize) -> String {
-    if content.len() <= budget {
-        return content.to_string();
-    }
-    let cut = content.len().min(budget.saturating_sub(50));
-    let safe = content.floor_char_boundary(cut);
-    format!(
-        "{}\n\n... (truncated to {} char budget)",
-        &content[..safe],
-        budget
-    )
+    render::apply_budget(content, budget)
 }
 
 // ── L1 Protocol Rendering ──
@@ -93,21 +76,7 @@ fn apply_context_budget(content: &str, budget: usize) -> String {
 /// No `.edda/` gate: if the bridge hook is running, the user has edda installed,
 /// so the agent should always learn about `edda decide`.
 pub(crate) fn render_write_back_protocol(_cwd: &str) -> Option<String> {
-    Some(
-        "## Write-Back Protocol\n\
-         Record architectural decisions with: `edda decide \"domain.aspect=value\" --reason \"justification\"`\n\
-         \n\
-         Examples:\n  \
-         `edda decide \"db.engine=postgres\" --reason \"need JSONB for flexible metadata\"`\n  \
-         `edda decide \"auth.method=JWT\" --reason \"stateless, scales horizontally\"`\n  \
-         `edda decide \"api.style=REST\" --reason \"client SDK compatibility\"`\n\
-         \n\
-         Do NOT record: formatting changes, test fixes, minor refactors, dependency bumps.\n\
-         \n\
-         Before ending a session, summarize open context:\n  \
-         `edda note \"completed X; decided Y; next: Z\" --tag session`"
-            .to_string(),
-    )
+    Some(render::writeback())
 }
 
 // ── L2 Solo Gate ──
@@ -509,152 +478,46 @@ fn render_active_plan_from_dir(plans_dir: &Path, project_id: Option<&str>) -> Op
     ))
 }
 
-// ── Compact Gap Detection ──
+// ── State Management (delegates to state module) ──
 
-/// Path to the compact_pending flag in the project state directory.
-fn compact_pending_path(project_id: &str) -> PathBuf {
-    edda_store::project_dir(project_id)
-        .join("state")
-        .join("compact_pending")
-}
-
-/// Set the compact_pending flag (called from PreCompact).
 fn set_compact_pending(project_id: &str) {
-    let path = compact_pending_path(project_id);
-    let _ = fs::write(&path, b"1");
+    state::set_compact_pending(project_id);
 }
 
-/// Check and clear the compact_pending flag.  Returns `true` if it was set.
 fn take_compact_pending(project_id: &str) -> bool {
-    let path = compact_pending_path(project_id);
-    if path.exists() {
-        let _ = fs::remove_file(&path);
-        true
-    } else {
-        false
-    }
+    state::take_compact_pending(project_id)
 }
 
-// ── Decision Nudge State ──
-
-/// Default cooldown between nudges (seconds).
-const NUDGE_COOLDOWN_SECS: i64 = 180; // 3 minutes
-
-/// Read the effective cooldown, allowing `EDDA_NUDGE_COOLDOWN_SECS` env override.
-fn nudge_cooldown_secs() -> i64 {
-    std::env::var("EDDA_NUDGE_COOLDOWN_SECS")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(NUDGE_COOLDOWN_SECS)
-}
-
-/// Check if we should send a nudge (cooldown expired).
 fn should_nudge(project_id: &str, session_id: &str) -> bool {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("nudge_ts.{session_id}"));
-    match fs::read_to_string(&path) {
-        Ok(ts) => {
-            let last = time::OffsetDateTime::parse(
-                ts.trim(),
-                &time::format_description::well_known::Rfc3339,
-            )
-            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
-            let elapsed = time::OffsetDateTime::now_utc() - last;
-            elapsed.whole_seconds() >= nudge_cooldown_secs()
-        }
-        Err(_) => true, // no previous nudge → allow
-    }
+    state::should_nudge(project_id, session_id)
 }
 
-/// Record that a nudge was sent.
 fn mark_nudge_sent(project_id: &str, session_id: &str) {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("nudge_ts.{session_id}"));
-    let _ = fs::write(&path, now_rfc3339());
+    state::mark_nudge_sent(project_id, session_id);
 }
 
-// ── Recall Rate Counters ──
-
-/// Increment a per-session counter file (nudge_count or decide_count).
 fn increment_counter(project_id: &str, session_id: &str, name: &str) {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("{name}.{session_id}"));
-    let current: u64 = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0);
-    let _ = fs::write(&path, (current + 1).to_string());
+    state::increment_counter(project_id, session_id, name);
 }
 
-/// Read a per-session counter file; returns 0 if missing.
 fn read_counter(project_id: &str, session_id: &str, name: &str) -> u64 {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("{name}.{session_id}"));
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
+    state::read_counter(project_id, session_id, name)
 }
 
-// ── Injection Dedup ──
-
-/// Path to the inject hash state file for a given session.
-fn inject_hash_path(project_id: &str, session_id: &str) -> PathBuf {
-    edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("inject_hash.{session_id}"))
-}
-
-/// Compute a 64-bit hash of a string (for dedup comparison).
-fn content_hash(s: &str) -> u64 {
-    let mut hasher = std::hash::DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
-}
-
-/// Check if the given content matches the last injected content for this session.
 fn is_same_as_last_inject(project_id: &str, session_id: &str, content: &str) -> bool {
-    let path = inject_hash_path(project_id, session_id);
-    let current = format!("{:016x}", content_hash(content));
-    match fs::read_to_string(&path) {
-        Ok(stored) => stored.trim() == current,
-        Err(_) => false,
-    }
+    state::is_same_as_last_inject(project_id, session_id, content)
 }
 
-/// Write the content hash for the current injection.
 fn write_inject_hash(project_id: &str, session_id: &str, content: &str) {
-    let path = inject_hash_path(project_id, session_id);
-    let hash = format!("{:016x}", content_hash(content));
-    let _ = fs::write(&path, hash);
+    state::write_inject_hash(project_id, session_id, content);
 }
 
-// ── Peer Count Tracking (Late Peer Detection) ──
-
-/// Path to the peer count state file for a given session.
-fn peer_count_path(project_id: &str, session_id: &str) -> PathBuf {
-    edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("peer_count.{session_id}"))
-}
-
-/// Read the previously recorded peer count for this session (defaults to 0).
 fn read_peer_count(project_id: &str, session_id: &str) -> usize {
-    let path = peer_count_path(project_id, session_id);
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
+    state::read_peer_count(project_id, session_id)
 }
 
-/// Write the current peer count for this session.
 fn write_peer_count(project_id: &str, session_id: &str, count: usize) {
-    let path = peer_count_path(project_id, session_id);
-    let _ = fs::write(&path, count.to_string());
+    state::write_peer_count(project_id, session_id, count);
 }
 
 /// Dispatch UserPromptSubmit — compact-aware.
@@ -1022,33 +885,15 @@ fn dispatch_session_start(
     }
 }
 
-/// Read a boolean value from `.edda/config.json` in the workspace.
-/// Supports dot-notation keys (e.g. "bridge.auto_digest").
+// ── Config Helpers (delegates to render module) ──
+
 fn read_workspace_config_bool(cwd: &str, key: &str) -> Option<bool> {
-    read_workspace_config_value(cwd, key)?.as_bool()
+    render::config_bool(cwd, key)
 }
 
-/// Read a usize value from `.edda/config.json` in the workspace.
+#[allow(dead_code)]
 fn read_workspace_config_usize(cwd: &str, key: &str) -> Option<usize> {
-    read_workspace_config_value(cwd, key)?
-        .as_u64()
-        .map(|v| v as usize)
-}
-
-/// Read a raw JSON value from `.edda/config.json` using dot-notation keys.
-fn read_workspace_config_value(cwd: &str, key: &str) -> Option<serde_json::Value> {
-    if cwd.is_empty() {
-        return None;
-    }
-    let root = edda_ledger::EddaPaths::find_root(Path::new(cwd))?;
-    let config_path = root.join(".edda").join("config.json");
-    let content = fs::read_to_string(&config_path).ok()?;
-    let val: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let mut current = val;
-    for part in key.split('.') {
-        current = current.get(part)?.clone();
-    }
-    Some(current)
+    render::config_usize(cwd, key)
 }
 
 fn dispatch_pre_tool_use(raw: &serde_json::Value, cwd: &str) -> anyhow::Result<HookResult> {
@@ -1180,90 +1025,10 @@ pub(crate) fn read_hot_pack(project_id: &str) -> Option<String> {
     fs::read_to_string(&pack_path).ok()
 }
 
-// ── Workspace Context ──
+// ── Workspace Context (delegate to render module) ──
 
-/// Try to render a workspace context section from the `.edda/` ledger in `cwd`.
-/// Returns `None` silently if no workspace exists or any error occurs.
 pub(crate) fn render_workspace_section(cwd: &str, workspace_budget: usize) -> Option<String> {
-    if cwd.is_empty() {
-        return None;
-    }
-    let cwd_path = Path::new(cwd);
-    let root = edda_ledger::EddaPaths::find_root(cwd_path)?;
-    let ledger = edda_ledger::Ledger::open(&root).ok()?;
-    let branch = ledger.head_branch().unwrap_or_else(|_| "main".to_string());
-
-    let max_depth: usize = std::env::var("EDDA_WORKSPACE_DEPTH")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3);
-
-    // Try with requested depth, reduce if over budget
-    for d in (1..=max_depth).rev() {
-        let opt = edda_derive::DeriveOptions { depth: d };
-        if let Ok(raw) = edda_derive::render_context(&ledger, &branch, opt) {
-            let mut section = transform_context_to_section(&raw);
-            // If edda ledger has no commit events, fall back to `git log`
-            supplement_git_commits(&mut section, cwd_path, d);
-            if section.len() <= workspace_budget {
-                return Some(section);
-            }
-        }
-    }
-    None
-}
-
-/// If the workspace section has empty "Recent Commits", supplement with `git log --oneline`.
-fn supplement_git_commits(section: &mut String, cwd: &Path, depth: usize) {
-    let empty_marker = format!("## Recent Commits (last {depth})\n- (none)\n");
-    if !section.contains(&empty_marker) {
-        return;
-    }
-    let Ok(output) = std::process::Command::new("git")
-        .args(["log", "--oneline", &format!("-{depth}")])
-        .current_dir(cwd)
-        .output()
-    else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let text = text.trim();
-    if text.is_empty() {
-        return;
-    }
-    let formatted: String = text.lines().map(|l| format!("- {l}\n")).collect();
-    let replacement = format!("## Recent Commits (last {depth})\n{formatted}");
-    *section = section.replace(&empty_marker, &replacement);
-}
-
-/// Transform `render_context` output into a pack-embeddable section.
-/// Replaces `# CONTEXT SNAPSHOT` header with `## Workspace Context`
-/// and removes the `## How to cite evidence` footer.
-fn transform_context_to_section(raw: &str) -> String {
-    let mut out = String::new();
-    out.push_str("## Workspace Context\n\n");
-    let mut skip_header = true;
-    let mut skip_cite = false;
-    for line in raw.lines() {
-        if skip_header && line.starts_with("# CONTEXT SNAPSHOT") {
-            skip_header = false;
-            continue;
-        }
-        if line.starts_with("## How to cite evidence") {
-            skip_cite = true;
-            continue;
-        }
-        if skip_cite {
-            continue;
-        }
-        skip_header = false;
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
+    render::workspace(cwd, workspace_budget)
 }
 
 #[cfg(test)]
@@ -1328,16 +1093,7 @@ mod tests {
         assert!(result.stderr.is_none());
     }
 
-    #[test]
-    fn transform_context_strips_header_and_cite() {
-        let raw = "# CONTEXT SNAPSHOT\n\n## Project (main)\n- head: main\n\n## How to cite evidence\n- Use event_id\n";
-        let section = transform_context_to_section(raw);
-        assert!(section.starts_with("## Workspace Context\n"));
-        assert!(section.contains("## Project (main)"));
-        assert!(!section.contains("# CONTEXT SNAPSHOT"));
-        assert!(!section.contains("How to cite evidence"));
-        assert!(!section.contains("Use event_id"));
-    }
+    // transform_context_strips_header_and_cite → moved to render::tests
 
     #[test]
     fn render_workspace_section_no_edda_returns_none() {
@@ -1411,11 +1167,12 @@ mod tests {
 
         // Set flag
         set_compact_pending(pid);
-        assert!(compact_pending_path(pid).exists());
+        let cp_path = edda_store::project_dir(pid).join("state").join("compact_pending");
+        assert!(cp_path.exists());
 
         // Take clears it and returns true once
         assert!(take_compact_pending(pid));
-        assert!(!compact_pending_path(pid).exists());
+        assert!(!cp_path.exists());
 
         // Second take returns false
         assert!(!take_compact_pending(pid));
@@ -1828,7 +1585,7 @@ mod tests {
     fn context_budget_default_without_config() {
         std::env::remove_var("EDDA_MAX_CONTEXT_CHARS");
         let budget = context_budget("/nonexistent/dir");
-        assert_eq!(budget, DEFAULT_MAX_CONTEXT_CHARS);
+        assert_eq!(budget, render::DEFAULT_MAX_CONTEXT_CHARS);
     }
 
     // ── Body/Tail Budget Split tests ──
@@ -2191,22 +1948,7 @@ mod tests {
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 
-    #[test]
-    fn nudge_cooldown_env_var_override() {
-        // Default cooldown is 180s
-        assert_eq!(nudge_cooldown_secs(), 180);
-
-        // Override via env var
-        std::env::set_var("EDDA_NUDGE_COOLDOWN_SECS", "60");
-        assert_eq!(nudge_cooldown_secs(), 60);
-
-        // Invalid env var falls back to default
-        std::env::set_var("EDDA_NUDGE_COOLDOWN_SECS", "not_a_number");
-        assert_eq!(nudge_cooldown_secs(), 180);
-
-        // Clean up
-        std::env::remove_var("EDDA_NUDGE_COOLDOWN_SECS");
-    }
+    // nudge_cooldown_env_var_override → moved to state::tests
 
     #[test]
     fn session_end_cleans_signal_count() {
