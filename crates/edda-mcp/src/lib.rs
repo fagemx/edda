@@ -219,7 +219,7 @@ impl EddaServer {
         };
         event.payload["decision"] = decision_obj;
 
-        // Auto-supersede: find prior decision with same key
+        // Auto-supersede: find prior decision with same key (skip if idempotent)
         let prior = find_prior_decision(&ledger, &branch, key);
         let mut supersede_info = String::new();
         if let Some((prior_id, prior_value)) = &prior {
@@ -229,12 +229,12 @@ impl EddaServer {
                     prior_id,
                     prior_value.as_deref().unwrap_or("?")
                 );
+                event.refs.provenance.push(Provenance {
+                    target: prior_id.clone(),
+                    rel: rel::SUPERSEDES.to_string(),
+                    note: Some(format!("key '{}' re-decided", key)),
+                });
             }
-            event.refs.provenance.push(Provenance {
-                target: prior_id.clone(),
-                rel: rel::SUPERSEDES.to_string(),
-                note: Some(format!("key '{}' re-decided", key)),
-            });
         }
 
         // Re-finalize after payload/refs mutation
@@ -777,6 +777,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_decide_idempotent_no_supersede() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root.clone());
+
+        // Same key, same value twice — should NOT create supersede link
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.engine=postgres".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.engine=postgres".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(!text.contains("supersedes"));
+
+        // Verify no provenance link on second event
+        let ledger = Ledger::open(&root).unwrap();
+        let events = ledger.iter_events().unwrap();
+        let last = events.last().unwrap();
+        assert!(last.refs.provenance.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_decide_invalid_format() {
         let (_tmp, root) = setup_workspace();
         let server = EddaServer::new(root);
@@ -910,15 +942,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Add a decision (also type=note)
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "key=value".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
-
+        // Filter by note type — should find the event
         let result = server
             .edda_log(Parameters(LogParams {
                 event_type: Some("note".to_string()),
@@ -931,8 +955,23 @@ mod tests {
             .unwrap();
 
         let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        // Both are notes, should appear
         assert!(text.contains("note"));
+        assert!(text.contains("test note"));
+
+        // Filter by non-existent type — should return nothing
+        let result = server
+            .edda_log(Parameters(LogParams {
+                event_type: Some("commit".to_string()),
+                keyword: None,
+                after: None,
+                before: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("No events match"));
     }
 
     #[tokio::test]
