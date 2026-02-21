@@ -286,7 +286,7 @@ fn ingest_and_build_pack(project_id: &str, session_id: &str, transcript_path: &s
     let budget: usize = std::env::var("EDDA_PACK_BUDGET_CHARS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(12000);
+        .unwrap_or(6000);
 
     if let Ok(turns) = edda_pack::build_turns(&project_dir, session_id, max_turns) {
         // Compute workspace section from .edda/ ledger
@@ -877,21 +877,21 @@ fn dispatch_session_start(
     // Previous session context is now rendered within the workspace section's
     // "## Session History" (tiered rendering). No separate injection needed.
 
-    // Append write-back protocol (L1 — always, solo or multi-session).
+    // Build tail (reserved sections — always included, never truncated).
+    // These are critical for agent functionality and must survive budget cuts.
+    let mut tail = String::new();
+
+    // Write-back protocol (L1 — always, solo or multi-session).
     if let Some(wb) = render_write_back_protocol(cwd) {
-        content = Some(match content {
-            Some(c) => format!("{c}\n\n{wb}"),
-            None => wb,
-        });
+        tail.push_str(&format!("\n\n{wb}"));
     }
 
-    // Append coordination protocol for multi-session awareness.
+    // Coordination protocol for multi-session awareness.
     if let Some(coord) = crate::peers::render_coordination_protocol(project_id, session_id, cwd) {
-        content = Some(match content {
-            Some(c) => format!("{c}\n\n{coord}"),
-            None => coord,
-        });
+        tail.push_str(&format!("\n\n{coord}"));
     }
+
+    // Remaining body sections (truncatable — nice-to-have context).
 
     // Append last assistant message from prior session for continuity.
     // Conductor mode: skip — phases are independent.
@@ -913,10 +913,28 @@ fn dispatch_session_start(
         });
     }
 
+    // Apply budget: body gets (total - tail.len()), tail appended unconditionally.
+    let total_budget = context_budget(cwd);
+    let body_budget = total_budget.saturating_sub(tail.len());
+
     if let Some(ctx) = content {
-        let budget = context_budget(cwd);
-        let budgeted = apply_context_budget(&ctx, budget);
-        let wrapped = wrap_context_boundary(&budgeted);
+        let budgeted_body = apply_context_budget(&ctx, body_budget);
+        let final_content = if tail.is_empty() {
+            budgeted_body
+        } else {
+            format!("{budgeted_body}{tail}")
+        };
+        let wrapped = wrap_context_boundary(&final_content);
+        let output = serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": wrapped
+            }
+        });
+        Ok(HookResult::output(serde_json::to_string(&output)?))
+    } else if !tail.is_empty() {
+        let trimmed = tail.trim_start().to_string();
+        let wrapped = wrap_context_boundary(&trimmed);
         let output = serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
@@ -1737,6 +1755,78 @@ mod tests {
         std::env::remove_var("EDDA_MAX_CONTEXT_CHARS");
         let budget = context_budget("/nonexistent/dir");
         assert_eq!(budget, DEFAULT_MAX_CONTEXT_CHARS);
+    }
+
+    // ── Body/Tail Budget Split tests ──
+
+    #[test]
+    fn tail_sections_survive_budget_truncation() {
+        // Simulate: large body (10K) + tail (write-back + coord), budget = 8000
+        let body = "x".repeat(10000);
+        let tail_wb = "\n\n## Write-Back Protocol\nRecord decisions with: `edda decide`";
+        let tail_coord = "\n\n## Coordination Protocol\nYou are one of 3 agents.";
+        let tail = format!("{tail_wb}{tail_coord}");
+
+        let total_budget: usize = 8000;
+        let body_budget = total_budget.saturating_sub(tail.len());
+        let budgeted_body = apply_context_budget(&body, body_budget);
+        let final_content = format!("{budgeted_body}{tail}");
+
+        assert!(
+            final_content.contains("Write-Back Protocol"),
+            "write-back protocol must survive: {}",
+            &final_content[final_content.len().saturating_sub(200)..]
+        );
+        assert!(
+            final_content.contains("Coordination Protocol"),
+            "coordination protocol must survive: {}",
+            &final_content[final_content.len().saturating_sub(200)..]
+        );
+    }
+
+    #[test]
+    fn body_truncated_when_tail_present() {
+        let body = "y".repeat(10000);
+        let tail = "\n\n## Reserved Section\nThis must appear.";
+        let total_budget: usize = 8000;
+        let body_budget = total_budget.saturating_sub(tail.len());
+        let budgeted_body = apply_context_budget(&body, body_budget);
+        let final_content = format!("{budgeted_body}{tail}");
+
+        // Body portion should be truncated
+        assert!(
+            budgeted_body.contains("truncated"),
+            "body should be truncated"
+        );
+        // Body portion should fit within body_budget (+ truncation notice overhead)
+        assert!(
+            budgeted_body.len() <= body_budget + 60,
+            "body len {} should be near body_budget {}",
+            budgeted_body.len(),
+            body_budget
+        );
+        // Tail must be present and complete
+        assert!(
+            final_content.ends_with("This must appear."),
+            "tail must be at the end: {}",
+            &final_content[final_content.len().saturating_sub(100)..]
+        );
+    }
+
+    #[test]
+    fn empty_tail_preserves_existing_behavior() {
+        let body = "z".repeat(5000);
+        let tail = "";
+        let total_budget: usize = 8000;
+        let body_budget = total_budget.saturating_sub(tail.len());
+        let budgeted_body = apply_context_budget(&body, body_budget);
+
+        // With empty tail, body should not be truncated (5000 < 8000)
+        assert!(
+            !budgeted_body.contains("truncated"),
+            "body should NOT be truncated when under budget"
+        );
+        assert_eq!(budgeted_body.len(), 5000);
     }
 
     // ── Decision Nudge tests ──
