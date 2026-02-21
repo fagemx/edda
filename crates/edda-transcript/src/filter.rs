@@ -23,18 +23,12 @@ pub enum FilterAction {
 
 /// Classify a transcript JSONL record.
 pub fn classify_record(json: &Value) -> FilterAction {
-    let record_type = json
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let record_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     match record_type {
         "user" | "assistant" => FilterAction::Keep,
         "system" => {
-            let subtype = json
-                .get("subtype")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let subtype = json.get("subtype").and_then(|v| v.as_str()).unwrap_or("");
             if subtype == "turn_duration" {
                 FilterAction::Drop
             } else {
@@ -49,10 +43,7 @@ pub fn classify_record(json: &Value) -> FilterAction {
 
 /// Progress Strategy 3: per-toolUseID, keep only the latest record.
 /// Truncate data.output to max chars and limit total entries.
-pub fn update_progress_last(
-    progress_map: &mut HashMap<String, Value>,
-    record: &Value,
-) {
+pub fn update_progress_last(progress_map: &mut HashMap<String, Value>, record: &Value) {
     let tool_use_id = record
         .get("toolUseID")
         .or_else(|| record.get("tool_use_id"))

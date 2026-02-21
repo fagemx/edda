@@ -161,9 +161,7 @@ mod tests {
 
         append_to_session_ledger(pid, "s1", &envelope).unwrap();
 
-        let ledger_path = edda_store::project_dir(pid)
-            .join("ledger")
-            .join("s1.jsonl");
+        let ledger_path = edda_store::project_dir(pid).join("ledger").join("s1.jsonl");
         assert!(ledger_path.exists(), "ledger file should be created");
 
         let content = fs::read_to_string(&ledger_path).unwrap();

@@ -1,9 +1,7 @@
 use std::path::Path;
 
 /// Read config from `.edda/config.json`. Returns empty map if file doesn't exist.
-fn read_config(
-    path: &Path,
-) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+fn read_config(path: &Path) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
     if !path.exists() {
         return Ok(serde_json::Map::new());
     }

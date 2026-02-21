@@ -220,7 +220,10 @@ phases:
     prompt: "Build schema"
 "#;
         let plan: Plan = serde_yml::from_str(yaml).unwrap();
-        assert_eq!(plan.purpose.as_deref(), Some("Simple todo app, keep it minimal"));
+        assert_eq!(
+            plan.purpose.as_deref(),
+            Some("Simple todo app, keep it minimal")
+        );
     }
 
     #[test]

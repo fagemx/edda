@@ -15,12 +15,7 @@ fn collect_commit_ids(ledger: &Ledger, branch: &str) -> anyhow::Result<Vec<Strin
     Ok(ids)
 }
 
-pub fn execute(
-    repo_root: &Path,
-    src: &str,
-    dst: &str,
-    reason: &str,
-) -> anyhow::Result<()> {
+pub fn execute(repo_root: &Path, src: &str, dst: &str, reason: &str) -> anyhow::Result<()> {
     let ledger = Ledger::open(repo_root)?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
@@ -53,10 +48,7 @@ pub fn execute(
 
     rebuild_all(&ledger)?;
 
-    println!(
-        "Merged {src} -> {dst} (adopted {} commits)",
-        adopted.len()
-    );
+    println!("Merged {src} -> {dst} (adopted {} commits)", adopted.len());
     println!("  {}", event.event_id);
     Ok(())
 }

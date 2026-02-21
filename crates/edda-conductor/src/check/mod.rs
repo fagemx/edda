@@ -1,8 +1,8 @@
 pub mod cmd_succeeds;
+pub mod edda_event;
 pub mod engine;
 pub mod file_contains;
 pub mod file_exists;
-pub mod edda_event;
 pub mod git_clean;
 pub mod wait_until;
 
@@ -51,7 +51,10 @@ pub fn mask_secrets(text: &str) -> String {
         // Bearer tokens
         (r"Bearer\s+[a-zA-Z0-9._\-]+", "Bearer [MASKED]"),
         // key=value patterns
-        (r"(?i)(password|secret|token|key|api_key|apikey)=[^\s&]+", "$1=[MASKED]"),
+        (
+            r"(?i)(password|secret|token|key|api_key|apikey)=[^\s&]+",
+            "$1=[MASKED]",
+        ),
     ];
 
     let mut result = text.to_string();

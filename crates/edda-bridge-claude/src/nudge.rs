@@ -98,7 +98,10 @@ fn is_schema_file(path: &str) -> bool {
 
 fn is_module_entry(path: &str) -> bool {
     let filename = path.rsplit(['/', '\\']).next().unwrap_or(path);
-    matches!(filename, "mod.rs" | "lib.rs" | "index.ts" | "index.js" | "__init__.py")
+    matches!(
+        filename,
+        "mod.rs" | "lib.rs" | "index.ts" | "index.js" | "__init__.py"
+    )
 }
 
 /// Format a nudge message for the agent.
@@ -217,14 +220,12 @@ fn extract_quoted_or_heredoc(s: &str) -> String {
     }
 
     // Simple quoted string
-    if s.starts_with('"') {
-        let inner = &s[1..];
+    if let Some(inner) = s.strip_prefix('"') {
         if let Some(end) = inner.find('"') {
             return inner[..end].to_string();
         }
     }
-    if s.starts_with('\'') {
-        let inner = &s[1..];
+    if let Some(inner) = s.strip_prefix('\'') {
         if let Some(end) = inner.find('\'') {
             return inner[..end].to_string();
         }
@@ -277,7 +278,10 @@ mod tests {
             "tool_input": { "command": "git commit -m \"feat: switch to postgres\"" }
         });
         let signal = detect_signal(&raw);
-        assert_eq!(signal, Some(NudgeSignal::Commit("feat: switch to postgres".into())));
+        assert_eq!(
+            signal,
+            Some(NudgeSignal::Commit("feat: switch to postgres".into()))
+        );
     }
 
     #[test]
@@ -287,7 +291,10 @@ mod tests {
             "tool_input": { "command": "git commit -m \"$(cat <<'EOF'\nfeat: add postgres support\n\nDetailed body here.\n\nCo-Authored-By: Claude\nEOF\n)\"" }
         });
         let signal = detect_signal(&raw);
-        assert_eq!(signal, Some(NudgeSignal::Commit("feat: add postgres support".into())));
+        assert_eq!(
+            signal,
+            Some(NudgeSignal::Commit("feat: add postgres support".into()))
+        );
     }
 
     #[test]
@@ -403,7 +410,10 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "pnpm add zod" }
         });
-        assert_eq!(detect_signal(&raw), Some(NudgeSignal::DependencyAdd("zod".into())));
+        assert_eq!(
+            detect_signal(&raw),
+            Some(NudgeSignal::DependencyAdd("zod".into()))
+        );
     }
 
     // ── File-based signal tests ──
@@ -428,7 +438,9 @@ mod tests {
         });
         assert_eq!(
             detect_signal(&raw),
-            Some(NudgeSignal::SchemaChange("/project/migrations/001_init.sql".into()))
+            Some(NudgeSignal::SchemaChange(
+                "/project/migrations/001_init.sql".into()
+            ))
         );
     }
 

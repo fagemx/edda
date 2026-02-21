@@ -45,14 +45,7 @@ pub fn project_dir(project_id: &str) -> PathBuf {
 /// Ensure all subdirectories exist for a project.
 pub fn ensure_dirs(project_id: &str) -> anyhow::Result<()> {
     let base = project_dir(project_id);
-    let subdirs = [
-        "ledger",
-        "transcripts",
-        "index",
-        "packs",
-        "state",
-        "search",
-    ];
+    let subdirs = ["ledger", "transcripts", "index", "packs", "state", "search"];
     for sub in &subdirs {
         fs::create_dir_all(base.join(sub))?;
     }
@@ -115,14 +108,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // Override store root by using project_dir directly
         let base = tmp.path().join("projects").join("test_proj");
-        let subdirs = [
-            "ledger",
-            "transcripts",
-            "index",
-            "packs",
-            "state",
-            "search",
-        ];
+        let subdirs = ["ledger", "transcripts", "index", "packs", "state", "search"];
         for sub in &subdirs {
             fs::create_dir_all(base.join(sub)).unwrap();
         }

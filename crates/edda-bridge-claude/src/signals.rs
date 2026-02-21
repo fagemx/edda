@@ -6,8 +6,6 @@ use crate::parse::now_rfc3339;
 
 // ── Session Signals (extracted from transcript) ──
 
-
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TaskSnapshot {
     pub id: String,
@@ -101,8 +99,7 @@ pub(crate) fn extract_session_signals(transcript_store_path: &Path) -> SessionSi
                         Some(i) => i,
                         None => continue,
                     };
-                    let tool_use_id =
-                        item.get("id").and_then(|s| s.as_str()).unwrap_or("");
+                    let tool_use_id = item.get("id").and_then(|s| s.as_str()).unwrap_or("");
 
                     match name {
                         "TaskCreate" => {
@@ -123,43 +120,31 @@ pub(crate) fn extract_session_signals(transcript_store_path: &Path) -> SessionSi
                             );
                         }
                         "TaskUpdate" => {
-                            let task_id = input
-                                .get("taskId")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("");
+                            let task_id =
+                                input.get("taskId").and_then(|s| s.as_str()).unwrap_or("");
                             if let Some(task) = tasks.get_mut(task_id) {
-                                if let Some(s) =
-                                    input.get("status").and_then(|s| s.as_str())
-                                {
+                                if let Some(s) = input.get("status").and_then(|s| s.as_str()) {
                                     task.status = s.to_string();
                                 }
-                                if let Some(s) =
-                                    input.get("subject").and_then(|s| s.as_str())
-                                {
+                                if let Some(s) = input.get("subject").and_then(|s| s.as_str()) {
                                     task.subject = s.to_string();
                                 }
                             }
                         }
                         "Edit" | "Write" => {
-                            if let Some(fp) =
-                                input.get("file_path").and_then(|s| s.as_str())
-                            {
+                            if let Some(fp) = input.get("file_path").and_then(|s| s.as_str()) {
                                 if !is_noise_file(fp) {
                                     *file_counts.entry(fp.to_string()).or_insert(0) += 1;
                                 }
                             }
                         }
                         "Bash" => {
-                            if let Some(cmd) =
-                                input.get("command").and_then(|s| s.as_str())
-                            {
-                                pending_bash
-                                    .insert(tool_use_id.to_string(), cmd.to_string());
+                            if let Some(cmd) = input.get("command").and_then(|s| s.as_str()) {
+                                pending_bash.insert(tool_use_id.to_string(), cmd.to_string());
                                 if cmd.contains("git commit") {
                                     // Extract message from -m flag if present
                                     let msg = extract_commit_msg_from_cmd(cmd);
-                                    pending_commits
-                                        .insert(tool_use_id.to_string(), msg);
+                                    pending_commits.insert(tool_use_id.to_string(), msg);
                                 }
                             }
                         }
@@ -182,8 +167,10 @@ pub(crate) fn extract_session_signals(transcript_store_path: &Path) -> SessionSi
                     if item.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
                         continue;
                     }
-                    let tool_use_id =
-                        item.get("tool_use_id").and_then(|s| s.as_str()).unwrap_or("");
+                    let tool_use_id = item
+                        .get("tool_use_id")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
                     // Extract result text (shared between commit and error processing)
                     let result_text = item
                         .get("content")
@@ -358,8 +345,7 @@ pub(crate) fn save_session_signals(project_id: &str, session_id: &str, signals: 
     // Failed commands
     if !signals.failed_commands.is_empty() {
         let mut p = payload;
-        p["failed_commands"] =
-            serde_json::to_value(&signals.failed_commands).unwrap_or_default();
+        p["failed_commands"] = serde_json::to_value(&signals.failed_commands).unwrap_or_default();
         let _ = fs::write(
             state_dir.join("failed_commands.json"),
             serde_json::to_string_pretty(&p).unwrap_or_default(),
@@ -390,7 +376,6 @@ pub(crate) fn load_state_vec<T: serde::de::DeserializeOwned>(
         .and_then(|t| serde_json::from_value::<Vec<T>>(t.clone()).ok())
         .unwrap_or_default()
 }
-
 
 pub(crate) fn render_blocking_section(project_id: &str) -> Option<String> {
     let failed: Vec<FailedBashCmd> =
@@ -556,9 +541,7 @@ fn find_focus_label(files: &[(&str, usize)]) -> Option<(String, String)> {
         .iter()
         .map(|(p, count)| {
             let p = p.replace('\\', "/");
-            let stripped = if let Some(rest) = p
-                .strip_prefix("C:")
-                .or_else(|| p.strip_prefix("c:"))
+            let stripped = if let Some(rest) = p.strip_prefix("C:").or_else(|| p.strip_prefix("c:"))
             {
                 rest.trim_start_matches('/').to_string()
             } else {
@@ -665,7 +648,10 @@ fn find_most_frequent_focus(paths: &[(Vec<String>, usize)]) -> Option<(String, S
     let (label, edits) = freq.iter().max_by_key(|(_, c)| *c)?;
     // Report focus if ≥30% of total edits are concentrated in one group
     if *edits * 10 >= total_edits * 3 {
-        Some((label.clone(), format!("{}% of edits", edits * 100 / total_edits)))
+        Some((
+            label.clone(),
+            format!("{}% of edits", edits * 100 / total_edits),
+        ))
     } else {
         None
     }
@@ -746,19 +732,17 @@ mod tests {
 
     #[test]
     fn signals_extract_files_modified() {
-        let records = vec![
-            serde_json::json!({
-                "type": "assistant",
-                "message": { "role": "assistant", "content": [
-                    { "type": "tool_use", "id": "e1", "name": "Edit",
-                      "input": { "file_path": "/repo/src/lib.rs", "old_string": "a", "new_string": "b" } },
-                    { "type": "tool_use", "id": "e2", "name": "Edit",
-                      "input": { "file_path": "/repo/src/lib.rs", "old_string": "c", "new_string": "d" } },
-                    { "type": "tool_use", "id": "w1", "name": "Write",
-                      "input": { "file_path": "/repo/src/new.rs", "content": "fn main() {}" } }
-                ]}
-            }),
-        ];
+        let records = vec![serde_json::json!({
+            "type": "assistant",
+            "message": { "role": "assistant", "content": [
+                { "type": "tool_use", "id": "e1", "name": "Edit",
+                  "input": { "file_path": "/repo/src/lib.rs", "old_string": "a", "new_string": "b" } },
+                { "type": "tool_use", "id": "e2", "name": "Edit",
+                  "input": { "file_path": "/repo/src/lib.rs", "old_string": "c", "new_string": "d" } },
+                { "type": "tool_use", "id": "w1", "name": "Write",
+                  "input": { "file_path": "/repo/src/new.rs", "content": "fn main() {}" } }
+            ]}
+        })];
         let path = make_transcript(&records);
         let signals = extract_session_signals(&path);
         assert_eq!(signals.files_modified.len(), 2);
@@ -799,31 +783,32 @@ mod tests {
         let _ = edda_store::ensure_dirs(pid);
 
         let signals = SessionSignals {
-            tasks: vec![
-                TaskSnapshot { id: "1".into(), subject: "Fix".into(), status: "completed".into() },
-            ],
-            files_modified: vec![
-                FileEditCount { path: "src/lib.rs".into(), count: 3 },
-            ],
-            commits: vec![
-                CommitInfo { hash: "abc".into(), message: "fix".into() },
-            ],
+            tasks: vec![TaskSnapshot {
+                id: "1".into(),
+                subject: "Fix".into(),
+                status: "completed".into(),
+            }],
+            files_modified: vec![FileEditCount {
+                path: "src/lib.rs".into(),
+                count: 3,
+            }],
+            commits: vec![CommitInfo {
+                hash: "abc".into(),
+                message: "fix".into(),
+            }],
             failed_commands: vec![],
         };
         save_session_signals(pid, "test-session", &signals);
 
-        let tasks: Vec<TaskSnapshot> =
-            load_state_vec(pid, "active_tasks.json", "tasks");
+        let tasks: Vec<TaskSnapshot> = load_state_vec(pid, "active_tasks.json", "tasks");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].status, "completed");
 
-        let files: Vec<FileEditCount> =
-            load_state_vec(pid, "files_modified.json", "files");
+        let files: Vec<FileEditCount> = load_state_vec(pid, "files_modified.json", "files");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].count, 3);
 
-        let commits: Vec<CommitInfo> =
-            load_state_vec(pid, "recent_commits.json", "commits");
+        let commits: Vec<CommitInfo> = load_state_vec(pid, "recent_commits.json", "commits");
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].hash, "abc");
 
@@ -840,10 +825,7 @@ mod tests {
             extract_commit_msg_from_cmd("git commit -m 'feat: new'"),
             "feat: new"
         );
-        assert_eq!(
-            extract_commit_msg_from_cmd("git add . && git commit"),
-            ""
-        );
+        assert_eq!(extract_commit_msg_from_cmd("git add . && git commit"), "");
     }
 
     #[test]
@@ -857,7 +839,9 @@ mod tests {
     #[test]
     fn noise_file_filters_skills() {
         assert!(is_noise_file(".claude/skills/commit/SKILL.md"));
-        assert!(is_noise_file("C:\\repo\\.claude\\skills\\testing\\SKILL.md"));
+        assert!(is_noise_file(
+            "C:\\repo\\.claude\\skills\\testing\\SKILL.md"
+        ));
         assert!(is_noise_file("/home/user/.claude/skills/foo/bar.md"));
         assert!(!is_noise_file("crates/edda-derive/src/lib.rs"));
         assert!(!is_noise_file("src/main.rs"));
@@ -865,22 +849,24 @@ mod tests {
 
     #[test]
     fn signals_skip_noise_files() {
-        let records = vec![
-            serde_json::json!({
-                "type": "assistant",
-                "message": { "role": "assistant", "content": [
-                    { "type": "tool_use", "id": "e1", "name": "Edit",
-                      "input": { "file_path": "/repo/src/lib.rs", "old_string": "a", "new_string": "b" } },
-                    { "type": "tool_use", "id": "e2", "name": "Write",
-                      "input": { "file_path": "/repo/.claude/skills/commit/SKILL.md", "content": "x" } },
-                    { "type": "tool_use", "id": "e3", "name": "Edit",
-                      "input": { "file_path": "/repo/.claude/skills/testing/SKILL.md", "old_string": "a", "new_string": "b" } }
-                ]}
-            }),
-        ];
+        let records = vec![serde_json::json!({
+            "type": "assistant",
+            "message": { "role": "assistant", "content": [
+                { "type": "tool_use", "id": "e1", "name": "Edit",
+                  "input": { "file_path": "/repo/src/lib.rs", "old_string": "a", "new_string": "b" } },
+                { "type": "tool_use", "id": "e2", "name": "Write",
+                  "input": { "file_path": "/repo/.claude/skills/commit/SKILL.md", "content": "x" } },
+                { "type": "tool_use", "id": "e3", "name": "Edit",
+                  "input": { "file_path": "/repo/.claude/skills/testing/SKILL.md", "old_string": "a", "new_string": "b" } }
+            ]}
+        })];
         let path = make_transcript(&records);
         let signals = extract_session_signals(&path);
-        assert_eq!(signals.files_modified.len(), 1, "skill files should be filtered");
+        assert_eq!(
+            signals.files_modified.len(),
+            1,
+            "skill files should be filtered"
+        );
         assert_eq!(signals.files_modified[0].path, "/repo/src/lib.rs");
         let _ = fs::remove_file(&path);
     }
@@ -945,8 +931,14 @@ mod tests {
     fn focus_windows_paths() {
         let files: &[(&str, usize)] = &[
             ("C:\\ai_agent\\edda\\crates\\edda-derive\\src\\types.rs", 3),
-            ("C:\\ai_agent\\edda\\crates\\edda-derive\\src\\context.rs", 2),
-            ("C:\\ai_agent\\edda\\crates\\edda-derive\\src\\writers.rs", 1),
+            (
+                "C:\\ai_agent\\edda\\crates\\edda-derive\\src\\context.rs",
+                2,
+            ),
+            (
+                "C:\\ai_agent\\edda\\crates\\edda-derive\\src\\writers.rs",
+                1,
+            ),
         ];
         let (label, _) = find_focus_label(files).unwrap();
         assert_eq!(label, "edda-derive");
@@ -983,7 +975,10 @@ mod tests {
         }
 
         let (label, display) = find_focus_label(&files).unwrap();
-        assert_eq!(label, "edda-bridge-claude", "should detect heavy crate by edits");
+        assert_eq!(
+            label, "edda-bridge-claude",
+            "should detect heavy crate by edits"
+        );
         assert!(display.contains("% of edits"), "display: {display}");
     }
 
@@ -995,9 +990,18 @@ mod tests {
         let signals = SessionSignals {
             tasks: vec![],
             files_modified: vec![
-                FileEditCount { path: "/repo/crates/foo/src/a.rs".into(), count: 10 },
-                FileEditCount { path: "/repo/crates/foo/src/b.rs".into(), count: 10 },
-                FileEditCount { path: "/repo/crates/foo/src/c.rs".into(), count: 10 },
+                FileEditCount {
+                    path: "/repo/crates/foo/src/a.rs".into(),
+                    count: 10,
+                },
+                FileEditCount {
+                    path: "/repo/crates/foo/src/b.rs".into(),
+                    count: 10,
+                },
+                FileEditCount {
+                    path: "/repo/crates/foo/src/c.rs".into(),
+                    count: 10,
+                },
             ],
             commits: vec![],
             failed_commands: vec![],
@@ -1006,7 +1010,10 @@ mod tests {
 
         let focus = render_focus_section(pid).unwrap();
         // avg = 10, threshold = 30 → no file > 30 → no hot files
-        assert!(!focus.contains("Hot files:"), "even edits should not trigger hot: {focus}");
+        assert!(
+            !focus.contains("Hot files:"),
+            "even edits should not trigger hot: {focus}"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1019,11 +1026,26 @@ mod tests {
         let signals = SessionSignals {
             tasks: vec![],
             files_modified: vec![
-                FileEditCount { path: "/repo/crates/foo/src/dispatch.rs".into(), count: 60 },
-                FileEditCount { path: "/repo/crates/foo/src/a.rs".into(), count: 2 },
-                FileEditCount { path: "/repo/crates/foo/src/b.rs".into(), count: 2 },
-                FileEditCount { path: "/repo/crates/foo/src/c.rs".into(), count: 1 },
-                FileEditCount { path: "/repo/crates/foo/src/d.rs".into(), count: 1 },
+                FileEditCount {
+                    path: "/repo/crates/foo/src/dispatch.rs".into(),
+                    count: 60,
+                },
+                FileEditCount {
+                    path: "/repo/crates/foo/src/a.rs".into(),
+                    count: 2,
+                },
+                FileEditCount {
+                    path: "/repo/crates/foo/src/b.rs".into(),
+                    count: 2,
+                },
+                FileEditCount {
+                    path: "/repo/crates/foo/src/c.rs".into(),
+                    count: 1,
+                },
+                FileEditCount {
+                    path: "/repo/crates/foo/src/d.rs".into(),
+                    count: 1,
+                },
             ],
             commits: vec![],
             failed_commands: vec![],
@@ -1033,8 +1055,14 @@ mod tests {
         let focus = render_focus_section(pid).unwrap();
         // avg = (60+2+2+1+1)/5 = 13.2, threshold = 39.6
         // dispatch.rs (60) > 39.6 → hot file
-        assert!(focus.contains("Hot files:"), "should detect hot file: {focus}");
-        assert!(focus.contains("dispatch.rs"), "should name the hot file: {focus}");
+        assert!(
+            focus.contains("Hot files:"),
+            "should detect hot file: {focus}"
+        );
+        assert!(
+            focus.contains("dispatch.rs"),
+            "should name the hot file: {focus}"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1061,15 +1089,24 @@ mod tests {
     fn truncate_stderr_finds_error_line() {
         let text = "Compiling foo v0.1.0\nerror[E0308]: mismatched types\n  --> src/lib.rs:10:5";
         let snippet = truncate_stderr(text, 200);
-        assert!(snippet.contains("error[E0308]"), "should find error line: {snippet}");
+        assert!(
+            snippet.contains("error[E0308]"),
+            "should find error line: {snippet}"
+        );
     }
 
     #[test]
     fn truncate_stderr_includes_source_location() {
         let text = "Compiling foo v0.1.0\nerror[E0308]: mismatched types\n  --> src/lib.rs:10:5";
         let snippet = truncate_stderr(text, 200);
-        assert!(snippet.contains("error[E0308]"), "should have error: {snippet}");
-        assert!(snippet.contains("src/lib.rs:10:5"), "should include source location: {snippet}");
+        assert!(
+            snippet.contains("error[E0308]"),
+            "should have error: {snippet}"
+        );
+        assert!(
+            snippet.contains("src/lib.rs:10:5"),
+            "should include source location: {snippet}"
+        );
     }
 
     #[test]
@@ -1126,9 +1163,15 @@ mod tests {
         ];
         let path = make_transcript(&records);
         let signals = extract_session_signals(&path);
-        assert_eq!(signals.failed_commands.len(), 1, "should aggregate by command base");
+        assert_eq!(
+            signals.failed_commands.len(),
+            1,
+            "should aggregate by command base"
+        );
         assert_eq!(signals.failed_commands[0].count, 2);
-        assert!(signals.failed_commands[0].command_base.contains("cargo test"));
+        assert!(signals.failed_commands[0]
+            .command_base
+            .contains("cargo test"));
         assert!(!signals.failed_commands[0].stderr_snippet.is_empty());
         let _ = fs::remove_file(&path);
     }
@@ -1250,8 +1293,13 @@ mod tests {
         let path = make_transcript(&records);
         let signals = extract_session_signals(&path);
         assert_eq!(signals.failed_commands.len(), 1);
-        assert_eq!(signals.failed_commands[0].count, 1, "count should reset after healing");
-        assert!(signals.failed_commands[0].stderr_snippet.contains("new unused variable"));
+        assert_eq!(
+            signals.failed_commands[0].count, 1,
+            "count should reset after healing"
+        );
+        assert!(signals.failed_commands[0]
+            .stderr_snippet
+            .contains("new unused variable"));
         let _ = fs::remove_file(&path);
     }
 

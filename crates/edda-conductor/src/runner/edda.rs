@@ -62,9 +62,7 @@ fn truncate_str(s: &str, max: usize) -> &str {
 
 /// Record a phase completion event.
 pub fn record_phase_done(cwd: &Path, phase_id: &str, summary: Option<&str>, cost_usd: Option<f64>) {
-    let cost_str = cost_usd
-        .map(|c| format!(" [${c:.3}]"))
-        .unwrap_or_default();
+    let cost_str = cost_usd.map(|c| format!(" [${c:.3}]")).unwrap_or_default();
     let summary_str = summary
         .map(|s| {
             let s = s.trim();
@@ -89,7 +87,11 @@ pub fn record_phase_failed(cwd: &Path, phase_id: &str, error: &str) {
         error.to_string()
     };
     let text = format!("Phase \"{phase_id}\" failed: {error_str}");
-    record_note(cwd, &text, &["conductor", &format!("phase:{phase_id}"), "failure"]);
+    record_note(
+        cwd,
+        &text,
+        &["conductor", &format!("phase:{phase_id}"), "failure"],
+    );
 }
 
 #[cfg(test)]

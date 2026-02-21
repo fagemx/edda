@@ -285,11 +285,7 @@ pub(crate) fn append_coord_event(project_id: &str, event: &CoordEvent) {
         Ok(l) => l,
         Err(_) => return,
     };
-    let mut file = match fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
+    let mut file = match fs::OpenOptions::new().create(true).append(true).open(&path) {
         Ok(f) => f,
         Err(_) => return,
     };
@@ -322,13 +318,7 @@ pub(crate) fn write_unclaim(project_id: &str, session_id: &str) {
 }
 
 /// Write a binding event to the coordination log.
-pub fn write_binding(
-    project_id: &str,
-    session_id: &str,
-    label: &str,
-    key: &str,
-    value: &str,
-) {
+pub fn write_binding(project_id: &str, session_id: &str, label: &str, key: &str, value: &str) {
     let event = CoordEvent {
         ts: now_rfc3339(),
         session_id: session_id.to_string(),
@@ -569,7 +559,7 @@ pub(crate) fn discover_active_peers(
         };
 
         let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
-        let age = if now > hb_epoch { now - hb_epoch } else { 0 };
+        let age = now.saturating_sub(hb_epoch);
 
         if age > stale_threshold {
             continue;
@@ -636,7 +626,7 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
         };
 
         let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
-        let age = if now > hb_epoch { now - hb_epoch } else { 0 };
+        let age = now.saturating_sub(hb_epoch);
 
         let claimed_paths = board
             .claims
@@ -704,7 +694,7 @@ pub fn infer_session_id(project_id: &str) -> Option<(String, String)> {
         };
 
         let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
-        let age = if now > hb_epoch { now - hb_epoch } else { 0 };
+        let age = now.saturating_sub(hb_epoch);
 
         if age <= stale_threshold {
             active.push((hb.session_id, hb.label));
@@ -802,16 +792,26 @@ pub fn render_coordination_protocol(
                     lines.push(format!("- {} ({age}): {t}", p.label));
                 }
             } else if !p.focus_files.is_empty() {
-                let files: Vec<&str> = p.focus_files.iter().take(2).map(|f| {
-                    f.rsplit(['/', '\\']).next().unwrap_or(f.as_str())
-                }).collect();
-                lines.push(format!("- {} ({age}): editing {}", p.label, files.join(", ")));
+                let files: Vec<&str> = p
+                    .focus_files
+                    .iter()
+                    .take(2)
+                    .map(|f| f.rsplit(['/', '\\']).next().unwrap_or(f.as_str()))
+                    .collect();
+                lines.push(format!(
+                    "- {} ({age}): editing {}",
+                    p.label,
+                    files.join(", ")
+                ));
             }
         }
     }
 
     // Off-limits
-    let peer_claims: Vec<&PeerSummary> = peers.iter().filter(|p| !p.claimed_paths.is_empty()).collect();
+    let peer_claims: Vec<&PeerSummary> = peers
+        .iter()
+        .filter(|p| !p.claimed_paths.is_empty())
+        .collect();
     if !peer_claims.is_empty() {
         lines.push("### Off-limits (other agents active)".to_string());
         for p in peer_claims.iter().take(5) {
@@ -934,7 +934,7 @@ pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<
     // Requests to current session (claim label → heartbeat label fallback)
     let my_claim = board.claims.iter().find(|c| c.session_id == session_id);
     let my_heartbeat = read_heartbeat(project_id, session_id);
-    let my_label: &str = if let Some(ref claim) = my_claim {
+    let my_label: &str = if let Some(claim) = my_claim {
         claim.label.as_str()
     } else if let Some(ref hb) = my_heartbeat {
         hb.label.as_str()
@@ -948,7 +948,10 @@ pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<
         .collect();
     if !my_requests.is_empty() {
         for r in my_requests.iter().take(2) {
-            lines.push(format!("- Request from {}: \"{}\"", r.from_label, r.message));
+            lines.push(format!(
+                "- Request from {}: \"{}\"",
+                r.from_label, r.message
+            ));
         }
     }
 
@@ -1054,11 +1057,16 @@ fn parse_rfc3339_to_epoch(ts: &str) -> Option<u64> {
 
     let month_days: [u64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut total_days = years_since_1970 * days_in_year + leap_years;
-    for m in 0..(month.saturating_sub(1) as usize).min(11) {
-        total_days += month_days[m];
+    for d in month_days
+        .iter()
+        .take((month.saturating_sub(1) as usize).min(11))
+    {
+        total_days += d;
     }
     // Add leap day for current year if applicable
-    if month > 2 && (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)) {
+    if month > 2
+        && (year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)))
+    {
         total_days += 1;
     }
     total_days += day.saturating_sub(1);
@@ -1335,10 +1343,19 @@ mod tests {
         remove_heartbeat(pid, "s3");
         remove_heartbeat(pid, "s4");
         let solo = render_coordination_protocol(pid, "s5", ".").unwrap();
-        assert!(solo.contains("Binding Decisions"), "solo should show bindings");
+        assert!(
+            solo.contains("Binding Decisions"),
+            "solo should show bindings"
+        );
         assert!(solo.contains("JWT RS256"), "solo should show binding value");
-        assert!(!solo.contains("Coordination Protocol"), "solo should NOT show coordination header");
-        assert!(!solo.contains("Peers Working On"), "solo should NOT show peer sections");
+        assert!(
+            !solo.contains("Coordination Protocol"),
+            "solo should NOT show coordination header"
+        );
+        assert!(
+            !solo.contains("Peers Working On"),
+            "solo should NOT show peer sections"
+        );
 
         // discover_all_sessions returns nothing after cleanup
         let all = discover_all_sessions(pid);
@@ -1380,8 +1397,14 @@ mod tests {
         // Calling coordination_path triggers migration
         let result = coordination_path(pid);
         assert_eq!(result, new_path);
-        assert!(new_path.exists(), "coordination.jsonl should exist after migration");
-        assert!(!old_path.exists(), "decisions.jsonl should be removed after migration");
+        assert!(
+            new_path.exists(),
+            "coordination.jsonl should exist after migration"
+        );
+        assert!(
+            !old_path.exists(),
+            "decisions.jsonl should be removed after migration"
+        );
         let content = fs::read_to_string(&new_path).unwrap();
         assert!(content.contains("test"), "content should be preserved");
 
@@ -1428,7 +1451,10 @@ mod tests {
             payload: serde_json::json!({"key": "db"}),
         };
         let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"binding\""), "new events should serialize as 'binding', got: {json}");
+        assert!(
+            json.contains("\"binding\""),
+            "new events should serialize as 'binding', got: {json}"
+        );
     }
 
     #[test]
@@ -1453,8 +1479,14 @@ mod tests {
         write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
 
         let result = render_coordination_protocol(pid, "s2", ".").unwrap();
-        assert!(result.contains("Peers Working On"), "should have working-on section, got:\n{result}");
-        assert!(result.contains("Implement auth flow"), "should show task subject, got:\n{result}");
+        assert!(
+            result.contains("Peers Working On"),
+            "should have working-on section, got:\n{result}"
+        );
+        assert!(
+            result.contains("Implement auth flow"),
+            "should show task subject, got:\n{result}"
+        );
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
@@ -1479,9 +1511,18 @@ mod tests {
         write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
 
         let result = render_coordination_protocol(pid, "s2", ".").unwrap();
-        assert!(result.contains("Peers Working On"), "should have working-on section, got:\n{result}");
-        assert!(result.contains("editing"), "should show focus files, got:\n{result}");
-        assert!(result.contains("lib.rs"), "should show file basename, got:\n{result}");
+        assert!(
+            result.contains("Peers Working On"),
+            "should have working-on section, got:\n{result}"
+        );
+        assert!(
+            result.contains("editing"),
+            "should show focus files, got:\n{result}"
+        );
+        assert!(
+            result.contains("lib.rs"),
+            "should show file basename, got:\n{result}"
+        );
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
@@ -1506,7 +1547,10 @@ mod tests {
         write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
 
         let result = render_peer_updates(pid, "s2").unwrap();
-        assert!(result.contains("Fix billing bug"), "should show peer task, got:\n{result}");
+        assert!(
+            result.contains("Fix billing bug"),
+            "should show peer task, got:\n{result}"
+        );
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
@@ -1609,12 +1653,30 @@ mod tests {
         write_binding(pid, "s1", "auth", "db.engine", "PostgreSQL");
 
         let result = render_coordination_protocol(pid, "solo-session", ".").unwrap();
-        assert!(result.contains("Binding Decisions"), "should have binding header, got:\n{result}");
-        assert!(result.contains("JWT RS256"), "should show binding value, got:\n{result}");
-        assert!(result.contains("PostgreSQL"), "should show second binding, got:\n{result}");
-        assert!(!result.contains("Coordination Protocol"), "should NOT have coordination header, got:\n{result}");
-        assert!(!result.contains("Peers Working On"), "should NOT have peer sections, got:\n{result}");
-        assert!(!result.contains("Off-limits"), "should NOT have off-limits, got:\n{result}");
+        assert!(
+            result.contains("Binding Decisions"),
+            "should have binding header, got:\n{result}"
+        );
+        assert!(
+            result.contains("JWT RS256"),
+            "should show binding value, got:\n{result}"
+        );
+        assert!(
+            result.contains("PostgreSQL"),
+            "should show second binding, got:\n{result}"
+        );
+        assert!(
+            !result.contains("Coordination Protocol"),
+            "should NOT have coordination header, got:\n{result}"
+        );
+        assert!(
+            !result.contains("Peers Working On"),
+            "should NOT have peer sections, got:\n{result}"
+        );
+        assert!(
+            !result.contains("Off-limits"),
+            "should NOT have off-limits, got:\n{result}"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1629,8 +1691,14 @@ mod tests {
         write_binding(pid, "s1", "auth", "auth.method", "JWT RS256");
 
         let result = render_peer_updates(pid, "solo-session").unwrap();
-        assert!(result.contains("JWT RS256"), "should show binding, got:\n{result}");
-        assert!(!result.contains("Peers"), "should NOT have peers header, got:\n{result}");
+        assert!(
+            result.contains("JWT RS256"),
+            "should show binding, got:\n{result}"
+        );
+        assert!(
+            !result.contains("Peers"),
+            "should NOT have peers header, got:\n{result}"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1688,7 +1756,10 @@ mod tests {
         let _ = fs::remove_file(coordination_path(pid));
 
         let conflict = find_binding_conflict(pid, "db.engine", "postgres");
-        assert!(conflict.is_none(), "no existing binding should not conflict");
+        assert!(
+            conflict.is_none(),
+            "no existing binding should not conflict"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1758,7 +1829,10 @@ mod tests {
             "recent_commits": []
         });
         let _ = fs::create_dir_all(stale_path.parent().unwrap());
-        let _ = fs::write(&stale_path, serde_json::to_string_pretty(&stale_hb).unwrap());
+        let _ = fs::write(
+            &stale_path,
+            serde_json::to_string_pretty(&stale_hb).unwrap(),
+        );
 
         let result = infer_session_id(pid);
         assert_eq!(result, Some(("fresh".into(), "frontend".into())));
@@ -1786,7 +1860,10 @@ mod tests {
             "recent_commits": []
         });
         let _ = fs::create_dir_all(stale_path.parent().unwrap());
-        let _ = fs::write(&stale_path, serde_json::to_string_pretty(&stale_hb).unwrap());
+        let _ = fs::write(
+            &stale_path,
+            serde_json::to_string_pretty(&stale_hb).unwrap(),
+        );
 
         let result = infer_session_id(pid);
         assert!(result.is_none(), "only stale heartbeats → None");
@@ -1809,7 +1886,11 @@ mod tests {
         write_binding(pid, "s2", "billing", "db.engine", "mysql");
 
         let board = compute_board_state(pid);
-        assert_eq!(board.bindings.len(), 1, "should have 1 binding (deduped by key)");
+        assert_eq!(
+            board.bindings.len(),
+            1,
+            "should have 1 binding (deduped by key)"
+        );
         assert_eq!(board.bindings[0].value, "mysql", "last write should win");
         assert_eq!(board.bindings[0].by_session, "s2");
 
@@ -1818,10 +1899,16 @@ mod tests {
         write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
 
         let updates_s1 = render_peer_updates(pid, "s1").unwrap();
-        assert!(updates_s1.contains("mysql"), "Session A should see latest binding, got:\n{updates_s1}");
+        assert!(
+            updates_s1.contains("mysql"),
+            "Session A should see latest binding, got:\n{updates_s1}"
+        );
 
         let updates_s2 = render_peer_updates(pid, "s2").unwrap();
-        assert!(updates_s2.contains("mysql"), "Session B should see latest binding, got:\n{updates_s2}");
+        assert!(
+            updates_s2.contains("mysql"),
+            "Session B should see latest binding, got:\n{updates_s2}"
+        );
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
@@ -1840,19 +1927,35 @@ mod tests {
         write_binding(pid, "s2", "billing", "auth.method", "JWT");
 
         let board = compute_board_state(pid);
-        assert_eq!(board.bindings.len(), 2, "should have 2 bindings (different keys)");
+        assert_eq!(
+            board.bindings.len(),
+            2,
+            "should have 2 bindings (different keys)"
+        );
 
         // Both sessions see both bindings
         write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
         write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
 
         let updates_s1 = render_peer_updates(pid, "s1").unwrap();
-        assert!(updates_s1.contains("postgres"), "s1 should see db.engine binding");
-        assert!(updates_s1.contains("JWT"), "s1 should see auth.method binding");
+        assert!(
+            updates_s1.contains("postgres"),
+            "s1 should see db.engine binding"
+        );
+        assert!(
+            updates_s1.contains("JWT"),
+            "s1 should see auth.method binding"
+        );
 
         let updates_s2 = render_peer_updates(pid, "s2").unwrap();
-        assert!(updates_s2.contains("postgres"), "s2 should see db.engine binding");
-        assert!(updates_s2.contains("JWT"), "s2 should see auth.method binding");
+        assert!(
+            updates_s2.contains("postgres"),
+            "s2 should see db.engine binding"
+        );
+        assert!(
+            updates_s2.contains("JWT"),
+            "s2 should see auth.method binding"
+        );
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");

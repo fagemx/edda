@@ -97,16 +97,23 @@ pub fn peers(repo_root: &Path) -> anyhow::Result<()> {
         } else {
             p.label.clone()
         };
-        println!("  {} — {} ({age}){scope}", &p.session_id[..8.min(p.session_id.len())], label);
+        println!(
+            "  {} — {} ({age}){scope}",
+            &p.session_id[..8.min(p.session_id.len())],
+            label
+        );
 
         if !p.task_subjects.is_empty() {
             for t in &p.task_subjects {
                 println!("    task: {t}");
             }
         } else if !p.focus_files.is_empty() {
-            let files: Vec<&str> = p.focus_files.iter().take(3).map(|f| {
-                f.rsplit(['/', '\\']).next().unwrap_or(f.as_str())
-            }).collect();
+            let files: Vec<&str> = p
+                .focus_files
+                .iter()
+                .take(3)
+                .map(|f| f.rsplit(['/', '\\']).next().unwrap_or(f.as_str()))
+                .collect();
             println!("    focus: {}", files.join(", "));
         }
         if p.files_modified_count > 0 {
@@ -122,7 +129,12 @@ pub fn peers(repo_root: &Path) -> anyhow::Result<()> {
 }
 
 /// `edda bridge claude claim <label>` — claim a coordination scope
-pub fn claim(repo_root: &Path, label: &str, paths: &[String], cli_session: Option<&str>) -> anyhow::Result<()> {
+pub fn claim(
+    repo_root: &Path,
+    label: &str,
+    paths: &[String],
+    cli_session: Option<&str>,
+) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
     let (session_id, _) = resolve_session_id(cli_session, &project_id, label);
 
@@ -140,10 +152,15 @@ pub fn claim(repo_root: &Path, label: &str, paths: &[String], cli_session: Optio
 /// Writes to both:
 /// 1. Peers `coordination.jsonl` — real-time broadcast to active peers
 /// 2. Workspace ledger — permanent record visible to all sessions
-pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>, cli_session: Option<&str>) -> anyhow::Result<()> {
-    let (key, value) = decision
-        .split_once('=')
-        .ok_or_else(|| anyhow::anyhow!("decision must be in key=value format (e.g. \"auth.method=JWT RS256\")"))?;
+pub fn decide(
+    repo_root: &Path,
+    decision: &str,
+    reason: Option<&str>,
+    cli_session: Option<&str>,
+) -> anyhow::Result<()> {
+    let (key, value) = decision.split_once('=').ok_or_else(|| {
+        anyhow::anyhow!("decision must be in key=value format (e.g. \"auth.method=JWT RS256\")")
+    })?;
 
     let key = key.trim();
     let value = value.trim();
@@ -152,7 +169,9 @@ pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>, cli_sessio
     let (session_id, label) = resolve_session_id(cli_session, &project_id, "cli");
 
     // L2 conflict check (coordination.jsonl) — before writing
-    if let Some(conflict) = edda_bridge_claude::peers::find_binding_conflict(&project_id, key, value) {
+    if let Some(conflict) =
+        edda_bridge_claude::peers::find_binding_conflict(&project_id, key, value)
+    {
         eprintln!(
             "\u{26a0} Conflict: key \"{key}\" already decided as \"{}\" by {} ({})",
             conflict.existing_value, conflict.by_label, conflict.ts
@@ -176,8 +195,13 @@ pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>, cli_sessio
 
     // Build event with structured decision fields alongside text
     // Use resolved label as actor (not hardcoded "system")
-    let actor = if session_id.starts_with("cli-") { "system" } else { &label };
-    let mut event = edda_core::event::new_note_event(&branch, parent_hash.as_deref(), actor, &text, &tags)?;
+    let actor = if session_id.starts_with("cli-") {
+        "system"
+    } else {
+        &label
+    };
+    let mut event =
+        edda_core::event::new_note_event(&branch, parent_hash.as_deref(), actor, &text, &tags)?;
 
     // Inject structured decision object into payload
     let decision_obj = match reason {
@@ -217,7 +241,12 @@ pub fn decide(repo_root: &Path, decision: &str, reason: Option<&str>, cli_sessio
 }
 
 /// `edda bridge claude request <to> <message>` — send cross-agent request
-pub fn request(repo_root: &Path, to: &str, message: &str, cli_session: Option<&str>) -> anyhow::Result<()> {
+pub fn request(
+    repo_root: &Path,
+    to: &str,
+    message: &str,
+    cli_session: Option<&str>,
+) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
     let (session_id, from_label) = resolve_session_id(cli_session, &project_id, "cli");
 
@@ -316,9 +345,8 @@ pub fn digest(repo_root: &Path, session: Option<&str>, all: bool) -> anyhow::Res
 
     if let Some(session_id) = session {
         println!("Digesting session {session_id}...");
-        let event_id = edda_bridge_claude::digest::digest_session_manual(
-            &project_id, session_id, cwd, true,
-        )?;
+        let event_id =
+            edda_bridge_claude::digest::digest_session_manual(&project_id, session_id, cwd, true)?;
         println!("  Written: {event_id}");
         return Ok(());
     }
@@ -333,7 +361,10 @@ pub fn digest(repo_root: &Path, session: Option<&str>, all: bool) -> anyhow::Res
         for session_id in &pending {
             print!("  Digesting {session_id}...");
             match edda_bridge_claude::digest::digest_session_manual(
-                &project_id, session_id, cwd, true,
+                &project_id,
+                session_id,
+                cwd,
+                true,
             ) {
                 Ok(event_id) => println!(" OK ({event_id})"),
                 Err(e) => println!(" FAILED: {e}"),
@@ -370,7 +401,11 @@ pub fn index_verify(
     let max_lines = if all { usize::MAX } else { sample * 2 };
     let records = edda_index::read_index_tail(&index_path, max_lines, 64 * 1024 * 1024)?;
 
-    let check_count = if all { records.len() } else { sample.min(records.len()) };
+    let check_count = if all {
+        records.len()
+    } else {
+        sample.min(records.len())
+    };
 
     // Sample evenly from the records
     let step = if check_count == 0 {
@@ -392,10 +427,7 @@ pub fn index_verify(
 
         let fetched = edda_index::fetch_store_line(&store_path, rec.store_offset, rec.store_len)?;
         let parsed: serde_json::Value = serde_json::from_slice(&fetched)?;
-        let fetched_uuid = parsed
-            .get("uuid")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let fetched_uuid = parsed.get("uuid").and_then(|v| v.as_str()).unwrap_or("");
 
         if fetched_uuid != rec.uuid {
             println!(
@@ -467,7 +499,11 @@ pub fn render_plan(repo_root: &Path) -> anyhow::Result<()> {
 // ── Heartbeat Commands ──
 
 /// `edda bridge claude heartbeat-write`
-pub fn heartbeat_write(repo_root: &Path, label: &str, cli_session: Option<&str>) -> anyhow::Result<()> {
+pub fn heartbeat_write(
+    repo_root: &Path,
+    label: &str,
+    cli_session: Option<&str>,
+) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
     let (session_id, _) = resolve_session_id(cli_session, &project_id, label);
     let _ = edda_store::ensure_dirs(&project_id);
@@ -558,10 +594,7 @@ mod tests {
 
     fn setup_workspace() -> (std::path::PathBuf, edda_ledger::Ledger) {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tmp = std::env::temp_dir().join(format!(
-            "edda_bridge_test_{}_{n}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("edda_bridge_test_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let paths = edda_ledger::EddaPaths::discover(&tmp);
         edda_ledger::ledger::init_workspace(&paths).unwrap();
@@ -580,8 +613,13 @@ mod tests {
         // Write a decision event with structured fields
         let tags = vec!["decision".to_string()];
         let mut event = edda_core::event::new_note_event(
-            &branch, parent_hash.as_deref(), "system", "db.engine: postgres", &tags,
-        ).unwrap();
+            &branch,
+            parent_hash.as_deref(),
+            "system",
+            "db.engine: postgres",
+            &tags,
+        )
+        .unwrap();
         event.payload["decision"] = serde_json::json!({"key": "db.engine", "value": "postgres"});
         edda_core::event::finalize_event(&mut event);
         ledger.append_event(&event, false).unwrap();
@@ -624,11 +662,15 @@ mod tests {
 
         // Verify binding was written via L2 conflict check API
         let conflict = edda_bridge_claude::peers::find_binding_conflict(&pid, "db.engine", "OTHER");
-        assert!(conflict.is_some(), "should find existing binding via conflict check");
+        assert!(
+            conflict.is_some(),
+            "should find existing binding via conflict check"
+        );
         let c = conflict.unwrap();
         assert_eq!(c.existing_value, "postgres");
         // Verify no conflict with same value (idempotent)
-        let no_conflict = edda_bridge_claude::peers::find_binding_conflict(&pid, "db.engine", "postgres");
+        let no_conflict =
+            edda_bridge_claude::peers::find_binding_conflict(&pid, "db.engine", "postgres");
         assert!(no_conflict.is_none(), "same value should not conflict");
 
         std::env::remove_var("EDDA_SESSION_ID");
@@ -725,13 +767,29 @@ mod tests {
         std::env::remove_var("EDDA_SESSION_ID");
 
         // Tier 3: heartbeat inference (single active session)
-        // Manually create a heartbeat file (write_heartbeat is pub(crate))
+        // Clean state dir first to avoid interference from concurrent sessions
         let state_dir = edda_store::project_dir(pid).join("state");
+        if state_dir.exists() {
+            for entry in std::fs::read_dir(&state_dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry
+                    .file_name()
+                    .to_str()
+                    .map_or(false, |n| n.starts_with("session."))
+                {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
         let _ = std::fs::create_dir_all(&state_dir);
+        let now = time::OffsetDateTime::now_utc();
+        let now_str = now
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
         let hb = serde_json::json!({
             "session_id": "inferred-sess",
-            "started_at": "2026-02-20T00:00:00Z",
-            "last_heartbeat": "2026-02-20T00:00:00Z",
+            "started_at": now_str,
+            "last_heartbeat": now_str,
             "label": "worker",
             "focus_files": [],
             "active_tasks": [],
@@ -742,7 +800,8 @@ mod tests {
         std::fs::write(
             state_dir.join("session.inferred-sess.json"),
             serde_json::to_string_pretty(&hb).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         let (sid, label) = resolve_session_id(None, pid, "cli");
         assert_eq!(sid, "inferred-sess", "should infer from sole heartbeat");
         assert_eq!(label, "worker", "should use heartbeat label");
@@ -767,7 +826,10 @@ mod tests {
     #[test]
     fn render_writeback_contains_protocol() {
         let output = edda_bridge_claude::render::writeback();
-        assert!(output.contains("Write-Back Protocol"), "should contain header");
+        assert!(
+            output.contains("Write-Back Protocol"),
+            "should contain header"
+        );
         assert!(output.contains("edda decide"), "should teach edda decide");
         assert!(output.contains("edda note"), "should teach edda note");
     }
@@ -777,9 +839,15 @@ mod tests {
         let (tmp, _ledger) = setup_workspace();
         let cwd = tmp.to_str().unwrap();
         let result = edda_bridge_claude::render::workspace(cwd, 2500);
-        assert!(result.is_some(), "workspace with ledger should produce output");
+        assert!(
+            result.is_some(),
+            "workspace with ledger should produce output"
+        );
         let text = result.unwrap();
-        assert!(text.contains("Project") || text.contains("Branch"), "should contain workspace sections");
+        assert!(
+            text.contains("Project") || text.contains("Branch"),
+            "should contain workspace sections"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -795,7 +863,10 @@ mod tests {
         let _ = edda_store::ensure_dirs(pid);
         let result = edda_bridge_claude::render::coordination(pid, "solo-session");
         // Solo with no bindings → None
-        assert!(result.is_none(), "solo session with no bindings should return None");
+        assert!(
+            result.is_none(),
+            "solo session with no bindings should return None"
+        );
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }
 
@@ -821,19 +892,17 @@ mod tests {
         assert!(hb_path.exists(), "heartbeat file should exist after write");
 
         // Verify label
-        let content: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&hb_path).unwrap()
-        ).unwrap();
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&hb_path).unwrap()).unwrap();
         assert_eq!(content["label"].as_str().unwrap(), "worker");
         assert_eq!(content["session_id"].as_str().unwrap(), sid);
 
         // Touch
-        let mtime_before = std::fs::metadata(&hb_path).unwrap().modified().unwrap();
+        let _mtime_before = std::fs::metadata(&hb_path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
         edda_bridge_claude::peers::touch_heartbeat(pid, sid);
-        let content_after: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&hb_path).unwrap()
-        ).unwrap();
+        let content_after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&hb_path).unwrap()).unwrap();
         // last_heartbeat string should have changed
         assert_ne!(
             content["last_heartbeat"].as_str().unwrap(),
@@ -843,7 +912,10 @@ mod tests {
 
         // Remove
         edda_bridge_claude::peers::remove_heartbeat(pid, sid);
-        assert!(!hb_path.exists(), "heartbeat file should be gone after remove");
+        assert!(
+            !hb_path.exists(),
+            "heartbeat file should be gone after remove"
+        );
 
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }

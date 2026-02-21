@@ -1,7 +1,5 @@
 use crate::plan::schema::Plan;
-use crate::state::machine::{
-    ErrorInfo, ErrorType, PhaseStatus, PlanState, PlanStatus,
-};
+use crate::state::machine::{ErrorInfo, ErrorType, PhaseStatus, PlanState, PlanStatus};
 
 /// Derive plan-level status from phase states.
 pub fn derive_plan_status(phases: &[crate::state::machine::PhaseState]) -> PlanStatus {
@@ -52,8 +50,7 @@ pub fn detect_stale_phases(state: &mut PlanState, plan: &Plan) {
     let now = time::OffsetDateTime::now_utc();
 
     for phase_state in &mut state.phases {
-        if phase_state.status != PhaseStatus::Running
-            && phase_state.status != PhaseStatus::Checking
+        if phase_state.status != PhaseStatus::Running && phase_state.status != PhaseStatus::Checking
         {
             continue;
         }
@@ -118,7 +115,9 @@ pub fn find_next_phase(plan: &Plan, state: &PlanState, order: &[String]) -> Opti
 mod tests {
     use super::*;
     use crate::plan::parser::parse_plan;
-    use crate::state::machine::{PhaseState, PhaseStatus, PlanState, PlanStatus, transition, PhaseUpdate};
+    use crate::state::machine::{
+        transition, PhaseState, PhaseStatus, PhaseUpdate, PlanState, PlanStatus,
+    };
 
     fn make_state(statuses: &[(&str, PhaseStatus)]) -> Vec<PhaseState> {
         statuses
@@ -202,7 +201,14 @@ phases:
         let order = vec!["a".to_string(), "b".to_string()];
 
         // Make 'a' running → 'b' can't start
-        transition(&mut state, "a", PhaseStatus::Pending, PhaseStatus::Running, None).unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Pending,
+            PhaseStatus::Running,
+            None,
+        )
+        .unwrap();
         assert_eq!(find_next_phase(&plan, &state, &order), None);
     }
 
@@ -222,9 +228,30 @@ phases:
         let order = vec!["a".to_string(), "b".to_string()];
 
         // Complete 'a'
-        transition(&mut state, "a", PhaseStatus::Pending, PhaseStatus::Running, None).unwrap();
-        transition(&mut state, "a", PhaseStatus::Running, PhaseStatus::Checking, None).unwrap();
-        transition(&mut state, "a", PhaseStatus::Checking, PhaseStatus::Passed, None).unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Pending,
+            PhaseStatus::Running,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Running,
+            PhaseStatus::Checking,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Checking,
+            PhaseStatus::Passed,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(find_next_phase(&plan, &state, &order), Some("b".into()));
     }
@@ -241,9 +268,30 @@ phases:
         let mut state = PlanState::from_plan(&plan, "plan.yaml");
         let order = vec!["a".to_string()];
 
-        transition(&mut state, "a", PhaseStatus::Pending, PhaseStatus::Running, None).unwrap();
-        transition(&mut state, "a", PhaseStatus::Running, PhaseStatus::Checking, None).unwrap();
-        transition(&mut state, "a", PhaseStatus::Checking, PhaseStatus::Passed, None).unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Pending,
+            PhaseStatus::Running,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Running,
+            PhaseStatus::Checking,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Checking,
+            PhaseStatus::Passed,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(find_next_phase(&plan, &state, &order), None);
     }

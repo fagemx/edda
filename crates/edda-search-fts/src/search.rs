@@ -65,22 +65,12 @@ pub fn search(
     let mut stmt = conn.prepare(sql)?;
 
     let rows = match (project_id, session_id, bind_count) {
-        (Some(pid), Some(sid), 4) => stmt.query_map(
-            params![query, pid, sid, limit as i64],
-            map_row,
-        )?,
-        (Some(pid), None, 3) => stmt.query_map(
-            params![query, pid, limit as i64],
-            map_row,
-        )?,
-        (None, Some(sid), 3) => stmt.query_map(
-            params![query, sid, limit as i64],
-            map_row,
-        )?,
-        _ => stmt.query_map(
-            params![query, limit as i64],
-            map_row,
-        )?,
+        (Some(pid), Some(sid), 4) => {
+            stmt.query_map(params![query, pid, sid, limit as i64], map_row)?
+        }
+        (Some(pid), None, 3) => stmt.query_map(params![query, pid, limit as i64], map_row)?,
+        (None, Some(sid), 3) => stmt.query_map(params![query, sid, limit as i64], map_row)?,
+        _ => stmt.query_map(params![query, limit as i64], map_row)?,
     };
 
     let mut results = Vec::new();
@@ -158,8 +148,17 @@ mod tests {
              user_text, assistant_text, tool_names, tool_commands, file_paths, tokens) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
-                turn_id, "p1", "s1", "2026-02-14T10:00:00Z", "main", "/tmp",
-                user_text, assistant_text, "Bash Read", "cargo test", "/tmp/foo.rs",
+                turn_id,
+                "p1",
+                "s1",
+                "2026-02-14T10:00:00Z",
+                "main",
+                "/tmp",
+                user_text,
+                assistant_text,
+                "Bash Read",
+                "cargo test",
+                "/tmp/foo.rs",
                 "Bash Read cargo test /tmp/foo.rs main",
             ],
         )
@@ -172,8 +171,16 @@ mod tests {
              assistant_store_offset, assistant_store_len) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                turn_id, "p1", "s1", "2026-02-14T10:00:00Z",
-                "u1", "a1", 0i64, 100i64, 101i64, 200i64,
+                turn_id,
+                "p1",
+                "s1",
+                "2026-02-14T10:00:00Z",
+                "u1",
+                "a1",
+                0i64,
+                100i64,
+                101i64,
+                200i64,
             ],
         )
         .unwrap();
@@ -182,8 +189,18 @@ mod tests {
     #[test]
     fn search_finds_matching_turn() {
         let conn = ensure_db_memory().unwrap();
-        insert_test_turn(&conn, "t1", "How to implement FTS5?", "Use rusqlite with fts5 feature");
-        insert_test_turn(&conn, "t2", "What is the weather today?", "I cannot check weather");
+        insert_test_turn(
+            &conn,
+            "t1",
+            "How to implement FTS5?",
+            "Use rusqlite with fts5 feature",
+        );
+        insert_test_turn(
+            &conn,
+            "t2",
+            "What is the weather today?",
+            "I cannot check weather",
+        );
 
         let results = search(&conn, "FTS5", None, None, 10).unwrap();
         assert_eq!(results.len(), 1);

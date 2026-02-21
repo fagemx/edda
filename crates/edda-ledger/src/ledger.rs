@@ -142,10 +142,7 @@ mod tests {
 
     fn setup_workspace() -> (std::path::PathBuf, Ledger) {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tmp = std::env::temp_dir().join(format!(
-            "edda_ledger_test_{}_{n}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("edda_ledger_test_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let paths = EddaPaths::discover(&tmp);
         init_workspace(&paths).unwrap();
@@ -194,10 +191,7 @@ mod tests {
     #[test]
     fn open_without_init_fails() {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tmp = std::env::temp_dir().join(format!(
-            "edda_no_init_{}_{n}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("edda_no_init_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         assert!(Ledger::open(&tmp).is_err());

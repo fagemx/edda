@@ -12,8 +12,7 @@ pub fn load_plan(path: &Path) -> Result<Plan> {
 /// Parse and validate a plan from a YAML string.
 pub fn parse_plan(yaml: &str) -> Result<Plan> {
     // Step 1: Parse into raw Value for short-format normalization
-    let mut raw: serde_yml::Value =
-        serde_yml::from_str(yaml).context("invalid YAML syntax")?;
+    let mut raw: serde_yml::Value = serde_yml::from_str(yaml).context("invalid YAML syntax")?;
 
     // Step 2: Normalize short-format checks
     normalize_checks(&mut raw)?;
@@ -22,8 +21,7 @@ pub fn parse_plan(yaml: &str) -> Result<Plan> {
     expand_variables(&mut raw);
 
     // Step 4: Deserialize into typed Plan
-    let plan: Plan =
-        serde_yml::from_value(raw).context("plan schema validation failed")?;
+    let plan: Plan = serde_yml::from_value(raw).context("plan schema validation failed")?;
 
     // Step 5: Validate constraints
     validate_plan(&plan)?;
@@ -65,13 +63,16 @@ fn normalize_one_check(check: &serde_yml::Value) -> Result<Option<serde_yml::Val
     };
 
     // Already tagged format (has "type" key)
-    if map.contains_key(&serde_yml::Value::String("type".into())) {
+    if map.contains_key(serde_yml::Value::String("type".into())) {
         return Ok(None);
     }
 
     // Short format: single key = check type, value = argument
     if map.len() != 1 {
-        bail!("short-format check must have exactly one key, got {}", map.len());
+        bail!(
+            "short-format check must have exactly one key, got {}",
+            map.len()
+        );
     }
 
     let (key, value) = map.iter().next().unwrap();
@@ -351,7 +352,9 @@ phases:
         let plan = parse_plan(yaml).unwrap();
         assert!(matches!(
             &plan.phases[0].check[0],
-            CheckSpec::GitClean { allow_untracked: false }
+            CheckSpec::GitClean {
+                allow_untracked: false
+            }
         ));
     }
 
@@ -484,9 +487,7 @@ phases:
             ("skip", OnFail::Skip),
             ("abort", OnFail::Abort),
         ] {
-            let yaml = format!(
-                "name: test\non_fail: {input}\nphases:\n  - id: a\n    prompt: x\n"
-            );
+            let yaml = format!("name: test\non_fail: {input}\nphases:\n  - id: a\n    prompt: x\n");
             let plan = parse_plan(&yaml).unwrap();
             assert_eq!(plan.on_fail, expected, "failed for {input}");
         }

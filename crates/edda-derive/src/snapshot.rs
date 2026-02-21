@@ -43,11 +43,7 @@ pub(crate) fn fmt_evidence_item(item: &Value) -> Option<String> {
         return Some(s.to_string());
     }
     if let Some(obj) = item.as_object() {
-        let why = obj
-            .get("why")
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .trim();
+        let why = obj.get("why").and_then(|x| x.as_str()).unwrap_or("").trim();
         if let Some(eid) = obj.get("event_id").and_then(|x| x.as_str()) {
             return Some(if why.is_empty() {
                 eid.to_string()
@@ -78,7 +74,10 @@ pub(crate) fn collect_branch_events(ledger: &Ledger, branch: &str) -> Result<Vec
 
 /// Look for a `branch_create` event whose payload.name matches the branch,
 /// and return its timestamp as a fallback created_at.
-pub(crate) fn resolve_branch_created_at_fallback(ledger: &Ledger, branch: &str) -> Result<Option<String>> {
+pub(crate) fn resolve_branch_created_at_fallback(
+    ledger: &Ledger,
+    branch: &str,
+) -> Result<Option<String>> {
     for ev in ledger.iter_events()? {
         if ev.event_type == "branch_create" {
             if let Some(name) = ev.payload.get("name").and_then(|x| x.as_str()) {

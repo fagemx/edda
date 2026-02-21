@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PlanStep {
-    pub index: usize,       // 1-based (from heading number)
+    pub index: usize,        // 1-based (from heading number)
     pub title: String,       // heading text without the "## Step N:" prefix
     pub heading_line: usize, // 0-based line index in plan content
 }
@@ -27,8 +27,8 @@ pub(crate) struct StepProgress {
 
 /// Words too common to be useful for matching.
 const STOP_WORDS: &[&str] = &[
-    "the", "and", "for", "with", "from", "into", "that", "this", "will",
-    "step", "plan", "add", "new", "use", "set", "get", "fix", "run",
+    "the", "and", "for", "with", "from", "into", "that", "this", "will", "step", "plan", "add",
+    "new", "use", "set", "get", "fix", "run",
 ];
 
 // ── Parsing ──
@@ -51,7 +51,10 @@ pub(crate) fn parse_plan_steps(content: &str) -> Vec<PlanStep> {
         let after_hash = &trimmed[3..]; // skip "## "
 
         // Pattern A: "Step N: Title" or "Step N — Title"
-        if let Some(rest) = after_hash.strip_prefix("Step ").or_else(|| after_hash.strip_prefix("step ")) {
+        if let Some(rest) = after_hash
+            .strip_prefix("Step ")
+            .or_else(|| after_hash.strip_prefix("step "))
+        {
             if let Some((index, title)) = parse_step_number_and_title(rest) {
                 steps.push(PlanStep {
                     index,
@@ -154,10 +157,8 @@ pub(crate) fn match_step_progress(
         .map(|t| (t, extract_tokens(&t.subject)))
         .collect();
 
-    let commit_tokens: Vec<HashSet<String>> = commits
-        .iter()
-        .map(|c| extract_tokens(&c.message))
-        .collect();
+    let commit_tokens: Vec<HashSet<String>> =
+        commits.iter().map(|c| extract_tokens(&c.message)).collect();
 
     let mut result: Vec<StepProgress> = steps
         .iter()
@@ -179,9 +180,7 @@ pub(crate) fn match_step_progress(
                 let overlap = step_tokens.intersection(task_tok).count();
                 let min_len = step_tokens.len().min(task_tok.len());
                 let score = overlap as f64 / min_len as f64;
-                if score >= 0.5
-                    && best_task_match.as_ref().is_none_or(|(_, s)| score > *s)
-                {
+                if score >= 0.5 && best_task_match.as_ref().is_none_or(|(_, s)| score > *s) {
                     best_task_match = Some((task, score));
                 }
             }
@@ -268,17 +267,22 @@ pub(crate) fn render_plan_with_progress(
 
     let progress = match_step_progress(&steps, &tasks, &commits);
 
-    let done_count = progress.iter().filter(|p| p.status == StepStatus::Done).count();
+    let done_count = progress
+        .iter()
+        .filter(|p| p.status == StepStatus::Done)
+        .count();
     let total = progress.len();
 
     // Build step list
     let mut lines = Vec::new();
     lines.push(format!("## Active Plan\n> {filename} ({mtime_str})"));
-    lines.push(format!("\nProgress: {done_count}/{total} steps completed\n"));
+    lines.push(format!(
+        "\nProgress: {done_count}/{total} steps completed\n"
+    ));
 
     for p in &progress {
         let icon = match p.status {
-            StepStatus::Done => "\u{2705}",   // ✅
+            StepStatus::Done => "\u{2705}",    // ✅
             StepStatus::Active => "\u{1f527}", // 🔧
             StepStatus::Pending => "\u{2b1c}", // ⬜
         };
@@ -295,7 +299,9 @@ pub(crate) fn render_plan_with_progress(
 
     if let Some(current) = current_step {
         let body = extract_step_body(content, current.step.heading_line, &steps);
-        let remaining_budget = PLAN_MAX_CHARS.saturating_sub(header.len()).max(CURRENT_STEP_MIN_CHARS);
+        let remaining_budget = PLAN_MAX_CHARS
+            .saturating_sub(header.len())
+            .max(CURRENT_STEP_MIN_CHARS);
         let truncated = truncate_to_budget(&body, remaining_budget);
 
         Some(format!("{header}\n\n### Current Step\n{truncated}"))
@@ -467,9 +473,9 @@ Description
         let tokens = extract_tokens("Fix the authentication bug with session");
         assert!(tokens.contains("authentication"));
         assert!(tokens.contains("session"));
-        assert!(!tokens.contains("the"));  // stop word
-        assert!(!tokens.contains("fix"));  // stop word
-        assert!(!tokens.contains("bug"));  // too short (3 chars)
+        assert!(!tokens.contains("the")); // stop word
+        assert!(!tokens.contains("fix")); // stop word
+        assert!(!tokens.contains("bug")); // too short (3 chars)
     }
 
     // ── match_step_progress tests ──
@@ -477,8 +483,16 @@ Description
     #[test]
     fn match_task_to_step() {
         let steps = vec![
-            PlanStep { index: 1, title: "Exit Code for Warnings".into(), heading_line: 0 },
-            PlanStep { index: 2, title: "Injection Dedup".into(), heading_line: 5 },
+            PlanStep {
+                index: 1,
+                title: "Exit Code for Warnings".into(),
+                heading_line: 0,
+            },
+            PlanStep {
+                index: 2,
+                title: "Injection Dedup".into(),
+                heading_line: 5,
+            },
         ];
         let tasks = vec![
             TaskSnapshot {
@@ -501,8 +515,16 @@ Description
     #[test]
     fn match_commit_evidence() {
         let steps = vec![
-            PlanStep { index: 1, title: "Privacy Stripping".into(), heading_line: 0 },
-            PlanStep { index: 2, title: "Session Index GC".into(), heading_line: 5 },
+            PlanStep {
+                index: 1,
+                title: "Privacy Stripping".into(),
+                heading_line: 0,
+            },
+            PlanStep {
+                index: 2,
+                title: "Session Index GC".into(),
+                heading_line: 5,
+            },
         ];
         let commits = vec![CommitInfo {
             hash: "abc1234".into(),
@@ -510,16 +532,36 @@ Description
         }];
 
         let progress = match_step_progress(&steps, &[], &commits);
-        assert_eq!(progress[0].status, StepStatus::Done, "commit should mark step done");
-        assert_eq!(progress[1].status, StepStatus::Pending, "unmatched step stays pending");
+        assert_eq!(
+            progress[0].status,
+            StepStatus::Done,
+            "commit should mark step done"
+        );
+        assert_eq!(
+            progress[1].status,
+            StepStatus::Pending,
+            "unmatched step stays pending"
+        );
     }
 
     #[test]
     fn positional_rule_marks_prior_done() {
         let steps = vec![
-            PlanStep { index: 1, title: "Exit Code for Warnings".into(), heading_line: 0 },
-            PlanStep { index: 2, title: "Injection Dedup Logic".into(), heading_line: 5 },
-            PlanStep { index: 3, title: "Privacy Stripping Patterns".into(), heading_line: 10 },
+            PlanStep {
+                index: 1,
+                title: "Exit Code for Warnings".into(),
+                heading_line: 0,
+            },
+            PlanStep {
+                index: 2,
+                title: "Injection Dedup Logic".into(),
+                heading_line: 5,
+            },
+            PlanStep {
+                index: 3,
+                title: "Privacy Stripping Patterns".into(),
+                heading_line: 10,
+            },
         ];
         let tasks = vec![TaskSnapshot {
             id: "1".into(),
@@ -528,16 +570,36 @@ Description
         }];
 
         let progress = match_step_progress(&steps, &tasks, &[]);
-        assert_eq!(progress[0].status, StepStatus::Done, "step 1 before active → done");
-        assert_eq!(progress[1].status, StepStatus::Active, "step 2 matched → active");
-        assert_eq!(progress[2].status, StepStatus::Pending, "step 3 after active → pending");
+        assert_eq!(
+            progress[0].status,
+            StepStatus::Done,
+            "step 1 before active → done"
+        );
+        assert_eq!(
+            progress[1].status,
+            StepStatus::Active,
+            "step 2 matched → active"
+        );
+        assert_eq!(
+            progress[2].status,
+            StepStatus::Pending,
+            "step 3 after active → pending"
+        );
     }
 
     #[test]
     fn no_signals_all_pending() {
         let steps = vec![
-            PlanStep { index: 1, title: "Setup database schema".into(), heading_line: 0 },
-            PlanStep { index: 2, title: "Build API endpoints".into(), heading_line: 5 },
+            PlanStep {
+                index: 1,
+                title: "Setup database schema".into(),
+                heading_line: 0,
+            },
+            PlanStep {
+                index: 2,
+                title: "Build API endpoints".into(),
+                heading_line: 5,
+            },
         ];
 
         let progress = match_step_progress(&steps, &[], &[]);
@@ -605,7 +667,8 @@ Final body line 2
     fn render_fallback_no_steps() {
         // Non-stepped plan should return None
         let content = "# Plan\n\n## Context\nSome context\n\n## Design\nSome design\n";
-        let result = render_plan_with_progress(content, "nonexistent_project", "test.md", "2026-01-01");
+        let result =
+            render_plan_with_progress(content, "nonexistent_project", "test.md", "2026-01-01");
         assert!(result.is_none());
     }
 }

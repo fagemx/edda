@@ -164,8 +164,7 @@ mod tests {
     use super::*;
     use crate::test_support::setup_workspace;
     use edda_core::event::{
-        new_note_event, new_commit_event, new_cmd_event,
-        CommitEventParams, CmdEventParams,
+        new_cmd_event, new_commit_event, new_note_event, CmdEventParams, CommitEventParams,
     };
 
     #[test]
@@ -188,7 +187,8 @@ mod tests {
             duration_ms: 500,
             stdout_blob: "",
             stderr_blob: "blob:sha256:err123",
-        }).unwrap();
+        })
+        .unwrap();
         ledger.append_event(&cmd, false).unwrap();
 
         // Add a regular note (not evidence)
@@ -198,7 +198,11 @@ mod tests {
         let result = build_auto_evidence(&ledger, "main", 20).unwrap();
 
         // Should have at least the todo + failed cmd
-        assert!(result.items.len() >= 2, "expected >=2 items, got {}", result.items.len());
+        assert!(
+            result.items.len() >= 2,
+            "expected >=2 items, got {}",
+            result.items.len()
+        );
         assert_eq!(result.items.len(), result.preview_lines.len());
 
         let _ = std::fs::remove_dir_all(&tmp);

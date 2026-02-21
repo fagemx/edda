@@ -41,10 +41,7 @@ pub fn query(
 }
 
 /// Execute `edda search index` — build/update FTS5 index for a project.
-pub fn index(
-    project_id: &str,
-    session_id: Option<&str>,
-) -> anyhow::Result<()> {
+pub fn index(project_id: &str, session_id: Option<&str>) -> anyhow::Result<()> {
     let proj_dir = project_dir(project_id);
     if !proj_dir.exists() {
         anyhow::bail!("Project directory not found: {}", proj_dir.display());

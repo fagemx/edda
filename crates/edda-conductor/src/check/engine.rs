@@ -46,9 +46,9 @@ impl CheckEngine {
 
             if !output.passed {
                 // Mark remaining as Waiting
-                for j in (i + 1)..checks.len() {
+                for check in &checks[(i + 1)..] {
                     results.push(CheckResult {
-                        check_type: checks[j].type_name().to_string(),
+                        check_type: check.type_name().to_string(),
                         status: CheckStatus::Waiting,
                         detail: None,
                         duration_ms: 0,

@@ -16,7 +16,11 @@ pub fn classify(repo_root: &Path, hash: &str, class_str: &str) -> anyhow::Result
     blob_meta::set_class(&mut meta, &resolved, class, "user");
     blob_meta::save_blob_meta(&paths.blob_meta_json, &meta)?;
 
-    println!("Classified blob {} as {}", &resolved[..resolved.len().min(12)], class);
+    println!(
+        "Classified blob {} as {}",
+        &resolved[..resolved.len().min(12)],
+        class
+    );
     Ok(())
 }
 
@@ -80,14 +84,21 @@ pub fn info(repo_root: &Path, hash: &str) -> anyhow::Result<()> {
     println!("Pinned:   {}", entry.pinned);
     println!("Location: {location}");
     if let Some(at) = &entry.classified_at {
-        println!("Classified: {} by {}", at, entry.classified_by.as_deref().unwrap_or("?"));
+        println!(
+            "Classified: {} by {}",
+            at,
+            entry.classified_by.as_deref().unwrap_or("?")
+        );
     }
 
     // Classification history
     if !entry.class_history.is_empty() {
         println!("\nClassification history:");
         for change in &entry.class_history {
-            println!("  {} -> {} (by {} at {})", change.from, change.to, change.by, change.at);
+            println!(
+                "  {} -> {} (by {} at {})",
+                change.from, change.to, change.by, change.at
+            );
         }
     }
 
@@ -137,8 +148,8 @@ fn explain_retention(
     if let Ok(meta) = blob_path.metadata() {
         if let Ok(modified) = meta.modified() {
             let modified_odt = time::OffsetDateTime::from(modified);
-            let cutoff = time::OffsetDateTime::now_utc()
-                - time::Duration::days(i64::from(keep_days));
+            let cutoff =
+                time::OffsetDateTime::now_utc() - time::Duration::days(i64::from(keep_days));
             if modified_odt < cutoff {
                 reasons.push(format!("expired (older than {keep_days} days)"));
             } else {
@@ -202,17 +213,35 @@ pub fn stats(repo_root: &Path) -> anyhow::Result<()> {
     }
 
     println!("Blob Store Statistics\n");
-    println!("Active:   {} blob(s) ({})", active_blobs.len(), format_size(active_size));
-    println!("Archived: {} blob(s) ({})", archived_blobs.len(), format_size(archived_size));
-    println!("Total:    {} blob(s) ({})",
+    println!(
+        "Active:   {} blob(s) ({})",
+        active_blobs.len(),
+        format_size(active_size)
+    );
+    println!(
+        "Archived: {} blob(s) ({})",
+        archived_blobs.len(),
+        format_size(archived_size)
+    );
+    println!(
+        "Total:    {} blob(s) ({})",
         active_blobs.len() + archived_blobs.len(),
         format_size(active_size + archived_size)
     );
     println!();
     println!("By class (active only):");
-    println!("  artifact:           {artifact_count:>4} ({:>8})", format_size(artifact_size));
-    println!("  decision_evidence:  {evidence_count:>4} ({:>8})", format_size(evidence_size));
-    println!("  trace_noise:        {noise_count:>4} ({:>8})", format_size(noise_size));
+    println!(
+        "  artifact:           {artifact_count:>4} ({:>8})",
+        format_size(artifact_size)
+    );
+    println!(
+        "  decision_evidence:  {evidence_count:>4} ({:>8})",
+        format_size(evidence_size)
+    );
+    println!(
+        "  trace_noise:        {noise_count:>4} ({:>8})",
+        format_size(noise_size)
+    );
     println!("  pinned:             {pinned_count:>4}");
 
     // Show quota usage if configured
@@ -295,7 +324,11 @@ fn resolve_hash(paths: &EddaPaths, prefix: &str) -> anyhow::Result<String> {
         0 => anyhow::bail!("blob not found: {prefix}"),
         1 => Ok(matches.into_iter().next().unwrap()),
         _ => {
-            let preview: Vec<_> = matches.iter().take(5).map(|h| &h[..h.len().min(16)]).collect();
+            let preview: Vec<_> = matches
+                .iter()
+                .take(5)
+                .map(|h| &h[..h.len().min(16)])
+                .collect();
             anyhow::bail!(
                 "ambiguous prefix '{prefix}': {} matches ({}...)",
                 matches.len(),
@@ -338,10 +371,7 @@ mod tests {
 
     fn setup_workspace() -> (std::path::PathBuf, EddaPaths) {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tmp = std::env::temp_dir().join(format!(
-            "edda_blob_test_{}_{n}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("edda_blob_test_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let paths = EddaPaths::discover(&tmp);
         edda_ledger::ledger::init_workspace(&paths).unwrap();
@@ -427,7 +457,10 @@ mod tests {
     fn info_nonexistent_blob_errors() {
         let (tmp, _paths) = setup_workspace();
 
-        let result = info(&tmp, "0000000000000000000000000000000000000000000000000000000000000000");
+        let result = info(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&tmp);

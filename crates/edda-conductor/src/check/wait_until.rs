@@ -55,9 +55,7 @@ fn compute_backoff(base_sec: u64, attempt: u32, strategy: BackoffStrategy) -> Du
 
 async fn run_inner(spec: &CheckSpec, cwd: &Path, phase_started_at: Option<&str>) -> CheckOutput {
     match spec {
-        CheckSpec::FileExists { path } => {
-            crate::check::file_exists::check_file_exists(path, cwd)
-        }
+        CheckSpec::FileExists { path } => crate::check::file_exists::check_file_exists(path, cwd),
         CheckSpec::CmdSucceeds { cmd, timeout_sec } => {
             crate::check::cmd_succeeds::check_cmd_succeeds(cmd, *timeout_sec, cwd).await
         }
@@ -79,10 +77,7 @@ async fn run_inner(spec: &CheckSpec, cwd: &Path, phase_started_at: Option<&str>)
         }
         CheckSpec::WaitUntil { .. } => {
             // Nested wait_until is rejected at parse time, but handle gracefully
-            CheckOutput::failed(
-                "nested wait_until is not supported".into(),
-                Duration::ZERO,
-            )
+            CheckOutput::failed("nested wait_until is not supported".into(), Duration::ZERO)
         }
     }
 }
@@ -93,22 +88,46 @@ mod tests {
 
     #[test]
     fn backoff_none() {
-        assert_eq!(compute_backoff(5, 1, BackoffStrategy::None), Duration::from_secs(5));
-        assert_eq!(compute_backoff(5, 3, BackoffStrategy::None), Duration::from_secs(5));
+        assert_eq!(
+            compute_backoff(5, 1, BackoffStrategy::None),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            compute_backoff(5, 3, BackoffStrategy::None),
+            Duration::from_secs(5)
+        );
     }
 
     #[test]
     fn backoff_linear() {
-        assert_eq!(compute_backoff(5, 1, BackoffStrategy::Linear), Duration::from_secs(5));
-        assert_eq!(compute_backoff(5, 2, BackoffStrategy::Linear), Duration::from_secs(10));
-        assert_eq!(compute_backoff(5, 3, BackoffStrategy::Linear), Duration::from_secs(15));
+        assert_eq!(
+            compute_backoff(5, 1, BackoffStrategy::Linear),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            compute_backoff(5, 2, BackoffStrategy::Linear),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            compute_backoff(5, 3, BackoffStrategy::Linear),
+            Duration::from_secs(15)
+        );
     }
 
     #[test]
     fn backoff_exponential() {
-        assert_eq!(compute_backoff(5, 1, BackoffStrategy::Exponential), Duration::from_secs(5));
-        assert_eq!(compute_backoff(5, 2, BackoffStrategy::Exponential), Duration::from_secs(10));
-        assert_eq!(compute_backoff(5, 3, BackoffStrategy::Exponential), Duration::from_secs(20));
+        assert_eq!(
+            compute_backoff(5, 1, BackoffStrategy::Exponential),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            compute_backoff(5, 2, BackoffStrategy::Exponential),
+            Duration::from_secs(10)
+        );
+        assert_eq!(
+            compute_backoff(5, 3, BackoffStrategy::Exponential),
+            Duration::from_secs(20)
+        );
     }
 
     #[test]

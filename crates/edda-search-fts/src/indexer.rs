@@ -29,8 +29,7 @@ pub fn index_session(
         .join(format!("{session_id}.jsonl"));
 
     // Read all index records
-    let records =
-        edda_index::read_index_tail(&index_path, 100_000, 256 * 1024 * 1024)?;
+    let records = edda_index::read_index_tail(&index_path, 100_000, 256 * 1024 * 1024)?;
     if records.is_empty() {
         return Ok(0);
     }
@@ -133,7 +132,10 @@ pub fn index_session(
         let cwd = asst_rec.cwd.as_deref().unwrap_or("");
 
         // Build tokens: concat of key identifiers for exact-match search
-        let tokens = format!("{} {} {} {}", &tool_names, &tool_commands, &file_paths, git_branch);
+        let tokens = format!(
+            "{} {} {} {}",
+            &tool_names, &tool_commands, &file_paths, git_branch
+        );
 
         // Insert into FTS5
         tx.execute(
@@ -263,17 +265,13 @@ fn extract_user_text(user_json: &serde_json::Value) -> String {
 }
 
 /// Extract assistant text, tool names, tool commands, and file paths from a transcript assistant record.
-fn extract_assistant_fields(
-    asst_json: &serde_json::Value,
-) -> (String, String, String, String) {
+fn extract_assistant_fields(asst_json: &serde_json::Value) -> (String, String, String, String) {
     let mut texts = Vec::new();
     let mut tool_names = Vec::new();
     let mut tool_commands = Vec::new();
     let mut file_paths = Vec::new();
 
-    let content = asst_json
-        .get("message")
-        .and_then(|m| m.get("content"));
+    let content = asst_json.get("message").and_then(|m| m.get("content"));
 
     if let Some(arr) = content.and_then(|c| c.as_array()) {
         for block in arr {

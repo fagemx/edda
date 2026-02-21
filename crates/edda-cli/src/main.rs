@@ -736,8 +736,17 @@ fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Command::Init => cmd_init::execute(&repo_root),
         Command::Note { text, role, tags } => cmd_note::execute(&repo_root, &text, &role, &tags),
-        Command::Decide { decision, reason, session } => cmd_bridge::decide(&repo_root, &decision, reason.as_deref(), session.as_deref()),
-        Command::Query { query, limit, json, all } => cmd_query::execute(&repo_root, &query, limit, json, all),
+        Command::Decide {
+            decision,
+            reason,
+            session,
+        } => cmd_bridge::decide(&repo_root, &decision, reason.as_deref(), session.as_deref()),
+        Command::Query {
+            query,
+            limit,
+            json,
+            all,
+        } => cmd_query::execute(&repo_root, &query, limit, json, all),
         Command::Run { argv } => cmd_run::execute(&repo_root, &argv),
         Command::Status => cmd_status::execute(&repo_root),
         Command::Commit {
@@ -791,14 +800,10 @@ fn main() -> anyhow::Result<()> {
             reason,
         } => cmd_rebuild::execute(&repo_root, branch.as_deref(), all, &reason),
         Command::Branch { cmd } => match cmd {
-            BranchCmd::Create { name, purpose } => {
-                cmd_branch::create(&repo_root, &name, &purpose)
-            }
+            BranchCmd::Create { name, purpose } => cmd_branch::create(&repo_root, &name, &purpose),
         },
         Command::Switch { name } => cmd_switch::execute(&repo_root, &name),
-        Command::Merge { src, dst, reason } => {
-            cmd_merge::execute(&repo_root, &src, &dst, &reason)
-        }
+        Command::Merge { src, dst, reason } => cmd_merge::execute(&repo_root, &src, &dst, &reason),
         Command::Draft { cmd } => match cmd {
             DraftCmd::Propose {
                 title,
@@ -844,21 +849,31 @@ fn main() -> anyhow::Result<()> {
         },
         Command::Bridge { cmd } => match cmd {
             BridgeCmd::Claude { cmd } => match cmd {
-                BridgeClaudeCmd::Install { no_claude_md } => cmd_bridge::install(&repo_root, no_claude_md),
+                BridgeClaudeCmd::Install { no_claude_md } => {
+                    cmd_bridge::install(&repo_root, no_claude_md)
+                }
                 BridgeClaudeCmd::Uninstall => cmd_bridge::uninstall(&repo_root),
                 BridgeClaudeCmd::Digest { session, all } => {
                     cmd_bridge::digest(&repo_root, session.as_deref(), all)
                 }
                 BridgeClaudeCmd::Peers => cmd_bridge::peers(&repo_root),
-                BridgeClaudeCmd::Claim { label, paths, session } => {
-                    cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref())
-                }
-                BridgeClaudeCmd::Decide { decision, reason, session } => {
+                BridgeClaudeCmd::Claim {
+                    label,
+                    paths,
+                    session,
+                } => cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref()),
+                BridgeClaudeCmd::Decide {
+                    decision,
+                    reason,
+                    session,
+                } => {
                     cmd_bridge::decide(&repo_root, &decision, reason.as_deref(), session.as_deref())
                 }
-                BridgeClaudeCmd::Request { to, message, session } => {
-                    cmd_bridge::request(&repo_root, &to, &message, session.as_deref())
-                }
+                BridgeClaudeCmd::Request {
+                    to,
+                    message,
+                    session,
+                } => cmd_bridge::request(&repo_root, &to, &message, session.as_deref()),
                 BridgeClaudeCmd::RenderWriteback => cmd_bridge::render_writeback(),
                 BridgeClaudeCmd::RenderWorkspace { budget } => {
                     cmd_bridge::render_workspace(&repo_root, budget)
@@ -924,8 +939,7 @@ fn main() -> anyhow::Result<()> {
         },
         Command::Mcp { cmd } => match cmd {
             McpCommand::Serve => {
-                tokio::runtime::Runtime::new()?
-                    .block_on(edda_mcp::serve(&repo_root))?;
+                tokio::runtime::Runtime::new()?.block_on(edda_mcp::serve(&repo_root))?;
                 Ok(())
             }
         },
@@ -958,14 +972,10 @@ fn main() -> anyhow::Result<()> {
                 reason,
                 plan,
             } => cmd_conduct::skip(&repo_root, &phase_id, reason.as_deref(), plan.as_deref()),
-            ConductCmd::Abort { plan_name } => {
-                cmd_conduct::abort(&repo_root, plan_name.as_deref())
-            }
+            ConductCmd::Abort { plan_name } => cmd_conduct::abort(&repo_root, plan_name.as_deref()),
         },
         Command::Blob { cmd } => match cmd {
-            BlobCmd::Classify { hash, class } => {
-                cmd_blob::classify(&repo_root, &hash, &class)
-            }
+            BlobCmd::Classify { hash, class } => cmd_blob::classify(&repo_root, &hash, &class),
             BlobCmd::Pin { hash } => cmd_blob::pin(&repo_root, &hash),
             BlobCmd::Unpin { hash } => cmd_blob::unpin(&repo_root, &hash),
             BlobCmd::Info { hash } => cmd_blob::info(&repo_root, &hash),
@@ -1013,6 +1023,6 @@ fn main() -> anyhow::Result<()> {
                     cmd_search::show(pid, &turn)
                 }
             }
-        },
+        }
     }
 }

@@ -262,7 +262,10 @@ fn ensure_claude_md_edda_section(repo_root: &Path) -> anyhow::Result<()> {
     } else {
         // Create new file with full onboarding template
         fs::write(&claude_md, EDDA_CLAUDE_MD_CREATE.trim_start())?;
-        println!("Created {} with edda decision tracking", claude_md.display());
+        println!(
+            "Created {} with edda decision tracking",
+            claude_md.display()
+        );
     }
     Ok(())
 }
@@ -275,11 +278,7 @@ pub fn doctor(repo_root: &Path) -> anyhow::Result<()> {
     let edda_in_path = which_edda();
     println!(
         "[{}] edda in PATH: {}",
-        if edda_in_path.is_some() {
-            "OK"
-        } else {
-            "WARN"
-        },
+        if edda_in_path.is_some() { "OK" } else { "WARN" },
         edda_in_path.unwrap_or_else(|| "not found".into())
     );
 
@@ -311,11 +310,7 @@ pub fn doctor(repo_root: &Path) -> anyhow::Result<()> {
 fn which_edda() -> Option<String> {
     let path_var = std::env::var("PATH").unwrap_or_default();
     let sep = if cfg!(windows) { ';' } else { ':' };
-    let exe_name = if cfg!(windows) {
-        "edda.exe"
-    } else {
-        "edda"
-    };
+    let exe_name = if cfg!(windows) { "edda.exe" } else { "edda" };
     for dir in path_var.split(sep) {
         let candidate = Path::new(dir).join(exe_name);
         if candidate.exists() {
@@ -345,10 +340,7 @@ mod tests {
         let pre_tool = &settings["hooks"]["PreToolUse"];
         let group = pre_tool.as_array().unwrap().first().unwrap();
         assert!(group.get("matcher").is_some());
-        assert_eq!(
-            group["hooks"][0]["type"].as_str().unwrap(),
-            "command"
-        );
+        assert_eq!(group["hooks"][0]["type"].as_str().unwrap(), "command");
         assert_eq!(
             group["hooks"][0]["command"].as_str().unwrap(),
             "edda hook claude"
@@ -378,10 +370,22 @@ mod tests {
         install(tmp.path(), false).unwrap();
 
         let content = fs::read_to_string(&claude_md).unwrap();
-        assert!(content.starts_with("# My Project"), "existing content preserved");
-        assert!(content.contains("Existing content."), "existing content preserved");
-        assert!(content.contains("edda:decision-tracking"), "edda section appended");
-        assert!(content.contains("edda decide"), "decide instruction present");
+        assert!(
+            content.starts_with("# My Project"),
+            "existing content preserved"
+        );
+        assert!(
+            content.contains("Existing content."),
+            "existing content preserved"
+        );
+        assert!(
+            content.contains("edda:decision-tracking"),
+            "edda section appended"
+        );
+        assert!(
+            content.contains("edda decide"),
+            "decide instruction present"
+        );
     }
 
     #[test]
@@ -397,7 +401,10 @@ mod tests {
 
         // But CLAUDE.md should NOT exist
         let claude_md = tmp.path().join(".claude").join("CLAUDE.md");
-        assert!(!claude_md.exists(), "CLAUDE.md should not be created with --no-claude-md");
+        assert!(
+            !claude_md.exists(),
+            "CLAUDE.md should not be created with --no-claude-md"
+        );
     }
 
     #[test]

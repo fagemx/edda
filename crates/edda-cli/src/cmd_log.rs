@@ -193,21 +193,45 @@ fn format_event_detail(event: &Event) -> String {
             format!("\"{title}\" {labels}")
         }
         "merge" => {
-            let src = event.payload.get("src").and_then(|v| v.as_str()).unwrap_or("");
-            let dst = event.payload.get("dst").and_then(|v| v.as_str()).unwrap_or("");
+            let src = event
+                .payload
+                .get("src")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let dst = event
+                .payload
+                .get("dst")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             format!("{src} -> {dst}")
         }
         "branch_create" => {
-            let name = event.payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let name = event
+                .payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             format!("create {name}")
         }
         "branch_switch" => {
-            let to = event.payload.get("to").and_then(|v| v.as_str()).unwrap_or("");
+            let to = event
+                .payload
+                .get("to")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             format!("switch -> {to}")
         }
         "approval" => {
-            let decision = event.payload.get("decision").and_then(|v| v.as_str()).unwrap_or("");
-            let actor = event.payload.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+            let decision = event
+                .payload
+                .get("decision")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let actor = event
+                .payload
+                .get("actor")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             format!("{decision} by {actor}")
         }
         _ => String::new(),

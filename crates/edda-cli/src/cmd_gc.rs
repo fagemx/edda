@@ -77,8 +77,7 @@ pub fn execute(params: &GcParams) -> anyhow::Result<()> {
     );
 
     // Phase 3: Build candidate list with class-aware priority
-    let cutoff = time::OffsetDateTime::now_utc()
-        - time::Duration::days(i64::from(blob_keep_days));
+    let cutoff = time::OffsetDateTime::now_utc() - time::Duration::days(i64::from(blob_keep_days));
 
     let mut candidates: Vec<GcCandidate> = Vec::new();
 
@@ -170,7 +169,11 @@ pub fn execute(params: &GcParams) -> anyhow::Result<()> {
     if candidates.is_empty() {
         println!("No removable blobs found.");
     } else {
-        let action = if params.archive { "archival" } else { "removal" };
+        let action = if params.archive {
+            "archival"
+        } else {
+            "removal"
+        };
         println!(
             "Candidates for {}:\n  {} blob(s) ({})",
             action,
@@ -178,7 +181,10 @@ pub fn execute(params: &GcParams) -> anyhow::Result<()> {
             format_size(candidate_size)
         );
         // Breakdown by class
-        let noise_count = candidates.iter().filter(|c| c.class == BlobClass::TraceNoise).count();
+        let noise_count = candidates
+            .iter()
+            .filter(|c| c.class == BlobClass::TraceNoise)
+            .count();
         let evidence_count = candidates
             .iter()
             .filter(|c| c.class == BlobClass::DecisionEvidence)
@@ -238,12 +244,17 @@ pub fn execute(params: &GcParams) -> anyhow::Result<()> {
             read_config_u32(&ledger.paths.config_json, "gc.session_keep_days")
                 .unwrap_or(transcript_keep_days)
         });
-        let session_cutoff = time::OffsetDateTime::now_utc()
-            - time::Duration::days(i64::from(session_keep_days));
+        let session_cutoff =
+            time::OffsetDateTime::now_utc() - time::Duration::days(i64::from(session_keep_days));
 
         // Session ledgers: {project_dir}/ledger/{session_id}.jsonl
         let ledger_dir = edda_store::project_dir(&pid).join("ledger");
-        scan_expired_files(&ledger_dir, "jsonl", session_cutoff, &mut session_candidates);
+        scan_expired_files(
+            &ledger_dir,
+            "jsonl",
+            session_cutoff,
+            &mut session_candidates,
+        );
 
         // Index files: {project_dir}/index/{session_id}.jsonl
         let index_dir = edda_store::project_dir(&pid).join("index");
@@ -352,10 +363,7 @@ pub fn execute(params: &GcParams) -> anyhow::Result<()> {
                 freed += size;
                 processed_count += 1;
             }
-            Err(e) => eprintln!(
-                "  warning: failed to remove {}: {e}",
-                path.display()
-            ),
+            Err(e) => eprintln!("  warning: failed to remove {}: {e}", path.display()),
         }
     }
 
@@ -366,10 +374,7 @@ pub fn execute(params: &GcParams) -> anyhow::Result<()> {
                 freed += size;
                 processed_count += 1;
             }
-            Err(e) => eprintln!(
-                "  warning: failed to remove {}: {e}",
-                path.display()
-            ),
+            Err(e) => eprintln!("  warning: failed to remove {}: {e}", path.display()),
         }
     }
 
@@ -399,8 +404,8 @@ fn purge_archive(params: &GcParams) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let cutoff = time::OffsetDateTime::now_utc()
-        - time::Duration::days(i64::from(archive_keep_days));
+    let cutoff =
+        time::OffsetDateTime::now_utc() - time::Duration::days(i64::from(archive_keep_days));
 
     let mut candidates: Vec<(&str, u64)> = Vec::new();
     for blob in &archived {
@@ -424,7 +429,10 @@ fn purge_archive(params: &GcParams) -> anyhow::Result<()> {
     );
 
     if candidates.is_empty() {
-        println!("No expired archived blobs (keep_days={})", archive_keep_days);
+        println!(
+            "No expired archived blobs (keep_days={})",
+            archive_keep_days
+        );
         return Ok(());
     }
 
@@ -620,19 +628,16 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edda_core::event::new_note_event;
     use edda_ledger::blob_store::blob_put;
     use edda_ledger::EddaPaths;
-    use edda_core::event::new_note_event;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn setup_workspace() -> (std::path::PathBuf, EddaPaths) {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tmp = std::env::temp_dir().join(format!(
-            "edda_gc_test_{}_{n}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("edda_gc_test_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let paths = EddaPaths::discover(&tmp);
         edda_ledger::ledger::init_workspace(&paths).unwrap();
@@ -657,9 +662,14 @@ mod tests {
         set_file_time_old(&paths.blobs_dir.join(hex_b));
 
         let params = GcParams {
-            repo_root: &tmp, dry_run: false, keep_days: Some(0),
-            force: true, global: false, archive: false,
-            purge_archive: false, archive_keep_days: None,
+            repo_root: &tmp,
+            dry_run: false,
+            keep_days: Some(0),
+            force: true,
+            global: false,
+            archive: false,
+            purge_archive: false,
+            archive_keep_days: None,
             include_sessions: false,
         };
         execute(&params).unwrap();
@@ -688,9 +698,14 @@ mod tests {
         set_file_time_old(&paths.blobs_dir.join(hex_a));
 
         let params = GcParams {
-            repo_root: &tmp, dry_run: true, keep_days: Some(0),
-            force: true, global: false, archive: false,
-            purge_archive: false, archive_keep_days: None,
+            repo_root: &tmp,
+            dry_run: true,
+            keep_days: Some(0),
+            force: true,
+            global: false,
+            archive: false,
+            purge_archive: false,
+            archive_keep_days: None,
             include_sessions: false,
         };
         execute(&params).unwrap();
@@ -706,9 +721,14 @@ mod tests {
         let ref_a = blob_put(&paths, b"recent orphan").unwrap();
 
         let params = GcParams {
-            repo_root: &tmp, dry_run: false, keep_days: Some(90),
-            force: true, global: false, archive: false,
-            purge_archive: false, archive_keep_days: None,
+            repo_root: &tmp,
+            dry_run: false,
+            keep_days: Some(90),
+            force: true,
+            global: false,
+            archive: false,
+            purge_archive: false,
+            archive_keep_days: None,
             include_sessions: false,
         };
         execute(&params).unwrap();
@@ -731,9 +751,14 @@ mod tests {
         blob_meta::save_blob_meta(&paths.blob_meta_json, &meta).unwrap();
 
         let params = GcParams {
-            repo_root: &tmp, dry_run: false, keep_days: Some(0),
-            force: true, global: false, archive: false,
-            purge_archive: false, archive_keep_days: None,
+            repo_root: &tmp,
+            dry_run: false,
+            keep_days: Some(0),
+            force: true,
+            global: false,
+            archive: false,
+            purge_archive: false,
+            archive_keep_days: None,
             include_sessions: false,
         };
         execute(&params).unwrap();
@@ -757,9 +782,14 @@ mod tests {
         blob_meta::save_blob_meta(&paths.blob_meta_json, &meta).unwrap();
 
         let params = GcParams {
-            repo_root: &tmp, dry_run: false, keep_days: Some(0),
-            force: true, global: false, archive: false,
-            purge_archive: false, archive_keep_days: None,
+            repo_root: &tmp,
+            dry_run: false,
+            keep_days: Some(0),
+            force: true,
+            global: false,
+            archive: false,
+            purge_archive: false,
+            archive_keep_days: None,
             include_sessions: false,
         };
         execute(&params).unwrap();
@@ -789,9 +819,14 @@ mod tests {
 
         // Run GC — both should be removed (both unreferenced + expired)
         let params = GcParams {
-            repo_root: &tmp, dry_run: false, keep_days: Some(0),
-            force: true, global: false, archive: false,
-            purge_archive: false, archive_keep_days: None,
+            repo_root: &tmp,
+            dry_run: false,
+            keep_days: Some(0),
+            force: true,
+            global: false,
+            archive: false,
+            purge_archive: false,
+            archive_keep_days: None,
             include_sessions: false,
         };
         execute(&params).unwrap();
@@ -812,9 +847,14 @@ mod tests {
         set_file_time_old(&paths.blobs_dir.join(hex_a));
 
         let params = GcParams {
-            repo_root: &tmp, dry_run: false, keep_days: Some(0),
-            force: true, global: false, archive: true,
-            purge_archive: false, archive_keep_days: None,
+            repo_root: &tmp,
+            dry_run: false,
+            keep_days: Some(0),
+            force: true,
+            global: false,
+            archive: true,
+            purge_archive: false,
+            archive_keep_days: None,
             include_sessions: false,
         };
         execute(&params).unwrap();
@@ -836,7 +876,7 @@ mod tests {
         // Create blobs totaling > quota
         let _ref_a = blob_put(&paths, &[0u8; 600]).unwrap(); // 600 bytes
         let _ref_b = blob_put(&paths, &[1u8; 600]).unwrap(); // 600 bytes
-        // Total: 1200 bytes
+                                                             // Total: 1200 bytes
 
         // Set quota to 1 byte (force cleanup of all non-protected blobs)
         let config = serde_json::json!({"gc.blob_quota_mb": 0});
@@ -847,9 +887,14 @@ mod tests {
         .unwrap();
 
         let params = GcParams {
-            repo_root: &tmp, dry_run: false, keep_days: Some(9999),
-            force: true, global: false, archive: false,
-            purge_archive: false, archive_keep_days: None,
+            repo_root: &tmp,
+            dry_run: false,
+            keep_days: Some(9999),
+            force: true,
+            global: false,
+            archive: false,
+            purge_archive: false,
+            archive_keep_days: None,
             include_sessions: false,
         };
         execute(&params).unwrap();
@@ -874,9 +919,14 @@ mod tests {
         set_file_time_old(&paths.archive_blobs_dir.join(hex_a));
 
         let params = GcParams {
-            repo_root: &tmp, dry_run: false, keep_days: None,
-            force: true, global: false, archive: false,
-            purge_archive: true, archive_keep_days: Some(0),
+            repo_root: &tmp,
+            dry_run: false,
+            keep_days: None,
+            force: true,
+            global: false,
+            archive: false,
+            purge_archive: true,
+            archive_keep_days: Some(0),
             include_sessions: false,
         };
         execute(&params).unwrap();
@@ -906,9 +956,14 @@ mod tests {
         assert!(!paths.blob_meta_json.exists());
 
         let params = GcParams {
-            repo_root: &tmp, dry_run: false, keep_days: Some(0),
-            force: true, global: false, archive: false,
-            purge_archive: false, archive_keep_days: None,
+            repo_root: &tmp,
+            dry_run: false,
+            keep_days: Some(0),
+            force: true,
+            global: false,
+            archive: false,
+            purge_archive: false,
+            archive_keep_days: None,
             include_sessions: false,
         };
         execute(&params).unwrap();
@@ -930,13 +985,10 @@ mod tests {
 
     fn set_file_time_old(path: &std::path::Path) {
         use std::fs::FileTimes;
-        let old_time = std::time::SystemTime::UNIX_EPOCH
-            + std::time::Duration::from_secs(1_000_000_000);
+        let old_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
         let times = FileTimes::new().set_modified(old_time);
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
         file.set_times(times).unwrap();
     }
 

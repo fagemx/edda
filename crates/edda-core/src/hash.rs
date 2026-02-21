@@ -33,6 +33,8 @@ mod tests {
     fn output_is_64_char_lowercase_hex() {
         let h = sha256_hex(b"test");
         assert_eq!(h.len(), 64);
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(h
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
     }
 }

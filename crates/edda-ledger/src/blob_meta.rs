@@ -192,7 +192,10 @@ mod tests {
 
     #[test]
     fn blob_class_from_str() {
-        assert_eq!("artifact".parse::<BlobClass>().unwrap(), BlobClass::Artifact);
+        assert_eq!(
+            "artifact".parse::<BlobClass>().unwrap(),
+            BlobClass::Artifact
+        );
         assert_eq!(
             "decision_evidence".parse::<BlobClass>().unwrap(),
             BlobClass::DecisionEvidence
@@ -214,9 +217,7 @@ mod tests {
     #[test]
     fn gc_priority_order() {
         assert!(BlobClass::TraceNoise.gc_priority() < BlobClass::DecisionEvidence.gc_priority());
-        assert!(
-            BlobClass::DecisionEvidence.gc_priority() < BlobClass::Artifact.gc_priority()
-        );
+        assert!(BlobClass::DecisionEvidence.gc_priority() < BlobClass::Artifact.gc_priority());
     }
 
     #[test]

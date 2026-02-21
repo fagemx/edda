@@ -5,8 +5,7 @@
 
 /// Static write-back protocol text that teaches agents to use `edda decide` and `edda note`.
 pub fn writeback() -> String {
-    crate::dispatch::render_write_back_protocol("")
-        .unwrap_or_default()
+    crate::dispatch::render_write_back_protocol("").unwrap_or_default()
 }
 
 /// Workspace context rendered from the `.edda/` ledger in `cwd`.

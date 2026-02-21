@@ -21,9 +21,7 @@ pub enum StreamMessage {
         model: Option<String>,
     },
     #[serde(rename = "assistant")]
-    Assistant {
-        message: serde_json::Value,
-    },
+    Assistant { message: serde_json::Value },
     #[serde(rename = "user")]
     User {
         #[serde(default)]
@@ -172,11 +170,10 @@ impl StreamMonitor {
 /// Print a human-readable live line for a stream message.
 fn print_live(msg: &StreamMessage) {
     match msg {
-        StreamMessage::System { model, .. } => {
-            if let Some(m) = model {
-                println!("  🔌 Model: {m}");
-            }
+        StreamMessage::System { model: Some(m), .. } => {
+            println!("  🔌 Model: {m}");
         }
+        StreamMessage::System { model: None, .. } => {}
         StreamMessage::Assistant { message } => {
             // Extract tool_use calls from content array
             if let Some(content) = message.get("content").and_then(|c| c.as_array()) {
@@ -188,17 +185,17 @@ fn print_live(msg: &StreamMessage) {
                             "Write" => input
                                 .and_then(|i| i.get("file_path"))
                                 .and_then(|p| p.as_str())
-                                .map(|p| shorten_path(p))
+                                .map(shorten_path)
                                 .unwrap_or_default(),
                             "Edit" => input
                                 .and_then(|i| i.get("file_path"))
                                 .and_then(|p| p.as_str())
-                                .map(|p| shorten_path(p))
+                                .map(shorten_path)
                                 .unwrap_or_default(),
                             "Read" => input
                                 .and_then(|i| i.get("file_path"))
                                 .and_then(|p| p.as_str())
-                                .map(|p| shorten_path(p))
+                                .map(shorten_path)
                                 .unwrap_or_default(),
                             "Bash" => input
                                 .and_then(|i| i.get("command"))
@@ -330,8 +327,7 @@ mod tests {
 
     #[test]
     fn parse_result_success() {
-        let json =
-            r#"{"type":"result","subtype":"success","total_cost_usd":0.42,"error":null}"#;
+        let json = r#"{"type":"result","subtype":"success","total_cost_usd":0.42,"error":null}"#;
         let msg: StreamMessage = serde_json::from_str(json).unwrap();
         match msg {
             StreamMessage::Result {
@@ -381,7 +377,9 @@ mod tests {
             result_text: None,
         };
         let r = classify_result(&monitor, Some(0));
-        assert!(matches!(r, PhaseResult::AgentDone { cost_usd: Some(c), .. } if (c - 0.5).abs() < 0.001));
+        assert!(
+            matches!(r, PhaseResult::AgentDone { cost_usd: Some(c), .. } if (c - 0.5).abs() < 0.001)
+        );
     }
 
     #[test]
@@ -506,7 +504,13 @@ mod tests {
         // Tee file captured raw lines (drop monitor to flush BufWriter)
         drop(monitor);
         let content = std::fs::read_to_string(&tee_path).unwrap();
-        assert!(content.contains("line_one"), "tee should capture raw lines: {content}");
-        assert!(content.contains("line_two"), "tee should capture both lines: {content}");
+        assert!(
+            content.contains("line_one"),
+            "tee should capture raw lines: {content}"
+        );
+        assert!(
+            content.contains("line_two"),
+            "tee should capture both lines: {content}"
+        );
     }
 }

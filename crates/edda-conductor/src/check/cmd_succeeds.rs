@@ -75,9 +75,7 @@ pub async fn check_cmd_succeeds(cmd: &str, timeout_sec: u64, cwd: &Path) -> Chec
                 start.elapsed(),
             )
         }
-        Ok(Err(e)) => {
-            CheckOutput::failed(format!("spawn error: {e}"), start.elapsed())
-        }
+        Ok(Err(e)) => CheckOutput::failed(format!("spawn error: {e}"), start.elapsed()),
         Err(_) => CheckOutput::failed(
             format!("command timed out after {timeout_sec}s: {cmd}"),
             start.elapsed(),
@@ -131,6 +129,9 @@ mod tests {
         let out = check_cmd_succeeds(cmd, 10, dir.path()).await;
         assert!(!out.passed);
         let detail = out.detail.unwrap();
-        assert!(!detail.contains("sk-ant"), "secret should be masked: {detail}");
+        assert!(
+            !detail.contains("sk-ant"),
+            "secret should be masked: {detail}"
+        );
     }
 }

@@ -18,7 +18,9 @@ impl WorkspaceLock {
             .read(true)
             .write(true)
             .open(&paths.lock_file)
-            .map_err(|e| anyhow::anyhow!("cannot open lock file {}: {}", paths.lock_file.display(), e))?;
+            .map_err(|e| {
+                anyhow::anyhow!("cannot open lock file {}: {}", paths.lock_file.display(), e)
+            })?;
 
         file.try_lock_exclusive().map_err(|_| {
             anyhow::anyhow!(

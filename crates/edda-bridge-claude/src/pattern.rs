@@ -168,7 +168,11 @@ mod tests {
 
     #[test]
     fn match_glob_test_files() {
-        let patterns = vec![sample_pattern("test-no-db", &["**/*.test.*"], "no direct DB")];
+        let patterns = vec![sample_pattern(
+            "test-no-db",
+            &["**/*.test.*"],
+            "no direct DB",
+        )];
         let matched = match_patterns(&patterns, "src/foo.test.ts");
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].id, "test-no-db");
@@ -176,7 +180,11 @@ mod tests {
 
     #[test]
     fn no_match_non_test_files() {
-        let patterns = vec![sample_pattern("test-no-db", &["**/*.test.*"], "no direct DB")];
+        let patterns = vec![sample_pattern(
+            "test-no-db",
+            &["**/*.test.*"],
+            "no direct DB",
+        )];
         let matched = match_patterns(&patterns, "src/foo.ts");
         assert!(matched.is_empty());
     }

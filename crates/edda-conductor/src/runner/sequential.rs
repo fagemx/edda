@@ -1,5 +1,5 @@
 use crate::agent::budget::BudgetTracker;
-use crate::agent::launcher::{AgentLauncher, PhaseResult, phase_session_id_attempt};
+use crate::agent::launcher::{phase_session_id_attempt, AgentLauncher, PhaseResult};
 use crate::check::engine::{CheckEngine, CheckRunResult};
 use crate::plan::schema::{CheckSpec, OnFail, Plan};
 use crate::plan::topo::topo_sort;
@@ -10,8 +10,8 @@ use crate::state::derive::{
     detect_stale_phases, find_next_phase, is_plan_blocked, is_plan_complete, update_plan_status,
 };
 use crate::state::machine::{
-    CheckResult, CheckStatus, ErrorInfo, ErrorType, PhaseStatus, PhaseUpdate, PlanState,
-    PlanStatus, transition,
+    transition, CheckResult, CheckStatus, ErrorInfo, ErrorType, PhaseStatus, PhaseUpdate,
+    PlanState, PlanStatus,
 };
 use crate::state::persist::save_state;
 use anyhow::Result;
@@ -20,6 +20,7 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Run a plan sequentially. The main conductor loop.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_plan(
     plan: &Plan,
     state: &mut PlanState,
@@ -76,7 +77,8 @@ pub async fn run_plan(
             if interactive {
                 match prompt_blocked_action(&failed_id) {
                     BlockedAction::Retry => {
-                        let current = state.get_phase(&failed_id)
+                        let current = state
+                            .get_phase(&failed_id)
                             .map(|p| p.status)
                             .unwrap_or(PhaseStatus::Failed);
                         let _ = transition(state, &failed_id, current, PhaseStatus::Pending, None);
@@ -103,8 +105,16 @@ pub async fn run_plan(
                         state.aborted_at = Some(now_rfc3339());
                         save_state(cwd, state)?;
                         event_log.record(Event::PlanAborted {
-                            phases_passed: state.phases.iter().filter(|p| p.status == PhaseStatus::Passed).count(),
-                            phases_pending: state.phases.iter().filter(|p| p.status == PhaseStatus::Pending).count(),
+                            phases_passed: state
+                                .phases
+                                .iter()
+                                .filter(|p| p.status == PhaseStatus::Passed)
+                                .count(),
+                            phases_pending: state
+                                .phases
+                                .iter()
+                                .filter(|p| p.status == PhaseStatus::Pending)
+                                .count(),
                         });
                         println!("  ✗ Plan aborted.");
                         break;
@@ -195,14 +205,23 @@ pub async fn run_plan(
 
         // 5. Process result
         match result {
-            PhaseResult::AgentDone { cost_usd, result_text } => {
+            PhaseResult::AgentDone {
+                cost_usd,
+                result_text,
+            } => {
                 if let Some(cost) = cost_usd {
                     budget.record(cost);
                     state.total_cost_usd += cost;
                 }
 
                 // running → checking
-                transition(state, &phase_id, PhaseStatus::Running, PhaseStatus::Checking, None)?;
+                transition(
+                    state,
+                    &phase_id,
+                    PhaseStatus::Running,
+                    PhaseStatus::Checking,
+                    None,
+                )?;
                 save_state(cwd, state)?;
 
                 // Run checks
@@ -226,7 +245,10 @@ pub async fn run_plan(
                         }),
                     )?;
                     let elapsed_ms = phase_start.elapsed().as_millis() as u64;
-                    println!("  ✓ Phase \"{phase_id}\" passed ({})", format_elapsed(phase_start.elapsed()));
+                    println!(
+                        "  ✓ Phase \"{phase_id}\" passed ({})",
+                        format_elapsed(phase_start.elapsed())
+                    );
 
                     // Record to edda ledger
                     edda::record_phase_done(cwd, &phase_id, result_text.as_deref(), cost_usd);
@@ -265,7 +287,16 @@ pub async fn run_plan(
                         duration_ms: elapsed_ms,
                         error: err_msg.to_string(),
                     });
-                    handle_on_fail(plan, phase, state, &phase_id, &check_result, notifier, &mut event_log).await;
+                    handle_on_fail(
+                        plan,
+                        phase,
+                        state,
+                        &phase_id,
+                        &check_result,
+                        notifier,
+                        &mut event_log,
+                    )
+                    .await;
                 }
             }
             PhaseResult::Timeout => {
@@ -286,7 +317,10 @@ pub async fn run_plan(
                     }),
                 )?;
                 let elapsed_ms = phase_start.elapsed().as_millis() as u64;
-                println!("  ⏰ Phase \"{phase_id}\" timed out ({})", format_elapsed(phase_start.elapsed()));
+                println!(
+                    "  ⏰ Phase \"{phase_id}\" timed out ({})",
+                    format_elapsed(phase_start.elapsed())
+                );
                 edda::record_phase_failed(cwd, &phase_id, "timed out");
                 event_log.record(Event::PhaseFailed {
                     phase_id: phase_id.clone(),
@@ -313,7 +347,10 @@ pub async fn run_plan(
                     }),
                 )?;
                 let elapsed_ms = phase_start.elapsed().as_millis() as u64;
-                println!("  ✗ Phase \"{phase_id}\" crashed ({}): {error}", format_elapsed(phase_start.elapsed()));
+                println!(
+                    "  ✗ Phase \"{phase_id}\" crashed ({}): {error}",
+                    format_elapsed(phase_start.elapsed())
+                );
                 edda::record_phase_failed(cwd, &phase_id, &error);
                 event_log.record(Event::PhaseFailed {
                     phase_id: phase_id.clone(),
@@ -327,7 +364,16 @@ pub async fn run_plan(
                     results: vec![],
                     error: None,
                 };
-                handle_on_fail(plan, phase, state, &phase_id, &empty_result, notifier, &mut event_log).await;
+                handle_on_fail(
+                    plan,
+                    phase,
+                    state,
+                    &phase_id,
+                    &empty_result,
+                    notifier,
+                    &mut event_log,
+                )
+                .await;
             }
             PhaseResult::MaxTurns { cost_usd } | PhaseResult::BudgetExceeded { cost_usd } => {
                 if let Some(cost) = cost_usd {
@@ -417,7 +463,13 @@ async fn handle_on_fail(
                 }
             };
             if should_retry {
-                let _ = transition(state, phase_id, PhaseStatus::Failed, PhaseStatus::Pending, None);
+                let _ = transition(
+                    state,
+                    phase_id,
+                    PhaseStatus::Failed,
+                    PhaseStatus::Pending,
+                    None,
+                );
                 println!("  ↻ Auto-retrying ({attempts}/{max})");
             } else {
                 notifier
@@ -441,8 +493,16 @@ async fn handle_on_fail(
             state.plan_status = PlanStatus::Aborted;
             state.aborted_at = Some(now_rfc3339());
             event_log.record(Event::PlanAborted {
-                phases_passed: state.phases.iter().filter(|p| p.status == PhaseStatus::Passed).count(),
-                phases_pending: state.phases.iter().filter(|p| p.status == PhaseStatus::Pending).count(),
+                phases_passed: state
+                    .phases
+                    .iter()
+                    .filter(|p| p.status == PhaseStatus::Passed)
+                    .count(),
+                phases_pending: state
+                    .phases
+                    .iter()
+                    .filter(|p| p.status == PhaseStatus::Pending)
+                    .count(),
             });
             println!("  → Plan aborted (on_fail: abort)");
         }
@@ -457,10 +517,7 @@ async fn handle_on_fail(
 }
 
 /// Build the full prompt for a phase, including retry context if any.
-fn build_phase_prompt(
-    phase: &crate::plan::schema::Phase,
-    retry_context: Option<&str>,
-) -> String {
+fn build_phase_prompt(phase: &crate::plan::schema::Phase, retry_context: Option<&str>) -> String {
     let mut prompt = String::new();
     if let Some(ctx) = &phase.context {
         prompt.push_str(ctx);
@@ -528,7 +585,12 @@ fn format_check_failures(results: &[CheckResult]) -> String {
 }
 
 /// Build plan progress context with edda decision history for --append-system-prompt.
-fn build_plan_context_with_edda(plan: &Plan, state: &PlanState, current_phase: &str, cwd: &Path) -> String {
+fn build_plan_context_with_edda(
+    plan: &Plan,
+    state: &PlanState,
+    current_phase: &str,
+    cwd: &Path,
+) -> String {
     let base = build_plan_context(plan, state, current_phase);
     let edda_ctx = edda::get_context(cwd);
     if edda_ctx.is_empty() {
@@ -984,8 +1046,14 @@ phases:
         let state = PlanState::from_plan(&plan, "test.yaml");
         let ctx = build_plan_context(&plan, &state, "db");
 
-        assert!(ctx.contains("## Purpose"), "missing Purpose section in:\n{ctx}");
-        assert!(ctx.contains("Simple todo app"), "missing purpose text in:\n{ctx}");
+        assert!(
+            ctx.contains("## Purpose"),
+            "missing Purpose section in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("Simple todo app"),
+            "missing purpose text in:\n{ctx}"
+        );
         // Purpose comes before Plan
         let purpose_pos = ctx.find("## Purpose").unwrap();
         let plan_pos = ctx.find("## Plan:").unwrap();
@@ -999,8 +1067,14 @@ phases:
         let state = PlanState::from_plan(&plan, "test.yaml");
         let ctx = build_plan_context(&plan, &state, "a");
 
-        assert!(!ctx.contains("## Purpose"), "should not have Purpose when not set");
-        assert!(ctx.starts_with("## Plan:"), "should start with Plan when no purpose");
+        assert!(
+            !ctx.contains("## Purpose"),
+            "should not have Purpose when not set"
+        );
+        assert!(
+            ctx.starts_with("## Plan:"),
+            "should start with Plan when no purpose"
+        );
     }
 
     #[test]
@@ -1109,7 +1183,12 @@ phases:
     prompt: "crash"
 "#;
         let launcher = MockLauncher::new();
-        launcher.set_results("a", vec![PhaseResult::AgentCrash { error: "boom".into() }]);
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentCrash {
+                error: "boom".into(),
+            }],
+        );
         let (_state, dir) = run_test_plan_with_dir(yaml, &launcher).await;
 
         let events = read_events(dir.path(), "test");
@@ -1155,6 +1234,9 @@ phases:
         let status = read_runner_status(dir.path(), "test").expect("runner-status.json missing");
         assert_eq!(status["plan"], "test");
         assert_eq!(status["status"], "completed");
-        assert!(status["completed"].as_array().unwrap().contains(&serde_json::json!("a")));
+        assert!(status["completed"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("a")));
     }
 }

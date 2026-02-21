@@ -528,8 +528,7 @@ mod tests {
 
     #[test]
     fn rebuild_event_fields() {
-        let event =
-            new_rebuild_event("main", None, "all", None, "rebuild views").unwrap();
+        let event = new_rebuild_event("main", None, "all", None, "rebuild views").unwrap();
         assert_eq!(event.event_type, "rebuild");
         assert_eq!(event.payload["scope"], "all");
         assert_eq!(event.payload["reason"], "rebuild views");
@@ -635,14 +634,7 @@ mod tests {
 
     #[test]
     fn event_round_trip_serialize() {
-        let event = new_note_event(
-            "main",
-            None,
-            "user",
-            "test",
-            &["todo".to_string()],
-        )
-        .unwrap();
+        let event = new_note_event("main", None, "user", "test", &["todo".to_string()]).unwrap();
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: Event = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.event_id, event.event_id);
@@ -719,7 +711,7 @@ mod tests {
 
     #[test]
     fn provenance_included_in_hash() {
-        use crate::types::{Provenance, rel};
+        use crate::types::{rel, Provenance};
 
         let e1 = new_note_event("main", None, "user", "test", &[]).unwrap();
         let mut e2 = new_note_event("main", None, "user", "test", &[]).unwrap();
@@ -741,7 +733,7 @@ mod tests {
 
     #[test]
     fn provenance_round_trip_serialize() {
-        use crate::types::{Provenance, rel};
+        use crate::types::{rel, Provenance};
 
         let mut event = new_note_event("main", None, "user", "test", &[]).unwrap();
         event.refs.provenance.push(Provenance {

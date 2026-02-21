@@ -221,12 +221,7 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
             dispatch_session_start(&project_id, &session_id, &cwd, digest_warning.as_deref())
         }
         "UserPromptSubmit" => {
-            dispatch_user_prompt_submit(
-                &project_id,
-                &session_id,
-                &transcript_path,
-                &cwd,
-            )
+            dispatch_user_prompt_submit(&project_id, &session_id, &transcript_path, &cwd)
         }
         "PreToolUse" => dispatch_pre_tool_use(&raw, &cwd),
         "PostToolUse" => dispatch_post_tool_use(&raw, &project_id, &session_id),
@@ -267,14 +262,19 @@ fn ingest_and_build_pack(project_id: &str, session_id: &str, transcript_path: &s
     let _ = edda_store::ensure_dirs(project_id);
 
     // Ingest transcript delta with index generation
-    let index_path = project_dir.join("index").join(format!("{session_id}.jsonl"));
+    let index_path = project_dir
+        .join("index")
+        .join(format!("{session_id}.jsonl"));
     let sid = session_id.to_string();
     let idx_path = index_path.clone();
-    let index_writer =
-        move |_raw: &str, offset: u64, len: u64, parsed: &serde_json::Value| -> anyhow::Result<()> {
-            let record = edda_index::build_index_record(&sid, offset, len, parsed);
-            edda_index::append_index(&idx_path, &record)
-        };
+    let index_writer = move |_raw: &str,
+                             offset: u64,
+                             len: u64,
+                             parsed: &serde_json::Value|
+          -> anyhow::Result<()> {
+        let record = edda_index::build_index_record(&sid, offset, len, parsed);
+        edda_index::append_index(&idx_path, &record)
+    };
 
     let _ = edda_transcript::ingest_transcript_delta(
         &project_dir,
@@ -367,8 +367,7 @@ fn dispatch_with_workspace_only(
 
     if first_peers {
         // First time seeing peers — inject full coordination protocol
-        if let Some(coord) =
-            crate::peers::render_coordination_protocol(project_id, session_id, cwd)
+        if let Some(coord) = crate::peers::render_coordination_protocol(project_id, session_id, cwd)
         {
             ws = Some(match ws {
                 Some(w) => format!("{w}\n\n{coord}"),
@@ -556,8 +555,11 @@ fn should_nudge(project_id: &str, session_id: &str) -> bool {
         .join(format!("nudge_ts.{session_id}"));
     match fs::read_to_string(&path) {
         Ok(ts) => {
-            let last = time::OffsetDateTime::parse(&ts.trim().to_string(), &time::format_description::well_known::Rfc3339)
-                .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
+            let last = time::OffsetDateTime::parse(
+                ts.trim(),
+                &time::format_description::well_known::Rfc3339,
+            )
+            .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
             let elapsed = time::OffsetDateTime::now_utc() - last;
             elapsed.whole_seconds() >= nudge_cooldown_secs()
         }
@@ -703,7 +705,14 @@ fn dispatch_session_end(
     let signal_count = read_counter(project_id, session_id, "signal_count");
 
     // 2c. Snapshot session digest for next session's "## Previous Session"
-    crate::digest::write_prev_digest_from_store(project_id, session_id, cwd, nudge_count, decide_count, signal_count);
+    crate::digest::write_prev_digest_from_store(
+        project_id,
+        session_id,
+        cwd,
+        nudge_count,
+        decide_count,
+        signal_count,
+    );
 
     // 3. Clean up session-scoped state files
     cleanup_session_state(project_id, session_id, peers_active);
@@ -818,7 +827,13 @@ fn run_auto_digest(project_id: &str, current_session_id: &str, cwd: &str) -> Opt
         Err(_) => read_workspace_config_bool(cwd, "bridge.digest_failed_cmds").unwrap_or(true),
     };
 
-    match crate::digest::digest_previous_sessions_with_opts(project_id, current_session_id, cwd, lock_timeout_ms, digest_failed_cmds) {
+    match crate::digest::digest_previous_sessions_with_opts(
+        project_id,
+        current_session_id,
+        cwd,
+        lock_timeout_ms,
+        digest_failed_cmds,
+    ) {
         crate::digest::DigestResult::Written { event_id } => {
             eprintln!("[edda] digested previous session → {event_id}");
             None
@@ -838,7 +853,10 @@ const LAST_ASSISTANT_MAX_CHARS: usize = 500;
 
 /// Extract the last assistant message from the most recent prior session's transcript.
 /// Returns None if no prior session exists or no assistant text found.
-fn extract_prior_session_last_message(project_id: &str, current_session_id: &str) -> Option<String> {
+fn extract_prior_session_last_message(
+    project_id: &str,
+    current_session_id: &str,
+) -> Option<String> {
     let transcripts_dir = edda_store::project_dir(project_id).join("transcripts");
     if !transcripts_dir.is_dir() {
         return None;
@@ -1012,7 +1030,9 @@ fn read_workspace_config_bool(cwd: &str, key: &str) -> Option<bool> {
 
 /// Read a usize value from `.edda/config.json` in the workspace.
 fn read_workspace_config_usize(cwd: &str, key: &str) -> Option<usize> {
-    read_workspace_config_value(cwd, key)?.as_u64().map(|v| v as usize)
+    read_workspace_config_value(cwd, key)?
+        .as_u64()
+        .map(|v| v as usize)
 }
 
 /// Read a raw JSON value from `.edda/config.json` using dot-notation keys.
@@ -1031,10 +1051,7 @@ fn read_workspace_config_value(cwd: &str, key: &str) -> Option<serde_json::Value
     Some(current)
 }
 
-fn dispatch_pre_tool_use(
-    raw: &serde_json::Value,
-    cwd: &str,
-) -> anyhow::Result<HookResult> {
+fn dispatch_pre_tool_use(raw: &serde_json::Value, cwd: &str) -> anyhow::Result<HookResult> {
     let auto_approve = std::env::var("EDDA_CLAUDE_AUTO_APPROVE").unwrap_or_else(|_| "1".into());
 
     // Pattern matching (only for Edit/Write)
@@ -1157,7 +1174,9 @@ fn match_tool_patterns(raw: &serde_json::Value, cwd: &str) -> Option<String> {
 }
 
 pub(crate) fn read_hot_pack(project_id: &str) -> Option<String> {
-    let pack_path = edda_store::project_dir(project_id).join("packs").join("hot.md");
+    let pack_path = edda_store::project_dir(project_id)
+        .join("packs")
+        .join("hot.md");
     fs::read_to_string(&pack_path).ok()
 }
 
@@ -1260,13 +1279,19 @@ mod tests {
         let stdin = r#"{"session_id":"s1","hook_event_name":"SessionStart","cwd":".","transcript_path":"","permission_mode":"default"}"#;
         let result = hook_entrypoint_from_stdin(stdin).unwrap();
         // Write-back protocol always fires, so there should be output
-        assert!(result.stdout.is_some(), "write-back protocol should always inject");
+        assert!(
+            result.stdout.is_some(),
+            "write-back protocol should always inject"
+        );
         let output: serde_json::Value =
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
         let ctx = output["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
-        assert!(ctx.contains("Write-Back Protocol"), "should contain write-back protocol");
+        assert!(
+            ctx.contains("Write-Back Protocol"),
+            "should contain write-back protocol"
+        );
         assert!(result.stderr.is_none());
         std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
         std::env::remove_var("EDDA_PLANS_DIR");
@@ -1281,10 +1306,7 @@ mod tests {
         assert!(result.stdout.is_some());
         let output: serde_json::Value =
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
-        assert_eq!(
-            output["hookSpecificOutput"]["permissionDecision"],
-            "allow"
-        );
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     #[test]
@@ -1295,10 +1317,7 @@ mod tests {
         assert!(result.stdout.is_some());
         let output: serde_json::Value =
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
-        assert_eq!(
-            output["hookSpecificOutput"]["permissionDecision"],
-            "allow"
-        );
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
     }
 
     #[test]
@@ -1461,13 +1480,11 @@ mod tests {
 
         // Save session signals (tasks, files, commits)
         let signals = SessionSignals {
-            tasks: vec![
-                TaskSnapshot {
-                    id: "1".into(),
-                    subject: "Fix bug".into(),
-                    status: "in_progress".into(),
-                },
-            ],
+            tasks: vec![TaskSnapshot {
+                id: "1".into(),
+                subject: "Fix bug".into(),
+                status: "in_progress".into(),
+            }],
             files_modified: vec![FileEditCount {
                 path: "/repo/crates/foo/src/lib.rs".into(),
                 count: 3,
@@ -1908,8 +1925,14 @@ mod tests {
         let ctx = output["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
-        assert!(ctx.contains("edda decide"), "nudge should mention edda decide");
-        assert!(ctx.contains("switch to postgres"), "nudge should quote commit msg");
+        assert!(
+            ctx.contains("edda decide"),
+            "nudge should mention edda decide"
+        );
+        assert!(
+            ctx.contains("switch to postgres"),
+            "nudge should quote commit msg"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1933,7 +1956,10 @@ mod tests {
             "tool_input": { "command": "git commit -m \"feat: add redis cache\"" }
         });
         let result = dispatch_post_tool_use(&raw, pid, sid).unwrap();
-        assert!(result.stdout.is_some(), "should nudge after decide (no global suppression)");
+        assert!(
+            result.stdout.is_some(),
+            "should nudge after decide (no global suppression)"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1958,7 +1984,10 @@ mod tests {
             "tool_input": { "command": "git commit -m \"feat: second commit\"" }
         });
         let result2 = dispatch_post_tool_use(&raw2, pid, sid).unwrap();
-        assert!(result2.stdout.is_none(), "second commit should be suppressed by cooldown");
+        assert!(
+            result2.stdout.is_none(),
+            "second commit should be suppressed by cooldown"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -1974,8 +2003,15 @@ mod tests {
             "tool_input": { "command": "edda decide \"db=postgres\" --reason \"need JSONB\"" }
         });
         let result = dispatch_post_tool_use(&raw, pid, sid).unwrap();
-        assert!(result.stdout.is_none(), "self-record should not produce output");
-        assert_eq!(read_counter(pid, sid, "decide_count"), 1, "decide_count should be incremented");
+        assert!(
+            result.stdout.is_none(),
+            "self-record should not produce output"
+        );
+        assert_eq!(
+            read_counter(pid, sid, "decide_count"),
+            1,
+            "decide_count should be incremented"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -2071,7 +2107,10 @@ mod tests {
             "tool_input": { "command": "git commit -m \"feat: second\"" }
         });
         let result2 = dispatch_post_tool_use(&raw2, pid, sid).unwrap();
-        assert!(result2.stdout.is_some(), "should produce nudge after cooldown reset");
+        assert!(
+            result2.stdout.is_some(),
+            "should produce nudge after cooldown reset"
+        );
         assert_eq!(read_counter(pid, sid, "nudge_count"), 2);
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -2239,15 +2278,24 @@ mod tests {
 
         // Session B (s2) dispatches UserPromptSubmit — should see the binding
         let result = dispatch_user_prompt_submit(pid, "s2", "", cwd.to_str().unwrap()).unwrap();
-        assert!(result.stdout.is_some(), "should return output (not dedup-skipped)");
+        assert!(
+            result.stdout.is_some(),
+            "should return output (not dedup-skipped)"
+        );
 
         let output: serde_json::Value =
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
         let ctx = output["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap_or("");
-        assert!(ctx.contains("db.engine"), "should contain binding key, got:\n{ctx}");
-        assert!(ctx.contains("postgres"), "should contain binding value, got:\n{ctx}");
+        assert!(
+            ctx.contains("db.engine"),
+            "should contain binding key, got:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("postgres"),
+            "should contain binding value, got:\n{ctx}"
+        );
 
         crate::peers::remove_heartbeat(pid, "s1");
         crate::peers::remove_heartbeat(pid, "s2");
@@ -2275,7 +2323,10 @@ mod tests {
 
         // Second call with identical state — should be dedup-skipped
         let r2 = dispatch_user_prompt_submit(pid, "dedup-sess", "", cwd.to_str().unwrap()).unwrap();
-        assert!(r2.stdout.is_none(), "second call should be dedup-skipped (empty)");
+        assert!(
+            r2.stdout.is_none(),
+            "second call should be dedup-skipped (empty)"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
         let _ = fs::remove_dir_all(&cwd);
@@ -2304,7 +2355,10 @@ mod tests {
         let ctx = output["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap_or("");
-        assert!(ctx.contains("GraphQL"), "solo session should see binding value, got:\n{ctx}");
+        assert!(
+            ctx.contains("GraphQL"),
+            "solo session should see binding value, got:\n{ctx}"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
         let _ = fs::remove_dir_all(&cwd);
@@ -2371,9 +2425,12 @@ mod tests {
         let _ = dispatch_session_end(pid, "s1", "", cwd.to_str().unwrap(), false);
 
         // Read coordination.jsonl and check no unclaim for s1
-        let coord_path = edda_store::project_dir(pid).join("state").join("coordination.jsonl");
+        let coord_path = edda_store::project_dir(pid)
+            .join("state")
+            .join("coordination.jsonl");
         let content = fs::read_to_string(&coord_path).unwrap_or_default();
-        let unclaim_count = content.lines()
+        let unclaim_count = content
+            .lines()
             .filter(|l| l.contains("\"unclaim\"") && l.contains("s1"))
             .count();
         assert_eq!(unclaim_count, 0, "no unclaim when peers_active=false");
@@ -2383,7 +2440,8 @@ mod tests {
         let _ = dispatch_session_end(pid, "s3", "", cwd.to_str().unwrap(), true);
 
         let content2 = fs::read_to_string(&coord_path).unwrap_or_default();
-        let unclaim_s3 = content2.lines()
+        let unclaim_s3 = content2
+            .lines()
             .filter(|l| l.contains("\"unclaim\"") && l.contains("s3"))
             .count();
         assert!(unclaim_s3 > 0, "should have unclaim when peers_active=true");
@@ -2423,9 +2481,18 @@ mod tests {
         assert!(result.is_ok(), "session_end should not error");
 
         // Counter files should be cleaned up
-        assert!(!state_dir.join(format!("decide_count.{sid}")).exists(), "decide_count should be cleaned");
-        assert!(!state_dir.join(format!("nudge_count.{sid}")).exists(), "nudge_count should be cleaned");
-        assert!(!state_dir.join(format!("signal_count.{sid}")).exists(), "signal_count should be cleaned");
+        assert!(
+            !state_dir.join(format!("decide_count.{sid}")).exists(),
+            "decide_count should be cleaned"
+        );
+        assert!(
+            !state_dir.join(format!("nudge_count.{sid}")).exists(),
+            "nudge_count should be cleaned"
+        );
+        assert!(
+            !state_dir.join(format!("signal_count.{sid}")).exists(),
+            "signal_count should be cleaned"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
         let _ = fs::remove_dir_all(&cwd);
@@ -2450,7 +2517,9 @@ mod tests {
         let signals = crate::signals::SessionSignals::default();
         crate::peers::write_heartbeat(pid, "peer-a", &signals, Some("billing"));
 
-        let result = dispatch_with_workspace_only(pid, sid, cwd.to_str().unwrap(), "UserPromptSubmit").unwrap();
+        let result =
+            dispatch_with_workspace_only(pid, sid, cwd.to_str().unwrap(), "UserPromptSubmit")
+                .unwrap();
         assert!(result.stdout.is_some(), "should return output");
 
         let output: serde_json::Value =
@@ -2467,7 +2536,11 @@ mod tests {
         let state_dir = edda_store::project_dir(pid).join("state");
         let count_file = state_dir.join(format!("peer_count.{sid}"));
         assert!(count_file.exists(), "peer_count file should be created");
-        let count: usize = fs::read_to_string(&count_file).unwrap().trim().parse().unwrap();
+        let count: usize = fs::read_to_string(&count_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         assert_eq!(count, 1, "peer_count should be 1");
 
         crate::peers::remove_heartbeat(pid, "peer-a");
@@ -2496,7 +2569,9 @@ mod tests {
         let signals = crate::signals::SessionSignals::default();
         crate::peers::write_heartbeat(pid, "peer-b", &signals, Some("auth"));
 
-        let result = dispatch_with_workspace_only(pid, sid, cwd.to_str().unwrap(), "UserPromptSubmit").unwrap();
+        let result =
+            dispatch_with_workspace_only(pid, sid, cwd.to_str().unwrap(), "UserPromptSubmit")
+                .unwrap();
         assert!(result.stdout.is_some(), "should return output");
 
         let output: serde_json::Value =
@@ -2532,8 +2607,15 @@ mod tests {
 
         let state_dir = edda_store::project_dir(pid).join("state");
         let count_file = state_dir.join(format!("peer_count.{sid}"));
-        assert!(count_file.exists(), "peer_count file should be created even for solo");
-        let count: usize = fs::read_to_string(&count_file).unwrap().trim().parse().unwrap();
+        assert!(
+            count_file.exists(),
+            "peer_count file should be created even for solo"
+        );
+        let count: usize = fs::read_to_string(&count_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
         assert_eq!(count, 0, "peer_count should be 0 for solo session");
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));

@@ -105,8 +105,20 @@ mod tests {
         let paths = EddaPaths::discover(&tmp);
         paths.ensure_layout().unwrap();
 
-        let t1 = make_tombstone("abc123", DeleteReason::Retention, BlobClass::TraceNoise, false, Some(1024));
-        let t2 = make_tombstone("def456", DeleteReason::Quota, BlobClass::DecisionEvidence, false, Some(2048));
+        let t1 = make_tombstone(
+            "abc123",
+            DeleteReason::Retention,
+            BlobClass::TraceNoise,
+            false,
+            Some(1024),
+        );
+        let t2 = make_tombstone(
+            "def456",
+            DeleteReason::Quota,
+            BlobClass::DecisionEvidence,
+            false,
+            Some(2048),
+        );
 
         append_tombstone(&paths, &t1).unwrap();
         append_tombstone(&paths, &t2).unwrap();

@@ -10,20 +10,14 @@ pub fn canonical_json_bytes(value: &Value) -> Vec<u8> {
 fn sort_value(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
-            let mut pairs: Vec<(&String, Value)> = map
-                .iter()
-                .map(|(k, v)| (k, sort_value(v)))
-                .collect();
+            let mut pairs: Vec<(&String, Value)> =
+                map.iter().map(|(k, v)| (k, sort_value(v))).collect();
             pairs.sort_by(|a, b| a.0.cmp(b.0));
-            let sorted_map: serde_json::Map<String, Value> = pairs
-                .into_iter()
-                .map(|(k, v)| (k.clone(), v))
-                .collect();
+            let sorted_map: serde_json::Map<String, Value> =
+                pairs.into_iter().map(|(k, v)| (k.clone(), v)).collect();
             Value::Object(sorted_map)
         }
-        Value::Array(arr) => {
-            Value::Array(arr.iter().map(sort_value).collect())
-        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sort_value).collect()),
         other => other.clone(),
     }
 }
@@ -42,8 +36,7 @@ mod tests {
 
     #[test]
     fn nested_objects_sorted() {
-        let input: Value =
-            serde_json::from_str(r#"{"b":{"z":1,"a":2},"a":1}"#).unwrap();
+        let input: Value = serde_json::from_str(r#"{"b":{"z":1,"a":2},"a":1}"#).unwrap();
         let bytes = canonical_json_bytes(&input);
         let output = String::from_utf8(bytes).unwrap();
         assert_eq!(output, r#"{"a":1,"b":{"a":2,"z":1}}"#);

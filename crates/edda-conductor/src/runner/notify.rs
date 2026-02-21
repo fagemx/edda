@@ -19,6 +19,12 @@ pub struct CollectNotifier {
     messages: std::sync::Mutex<Vec<String>>,
 }
 
+impl Default for CollectNotifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CollectNotifier {
     pub fn new() -> Self {
         Self {

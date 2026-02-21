@@ -59,7 +59,9 @@ pub fn build_turns(
         .unwrap_or(DEFAULT_PACK_TURNS);
     let max_turns = max_turns.min(pack_turns);
 
-    let index_path = project_dir.join("index").join(format!("{session_id}.jsonl"));
+    let index_path = project_dir
+        .join("index")
+        .join(format!("{session_id}.jsonl"));
     let records = read_index_tail(&index_path, tail_lines, tail_bytes)?;
 
     if records.is_empty() {
@@ -67,10 +69,8 @@ pub fn build_turns(
     }
 
     // Build lookup by uuid
-    let by_uuid: HashMap<String, &IndexRecordV1> = records
-        .iter()
-        .map(|r| (r.uuid.clone(), r))
-        .collect();
+    let by_uuid: HashMap<String, &IndexRecordV1> =
+        records.iter().map(|r| (r.uuid.clone(), r)).collect();
 
     // Collect assistant records in order
     let assistants: Vec<&IndexRecordV1> = records
@@ -116,11 +116,9 @@ pub fn build_turns(
 
             if parent_rec.record_type == "user" {
                 // Try to extract user text from this record
-                if let Ok(raw) = fetch_store_line(
-                    &store_path,
-                    parent_rec.store_offset,
-                    parent_rec.store_len,
-                ) {
+                if let Ok(raw) =
+                    fetch_store_line(&store_path, parent_rec.store_offset, parent_rec.store_len)
+                {
                     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&raw) {
                         let text = extract_user_text(&json);
                         if !text.is_empty() {
@@ -134,11 +132,9 @@ pub fn build_turns(
                 current_parent = parent_rec.parent_uuid.as_deref();
             } else if parent_rec.record_type == "assistant" {
                 // Intermediate assistant → collect its tool_uses
-                if let Ok(raw) = fetch_store_line(
-                    &store_path,
-                    parent_rec.store_offset,
-                    parent_rec.store_len,
-                ) {
+                if let Ok(raw) =
+                    fetch_store_line(&store_path, parent_rec.store_offset, parent_rec.store_len)
+                {
                     if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&raw) {
                         let (_, tus) = parse_assistant_content(&json);
                         chain_tool_uses.extend(tus);
@@ -234,9 +230,7 @@ fn parse_assistant_content(asst_json: &serde_json::Value) -> (Vec<String>, Vec<T
     let mut texts = Vec::new();
     let mut tool_uses = Vec::new();
 
-    let content = asst_json
-        .get("message")
-        .and_then(|m| m.get("content"));
+    let content = asst_json.get("message").and_then(|m| m.get("content"));
 
     if let Some(arr) = content.and_then(|c| c.as_array()) {
         for block in arr {
@@ -289,11 +283,7 @@ fn parse_assistant_content(asst_json: &serde_json::Value) -> (Vec<String>, Vec<T
 // ── Pack rendering ──
 
 /// Render turns into a markdown pack string with budget truncation.
-pub fn render_pack(
-    turns: &[Turn],
-    metadata: &PackMetadata,
-    budget_chars: usize,
-) -> String {
+pub fn render_pack(turns: &[Turn], metadata: &PackMetadata, budget_chars: usize) -> String {
     let budget = if budget_chars == 0 {
         std::env::var("EDDA_PACK_BUDGET_CHARS")
             .ok()
@@ -373,11 +363,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 }
 
 /// Write hot.md and hot.meta.json to the packs directory.
-pub fn write_pack(
-    project_dir: &Path,
-    pack_md: &str,
-    meta: &PackMetadata,
-) -> anyhow::Result<()> {
+pub fn write_pack(project_dir: &Path, pack_md: &str, meta: &PackMetadata) -> anyhow::Result<()> {
     let packs_dir = project_dir.join("packs");
     std::fs::create_dir_all(&packs_dir)?;
 

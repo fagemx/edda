@@ -5,11 +5,7 @@ use tokio::process::Command;
 
 /// Check that a edda event of the given type exists.
 /// Shells out to `edda log` (or `edda log` after rename).
-pub async fn check_edda_event(
-    event_type: &str,
-    after: Option<&str>,
-    cwd: &Path,
-) -> CheckOutput {
+pub async fn check_edda_event(event_type: &str, after: Option<&str>, cwd: &Path) -> CheckOutput {
     let start = Instant::now();
 
     let mut args = vec![
@@ -52,9 +48,6 @@ pub async fn check_edda_event(
                 start.elapsed(),
             )
         }
-        Err(e) => CheckOutput::failed(
-            format!("edda not available: {e}"),
-            start.elapsed(),
-        ),
+        Err(e) => CheckOutput::failed(format!("edda not available: {e}"), start.elapsed()),
     }
 }

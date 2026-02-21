@@ -44,13 +44,12 @@ pub fn ingest_transcript_delta(
     let _lock = edda_store::lock_file(&lock_path)?;
 
     // Load or create cursor
-    let mut cursor = TranscriptCursor::load(&state_dir, session_id)?
-        .unwrap_or(TranscriptCursor {
-            offset: 0,
-            file_size: 0,
-            mtime_unix: 0,
-            updated_at_unix: 0,
-        });
+    let mut cursor = TranscriptCursor::load(&state_dir, session_id)?.unwrap_or(TranscriptCursor {
+        offset: 0,
+        file_size: 0,
+        mtime_unix: 0,
+        updated_at_unix: 0,
+    });
 
     // Check file metadata
     let meta = std::fs::metadata(transcript_path)?;
@@ -150,7 +149,10 @@ pub fn ingest_transcript_delta(
             Ok(v) => v,
             Err(_) => {
                 stats.records_dropped += 1;
-                *stats.dropped_by_type.entry("parse_error".into()).or_insert(0) += 1;
+                *stats
+                    .dropped_by_type
+                    .entry("parse_error".into())
+                    .or_insert(0) += 1;
                 continue;
             }
         };
@@ -164,9 +166,7 @@ pub fn ingest_transcript_delta(
         match classify_record(&parsed) {
             FilterAction::Keep => {
                 // Record store_offset before write
-                let store_offset = store_file
-                    .seek(SeekFrom::End(0))
-                    .unwrap_or(0);
+                let store_offset = store_file.seek(SeekFrom::End(0)).unwrap_or(0);
 
                 // Write raw line verbatim (CONTRACT BRIDGE-03)
                 store_file.write_all(raw_line)?;
@@ -241,8 +241,7 @@ mod tests {
             ],
         );
 
-        let stats =
-            ingest_transcript_delta(&project_dir, "sess1", &transcript, None).unwrap();
+        let stats = ingest_transcript_delta(&project_dir, "sess1", &transcript, None).unwrap();
 
         assert_eq!(stats.records_read, 4);
         assert_eq!(stats.records_kept, 2); // user + assistant
@@ -268,7 +267,11 @@ mod tests {
         // First write
         {
             let mut f = std::fs::File::create(&transcript_path).unwrap();
-            writeln!(f, r#"{{"type":"user","uuid":"u1","message":{{"content":"first"}}}}"#).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"user","uuid":"u1","message":{{"content":"first"}}}}"#
+            )
+            .unwrap();
         }
         let stats1 =
             ingest_transcript_delta(&project_dir, "sess1", &transcript_path, None).unwrap();
@@ -280,7 +283,11 @@ mod tests {
                 .append(true)
                 .open(&transcript_path)
                 .unwrap();
-            writeln!(f, r#"{{"type":"user","uuid":"u2","message":{{"content":"second"}}}}"#).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"user","uuid":"u2","message":{{"content":"second"}}}}"#
+            )
+            .unwrap();
         }
         let stats2 =
             ingest_transcript_delta(&project_dir, "sess1", &transcript_path, None).unwrap();
@@ -307,7 +314,11 @@ mod tests {
         let called = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let called_clone = called.clone();
 
-        let writer = move |_raw: &str, _offset: u64, _len: u64, _json: &serde_json::Value| -> anyhow::Result<()> {
+        let writer = move |_raw: &str,
+                           _offset: u64,
+                           _len: u64,
+                           _json: &serde_json::Value|
+              -> anyhow::Result<()> {
             called_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         };

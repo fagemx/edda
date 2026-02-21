@@ -154,10 +154,7 @@ fn print_enriched_rust_plan(cwd: &Path, crates: &[CrateInfo], purpose: Option<&s
         .iter()
         .map(|(_, infos)| {
             // Pick the most representative role for this layer
-            infos
-                .first()
-                .map(|c| c.role)
-                .unwrap_or("unknown")
+            infos.first().map(|c| c.role).unwrap_or("unknown")
         })
         .collect();
 
@@ -168,14 +165,8 @@ fn print_enriched_rust_plan(cwd: &Path, crates: &[CrateInfo], purpose: Option<&s
     let name = sanitize_id(dir_name);
 
     // Header
-    println!(
-        "# Detected: Rust workspace ({} crates)",
-        crates.len()
-    );
-    println!(
-        "# Layers: {}",
-        dedup_layer_names(&layer_names)
-    );
+    println!("# Detected: Rust workspace ({} crates)", crates.len());
+    println!("# Layers: {}", dedup_layer_names(&layer_names));
     println!("# Edit prompts, then run: edda conduct run plan.yaml");
     println!();
     println!("name: {name}");
@@ -189,14 +180,8 @@ fn print_enriched_rust_plan(cwd: &Path, crates: &[CrateInfo], purpose: Option<&s
 
     for (layer_idx, layer_crates) in &layers {
         // Layer comment
-        let layer_role = layer_crates
-            .first()
-            .map(|c| c.role)
-            .unwrap_or("unknown");
-        println!(
-            "  # ── Layer {}: {} ──",
-            layer_idx, layer_role
-        );
+        let layer_role = layer_crates.first().map(|c| c.role).unwrap_or("unknown");
+        println!("  # ── Layer {}: {} ──", layer_idx, layer_role);
 
         for ci in layer_crates {
             println!("  - id: {}", ci.name);
@@ -233,15 +218,9 @@ fn print_enriched_rust_plan(cwd: &Path, crates: &[CrateInfo], purpose: Option<&s
 
             // checks
             println!("    check:");
-            println!(
-                "      - cmd_succeeds: \"cargo check -p {}\"",
-                ci.name
-            );
+            println!("      - cmd_succeeds: \"cargo check -p {}\"", ci.name);
             if ci.has_tests {
-                println!(
-                    "      - cmd_succeeds: \"cargo test -p {}\"",
-                    ci.name
-                );
+                println!("      - cmd_succeeds: \"cargo test -p {}\"", ci.name);
             }
 
             println!();
@@ -282,7 +261,9 @@ pub fn init(_cwd: &Path, template: Option<&str>, output: &str) -> anyhow::Result
 
     let path = Path::new(output);
     if path.exists() {
-        anyhow::bail!("{output} already exists. Remove it first or use -o to specify a different path.");
+        anyhow::bail!(
+            "{output} already exists. Remove it first or use -o to specify a different path."
+        );
     }
 
     std::fs::write(path, content)?;
@@ -468,10 +449,7 @@ fn compute_layers(crates: &[CrateInfo]) -> Vec<(usize, Vec<&CrateInfo>)> {
         for dep in &ci.internal_deps {
             if names.contains(dep.as_str()) {
                 *in_degree.entry(&ci.name).or_insert(0) += 1;
-                dependents
-                    .entry(dep.as_str())
-                    .or_default()
-                    .push(&ci.name);
+                dependents.entry(dep.as_str()).or_default().push(&ci.name);
             }
         }
     }
@@ -548,7 +526,13 @@ struct Phase {
 
 fn sanitize_id(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .to_lowercase()
 }
@@ -902,10 +886,7 @@ pub use types::*;
         assert_eq!(classify_role(&[], true, true), "cli");
         assert_eq!(classify_role(&[], true, false), "binary");
         assert_eq!(classify_role(&[], false, false), "foundation");
-        assert_eq!(
-            classify_role(&["edda-core".into()], false, false),
-            "domain"
-        );
+        assert_eq!(classify_role(&["edda-core".into()], false, false), "domain");
         assert_eq!(
             classify_role(&["a".into(), "b".into()], false, false),
             "domain"

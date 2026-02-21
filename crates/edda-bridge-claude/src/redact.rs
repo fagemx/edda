@@ -174,17 +174,11 @@ mod tests {
 
         let ti = &sanitized["tool_input"];
         assert!(
-            !ti["command"]
-                .as_str()
-                .unwrap()
-                .contains("eyJhbGci"),
+            !ti["command"].as_str().unwrap().contains("eyJhbGci"),
             "Bearer token should be redacted"
         );
         assert!(
-            !ti["nested"]["key"]
-                .as_str()
-                .unwrap()
-                .contains("sk-abc"),
+            !ti["nested"]["key"].as_str().unwrap().contains("sk-abc"),
             "API key should be redacted"
         );
         assert!(
@@ -198,7 +192,8 @@ mod tests {
 
     #[test]
     fn redact_multiple_secrets_in_one_string() {
-        let input = "keys: sk-aaaa1111222233334444bbbb ghp_CCCCddddeeeeffffgggg1111222233334444aaaa";
+        let input =
+            "keys: sk-aaaa1111222233334444bbbb ghp_CCCCddddeeeeffffgggg1111222233334444aaaa";
         let output = redact_secrets(input);
         assert!(!output.contains("sk-aaaa"));
         assert!(!output.contains("ghp_CCCC"));

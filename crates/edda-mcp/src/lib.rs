@@ -4,7 +4,9 @@ use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::*;
 use rmcp::service::RequestContext;
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt};
+use rmcp::{
+    tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
+};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -113,8 +115,7 @@ impl EddaServer {
         let head = ledger.head_branch().map_err(to_mcp_err)?;
         let depth = params.depth.unwrap_or(5);
 
-        let text =
-            render_context(&ledger, &head, DeriveOptions { depth }).map_err(to_mcp_err)?;
+        let text = render_context(&ledger, &head, DeriveOptions { depth }).map_err(to_mcp_err)?;
 
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
@@ -173,10 +174,8 @@ impl ServerHandler for EddaServer {
             }
             "edda://log" => {
                 let events = ledger.iter_events().map_err(to_mcp_err)?;
-                let branch_events: Vec<_> =
-                    events.iter().filter(|e| e.branch == head).collect();
-                let recent: Vec<_> =
-                    branch_events.iter().rev().take(50).rev().collect();
+                let branch_events: Vec<_> = events.iter().filter(|e| e.branch == head).collect();
+                let recent: Vec<_> = branch_events.iter().rev().take(50).rev().collect();
                 let lines: Vec<String> = recent
                     .iter()
                     .map(|e| {

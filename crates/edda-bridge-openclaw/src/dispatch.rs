@@ -104,12 +104,8 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
     let _ = append_to_session_ledger(&project_id, &envelope.session_id, &envelope);
 
     match envelope.hook_event_name.as_str() {
-        "before_agent_start" => {
-            dispatch_before_agent_start(&project_id, &envelope)
-        }
-        "agent_end" => {
-            dispatch_agent_end(&project_id, &envelope)
-        }
+        "before_agent_start" => dispatch_before_agent_start(&project_id, &envelope),
+        "agent_end" => dispatch_agent_end(&project_id, &envelope),
         _ => {
             // Unknown event — pass through silently
             Ok(ok_json())
@@ -171,18 +167,14 @@ fn dispatch_before_agent_start(
 // ── agent_end ──
 
 /// Handle session end: trigger auto-digest.
-fn dispatch_agent_end(
-    project_id: &str,
-    envelope: &OpenClawEnvelope,
-) -> anyhow::Result<HookResult> {
+fn dispatch_agent_end(project_id: &str, envelope: &OpenClawEnvelope) -> anyhow::Result<HookResult> {
     let cwd = &envelope.workspace_dir;
     let session_id = &envelope.session_id;
 
     // Auto-digest this session
     if !session_id.is_empty() {
-        let _ = edda_bridge_claude::digest::digest_session_manual(
-            project_id, session_id, cwd, true,
-        );
+        let _ =
+            edda_bridge_claude::digest::digest_session_manual(project_id, session_id, cwd, true);
     }
 
     Ok(ok_json())
@@ -344,7 +336,8 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_event_returns_ok() {
-        let stdin = r#"{"hook_event_name":"some_future_event","session_id":"s1","workspace_dir":"."}"#;
+        let stdin =
+            r#"{"hook_event_name":"some_future_event","session_id":"s1","workspace_dir":"."}"#;
         let result = hook_entrypoint_from_stdin(stdin).unwrap();
         assert!(result.stdout.is_some());
         let output: serde_json::Value =
@@ -388,9 +381,18 @@ mod tests {
         let output: serde_json::Value =
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
         let ctx = output["prependContext"].as_str().unwrap();
-        assert!(ctx.contains("Write-Back Protocol"), "should contain write-back protocol");
-        assert!(ctx.contains("edda decide"), "should contain decide instruction");
-        assert!(ctx.contains(EDDA_BOUNDARY_START), "should have boundary start");
+        assert!(
+            ctx.contains("Write-Back Protocol"),
+            "should contain write-back protocol"
+        );
+        assert!(
+            ctx.contains("edda decide"),
+            "should contain decide instruction"
+        );
+        assert!(
+            ctx.contains(EDDA_BOUNDARY_START),
+            "should have boundary start"
+        );
         assert!(ctx.contains(EDDA_BOUNDARY_END), "should have boundary end");
 
         std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
@@ -410,12 +412,18 @@ mod tests {
         });
 
         let result = hook_entrypoint_from_stdin(&serde_json::to_string(&stdin).unwrap()).unwrap();
-        assert!(result.stdout.is_some(), "should return context even without .edda/");
+        assert!(
+            result.stdout.is_some(),
+            "should return context even without .edda/"
+        );
 
         let output: serde_json::Value =
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
         let ctx = output["prependContext"].as_str().unwrap();
-        assert!(ctx.contains("Write-Back Protocol"), "write-back protocol always fires");
+        assert!(
+            ctx.contains("Write-Back Protocol"),
+            "write-back protocol always fires"
+        );
 
         std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     }

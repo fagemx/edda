@@ -45,14 +45,12 @@ fn render_persistent_tasks(digests: &[SessionDigestEntry]) -> String {
     for d in digests {
         let sid = &d.session_id[..d.session_id.len().min(8)];
         for task in &d.tasks_snapshot {
-            let entry = tracker
-                .entry(task.subject.as_str())
-                .or_insert(TaskTracker {
-                    pending_sessions: 0,
-                    first_session_id: sid,
-                    last_session_id: sid,
-                    last_status: task.status.as_str(),
-                });
+            let entry = tracker.entry(task.subject.as_str()).or_insert(TaskTracker {
+                pending_sessions: 0,
+                first_session_id: sid,
+                last_session_id: sid,
+                last_status: task.status.as_str(),
+            });
             entry.last_session_id = sid;
             entry.last_status = task.status.as_str();
             if task.status != "completed" {
@@ -227,7 +225,11 @@ fn render_session_history(digests: &[SessionDigestEntry]) -> String {
             } else {
                 format!(", {outcome_tag}")
             };
-            let commit_word = if commit_count == 1 { "commit" } else { "commits" };
+            let commit_word = if commit_count == 1 {
+                "commit"
+            } else {
+                "commits"
+            };
             let file_word = if file_count == 1 { "file" } else { "files" };
             let note_suffix = if let Some(first_note) = d.notes.first() {
                 if first_note.len() > 40 {
@@ -258,7 +260,11 @@ fn render_session_history(digests: &[SessionDigestEntry]) -> String {
             oldest_date,
             newest_date,
         ));
-        let commit_word = if total_commits == 1 { "commit" } else { "commits" };
+        let commit_word = if total_commits == 1 {
+            "commit"
+        } else {
+            "commits"
+        };
         let file_word = if total_files == 1 { "file" } else { "files" };
         out.push_str(&format!(
             "- {total_commits} {commit_word}, {total_files} {file_word} modified\n",
@@ -289,12 +295,15 @@ pub fn render_context(ledger: &Ledger, branch: &str, opt: DeriveOptions) -> Resu
         .iter()
         .filter(|s| s.ts.as_str() >= sig_cutoff.as_str())
         .collect();
-    let sigs: Vec<_> = recent_sigs.iter().rev().take(n).copied().collect::<Vec<_>>();
+    let sigs: Vec<_> = recent_sigs
+        .iter()
+        .rev()
+        .take(n)
+        .copied()
+        .collect::<Vec<_>>();
     let sigs: Vec<_> = sigs.into_iter().rev().collect();
 
-    let head = ledger
-        .head_branch()
-        .unwrap_or_else(|_| "main".to_string());
+    let head = ledger.head_branch().unwrap_or_else(|_| "main".to_string());
 
     let mut out = String::new();
     out.push_str("# CONTEXT SNAPSHOT\n\n");
@@ -328,9 +337,7 @@ pub fn render_context(ledger: &Ledger, branch: &str, opt: DeriveOptions) -> Resu
                 out.push_str(&format!("- sessions: 1 ({date})\n"));
             }
         } else if let (Some(oldest), Some(newest)) = (dates.first(), dates.last()) {
-            out.push_str(&format!(
-                "- sessions: {count} ({oldest} — {newest})\n"
-            ));
+            out.push_str(&format!("- sessions: {count} ({oldest} — {newest})\n"));
         }
     }
     out.push('\n');
@@ -456,11 +463,7 @@ pub fn render_context(ledger: &Ledger, branch: &str, opt: DeriveOptions) -> Resu
                     group[0].text, group[0].event_id
                 ));
             } else {
-                out.push_str(&format!(
-                    "- CMD fail: {} ({}x)\n",
-                    base,
-                    group.len(),
-                ));
+                out.push_str(&format!("- CMD fail: {} ({}x)\n", base, group.len(),));
             }
         }
         out.push('\n');
@@ -468,9 +471,7 @@ pub fn render_context(ledger: &Ledger, branch: &str, opt: DeriveOptions) -> Resu
 
     out.push_str("## How to cite evidence\n");
     out.push_str("- Use event_id to locate raw trace in .edda/ledger/events.jsonl\n");
-    out.push_str(
-        "- Use blob:sha256:* to open stdout/stderr artifacts in .edda/ledger/blobs/\n",
-    );
+    out.push_str("- Use blob:sha256:* to open stdout/stderr artifacts in .edda/ledger/blobs/\n");
 
     Ok(out)
 }
@@ -479,11 +480,10 @@ pub fn render_context(ledger: &Ledger, branch: &str, opt: DeriveOptions) -> Resu
 mod tests {
     use super::*;
     use crate::test_support::setup_workspace;
-    use edda_core::Event;
     use edda_core::event::{
-        new_note_event, new_commit_event, new_cmd_event,
-        CommitEventParams, CmdEventParams,
+        new_cmd_event, new_commit_event, new_note_event, CmdEventParams, CommitEventParams,
     };
+    use edda_core::Event;
 
     #[test]
     fn render_context_includes_commits_and_signals() {
@@ -527,7 +527,16 @@ mod tests {
         failed: &[&str],
         duration_min: u64,
     ) -> Event {
-        make_digest_note_with_tasks(branch, session_id, tool_calls, files, commits, failed, duration_min, &[])
+        make_digest_note_with_tasks(
+            branch,
+            session_id,
+            tool_calls,
+            files,
+            commits,
+            failed,
+            duration_min,
+            &[],
+        )
     }
 
     fn make_digest_note_with_tasks(
@@ -540,7 +549,17 @@ mod tests {
         duration_min: u64,
         tasks: &[(&str, &str)], // (subject, status)
     ) -> Event {
-        make_digest_note_full(branch, session_id, tool_calls, files, commits, failed, duration_min, tasks, "completed")
+        make_digest_note_full(
+            branch,
+            session_id,
+            tool_calls,
+            files,
+            commits,
+            failed,
+            duration_min,
+            tasks,
+            "completed",
+        )
     }
 
     fn make_digest_note_full(
@@ -672,7 +691,10 @@ mod tests {
         );
         assert!(ctx.contains("sess-abc"), "missing session id in:\n{ctx}");
         assert!(ctx.contains("45 min"), "missing duration in:\n{ctx}");
-        assert!(ctx.contains("15 tool calls"), "missing tool calls in:\n{ctx}");
+        assert!(
+            ctx.contains("15 tool calls"),
+            "missing tool calls in:\n{ctx}"
+        );
         assert!(ctx.contains("main.rs"), "missing file name in:\n{ctx}");
         assert!(ctx.contains("lib.rs"), "missing file name in:\n{ctx}");
         assert!(
@@ -708,11 +730,23 @@ mod tests {
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
         // Tier 1: Last Session with full detail
-        assert!(ctx.contains("### Last Session (sess-003"), "missing tier 1 in:\n{ctx}");
+        assert!(
+            ctx.contains("### Last Session (sess-003"),
+            "missing tier 1 in:\n{ctx}"
+        );
         // Tier 2: Prior sessions as one-liners
-        assert!(ctx.contains("### Prior Sessions"), "missing tier 2 header in:\n{ctx}");
-        assert!(ctx.contains("sess-002"), "missing sess-002 in tier 2:\n{ctx}");
-        assert!(ctx.contains("sess-001"), "missing sess-001 in tier 2:\n{ctx}");
+        assert!(
+            ctx.contains("### Prior Sessions"),
+            "missing tier 2 header in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("sess-002"),
+            "missing sess-002 in tier 2:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("sess-001"),
+            "missing sess-001 in tier 2:\n{ctx}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -747,17 +781,30 @@ mod tests {
             &["fix: auth bug"],
             &[],
             30,
-            &[("Fix auth bug", "completed"), ("Add tests", "in_progress"), ("Deploy", "pending")],
+            &[
+                ("Fix auth bug", "completed"),
+                ("Add tests", "in_progress"),
+                ("Deploy", "pending"),
+            ],
         );
         ledger.append_event(&digest, false).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
         // Should show Done/WIP instead of tool call counts
-        assert!(ctx.contains("- Done: Fix auth bug"), "missing Done in:\n{ctx}");
-        assert!(ctx.contains("- WIP: Add tests, Deploy"), "missing WIP in:\n{ctx}");
+        assert!(
+            ctx.contains("- Done: Fix auth bug"),
+            "missing Done in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("- WIP: Add tests, Deploy"),
+            "missing WIP in:\n{ctx}"
+        );
         // Should NOT show tool call counts when tasks are present
-        assert!(!ctx.contains("10 tool calls"), "should not show tool calls when tasks present in:\n{ctx}");
+        assert!(
+            !ctx.contains("10 tool calls"),
+            "should not show tool calls when tasks present in:\n{ctx}"
+        );
         // Files and commits should still appear
         assert!(ctx.contains("lib.rs"), "missing files in:\n{ctx}");
         assert!(ctx.contains("fix: auth bug"), "missing commit in:\n{ctx}");
@@ -770,21 +817,19 @@ mod tests {
         let (tmp, ledger) = setup_workspace();
 
         // Digest with no tasks_snapshot — should fall back to tool call counts
-        let digest = make_digest_note(
-            "main",
-            "sess-notask",
-            8,
-            &[],
-            &[],
-            &[],
-            20,
-        );
+        let digest = make_digest_note("main", "sess-notask", 8, &[], &[], &[], 20);
         ledger.append_event(&digest, false).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
-        assert!(ctx.contains("8 tool calls"), "should show tool calls as fallback in:\n{ctx}");
-        assert!(!ctx.contains("Done:"), "should not show Done without tasks in:\n{ctx}");
+        assert!(
+            ctx.contains("8 tool calls"),
+            "should show tool calls as fallback in:\n{ctx}"
+        );
+        assert!(
+            !ctx.contains("Done:"),
+            "should not show Done without tasks in:\n{ctx}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -820,17 +865,8 @@ mod tests {
     fn session_digest_no_badge_for_completed() {
         let (tmp, ledger) = setup_workspace();
 
-        let digest = make_digest_note_full(
-            "main",
-            "sess-ok",
-            10,
-            &[],
-            &[],
-            &[],
-            30,
-            &[],
-            "completed",
-        );
+        let digest =
+            make_digest_note_full("main", "sess-ok", 10, &[], &[], &[], 30, &[], "completed");
         ledger.append_event(&digest, false).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
@@ -849,7 +885,10 @@ mod tests {
 
     #[test]
     fn cmd_base_key_extracts_first_two_tokens() {
-        assert_eq!(cmd_base_key("cargo check -p edda-mcp (exit=1)"), "cargo check");
+        assert_eq!(
+            cmd_base_key("cargo check -p edda-mcp (exit=1)"),
+            "cargo check"
+        );
         assert_eq!(cmd_base_key("cargo test --all (exit=101)"), "cargo test");
         assert_eq!(cmd_base_key("npm install (exit=1)"), "npm install");
         assert_eq!(cmd_base_key("make (exit=2)"), "make");
@@ -862,7 +901,12 @@ mod tests {
 
         // Add 3 "cargo check" failures and 1 "cargo test" failure
         for _ in 0..3 {
-            let argv = vec!["cargo".to_string(), "check".to_string(), "-p".to_string(), "edda-mcp".to_string()];
+            let argv = vec![
+                "cargo".to_string(),
+                "check".to_string(),
+                "-p".to_string(),
+                "edda-mcp".to_string(),
+            ];
             let cmd = new_cmd_event(&CmdEventParams {
                 branch: "main",
                 parent_hash: None,
@@ -872,7 +916,8 @@ mod tests {
                 duration_ms: 500,
                 stdout_blob: "",
                 stderr_blob: "",
-            }).unwrap();
+            })
+            .unwrap();
             ledger.append_event(&cmd, false).unwrap();
         }
         let argv2 = vec!["cargo".to_string(), "test".to_string()];
@@ -885,7 +930,8 @@ mod tests {
             duration_ms: 200,
             stdout_blob: "",
             stderr_blob: "",
-        }).unwrap();
+        })
+        .unwrap();
         ledger.append_event(&cmd2, false).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
@@ -918,7 +964,8 @@ mod tests {
             duration_ms: 100,
             stdout_blob: "",
             stderr_blob: "",
-        }).unwrap();
+        })
+        .unwrap();
         ledger.append_event(&cmd, false).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
@@ -949,9 +996,18 @@ mod tests {
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
         // Should show "events: 2" instead of "uncommitted_events: 2"
-        assert!(ctx.contains("- events: 2"), "expected '- events: 2' in:\n{ctx}");
-        assert!(!ctx.contains("uncommitted_events"), "should not contain 'uncommitted_events'");
-        assert!(!ctx.contains("last_commit: (none)"), "should not contain 'last_commit: (none)'");
+        assert!(
+            ctx.contains("- events: 2"),
+            "expected '- events: 2' in:\n{ctx}"
+        );
+        assert!(
+            !ctx.contains("uncommitted_events"),
+            "should not contain 'uncommitted_events'"
+        );
+        assert!(
+            !ctx.contains("last_commit: (none)"),
+            "should not contain 'last_commit: (none)'"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -961,21 +1017,47 @@ mod tests {
         let (tmp, ledger) = setup_workspace();
 
         let tags = vec!["decision".to_string()];
-        let d1 = new_note_event("main", None, "user", "Use PostgreSQL for concurrent writes", &tags).unwrap();
-        let d2 = new_note_event("main", None, "user", "REST over GraphQL for simplicity", &tags).unwrap();
+        let d1 = new_note_event(
+            "main",
+            None,
+            "user",
+            "Use PostgreSQL for concurrent writes",
+            &tags,
+        )
+        .unwrap();
+        let d2 = new_note_event(
+            "main",
+            None,
+            "user",
+            "REST over GraphQL for simplicity",
+            &tags,
+        )
+        .unwrap();
         ledger.append_event(&d1, false).unwrap();
         ledger.append_event(&d2, false).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
         // Decisions section should exist
-        assert!(ctx.contains("## Decisions"), "missing Decisions section in:\n{ctx}");
-        assert!(ctx.contains("Use PostgreSQL"), "missing decision text in:\n{ctx}");
-        assert!(ctx.contains("REST over GraphQL"), "missing decision text in:\n{ctx}");
+        assert!(
+            ctx.contains("## Decisions"),
+            "missing Decisions section in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("Use PostgreSQL"),
+            "missing decision text in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("REST over GraphQL"),
+            "missing decision text in:\n{ctx}"
+        );
 
         // Decisions should NOT appear in Recent Signals
         let signals_section = ctx.split("## Recent Signals").nth(1).unwrap_or("");
-        assert!(!signals_section.contains("PostgreSQL"), "decision leaked into Signals in:\n{ctx}");
+        assert!(
+            !signals_section.contains("PostgreSQL"),
+            "decision leaked into Signals in:\n{ctx}"
+        );
 
         // Decisions section should come before Recent Signals
         let dec_pos = ctx.find("## Decisions").unwrap();
@@ -1018,8 +1100,14 @@ mod tests {
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
         // Old decision should still appear (no 2hr cutoff)
-        assert!(ctx.contains("JWT for auth tokens"), "old decision should survive cutoff in:\n{ctx}");
-        assert!(ctx.contains("## Decisions"), "Decisions section missing in:\n{ctx}");
+        assert!(
+            ctx.contains("JWT for auth tokens"),
+            "old decision should survive cutoff in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("## Decisions"),
+            "Decisions section missing in:\n{ctx}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1035,7 +1123,10 @@ mod tests {
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
-        assert!(!ctx.contains("## Decisions"), "should not have Decisions section when none exist");
+        assert!(
+            !ctx.contains("## Decisions"),
+            "should not have Decisions section when none exist"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1087,8 +1178,14 @@ mod tests {
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
         // Only d2 (postgres) should appear, not d1 (mysql)
-        assert!(ctx.contains("postgres"), "active decision missing in:\n{ctx}");
-        assert!(!ctx.contains("mysql"), "superseded decision should be hidden in:\n{ctx}");
+        assert!(
+            ctx.contains("postgres"),
+            "active decision missing in:\n{ctx}"
+        );
+        assert!(
+            !ctx.contains("mysql"),
+            "superseded decision should be hidden in:\n{ctx}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1110,7 +1207,9 @@ mod tests {
         let mut b = new_note_event("main", None, "system", "db: mysql", &tags).unwrap();
         let b_id = b.event_id.clone();
         b.refs.provenance.push(Provenance {
-            target: a_id, rel: "supersedes".to_string(), note: None,
+            target: a_id,
+            rel: "supersedes".to_string(),
+            note: None,
         });
         finalize_event(&mut b);
         ledger.append_event(&b, false).unwrap();
@@ -1118,16 +1217,27 @@ mod tests {
         // C: db = postgres, supersedes B
         let mut c = new_note_event("main", None, "system", "db: postgres", &tags).unwrap();
         c.refs.provenance.push(Provenance {
-            target: b_id, rel: "supersedes".to_string(), note: None,
+            target: b_id,
+            rel: "supersedes".to_string(),
+            note: None,
         });
         finalize_event(&mut c);
         ledger.append_event(&c, false).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
-        assert!(ctx.contains("postgres"), "final decision missing in:\n{ctx}");
-        assert!(!ctx.contains("mysql"), "superseded B should be hidden in:\n{ctx}");
-        assert!(!ctx.contains("sqlite"), "superseded A should be hidden in:\n{ctx}");
+        assert!(
+            ctx.contains("postgres"),
+            "final decision missing in:\n{ctx}"
+        );
+        assert!(
+            !ctx.contains("mysql"),
+            "superseded B should be hidden in:\n{ctx}"
+        );
+        assert!(
+            !ctx.contains("sqlite"),
+            "superseded A should be hidden in:\n{ctx}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1138,13 +1248,26 @@ mod tests {
 
         // Old-format decision (no payload.decision field)
         let tags = vec!["decision".to_string()];
-        let d = new_note_event("main", None, "system", "orm: sqlx — compile-time checks", &tags).unwrap();
+        let d = new_note_event(
+            "main",
+            None,
+            "system",
+            "orm: sqlx — compile-time checks",
+            &tags,
+        )
+        .unwrap();
         ledger.append_event(&d, false).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
-        assert!(ctx.contains("orm: sqlx"), "old-format decision should render in:\n{ctx}");
-        assert!(ctx.contains("## Decisions"), "Decisions section missing in:\n{ctx}");
+        assert!(
+            ctx.contains("orm: sqlx"),
+            "old-format decision should render in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("## Decisions"),
+            "Decisions section missing in:\n{ctx}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1166,8 +1289,14 @@ mod tests {
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
-        assert!(ctx.contains("## Session History"), "missing Session History in:\n{ctx}");
-        assert!(ctx.contains("### Last Session (sess-not"), "missing tier 1 in:\n{ctx}");
+        assert!(
+            ctx.contains("## Session History"),
+            "missing Session History in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("### Last Session (sess-not"),
+            "missing tier 1 in:\n{ctx}"
+        );
         assert!(
             ctx.contains("Note: \"Switched to JWT auth approach\""),
             "missing note 1 in:\n{ctx}"
@@ -1190,8 +1319,14 @@ mod tests {
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
-        assert!(ctx.contains("## Session History"), "missing Session History in:\n{ctx}");
-        assert!(!ctx.contains("Note:"), "should not show Note: line for old digests:\n{ctx}");
+        assert!(
+            ctx.contains("## Session History"),
+            "missing Session History in:\n{ctx}"
+        );
+        assert!(
+            !ctx.contains("Note:"),
+            "should not show Note: line for old digests:\n{ctx}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1216,11 +1351,23 @@ mod tests {
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
         // Tier 1: full detail for newest
-        assert!(ctx.contains("### Last Session (sess-004"), "missing tier 1 in:\n{ctx}");
+        assert!(
+            ctx.contains("### Last Session (sess-004"),
+            "missing tier 1 in:\n{ctx}"
+        );
         // Tier 2: one-liners for older sessions
-        assert!(ctx.contains("### Prior Sessions"), "missing tier 2 header in:\n{ctx}");
-        assert!(ctx.contains("sess-003"), "missing sess-003 in tier 2:\n{ctx}");
-        assert!(ctx.contains("1 commit, 1 file"), "missing stats in tier 2:\n{ctx}");
+        assert!(
+            ctx.contains("### Prior Sessions"),
+            "missing tier 2 header in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("sess-003"),
+            "missing sess-003 in tier 2:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("1 commit, 1 file"),
+            "missing stats in tier 2:\n{ctx}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1280,10 +1427,13 @@ mod tests {
         let tags = vec!["decision".to_string()];
         for i in 1..=8 {
             let d = new_note_event(
-                "main", None, "user",
+                "main",
+                None,
+                "user",
                 &format!("Decision {i}: choice {i}"),
                 &tags,
-            ).unwrap();
+            )
+            .unwrap();
             ledger.append_event(&d, false).unwrap();
         }
 
@@ -1291,7 +1441,10 @@ mod tests {
         let opts = DeriveOptions { depth: 1 };
         let ctx = render_context(&ledger, "main", opts).unwrap();
 
-        assert!(ctx.contains("## Decisions"), "missing Decisions section in:\n{ctx}");
+        assert!(
+            ctx.contains("## Decisions"),
+            "missing Decisions section in:\n{ctx}"
+        );
         // At least 5 decisions visible even at depth=1
         let decision_count = (1..=8)
             .filter(|i| ctx.contains(&format!("Decision {i}: choice {i}")))
@@ -1312,8 +1465,12 @@ mod tests {
         let d1 = make_digest_note("main", "sess-002", 10, &[], &[], &[], 30);
         // Older session (tier 2) — has a long note
         let d2 = make_digest_note_with_notes(
-            "main", "sess-001", 5,
-            &["/src/lib.rs"], &["fix: auth"], 20,
+            "main",
+            "sess-001",
+            5,
+            &["/src/lib.rs"],
+            &["fix: auth"],
+            20,
             &["Switched to JWT auth approach because session tokens were unreliable"],
         );
         ledger.append_event(&d2, false).unwrap();
@@ -1339,17 +1496,26 @@ mod tests {
         let (tmp, ledger) = setup_workspace();
 
         let d1 = make_digest_note("main", "sess-002", 10, &[], &[], &[], 30);
-        let d2 = make_digest_note("main", "sess-001", 5, &["/src/lib.rs"], &["fix: bug"], &[], 20);
+        let d2 = make_digest_note(
+            "main",
+            "sess-001",
+            5,
+            &["/src/lib.rs"],
+            &["fix: bug"],
+            &[],
+            20,
+        );
         ledger.append_event(&d2, false).unwrap();
         ledger.append_event(&d1, false).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
         // Tier 2 should NOT have note fragment
-        let tier2_lines: Vec<&str> = ctx.lines()
-            .filter(|l| l.contains("sess-001"))
-            .collect();
-        assert!(!tier2_lines.is_empty(), "missing sess-001 in tier 2:\n{ctx}");
+        let tier2_lines: Vec<&str> = ctx.lines().filter(|l| l.contains("sess-001")).collect();
+        assert!(
+            !tier2_lines.is_empty(),
+            "missing sess-001 in tier 2:\n{ctx}"
+        );
         for line in &tier2_lines {
             assert!(
                 !line.contains(" — \""),
@@ -1366,7 +1532,12 @@ mod tests {
 
         let d1 = make_digest_note("main", "sess-002", 10, &[], &[], &[], 30);
         let d2 = make_digest_note_with_notes(
-            "main", "sess-001", 5, &[], &["fix: it"], 20,
+            "main",
+            "sess-001",
+            5,
+            &[],
+            &["fix: it"],
+            20,
             &["Short note"],
         );
         ledger.append_event(&d2, false).unwrap();
@@ -1391,9 +1562,7 @@ mod tests {
     fn project_header_shows_session_count_single() {
         let (tmp, ledger) = setup_workspace();
 
-        let d = make_digest_note_with_ts(
-            "main", "sess-001", "2026-02-17T10:00:00Z", &[], &[],
-        );
+        let d = make_digest_note_with_ts("main", "sess-001", "2026-02-17T10:00:00Z", &[], &[]);
         ledger.append_event(&d, false).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
@@ -1410,15 +1579,9 @@ mod tests {
     fn project_header_shows_session_count_range() {
         let (tmp, ledger) = setup_workspace();
 
-        let d1 = make_digest_note_with_ts(
-            "main", "sess-001", "2026-02-12T10:00:00Z", &[], &["c1"],
-        );
-        let d2 = make_digest_note_with_ts(
-            "main", "sess-002", "2026-02-14T10:00:00Z", &[], &["c2"],
-        );
-        let d3 = make_digest_note_with_ts(
-            "main", "sess-003", "2026-02-17T10:00:00Z", &[], &["c3"],
-        );
+        let d1 = make_digest_note_with_ts("main", "sess-001", "2026-02-12T10:00:00Z", &[], &["c1"]);
+        let d2 = make_digest_note_with_ts("main", "sess-002", "2026-02-14T10:00:00Z", &[], &["c2"]);
+        let d3 = make_digest_note_with_ts("main", "sess-003", "2026-02-17T10:00:00Z", &[], &["c3"]);
         ledger.append_event(&d1, false).unwrap();
         ledger.append_event(&d2, false).unwrap();
         ledger.append_event(&d3, false).unwrap();
@@ -1459,7 +1622,11 @@ mod tests {
             let d = make_digest_note_with_tasks(
                 "main",
                 &format!("sess-{i:03}"),
-                10, &[], &[], &[], 30,
+                10,
+                &[],
+                &[],
+                &[],
+                30,
                 &[("Add OAuth", "pending")],
             );
             ledger.append_event(&d, false).unwrap();
@@ -1485,15 +1652,33 @@ mod tests {
 
         // Sessions 1-2: "Fix auth" pending, Session 3: completed
         let d1 = make_digest_note_with_tasks(
-            "main", "sess-001", 10, &[], &[], &[], 30,
+            "main",
+            "sess-001",
+            10,
+            &[],
+            &[],
+            &[],
+            30,
             &[("Fix auth", "pending")],
         );
         let d2 = make_digest_note_with_tasks(
-            "main", "sess-002", 10, &[], &[], &[], 30,
+            "main",
+            "sess-002",
+            10,
+            &[],
+            &[],
+            &[],
+            30,
             &[("Fix auth", "in_progress")],
         );
         let d3 = make_digest_note_with_tasks(
-            "main", "sess-003", 10, &[], &[], &[], 30,
+            "main",
+            "sess-003",
+            10,
+            &[],
+            &[],
+            &[],
+            30,
             &[("Fix auth", "completed")],
         );
         ledger.append_event(&d1, false).unwrap();
@@ -1519,7 +1704,13 @@ mod tests {
         let (tmp, ledger) = setup_workspace();
 
         let d = make_digest_note_with_tasks(
-            "main", "sess-001", 10, &[], &[], &[], 30,
+            "main",
+            "sess-001",
+            10,
+            &[],
+            &[],
+            &[],
+            30,
             &[("Add OAuth", "pending")],
         );
         ledger.append_event(&d, false).unwrap();
@@ -1555,14 +1746,32 @@ mod tests {
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
         // Tier 1
-        assert!(ctx.contains("### Last Session (sess-008"), "missing tier 1 in:\n{ctx}");
+        assert!(
+            ctx.contains("### Last Session (sess-008"),
+            "missing tier 1 in:\n{ctx}"
+        );
         // Tier 2
-        assert!(ctx.contains("### Prior Sessions"), "missing tier 2 in:\n{ctx}");
-        assert!(ctx.contains("sess-007"), "missing sess-007 in tier 2:\n{ctx}");
-        assert!(ctx.contains("sess-004"), "missing sess-004 in tier 2:\n{ctx}");
+        assert!(
+            ctx.contains("### Prior Sessions"),
+            "missing tier 2 in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("sess-007"),
+            "missing sess-007 in tier 2:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("sess-004"),
+            "missing sess-004 in tier 2:\n{ctx}"
+        );
         // Tier 3: aggregate
-        assert!(ctx.contains("### Earlier (3 sessions"), "missing tier 3 in:\n{ctx}");
-        assert!(ctx.contains("3 commits, 3 files modified"), "missing aggregate stats in:\n{ctx}");
+        assert!(
+            ctx.contains("### Earlier (3 sessions"),
+            "missing tier 3 in:\n{ctx}"
+        );
+        assert!(
+            ctx.contains("3 commits, 3 files modified"),
+            "missing aggregate stats in:\n{ctx}"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

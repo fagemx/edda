@@ -108,16 +108,10 @@ mod tests {
             p.events_jsonl,
             PathBuf::from("/tmp/repo/.edda/ledger/events.jsonl")
         );
-        assert_eq!(
-            p.blobs_dir,
-            PathBuf::from("/tmp/repo/.edda/ledger/blobs")
-        );
+        assert_eq!(p.blobs_dir, PathBuf::from("/tmp/repo/.edda/ledger/blobs"));
         assert_eq!(p.head_file, PathBuf::from("/tmp/repo/.edda/refs/HEAD"));
         assert_eq!(p.lock_file, PathBuf::from("/tmp/repo/.edda/LOCK"));
-        assert_eq!(
-            p.patterns_dir,
-            PathBuf::from("/tmp/repo/.edda/patterns")
-        );
+        assert_eq!(p.patterns_dir, PathBuf::from("/tmp/repo/.edda/patterns"));
         assert_eq!(
             p.blob_meta_json,
             PathBuf::from("/tmp/repo/.edda/ledger/blob_meta.json")
@@ -126,10 +120,7 @@ mod tests {
             p.tombstones_jsonl,
             PathBuf::from("/tmp/repo/.edda/ledger/tombstones.jsonl")
         );
-        assert_eq!(
-            p.archive_dir,
-            PathBuf::from("/tmp/repo/.edda/archive")
-        );
+        assert_eq!(p.archive_dir, PathBuf::from("/tmp/repo/.edda/archive"));
         assert_eq!(
             p.archive_blobs_dir,
             PathBuf::from("/tmp/repo/.edda/archive/blobs")

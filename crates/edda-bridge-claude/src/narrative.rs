@@ -51,10 +51,7 @@ pub(crate) fn compose_narrative_minimal(project_id: &str) -> Option<String> {
 /// Render active tasks in compact format (in_progress only, no completed noise).
 fn render_active_tasks_compact(project_id: &str) -> Option<String> {
     let tasks: Vec<TaskSnapshot> = load_state_vec(project_id, "active_tasks.json", "tasks");
-    let active: Vec<&TaskSnapshot> = tasks
-        .iter()
-        .filter(|t| t.status == "in_progress")
-        .collect();
+    let active: Vec<&TaskSnapshot> = tasks.iter().filter(|t| t.status == "in_progress").collect();
     let pending: Vec<&TaskSnapshot> = tasks.iter().filter(|t| t.status == "pending").collect();
 
     if active.is_empty() && pending.is_empty() {
@@ -121,10 +118,7 @@ fn render_activity_summary(project_id: &str) -> Option<String> {
     // Failed command count
     if !failed.is_empty() {
         let total_failures: usize = failed.iter().map(|f| f.count).sum();
-        lines.push(format!(
-            "- {} command failures",
-            total_failures
-        ));
+        lines.push(format!("- {} command failures", total_failures));
     }
 
     Some(lines.join("\n"))
@@ -137,7 +131,9 @@ fn read_turn_count(project_id: &str) -> Option<usize> {
         .join("hot.meta.json");
     let content = std::fs::read_to_string(meta_path).ok()?;
     let val: serde_json::Value = serde_json::from_str(&content).ok()?;
-    val.get("turn_count").and_then(|v| v.as_u64()).map(|v| v as usize)
+    val.get("turn_count")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
 }
 
 /// Truncate a string to max_len chars.
@@ -151,7 +147,6 @@ fn truncate_str(s: &str, max_len: usize) -> String {
 }
 
 // ── Previous Session Digest ──
-
 
 #[cfg(test)]
 mod tests {
@@ -195,9 +190,18 @@ mod tests {
         let result = compose_narrative_minimal(pid);
         assert!(result.is_some(), "should return activity summary");
         let text = result.unwrap();
-        assert!(text.contains("Session Activity"), "should have activity: {text}");
-        assert!(text.contains("1 files modified"), "should have files: {text}");
-        assert!(!text.contains("## Tasks"), "should NOT have tasks section: {text}");
+        assert!(
+            text.contains("Session Activity"),
+            "should have activity: {text}"
+        );
+        assert!(
+            text.contains("1 files modified"),
+            "should have files: {text}"
+        );
+        assert!(
+            !text.contains("## Tasks"),
+            "should NOT have tasks section: {text}"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -230,20 +234,28 @@ mod tests {
                 },
             ],
             files_modified: vec![
-                FileEditCount { path: "/repo/crates/edda-bridge-claude/src/dispatch.rs".into(), count: 10 },
-                FileEditCount { path: "/repo/crates/edda-bridge-claude/src/signals.rs".into(), count: 5 },
-                FileEditCount { path: "/repo/crates/edda-bridge-claude/src/lib.rs".into(), count: 2 },
-            ],
-            commits: vec![
-                CommitInfo { hash: "abc1234".into(), message: "fix: auth flow".into() },
-            ],
-            failed_commands: vec![
-                FailedBashCmd {
-                    command_base: "cargo test -p edda-bridge-claude".into(),
-                    stderr_snippet: "thread 'test' panicked".into(),
+                FileEditCount {
+                    path: "/repo/crates/edda-bridge-claude/src/dispatch.rs".into(),
+                    count: 10,
+                },
+                FileEditCount {
+                    path: "/repo/crates/edda-bridge-claude/src/signals.rs".into(),
+                    count: 5,
+                },
+                FileEditCount {
+                    path: "/repo/crates/edda-bridge-claude/src/lib.rs".into(),
                     count: 2,
                 },
             ],
+            commits: vec![CommitInfo {
+                hash: "abc1234".into(),
+                message: "fix: auth flow".into(),
+            }],
+            failed_commands: vec![FailedBashCmd {
+                command_base: "cargo test -p edda-bridge-claude".into(),
+                stderr_snippet: "thread 'test' panicked".into(),
+                count: 2,
+            }],
         };
         save_session_signals(pid, "test-session", &signals);
 
@@ -267,10 +279,22 @@ mod tests {
         }
 
         // Content checks
-        assert!(narrative.contains("Fix the auth bug"), "should include task subject");
-        assert!(narrative.contains("3 files modified"), "should include file count");
-        assert!(narrative.contains("1 commits"), "should include commit count");
-        assert!(narrative.contains("cargo test"), "should include failed cmd");
+        assert!(
+            narrative.contains("Fix the auth bug"),
+            "should include task subject"
+        );
+        assert!(
+            narrative.contains("3 files modified"),
+            "should include file count"
+        );
+        assert!(
+            narrative.contains("1 commits"),
+            "should include commit count"
+        );
+        assert!(
+            narrative.contains("cargo test"),
+            "should include failed cmd"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -283,12 +307,24 @@ mod tests {
         let signals = SessionSignals {
             tasks: vec![],
             files_modified: vec![
-                FileEditCount { path: "a.rs".into(), count: 5 },
-                FileEditCount { path: "b.rs".into(), count: 3 },
+                FileEditCount {
+                    path: "a.rs".into(),
+                    count: 5,
+                },
+                FileEditCount {
+                    path: "b.rs".into(),
+                    count: 3,
+                },
             ],
             commits: vec![
-                CommitInfo { hash: "aaa".into(), message: "first".into() },
-                CommitInfo { hash: "bbb".into(), message: "second commit".into() },
+                CommitInfo {
+                    hash: "aaa".into(),
+                    message: "first".into(),
+                },
+                CommitInfo {
+                    hash: "bbb".into(),
+                    message: "second commit".into(),
+                },
             ],
             failed_commands: vec![],
         };
@@ -309,8 +345,14 @@ mod tests {
         let signals = SessionSignals {
             tasks: vec![],
             files_modified: vec![
-                FileEditCount { path: "a.rs".into(), count: 50 },
-                FileEditCount { path: "b.rs".into(), count: 30 },
+                FileEditCount {
+                    path: "a.rs".into(),
+                    count: 50,
+                },
+                FileEditCount {
+                    path: "b.rs".into(),
+                    count: 30,
+                },
             ],
             commits: vec![],
             failed_commands: vec![],
@@ -327,10 +369,17 @@ mod tests {
             "turn_count": 10,
             "budget_chars": 8000
         });
-        fs::write(packs_dir.join("hot.meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
+        fs::write(
+            packs_dir.join("hot.meta.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
 
         let summary = render_activity_summary(pid).unwrap();
-        assert!(summary.contains("over 10 turns"), "should show velocity: {summary}");
+        assert!(
+            summary.contains("over 10 turns"),
+            "should show velocity: {summary}"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -346,5 +395,4 @@ mod tests {
         assert!(result.ends_with("..."));
         assert!(result.len() <= 15);
     }
-
 }

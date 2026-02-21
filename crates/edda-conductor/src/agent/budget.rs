@@ -25,9 +25,7 @@ impl BudgetTracker {
     }
 
     pub fn is_exhausted(&self) -> bool {
-        self.plan_budget
-            .map(|b| self.spent >= b)
-            .unwrap_or(false)
+        self.plan_budget.map(|b| self.spent >= b).unwrap_or(false)
     }
 }
 

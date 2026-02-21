@@ -106,10 +106,7 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
         };
 
         // Track timestamps for duration
-        let ts = envelope
-            .get("ts")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let ts = envelope.get("ts").and_then(|v| v.as_str()).unwrap_or("");
         if !ts.is_empty() {
             if stats.first_ts.is_none() {
                 stats.first_ts = Some(ts.to_string());
@@ -258,7 +255,10 @@ pub fn render_digest_text(session_id: &str, stats: &SessionStats) -> String {
     ));
 
     if !stats.files_modified.is_empty() {
-        lines.push(format!("Files modified: {}", stats.files_modified.join(", ")));
+        lines.push(format!(
+            "Files modified: {}",
+            stats.files_modified.join(", ")
+        ));
     }
 
     if !stats.commits_made.is_empty() {
@@ -364,7 +364,10 @@ pub fn build_digest_event(
             provenance: vec![Provenance {
                 target: format!("session:{session_id}"),
                 rel: "based_on".to_string(),
-                note: Some(format!("bridge digest of session {}", &session_id[..session_id.len().min(8)])),
+                note: Some(format!(
+                    "bridge digest of session {}",
+                    &session_id[..session_id.len().min(8)]
+                )),
             }],
             ..Default::default()
         },
@@ -483,11 +486,17 @@ pub fn save_digest_state(project_id: &str, state: &DigestState) -> anyhow::Resul
 }
 
 fn digest_state_path(project_id: &str) -> std::path::PathBuf {
-    edda_store::project_dir(project_id).join("state").join("last_digested_session.json")
+    edda_store::project_dir(project_id)
+        .join("state")
+        .join("last_digested_session.json")
 }
 
 /// Find session ledger files in the store, excluding the current session.
-fn find_pending_sessions(project_id: &str, current_session_id: &str, state: &DigestState) -> Vec<String> {
+fn find_pending_sessions(
+    project_id: &str,
+    current_session_id: &str,
+    state: &DigestState,
+) -> Vec<String> {
     let ledger_dir = edda_store::project_dir(project_id).join("ledger");
     let entries = match std::fs::read_dir(&ledger_dir) {
         Ok(e) => e,
@@ -601,14 +610,28 @@ pub fn digest_previous_sessions_with_opts(
         // Check if there's a retry pending
         if !state.pending_session_id.is_empty() && state.retry_count > 0 {
             let retry_id = state.pending_session_id.clone();
-            return digest_one_session(project_id, &retry_id, cwd, lock_timeout_ms, digest_failed_cmds, &mut state);
+            return digest_one_session(
+                project_id,
+                &retry_id,
+                cwd,
+                lock_timeout_ms,
+                digest_failed_cmds,
+                &mut state,
+            );
         }
         return DigestResult::NoPending;
     }
 
     // Digest the first pending session (one per SessionStart to keep latency low)
     let session_id = pending[0].clone();
-    digest_one_session(project_id, &session_id, cwd, lock_timeout_ms, digest_failed_cmds, &mut state)
+    digest_one_session(
+        project_id,
+        &session_id,
+        cwd,
+        lock_timeout_ms,
+        digest_failed_cmds,
+        &mut state,
+    )
 }
 
 /// Build a context hint from active tasks and latest commit for inferred decisions.
@@ -671,9 +694,9 @@ fn harvest_inferred_decisions(
     for pkg in &stats.deps_added {
         // Skip if agent already recorded a decision containing this package name
         let pkg_lower = pkg.to_lowercase();
-        let already_recorded = decisions_recorded.iter().any(|d| {
-            d.to_lowercase().contains(&pkg_lower)
-        });
+        let already_recorded = decisions_recorded
+            .iter()
+            .any(|d| d.to_lowercase().contains(&pkg_lower));
         if already_recorded {
             continue;
         }
@@ -706,7 +729,10 @@ fn harvest_inferred_decisions(
                 provenance: vec![Provenance {
                     target: format!("session:{session_id}"),
                     rel: "inferred_from".to_string(),
-                    note: Some(format!("passive harvest from session {}", &session_id[..session_id.len().min(8)])),
+                    note: Some(format!(
+                        "passive harvest from session {}",
+                        &session_id[..session_id.len().min(8)]
+                    )),
                 }],
                 ..Default::default()
             },
@@ -759,7 +785,12 @@ fn digest_one_session(
     let ledger = match edda_ledger::Ledger::open(&root) {
         Ok(l) => l,
         Err(e) => {
-            record_failure(project_id, session_id, state, &format!("cannot open ledger: {e}"));
+            record_failure(
+                project_id,
+                session_id,
+                state,
+                &format!("cannot open ledger: {e}"),
+            );
             return DigestResult::Error(format!("cannot open ledger: {e}"));
         }
     };
@@ -778,7 +809,12 @@ fn digest_one_session(
     let parent_hash = match ledger.last_event_hash() {
         Ok(h) => h,
         Err(e) => {
-            record_failure(project_id, session_id, state, &format!("cannot read last hash: {e}"));
+            record_failure(
+                project_id,
+                session_id,
+                state,
+                &format!("cannot read last hash: {e}"),
+            );
             return DigestResult::Error(format!("cannot read last hash: {e}"));
         }
     };
@@ -787,7 +823,12 @@ fn digest_one_session(
     let mut stats = match extract_stats(&session_ledger_path) {
         Ok(s) => s,
         Err(e) => {
-            record_failure(project_id, session_id, state, &format!("extraction failed: {e}"));
+            record_failure(
+                project_id,
+                session_id,
+                state,
+                &format!("extraction failed: {e}"),
+            );
             return DigestResult::Error(format!("extraction failed: {e}"));
         }
     };
@@ -811,16 +852,27 @@ fn digest_one_session(
     let (decisions, notes) = collect_session_ledger_extras(cwd, stats.first_ts.as_deref());
 
     // Build and append session digest note
-    let event = match build_digest_event(session_id, &stats, &branch, parent_hash.as_deref(), &notes) {
-        Ok(e) => e,
-        Err(e) => {
-            record_failure(project_id, session_id, state, &format!("build event failed: {e}"));
-            return DigestResult::Error(format!("build event failed: {e}"));
-        }
-    };
+    let event =
+        match build_digest_event(session_id, &stats, &branch, parent_hash.as_deref(), &notes) {
+            Ok(e) => e,
+            Err(e) => {
+                record_failure(
+                    project_id,
+                    session_id,
+                    state,
+                    &format!("build event failed: {e}"),
+                );
+                return DigestResult::Error(format!("build event failed: {e}"));
+            }
+        };
 
     if let Err(e) = ledger.append_event(&event, false) {
-        record_failure(project_id, session_id, state, &format!("append failed: {e}"));
+        record_failure(
+            project_id,
+            session_id,
+            state,
+            &format!("append failed: {e}"),
+        );
         return DigestResult::Error(format!("append failed: {e}"));
     }
 
@@ -875,7 +927,9 @@ fn digest_one_session(
     // and re-digesting this session in future SessionStart calls.
     let _ = std::fs::remove_file(&session_ledger_path);
 
-    DigestResult::Written { event_id: last_event_id }
+    DigestResult::Written {
+        event_id: last_event_id,
+    }
 }
 
 /// Manually digest a specific session (CLI escape hatch).
@@ -895,7 +949,10 @@ pub fn digest_session_manual(
         .join(format!("{session_id}.jsonl"));
 
     if !session_ledger_path.exists() {
-        anyhow::bail!("session ledger not found: {}", session_ledger_path.display());
+        anyhow::bail!(
+            "session ledger not found: {}",
+            session_ledger_path.display()
+        );
     }
 
     let cwd_path = Path::new(cwd);
@@ -918,12 +975,8 @@ pub fn digest_session_manual(
     if digest_failed_cmds && !stats.failed_cmds_detail.is_empty() {
         let mut chain_hash = Some(event.hash.clone());
         for failed_cmd in &stats.failed_cmds_detail {
-            let cmd_event = build_cmd_milestone_event(
-                session_id,
-                failed_cmd,
-                &branch,
-                chain_hash.as_deref(),
-            )?;
+            let cmd_event =
+                build_cmd_milestone_event(session_id, failed_cmd, &branch, chain_hash.as_deref())?;
             ledger.append_event(&cmd_event, false)?;
             chain_hash = Some(cmd_event.hash.clone());
             last_event_id = cmd_event.event_id.clone();
@@ -1222,7 +1275,10 @@ pub fn read_prev_digest(project_id: &str) -> Option<PrevDigest> {
 /// during this session (events with `ts >= session_first_ts`).
 ///
 /// Returns `(decisions, notes)`. Gracefully returns empty vecs on any error.
-pub fn collect_session_ledger_extras(cwd: &str, session_first_ts: Option<&str>) -> (Vec<String>, Vec<String>) {
+pub fn collect_session_ledger_extras(
+    cwd: &str,
+    session_first_ts: Option<&str>,
+) -> (Vec<String>, Vec<String>) {
     let first_ts = match session_first_ts {
         Some(ts) if !ts.is_empty() => ts,
         _ => return (Vec::new(), Vec::new()),
@@ -1255,7 +1311,11 @@ pub fn collect_session_ledger_extras(cwd: &str, session_first_ts: Option<&str>) 
         }
 
         // Skip auto-generated digest notes
-        let source = event.payload.get("source").and_then(|v| v.as_str()).unwrap_or("");
+        let source = event
+            .payload
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if source.starts_with("bridge:") {
             continue;
         }
@@ -1401,13 +1461,21 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let lines = vec![
             make_envelope("PostToolUse", "Bash", serde_json::json!({})),
-            make_envelope("PostToolUse", "Edit", serde_json::json!({
-                "tool_input": { "file_path": "/src/main.rs" }
-            })),
+            make_envelope(
+                "PostToolUse",
+                "Edit",
+                serde_json::json!({
+                    "tool_input": { "file_path": "/src/main.rs" }
+                }),
+            ),
             make_envelope("PostToolUse", "Read", serde_json::json!({})),
-            make_envelope("PostToolUseFailure", "Bash", serde_json::json!({
-                "tool_input": { "command": "cargo test" }
-            })),
+            make_envelope(
+                "PostToolUseFailure",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "cargo test" }
+                }),
+            ),
             make_envelope("UserPromptSubmit", "", serde_json::json!({})),
             make_envelope("UserPromptSubmit", "", serde_json::json!({})),
         ];
@@ -1423,15 +1491,27 @@ mod tests {
     fn digest_extracts_files() {
         let tmp = tempfile::tempdir().unwrap();
         let lines = vec![
-            make_envelope("PostToolUse", "Edit", serde_json::json!({
-                "tool_input": { "file_path": "/src/main.rs" }
-            })),
-            make_envelope("PostToolUse", "Write", serde_json::json!({
-                "tool_input": { "file_path": "/src/lib.rs" }
-            })),
-            make_envelope("PostToolUse", "Edit", serde_json::json!({
-                "tool_input": { "file_path": "/src/main.rs" }
-            })),
+            make_envelope(
+                "PostToolUse",
+                "Edit",
+                serde_json::json!({
+                    "tool_input": { "file_path": "/src/main.rs" }
+                }),
+            ),
+            make_envelope(
+                "PostToolUse",
+                "Write",
+                serde_json::json!({
+                    "tool_input": { "file_path": "/src/lib.rs" }
+                }),
+            ),
+            make_envelope(
+                "PostToolUse",
+                "Edit",
+                serde_json::json!({
+                    "tool_input": { "file_path": "/src/main.rs" }
+                }),
+            ),
             make_envelope("PostToolUse", "Read", serde_json::json!({})),
         ];
         let path = write_session_ledger(tmp.path(), &lines);
@@ -1446,13 +1526,21 @@ mod tests {
     fn digest_extracts_failed_cmds() {
         let tmp = tempfile::tempdir().unwrap();
         let lines = vec![
-            make_envelope("PostToolUseFailure", "Bash", serde_json::json!({
-                "tool_input": { "command": "cargo test --all" }
-            })),
+            make_envelope(
+                "PostToolUseFailure",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "cargo test --all" }
+                }),
+            ),
             make_envelope("PostToolUseFailure", "Edit", serde_json::json!({})),
-            make_envelope("PostToolUseFailure", "Bash", serde_json::json!({
-                "tool_input": { "command": "npm run build" }
-            })),
+            make_envelope(
+                "PostToolUseFailure",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "npm run build" }
+                }),
+            ),
         ];
         let path = write_session_ledger(tmp.path(), &lines);
         let stats = extract_stats(&path).unwrap();
@@ -1479,9 +1567,7 @@ mod tests {
     #[test]
     fn digest_payload_has_source() {
         let tmp = tempfile::tempdir().unwrap();
-        let lines = vec![
-            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
-        ];
+        let lines = vec![make_envelope("PostToolUse", "Bash", serde_json::json!({}))];
         let path = write_session_ledger(tmp.path(), &lines);
 
         let event = extract_session_digest(&path, "sess-src", "main", None).unwrap();
@@ -1496,11 +1582,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let lines = vec![
             make_envelope_at(
-                "UserPromptSubmit", "", "2026-02-14T10:00:00Z",
+                "UserPromptSubmit",
+                "",
+                "2026-02-14T10:00:00Z",
                 serde_json::json!({}),
             ),
             make_envelope_at(
-                "PostToolUse", "Bash", "2026-02-14T10:35:00Z",
+                "PostToolUse",
+                "Bash",
+                "2026-02-14T10:35:00Z",
                 serde_json::json!({}),
             ),
         ];
@@ -1514,15 +1604,27 @@ mod tests {
     fn digest_extracts_commits_from_bash() {
         let tmp = tempfile::tempdir().unwrap();
         let lines = vec![
-            make_envelope("PostToolUse", "Bash", serde_json::json!({
-                "tool_input": { "command": "git commit -m \"fix: resolve UTF-8 truncation\"" }
-            })),
-            make_envelope("PostToolUse", "Bash", serde_json::json!({
-                "tool_input": { "command": "cargo test --all" }
-            })),
-            make_envelope("PostToolUse", "Bash", serde_json::json!({
-                "tool_input": { "command": "git add . && git commit -m 'feat: add digest'" }
-            })),
+            make_envelope(
+                "PostToolUse",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "git commit -m \"fix: resolve UTF-8 truncation\"" }
+                }),
+            ),
+            make_envelope(
+                "PostToolUse",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "cargo test --all" }
+                }),
+            ),
+            make_envelope(
+                "PostToolUse",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "git add . && git commit -m 'feat: add digest'" }
+                }),
+            ),
         ];
         let path = write_session_ledger(tmp.path(), &lines);
         let stats = extract_stats(&path).unwrap();
@@ -1535,11 +1637,13 @@ mod tests {
     #[test]
     fn digest_commits_in_payload() {
         let tmp = tempfile::tempdir().unwrap();
-        let lines = vec![
-            make_envelope("PostToolUse", "Bash", serde_json::json!({
+        let lines = vec![make_envelope(
+            "PostToolUse",
+            "Bash",
+            serde_json::json!({
                 "tool_input": { "command": "git commit -m \"fix: something\"" }
-            })),
-        ];
+            }),
+        )];
         let path = write_session_ledger(tmp.path(), &lines);
         let event = extract_session_digest(&path, "sess-commits", "main", None).unwrap();
 
@@ -1666,10 +1770,7 @@ mod tests {
             extract_git_commit_msg("git commit -m 'feat: new'"),
             "feat: new"
         );
-        assert_eq!(
-            extract_git_commit_msg("git add . && git commit"),
-            ""
-        );
+        assert_eq!(extract_git_commit_msg("git add . && git commit"), "");
     }
 
     #[test]
@@ -1700,9 +1801,7 @@ mod tests {
 
     /// Create a workspace (.edda/) and a fake store with a session ledger.
     /// Returns (workspace_root, fake_project_id, session_id).
-    fn setup_digest_workspace(
-        tmp: &Path,
-    ) -> (std::path::PathBuf, String) {
+    fn setup_digest_workspace(tmp: &Path) -> (std::path::PathBuf, String) {
         // Create workspace
         let workspace = tmp.join("repo");
         let paths = edda_ledger::EddaPaths::discover(&workspace);
@@ -1717,11 +1816,7 @@ mod tests {
         (workspace, project_id)
     }
 
-    fn write_store_session_ledger(
-        project_id: &str,
-        session_id: &str,
-        lines: &[serde_json::Value],
-    ) {
+    fn write_store_session_ledger(project_id: &str, session_id: &str, lines: &[serde_json::Value]) {
         let dir = edda_store::project_dir(project_id).join("ledger");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("{session_id}.jsonl"));
@@ -1738,10 +1833,14 @@ mod tests {
 
         // Create a previous session's ledger in the store
         let prev_session = "prev-session-001";
-        write_store_session_ledger(&project_id, prev_session, &[
-            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
-            make_envelope("UserPromptSubmit", "", serde_json::json!({})),
-        ]);
+        write_store_session_ledger(
+            &project_id,
+            prev_session,
+            &[
+                make_envelope("PostToolUse", "Bash", serde_json::json!({})),
+                make_envelope("UserPromptSubmit", "", serde_json::json!({})),
+            ],
+        );
 
         let result = digest_previous_sessions(
             &project_id,
@@ -1767,23 +1866,25 @@ mod tests {
         let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
         // Write two previous sessions
-        write_store_session_ledger(&project_id, "sess-aaa", &[
-            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
-        ]);
-        write_store_session_ledger(&project_id, "sess-bbb", &[
-            make_envelope("PostToolUse", "Edit", serde_json::json!({})),
-        ]);
+        write_store_session_ledger(
+            &project_id,
+            "sess-aaa",
+            &[make_envelope("PostToolUse", "Bash", serde_json::json!({}))],
+        );
+        write_store_session_ledger(
+            &project_id,
+            "sess-bbb",
+            &[make_envelope("PostToolUse", "Edit", serde_json::json!({}))],
+        );
 
         // Digest first
-        let r1 = digest_previous_sessions(
-            &project_id, "current", workspace.to_str().unwrap(), 2000,
-        );
+        let r1 =
+            digest_previous_sessions(&project_id, "current", workspace.to_str().unwrap(), 2000);
         assert!(matches!(r1, DigestResult::Written { .. }));
 
         // Digest second
-        let r2 = digest_previous_sessions(
-            &project_id, "current", workspace.to_str().unwrap(), 2000,
-        );
+        let r2 =
+            digest_previous_sessions(&project_id, "current", workspace.to_str().unwrap(), 2000);
         assert!(matches!(r2, DigestResult::Written { .. }));
 
         // Verify hash chain
@@ -1791,7 +1892,10 @@ mod tests {
         let events = ledger.iter_events().unwrap();
         assert_eq!(events.len(), 2);
         assert!(events[0].parent_hash.is_none());
-        assert_eq!(events[1].parent_hash.as_deref(), Some(events[0].hash.as_str()));
+        assert_eq!(
+            events[1].parent_hash.as_deref(),
+            Some(events[0].hash.as_str())
+        );
     }
 
     #[test]
@@ -1799,26 +1903,28 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
-        write_store_session_ledger(&project_id, "sess-once", &[
-            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
-        ]);
+        write_store_session_ledger(
+            &project_id,
+            "sess-once",
+            &[make_envelope("PostToolUse", "Bash", serde_json::json!({}))],
+        );
 
         let ledger_dir = edda_store::project_dir(&project_id).join("ledger");
 
         // Digest once
-        let r1 = digest_previous_sessions(
-            &project_id, "current", workspace.to_str().unwrap(), 2000,
-        );
+        let r1 =
+            digest_previous_sessions(&project_id, "current", workspace.to_str().unwrap(), 2000);
         assert!(matches!(r1, DigestResult::Written { .. }));
 
         // Session ledger file should be deleted after successful digest
-        assert!(!ledger_dir.join("sess-once.jsonl").exists(),
-            "session ledger file should be removed after successful digest");
+        assert!(
+            !ledger_dir.join("sess-once.jsonl").exists(),
+            "session ledger file should be removed after successful digest"
+        );
 
         // Digest again — should be NoPending (file is gone, not re-discovered)
-        let r2 = digest_previous_sessions(
-            &project_id, "current", workspace.to_str().unwrap(), 2000,
-        );
+        let r2 =
+            digest_previous_sessions(&project_id, "current", workspace.to_str().unwrap(), 2000);
         assert!(matches!(r2, DigestResult::NoPending));
 
         // Workspace ledger should still have exactly 1 event
@@ -1833,9 +1939,11 @@ mod tests {
 
         // Create 3 session ledger files
         for sid in &["sess-001", "sess-002", "sess-003"] {
-            write_store_session_ledger(&project_id, sid, &[
-                make_envelope("PostToolUse", "Bash", serde_json::json!({})),
-            ]);
+            write_store_session_ledger(
+                &project_id,
+                sid,
+                &[make_envelope("PostToolUse", "Bash", serde_json::json!({}))],
+            );
         }
 
         let ws = workspace.to_str().unwrap();
@@ -1859,8 +1967,11 @@ mod tests {
 
         // Workspace ledger should have exactly 3 digest events (not more)
         let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
-        assert_eq!(ledger.iter_events().unwrap().len(), 3,
-            "should have exactly 3 digest events, no duplicates");
+        assert_eq!(
+            ledger.iter_events().unwrap().len(),
+            3,
+            "should have exactly 3 digest events, no duplicates"
+        );
     }
 
     #[test]
@@ -1874,9 +1985,11 @@ mod tests {
         let ledger_dir = edda_store::project_dir(project_id).join("ledger");
         let _ = std::fs::remove_dir_all(&ledger_dir);
 
-        write_store_session_ledger(project_id, "sess-fail", &[
-            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
-        ]);
+        write_store_session_ledger(
+            project_id,
+            "sess-fail",
+            &[make_envelope("PostToolUse", "Bash", serde_json::json!({}))],
+        );
 
         let result = digest_previous_sessions(
             project_id,
@@ -1911,16 +2024,14 @@ mod tests {
         };
         save_digest_state(project_id, &state).unwrap();
 
-        write_store_session_ledger(project_id, "sess-stuck", &[
-            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
-        ]);
-
-        let result = digest_previous_sessions(
+        write_store_session_ledger(
             project_id,
-            "current",
-            tmp.path().to_str().unwrap(),
-            2000,
+            "sess-stuck",
+            &[make_envelope("PostToolUse", "Bash", serde_json::json!({}))],
         );
+
+        let result =
+            digest_previous_sessions(project_id, "current", tmp.path().to_str().unwrap(), 2000);
 
         assert!(matches!(result, DigestResult::PermanentFailure(_)));
         if let DigestResult::PermanentFailure(msg) = result {
@@ -2029,23 +2140,31 @@ mod tests {
         let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
         // Write session with a failed Bash command
-        write_store_session_ledger(&project_id, "sess-cmd-ws", &[
-            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
-            serde_json::json!({
-                "ts": "2026-02-14T10:01:00Z",
-                "hook_event_name": "PostToolUseFailure",
-                "tool_name": "Bash",
-                "cwd": "/proj",
-                "raw": {
-                    "toolName": "Bash",
-                    "toolInput": { "command": "failing-cmd" },
-                    "toolResponse": { "exitCode": 1 }
-                }
-            }),
-        ]);
+        write_store_session_ledger(
+            &project_id,
+            "sess-cmd-ws",
+            &[
+                make_envelope("PostToolUse", "Bash", serde_json::json!({})),
+                serde_json::json!({
+                    "ts": "2026-02-14T10:01:00Z",
+                    "hook_event_name": "PostToolUseFailure",
+                    "tool_name": "Bash",
+                    "cwd": "/proj",
+                    "raw": {
+                        "toolName": "Bash",
+                        "toolInput": { "command": "failing-cmd" },
+                        "toolResponse": { "exitCode": 1 }
+                    }
+                }),
+            ],
+        );
 
         let result = digest_previous_sessions_with_opts(
-            &project_id, "current", workspace.to_str().unwrap(), 2000, true,
+            &project_id,
+            "current",
+            workspace.to_str().unwrap(),
+            2000,
+            true,
         );
         assert!(matches!(result, DigestResult::Written { .. }));
 
@@ -2057,7 +2176,10 @@ mod tests {
         assert_eq!(events[1].event_type, "cmd");
         assert_eq!(events[1].payload["source"], "bridge:cmd");
         // Hash chain: second event parents the first
-        assert_eq!(events[1].parent_hash.as_deref(), Some(events[0].hash.as_str()));
+        assert_eq!(
+            events[1].parent_hash.as_deref(),
+            Some(events[0].hash.as_str())
+        );
     }
 
     #[test]
@@ -2065,8 +2187,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
-        write_store_session_ledger(&project_id, "sess-no-cmd", &[
-            serde_json::json!({
+        write_store_session_ledger(
+            &project_id,
+            "sess-no-cmd",
+            &[serde_json::json!({
                 "ts": "2026-02-14T10:01:00Z",
                 "hook_event_name": "PostToolUseFailure",
                 "tool_name": "Bash",
@@ -2076,12 +2200,16 @@ mod tests {
                     "toolInput": { "command": "fail-cmd" },
                     "toolResponse": { "exitCode": 1 }
                 }
-            }),
-        ]);
+            })],
+        );
 
         // digest_failed_cmds = false
         let result = digest_previous_sessions_with_opts(
-            &project_id, "current", workspace.to_str().unwrap(), 2000, false,
+            &project_id,
+            "current",
+            workspace.to_str().unwrap(),
+            2000,
+            false,
         );
         assert!(matches!(result, DigestResult::Written { .. }));
 
@@ -2097,14 +2225,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
-        write_store_session_ledger(&project_id, "sess-manual", &[
-            make_envelope("PostToolUse", "Edit", serde_json::json!({})),
-            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
-        ]);
+        write_store_session_ledger(
+            &project_id,
+            "sess-manual",
+            &[
+                make_envelope("PostToolUse", "Edit", serde_json::json!({})),
+                make_envelope("PostToolUse", "Bash", serde_json::json!({})),
+            ],
+        );
 
         let event_id = digest_session_manual(
-            &project_id, "sess-manual", workspace.to_str().unwrap(), true,
-        ).unwrap();
+            &project_id,
+            "sess-manual",
+            workspace.to_str().unwrap(),
+            true,
+        )
+        .unwrap();
 
         assert!(event_id.starts_with("evt_"));
 
@@ -2124,9 +2260,18 @@ mod tests {
 
         let stats = SessionStats {
             tasks_snapshot: vec![
-                DigestTaskSnapshot { subject: "Fix bug".into(), status: "completed".into() },
-                DigestTaskSnapshot { subject: "Add tests".into(), status: "completed".into() },
-                DigestTaskSnapshot { subject: "Deploy".into(), status: "pending".into() },
+                DigestTaskSnapshot {
+                    subject: "Fix bug".into(),
+                    status: "completed".into(),
+                },
+                DigestTaskSnapshot {
+                    subject: "Add tests".into(),
+                    status: "completed".into(),
+                },
+                DigestTaskSnapshot {
+                    subject: "Deploy".into(),
+                    status: "pending".into(),
+                },
             ],
             commits_made: vec!["fix: auth flow".into(), "feat: add billing".into()],
             files_modified: vec!["src/lib.rs".into(), "src/main.rs".into()],
@@ -2187,7 +2332,9 @@ mod tests {
             ..Default::default()
         };
         write_prev_digest(
-            pid, "test-dn", &stats,
+            pid,
+            "test-dn",
+            &stats,
             vec!["auth=jwt (stateless)".into(), "db=postgres".into()],
             vec!["OAuth deferred — needs client registration".into()],
         );
@@ -2219,15 +2366,23 @@ mod tests {
             "files_modified_count": 1,
             "total_edits": 5
         });
-        let path = edda_store::project_dir(pid).join("state").join("prev_digest.json");
+        let path = edda_store::project_dir(pid)
+            .join("state")
+            .join("prev_digest.json");
         let _ = std::fs::create_dir_all(path.parent().unwrap());
         std::fs::write(&path, serde_json::to_string_pretty(&old_json).unwrap()).unwrap();
 
         let digest = read_prev_digest(pid).expect("old format should deserialize");
         assert_eq!(digest.session_id, "old-sess");
-        assert!(digest.decisions.is_empty(), "decisions should default to empty");
+        assert!(
+            digest.decisions.is_empty(),
+            "decisions should default to empty"
+        );
         assert!(digest.notes.is_empty(), "notes should default to empty");
-        assert!(digest.failed_commands.is_empty(), "failed_commands should default to empty");
+        assert!(
+            digest.failed_commands.is_empty(),
+            "failed_commands should default to empty"
+        );
 
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -2245,10 +2400,11 @@ mod tests {
 
         // Write a decision event
         let tags_d = vec!["decision".to_string()];
-        let mut evt = edda_core::event::new_note_event(
-            &branch, None, "system", "auth: jwt", &tags_d,
-        ).unwrap();
-        evt.payload["decision"] = serde_json::json!({"key": "auth", "value": "jwt", "reason": "stateless"});
+        let mut evt =
+            edda_core::event::new_note_event(&branch, None, "system", "auth: jwt", &tags_d)
+                .unwrap();
+        evt.payload["decision"] =
+            serde_json::json!({"key": "auth", "value": "jwt", "reason": "stateless"});
         edda_core::event::finalize_event(&mut evt);
         let decision_ts = evt.ts.clone();
         ledger.append_event(&evt, false).unwrap();
@@ -2256,14 +2412,17 @@ mod tests {
         // Write a session note
         let tags_s = vec!["session".to_string()];
         let evt2 = edda_core::event::new_note_event(
-            &branch, Some(&evt.hash), "user", "completed auth, next OAuth", &tags_s,
-        ).unwrap();
+            &branch,
+            Some(&evt.hash),
+            "user",
+            "completed auth, next OAuth",
+            &tags_s,
+        )
+        .unwrap();
         ledger.append_event(&evt2, false).unwrap();
 
-        let (decisions, notes) = collect_session_ledger_extras(
-            workspace.to_str().unwrap(),
-            Some(&decision_ts),
-        );
+        let (decisions, notes) =
+            collect_session_ledger_extras(workspace.to_str().unwrap(), Some(&decision_ts));
         assert_eq!(decisions.len(), 1);
         assert!(decisions[0].contains("auth=jwt"), "got: {}", decisions[0]);
         assert!(decisions[0].contains("stateless"), "got: {}", decisions[0]);
@@ -2285,17 +2444,20 @@ mod tests {
         // Write an auto-generated digest note (source: "bridge:session_digest")
         let tags = vec!["session_digest".to_string()];
         let mut evt = edda_core::event::new_note_event(
-            &branch, None, "system", "Session abc: 10 tool calls", &tags,
-        ).unwrap();
+            &branch,
+            None,
+            "system",
+            "Session abc: 10 tool calls",
+            &tags,
+        )
+        .unwrap();
         evt.payload["source"] = serde_json::json!("bridge:session_digest");
         edda_core::event::finalize_event(&mut evt);
         let ts = evt.ts.clone();
         ledger.append_event(&evt, false).unwrap();
 
-        let (decisions, notes) = collect_session_ledger_extras(
-            workspace.to_str().unwrap(),
-            Some(&ts),
-        );
+        let (decisions, notes) =
+            collect_session_ledger_extras(workspace.to_str().unwrap(), Some(&ts));
         assert!(decisions.is_empty(), "auto-digest should be excluded");
         assert!(notes.is_empty(), "auto-digest should be excluded");
     }
@@ -2318,16 +2480,14 @@ mod tests {
         let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
         // Write a session with only SessionStart (no tool calls, no user prompts)
-        write_store_session_ledger(&project_id, "sess-empty-skip", &[
-            make_envelope("SessionStart", "", serde_json::json!({})),
-        ]);
-
-        let result = digest_previous_sessions(
+        write_store_session_ledger(
             &project_id,
-            "current",
-            workspace.to_str().unwrap(),
-            2000,
+            "sess-empty-skip",
+            &[make_envelope("SessionStart", "", serde_json::json!({}))],
         );
+
+        let result =
+            digest_previous_sessions(&project_id, "current", workspace.to_str().unwrap(), 2000);
 
         // Should skip (NoPending), not write to workspace ledger
         assert!(matches!(result, DigestResult::NoPending), "got: {result:?}");
@@ -2340,7 +2500,10 @@ mod tests {
         let session_path = edda_store::project_dir(&project_id)
             .join("ledger")
             .join("sess-empty-skip.jsonl");
-        assert!(!session_path.exists(), "empty session ledger should be removed");
+        assert!(
+            !session_path.exists(),
+            "empty session ledger should be removed"
+        );
 
         // State should mark as processed to avoid re-processing
         let state = load_digest_state(&project_id);
@@ -2379,8 +2542,14 @@ mod tests {
             .as_array()
             .expect("notes should be an array");
         assert_eq!(payload_notes.len(), 2);
-        assert_eq!(payload_notes[0].as_str().unwrap(), "Switched to JWT auth approach");
-        assert_eq!(payload_notes[1].as_str().unwrap(), "Need to revisit caching strategy");
+        assert_eq!(
+            payload_notes[0].as_str().unwrap(),
+            "Switched to JWT auth approach"
+        );
+        assert_eq!(
+            payload_notes[1].as_str().unwrap(),
+            "Need to revisit caching strategy"
+        );
     }
 
     #[test]
@@ -2434,19 +2603,35 @@ mod tests {
     fn digest_extracts_deps_added() {
         let dir = tempfile::tempdir().unwrap();
         let lines = vec![
-            make_envelope("PostToolUse", "Bash", serde_json::json!({
-                "tool_input": { "command": "cargo add serde" }
-            })),
-            make_envelope("PostToolUse", "Bash", serde_json::json!({
-                "tool_input": { "command": "npm install express" }
-            })),
-            make_envelope("PostToolUse", "Bash", serde_json::json!({
-                "tool_input": { "command": "pnpm add zod" }
-            })),
+            make_envelope(
+                "PostToolUse",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "cargo add serde" }
+                }),
+            ),
+            make_envelope(
+                "PostToolUse",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "npm install express" }
+                }),
+            ),
+            make_envelope(
+                "PostToolUse",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "pnpm add zod" }
+                }),
+            ),
             // Bare npm install (no package) → NOT captured
-            make_envelope("PostToolUse", "Bash", serde_json::json!({
-                "tool_input": { "command": "npm install" }
-            })),
+            make_envelope(
+                "PostToolUse",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "npm install" }
+                }),
+            ),
         ];
         let path = write_session_ledger(dir.path(), &lines);
         let stats = extract_stats(&path).unwrap();
@@ -2457,16 +2642,28 @@ mod tests {
     fn digest_extracts_deps_added_dedup() {
         let dir = tempfile::tempdir().unwrap();
         let lines = vec![
-            make_envelope("PostToolUse", "Bash", serde_json::json!({
-                "tool_input": { "command": "cargo add serde" }
-            })),
-            make_envelope("PostToolUse", "Bash", serde_json::json!({
-                "tool_input": { "command": "cargo add serde --features derive" }
-            })),
+            make_envelope(
+                "PostToolUse",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "cargo add serde" }
+                }),
+            ),
+            make_envelope(
+                "PostToolUse",
+                "Bash",
+                serde_json::json!({
+                    "tool_input": { "command": "cargo add serde --features derive" }
+                }),
+            ),
         ];
         let path = write_session_ledger(dir.path(), &lines);
         let stats = extract_stats(&path).unwrap();
-        assert_eq!(stats.deps_added, vec!["serde"], "duplicate deps should be deduped");
+        assert_eq!(
+            stats.deps_added,
+            vec!["serde"],
+            "duplicate deps should be deduped"
+        );
     }
 
     // ── Passive harvest tests ──
@@ -2493,7 +2690,7 @@ mod tests {
         let ids = harvest_inferred_decisions(
             "sess-harvest",
             &stats,
-            &[],  // no decisions recorded
+            &[], // no decisions recorded
             &ledger,
             "main",
             None,
@@ -2510,8 +2707,11 @@ mod tests {
         assert_eq!(last.payload["decision"]["value"], "jsonwebtoken");
 
         let tags: Vec<&str> = last.payload["tags"]
-            .as_array().unwrap()
-            .iter().filter_map(|v| v.as_str()).collect();
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
         assert!(tags.contains(&"decision"));
         assert!(tags.contains(&"inferred"));
     }
@@ -2533,16 +2733,13 @@ mod tests {
         // Agent already recorded a decision mentioning "serde"
         let decisions = vec!["dep.serde=serde (serialization)".to_string()];
 
-        let ids = harvest_inferred_decisions(
-            "sess-skip",
-            &stats,
-            &decisions,
-            &ledger,
-            "main",
-            None,
-        );
+        let ids =
+            harvest_inferred_decisions("sess-skip", &stats, &decisions, &ledger, "main", None);
 
-        assert!(ids.is_empty(), "should NOT write inferred decision when already recorded");
+        assert!(
+            ids.is_empty(),
+            "should NOT write inferred decision when already recorded"
+        );
     }
 
     #[test]
@@ -2557,8 +2754,14 @@ mod tests {
         };
 
         let hint = build_context_hint(&stats);
-        assert!(hint.contains("Add JWT authentication"), "should contain task subject");
-        assert!(hint.contains("feat: add auth middleware"), "should contain commit message");
+        assert!(
+            hint.contains("Add JWT authentication"),
+            "should contain task subject"
+        );
+        assert!(
+            hint.contains("feat: add auth middleware"),
+            "should contain commit message"
+        );
     }
 
     #[test]
@@ -2579,14 +2782,7 @@ mod tests {
 
         let stats = SessionStats::default(); // no deps_added
 
-        let ids = harvest_inferred_decisions(
-            "sess-empty",
-            &stats,
-            &[],
-            &ledger,
-            "main",
-            None,
-        );
+        let ids = harvest_inferred_decisions("sess-empty", &stats, &[], &ledger, "main", None);
 
         assert!(ids.is_empty(), "empty deps_added should produce no events");
     }

@@ -374,10 +374,7 @@ fn all_stages_approved(d: &CommitDraftV1) -> bool {
 
 // ── Draft stage building ──
 
-fn build_draft_stages(
-    policy_stages: &[PolicyStageDef],
-    actors: &ActorsConfig,
-) -> Vec<DraftStage> {
+fn build_draft_stages(policy_stages: &[PolicyStageDef], actors: &ActorsConfig) -> Vec<DraftStage> {
     policy_stages
         .iter()
         .map(|ps| {
@@ -446,10 +443,7 @@ fn write_draft(ledger: &Ledger, draft: &CommitDraftV1) -> anyhow::Result<()> {
 
 fn write_latest(ledger: &Ledger, draft_id: &str, ts: &str) -> anyhow::Result<()> {
     let latest = serde_json::json!({ "draft_id": draft_id, "ts": ts });
-    std::fs::write(
-        latest_path(ledger),
-        serde_json::to_string_pretty(&latest)?,
-    )?;
+    std::fs::write(latest_path(ledger), serde_json::to_string_pretty(&latest)?)?;
     Ok(())
 }
 
@@ -555,8 +549,7 @@ pub fn propose(p: ProposeParams<'_>) -> anyhow::Result<()> {
     let policy = load_policy_v2(&ledger)?;
     let actors = load_actors(&ledger)?;
     let has_failed_cmd = evidence_has_failed_cmd_check(&ledger, &evidence)?;
-    let (rule_id, policy_stages) =
-        route_select(&policy, &p.labels, has_failed_cmd, evidence.len());
+    let (rule_id, policy_stages) = route_select(&policy, &p.labels, has_failed_cmd, evidence.len());
     let draft_stages = build_draft_stages(&policy_stages, &actors);
     let need_approval = !draft_stages.is_empty();
 
@@ -771,8 +764,17 @@ pub fn inbox(
         return Ok(());
     }
 
-    let mut items: Vec<(String, String, String, String, String, usize, usize, Vec<String>)> =
-        Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut items: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        usize,
+        usize,
+        Vec<String>,
+    )> = Vec::new();
 
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -863,10 +865,7 @@ pub fn approve(
 
     let head = ledger.head_branch()?;
     if head != draft.branch {
-        anyhow::bail!(
-            "draft branch mismatch: draft={}, head={head}",
-            draft.branch
-        );
+        anyhow::bail!("draft branch mismatch: draft={}, head={head}", draft.branch);
     }
 
     if !draft.stages.is_empty() {
@@ -924,11 +923,7 @@ pub fn approve(
         ledger.append_event(&event, true)?;
 
         // Update stage
-        let stage = draft
-            .stages
-            .iter_mut()
-            .find(|s| s.stage_id == sid)
-            .unwrap();
+        let stage = draft.stages.iter_mut().find(|s| s.stage_id == sid).unwrap();
         if !stage.approved_by.contains(&actor.to_string()) {
             stage.approved_by.push(actor.to_string());
         }
@@ -1029,10 +1024,7 @@ pub fn reject(
 
     let head = ledger.head_branch()?;
     if head != draft.branch {
-        anyhow::bail!(
-            "draft branch mismatch: draft={}, head={head}",
-            draft.branch
-        );
+        anyhow::bail!("draft branch mismatch: draft={}, head={head}", draft.branch);
     }
 
     if !draft.stages.is_empty() {
@@ -1087,11 +1079,7 @@ pub fn reject(
         })?;
         ledger.append_event(&event, true)?;
 
-        let stage = draft
-            .stages
-            .iter_mut()
-            .find(|s| s.stage_id == sid)
-            .unwrap();
+        let stage = draft.stages.iter_mut().find(|s| s.stage_id == sid).unwrap();
         stage.status = "rejected".to_string();
 
         draft.approvals.push(ApprovalRecord {
@@ -1148,12 +1136,7 @@ pub fn reject(
     Ok(())
 }
 
-pub fn apply(
-    repo_root: &Path,
-    id: &str,
-    dry_run: bool,
-    delete_after: bool,
-) -> anyhow::Result<()> {
+pub fn apply(repo_root: &Path, id: &str, dry_run: bool, delete_after: bool) -> anyhow::Result<()> {
     let ledger = Ledger::open(repo_root)?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
@@ -1162,10 +1145,7 @@ pub fn apply(
     // Branch mismatch check
     let head = ledger.head_branch()?;
     if head != draft.branch {
-        anyhow::bail!(
-            "draft branch mismatch: draft={}, head={head}",
-            draft.branch
-        );
+        anyhow::bail!("draft branch mismatch: draft={}, head={head}", draft.branch);
     }
 
     // Policy gate

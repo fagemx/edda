@@ -109,12 +109,25 @@ pub enum CheckStatus {
 // ── Valid transitions ──
 
 const VALID_TRANSITIONS: &[(PhaseStatus, &[PhaseStatus])] = &[
-    (PhaseStatus::Pending, &[PhaseStatus::Running, PhaseStatus::Skipped]),
-    (PhaseStatus::Running, &[PhaseStatus::Checking, PhaseStatus::Failed, PhaseStatus::Stale]),
-    (PhaseStatus::Checking, &[PhaseStatus::Passed, PhaseStatus::Failed]),
-    (PhaseStatus::Failed, &[PhaseStatus::Pending]),   // retry
-    (PhaseStatus::Stale, &[PhaseStatus::Pending]),    // retry
-    // Passed and Skipped are terminal
+    (
+        PhaseStatus::Pending,
+        &[PhaseStatus::Running, PhaseStatus::Skipped],
+    ),
+    (
+        PhaseStatus::Running,
+        &[
+            PhaseStatus::Checking,
+            PhaseStatus::Failed,
+            PhaseStatus::Stale,
+        ],
+    ),
+    (
+        PhaseStatus::Checking,
+        &[PhaseStatus::Passed, PhaseStatus::Failed],
+    ),
+    (PhaseStatus::Failed, &[PhaseStatus::Pending]), // retry
+    (PhaseStatus::Stale, &[PhaseStatus::Pending]),  // retry
+                                                    // Passed and Skipped are terminal
 ];
 
 fn is_valid_transition(from: PhaseStatus, to: PhaseStatus) -> bool {
@@ -264,7 +277,10 @@ phases:
         let state = PlanState::from_plan(&plan, "plan.yaml");
         assert_eq!(state.plan_status, PlanStatus::Pending);
         assert_eq!(state.phases.len(), 2);
-        assert!(state.phases.iter().all(|p| p.status == PhaseStatus::Pending));
+        assert!(state
+            .phases
+            .iter()
+            .all(|p| p.status == PhaseStatus::Pending));
         assert_eq!(state.version, 0);
     }
 
@@ -272,7 +288,14 @@ phases:
     fn valid_transition_pending_to_running() {
         let plan = test_plan();
         let mut state = PlanState::from_plan(&plan, "plan.yaml");
-        let ok = transition(&mut state, "a", PhaseStatus::Pending, PhaseStatus::Running, None).unwrap();
+        let ok = transition(
+            &mut state,
+            "a",
+            PhaseStatus::Pending,
+            PhaseStatus::Running,
+            None,
+        )
+        .unwrap();
         assert!(ok);
         assert_eq!(state.get_phase("a").unwrap().status, PhaseStatus::Running);
         assert_eq!(state.version, 1);
@@ -283,7 +306,14 @@ phases:
         let plan = test_plan();
         let mut state = PlanState::from_plan(&plan, "plan.yaml");
         // Try to transition from Running, but it's Pending
-        let ok = transition(&mut state, "a", PhaseStatus::Running, PhaseStatus::Checking, None).unwrap();
+        let ok = transition(
+            &mut state,
+            "a",
+            PhaseStatus::Running,
+            PhaseStatus::Checking,
+            None,
+        )
+        .unwrap();
         assert!(!ok);
         assert_eq!(state.get_phase("a").unwrap().status, PhaseStatus::Pending);
     }
@@ -293,7 +323,13 @@ phases:
         let plan = test_plan();
         let mut state = PlanState::from_plan(&plan, "plan.yaml");
         // Pending → Passed is not valid
-        let err = transition(&mut state, "a", PhaseStatus::Pending, PhaseStatus::Passed, None);
+        let err = transition(
+            &mut state,
+            "a",
+            PhaseStatus::Pending,
+            PhaseStatus::Passed,
+            None,
+        );
         assert!(err.is_err());
     }
 
@@ -325,9 +361,30 @@ phases:
         let mut state = PlanState::from_plan(&plan, "plan.yaml");
 
         // pending → running → failed → pending (retry)
-        transition(&mut state, "a", PhaseStatus::Pending, PhaseStatus::Running, None).unwrap();
-        transition(&mut state, "a", PhaseStatus::Running, PhaseStatus::Failed, None).unwrap();
-        let ok = transition(&mut state, "a", PhaseStatus::Failed, PhaseStatus::Pending, None).unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Pending,
+            PhaseStatus::Running,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Running,
+            PhaseStatus::Failed,
+            None,
+        )
+        .unwrap();
+        let ok = transition(
+            &mut state,
+            "a",
+            PhaseStatus::Failed,
+            PhaseStatus::Pending,
+            None,
+        )
+        .unwrap();
         assert!(ok);
         assert_eq!(state.get_phase("a").unwrap().status, PhaseStatus::Pending);
     }
@@ -338,12 +395,39 @@ phases:
         let mut state = PlanState::from_plan(&plan, "plan.yaml");
 
         // Get to Passed
-        transition(&mut state, "a", PhaseStatus::Pending, PhaseStatus::Running, None).unwrap();
-        transition(&mut state, "a", PhaseStatus::Running, PhaseStatus::Checking, None).unwrap();
-        transition(&mut state, "a", PhaseStatus::Checking, PhaseStatus::Passed, None).unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Pending,
+            PhaseStatus::Running,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Running,
+            PhaseStatus::Checking,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Checking,
+            PhaseStatus::Passed,
+            None,
+        )
+        .unwrap();
 
         // Passed → anything should fail
-        let err = transition(&mut state, "a", PhaseStatus::Passed, PhaseStatus::Pending, None);
+        let err = transition(
+            &mut state,
+            "a",
+            PhaseStatus::Passed,
+            PhaseStatus::Pending,
+            None,
+        );
         assert!(err.is_err());
     }
 
@@ -351,7 +435,13 @@ phases:
     fn unknown_phase_errors() {
         let plan = test_plan();
         let mut state = PlanState::from_plan(&plan, "plan.yaml");
-        let err = transition(&mut state, "nonexistent", PhaseStatus::Pending, PhaseStatus::Running, None);
+        let err = transition(
+            &mut state,
+            "nonexistent",
+            PhaseStatus::Pending,
+            PhaseStatus::Running,
+            None,
+        );
         assert!(err.is_err());
     }
 

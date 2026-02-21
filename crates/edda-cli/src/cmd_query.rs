@@ -3,7 +3,13 @@ use std::collections::HashSet;
 use std::path::Path;
 
 /// `edda query <text>` — search workspace decisions and transcripts by keyword.
-pub fn execute(repo_root: &Path, query_str: &str, limit: usize, json: bool, all: bool) -> anyhow::Result<()> {
+pub fn execute(
+    repo_root: &Path,
+    query_str: &str,
+    limit: usize,
+    json: bool,
+    all: bool,
+) -> anyhow::Result<()> {
     let ledger = Ledger::open(repo_root)?;
     let events = ledger.iter_events()?;
 
@@ -26,11 +32,7 @@ pub fn execute(repo_root: &Path, query_str: &str, limit: usize, json: bool, all:
             if !has_decision_tag {
                 return false;
             }
-            let text = e
-                .payload
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let text = e.payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
             text.to_lowercase().contains(&query_lower)
         })
         .collect();
@@ -97,10 +99,7 @@ pub fn execute(repo_root: &Path, query_str: &str, limit: usize, json: bool, all:
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
         if !decisions.is_empty() {
-            println!(
-                "Decisions ({}):\n",
-                decisions.len(),
-            );
+            println!("Decisions ({}):\n", decisions.len(),);
             for e in &decisions {
                 let (key, value, reason) = extract_decision_fields(e);
                 let date = if e.ts.len() >= 10 { &e.ts[..10] } else { &e.ts };
@@ -123,10 +122,7 @@ pub fn execute(repo_root: &Path, query_str: &str, limit: usize, json: bool, all:
         }
 
         if !conversations.is_empty() {
-            println!(
-                "Conversations ({}):\n",
-                conversations.len(),
-            );
+            println!("Conversations ({}):\n", conversations.len(),);
             for r in &conversations {
                 let date = if r.ts.len() >= 10 { &r.ts[..10] } else { &r.ts };
                 let sid_short = &r.session_id[..r.session_id.len().min(8)];
@@ -143,13 +139,29 @@ pub fn execute(repo_root: &Path, query_str: &str, limit: usize, json: bool, all:
 /// Prefers structured `payload.decision` fields, falls back to text parse.
 fn extract_decision_fields(event: &edda_core::Event) -> (String, String, String) {
     if let Some(d) = event.payload.get("decision") {
-        let key = d.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let value = d.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let reason = d.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let key = d
+            .get("key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let value = d
+            .get("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let reason = d
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         return (key, value, reason);
     }
     // Fallback: parse flat text
-    let text = event.payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let text = event
+        .payload
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let (k, v, r) = parse_decision_text(text);
     (k.to_string(), v.to_string(), r.to_string())
 }

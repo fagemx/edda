@@ -11,17 +11,21 @@ use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
 /// Execute `edda conduct run <plan.yaml>`
-pub fn run(plan_file: &Path, cwd_override: Option<&Path>, dry_run: bool, verbose: bool) -> Result<()> {
+pub fn run(
+    plan_file: &Path,
+    cwd_override: Option<&Path>,
+    dry_run: bool,
+    verbose: bool,
+) -> Result<()> {
     let plan = load_plan(plan_file)?;
     let cwd = cwd_override
         .map(|p| p.to_path_buf())
-        .or_else(|| plan.cwd.as_ref().map(|p| plan_file.parent().unwrap_or(Path::new(".")).join(p)))
-        .unwrap_or_else(|| {
-            plan_file
-                .parent()
-                .unwrap_or(Path::new("."))
-                .to_path_buf()
-        });
+        .or_else(|| {
+            plan.cwd
+                .as_ref()
+                .map(|p| plan_file.parent().unwrap_or(Path::new(".")).join(p))
+        })
+        .unwrap_or_else(|| plan_file.parent().unwrap_or(Path::new(".")).to_path_buf());
     let cwd = if cwd.is_relative() {
         std::env::current_dir()?.join(&cwd)
     } else {
@@ -35,7 +39,11 @@ pub fn run(plan_file: &Path, cwd_override: Option<&Path>, dry_run: bool, verbose
             s
         }
         None => {
-            println!("Starting plan \"{}\" ({} phases)", plan.name, plan.phases.len());
+            println!(
+                "Starting plan \"{}\" ({} phases)",
+                plan.name,
+                plan.phases.len()
+            );
             PlanState::from_plan(&plan, &plan_file.display().to_string())
         }
     };
@@ -43,7 +51,11 @@ pub fn run(plan_file: &Path, cwd_override: Option<&Path>, dry_run: bool, verbose
     if dry_run {
         println!("\n[dry-run] Plan: {}", plan.name);
         println!("  Phases: {}", plan.phases.len());
-        println!("  Budget: {}", plan.budget_usd.map_or("unlimited".into(), |b| format!("${b:.2}")));
+        println!(
+            "  Budget: {}",
+            plan.budget_usd
+                .map_or("unlimited".into(), |b| format!("${b:.2}"))
+        );
         println!("  Max attempts: {}", plan.max_attempts);
         println!("  On fail: {:?}", plan.on_fail);
         println!("\n  Phase order:");
@@ -202,13 +214,21 @@ pub fn retry(repo_root: &Path, phase_id: &str, plan_name: Option<&str>) -> Resul
 }
 
 /// Execute `edda conduct skip <phase-id>`
-pub fn skip(repo_root: &Path, phase_id: &str, reason: Option<&str>, plan_name: Option<&str>) -> Result<()> {
+pub fn skip(
+    repo_root: &Path,
+    phase_id: &str,
+    reason: Option<&str>,
+    plan_name: Option<&str>,
+) -> Result<()> {
     let name = resolve_plan_name(repo_root, plan_name)?;
     let mut state = load_state(repo_root, &name)?
         .ok_or_else(|| anyhow::anyhow!("no state for plan \"{name}\""))?;
 
     let ps = state.get_phase_mut(phase_id)?;
-    if ps.status != PhaseStatus::Failed && ps.status != PhaseStatus::Stale && ps.status != PhaseStatus::Pending {
+    if ps.status != PhaseStatus::Failed
+        && ps.status != PhaseStatus::Stale
+        && ps.status != PhaseStatus::Pending
+    {
         bail!(
             "Phase \"{}\" is {:?}. Can only skip Failed, Stale, or Pending phases.",
             phase_id,
@@ -279,10 +299,7 @@ fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Result<String>
 }
 
 fn print_status(state: &PlanState) {
-    println!(
-        "\nPlan: {} ({:?})",
-        state.plan_name, state.plan_status
-    );
+    println!("\nPlan: {} ({:?})", state.plan_name, state.plan_status);
     if !state.plan_file.is_empty() {
         println!("  File: {}", state.plan_file);
     }
@@ -291,12 +308,12 @@ fn print_status(state: &PlanState) {
     println!();
     for ps in &state.phases {
         let icon = match ps.status {
-            PhaseStatus::Passed => "\u{2713}",   // ✓
-            PhaseStatus::Failed => "\u{2717}",   // ✗
+            PhaseStatus::Passed => "\u{2713}",                          // ✓
+            PhaseStatus::Failed => "\u{2717}",                          // ✗
             PhaseStatus::Running | PhaseStatus::Checking => "\u{25B6}", // ▶
-            PhaseStatus::Skipped => "\u{2298}",  // ⊘
-            PhaseStatus::Stale => "\u{23F0}",    // ⏰
-            PhaseStatus::Pending => "\u{25CB}",  // ○
+            PhaseStatus::Skipped => "\u{2298}",                         // ⊘
+            PhaseStatus::Stale => "\u{23F0}",                           // ⏰
+            PhaseStatus::Pending => "\u{25CB}",                         // ○
         };
         let detail = match ps.status {
             PhaseStatus::Passed => format!("(attempt {})", ps.attempts),

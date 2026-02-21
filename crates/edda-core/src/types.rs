@@ -55,9 +55,10 @@ pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'
         "rebuild" => (Some(event_family::ADMIN), Some(event_level::TRACE)),
         "branch_create" => (Some(event_family::ADMIN), Some(event_level::INFO)),
         "branch_switch" => (Some(event_family::ADMIN), Some(event_level::INFO)),
-        "approval" | "approval_request" => {
-            (Some(event_family::GOVERNANCE), Some(event_level::GOVERNANCE))
-        }
+        "approval" | "approval_request" => (
+            Some(event_family::GOVERNANCE),
+            Some(event_level::GOVERNANCE),
+        ),
         _ => (None, None),
     }
 }

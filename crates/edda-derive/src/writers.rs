@@ -6,7 +6,9 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use crate::snapshot::{as_str, as_arr_str, collect_branch_events, fmt_cmd_argv, build_branch_snapshot};
+use crate::snapshot::{
+    as_arr_str, as_str, build_branch_snapshot, collect_branch_events, fmt_cmd_argv,
+};
 use crate::types::*;
 
 // ── View writers ──
@@ -222,7 +224,9 @@ fn write_log_md(dir: &Path, ledger: &Ledger, branch: &str) -> Result<()> {
             other => {
                 out.push_str(&format!(
                     "[{}] {} ({})\n",
-                    ev.ts, other.to_uppercase(), ev.event_id
+                    ev.ts,
+                    other.to_uppercase(),
+                    ev.event_id
                 ));
             }
         }
@@ -242,9 +246,7 @@ struct MetadataYaml {
 }
 
 fn write_metadata_yaml(dir: &Path, ledger: &Ledger, snap: &BranchSnapshot) -> Result<()> {
-    let head = ledger
-        .head_branch()
-        .unwrap_or_else(|_| "main".to_string());
+    let head = ledger.head_branch().unwrap_or_else(|_| "main".to_string());
 
     let m = MetadataYaml {
         repo_root: ".".to_string(),
@@ -261,9 +263,7 @@ fn write_metadata_yaml(dir: &Path, ledger: &Ledger, snap: &BranchSnapshot) -> Re
 }
 
 fn write_main_md(dir: &Path, ledger: &Ledger, snap: &BranchSnapshot) -> Result<()> {
-    let head = ledger
-        .head_branch()
-        .unwrap_or_else(|_| "main".to_string());
+    let head = ledger.head_branch().unwrap_or_else(|_| "main".to_string());
 
     let mut out = String::new();
     out.push_str("# MAIN\n\n");
@@ -365,10 +365,7 @@ pub fn rebuild_all(ledger: &Ledger) -> Result<Vec<BranchSnapshot>> {
 mod tests {
     use super::*;
     use crate::test_support::setup_workspace;
-    use edda_core::event::{
-        new_note_event, new_commit_event, new_merge_event,
-        CommitEventParams,
-    };
+    use edda_core::event::{new_commit_event, new_merge_event, new_note_event, CommitEventParams};
 
     #[test]
     fn rebuild_branch_creates_view_files() {
@@ -417,8 +414,14 @@ mod tests {
 
         // Create a second branch event
         let branch_evt = edda_core::event::new_branch_create_event(
-            "feature", None, "feature", "testing feature", "main", None,
-        ).unwrap();
+            "feature",
+            None,
+            "feature",
+            "testing feature",
+            "main",
+            None,
+        )
+        .unwrap();
         ledger.append_event(&branch_evt, false).unwrap();
 
         let note2 = new_note_event("feature", None, "user", "feature note", &[]).unwrap();
@@ -476,9 +479,8 @@ mod tests {
     fn rebuild_branch_captures_merge() {
         let (tmp, ledger) = setup_workspace();
 
-        let merge = new_merge_event(
-            "main", None, "feature", "main", "merge feature work", &[],
-        ).unwrap();
+        let merge =
+            new_merge_event("main", None, "feature", "main", "merge feature work", &[]).unwrap();
         ledger.append_event(&merge, false).unwrap();
 
         let snap = rebuild_branch(&ledger, "main").unwrap();

@@ -43,7 +43,10 @@ pub async fn check_git_clean(allow_untracked: bool, cwd: &Path) -> CheckOutput {
                     String::new()
                 };
                 CheckOutput::failed(
-                    format!("working tree not clean ({} files):\n{preview}{extra}", dirty_lines.len()),
+                    format!(
+                        "working tree not clean ({} files):\n{preview}{extra}",
+                        dirty_lines.len()
+                    ),
                     start.elapsed(),
                 )
             }

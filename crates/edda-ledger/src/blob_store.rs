@@ -323,14 +323,12 @@ mod tests {
 
     #[test]
     fn blob_put_classified_writes_meta() {
-        let tmp =
-            std::env::temp_dir().join(format!("edda_blob_clsfy_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("edda_blob_clsfy_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let p = EddaPaths::discover(&tmp);
         p.ensure_layout().unwrap();
 
-        let blob_ref =
-            blob_put_classified(&p, b"classified data", BlobClass::Artifact).unwrap();
+        let blob_ref = blob_put_classified(&p, b"classified data", BlobClass::Artifact).unwrap();
         let hex = blob_ref.strip_prefix("blob:sha256:").unwrap();
 
         // Verify metadata was written

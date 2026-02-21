@@ -15,10 +15,16 @@ pub enum PhaseResult {
         /// The agent's final summary text (from stream-json result message).
         result_text: Option<String>,
     },
-    AgentCrash { error: String },
+    AgentCrash {
+        error: String,
+    },
     Timeout,
-    MaxTurns { cost_usd: Option<f64> },
-    BudgetExceeded { cost_usd: Option<f64> },
+    MaxTurns {
+        cost_usd: Option<f64>,
+    },
+    BudgetExceeded {
+        cost_usd: Option<f64>,
+    },
 }
 
 /// Trait for launching AI agents. Implemented by MockLauncher (tests)
@@ -38,8 +44,7 @@ pub trait AgentLauncher: Send + Sync {
 
 /// Fixed namespace UUID for conductor sessions.
 const CONDUCTOR_NS: Uuid = Uuid::from_bytes([
-    0xed, 0xda, 0xc0, 0x5d, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x01,
+    0xed, 0xda, 0xc0, 0x5d, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
 ]);
 
 /// Deterministic session ID per plan+phase+attempt.
@@ -62,6 +67,12 @@ pub struct ClaudeCodeLauncher {
     pub verbose: bool,
     /// If set, raw agent stdout is captured to `{transcript_dir}/{phase_id}-{session_id_prefix}.jsonl`.
     pub transcript_dir: Option<PathBuf>,
+}
+
+impl Default for ClaudeCodeLauncher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ClaudeCodeLauncher {
@@ -139,8 +150,7 @@ impl AgentLauncher for ClaudeCodeLauncher {
 
         // Optional: per-phase budget
         if let Some(budget) = phase.budget_usd {
-            cmd.arg("--max-budget-usd")
-                .arg(budget.to_string());
+            cmd.arg("--max-budget-usd").arg(budget.to_string());
         }
 
         // Optional: plan context as system prompt
@@ -195,6 +205,12 @@ impl AgentLauncher for ClaudeCodeLauncher {
 /// If no results configured (or exhausted), returns AgentDone.
 pub struct MockLauncher {
     results: std::sync::Mutex<std::collections::HashMap<String, Vec<PhaseResult>>>,
+}
+
+impl Default for MockLauncher {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MockLauncher {
@@ -326,7 +342,9 @@ mod tests {
             .run_phase(&plan.phases[0], "", "", "s", Path::new("."), cancel)
             .await
             .unwrap();
-        assert!(matches!(r2, PhaseResult::AgentDone { cost_usd: Some(c), .. } if (c - 1.0).abs() < 0.01));
+        assert!(
+            matches!(r2, PhaseResult::AgentDone { cost_usd: Some(c), .. } if (c - 1.0).abs() < 0.01)
+        );
     }
 
     #[tokio::test]
