@@ -2,6 +2,7 @@ pub mod digest;
 pub mod pattern;
 pub mod peers;
 pub mod redact;
+pub mod render;
 
 mod admin;
 mod dispatch;

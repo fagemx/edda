@@ -92,7 +92,7 @@ fn apply_context_budget(content: &str, budget: usize) -> String {
 /// Teaches the agent to record decisions via `edda decide`.
 /// No `.edda/` gate: if the bridge hook is running, the user has edda installed,
 /// so the agent should always learn about `edda decide`.
-fn render_write_back_protocol(_cwd: &str) -> Option<String> {
+pub(crate) fn render_write_back_protocol(_cwd: &str) -> Option<String> {
     Some(
         "## Write-Back Protocol\n\
          Record architectural decisions with: `edda decide \"domain.aspect=value\" --reason \"justification\"`\n\
@@ -415,7 +415,7 @@ const PLAN_EXCERPT_MAX_LINES: usize = 30;
 /// When `project_id` is provided, attempts structured rendering with progress
 /// tracking (cross-referencing plan steps against tasks/commits). Falls back
 /// to simple truncation if the plan has no recognizable step structure.
-fn render_active_plan(project_id: Option<&str>) -> Option<String> {
+pub(crate) fn render_active_plan(project_id: Option<&str>) -> Option<String> {
     let plans_dir = match std::env::var("EDDA_PLANS_DIR") {
         Ok(dir) => PathBuf::from(dir),
         Err(_) => dirs::home_dir()?.join(".claude").join("plans"),
@@ -1151,7 +1151,7 @@ fn match_tool_patterns(raw: &serde_json::Value, cwd: &str) -> Option<String> {
     crate::pattern::render_pattern_context(&matched, file_path, budget)
 }
 
-fn read_hot_pack(project_id: &str) -> Option<String> {
+pub(crate) fn read_hot_pack(project_id: &str) -> Option<String> {
     let pack_path = edda_store::project_dir(project_id).join("packs").join("hot.md");
     fs::read_to_string(&pack_path).ok()
 }
@@ -1160,7 +1160,7 @@ fn read_hot_pack(project_id: &str) -> Option<String> {
 
 /// Try to render a workspace context section from the `.edda/` ledger in `cwd`.
 /// Returns `None` silently if no workspace exists or any error occurs.
-fn render_workspace_section(cwd: &str, workspace_budget: usize) -> Option<String> {
+pub(crate) fn render_workspace_section(cwd: &str, workspace_budget: usize) -> Option<String> {
     if cwd.is_empty() {
         return None;
     }

@@ -204,7 +204,7 @@ pub(crate) fn write_heartbeat(
 }
 
 /// Lightweight heartbeat touch: only update last_heartbeat timestamp.
-pub(crate) fn touch_heartbeat(project_id: &str, session_id: &str) {
+pub fn touch_heartbeat(project_id: &str, session_id: &str) {
     let path = heartbeat_path(project_id, session_id);
     if let Some(mut hb) = read_heartbeat(project_id, session_id) {
         hb.last_heartbeat = now_rfc3339();
@@ -216,8 +216,39 @@ pub(crate) fn touch_heartbeat(project_id: &str, session_id: &str) {
 }
 
 /// Remove heartbeat on SessionEnd.
-pub(crate) fn remove_heartbeat(project_id: &str, session_id: &str) {
+pub fn remove_heartbeat(project_id: &str, session_id: &str) {
     let _ = fs::remove_file(heartbeat_path(project_id, session_id));
+}
+
+/// Write a minimal heartbeat for CLI/external bridge use (no signal data).
+///
+/// Creates a heartbeat with the given label and empty signals, sufficient
+/// for peer discovery. Use `write_heartbeat` for full signal-enriched heartbeats.
+pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str) {
+    let now = now_rfc3339();
+    let path = heartbeat_path(project_id, session_id);
+
+    let started_at = read_heartbeat(project_id, session_id)
+        .map(|h| h.started_at)
+        .unwrap_or_else(|| now.clone());
+
+    let heartbeat = SessionHeartbeat {
+        session_id: session_id.to_string(),
+        started_at,
+        last_heartbeat: now,
+        label: label.to_string(),
+        focus_files: Vec::new(),
+        active_tasks: Vec::new(),
+        files_modified_count: 0,
+        total_edits: 0,
+        recent_commits: Vec::new(),
+    };
+
+    let data = match serde_json::to_string_pretty(&heartbeat) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let _ = edda_store::write_atomic(&path, data.as_bytes());
 }
 
 /// Read a single session's heartbeat file.
