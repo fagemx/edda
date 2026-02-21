@@ -6,6 +6,7 @@ pub struct EddaPaths {
     pub root: PathBuf,
     pub edda_dir: PathBuf,
     pub ledger_dir: PathBuf,
+    pub ledger_db: PathBuf,
     pub events_jsonl: PathBuf,
     pub blobs_dir: PathBuf,
     pub branches_dir: PathBuf,
@@ -32,6 +33,7 @@ impl EddaPaths {
         let refs_dir = edda_dir.join("refs");
         let archive_dir = edda_dir.join("archive");
         Self {
+            ledger_db: edda_dir.join("ledger.db"),
             events_jsonl: ledger_dir.join("events.jsonl"),
             blobs_dir: ledger_dir.join("blobs"),
             blob_meta_json: ledger_dir.join("blob_meta.json"),

@@ -536,6 +536,7 @@ dependencies = [
  "anyhow",
  "edda-core",
  "fs2",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror",

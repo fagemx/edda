@@ -3,6 +3,7 @@ pub mod blob_store;
 pub mod ledger;
 pub mod lock;
 pub mod paths;
+pub mod sqlite_store;
 pub mod tombstone;
 
 pub use blob_meta::{BlobClass, BlobMetaEntry, BlobMetaMap, ClassChange};
