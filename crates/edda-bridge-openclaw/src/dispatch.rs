@@ -24,12 +24,6 @@ impl HookResult {
         }
     }
 
-    pub fn warning(msg: String) -> Self {
-        Self {
-            stdout: None,
-            stderr: Some(msg),
-        }
-    }
 
     pub fn empty() -> Self {
         Self::default()
@@ -208,20 +202,8 @@ fn dispatch_before_agent_start(
     tail.push_str("\n\n");
     tail.push_str(&render_write_back_protocol());
 
-    // Coordination protocol — with late peer detection
-    let peers = edda_bridge_claude::peers::discover_active_peers(project_id, session_id);
-    let prev_count = read_peer_count(project_id, session_id);
-    let first_peers = prev_count == 0 && !peers.is_empty();
-    write_peer_count(project_id, session_id, peers.len());
-
-    if first_peers {
-        // Solo→multi transition: inject full coordination protocol
-        if let Some(coord) =
-            edda_bridge_claude::peers::render_coordination_protocol(project_id, session_id, cwd)
-        {
-            tail.push_str(&format!("\n\n{coord}"));
-        }
-    } else if let Some(coord) =
+    // Coordination protocol
+    if let Some(coord) =
         edda_bridge_claude::peers::render_coordination_protocol(project_id, session_id, cwd)
     {
         tail.push_str(&format!("\n\n{coord}"));
@@ -410,7 +392,6 @@ fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool)
     let _ = fs::remove_file(state_dir.join(format!("nudge_count.{session_id}")));
     let _ = fs::remove_file(state_dir.join(format!("decide_count.{session_id}")));
     let _ = fs::remove_file(state_dir.join(format!("signal_count.{session_id}")));
-    let _ = fs::remove_file(state_dir.join(format!("peer_count.{session_id}")));
     let _ = fs::remove_file(state_dir.join("compact_pending"));
 
     // Peer heartbeat + unclaim
@@ -529,24 +510,6 @@ fn write_inject_hash(project_id: &str, session_id: &str, content: &str) {
     let _ = fs::write(&path, hash);
 }
 
-// ── Peer Count Tracking ──
-
-fn read_peer_count(project_id: &str, session_id: &str) -> usize {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("peer_count.{session_id}"));
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse().ok())
-        .unwrap_or(0)
-}
-
-fn write_peer_count(project_id: &str, session_id: &str, count: usize) {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("peer_count.{session_id}"));
-    let _ = fs::write(&path, count.to_string());
-}
 
 // ── Auto-digest ──
 
@@ -1097,7 +1060,6 @@ mod tests {
         let _ = fs::write(state_dir.join(format!("nudge_count.{sid}")), "3");
         let _ = fs::write(state_dir.join(format!("decide_count.{sid}")), "2");
         let _ = fs::write(state_dir.join(format!("signal_count.{sid}")), "5");
-        let _ = fs::write(state_dir.join(format!("peer_count.{sid}")), "1");
         let _ = fs::write(state_dir.join("compact_pending"), "1");
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1119,7 +1081,6 @@ mod tests {
         assert!(!state_dir.join(format!("nudge_count.{sid}")).exists());
         assert!(!state_dir.join(format!("decide_count.{sid}")).exists());
         assert!(!state_dir.join(format!("signal_count.{sid}")).exists());
-        assert!(!state_dir.join(format!("peer_count.{sid}")).exists());
         assert!(!state_dir.join("compact_pending").exists());
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
