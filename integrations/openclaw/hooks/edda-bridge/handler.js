@@ -11,7 +11,7 @@
  * - gateway:startup   → log session start to edda ledger
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -73,12 +73,11 @@ function hasEddaInit(workdir) {
 
 function runEdda(args, workdir, timeoutMs = 5000) {
   try {
-    const result = execSync(`${EDDA_BIN} ${args.join(" ")}`, {
+    const result = execFileSync(EDDA_BIN, args, {
       cwd: workdir,
       timeout: timeoutMs,
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env },
     });
     return result.trim();
   } catch (err) {
@@ -93,11 +92,6 @@ function resolveHookConfig(cfg, hookName) {
   } catch {
     return null;
   }
-}
-
-function escapeShellArg(str) {
-  // Escape for shell — wrap in double quotes, escape inner quotes
-  return `"${str.replace(/"/g, '\\"')}"`;
 }
 
 function formatCoordinationSection(workdir) {
@@ -195,7 +189,7 @@ function handleMessageSent(event, hookConfig) {
         if (cleaned.length < 20) continue; // too short to be meaningful
 
         runEdda(
-          ["note", escapeShellArg(`[auto] ${cleaned}`)],
+          ["note", `[auto] ${cleaned}`],
           workdir
         );
         captured++;
@@ -224,7 +218,7 @@ function handleSessionEnd(event, hookConfig) {
   const ts = event.timestamp.toISOString().split("T")[1].split(".")[0];
   const msg = `session: /new via ${source} at ${ts}`;
 
-  const result = runEdda(["commit", "-m", escapeShellArg(msg)], workdir);
+  const result = runEdda(["commit", "--title", msg], workdir);
 
   if (result) {
     console.log(`${TAG} Committed: ${result}`);
@@ -253,7 +247,7 @@ function handleSessionBoundary(event, hookConfig, source) {
 
   const ts = event.timestamp?.toISOString?.()?.split("T")[1]?.split(".")[0] || "unknown";
   const msg = `session: /${source} at ${ts}`;
-  const commitResult = runEdda(["commit", "-m", escapeShellArg(msg)], workdir);
+  const commitResult = runEdda(["commit", "--title", msg], workdir);
 
   if (commitResult) {
     console.log(`${TAG} Committed (${source}): ${commitResult}`);
@@ -271,7 +265,7 @@ function handleGatewayStartup(event, hookConfig) {
   }
 
   runEdda(
-    ["note", escapeShellArg("gateway started"), "--tag", "session"],
+    ["note", "gateway started", "--tag", "session"],
     workdir
   );
   console.log(`${TAG} Logged gateway startup to edda ledger`);
