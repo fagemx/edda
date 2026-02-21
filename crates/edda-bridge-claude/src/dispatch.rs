@@ -938,6 +938,11 @@ fn dispatch_session_start(
         tail.push_str(&format!("\n\n{coord}"));
     }
 
+    // Seed peer count so UserPromptSubmit knows the baseline and doesn't
+    // re-inject the full protocol on the first prompt after SessionStart (#11).
+    let peers = crate::peers::discover_active_peers(project_id, session_id);
+    write_peer_count(project_id, session_id, peers.len());
+
     // Remaining body sections (truncatable — nice-to-have context).
 
     // Append last assistant message from prior session for continuity.
