@@ -5,10 +5,52 @@ use std::path::{Path, PathBuf};
 
 /// Compute a deterministic project ID from a repo root or cwd path.
 /// project_id = blake3(normalize_path(input)) → hex string (first 32 chars).
+///
+/// If `repo_root_or_cwd` is inside a git worktree, resolves to the main
+/// repository root so that all worktrees share the same project ID.
 pub fn project_id(repo_root_or_cwd: &Path) -> String {
-    let normalized = normalize_path(repo_root_or_cwd);
+    let resolved = resolve_git_root(repo_root_or_cwd)
+        .unwrap_or_else(|| repo_root_or_cwd.to_path_buf());
+    let normalized = normalize_path(&resolved);
     let hash = blake3::hash(normalized.as_bytes());
     hash.to_hex()[..32].to_string()
+}
+
+/// Resolve the git repository root, handling worktrees.
+///
+/// Walks up from `start` looking for `.git`:
+/// - **Directory** → parent is the repo root (normal repo).
+/// - **File** with `gitdir: .../worktrees/{name}` → strip to find the common
+///   `.git` directory, then return its parent (the main working tree root).
+/// - **File** without `/worktrees/` (e.g. submodule) → return that directory.
+/// - **Not found** → returns `None` (non-git directory; caller uses original path).
+fn resolve_git_root(start: &Path) -> Option<PathBuf> {
+    let abs = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    let mut cur = abs.as_path();
+    loop {
+        let dot_git = cur.join(".git");
+        if dot_git.is_dir() {
+            return Some(cur.to_path_buf());
+        }
+        if dot_git.is_file() {
+            if let Ok(content) = fs::read_to_string(&dot_git) {
+                let content = content.trim();
+                if let Some(gitdir) = content.strip_prefix("gitdir:") {
+                    let gitdir = gitdir.trim().replace('\\', "/");
+                    if let Some(pos) = gitdir.find("/worktrees/") {
+                        // Worktree: gitdir points to .git/worktrees/{name}
+                        // Strip /worktrees/{name} to get the common .git dir,
+                        // then take its parent as the repo root.
+                        let common_git = &gitdir[..pos];
+                        return Path::new(common_git).parent().map(|p| p.to_path_buf());
+                    }
+                }
+            }
+            // .git file but not a worktree (e.g. submodule) → use this dir
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
 }
 
 /// Normalize a path: canonicalize, lowercase on Windows, forward slashes.
@@ -132,5 +174,77 @@ mod tests {
         let guard = lock_file(&lock_path).unwrap();
         assert!(lock_path.exists());
         drop(guard);
+    }
+
+    #[test]
+    fn resolve_git_root_normal_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("my-repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+
+        let result = resolve_git_root(&repo);
+        assert_eq!(result.unwrap(), repo.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_git_root_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Simulate: repo/.git/ (directory) + repo/.claude/worktrees/feat-x/.git (file)
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join(".git").join("worktrees").join("feat-x")).unwrap();
+
+        let wt = repo.join(".claude").join("worktrees").join("feat-x");
+        fs::create_dir_all(&wt).unwrap();
+
+        // Write .git file pointing to the worktree gitdir
+        let gitdir = repo.join(".git").join("worktrees").join("feat-x");
+        let gitdir_str = gitdir.to_string_lossy().replace('\\', "/");
+        fs::write(wt.join(".git"), format!("gitdir: {gitdir_str}")).unwrap();
+
+        let resolved = resolve_git_root(&wt).unwrap();
+        assert_eq!(
+            normalize_path(&resolved),
+            normalize_path(&repo),
+            "worktree should resolve to repo root"
+        );
+    }
+
+    #[test]
+    fn worktree_and_main_produce_same_project_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join(".git").join("worktrees").join("feat-x")).unwrap();
+
+        let wt = repo.join(".claude").join("worktrees").join("feat-x");
+        fs::create_dir_all(&wt).unwrap();
+        let gitdir = repo.join(".git").join("worktrees").join("feat-x");
+        let gitdir_str = gitdir.to_string_lossy().replace('\\', "/");
+        fs::write(wt.join(".git"), format!("gitdir: {gitdir_str}")).unwrap();
+
+        let id_main = project_id(&repo);
+        let id_wt = project_id(&wt);
+        assert_eq!(id_main, id_wt, "worktree and main tree must have same project_id");
+    }
+
+    #[test]
+    fn resolve_git_root_submodule_no_worktree_resolution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("parent").join("submodule");
+        fs::create_dir_all(&sub).unwrap();
+        // Submodule .git file has /modules/ not /worktrees/
+        fs::write(sub.join(".git"), "gitdir: ../../.git/modules/submodule").unwrap();
+
+        let resolved = resolve_git_root(&sub).unwrap();
+        // Should resolve to the submodule dir itself (not the parent repo)
+        assert_eq!(resolved, sub.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_git_root_non_git_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("not-a-repo");
+        fs::create_dir_all(&dir).unwrap();
+
+        assert!(resolve_git_root(&dir).is_none());
     }
 }
