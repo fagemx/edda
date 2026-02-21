@@ -24,6 +24,9 @@ fn protocol_budget() -> usize {
         .unwrap_or(600)
 }
 
+/// Maximum chars for the lightweight peer updates section (UserPromptSubmit).
+const PEER_UPDATES_BUDGET: usize = 500;
+
 /// Session label from env var (set before launching Claude Code).
 fn env_label() -> Option<String> {
     std::env::var("EDDA_SESSION_LABEL")
@@ -842,8 +845,8 @@ pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<
             lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
         }
         let result = lines.join("\n");
-        return Some(if result.len() > 300 {
-            truncate_to_budget(&result, 300)
+        return Some(if result.len() > PEER_UPDATES_BUDGET {
+            truncate_to_budget(&result, PEER_UPDATES_BUDGET)
         } else {
             result
         });
@@ -851,12 +854,27 @@ pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<
 
     let mut lines = vec![format!("## Peers ({} active)", peers.len())];
 
-    // Peer activity (tasks)
+    // L2 instructions (condensed single line)
+    lines.push(
+        "Claim: `edda claim \"label\" --paths \"path\"` | Message: `edda request \"peer\" \"msg\"`"
+            .to_string(),
+    );
+
+    // Peer activity (tasks → focus files → bare label)
     for p in peers.iter().take(3) {
+        let age = format_age(p.age_secs);
         if !p.task_subjects.is_empty() {
             for t in p.task_subjects.iter().take(1) {
-                lines.push(format!("- {}: {t}", p.label));
+                lines.push(format!("- {} ({age}): {t}", p.label));
             }
+        } else if !p.focus_files.is_empty() {
+            let file = p.focus_files[0]
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&p.focus_files[0]);
+            lines.push(format!("- {} ({age}): editing {file}", p.label));
+        } else {
+            lines.push(format!("- {} ({age})", p.label));
         }
     }
 
@@ -889,8 +907,8 @@ pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<
     }
 
     let result = lines.join("\n");
-    if result.len() > 300 {
-        Some(truncate_to_budget(&result, 300))
+    if result.len() > PEER_UPDATES_BUDGET {
+        Some(truncate_to_budget(&result, PEER_UPDATES_BUDGET))
     } else {
         Some(result)
     }
@@ -1443,6 +1461,89 @@ mod tests {
 
         let result = render_peer_updates(pid, "s2").unwrap();
         assert!(result.contains("Fix billing bug"), "should show peer task, got:\n{result}");
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_peer_updates_shows_focus_files() {
+        let pid = "test_peers_updates_focus";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Peer with focus files but no tasks
+        let signals = SessionSignals {
+            files_modified: vec![crate::signals::FileEditCount {
+                path: "src/billing/invoice.rs".into(),
+                count: 3,
+            }],
+            ..Default::default()
+        };
+        write_heartbeat(pid, "s1", &signals, Some("billing"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+
+        let result = render_peer_updates(pid, "s2").unwrap();
+        assert!(
+            result.contains("invoice.rs"),
+            "should show focus file, got:\n{result}"
+        );
+        assert!(
+            result.contains("billing"),
+            "should show peer label, got:\n{result}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_peer_updates_shows_bare_label() {
+        let pid = "test_peers_updates_bare";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Peer with no tasks and no focus files
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("billing"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+
+        let result = render_peer_updates(pid, "s2").unwrap();
+        assert!(
+            result.contains("billing"),
+            "should show peer label even without tasks/files, got:\n{result}"
+        );
+        // Should not be just the header
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(
+            lines.len() > 2,
+            "should have more than just header + L2 instructions, got:\n{result}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_peer_updates_includes_l2_instructions() {
+        let pid = "test_peers_updates_l2";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("billing"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+
+        let result = render_peer_updates(pid, "s2").unwrap();
+        assert!(
+            result.contains("edda claim"),
+            "should include claim instruction, got:\n{result}"
+        );
+        assert!(
+            result.contains("edda request"),
+            "should include request instruction, got:\n{result}"
+        );
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
