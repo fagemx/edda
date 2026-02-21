@@ -7,7 +7,7 @@ pub mod render;
 mod admin;
 mod dispatch;
 mod narrative;
-mod nudge;
+pub mod nudge;
 mod parse;
 mod plan;
 mod signals;
