@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::parse::now_rfc3339;
-use crate::signals::{SessionSignals, TaskSnapshot};
+use crate::signals::{FileEditCount, SessionSignals, TaskSnapshot};
 
 // ── Configuration ──
 
@@ -130,7 +130,22 @@ pub struct BindingConflict {
     pub ts: String,
 }
 
+/// Persisted auto-claim state for dedup (avoid repeated writes to coordination.jsonl).
+/// Location: ~/.edda/projects/{pid}/state/autoclaim.{sid}.json
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AutoClaimState {
+    label: String,
+    paths: Vec<String>,
+    ts: String,
+}
+
 // ── Path Helpers ──
+
+fn autoclaim_state_path(project_id: &str, session_id: &str) -> PathBuf {
+    edda_store::project_dir(project_id)
+        .join("state")
+        .join(format!("autoclaim.{session_id}.json"))
+}
 
 fn heartbeat_path(project_id: &str, session_id: &str) -> PathBuf {
     edda_store::project_dir(project_id)
@@ -958,6 +973,113 @@ pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<
     } else {
         Some(result)
     }
+}
+
+// ── Auto-Claim ──
+
+/// Derive a scope label and path globs from edited file paths.
+///
+/// Groups files by crate/package directory, returns the dominant group.
+/// Returns `None` if no files modified or no clear grouping.
+fn derive_scope_from_files(files: &[FileEditCount]) -> Option<(String, Vec<String>)> {
+    if files.is_empty() {
+        return None;
+    }
+
+    // Group by crate: look for "crates/{name}" or "packages/{name}" pattern
+    let mut groups: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for f in files {
+        let normalized = f.path.replace('\\', "/");
+        let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+        for (i, seg) in segments.iter().enumerate() {
+            if (*seg == "crates" || *seg == "packages") && i + 1 < segments.len() {
+                *groups.entry(segments[i + 1].to_string()).or_default() += f.count;
+                break;
+            }
+        }
+    }
+
+    if let Some((label, _)) = groups.iter().max_by_key(|(_, c)| *c) {
+        let paths = vec![format!("crates/{}/*", label)];
+        return Some((label.clone(), paths));
+    }
+
+    // Fallback: use src/{module} grouping
+    let mut src_groups: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for f in files {
+        let normalized = f.path.replace('\\', "/");
+        let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+        if let Some(src_pos) = segments.iter().position(|s| *s == "src") {
+            if let Some(module) = segments.get(src_pos + 1) {
+                if !module.contains('.') {
+                    *src_groups.entry(module.to_string()).or_default() += f.count;
+                }
+            }
+        }
+    }
+
+    if let Some((label, _)) = src_groups.iter().max_by_key(|(_, c)| *c) {
+        let paths = vec![format!("src/{}/*", label)];
+        return Some((label.clone(), paths));
+    }
+
+    None
+}
+
+/// Auto-claim scope from session signals if no manual claim exists.
+///
+/// - Skips if session already has an explicit claim in `coordination.jsonl`
+/// - Skips if derived scope is identical to last auto-claim (dedup)
+/// - Writes claim event + saves state file for dedup
+pub(crate) fn maybe_auto_claim(
+    project_id: &str,
+    session_id: &str,
+    signals: &SessionSignals,
+) {
+    // 1. Check existing state
+    let board = compute_board_state(project_id);
+    let existing_claim = board.claims.iter().find(|c| c.session_id == session_id);
+    let state_path = autoclaim_state_path(project_id, session_id);
+    let prev_auto = fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<AutoClaimState>(&c).ok());
+
+    // If a claim exists but no auto-claim state file → it was manual → skip
+    if existing_claim.is_some() && prev_auto.is_none() {
+        return;
+    }
+
+    // 2. Derive scope from edited files
+    let (label, paths) = match derive_scope_from_files(&signals.files_modified) {
+        Some(v) => v,
+        None => return,
+    };
+
+    // 3. Dedup: skip if scope unchanged from last auto-claim
+    if let Some(ref prev) = prev_auto {
+        if prev.label == label && prev.paths == paths {
+            return;
+        }
+    }
+
+    // 4. Write claim to coordination.jsonl
+    write_claim(project_id, session_id, &label, &paths);
+
+    // 5. Save state for dedup
+    let state = AutoClaimState {
+        label,
+        paths,
+        ts: now_rfc3339(),
+    };
+    if let Ok(data) = serde_json::to_string_pretty(&state) {
+        let _ = edda_store::write_atomic(&state_path, data.as_bytes());
+    }
+}
+
+/// Remove auto-claim state file on session end.
+pub(crate) fn remove_autoclaim_state(project_id: &str, session_id: &str) {
+    let _ = fs::remove_file(autoclaim_state_path(project_id, session_id));
 }
 
 // ── Helpers ──
@@ -2150,6 +2272,192 @@ mod tests {
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Auto-claim tests (issue #24) ──
+
+    #[test]
+    fn derive_scope_from_crate_files() {
+        let files = vec![
+            FileEditCount {
+                path: "crates/edda-store/src/lib.rs".into(),
+                count: 5,
+            },
+            FileEditCount {
+                path: "crates/edda-store/src/resolve.rs".into(),
+                count: 3,
+            },
+        ];
+        let (label, paths) = derive_scope_from_files(&files).unwrap();
+        assert_eq!(label, "edda-store");
+        assert_eq!(paths, vec!["crates/edda-store/*"]);
+    }
+
+    #[test]
+    fn derive_scope_from_src_module() {
+        let files = vec![
+            FileEditCount {
+                path: "/repo/src/auth/jwt.rs".into(),
+                count: 5,
+            },
+            FileEditCount {
+                path: "/repo/src/auth/middleware.rs".into(),
+                count: 2,
+            },
+        ];
+        let (label, paths) = derive_scope_from_files(&files).unwrap();
+        assert_eq!(label, "auth");
+        assert_eq!(paths, vec!["src/auth/*"]);
+    }
+
+    #[test]
+    fn derive_scope_empty_files() {
+        assert!(derive_scope_from_files(&[]).is_none());
+    }
+
+    #[test]
+    fn auto_claim_writes_claim_from_signals() {
+        let pid = "test_autoclaim_writes";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let signals = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "crates/edda-store/src/lib.rs".into(),
+                count: 5,
+            }],
+            ..Default::default()
+        };
+
+        maybe_auto_claim(pid, "s1", &signals);
+
+        let board = compute_board_state(pid);
+        assert_eq!(board.claims.len(), 1, "should have 1 claim");
+        assert_eq!(board.claims[0].label, "edda-store");
+        assert_eq!(board.claims[0].paths, vec!["crates/edda-store/*"]);
+
+        remove_autoclaim_state(pid, "s1");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn auto_claim_skips_when_manual_claim_exists() {
+        let pid = "test_autoclaim_skip_manual";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Manual claim first
+        write_claim(pid, "s1", "backend", &["src/api/*".into()]);
+
+        let signals = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "crates/edda-store/src/lib.rs".into(),
+                count: 5,
+            }],
+            ..Default::default()
+        };
+
+        maybe_auto_claim(pid, "s1", &signals);
+
+        let board = compute_board_state(pid);
+        let claim = board.claims.iter().find(|c| c.session_id == "s1").unwrap();
+        assert_eq!(
+            claim.label, "backend",
+            "manual claim should be preserved, not overwritten by auto-claim"
+        );
+
+        remove_autoclaim_state(pid, "s1");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn auto_claim_dedup_no_repeated_writes() {
+        let pid = "test_autoclaim_dedup";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let signals = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "crates/edda-store/src/lib.rs".into(),
+                count: 5,
+            }],
+            ..Default::default()
+        };
+
+        maybe_auto_claim(pid, "s1", &signals);
+        maybe_auto_claim(pid, "s1", &signals);
+
+        let content = fs::read_to_string(coordination_path(pid)).unwrap_or_default();
+        let claim_count = content
+            .lines()
+            .filter(|l| l.contains("\"claim\""))
+            .count();
+        assert_eq!(claim_count, 1, "dedup should prevent repeated claim writes");
+
+        remove_autoclaim_state(pid, "s1");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn auto_claim_updates_on_scope_change() {
+        let pid = "test_autoclaim_scope_change";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let signals1 = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "crates/edda-store/src/lib.rs".into(),
+                count: 5,
+            }],
+            ..Default::default()
+        };
+        maybe_auto_claim(pid, "s1", &signals1);
+
+        let signals2 = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "crates/edda-bridge-claude/src/peers.rs".into(),
+                count: 10,
+            }],
+            ..Default::default()
+        };
+        maybe_auto_claim(pid, "s1", &signals2);
+
+        let board = compute_board_state(pid);
+        let claim = board.claims.iter().find(|c| c.session_id == "s1").unwrap();
+        assert_eq!(
+            claim.label, "edda-bridge-claude",
+            "claim should update to new scope"
+        );
+
+        remove_autoclaim_state(pid, "s1");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn auto_claim_cleanup_removes_state_file() {
+        let pid = "test_autoclaim_cleanup";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let signals = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "crates/edda-store/src/lib.rs".into(),
+                count: 5,
+            }],
+            ..Default::default()
+        };
+        maybe_auto_claim(pid, "s1", &signals);
+
+        let state_path = autoclaim_state_path(pid, "s1");
+        assert!(state_path.exists(), "state file should exist after auto-claim");
+
+        remove_autoclaim_state(pid, "s1");
+        assert!(
+            !state_path.exists(),
+            "state file should be removed after cleanup"
+        );
+
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }

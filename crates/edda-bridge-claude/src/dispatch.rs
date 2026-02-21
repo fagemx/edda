@@ -339,6 +339,9 @@ fn ingest_and_build_pack(project_id: &str, session_id: &str, transcript_path: &s
 
     // Write full peer heartbeat with signals snapshot (unconditional — peer discovery depends on it)
     crate::peers::write_heartbeat(project_id, session_id, &signals, None);
+
+    // Auto-claim scope from edited files (L1 auto-detection, #24)
+    crate::peers::maybe_auto_claim(project_id, session_id, &signals);
 }
 
 /// Lightweight injection: workspace context only (~2K chars), no turns.
@@ -743,6 +746,8 @@ fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool)
     let _ = fs::remove_file(state_dir.join(format!("signal_count.{session_id}")));
     // Late peer detection counter (#11)
     let _ = fs::remove_file(state_dir.join(format!("peer_count.{session_id}")));
+    // Auto-claim state file (#24)
+    crate::peers::remove_autoclaim_state(project_id, session_id);
     // Peer heartbeat + unclaim (L2 — keep remove_heartbeat unconditional as idempotent cleanup)
     crate::peers::remove_heartbeat(project_id, session_id);
     if peers_active {
