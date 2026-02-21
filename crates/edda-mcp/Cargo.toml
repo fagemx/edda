@@ -7,7 +7,7 @@ edition.workspace = true
 edda-core = { path = "../edda-core" }
 edda-ledger = { path = "../edda-ledger" }
 edda-derive = { path = "../edda-derive" }
-rmcp = { version = "0.15", features = ["server", "transport-io"] }
+rmcp = { version = "0.16", features = ["server", "transport-io"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 anyhow.workspace = true
 serde.workspace = true
