@@ -361,6 +361,45 @@ enum BridgeClaudeCmd {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Render write-back protocol (static teaching text)
+    RenderWriteback,
+    /// Render workspace context from .edda/ ledger
+    RenderWorkspace {
+        /// Max chars budget
+        #[arg(long, default_value = "2500")]
+        budget: usize,
+    },
+    /// Render L2 coordination protocol
+    RenderCoordination {
+        /// Session ID (auto-inferred if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Render hot pack (recent turns summary, reads last-built pack)
+    RenderPack,
+    /// Render active plan excerpt
+    RenderPlan,
+    /// Write session heartbeat for peer discovery
+    HeartbeatWrite {
+        /// Session label (e.g. "auth", "billing")
+        #[arg(long)]
+        label: String,
+        /// Session ID (auto-inferred if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Touch heartbeat timestamp (liveness ping)
+    HeartbeatTouch {
+        /// Session ID (auto-inferred if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Remove session heartbeat
+    HeartbeatRemove {
+        /// Session ID (auto-inferred if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -819,6 +858,24 @@ fn main() -> anyhow::Result<()> {
                 }
                 BridgeClaudeCmd::Request { to, message, session } => {
                     cmd_bridge::request(&repo_root, &to, &message, session.as_deref())
+                }
+                BridgeClaudeCmd::RenderWriteback => cmd_bridge::render_writeback(),
+                BridgeClaudeCmd::RenderWorkspace { budget } => {
+                    cmd_bridge::render_workspace(&repo_root, budget)
+                }
+                BridgeClaudeCmd::RenderCoordination { session } => {
+                    cmd_bridge::render_coordination(&repo_root, session.as_deref())
+                }
+                BridgeClaudeCmd::RenderPack => cmd_bridge::render_pack(&repo_root),
+                BridgeClaudeCmd::RenderPlan => cmd_bridge::render_plan(&repo_root),
+                BridgeClaudeCmd::HeartbeatWrite { label, session } => {
+                    cmd_bridge::heartbeat_write(&repo_root, &label, session.as_deref())
+                }
+                BridgeClaudeCmd::HeartbeatTouch { session } => {
+                    cmd_bridge::heartbeat_touch(&repo_root, session.as_deref())
+                }
+                BridgeClaudeCmd::HeartbeatRemove { session } => {
+                    cmd_bridge::heartbeat_remove(&repo_root, session.as_deref())
                 }
             },
             BridgeCmd::Openclaw { cmd } => match cmd {
