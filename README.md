@@ -27,7 +27,7 @@
 </p>
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/b818396d-3d70-4af7-9ea4-a7c5e67f7244" width="700" alt="Edda overview" />
+  <img src="https://github.com/user-attachments/assets/03180d1f-5943-4a62-808b-0b8d159a94db" width="700" alt="Edda overview" />
 </p>
 
 ---
