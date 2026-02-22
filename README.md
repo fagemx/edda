@@ -25,7 +25,10 @@ Your coding agent forgets every decision when the session ends. Edda makes them 
 ## Install
 
 ```bash
-# Download a prebuilt binary
+# macOS / Linux (Homebrew)
+brew install fagemx/tap/edda
+
+# Or download a prebuilt binary
 # → https://github.com/fagemx/edda/releases
 
 # Or build from source

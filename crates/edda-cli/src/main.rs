@@ -26,7 +26,7 @@ mod tui;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "edda", about = "Git-style Context Controller")]
+#[command(name = "edda", version, about = "Decision memory for coding agents")]
 struct Cli {
     #[command(subcommand)]
     cmd: Command,
