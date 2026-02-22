@@ -20,9 +20,16 @@ pub fn snapshot(
     let peers = peers::discover_all_sessions(project_id);
     let board = peers::compute_board_state(project_id);
 
-    let ledger = edda_ledger::Ledger::open(repo_root)?;
-    let all_events = ledger.iter_events()?;
-    let events: Vec<_> = all_events.into_iter().rev().take(event_limit).collect();
+    let events = match edda_ledger::Ledger::open(repo_root) {
+        Ok(ledger) => ledger
+            .iter_events()
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .take(event_limit)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
 
     Ok(WatchData {
         peers,
