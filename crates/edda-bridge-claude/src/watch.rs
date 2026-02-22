@@ -20,7 +20,7 @@ pub fn snapshot(
     let peers = peers::discover_all_sessions(project_id);
     let board = peers::compute_board_state(project_id);
 
-    let events = match edda_ledger::Ledger::open(repo_root) {
+    let events = match edda_ledger::Ledger::open_or_init(repo_root) {
         Ok(ledger) => ledger
             .iter_events()
             .unwrap_or_default()
