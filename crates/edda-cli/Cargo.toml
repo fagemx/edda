@@ -24,7 +24,6 @@ edda-search-fts = { path = "../edda-search-fts" }
 edda-conductor = { path = "../edda-conductor" }
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
-color-eyre = { version = "0.6", optional = true }
 clap.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-util = "0.7"
@@ -40,7 +39,7 @@ time.workspace = true
 
 [features]
 default = ["tui"]
-tui = ["ratatui", "crossterm", "color-eyre"]
+tui = ["ratatui", "crossterm"]
 
 [dev-dependencies]
 tempfile.workspace = true
