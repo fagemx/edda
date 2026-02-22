@@ -61,8 +61,12 @@ jobs:
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal
 
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
       - name: Build release binaries
-        run: cargo build --release -p edda-cli -p edda-tui
+        run: cargo build --release -p edda-cli
 
       - name: Prepare archive (unix)
         if: matrix.archive == 'tar.gz'
@@ -70,7 +74,7 @@ jobs:
           TAG="${{ needs.create-release.outputs.tag }}"
           ARCHIVE="edda-${TAG}-${{ matrix.target }}"
           mkdir "$ARCHIVE"
-          cp target/release/edda target/release/edda-tui "$ARCHIVE/"
+          cp target/release/edda "$ARCHIVE/"
           cp LICENSE-MIT LICENSE-APACHE "$ARCHIVE/"
           tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
           shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
@@ -84,7 +88,6 @@ jobs:
           $ARCHIVE = "edda-${TAG}-${{ matrix.target }}"
           New-Item -ItemType Directory -Path $ARCHIVE
           Copy-Item "target\release\edda.exe" "$ARCHIVE\"
-          Copy-Item "target\release\edda-tui.exe" "$ARCHIVE\"
           Copy-Item "LICENSE-MIT" "$ARCHIVE\"
           Copy-Item "LICENSE-APACHE" "$ARCHIVE\"
           Compress-Archive -Path "$ARCHIVE\*" -DestinationPath "${ARCHIVE}.zip"
