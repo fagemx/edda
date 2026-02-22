@@ -1,12 +1,17 @@
 [package]
 name = "edda-derive"
+description = "View rebuilding and tiered history for Edda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
 
 [dependencies]
-edda-core = { path = "../edda-core" }
-edda-ledger = { path = "../edda-ledger" }
+edda-core = { path = "../edda-core", version = "0.1.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.0" }
 anyhow.workspace = true
 time.workspace = true
 serde.workspace = true

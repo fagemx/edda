@@ -1,11 +1,16 @@
 [package]
 name = "edda-ledger"
+description = "Append-only SQLite ledger with hash-chained events for Edda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
 
 [dependencies]
-edda-core = { path = "../edda-core" }
+edda-core = { path = "../edda-core", version = "0.1.0" }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

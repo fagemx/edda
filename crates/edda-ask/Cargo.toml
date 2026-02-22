@@ -1,12 +1,17 @@
 [package]
 name = "edda-ask"
+description = "Cross-source decision query engine for Edda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
 
 [dependencies]
-edda-ledger = { path = "../edda-ledger" }
-edda-core = { path = "../edda-core" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.0" }
+edda-core = { path = "../edda-core", version = "0.1.0" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 anyhow = { workspace = true }

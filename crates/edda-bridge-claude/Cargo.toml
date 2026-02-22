@@ -1,17 +1,22 @@
 [package]
 name = "edda-bridge-claude"
+description = "Claude Code hooks, transcript ingest, and context injection for Edda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
 
 [dependencies]
-edda-core = { path = "../edda-core" }
-edda-store = { path = "../edda-store" }
-edda-transcript = { path = "../edda-transcript" }
-edda-index = { path = "../edda-index" }
-edda-pack = { path = "../edda-pack" }
-edda-ledger = { path = "../edda-ledger" }
-edda-derive = { path = "../edda-derive" }
+edda-core = { path = "../edda-core", version = "0.1.0" }
+edda-store = { path = "../edda-store", version = "0.1.0" }
+edda-transcript = { path = "../edda-transcript", version = "0.1.0" }
+edda-index = { path = "../edda-index", version = "0.1.0" }
+edda-pack = { path = "../edda-pack", version = "0.1.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.0" }
+edda-derive = { path = "../edda-derive", version = "0.1.0" }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

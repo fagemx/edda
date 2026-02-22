@@ -1,13 +1,18 @@
 [package]
 name = "edda-search-fts"
+description = "Full-text search powered by Tantivy for Edda"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
 
 [dependencies]
-edda-store = { path = "../edda-store" }
-edda-index = { path = "../edda-index" }
-edda-core = { path = "../edda-core" }
+edda-store = { path = "../edda-store", version = "0.1.0" }
+edda-index = { path = "../edda-index", version = "0.1.0" }
+edda-core = { path = "../edda-core", version = "0.1.0" }
 tantivy = { version = "0.25", default-features = false, features = ["mmap", "lz4-compression"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde.workspace = true

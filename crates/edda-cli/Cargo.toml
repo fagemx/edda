@@ -1,27 +1,32 @@
 [package]
 name = "edda-cli"
+description = "CLI and TUI for Edda — decision memory for coding agents"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
 
 [[bin]]
 name = "edda"
 path = "src/main.rs"
 
 [dependencies]
-edda-ask = { path = "../edda-ask" }
-edda-core = { path = "../edda-core" }
-edda-ledger = { path = "../edda-ledger" }
-edda-derive = { path = "../edda-derive" }
-edda-store = { path = "../edda-store" }
-edda-bridge-claude = { path = "../edda-bridge-claude" }
-edda-bridge-openclaw = { path = "../edda-bridge-openclaw" }
-edda-transcript = { path = "../edda-transcript" }
-edda-index = { path = "../edda-index" }
-edda-pack = { path = "../edda-pack" }
-edda-mcp = { path = "../edda-mcp" }
-edda-search-fts = { path = "../edda-search-fts" }
-edda-conductor = { path = "../edda-conductor" }
+edda-ask = { path = "../edda-ask", version = "0.1.0" }
+edda-core = { path = "../edda-core", version = "0.1.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.0" }
+edda-derive = { path = "../edda-derive", version = "0.1.0" }
+edda-store = { path = "../edda-store", version = "0.1.0" }
+edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.1.0" }
+edda-bridge-openclaw = { path = "../edda-bridge-openclaw", version = "0.1.0" }
+edda-transcript = { path = "../edda-transcript", version = "0.1.0" }
+edda-index = { path = "../edda-index", version = "0.1.0" }
+edda-pack = { path = "../edda-pack", version = "0.1.0" }
+edda-mcp = { path = "../edda-mcp", version = "0.1.0" }
+edda-search-fts = { path = "../edda-search-fts", version = "0.1.0" }
+edda-conductor = { path = "../edda-conductor", version = "0.1.0" }
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 clap.workspace = true
