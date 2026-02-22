@@ -628,6 +628,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "edda-ask"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "edda-core",
+ "edda-ledger",
+ "serde",
+ "serde_json",
+ "time",
+ "ulid",
+]
+
+[[package]]
 name = "edda-bridge-claude"
 version = "0.1.0"
 dependencies = [
@@ -674,6 +687,7 @@ dependencies = [
  "anyhow",
  "clap",
  "ctrlc",
+ "edda-ask",
  "edda-bridge-claude",
  "edda-bridge-openclaw",
  "edda-conductor",
@@ -775,6 +789,7 @@ name = "edda-mcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "edda-ask",
  "edda-core",
  "edda-derive",
  "edda-ledger",

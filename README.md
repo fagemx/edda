@@ -7,7 +7,7 @@
 $ edda decide "db=SQLite" --reason "single-user, no deployment overhead, FTS5 for search"
 Recorded: db=SQLite
 
-$ edda query "database"
+$ edda ask "database"
 [2026-02-15 session-7a] db=SQLite
   reason: single-user, no deployment overhead, FTS5 for search
 
@@ -75,7 +75,7 @@ Recorded note.
 ### Query past decisions
 
 ```bash
-$ edda query "cache"
+$ edda ask "cache"
 [2026-02-18 session-3f] cache=Redis
   reason: need TTL, pub/sub for invalidation
 
@@ -156,7 +156,7 @@ Claude Code session
    Bridge hooks (automatic)
         │
         ▼
-   ┌─────────┐     edda query ←── manual lookup
+   ┌─────────┐     edda ask ←── cross-source query
    │  .edda/  │     edda context ←── auto-injected at session start
    │  ledger  │     edda search ←── full-text across transcripts
    └─────────┘
@@ -206,7 +206,7 @@ Every event is a single JSON line, hash-chained:
 edda init          Initialize .edda/ in your project
 edda decide        Record a binding decision
 edda note          Record a note
-edda query         Search decisions by keyword
+edda ask           Query decisions, history, and conversations
 edda search        Full-text search across transcripts (FTS5)
 edda log           Query events with filters (type, date, tag, branch)
 edda context       Output context snapshot (what the agent sees)

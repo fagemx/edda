@@ -1,3 +1,4 @@
+mod cmd_ask;
 mod cmd_blob;
 mod cmd_branch;
 mod cmd_bridge;
@@ -13,7 +14,6 @@ mod cmd_merge;
 mod cmd_note;
 mod cmd_pattern;
 mod cmd_plan;
-mod cmd_query;
 mod cmd_rebuild;
 mod cmd_run;
 mod cmd_search;
@@ -56,11 +56,11 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Query workspace decisions by keyword
-    Query {
-        /// Search text (case-insensitive substring match)
-        query: String,
-        /// Maximum results (default: 20)
+    /// Query project decisions, history, and conversations
+    Ask {
+        /// Query string (keyword, domain, or exact key like "db.engine"). Omit for all active decisions.
+        query: Option<String>,
+        /// Maximum results per section (default: 20)
         #[arg(long, default_value = "20")]
         limit: usize,
         /// Output as JSON
@@ -69,6 +69,9 @@ enum Command {
         /// Include superseded decisions
         #[arg(long)]
         all: bool,
+        /// Filter by branch
+        #[arg(long)]
+        branch: Option<String>,
     },
     /// Run a command and record its output
     Run {
@@ -753,12 +756,20 @@ fn main() -> anyhow::Result<()> {
             reason,
             session,
         } => cmd_bridge::decide(&repo_root, &decision, reason.as_deref(), session.as_deref()),
-        Command::Query {
+        Command::Ask {
             query,
             limit,
             json,
             all,
-        } => cmd_query::execute(&repo_root, &query, limit, json, all),
+            branch,
+        } => cmd_ask::execute(
+            &repo_root,
+            query.as_deref(),
+            limit,
+            json,
+            all,
+            branch.as_deref(),
+        ),
         Command::Run { argv } => cmd_run::execute(&repo_root, &argv),
         Command::Status => cmd_status::execute(&repo_root),
         Command::Commit {

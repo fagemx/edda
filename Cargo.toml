@@ -11,6 +11,7 @@ members = [
     "crates/edda-index",
     "crates/edda-pack",
     "crates/edda-mcp",
+    "crates/edda-ask",
     "crates/edda-search-fts",
     "crates/edda-conductor",
     "crates/edda-tui",

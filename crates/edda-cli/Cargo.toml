@@ -8,6 +8,7 @@ name = "edda"
 path = "src/main.rs"
 
 [dependencies]
+edda-ask = { path = "../edda-ask" }
 edda-core = { path = "../edda-core" }
 edda-ledger = { path = "../edda-ledger" }
 edda-derive = { path = "../edda-derive" }

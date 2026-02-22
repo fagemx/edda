@@ -1,6 +1,6 @@
 ---
 name: edda-workflow
-description: "Post-task notification and draft approval via edda (decision memory). Use when: (1) a coding agent finishes and you need to report results, (2) checking for pending edda drafts that need approval, (3) user says 'approve', 'reject', or asks about draft status. NOT for: recording decisions (use `edda decide` directly), querying past decisions (use `edda query`), or session context (handled automatically by edda bridge)."
+description: "Post-task notification and draft approval via edda (decision memory). Use when: (1) a coding agent finishes and you need to report results, (2) checking for pending edda drafts that need approval, (3) user says 'approve', 'reject', or asks about draft status. NOT for: recording decisions (use `edda decide` directly), querying past decisions (use `edda ask`), or session context (handled automatically by edda bridge)."
 metadata:
   {
     "openclaw":

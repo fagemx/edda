@@ -91,6 +91,10 @@ pub fn workspace(cwd: &str, budget: usize) -> Option<String> {
             let mut section = transform_context_to_section(&raw);
             // If edda ledger has no commit events, fall back to `git log`
             supplement_git_commits(&mut section, cwd_path, d);
+            // Hint for LLM agents to discover the ask tool
+            section.push_str(
+                "\n> Use edda_ask MCP tool or `edda ask <keyword>` for detailed decision history\n",
+            );
             if section.len() <= budget {
                 return Some(section);
             }

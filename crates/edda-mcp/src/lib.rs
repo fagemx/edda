@@ -43,10 +43,10 @@ struct DecideParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-struct QueryParams {
-    /// Search keyword (case-insensitive, matches decision key/value/reason)
-    query: String,
-    /// Maximum number of results (default: 20)
+struct AskParams {
+    /// Query string (keyword, domain, or exact key like "db.engine"). Leave empty for all active decisions.
+    query: Option<String>,
+    /// Maximum results per section (default: 10)
     limit: Option<usize>,
     /// Include superseded decisions (default: false)
     include_superseded: Option<bool>,
@@ -248,124 +248,26 @@ impl EddaServer {
         ))]))
     }
 
-    /// Search decisions by keyword (case-insensitive match on key/value/reason)
+    /// Query project decisions, history, and conversations
     #[tool(
-        description = "Search decisions by keyword (case-insensitive match on key/value/reason)"
+        description = "Query project decisions, history, and conversations. Returns a structured context bundle with decisions, timeline, related commits, notes, and transcript excerpts."
     )]
-    async fn edda_query(
+    async fn edda_ask(
         &self,
-        Parameters(params): Parameters<QueryParams>,
+        Parameters(params): Parameters<AskParams>,
     ) -> Result<CallToolResult, McpError> {
         let ledger = self.open_ledger()?;
-        let head = ledger.head_branch().map_err(to_mcp_err)?;
-        let events = ledger.iter_events().map_err(to_mcp_err)?;
-        let limit = params.limit.unwrap_or(20);
-        let include_superseded = params.include_superseded.unwrap_or(false);
-        let query_lower = params.query.to_lowercase();
+        let q = params.query.as_deref().unwrap_or("");
+        let opts = edda_ask::AskOptions {
+            limit: params.limit.unwrap_or(10),
+            include_superseded: params.include_superseded.unwrap_or(false),
+            branch: None,
+        };
 
-        // Collect decision events on this branch
-        let decisions: Vec<_> = events
-            .iter()
-            .filter(|e| e.branch == head && e.event_type == "note")
-            .filter(|e| {
-                e.payload
-                    .get("tags")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
-                    .unwrap_or(false)
-            })
-            .collect();
+        let result = edda_ask::ask(&ledger, q, &opts, None).map_err(to_mcp_err)?;
+        let json = serde_json::to_string_pretty(&result).map_err(|e| to_mcp_err(e.into()))?;
 
-        // Build superseded set from provenance links
-        let mut superseded_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for e in &decisions {
-            for prov in &e.refs.provenance {
-                if prov.rel == rel::SUPERSEDES {
-                    superseded_ids.insert(&prov.target);
-                }
-            }
-        }
-
-        // Filter by keyword match + supersede status, newest first
-        let results: Vec<_> = decisions
-            .iter()
-            .rev()
-            .filter(|e| {
-                if !include_superseded && superseded_ids.contains(e.event_id.as_str()) {
-                    return false;
-                }
-                // Match against key, value, reason, or text
-                let text = e.payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                let dec_key = e
-                    .payload
-                    .get("decision")
-                    .and_then(|d| d.get("key"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let dec_value = e
-                    .payload
-                    .get("decision")
-                    .and_then(|d| d.get("value"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let dec_reason = e
-                    .payload
-                    .get("decision")
-                    .and_then(|d| d.get("reason"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-
-                text.to_lowercase().contains(&query_lower)
-                    || dec_key.to_lowercase().contains(&query_lower)
-                    || dec_value.to_lowercase().contains(&query_lower)
-                    || dec_reason.to_lowercase().contains(&query_lower)
-            })
-            .take(limit)
-            .collect();
-
-        if results.is_empty() {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "No decisions matching \"{}\"",
-                params.query
-            ))]));
-        }
-
-        let lines: Vec<String> = results
-            .iter()
-            .map(|e| {
-                let ts_short = e.ts.get(..10).unwrap_or(&e.ts);
-                let key = e
-                    .payload
-                    .get("decision")
-                    .and_then(|d| d.get("key"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                let value = e
-                    .payload
-                    .get("decision")
-                    .and_then(|d| d.get("value"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                let reason = e
-                    .payload
-                    .get("decision")
-                    .and_then(|d| d.get("reason"))
-                    .and_then(|v| v.as_str());
-                let superseded = if superseded_ids.contains(e.event_id.as_str()) {
-                    " [SUPERSEDED]"
-                } else {
-                    ""
-                };
-                match reason {
-                    Some(r) => format!("[{ts_short}] {key} = {value}{superseded}\n  {r}"),
-                    None => format!("[{ts_short}] {key} = {value}{superseded}"),
-                }
-            })
-            .collect();
-
-        Ok(CallToolResult::success(vec![Content::text(
-            lines.join("\n"),
-        )]))
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     /// Query the event log with optional filters (type, keyword, date range)
@@ -822,10 +724,10 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // --- edda_query tests ---
+    // --- edda_ask tests ---
 
     #[tokio::test]
-    async fn test_query_finds_decisions() {
+    async fn test_ask_finds_decisions() {
         let (_tmp, root) = setup_workspace();
         let server = EddaServer::new(root);
 
@@ -845,8 +747,8 @@ mod tests {
             .unwrap();
 
         let result = server
-            .edda_query(Parameters(QueryParams {
-                query: "postgres".to_string(),
+            .edda_ask(Parameters(AskParams {
+                query: Some("postgres".to_string()),
                 limit: None,
                 include_superseded: None,
             }))
@@ -854,22 +756,17 @@ mod tests {
             .unwrap();
 
         let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("db.engine = postgres"));
-        assert!(!text.contains("auth.method"));
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["input_type"], "keyword");
+        assert_eq!(parsed["decisions"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["decisions"][0]["key"], "db.engine");
     }
 
     #[tokio::test]
-    async fn test_query_supersede_filter() {
+    async fn test_ask_empty_returns_all_active() {
         let (_tmp, root) = setup_workspace();
         let server = EddaServer::new(root);
 
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.engine=sqlite".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
         server
             .edda_decide(Parameters(DecideParams {
                 decision: "db.engine=postgres".to_string(),
@@ -877,43 +774,79 @@ mod tests {
             }))
             .await
             .unwrap();
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "auth.method=JWT".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
 
-        // Default: superseded hidden
         let result = server
-            .edda_query(Parameters(QueryParams {
-                query: "db".to_string(),
+            .edda_ask(Parameters(AskParams {
+                query: None,
                 limit: None,
                 include_superseded: None,
             }))
             .await
             .unwrap();
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("postgres"));
-        assert!(!text.contains("sqlite"));
 
-        // With include_superseded
-        let result = server
-            .edda_query(Parameters(QueryParams {
-                query: "db".to_string(),
-                limit: None,
-                include_superseded: Some(true),
-            }))
-            .await
-            .unwrap();
         let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("postgres"));
-        assert!(text.contains("sqlite"));
-        assert!(text.contains("[SUPERSEDED]"));
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["input_type"], "overview");
+        assert_eq!(parsed["decisions"].as_array().unwrap().len(), 2);
     }
 
     #[tokio::test]
-    async fn test_query_no_results() {
+    async fn test_ask_domain_browse() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.engine=postgres".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.pool=10".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "auth.method=JWT".to_string(),
+                reason: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .edda_ask(Parameters(AskParams {
+                query: Some("db".to_string()),
+                limit: None,
+                include_superseded: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["input_type"], "domain");
+        assert_eq!(parsed["decisions"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_ask_no_results() {
         let (_tmp, root) = setup_workspace();
         let server = EddaServer::new(root);
 
         let result = server
-            .edda_query(Parameters(QueryParams {
-                query: "nonexistent".to_string(),
+            .edda_ask(Parameters(AskParams {
+                query: Some("nonexistent".to_string()),
                 limit: None,
                 include_superseded: None,
             }))
@@ -921,7 +854,8 @@ mod tests {
             .unwrap();
 
         let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("No decisions matching"));
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(parsed["decisions"].as_array().unwrap().is_empty());
     }
 
     // --- edda_log tests ---
