@@ -113,8 +113,7 @@ mod tests {
 
     fn temp_dir() -> std::path::PathBuf {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tmp =
-            std::env::temp_dir().join(format!("edda_init_test_{}_{n}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("edda_init_test_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         tmp

@@ -1,8 +1,8 @@
-use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::Frame;
 
 use crate::app::{App, Panel};
 
@@ -53,20 +53,24 @@ fn render_peers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .skip(app.peer_scroll)
         .flat_map(|(i, peer)| {
             let status = if peer.age_secs < 120 { "+" } else { "-" };
-            let label = if peer.label.is_empty() { "?" } else { &peer.label };
+            let label = if peer.label.is_empty() {
+                "?"
+            } else {
+                &peer.label
+            };
             let header = format!(" {status} {label}  ({:.8})", peer.session_id);
-            let style = if app.active_panel == Panel::Peers
-                && i == app.peer_scroll
-            {
+            let style = if app.active_panel == Panel::Peers && i == app.peer_scroll {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
             };
             let mut lines = vec![ListItem::new(Line::from(Span::styled(header, style)))];
             if !peer.focus_files.is_empty() {
-                let files: Vec<&str> = peer.focus_files.iter().map(|f| {
-                    f.rsplit(['/', '\\']).next().unwrap_or(f)
-                }).collect();
+                let files: Vec<&str> = peer
+                    .focus_files
+                    .iter()
+                    .map(|f| f.rsplit(['/', '\\']).next().unwrap_or(f))
+                    .collect();
                 let detail = format!("     {}", files.join(", "));
                 lines.push(ListItem::new(Line::from(Span::styled(
                     detail,
@@ -144,9 +148,7 @@ fn render_decisions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             ListItem::new(Line::from(line))
         })
         .collect();
-    let binding_block = Block::default()
-        .title(" Bindings ")
-        .borders(Borders::TOP);
+    let binding_block = Block::default().title(" Bindings ").borders(Borders::TOP);
     let binding_list = List::new(binding_items).block(binding_block);
     f.render_widget(binding_list, inner_chunks[0]);
 
@@ -161,9 +163,7 @@ fn render_decisions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             ListItem::new(Line::from(line))
         })
         .collect();
-    let claim_block = Block::default()
-        .title(" Claims ")
-        .borders(Borders::TOP);
+    let claim_block = Block::default().title(" Claims ").borders(Borders::TOP);
     let claim_list = List::new(claim_items).block(claim_block);
     f.render_widget(claim_list, inner_chunks[1]);
 
@@ -177,9 +177,7 @@ fn render_decisions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             ListItem::new(Line::from(line))
         })
         .collect();
-    let request_block = Block::default()
-        .title(" Requests ")
-        .borders(Borders::TOP);
+    let request_block = Block::default().title(" Requests ").borders(Borders::TOP);
     let request_list = List::new(request_items).block(request_block);
     f.render_widget(request_list, inner_chunks[2]);
 }

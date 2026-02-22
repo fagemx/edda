@@ -338,7 +338,14 @@ pub fn index_project(
             if session_id.is_empty() {
                 continue;
             }
-            match index_session(writer, schema, meta_conn, project_dir, project_id, &session_id) {
+            match index_session(
+                writer,
+                schema,
+                meta_conn,
+                project_dir,
+                project_id,
+                &session_id,
+            ) {
                 Ok(n) => total += n,
                 Err(e) => {
                     eprintln!("warn: indexing session {session_id}: {e}");
@@ -612,7 +619,11 @@ mod tests {
         // Reload reader to see merged segments
         let reader2 = index.reader().unwrap();
         let searcher2 = reader2.searcher();
-        assert_eq!(searcher2.num_docs(), 1, "events should not be duplicated on re-index");
+        assert_eq!(
+            searcher2.num_docs(),
+            1,
+            "events should not be duplicated on re-index"
+        );
     }
 
     #[test]
@@ -622,7 +633,14 @@ mod tests {
         let writer = index_writer(&index).unwrap();
         let meta_conn = ensure_meta_db_memory().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        let result = index_session(&writer, &schema, &meta_conn, tmp.path(), "p1", "nonexistent");
+        let result = index_session(
+            &writer,
+            &schema,
+            &meta_conn,
+            tmp.path(),
+            "p1",
+            "nonexistent",
+        );
         assert_eq!(result.unwrap(), 0);
     }
 
@@ -721,8 +739,7 @@ mod tests {
         let mut writer = index_writer(&index).unwrap();
         let meta_conn = ensure_meta_db_memory().unwrap();
 
-        let count =
-            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        let count = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
         assert_eq!(count, 1);
         writer.commit().unwrap();
 
@@ -742,8 +759,7 @@ mod tests {
         assert_eq!(turn_id, "u1:a1");
 
         // Re-index is idempotent (dedup via turns_meta check)
-        let count2 =
-            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        let count2 = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
         assert_eq!(count2, 0);
     }
 }

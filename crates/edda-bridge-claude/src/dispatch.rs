@@ -1172,7 +1172,9 @@ mod tests {
 
         // Set flag
         set_compact_pending(pid);
-        let cp_path = edda_store::project_dir(pid).join("state").join("compact_pending");
+        let cp_path = edda_store::project_dir(pid)
+            .join("state")
+            .join("compact_pending");
         assert!(cp_path.exists());
 
         // Take clears it and returns true once

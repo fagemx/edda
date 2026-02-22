@@ -139,9 +139,7 @@ pub fn search(
         let snippet = snippet_gen.snippet_from_doc(&doc);
         let snippet_html = snippet.to_html();
         // Convert <b>match</b> to «match» for consistency with old FTS5 output
-        let snippet_text = snippet_html
-            .replace("<b>", "«")
-            .replace("</b>", "»");
+        let snippet_text = snippet_html.replace("<b>", "«").replace("</b>", "»");
 
         results.push(SearchResult {
             doc_id: get_text(f_doc_id),
@@ -335,8 +333,13 @@ mod tests {
         let index = ensure_index_ram().unwrap();
         insert_test_docs(&index);
 
-        let results =
-            search(&index, "nonexistent_query_xyz", &SearchOptions::default(), 10).unwrap();
+        let results = search(
+            &index,
+            "nonexistent_query_xyz",
+            &SearchOptions::default(),
+            10,
+        )
+        .unwrap();
         assert!(results.is_empty());
     }
 
@@ -362,7 +365,10 @@ mod tests {
 
         // "dispatc" (missing 'h') should find "dispatch" via fuzzy search
         let results = search(&index, "dispatc", &SearchOptions::default(), 10).unwrap();
-        assert!(!results.is_empty(), "fuzzy search should find 'dispatch' with typo 'dispatc'");
+        assert!(
+            !results.is_empty(),
+            "fuzzy search should find 'dispatch' with typo 'dispatc'"
+        );
         assert_eq!(results[0].doc_id, "u1:a1");
     }
 
@@ -373,7 +379,10 @@ mod tests {
 
         // Regex: /bridge.*/ should match "bridge messages"
         let results = search(&index, "/bridge.*/", &SearchOptions::default(), 10).unwrap();
-        assert!(!results.is_empty(), "regex search should find 'bridge messages'");
+        assert!(
+            !results.is_empty(),
+            "regex search should find 'bridge messages'"
+        );
     }
 
     #[test]
@@ -391,7 +400,10 @@ mod tests {
 
         // Exact search for "postgre" (typo) should NOT find anything (no fuzzy)
         let results = search(&index, "postgre", &opts, 10).unwrap();
-        assert!(results.is_empty(), "exact mode should not use fuzzy matching");
+        assert!(
+            results.is_empty(),
+            "exact mode should not use fuzzy matching"
+        );
     }
 
     #[test]
@@ -403,7 +415,18 @@ mod tests {
              user_store_offset, user_store_len, \
              assistant_store_offset, assistant_store_len) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params!["t1", "p1", "s1", "2026-02-14T10:00:00Z", "u1", "a1", 0i64, 100i64, 101i64, 200i64],
+            params![
+                "t1",
+                "p1",
+                "s1",
+                "2026-02-14T10:00:00Z",
+                "u1",
+                "a1",
+                0i64,
+                100i64,
+                101i64,
+                200i64
+            ],
         )
         .unwrap();
 

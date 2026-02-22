@@ -24,7 +24,6 @@ impl HookResult {
         }
     }
 
-
     pub fn empty() -> Self {
         Self::default()
     }
@@ -714,10 +713,7 @@ mod tests {
             .join("state")
             .join("compact_pending");
         assert!(cp_path.exists(), "flag should be set");
-        assert!(
-            state::take_compact_pending(pid),
-            "take should return true"
-        );
+        assert!(state::take_compact_pending(pid), "take should return true");
         assert!(!cp_path.exists(), "flag should be cleared");
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -833,7 +829,11 @@ mod tests {
         assert!(!state::is_same_as_last_inject(pid, sid, content));
         state::write_inject_hash(pid, sid, content);
         assert!(state::is_same_as_last_inject(pid, sid, content));
-        assert!(!state::is_same_as_last_inject(pid, sid, "different content"));
+        assert!(!state::is_same_as_last_inject(
+            pid,
+            sid,
+            "different content"
+        ));
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }

@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 /// If `repo_root_or_cwd` is inside a git worktree, resolves to the main
 /// repository root so that all worktrees share the same project ID.
 pub fn project_id(repo_root_or_cwd: &Path) -> String {
-    let resolved = resolve_git_root(repo_root_or_cwd)
-        .unwrap_or_else(|| repo_root_or_cwd.to_path_buf());
+    let resolved =
+        resolve_git_root(repo_root_or_cwd).unwrap_or_else(|| repo_root_or_cwd.to_path_buf());
     let normalized = normalize_path(&resolved);
     let hash = blake3::hash(normalized.as_bytes());
     hash.to_hex()[..32].to_string()
@@ -223,7 +223,10 @@ mod tests {
 
         let id_main = project_id(&repo);
         let id_wt = project_id(&wt);
-        assert_eq!(id_main, id_wt, "worktree and main tree must have same project_id");
+        assert_eq!(
+            id_main, id_wt,
+            "worktree and main tree must have same project_id"
+        );
     }
 
     #[test]

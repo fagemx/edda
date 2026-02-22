@@ -80,13 +80,22 @@ pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> an
 
     // Index ledger events
     let ledger = Ledger::open(repo_root)?;
-    let event_count = indexer::index_events(&writer, &tantivy_schema, project_id, || ledger.iter_events())?;
+    let event_count = indexer::index_events(&writer, &tantivy_schema, project_id, || {
+        ledger.iter_events()
+    })?;
 
     // Index transcript turns
     let meta_db_path = proj_dir.join("search").join("meta.sqlite");
     let meta_conn = schema::ensure_meta_db(&meta_db_path)?;
     let turn_count = if let Some(sid) = session_id {
-        indexer::index_session(&writer, &tantivy_schema, &meta_conn, &proj_dir, project_id, sid)?
+        indexer::index_session(
+            &writer,
+            &tantivy_schema,
+            &meta_conn,
+            &proj_dir,
+            project_id,
+            sid,
+        )?
     } else {
         indexer::index_project(&writer, &tantivy_schema, &meta_conn, &proj_dir, project_id)?
     };

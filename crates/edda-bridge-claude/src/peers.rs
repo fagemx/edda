@@ -1009,8 +1009,7 @@ fn derive_scope_from_files(files: &[FileEditCount]) -> Option<(String, Vec<Strin
     }
 
     // Fallback: use src/{module} grouping
-    let mut src_groups: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut src_groups: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for f in files {
         let normalized = f.path.replace('\\', "/");
         let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
@@ -1036,11 +1035,7 @@ fn derive_scope_from_files(files: &[FileEditCount]) -> Option<(String, Vec<Strin
 /// - Skips if session already has an explicit claim in `coordination.jsonl`
 /// - Skips if derived scope is identical to last auto-claim (dedup)
 /// - Writes claim event + saves state file for dedup
-pub(crate) fn maybe_auto_claim(
-    project_id: &str,
-    session_id: &str,
-    signals: &SessionSignals,
-) {
+pub(crate) fn maybe_auto_claim(project_id: &str, session_id: &str, signals: &SessionSignals) {
     // 1. Check existing state
     let board = compute_board_state(project_id);
     let existing_claim = board.claims.iter().find(|c| c.session_id == session_id);
@@ -2393,10 +2388,7 @@ mod tests {
         maybe_auto_claim(pid, "s1", &signals);
 
         let content = fs::read_to_string(coordination_path(pid)).unwrap_or_default();
-        let claim_count = content
-            .lines()
-            .filter(|l| l.contains("\"claim\""))
-            .count();
+        let claim_count = content.lines().filter(|l| l.contains("\"claim\"")).count();
         assert_eq!(claim_count, 1, "dedup should prevent repeated claim writes");
 
         remove_autoclaim_state(pid, "s1");
@@ -2454,7 +2446,10 @@ mod tests {
         maybe_auto_claim(pid, "s1", &signals);
 
         let state_path = autoclaim_state_path(pid, "s1");
-        assert!(state_path.exists(), "state file should exist after auto-claim");
+        assert!(
+            state_path.exists(),
+            "state file should exist after auto-claim"
+        );
 
         remove_autoclaim_state(pid, "s1");
         assert!(
