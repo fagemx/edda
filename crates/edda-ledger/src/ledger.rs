@@ -27,6 +27,10 @@ impl Ledger {
     ///
     /// Use this for read-path consumers (e.g. `edda watch`) that should
     /// work without requiring the user to run `edda init` first.
+    ///
+    /// This is a **lightweight init** — it only creates the ledger directory
+    /// layout and SQLite DB. Config files (`policy.yaml`, `actors.yaml`) and
+    /// bridge hooks are NOT created; those require `edda init`.
     pub fn open_or_init(repo_root: impl Into<std::path::PathBuf>) -> anyhow::Result<Self> {
         let root = repo_root.into();
         let paths = EddaPaths::discover(&root);
@@ -36,6 +40,21 @@ impl Ledger {
             init_branches_json(&paths, "main")?;
         }
         Self::open(root)
+    }
+
+    /// Ensure `.edda/` and ledger exist, without returning a Ledger handle.
+    ///
+    /// Use this when you only need the side effect (workspace creation)
+    /// and will open the ledger separately later.
+    pub fn ensure_initialized(repo_root: impl Into<std::path::PathBuf>) -> anyhow::Result<()> {
+        let root = repo_root.into();
+        let paths = EddaPaths::discover(&root);
+        if !paths.is_initialized() {
+            init_workspace(&paths)?;
+            init_head(&paths, "main")?;
+            init_branches_json(&paths, "main")?;
+        }
+        Ok(())
     }
 
     /// Convenience: open from a Path ref (avoids Into<PathBuf> ambiguity).

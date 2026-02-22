@@ -14,8 +14,12 @@ fn main() -> color_eyre::Result<()> {
     let project_id = edda_store::project_id(&repo_root);
 
     // Auto-init: ensure .edda/ and store dirs exist (no manual `edda init` needed)
-    let _ = edda_store::ensure_dirs(&project_id);
-    let _ = edda_ledger::Ledger::open_or_init(&repo_root);
+    if let Err(e) = edda_store::ensure_dirs(&project_id) {
+        eprintln!("Warning: failed to ensure store dirs: {e}");
+    }
+    if let Err(e) = edda_ledger::Ledger::ensure_initialized(&repo_root) {
+        eprintln!("Warning: failed to auto-init .edda/: {e}");
+    }
 
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, project_id, repo_root);
