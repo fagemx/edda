@@ -51,10 +51,10 @@ fn render_peers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .iter()
         .enumerate()
         .skip(app.peer_scroll)
-        .map(|(i, peer)| {
+        .flat_map(|(i, peer)| {
             let status = if peer.age_secs < 120 { "+" } else { "-" };
             let label = if peer.label.is_empty() { "?" } else { &peer.label };
-            let line = format!(" {status} {label}  ({:.8})", peer.session_id);
+            let header = format!(" {status} {label}  ({:.8})", peer.session_id);
             let style = if app.active_panel == Panel::Peers
                 && i == app.peer_scroll
             {
@@ -62,7 +62,26 @@ fn render_peers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             } else {
                 Style::default()
             };
-            ListItem::new(Line::from(Span::styled(line, style)))
+            let mut lines = vec![ListItem::new(Line::from(Span::styled(header, style)))];
+            if !peer.focus_files.is_empty() {
+                let files: Vec<&str> = peer.focus_files.iter().map(|f| {
+                    f.rsplit(['/', '\\']).next().unwrap_or(f)
+                }).collect();
+                let detail = format!("     {}", files.join(", "));
+                lines.push(ListItem::new(Line::from(Span::styled(
+                    detail,
+                    Style::default().fg(Color::DarkGray),
+                ))));
+            }
+            if !peer.task_subjects.is_empty() {
+                let task = truncate_str(&peer.task_subjects[0], 30);
+                let detail = format!("     >> {task}");
+                lines.push(ListItem::new(Line::from(Span::styled(
+                    detail,
+                    Style::default().fg(Color::Yellow),
+                ))));
+            }
+            lines
         })
         .collect();
 
