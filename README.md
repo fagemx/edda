@@ -1,6 +1,7 @@
 # Edda
 
-**Decision memory for coding agents.**
+**Automatic decision memory for Claude Code with cross-session persistence.**
+**Local, deterministic, and zero-cost — no LLM, no embeddings, no cloud.**
 
 <p>
   <a href="https://github.com/fagemx/edda/releases"><img src="https://img.shields.io/github/v/release/fagemx/edda?style=flat-square&label=release" alt="Release" /></a>
@@ -15,9 +16,9 @@
 
 ## What is Edda?
 
-Coding agents (Claude Code, Cursor, Windsurf) lose all context when a session ends. The next session starts from scratch — no memory of what was decided, what was tried, or why.
+Claude Code loses all context when a session ends. The next session starts from scratch — no memory of what was decided, what was tried, or why.
 
-Edda is an **automatic** decision memory that runs in the background. It captures decisions from your agent's conversations, stores them in a local append-only ledger, and injects relevant context when the next session starts.
+Edda runs in the background and **automatically** captures decisions from your agent's conversations, stores them in a local append-only ledger, and injects relevant context when the next session starts. Also works with OpenClaw and any MCP client.
 
 **You don't need to do anything.** After `edda init`, hooks handle everything:
 
