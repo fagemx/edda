@@ -1079,17 +1079,33 @@ fn extract_envelope_cwd(envelope: &serde_json::Value) -> String {
 }
 
 fn extract_exit_code(envelope: &serde_json::Value) -> i32 {
-    // Try raw.tool_response.exitCode (Claude Code format)
-    if let Some(code) = envelope
-        .get("raw")
-        .and_then(|r| r.get("tool_response").or_else(|| r.get("toolResponse")))
+    let raw = match envelope.get("raw") {
+        Some(r) => r,
+        None => return 1,
+    };
+
+    // Path 1: raw.tool_response.exitCode (if Claude Code ever adds it)
+    if let Some(code) = raw
+        .get("tool_response")
+        .or_else(|| raw.get("toolResponse"))
         .and_then(|tr| tr.get("exitCode").or_else(|| tr.get("exit_code")))
         .and_then(|v| v.as_i64())
     {
         return code as i32;
     }
-    // Default: -1 (unknown)
-    -1
+
+    // Path 2: raw.error = "Exit code {N}" (PostToolUseFailure format)
+    if let Some(error_str) = raw.get("error").and_then(|v| v.as_str()) {
+        let first_line = error_str.lines().next().unwrap_or("");
+        if let Some(code_str) = first_line.strip_prefix("Exit code ") {
+            if let Ok(code) = code_str.trim().parse::<i32>() {
+                return code;
+            }
+        }
+    }
+
+    // Default: generic failure (only called for PostToolUseFailure events)
+    1
 }
 
 fn extract_bash_command(envelope: &serde_json::Value) -> Option<String> {
@@ -2113,16 +2129,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("sess-detail.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
-        // PostToolUseFailure with Bash including exit code
+        // PostToolUseFailure with real Claude Code format: error field, no toolResponse
         let envelope = serde_json::json!({
             "ts": "2026-02-14T10:00:00Z",
             "hook_event_name": "PostToolUseFailure",
             "tool_name": "Bash",
             "cwd": "/my/project",
             "raw": {
-                "toolName": "Bash",
-                "toolInput": { "command": "cargo build" },
-                "toolResponse": { "exitCode": 101 }
+                "tool_name": "Bash",
+                "tool_input": { "command": "cargo build" },
+                "error": "Exit code 101\nerror[E0308]: mismatched types"
             }
         });
         writeln!(f, "{}", serde_json::to_string(&envelope).unwrap()).unwrap();
@@ -2135,11 +2151,44 @@ mod tests {
     }
 
     #[test]
+    fn extract_exit_code_from_error_field() {
+        // Real Claude Code PostToolUseFailure format
+        let envelope = serde_json::json!({
+            "raw": {
+                "error": "Exit code 49",
+                "tool_name": "Bash",
+                "tool_input": { "command": "python3 --version" }
+            }
+        });
+        assert_eq!(extract_exit_code(&envelope), 49);
+
+        // Error with multiline detail
+        let envelope2 = serde_json::json!({
+            "raw": {
+                "error": "Exit code 128\nfatal: not a git repository"
+            }
+        });
+        assert_eq!(extract_exit_code(&envelope2), 128);
+
+        // Legacy camelCase toolResponse.exitCode still works
+        let envelope3 = serde_json::json!({
+            "raw": {
+                "toolResponse": { "exitCode": 42 }
+            }
+        });
+        assert_eq!(extract_exit_code(&envelope3), 42);
+
+        // No raw → default 1
+        let envelope4 = serde_json::json!({});
+        assert_eq!(extract_exit_code(&envelope4), 1);
+    }
+
+    #[test]
     fn digest_writes_cmd_milestones_to_workspace() {
         let tmp = tempfile::tempdir().unwrap();
         let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
-        // Write session with a failed Bash command
+        // Write session with a failed Bash command (real Claude Code format)
         write_store_session_ledger(
             &project_id,
             "sess-cmd-ws",
@@ -2151,9 +2200,9 @@ mod tests {
                     "tool_name": "Bash",
                     "cwd": "/proj",
                     "raw": {
-                        "toolName": "Bash",
-                        "toolInput": { "command": "failing-cmd" },
-                        "toolResponse": { "exitCode": 1 }
+                        "tool_name": "Bash",
+                        "tool_input": { "command": "failing-cmd" },
+                        "error": "Exit code 1"
                     }
                 }),
             ],
@@ -2196,9 +2245,9 @@ mod tests {
                 "tool_name": "Bash",
                 "cwd": "/proj",
                 "raw": {
-                    "toolName": "Bash",
-                    "toolInput": { "command": "fail-cmd" },
-                    "toolResponse": { "exitCode": 1 }
+                    "tool_name": "Bash",
+                    "tool_input": { "command": "fail-cmd" },
+                    "error": "Exit code 1"
                 }
             })],
         );
