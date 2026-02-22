@@ -469,7 +469,11 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
     }
 
     BoardState {
-        claims: claims.into_values().collect(),
+        claims: {
+            let mut v: Vec<_> = claims.into_values().collect();
+            v.sort_by(|a, b| a.label.cmp(&b.label));
+            v
+        },
         bindings,
         requests,
     }
