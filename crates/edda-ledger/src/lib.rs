@@ -2,6 +2,7 @@ pub mod blob_meta;
 pub mod blob_store;
 pub mod ledger;
 pub mod lock;
+pub mod migrate;
 pub mod paths;
 pub mod sqlite_store;
 pub mod tombstone;

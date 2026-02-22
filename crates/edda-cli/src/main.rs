@@ -10,6 +10,7 @@ mod cmd_gc;
 mod cmd_init;
 mod cmd_log;
 mod cmd_merge;
+mod cmd_migrate;
 mod cmd_note;
 mod cmd_pattern;
 mod cmd_plan;
@@ -154,6 +155,15 @@ enum Command {
         /// Reason for rebuild
         #[arg(long, default_value = "rebuild views")]
         reason: String,
+    },
+    /// Migrate legacy JSONL ledger to SQLite format
+    Migrate {
+        /// Report what would be migrated without making changes
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip post-migration verification
+        #[arg(long)]
+        no_verify: bool,
     },
     /// Branch operations
     Branch {
@@ -799,6 +809,10 @@ fn main() -> anyhow::Result<()> {
             all,
             reason,
         } => cmd_rebuild::execute(&repo_root, branch.as_deref(), all, &reason),
+        Command::Migrate {
+            dry_run,
+            no_verify,
+        } => cmd_migrate::execute(&repo_root, dry_run, no_verify),
         Command::Branch { cmd } => match cmd {
             BranchCmd::Create { name, purpose } => cmd_branch::create(&repo_root, &name, &purpose),
         },
