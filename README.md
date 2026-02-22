@@ -1,16 +1,25 @@
-# Edda
+<h1 align="center">Edda</h1>
 
-**Automatic decision memory for Claude Code with cross-session persistence.**
-**Local, deterministic, and zero-cost — no LLM, no embeddings, no cloud.**
+<p align="center">
+  <strong>Automatic decision memory for Claude Code with cross-session persistence.</strong><br/>
+  Local, deterministic, and zero-cost — no LLM, no embeddings, no cloud.
+</p>
 
-<p>
+<p align="center">
   <a href="https://github.com/fagemx/edda/releases"><img src="https://img.shields.io/github/v/release/fagemx/edda?style=flat-square&label=release" alt="Release" /></a>
   <a href="https://github.com/fagemx/edda/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/fagemx/edda/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
   <a href="https://github.com/fagemx/edda/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue?style=flat-square" alt="License" /></a>
   <a href="https://github.com/fagemx/edda/stargazers"><img src="https://img.shields.io/github/stars/fagemx/edda?style=flat-square" alt="Stars" /></a>
 </p>
 
-[What is Edda?](#what-is-edda) · [Install](#install) · [How It Works](#how-it-works) · [Comparison](#how-edda-compares) · [Integration](#integration) · [Architecture](#architecture)
+<p align="center">
+  <a href="#what-is-edda">What is Edda?</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#how-it-works">How It Works</a> ·
+  <a href="#how-edda-compares">Comparison</a> ·
+  <a href="#integration">Integration</a> ·
+  <a href="#architecture">Architecture</a>
+</p>
 
 ---
 
