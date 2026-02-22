@@ -34,6 +34,19 @@ fn env_label() -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+/// Detect the current git branch via `git rev-parse --abbrev-ref HEAD`.
+/// Returns `None` if not in a git repo or git is unavailable.
+fn detect_git_branch() -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 // ── Data Structures ──
 
 /// Per-session heartbeat file.
@@ -49,6 +62,8 @@ pub struct SessionHeartbeat {
     pub files_modified_count: usize,
     pub total_edits: usize,
     pub recent_commits: Vec<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
 }
 
 /// Append-only coordination event.
@@ -119,6 +134,7 @@ pub struct PeerSummary {
     pub files_modified_count: usize,
     pub recent_commits: Vec<String>,
     pub claimed_paths: Vec<String>,
+    pub branch: Option<String>,
 }
 
 /// Conflict info when a binding with the same key but different value exists.
@@ -209,6 +225,7 @@ pub(crate) fn write_heartbeat(
             .take(3)
             .map(|c| format!("{} {}", &c.hash[..7.min(c.hash.len())], c.message))
             .collect(),
+        branch: detect_git_branch(),
     };
 
     let data = match serde_json::to_string_pretty(&heartbeat) {
@@ -272,6 +289,7 @@ pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str) 
         files_modified_count: 0,
         total_edits: 0,
         recent_commits: Vec::new(),
+        branch: detect_git_branch(),
     };
 
     let data = match serde_json::to_string_pretty(&heartbeat) {
@@ -605,6 +623,7 @@ pub fn discover_active_peers(project_id: &str, current_session_id: &str) -> Vec<
             files_modified_count: hb.files_modified_count,
             recent_commits: hb.recent_commits,
             claimed_paths,
+            branch: hb.branch,
         });
     }
 
@@ -668,6 +687,7 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
             files_modified_count: hb.files_modified_count,
             recent_commits: hb.recent_commits,
             claimed_paths,
+            branch: hb.branch,
         });
     }
 
@@ -803,9 +823,14 @@ pub fn render_coordination_protocol(
         lines.push("### Peers Working On".to_string());
         for p in active_peers.iter().take(5) {
             let age = format_age(p.age_secs);
+            let branch_suffix = p
+                .branch
+                .as_deref()
+                .map(|b| format!(" [branch: {b}]"))
+                .unwrap_or_default();
             if !p.task_subjects.is_empty() {
                 for t in p.task_subjects.iter().take(2) {
-                    lines.push(format!("- {} ({age}): {t}", p.label));
+                    lines.push(format!("- {} ({age}){branch_suffix}: {t}", p.label));
                 }
             } else if !p.focus_files.is_empty() {
                 let files: Vec<&str> = p
@@ -815,7 +840,7 @@ pub fn render_coordination_protocol(
                     .map(|f| f.rsplit(['/', '\\']).next().unwrap_or(f.as_str()))
                     .collect();
                 lines.push(format!(
-                    "- {} ({age}): editing {}",
+                    "- {} ({age}){branch_suffix}: editing {}",
                     p.label,
                     files.join(", ")
                 ));
@@ -925,18 +950,26 @@ pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<
     // Peer activity (tasks → focus files → bare label)
     for p in peers.iter().take(3) {
         let age = format_age(p.age_secs);
+        let branch_suffix = p
+            .branch
+            .as_deref()
+            .map(|b| format!(" [branch: {b}]"))
+            .unwrap_or_default();
         if !p.task_subjects.is_empty() {
             for t in p.task_subjects.iter().take(1) {
-                lines.push(format!("- {} ({age}): {t}", p.label));
+                lines.push(format!("- {} ({age}){branch_suffix}: {t}", p.label));
             }
         } else if !p.focus_files.is_empty() {
             let file = p.focus_files[0]
                 .rsplit(['/', '\\'])
                 .next()
                 .unwrap_or(&p.focus_files[0]);
-            lines.push(format!("- {} ({age}): editing {file}", p.label));
+            lines.push(format!(
+                "- {} ({age}){branch_suffix}: editing {file}",
+                p.label
+            ));
         } else {
-            lines.push(format!("- {} ({age})", p.label));
+            lines.push(format!("- {} ({age}){branch_suffix}", p.label));
         }
     }
 
@@ -2457,6 +2490,87 @@ mod tests {
             "state file should be removed after cleanup"
         );
 
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_shows_branch_when_present() {
+        let pid = "test_peers_branch_render";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Write heartbeat with branch via JSON (bypassing auto-detect)
+        let hb_json = serde_json::json!({
+            "session_id": "s1",
+            "started_at": now_rfc3339(),
+            "last_heartbeat": now_rfc3339(),
+            "label": "auth",
+            "focus_files": ["src/auth/lib.rs"],
+            "active_tasks": [],
+            "files_modified_count": 1,
+            "total_edits": 3,
+            "recent_commits": [],
+            "branch": "feat/issue-81-peer-branch"
+        });
+        let path = edda_store::project_dir(pid)
+            .join("state")
+            .join("session.s1.json");
+        let _ = fs::create_dir_all(path.parent().unwrap());
+        fs::write(&path, serde_json::to_string_pretty(&hb_json).unwrap()).unwrap();
+
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(
+            result.contains("[branch: feat/issue-81-peer-branch]"),
+            "should show branch in protocol, got:\n{result}"
+        );
+
+        let updates = render_peer_updates(pid, "s2").unwrap();
+        assert!(
+            updates.contains("[branch: feat/issue-81-peer-branch]"),
+            "should show branch in peer updates, got:\n{updates}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_omits_branch_when_absent() {
+        let pid = "test_peers_branch_absent";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Write heartbeat WITHOUT branch field (simulating old heartbeat format)
+        let hb_json = serde_json::json!({
+            "session_id": "s1",
+            "started_at": now_rfc3339(),
+            "last_heartbeat": now_rfc3339(),
+            "label": "auth",
+            "focus_files": ["src/auth/lib.rs"],
+            "active_tasks": [],
+            "files_modified_count": 1,
+            "total_edits": 3,
+            "recent_commits": []
+        });
+        let path = edda_store::project_dir(pid)
+            .join("state")
+            .join("session.s1.json");
+        let _ = fs::create_dir_all(path.parent().unwrap());
+        fs::write(&path, serde_json::to_string_pretty(&hb_json).unwrap()).unwrap();
+
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+
+        let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        assert!(
+            !result.contains("[branch:"),
+            "should NOT show branch marker when absent, got:\n{result}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }
