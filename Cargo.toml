@@ -13,6 +13,7 @@ members = [
     "crates/edda-mcp",
     "crates/edda-search-fts",
     "crates/edda-conductor",
+    "crates/edda-tui",
     "crates/edda-cli",
 ]
 
