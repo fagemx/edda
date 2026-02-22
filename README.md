@@ -251,14 +251,13 @@ edda mcp serve    # stdio JSON-RPC 2.0
 
 ## Architecture
 
-15 Rust crates:
+14 Rust crates:
 
 | Crate | What it does |
 |-------|-------------|
 | `edda-core` | Event model, hash chain, schema, provenance |
 | `edda-ledger` | Append-only ledger (SQLite), blob store, locking |
-| `edda-cli` | All commands |
-| `edda-tui` | Real-time TUI (ratatui): peers, events, decisions |
+| `edda-cli` | All commands + TUI (`tui` feature, default on) |
 | `edda-bridge-claude` | Claude Code hooks, transcript ingest, context injection |
 | `edda-bridge-openclaw` | OpenClaw hooks and plugin |
 | `edda-mcp` | MCP server (7 tools) |

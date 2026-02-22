@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **edda watch** — real-time TUI with peers, events, and decisions panels (#34)
+- **edda watch** — real-time TUI with peers, events, and decisions panels; now built into `edda` binary behind `tui` feature flag (default on), with plain-text fallback when disabled (#34, #44)
 - **edda ask** — cross-source decision aggregator combining ledger, coordination, and transcript data (#54)
 - **edda init --no-hooks** — auto-detect `.claude/` and install bridge hooks; `--no-hooks` to skip (#50)
 - **MCP server** expanded from 3 to 7 tools: `edda_status`, `edda_note`, `edda_decide`, `edda_query`, `edda_log`, `edda_context`, `edda_draft_inbox` (#37)
@@ -44,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **edda-tui** standalone crate — TUI consolidated into `edda-cli` behind `tui` feature flag (#44)
 - JSONL dual-mode code, `refs/` directory, and `edda migrate` command (#40)
 - TypeScript orchestrator prototype (replaced by Rust `edda-conductor`)
 
