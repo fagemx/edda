@@ -100,18 +100,17 @@ fn render_events(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .borders(Borders::ALL)
         .border_style(panel_style(app, Panel::Events));
 
-    let max_preview = area.width.saturating_sub(24) as usize; // 24 = borders + time(5) + type(10) + spaces
+    let max_preview = area.width.saturating_sub(24) as usize; // 24 = borders + time(8) + type(10) + spaces
     let items: Vec<ListItem> = app
         .events
         .iter()
         .skip(app.event_scroll)
         .map(|evt| {
             let ts = &evt.ts[11..19.min(evt.ts.len())]; // HH:MM:SS only
-            let etype = &evt.event_type;
-            let preview = event_preview(&evt.payload, etype);
+            let (dtype, preview, style) = event_display(&evt.payload, &evt.event_type);
             let preview = truncate_str(&preview, max_preview);
-            let line = format!(" {ts}  {etype:<10} {preview}");
-            ListItem::new(Line::from(line))
+            let line = format!(" {ts}  {dtype:<10} {preview}");
+            ListItem::new(Line::from(Span::styled(line, style)))
         })
         .collect();
 
@@ -206,26 +205,109 @@ fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     f.render_widget(bar, area);
 }
 
-/// Extract a human-readable preview from an event payload.
-fn event_preview(payload: &serde_json::Value, event_type: &str) -> String {
+/// Extract display type, preview text, and style from an event.
+fn event_display(payload: &serde_json::Value, event_type: &str) -> (String, String, Style) {
+    let default = Style::default();
     match event_type {
-        "note" => payload["text"].as_str().unwrap_or("").to_string(),
+        "note" => {
+            let tags = payload["tags"].as_array();
+            let has_tag = |t: &str| tags.is_some_and(|a| a.iter().any(|v| v.as_str() == Some(t)));
+
+            if has_tag("session_digest") {
+                let stats = &payload["session_stats"];
+                let sid = payload["session_id"].as_str().unwrap_or("?");
+                let tools = stats["tool_calls"].as_u64().unwrap_or(0);
+                let dur = stats["duration_minutes"].as_u64().unwrap_or(0);
+                let outcome = stats["outcome"].as_str().unwrap_or("?");
+                (
+                    "digest".into(),
+                    format!("{:.8} {outcome} ({tools} tools, {dur}m)", sid),
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else if has_tag("decision") {
+                let d = &payload["decision"];
+                let key = d["key"].as_str().unwrap_or("?");
+                let val = d["value"].as_str().unwrap_or("?");
+                (
+                    "decide".into(),
+                    format!("{key} = {val}"),
+                    Style::default().fg(Color::Yellow),
+                )
+            } else {
+                let text = first_line(payload["text"].as_str().unwrap_or(""));
+                ("note".into(), text.to_string(), default)
+            }
+        }
         "decision" => {
             let key = payload["key"].as_str().unwrap_or("?");
             let val = payload["value"].as_str().unwrap_or("?");
-            format!("{key} = {val}")
+            (
+                "decision".into(),
+                format!("{key} = {val}"),
+                Style::default().fg(Color::Yellow),
+            )
         }
-        "commit" => payload["title"].as_str().unwrap_or("").to_string(),
+        "cmd" => {
+            let argv = &payload["argv"];
+            let cmd_str = argv
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let short = shorten_cmd(cmd_str);
+            let exit = payload["exit_code"].as_i64().unwrap_or(-1);
+            if exit == 0 {
+                ("cmd".into(), format!("$ {short}"), default)
+            } else {
+                (
+                    "cmd:fail".into(),
+                    format!("$ {short} [exit:{exit}]"),
+                    Style::default().fg(Color::Red),
+                )
+            }
+        }
+        "commit" => {
+            let title = first_line(payload["title"].as_str().unwrap_or(""));
+            ("commit".into(), title.to_string(), default)
+        }
         "merge" => {
             let src = payload["src"].as_str().unwrap_or("?");
             let dst = payload["dst"].as_str().unwrap_or("?");
-            format!("{src} -> {dst}")
+            ("merge".into(), format!("{src} -> {dst}"), default)
         }
-        _ => {
-            // Fallback: compact JSON
-            serde_json::to_string(payload).unwrap_or_default()
+        other => {
+            // Fallback: try text or message fields before raw JSON
+            let preview = if let Some(text) = payload["text"].as_str() {
+                first_line(text).to_string()
+            } else if let Some(msg) = payload["message"].as_str() {
+                first_line(msg).to_string()
+            } else {
+                serde_json::to_string(payload).unwrap_or_default()
+            };
+            (other.to_string(), preview, default)
         }
     }
+}
+
+/// Extract the meaningful command from a shell invocation.
+fn shorten_cmd(cmd: &str) -> String {
+    let cmd = cmd.trim();
+    // Take first line only (multi-line scripts)
+    let cmd = cmd.lines().next().unwrap_or(cmd);
+    // If "cd ... && actual_cmd ...", extract after last &&
+    let cmd = if let Some(pos) = cmd.rfind("&&") {
+        cmd[pos + 2..].trim()
+    } else {
+        cmd
+    };
+    // Strip trailing redirections
+    let cmd = cmd.trim_end_matches("2>&1").trim();
+    cmd.to_string()
+}
+
+/// Return only the first line of a string.
+fn first_line(s: &str) -> &str {
+    s.lines().next().unwrap_or(s)
 }
 
 /// Truncate a string to at most `max_chars` characters, appending "..." if truncated.
@@ -236,5 +318,112 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
         format!("{truncated}...")
     } else {
         truncated
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cmd_success_shows_short_command() {
+        let payload = json!({
+            "argv": ["cd /c/project && cargo test --workspace 2>&1"],
+            "exit_code": 0,
+            "duration_ms": 1200
+        });
+        let (dtype, preview, _) = event_display(&payload, "cmd");
+        assert_eq!(dtype, "cmd");
+        assert_eq!(preview, "$ cargo test --workspace");
+    }
+
+    #[test]
+    fn cmd_failure_shows_exit_code() {
+        let payload = json!({
+            "argv": ["cd /tmp && python3 script.py 2>&1"],
+            "exit_code": 1
+        });
+        let (dtype, preview, style) = event_display(&payload, "cmd");
+        assert_eq!(dtype, "cmd:fail");
+        assert!(preview.contains("[exit:1]"));
+        assert_eq!(style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn note_session_digest_shows_compact() {
+        let payload = json!({
+            "text": "Session abc: 15 tools...\nFailed: ...",
+            "tags": ["session_digest"],
+            "session_id": "abc12345-long-id",
+            "session_stats": {
+                "tool_calls": 15,
+                "duration_minutes": 42,
+                "outcome": "completed"
+            }
+        });
+        let (dtype, preview, _) = event_display(&payload, "note");
+        assert_eq!(dtype, "digest");
+        assert!(preview.contains("abc12345"));
+        assert!(preview.contains("completed"));
+        assert!(preview.contains("15 tools"));
+        assert!(preview.contains("42m"));
+    }
+
+    #[test]
+    fn note_decision_shows_key_value() {
+        let payload = json!({
+            "text": "db.engine: sqlite — reason",
+            "tags": ["decision"],
+            "decision": { "key": "db.engine", "value": "sqlite" }
+        });
+        let (dtype, preview, style) = event_display(&payload, "note");
+        assert_eq!(dtype, "decide");
+        assert_eq!(preview, "db.engine = sqlite");
+        assert_eq!(style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn note_plain_strips_newlines() {
+        let payload = json!({
+            "text": "first line\nsecond line\nthird",
+            "tags": []
+        });
+        let (dtype, preview, _) = event_display(&payload, "note");
+        assert_eq!(dtype, "note");
+        assert_eq!(preview, "first line");
+    }
+
+    #[test]
+    fn shorten_cmd_extracts_after_cd() {
+        assert_eq!(
+            shorten_cmd("cd /c/project && cargo build 2>&1"),
+            "cargo build"
+        );
+    }
+
+    #[test]
+    fn shorten_cmd_no_cd_prefix() {
+        assert_eq!(shorten_cmd("cargo test"), "cargo test");
+    }
+
+    #[test]
+    fn shorten_cmd_multiline_takes_first() {
+        assert_eq!(shorten_cmd("echo hello\necho world"), "echo hello");
+    }
+
+    #[test]
+    fn first_line_basic() {
+        assert_eq!(first_line("a\nb\nc"), "a");
+        assert_eq!(first_line("single"), "single");
+        assert_eq!(first_line(""), "");
+    }
+
+    #[test]
+    fn unknown_type_tries_text_field() {
+        let payload = json!({ "text": "some info\nmore" });
+        let (dtype, preview, _) = event_display(&payload, "custom_evt");
+        assert_eq!(dtype, "custom_evt");
+        assert_eq!(preview, "some info");
     }
 }
