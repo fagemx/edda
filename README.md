@@ -2,6 +2,17 @@
 
 **Decision memory for coding agents.**
 
+<p>
+  <a href="https://github.com/fagemx/edda/releases"><img src="https://img.shields.io/github/v/release/fagemx/edda?style=flat-square&label=release" alt="Release" /></a>
+  <a href="https://github.com/fagemx/edda/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/fagemx/edda/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
+  <a href="https://github.com/fagemx/edda/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue?style=flat-square" alt="License" /></a>
+  <a href="https://github.com/fagemx/edda/stargazers"><img src="https://img.shields.io/github/stars/fagemx/edda?style=flat-square" alt="Stars" /></a>
+</p>
+
+[Install](#install) · [Quick Start](#quick-start) · [How It Works](#how-it-works) · [Commands](#all-commands) · [Integration](#integration) · [Architecture](#architecture)
+
+---
+
 <!-- TODO: replace with asciinema or GIF recording -->
 ```
 $ edda decide "db=SQLite" --reason "single-user, no deployment overhead, FTS5 for search"
@@ -207,32 +218,32 @@ Every event is a single JSON line, hash-chained:
 
 ## All Commands
 
-```
-edda init          Initialize .edda/ (auto-installs hooks if .claude/ detected)
-edda decide        Record a binding decision
-edda note          Record a note
-edda ask           Query decisions, history, and conversations
-edda search        Full-text search across transcripts (Tantivy)
-edda log           Query events with filters (type, date, tag, branch)
-edda context       Output context snapshot (what the agent sees)
-edda status        Show workspace status
-edda watch         Real-time TUI: peers, events, decisions
-edda commit        Create a commit event
-edda branch        Branch operations
-edda switch        Switch branch
-edda merge         Merge branches
-edda draft         Propose / list / approve / reject drafts
-edda bridge        Install/uninstall tool hooks
-edda doctor        Health check
-edda config        Read/write workspace config
-edda pattern       Manage classification patterns
-edda mcp           Start MCP server (stdio JSON-RPC 2.0)
-edda conduct       Multi-phase plan orchestration
-edda plan          Plan scaffolding and templates
-edda run           Run a command and record output
-edda blob          Manage blob metadata
-edda gc            Garbage collect expired content
-```
+| Command | Description |
+|---------|-------------|
+| `edda init` | Initialize `.edda/` (auto-installs hooks if `.claude/` detected) |
+| `edda decide` | Record a binding decision |
+| `edda note` | Record a note |
+| `edda ask` | Query decisions, history, and conversations |
+| `edda search` | Full-text search across transcripts (Tantivy) |
+| `edda log` | Query events with filters (type, date, tag, branch) |
+| `edda context` | Output context snapshot (what the agent sees) |
+| `edda status` | Show workspace status |
+| `edda watch` | Real-time TUI: peers, events, decisions |
+| `edda commit` | Create a commit event |
+| `edda branch` | Branch operations |
+| `edda switch` | Switch branch |
+| `edda merge` | Merge branches |
+| `edda draft` | Propose / list / approve / reject drafts |
+| `edda bridge` | Install/uninstall tool hooks |
+| `edda doctor` | Health check |
+| `edda config` | Read/write workspace config |
+| `edda pattern` | Manage classification patterns |
+| `edda mcp` | Start MCP server (stdio JSON-RPC 2.0) |
+| `edda conduct` | Multi-phase plan orchestration |
+| `edda plan` | Plan scaffolding and templates |
+| `edda run` | Run a command and record output |
+| `edda blob` | Manage blob metadata |
+| `edda gc` | Garbage collect expired content |
 
 ## Integration
 
@@ -280,9 +291,19 @@ edda mcp serve    # stdio JSON-RPC 2.0
 
 - [x] Prebuilt binaries (macOS, Linux, Windows)
 - [x] One-line install script (`curl | sh`)
+- [x] Homebrew tap (`brew install fagemx/tap/edda`)
 - [ ] Decision recall metrics
 - [ ] Cross-project decision search
 - [ ] tmux-based multi-pane TUI (L3)
+
+## Contributing
+
+Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
+
+## Community
+
+- [GitHub Issues](https://github.com/fagemx/edda/issues) — bugs & feature requests
+- [Releases](https://github.com/fagemx/edda/releases) — changelog & binaries
 
 ## License
 
