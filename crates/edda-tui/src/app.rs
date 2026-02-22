@@ -41,6 +41,7 @@ pub struct App {
     pub peers: Vec<PeerSummary>,
     pub board: BoardState,
     pub events: Vec<edda_core::types::Event>,
+    pub error: Option<String>,
 
     // Scroll positions (per panel)
     pub peer_scroll: usize,
@@ -57,12 +58,9 @@ impl App {
             active_panel: Panel::Peers,
             paused: false,
             peers: Vec::new(),
-            board: BoardState {
-                claims: Vec::new(),
-                bindings: Vec::new(),
-                requests: Vec::new(),
-            },
+            board: BoardState::default(),
             events: Vec::new(),
+            error: None,
             peer_scroll: 0,
             event_scroll: 0,
             decision_scroll: 0,
@@ -70,15 +68,22 @@ impl App {
     }
 
     /// Refresh data from disk (unless paused).
-    pub fn refresh_data(&mut self) -> anyhow::Result<()> {
+    /// Errors are stored in `self.error` instead of propagating.
+    pub fn refresh_data(&mut self) {
         if self.paused {
-            return Ok(());
+            return;
         }
-        let data = watch::snapshot(&self.project_id, &self.repo_root, 200)?;
-        self.peers = data.peers;
-        self.board = data.board;
-        self.events = data.events;
-        Ok(())
+        match watch::snapshot(&self.project_id, &self.repo_root, 200) {
+            Ok(data) => {
+                self.peers = data.peers;
+                self.board = data.board;
+                self.events = data.events;
+                self.error = None;
+            }
+            Err(e) => {
+                self.error = Some(e.to_string());
+            }
+        }
     }
 
     /// Handle a key press.
@@ -135,6 +140,7 @@ mod tests {
         assert!(app.peers.is_empty());
         assert!(app.board.claims.is_empty());
         assert!(app.events.is_empty());
+        assert!(app.error.is_none());
         assert!(!app.should_quit);
         assert!(!app.paused);
         assert_eq!(app.active_panel, Panel::Peers);

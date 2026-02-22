@@ -29,8 +29,7 @@ fn run(
     let interval = Duration::from_secs(1);
     let mut last_refresh = Instant::now();
 
-    // Initial load — errors are non-fatal, show empty state
-    let _ = app.refresh_data();
+    app.refresh_data();
 
     loop {
         terminal.draw(|f| ui::render(f, &app))?;
@@ -45,7 +44,7 @@ fn run(
         }
 
         if last_refresh.elapsed() >= interval {
-            let _ = app.refresh_data();
+            app.refresh_data();
             last_refresh = Instant::now();
         }
 

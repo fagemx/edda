@@ -86,11 +86,7 @@ fn render_events(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             let etype = &evt.event_type;
             let preview = serde_json::to_string(&evt.payload)
                 .unwrap_or_default();
-            let preview = if preview.len() > 60 {
-                format!("{}...", &preview[..60])
-            } else {
-                preview
-            };
+            let preview = truncate_str(&preview, 60);
             let line = format!(" {ts}  {etype:<10} {preview}");
             ListItem::new(Line::from(line))
         })
@@ -176,12 +172,30 @@ fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         Panel::Events => "Events",
         Panel::Decisions => "Decisions",
     };
-    let text = format!(
-        " edda watch | {panel_name}{pause_indicator} | Tab:switch  j/k:scroll  Space:pause  q:quit"
-    );
-    let bar = Paragraph::new(Line::from(Span::styled(
-        text,
-        Style::default().fg(Color::White).bg(Color::DarkGray),
-    )));
+    let (text, style) = if let Some(err) = &app.error {
+        (
+            format!(" ERROR: {err}"),
+            Style::default().fg(Color::White).bg(Color::Red),
+        )
+    } else {
+        (
+            format!(
+                " edda watch | {panel_name}{pause_indicator} | Tab:switch  j/k:scroll  Space:pause  q:quit"
+            ),
+            Style::default().fg(Color::White).bg(Color::DarkGray),
+        )
+    };
+    let bar = Paragraph::new(Line::from(Span::styled(text, style)));
     f.render_widget(bar, area);
+}
+
+/// Truncate a string to at most `max_chars` characters, appending "..." if truncated.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    let mut chars = s.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
