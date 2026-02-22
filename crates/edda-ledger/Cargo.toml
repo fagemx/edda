@@ -2,6 +2,7 @@
 name = "edda-ledger"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 edda-core = { path = "../edda-core" }

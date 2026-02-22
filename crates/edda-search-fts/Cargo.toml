@@ -2,6 +2,7 @@
 name = "edda-search-fts"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 edda-store = { path = "../edda-store" }
