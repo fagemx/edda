@@ -7,14 +7,9 @@ pub struct EddaPaths {
     pub edda_dir: PathBuf,
     pub ledger_dir: PathBuf,
     pub ledger_db: PathBuf,
-    pub events_jsonl: PathBuf,
     pub blobs_dir: PathBuf,
     pub branches_dir: PathBuf,
-    pub refs_dir: PathBuf,
-    pub head_file: PathBuf,
-    pub branches_json: PathBuf,
     pub drafts_dir: PathBuf,
-    pub cache_dir: PathBuf,
     pub lock_file: PathBuf,
     pub config_json: PathBuf,
     pub patterns_dir: PathBuf,
@@ -30,26 +25,20 @@ impl EddaPaths {
         let root = repo_root.into();
         let edda_dir = root.join(".edda");
         let ledger_dir = edda_dir.join("ledger");
-        let refs_dir = edda_dir.join("refs");
         let archive_dir = edda_dir.join("archive");
         Self {
             ledger_db: edda_dir.join("ledger.db"),
-            events_jsonl: ledger_dir.join("events.jsonl"),
             blobs_dir: ledger_dir.join("blobs"),
             blob_meta_json: ledger_dir.join("blob_meta.json"),
             tombstones_jsonl: ledger_dir.join("tombstones.jsonl"),
             branches_dir: edda_dir.join("branches"),
-            head_file: refs_dir.join("HEAD"),
-            branches_json: refs_dir.join("branches.json"),
             drafts_dir: edda_dir.join("drafts"),
-            cache_dir: edda_dir.join("cache"),
             lock_file: edda_dir.join("LOCK"),
             config_json: edda_dir.join("config.json"),
             patterns_dir: edda_dir.join("patterns"),
             archive_blobs_dir: archive_dir.join("blobs"),
             archive_dir,
             ledger_dir,
-            refs_dir,
             edda_dir,
             root,
         }
@@ -61,9 +50,7 @@ impl EddaPaths {
             &self.ledger_dir,
             &self.blobs_dir,
             &self.branches_dir,
-            &self.refs_dir,
             &self.drafts_dir,
-            &self.cache_dir,
             &self.patterns_dir,
         ] {
             std::fs::create_dir_all(dir)?;
@@ -106,12 +93,7 @@ mod tests {
     fn discover_builds_correct_paths() {
         let p = EddaPaths::discover("/tmp/repo");
         assert_eq!(p.edda_dir, PathBuf::from("/tmp/repo/.edda"));
-        assert_eq!(
-            p.events_jsonl,
-            PathBuf::from("/tmp/repo/.edda/ledger/events.jsonl")
-        );
         assert_eq!(p.blobs_dir, PathBuf::from("/tmp/repo/.edda/ledger/blobs"));
-        assert_eq!(p.head_file, PathBuf::from("/tmp/repo/.edda/refs/HEAD"));
         assert_eq!(p.lock_file, PathBuf::from("/tmp/repo/.edda/LOCK"));
         assert_eq!(p.patterns_dir, PathBuf::from("/tmp/repo/.edda/patterns"));
         assert_eq!(
@@ -138,9 +120,7 @@ mod tests {
         assert!(p.ledger_dir.is_dir());
         assert!(p.blobs_dir.is_dir());
         assert!(p.branches_dir.is_dir());
-        assert!(p.refs_dir.is_dir());
         assert!(p.drafts_dir.is_dir());
-        assert!(p.cache_dir.is_dir());
         assert!(p.patterns_dir.is_dir());
         let _ = std::fs::remove_dir_all(&tmp);
     }

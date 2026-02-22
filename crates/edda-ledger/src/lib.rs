@@ -2,7 +2,6 @@ pub mod blob_meta;
 pub mod blob_store;
 pub mod ledger;
 pub mod lock;
-pub mod migrate;
 pub mod paths;
 pub mod sqlite_store;
 pub mod tombstone;
@@ -13,7 +12,7 @@ pub use blob_store::{
     blob_put_classified, blob_remove, blob_size, BlobInfo,
 };
 pub use ledger::Ledger;
-pub use sqlite_store::DecisionRow;
 pub use lock::WorkspaceLock;
 pub use paths::EddaPaths;
+pub use sqlite_store::DecisionRow;
 pub use tombstone::{append_tombstone, list_tombstones, make_tombstone, DeleteReason, Tombstone};

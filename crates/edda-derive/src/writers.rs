@@ -313,8 +313,7 @@ fn write_branches_json(ledger: &Ledger, snaps: &[BranchSnapshot]) -> Result<()> 
         );
     }
     let root = serde_json::json!({ "branches": branches });
-    let text = serde_json::to_string_pretty(&root)?;
-    fs::write(&ledger.paths.branches_json, text.as_bytes())?;
+    ledger.set_branches_json(&root)?;
     Ok(())
 }
 
@@ -434,8 +433,8 @@ mod tests {
         assert!(branch_names.contains(&"main"));
         assert!(branch_names.contains(&"feature"));
 
-        // branches.json should exist (in refs_dir, not branches_dir)
-        assert!(ledger.paths.branches_json.exists());
+        // branches.json should be readable from SQLite
+        assert!(ledger.branches_json().is_ok());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

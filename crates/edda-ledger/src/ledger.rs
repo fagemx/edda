@@ -1,23 +1,16 @@
 use crate::paths::EddaPaths;
 use crate::sqlite_store::{DecisionRow, SqliteStore};
 use edda_core::Event;
-use std::io::{BufRead, Write};
 use std::path::Path;
 
-/// The append-only event ledger.
-///
-/// Dual-mode: uses SQLite (`ledger.db`) for new workspaces,
-/// falls back to JSONL (`events.jsonl`) for legacy workspaces.
+/// The append-only event ledger (SQLite backend).
 pub struct Ledger {
     pub paths: EddaPaths,
-    sqlite: Option<SqliteStore>,
+    sqlite: SqliteStore,
 }
 
 impl Ledger {
     /// Open an existing workspace. Fails if `.edda/` does not exist.
-    ///
-    /// If `ledger.db` exists, uses SQLite backend.
-    /// Otherwise, falls back to legacy JSONL backend.
     pub fn open(repo_root: impl Into<std::path::PathBuf>) -> anyhow::Result<Self> {
         let paths = EddaPaths::discover(repo_root);
         if !paths.is_initialized() {
@@ -26,11 +19,7 @@ impl Ledger {
                 paths.root.display()
             );
         }
-        let sqlite = if paths.ledger_db.exists() {
-            Some(SqliteStore::open(&paths.ledger_db)?)
-        } else {
-            None
-        };
+        let sqlite = SqliteStore::open(&paths.ledger_db)?;
         Ok(Self { paths, sqlite })
     }
 
@@ -39,142 +28,64 @@ impl Ledger {
         Self::open(repo_root.to_path_buf())
     }
 
-    /// Returns true if this ledger uses the SQLite backend.
-    pub fn is_sqlite(&self) -> bool {
-        self.sqlite.is_some()
-    }
-
     // ── HEAD branch ─────────────────────────────────────────────────
 
     /// Read the current HEAD branch name.
     pub fn head_branch(&self) -> anyhow::Result<String> {
-        if let Some(store) = &self.sqlite {
-            return store.head_branch();
-        }
-        let content = std::fs::read_to_string(&self.paths.head_file)
-            .map_err(|e| anyhow::anyhow!("cannot read HEAD: {e}"))?;
-        Ok(content.trim().to_string())
+        self.sqlite.head_branch()
     }
 
     /// Write the HEAD branch name.
     pub fn set_head_branch(&self, name: &str) -> anyhow::Result<()> {
-        if let Some(store) = &self.sqlite {
-            return store.set_head_branch(name);
-        }
-        std::fs::write(&self.paths.head_file, format!("{name}\n"))?;
-        Ok(())
+        self.sqlite.set_head_branch(name)
     }
 
     // ── Events ──────────────────────────────────────────────────────
 
     /// Append an event to the ledger. Append-only (CONTRACT LEDGER-02).
     ///
-    /// For SQLite backend, `fsync` is ignored (WAL mode handles durability).
-    pub fn append_event(&self, event: &Event, fsync: bool) -> anyhow::Result<()> {
-        if let Some(store) = &self.sqlite {
-            return store.append_event(event);
-        }
-        // Legacy JSONL path
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.paths.events_jsonl)?;
-        let json = serde_json::to_string(event)?;
-        writeln!(file, "{json}")?;
-        if fsync {
-            file.sync_all()?;
-        }
-        Ok(())
+    /// The `_fsync` parameter is kept for API compatibility but ignored
+    /// (SQLite WAL mode handles durability).
+    pub fn append_event(&self, event: &Event, _fsync: bool) -> anyhow::Result<()> {
+        self.sqlite.append_event(event)
     }
 
     /// Get the hash of the last event, or `None` if the ledger is empty.
     pub fn last_event_hash(&self) -> anyhow::Result<Option<String>> {
-        if let Some(store) = &self.sqlite {
-            return store.last_event_hash();
-        }
-        // Legacy JSONL path
-        if !self.paths.events_jsonl.exists() {
-            return Ok(None);
-        }
-        let content = std::fs::read_to_string(&self.paths.events_jsonl)?;
-        let last_line = content.lines().rev().find(|l| !l.trim().is_empty());
-        match last_line {
-            None => Ok(None),
-            Some(line) => {
-                let event: Event = serde_json::from_str(line)?;
-                Ok(Some(event.hash))
-            }
-        }
+        self.sqlite.last_event_hash()
     }
 
     /// Read all events in the ledger.
     pub fn iter_events(&self) -> anyhow::Result<Vec<Event>> {
-        if let Some(store) = &self.sqlite {
-            return store.iter_events();
-        }
-        // Legacy JSONL path
-        if !self.paths.events_jsonl.exists() {
-            return Ok(Vec::new());
-        }
-        let file = std::fs::File::open(&self.paths.events_jsonl)?;
-        let reader = std::io::BufReader::new(file);
-        let mut events = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let event: Event = serde_json::from_str(&line)?;
-            events.push(event);
-        }
-        Ok(events)
+        self.sqlite.iter_events()
     }
 
     // ── Branches JSON ───────────────────────────────────────────────
 
     /// Read branches.json content.
     pub fn branches_json(&self) -> anyhow::Result<serde_json::Value> {
-        if let Some(store) = &self.sqlite {
-            return store.branches_json();
-        }
-        let content = std::fs::read_to_string(&self.paths.branches_json)?;
-        Ok(serde_json::from_str(&content)?)
+        self.sqlite.branches_json()
     }
 
     /// Write branches.json content.
     pub fn set_branches_json(&self, value: &serde_json::Value) -> anyhow::Result<()> {
-        if let Some(store) = &self.sqlite {
-            return store.set_branches_json(value);
-        }
-        std::fs::write(
-            &self.paths.branches_json,
-            serde_json::to_string_pretty(value)?,
-        )?;
-        Ok(())
+        self.sqlite.set_branches_json(value)
     }
 
     // ── Decisions ───────────────────────────────────────────────────
 
     /// Query active decisions, optionally filtered by domain or key pattern.
-    ///
-    /// For JSONL backend, returns empty (decisions table not available).
     pub fn active_decisions(
         &self,
         domain: Option<&str>,
         key_pattern: Option<&str>,
     ) -> anyhow::Result<Vec<DecisionRow>> {
-        if let Some(store) = &self.sqlite {
-            return store.active_decisions(domain, key_pattern);
-        }
-        Ok(Vec::new())
+        self.sqlite.active_decisions(domain, key_pattern)
     }
 
     /// All decisions for a key (active + superseded), ordered by time.
     pub fn decision_timeline(&self, key: &str) -> anyhow::Result<Vec<DecisionRow>> {
-        if let Some(store) = &self.sqlite {
-            return store.decision_timeline(key);
-        }
-        Ok(Vec::new())
+        self.sqlite.decision_timeline(key)
     }
 
     /// Find the active decision for a specific key on a branch.
@@ -183,10 +94,7 @@ impl Ledger {
         branch: &str,
         key: &str,
     ) -> anyhow::Result<Option<DecisionRow>> {
-        if let Some(store) = &self.sqlite {
-            return store.find_active_decision(branch, key);
-        }
-        Ok(None)
+        self.sqlite.find_active_decision(branch, key)
     }
 }
 
@@ -198,28 +106,20 @@ impl Ledger {
 pub fn init_workspace(paths: &EddaPaths) -> anyhow::Result<()> {
     paths.ensure_layout()?;
     std::fs::create_dir_all(paths.branch_dir("main"))?;
-    // Create SQLite ledger
     SqliteStore::open_or_create(&paths.ledger_db)?;
     Ok(())
 }
 
-/// Write the initial HEAD. Uses SQLite if `ledger.db` exists, else file.
+/// Write the initial HEAD into SQLite.
 pub fn init_head(paths: &EddaPaths, branch: &str) -> anyhow::Result<()> {
-    if paths.ledger_db.exists() {
-        let store = SqliteStore::open(&paths.ledger_db)?;
-        if store.head_branch().is_err() {
-            store.set_head_branch(branch)?;
-        }
-    } else if !paths.head_file.exists() {
-        if let Some(parent) = paths.head_file.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&paths.head_file, format!("{branch}\n"))?;
+    let store = SqliteStore::open(&paths.ledger_db)?;
+    if store.head_branch().is_err() {
+        store.set_head_branch(branch)?;
     }
     Ok(())
 }
 
-/// Write initial branches.json. Uses SQLite if `ledger.db` exists, else file.
+/// Write initial branches.json into SQLite.
 pub fn init_branches_json(paths: &EddaPaths, branch: &str) -> anyhow::Result<()> {
     let now = time_now_rfc3339();
     let json = serde_json::json!({
@@ -229,13 +129,9 @@ pub fn init_branches_json(paths: &EddaPaths, branch: &str) -> anyhow::Result<()>
             }
         }
     });
-    if paths.ledger_db.exists() {
-        let store = SqliteStore::open(&paths.ledger_db)?;
-        if store.branches_json().is_err() {
-            store.set_branches_json(&json)?;
-        }
-    } else if !paths.branches_json.exists() {
-        std::fs::write(&paths.branches_json, serde_json::to_string_pretty(&json)?)?;
+    let store = SqliteStore::open(&paths.ledger_db)?;
+    if store.branches_json().is_err() {
+        store.set_branches_json(&json)?;
     }
     Ok(())
 }
@@ -264,13 +160,6 @@ mod tests {
         init_branches_json(&paths, "main").unwrap();
         let ledger = Ledger::open(&tmp).unwrap();
         (tmp, ledger)
-    }
-
-    #[test]
-    fn sqlite_backend_detected() {
-        let (tmp, ledger) = setup_workspace();
-        assert!(ledger.is_sqlite(), "new workspace should use SQLite");
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
