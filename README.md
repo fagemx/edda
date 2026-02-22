@@ -276,13 +276,10 @@ edda mcp serve    # stdio JSON-RPC 2.0
 | `edda-index` | Transcript index |
 | `edda-conductor` | Multi-phase plan orchestration |
 
-## Status
-
-MIT OR Apache-2.0
-
 ## Roadmap
 
 - [x] Prebuilt binaries (macOS, Linux, Windows)
+- [x] One-line install script (`curl | sh`)
 - [ ] npm wrapper (`npx edda init`)
 - [ ] Decision recall metrics
 - [ ] Cross-project decision search
