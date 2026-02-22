@@ -23,7 +23,7 @@ jobs:
         id: tag
         run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
       - name: Create draft release
-        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME"
+        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
