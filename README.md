@@ -58,9 +58,29 @@ cargo install --git https://github.com/fagemx/edda edda-cli
 ## Quick Start
 
 ```bash
-edda init    # auto-detects Claude Code / OpenClaw, installs hooks
+edda init    # auto-detects Claude Code, installs hooks
 # Done. Start coding. Edda works in the background.
 ```
+
+`edda init` does three things:
+
+1. Creates `.edda/` with an empty ledger
+2. Installs lifecycle hooks into `.claude/settings.local.json`
+3. Adds decision-tracking instructions to `.claude/CLAUDE.md`
+
+The CLAUDE.md section teaches your agent when and how to record decisions:
+
+```markdown
+## Decision Tracking (edda)
+
+When you make an architectural decision, record it:
+  edda decide "domain.aspect=value" --reason "why"
+
+Before ending a session, summarize what you did:
+  edda note "completed X; decided Y; next: Z" --tag session
+```
+
+This is the key to Edda's automation — the agent learns to call `edda decide` naturally during conversation, and hooks capture everything else.
 
 ## How It Works
 
@@ -99,7 +119,7 @@ At the start of each session, Edda assembles a context snapshot from the ledger 
 | **Cost per query** | Free | Embedding API call | LLM API call | **Free** (local SQLite) |
 | **Examples** | Claude Code built-in, OpenClaw | mem0, Zep, Chroma | ChatGPT Memory, Copilot | — |
 
-Edda is **deterministic, local, and free to query**. No API calls, no embeddings, no LLM in the loop.
+Every query runs locally against SQLite — same answer every time, in milliseconds, at zero cost.
 
 ## Integration
 
