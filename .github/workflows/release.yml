@@ -106,3 +106,14 @@ jobs:
         run: gh release upload "${{ needs.create-release.outputs.tag }}" "${{ env.ASSET }}" "${{ env.ASSET }}.sha256"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-release:
+    name: Publish Release
+    needs: [create-release, build-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish release
+        run: gh release edit "${{ needs.create-release.outputs.tag }}" --draft=false
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
