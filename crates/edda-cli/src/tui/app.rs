@@ -1,7 +1,18 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use edda_bridge_claude::peers::{BoardState, PeerSummary};
 use edda_bridge_claude::watch;
+
+/// Domains considered user-facing (shown expanded by default).
+const USER_FACING_DOMAINS: &[&str] = &[
+    "api", "auth", "ci", "db", "install", "readme", "release", "storage", "testing",
+];
+
+/// Check if a domain prefix is user-facing (shown expanded by default).
+pub fn is_user_facing_domain(domain: &str) -> bool {
+    USER_FACING_DOMAINS.contains(&domain)
+}
 
 /// Which panel is currently focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +58,11 @@ pub struct App {
     pub peer_scroll: usize,
     pub event_scroll: usize,
     pub decision_scroll: usize,
+
+    // Filters
+    pub show_cmd_events: bool,
+    pub show_stale_peers: bool,
+    pub expanded_domains: HashSet<String>,
 }
 
 impl App {
@@ -64,7 +80,37 @@ impl App {
             peer_scroll: 0,
             event_scroll: 0,
             decision_scroll: 0,
+            show_cmd_events: false,
+            show_stale_peers: false,
+            expanded_domains: HashSet::new(),
         }
+    }
+
+    /// Return only events that pass the current filter.
+    pub fn visible_events(&self) -> Vec<&edda_core::types::Event> {
+        self.events
+            .iter()
+            .filter(|e| {
+                if !self.show_cmd_events && e.event_type == "cmd" {
+                    return false;
+                }
+                true
+            })
+            .collect()
+    }
+
+    /// Return only peers that are active or have a label (hiding ghost sessions).
+    pub fn active_peers(&self) -> Vec<&PeerSummary> {
+        self.peers
+            .iter()
+            .filter(|p| {
+                if self.show_stale_peers {
+                    return true;
+                }
+                // Hide stale peers with no label
+                !(p.label.is_empty() && p.age_secs > 120)
+            })
+            .collect()
     }
 
     /// Refresh data from disk (unless paused).
@@ -95,9 +141,38 @@ impl App {
             KeyCode::Tab => self.active_panel = self.active_panel.next(),
             KeyCode::BackTab => self.active_panel = self.active_panel.prev(),
             KeyCode::Char(' ') => self.paused = !self.paused,
+            KeyCode::Char('c') => self.show_cmd_events = !self.show_cmd_events,
+            KeyCode::Char('p') => self.show_stale_peers = !self.show_stale_peers,
             KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
             KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
+            KeyCode::Enter => self.toggle_domain_expand(),
             _ => {}
+        }
+    }
+
+    fn toggle_domain_expand(&mut self) {
+        if self.active_panel != Panel::Decisions {
+            return;
+        }
+        // Find which domain is at the current scroll position
+        let groups = crate::tui::ui::group_bindings(&self.board.bindings);
+        let mut row = 0;
+        for (domain, _bindings) in &groups {
+            if row == self.decision_scroll {
+                let domain = (*domain).to_string();
+                if self.expanded_domains.contains(&domain) {
+                    self.expanded_domains.remove(&domain);
+                } else {
+                    self.expanded_domains.insert(domain);
+                }
+                return;
+            }
+            row += 1; // domain header
+            let is_internal = !is_user_facing_domain(domain);
+            let expanded = self.expanded_domains.contains(*domain);
+            if !is_internal || expanded {
+                row += _bindings.len();
+            }
         }
     }
 
@@ -134,6 +209,37 @@ impl App {
 mod tests {
     use super::*;
 
+    fn make_event(event_type: &str) -> edda_core::types::Event {
+        edda_core::types::Event {
+            event_id: "evt_test".into(),
+            ts: "2026-02-23T05:00:00Z".into(),
+            event_type: event_type.into(),
+            branch: "main".into(),
+            parent_hash: None,
+            hash: "abc".into(),
+            payload: serde_json::json!({}),
+            refs: Default::default(),
+            schema_version: 1,
+            digests: vec![],
+            event_family: None,
+            event_level: None,
+        }
+    }
+
+    fn make_peer(label: &str, age_secs: u64) -> PeerSummary {
+        PeerSummary {
+            session_id: "test123".into(),
+            label: label.into(),
+            age_secs,
+            focus_files: vec![],
+            task_subjects: vec![],
+            files_modified_count: 0,
+            recent_commits: vec![],
+            claimed_paths: vec![],
+            branch: None,
+        }
+    }
+
     #[test]
     fn new_app_has_empty_data() {
         let app = App::new("test-project".into(), PathBuf::from("/tmp"));
@@ -144,6 +250,70 @@ mod tests {
         assert!(!app.should_quit);
         assert!(!app.paused);
         assert_eq!(app.active_panel, Panel::Peers);
+        assert!(!app.show_cmd_events);
+        assert!(!app.show_stale_peers);
+    }
+
+    #[test]
+    fn visible_events_hides_cmd_by_default() {
+        let mut app = App::new("test".into(), PathBuf::from("/tmp"));
+        app.events = vec![
+            make_event("note"),
+            make_event("cmd"),
+            make_event("commit"),
+            make_event("cmd"),
+        ];
+        let visible = app.visible_events();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].event_type, "note");
+        assert_eq!(visible[1].event_type, "commit");
+    }
+
+    #[test]
+    fn visible_events_shows_cmd_when_toggled() {
+        let mut app = App::new("test".into(), PathBuf::from("/tmp"));
+        app.events = vec![make_event("note"), make_event("cmd")];
+        app.show_cmd_events = true;
+        assert_eq!(app.visible_events().len(), 2);
+    }
+
+    #[test]
+    fn active_peers_hides_stale_unlabeled() {
+        let mut app = App::new("test".into(), PathBuf::from("/tmp"));
+        app.peers = vec![
+            make_peer("worker-1", 30),   // active, labeled → show
+            make_peer("", 200),          // stale, no label → hide
+            make_peer("worker-2", 200),  // stale, labeled → show
+            make_peer("", 50),           // active, no label → show
+        ];
+        let active = app.active_peers();
+        assert_eq!(active.len(), 3);
+    }
+
+    #[test]
+    fn key_c_toggles_cmd_filter() {
+        let mut app = App::new("test".into(), PathBuf::from("/tmp"));
+        assert!(!app.show_cmd_events);
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('c'),
+            crossterm::event::KeyModifiers::empty(),
+        );
+        app.handle_key(key);
+        assert!(app.show_cmd_events);
+        app.handle_key(key);
+        assert!(!app.show_cmd_events);
+    }
+
+    #[test]
+    fn key_p_toggles_peer_filter() {
+        let mut app = App::new("test".into(), PathBuf::from("/tmp"));
+        assert!(!app.show_stale_peers);
+        let key = crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('p'),
+            crossterm::event::KeyModifiers::empty(),
+        );
+        app.handle_key(key);
+        assert!(app.show_stale_peers);
     }
 
     #[test]
