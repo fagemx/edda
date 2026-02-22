@@ -112,6 +112,7 @@ pub fn install(repo_root: &Path, no_claude_md: bool) -> anyhow::Result<()> {
     // 0% recall without it, ~1.33 decisions/session with it.
     if !no_claude_md {
         ensure_claude_md_edda_section(repo_root)?;
+        ensure_claude_md_coordination_section(repo_root)?;
     }
 
     Ok(())
@@ -162,6 +163,25 @@ pub fn uninstall(repo_root: &Path) -> anyhow::Result<()> {
 /// Marker used to detect whether CLAUDE.md already has the edda section.
 const EDDA_SECTION_MARKER: &str = "<!-- edda:decision-tracking -->";
 
+/// Marker for the coordination section (independent of decision-tracking).
+const EDDA_COORDINATION_MARKER: &str = "<!-- edda:coordination -->";
+
+/// Coordination rules appended to existing CLAUDE.md (or embedded in CREATE template).
+const EDDA_COORDINATION_SECTION: &str = r#"
+<!-- edda:coordination -->
+## Multi-Agent Coordination (edda)
+
+When edda detects multiple agents, it injects peer information into your context.
+
+**You MUST follow these rules:**
+- **Check Off-limits** before editing any file — if a file is listed under "Off-limits", do NOT edit it
+- **Claim your scope** at session start: `edda claim "label" --paths "src/scope/*"`
+- **Request before crossing boundaries**: `edda request "peer-label" "your message"`
+- **Respect binding decisions** — they apply to all sessions
+
+Ignoring these rules causes merge conflicts and duplicated work.
+"#;
+
 /// Full template for creating a NEW `.claude/CLAUDE.md` with edda onboarding.
 /// The marker is at the end so the model sees actionable content first.
 const EDDA_CLAUDE_MD_CREATE: &str = r#"# Project Guidelines
@@ -210,6 +230,19 @@ edda note "completed X; decided Y; next: Z" --tag session
 ```
 
 <!-- edda:decision-tracking -->
+
+<!-- edda:coordination -->
+## Multi-Agent Coordination (edda)
+
+When edda detects multiple agents, it injects peer information into your context.
+
+**You MUST follow these rules:**
+- **Check Off-limits** before editing any file — if a file is listed under "Off-limits", do NOT edit it
+- **Claim your scope** at session start: `edda claim "label" --paths "src/scope/*"`
+- **Request before crossing boundaries**: `edda request "peer-label" "your message"`
+- **Respect binding decisions** — they apply to all sessions
+
+Ignoring these rules causes merge conflicts and duplicated work.
 "#;
 
 /// Shorter section appended to an EXISTING `.claude/CLAUDE.md`.
@@ -267,6 +300,29 @@ fn ensure_claude_md_edda_section(repo_root: &Path) -> anyhow::Result<()> {
             claude_md.display()
         );
     }
+    Ok(())
+}
+
+/// Ensure `.claude/CLAUDE.md` contains the edda coordination section.
+/// Appends the section if the coordination marker is absent.
+/// Skips if the file doesn't exist (it will be created by `ensure_claude_md_edda_section`
+/// with both sections included).
+fn ensure_claude_md_coordination_section(repo_root: &Path) -> anyhow::Result<()> {
+    let claude_md = repo_root.join(".claude").join("CLAUDE.md");
+    if !claude_md.exists() {
+        return Ok(());
+    }
+    let content = fs::read_to_string(&claude_md)?;
+    if content.contains(EDDA_COORDINATION_MARKER) {
+        return Ok(());
+    }
+    let mut appended = content;
+    if !appended.ends_with('\n') {
+        appended.push('\n');
+    }
+    appended.push_str(EDDA_COORDINATION_SECTION);
+    fs::write(&claude_md, appended)?;
+    println!("Appended coordination rules to {}", claude_md.display());
     Ok(())
 }
 
@@ -353,6 +409,18 @@ mod tests {
         assert!(md_content.contains("edda:decision-tracking"), "marker");
         assert!(md_content.contains("edda decide"), "decide instruction");
         assert!(md_content.contains("edda note"), "note instruction");
+        assert!(
+            md_content.contains("edda:coordination"),
+            "coordination marker"
+        );
+        assert!(
+            md_content.contains("edda claim"),
+            "claim instruction"
+        );
+        assert!(
+            md_content.contains("edda request"),
+            "request instruction"
+        );
 
         uninstall(tmp.path()).unwrap();
         let content = fs::read_to_string(&path).unwrap();
@@ -385,6 +453,14 @@ mod tests {
         assert!(
             content.contains("edda decide"),
             "decide instruction present"
+        );
+        assert!(
+            content.contains("edda:coordination"),
+            "coordination section appended"
+        );
+        assert!(
+            content.contains("edda claim"),
+            "claim instruction present"
         );
     }
 
@@ -427,6 +503,69 @@ mod tests {
             content.matches("edda:decision-tracking").count(),
             1,
             "should not duplicate edda section"
+        );
+        // But coordination should be appended
+        assert!(
+            content.contains("edda:coordination"),
+            "coordination section appended to existing"
+        );
+    }
+
+    #[test]
+    fn install_appends_coordination_to_existing_without_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_md = claude_dir.join("CLAUDE.md");
+        // Has decision-tracking but no coordination
+        fs::write(
+            &claude_md,
+            "# Project\n<!-- edda:decision-tracking -->\nDecision stuff.\n",
+        )
+        .unwrap();
+
+        install(tmp.path(), false).unwrap();
+
+        let content = fs::read_to_string(&claude_md).unwrap();
+        assert!(
+            content.contains("edda:coordination"),
+            "coordination section appended"
+        );
+        assert!(
+            content.contains("edda claim"),
+            "claim instruction present"
+        );
+        assert!(
+            content.contains("Off-limits"),
+            "off-limits rule present"
+        );
+        assert_eq!(
+            content.matches("edda:decision-tracking").count(),
+            1,
+            "decision-tracking not duplicated"
+        );
+    }
+
+    #[test]
+    fn install_skips_if_coordination_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+        let claude_md = claude_dir.join("CLAUDE.md");
+        // Has both markers
+        fs::write(
+            &claude_md,
+            "# Project\n<!-- edda:decision-tracking -->\n<!-- edda:coordination -->\nBoth here.\n",
+        )
+        .unwrap();
+
+        install(tmp.path(), false).unwrap();
+
+        let content = fs::read_to_string(&claude_md).unwrap();
+        assert_eq!(
+            content.matches("edda:coordination").count(),
+            1,
+            "should not duplicate coordination section"
         );
     }
 }
