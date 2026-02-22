@@ -6,6 +6,7 @@
 </p>
 
 <p align="center">
+  <a href="https://crates.io/crates/edda"><img src="https://img.shields.io/crates/v/edda?style=flat-square" alt="crates.io" /></a>
   <a href="https://github.com/fagemx/edda/releases"><img src="https://img.shields.io/github/v/release/fagemx/edda?style=flat-square&label=release" alt="Release" /></a>
   <a href="https://github.com/fagemx/edda/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/fagemx/edda/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
   <a href="https://github.com/fagemx/edda/blob/main/LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue?style=flat-square" alt="License" /></a>
@@ -70,11 +71,11 @@ curl -sSf https://raw.githubusercontent.com/fagemx/edda/main/install.sh | sh
 # macOS / Linux（Homebrew）
 brew install fagemx/tap/edda
 
+# crates.io
+cargo install edda
+
 # 或下載預編譯的二進位檔
 # → https://github.com/fagemx/edda/releases
-
-# 或從原始碼編譯
-cargo install --git https://github.com/fagemx/edda edda
 ```
 
 ## 快速開始
