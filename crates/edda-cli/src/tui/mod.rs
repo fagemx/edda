@@ -1,19 +1,16 @@
-mod app;
-mod ui;
+pub mod app;
+pub mod ui;
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyEventKind};
 
 use app::App;
 
-fn main() -> color_eyre::Result<()> {
-    color_eyre::install()?;
-
-    let repo_root = std::env::current_dir()?;
-    let project_id = edda_store::project_id(&repo_root);
-
-    // Auto-init: ensure .edda/ and store dirs exist (no manual `edda init` needed)
+/// Run the interactive TUI (called by `edda watch` when the `tui` feature is enabled).
+pub fn run(project_id: String, repo_root: PathBuf) -> anyhow::Result<()> {
+    // Auto-init: ensure .edda/ and store dirs exist
     if let Err(e) = edda_store::ensure_dirs(&project_id) {
         eprintln!("Warning: failed to ensure store dirs: {e}");
     }
@@ -22,17 +19,17 @@ fn main() -> color_eyre::Result<()> {
     }
 
     let mut terminal = ratatui::init();
-    let result = run(&mut terminal, project_id, repo_root);
+    let result = run_loop(&mut terminal, project_id, repo_root);
     ratatui::restore();
 
     result
 }
 
-fn run(
+fn run_loop(
     terminal: &mut ratatui::DefaultTerminal,
     project_id: String,
-    repo_root: std::path::PathBuf,
-) -> color_eyre::Result<()> {
+    repo_root: PathBuf,
+) -> anyhow::Result<()> {
     let mut app = App::new(project_id, repo_root);
     let interval = Duration::from_secs(1);
     let mut last_refresh = Instant::now();

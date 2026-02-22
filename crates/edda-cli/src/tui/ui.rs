@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, Panel};
+use super::app::{App, Panel};
 
 /// Render the full TUI frame.
 pub fn render(f: &mut Frame, app: &App) {
@@ -292,15 +292,12 @@ fn event_display(payload: &serde_json::Value, event_type: &str) -> (String, Stri
 /// Extract the meaningful command from a shell invocation.
 fn shorten_cmd(cmd: &str) -> String {
     let cmd = cmd.trim();
-    // Take first line only (multi-line scripts)
     let cmd = cmd.lines().next().unwrap_or(cmd);
-    // If "cd ... && actual_cmd ...", extract after last &&
     let cmd = if let Some(pos) = cmd.rfind("&&") {
         cmd[pos + 2..].trim()
     } else {
         cmd
     };
-    // Strip trailing redirections
     let cmd = cmd.trim_end_matches("2>&1").trim();
     cmd.to_string()
 }

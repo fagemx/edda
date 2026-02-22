@@ -20,6 +20,8 @@ mod cmd_search;
 mod cmd_status;
 mod cmd_switch;
 mod cmd_watch;
+#[cfg(feature = "tui")]
+mod tui;
 
 use clap::{Parser, Subcommand};
 
@@ -1001,7 +1003,7 @@ fn main() -> anyhow::Result<()> {
             } => cmd_conduct::skip(&repo_root, &phase_id, reason.as_deref(), plan.as_deref()),
             ConductCmd::Abort { plan_name } => cmd_conduct::abort(&repo_root, plan_name.as_deref()),
         },
-        Command::Watch => cmd_watch::execute(),
+        Command::Watch => cmd_watch::execute(&repo_root),
         Command::Blob { cmd } => match cmd {
             BlobCmd::Classify { hash, class } => cmd_blob::classify(&repo_root, &hash, &class),
             BlobCmd::Pin { hash } => cmd_blob::pin(&repo_root, &hash),

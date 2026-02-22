@@ -686,6 +686,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "color-eyre",
+ "crossterm",
  "ctrlc",
  "edda-ask",
  "edda-bridge-claude",
@@ -701,6 +703,7 @@ dependencies = [
  "edda-store",
  "edda-transcript",
  "hex",
+ "ratatui",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -855,21 +858,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
-]
-
-[[package]]
-name = "edda-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "color-eyre",
- "crossterm",
- "edda-bridge-claude",
- "edda-core",
- "edda-ledger",
- "edda-store",
- "ratatui",
- "serde_json",
 ]
 
 [[package]]

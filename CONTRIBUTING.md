@@ -23,14 +23,13 @@ cargo clippy --workspace --all-targets
 
 ## Project Structure
 
-Edda is a Cargo workspace with 15 crates:
+Edda is a Cargo workspace with 14 crates:
 
 | Crate | Purpose |
 |-------|---------|
 | `edda-core` | Event model, hash chain, schema |
 | `edda-ledger` | SQLite ledger, blob store |
-| `edda-cli` | All CLI commands |
-| `edda-tui` | Real-time TUI (`edda watch`) |
+| `edda-cli` | All CLI commands + TUI (`tui` feature, default on) |
 | `edda-bridge-claude` | Claude Code hooks and context injection |
 | `edda-bridge-openclaw` | OpenClaw hooks and plugin |
 | `edda-mcp` | MCP server (7 tools) |
