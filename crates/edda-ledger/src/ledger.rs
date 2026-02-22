@@ -19,7 +19,7 @@ impl Ledger {
                 paths.root.display()
             );
         }
-        let sqlite = SqliteStore::open(&paths.ledger_db)?;
+        let sqlite = SqliteStore::open_or_create(&paths.ledger_db)?;
         Ok(Self { paths, sqlite })
     }
 
