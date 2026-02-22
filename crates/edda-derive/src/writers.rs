@@ -313,8 +313,7 @@ fn write_branches_json(ledger: &Ledger, snaps: &[BranchSnapshot]) -> Result<()> 
         );
     }
     let root = serde_json::json!({ "branches": branches });
-    let text = serde_json::to_string_pretty(&root)?;
-    fs::write(&ledger.paths.branches_json, text.as_bytes())?;
+    ledger.set_branches_json(&root)?;
     Ok(())
 }
 
@@ -373,7 +372,7 @@ mod tests {
 
         // Add a note and a commit
         let note = new_note_event("main", None, "user", "test note", &[]).unwrap();
-        ledger.append_event(&note, false).unwrap();
+        ledger.append_event(&note).unwrap();
 
         let mut params = CommitEventParams {
             branch: "main",
@@ -386,7 +385,7 @@ mod tests {
             labels: vec![],
         };
         let commit = new_commit_event(&mut params).unwrap();
-        ledger.append_event(&commit, false).unwrap();
+        ledger.append_event(&commit).unwrap();
 
         let snap = rebuild_branch(&ledger, "main").unwrap();
         assert_eq!(snap.branch, "main");
@@ -410,7 +409,7 @@ mod tests {
 
         // Add events on main
         let note = new_note_event("main", None, "user", "main note", &[]).unwrap();
-        ledger.append_event(&note, false).unwrap();
+        ledger.append_event(&note).unwrap();
 
         // Create a second branch event
         let branch_evt = edda_core::event::new_branch_create_event(
@@ -422,10 +421,10 @@ mod tests {
             None,
         )
         .unwrap();
-        ledger.append_event(&branch_evt, false).unwrap();
+        ledger.append_event(&branch_evt).unwrap();
 
         let note2 = new_note_event("feature", None, "user", "feature note", &[]).unwrap();
-        ledger.append_event(&note2, false).unwrap();
+        ledger.append_event(&note2).unwrap();
 
         let snaps = rebuild_all(&ledger).unwrap();
         assert!(snaps.len() >= 2);
@@ -434,8 +433,8 @@ mod tests {
         assert!(branch_names.contains(&"main"));
         assert!(branch_names.contains(&"feature"));
 
-        // branches.json should exist (in refs_dir, not branches_dir)
-        assert!(ledger.paths.branches_json.exists());
+        // branches.json should be readable from SQLite
+        assert!(ledger.branches_json().is_ok());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -447,8 +446,8 @@ mod tests {
         // Add notes without any commit
         let n1 = new_note_event("main", None, "user", "note 1", &[]).unwrap();
         let n2 = new_note_event("main", None, "user", "note 2", &[]).unwrap();
-        ledger.append_event(&n1, false).unwrap();
-        ledger.append_event(&n2, false).unwrap();
+        ledger.append_event(&n1).unwrap();
+        ledger.append_event(&n2).unwrap();
 
         let snap = rebuild_branch(&ledger, "main").unwrap();
         assert_eq!(snap.commits.len(), 0);
@@ -466,7 +465,7 @@ mod tests {
             labels: vec![],
         };
         let c = new_commit_event(&mut params).unwrap();
-        ledger.append_event(&c, false).unwrap();
+        ledger.append_event(&c).unwrap();
 
         let snap2 = rebuild_branch(&ledger, "main").unwrap();
         assert_eq!(snap2.commits.len(), 1);
@@ -481,7 +480,7 @@ mod tests {
 
         let merge =
             new_merge_event("main", None, "feature", "main", "merge feature work", &[]).unwrap();
-        ledger.append_event(&merge, false).unwrap();
+        ledger.append_event(&merge).unwrap();
 
         let snap = rebuild_branch(&ledger, "main").unwrap();
         assert_eq!(snap.merges.len(), 1);

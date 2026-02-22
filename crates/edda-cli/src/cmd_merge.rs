@@ -44,7 +44,7 @@ pub fn execute(repo_root: &Path, src: &str, dst: &str, reason: &str) -> anyhow::
     let parent_hash = ledger.last_event_hash()?;
 
     let event = new_merge_event(dst, parent_hash.as_deref(), src, dst, reason, &adopted)?;
-    ledger.append_event(&event, true)?;
+    ledger.append_event(&event)?;
 
     rebuild_all(&ledger)?;
 

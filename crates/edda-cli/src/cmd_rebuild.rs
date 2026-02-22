@@ -18,7 +18,7 @@ pub fn execute(
 
     if all {
         let event = new_rebuild_event(&head, parent_hash.as_deref(), "all", None, reason)?;
-        ledger.append_event(&event, true)?;
+        ledger.append_event(&event)?;
 
         let snaps = rebuild_all(&ledger)?;
         println!("Rebuilt views for all branches ({} branches).", snaps.len());
@@ -31,7 +31,7 @@ pub fn execute(
             Some(target),
             reason,
         )?;
-        ledger.append_event(&event, true)?;
+        ledger.append_event(&event)?;
 
         rebuild_branch(&ledger, target)?;
         println!("Rebuilt views for {target}.");

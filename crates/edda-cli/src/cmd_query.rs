@@ -2,7 +2,6 @@ use edda_ledger::Ledger;
 use std::collections::HashSet;
 use std::path::Path;
 
-/// Unified decision result for display (works with both SQLite and JSONL paths).
 struct DecisionResult {
     event_id: String,
     key: String,
@@ -24,11 +23,7 @@ pub fn execute(
     let ledger = Ledger::open(repo_root)?;
 
     // --- Source 1: Ledger decisions ---
-    let decisions = if ledger.is_sqlite() {
-        query_decisions_sqlite(&ledger, query_str, limit, all)?
-    } else {
-        query_decisions_jsonl(&ledger, query_str, limit, all)?
-    };
+    let decisions = query_decisions(&ledger, query_str, limit, all)?;
 
     // --- Source 2: Transcript turns (FTS5) ---
     let conversations = search_transcripts(repo_root, query_str, limit);
@@ -71,11 +66,7 @@ pub fn execute(
             println!("Decisions ({}):\n", decisions.len());
             for d in &decisions {
                 let date = if d.ts.len() >= 10 { &d.ts[..10] } else { &d.ts };
-                let superseded_marker = if d.is_superseded {
-                    " [superseded]"
-                } else {
-                    ""
-                };
+                let superseded_marker = if d.is_superseded { " [superseded]" } else { "" };
 
                 if d.key.is_empty() {
                     println!("  [{date}] {}{superseded_marker}", d.value);
@@ -104,7 +95,7 @@ pub fn execute(
 }
 
 /// SQLite fast path: query the decisions table directly.
-fn query_decisions_sqlite(
+fn query_decisions(
     ledger: &Ledger,
     query_str: &str,
     limit: usize,
@@ -158,60 +149,6 @@ fn query_decisions_sqlite(
             }
         }
     }
-
-    Ok(results)
-}
-
-/// Legacy JSONL path: scan events and build superseded set in memory.
-fn query_decisions_jsonl(
-    ledger: &Ledger,
-    query_str: &str,
-    limit: usize,
-    all: bool,
-) -> anyhow::Result<Vec<DecisionResult>> {
-    let events = ledger.iter_events()?;
-    let query_lower = query_str.to_lowercase();
-
-    let all_decisions: Vec<_> = events
-        .iter()
-        .rev()
-        .filter(|e| {
-            if !is_decision_event(e) {
-                return false;
-            }
-            let text = e.payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            text.to_lowercase().contains(&query_lower)
-        })
-        .collect();
-
-    let superseded: HashSet<&str> = all_decisions
-        .iter()
-        .flat_map(|e| {
-            e.refs
-                .provenance
-                .iter()
-                .filter(|p| p.rel == "supersedes")
-                .map(|p| p.target.as_str())
-        })
-        .collect();
-
-    let results = all_decisions
-        .iter()
-        .filter(|e| all || !superseded.contains(e.event_id.as_str()))
-        .take(limit)
-        .map(|e| {
-            let (key, value, reason) = extract_decision_fields(e);
-            DecisionResult {
-                event_id: e.event_id.clone(),
-                key,
-                value,
-                reason,
-                ts: e.ts.clone(),
-                branch: e.branch.clone(),
-                is_superseded: superseded.contains(e.event_id.as_str()),
-            }
-        })
-        .collect();
 
     Ok(results)
 }

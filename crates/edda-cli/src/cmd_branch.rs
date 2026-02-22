@@ -46,7 +46,7 @@ pub fn create(repo_root: &Path, name: &str, purpose: &str) -> anyhow::Result<()>
         &head,
         from_event_id,
     )?;
-    ledger.append_event(&create_event, true)?;
+    ledger.append_event(&create_event)?;
 
     // Seed target branch with a system note
     let parent_hash = ledger.last_event_hash()?;
@@ -58,7 +58,7 @@ pub fn create(repo_root: &Path, name: &str, purpose: &str) -> anyhow::Result<()>
         &seed_text,
         &["branch".to_string()],
     )?;
-    ledger.append_event(&seed_event, true)?;
+    ledger.append_event(&seed_event)?;
 
     rebuild_all(&ledger)?;
 

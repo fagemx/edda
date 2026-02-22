@@ -744,7 +744,7 @@ fn harvest_inferred_decisions(
 
         finalize_event(&mut event);
 
-        if ledger.append_event(&event, false).is_ok() {
+        if ledger.append_event(&event).is_ok() {
             chain_hash = Some(event.hash.clone());
             written_ids.push(event_id);
         } else {
@@ -866,7 +866,7 @@ fn digest_one_session(
             }
         };
 
-    if let Err(e) = ledger.append_event(&event, false) {
+    if let Err(e) = ledger.append_event(&event) {
         record_failure(
             project_id,
             session_id,
@@ -891,7 +891,7 @@ fn digest_one_session(
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            if ledger.append_event(&cmd_event, false).is_err() {
+            if ledger.append_event(&cmd_event).is_err() {
                 break;
             }
             last_hash = cmd_event.hash.clone();
@@ -968,7 +968,7 @@ pub fn digest_session_manual(
     stats.tasks_snapshot = load_tasks_for_digest(project_id);
     let (_decisions, notes) = collect_session_ledger_extras(cwd, stats.first_ts.as_deref());
     let event = build_digest_event(session_id, &stats, &branch, parent_hash.as_deref(), &notes)?;
-    ledger.append_event(&event, false)?;
+    ledger.append_event(&event)?;
 
     let mut last_event_id = event.event_id.clone();
 
@@ -977,7 +977,7 @@ pub fn digest_session_manual(
         for failed_cmd in &stats.failed_cmds_detail {
             let cmd_event =
                 build_cmd_milestone_event(session_id, failed_cmd, &branch, chain_hash.as_deref())?;
-            ledger.append_event(&cmd_event, false)?;
+            ledger.append_event(&cmd_event)?;
             chain_hash = Some(cmd_event.hash.clone());
             last_event_id = cmd_event.event_id.clone();
         }
@@ -2407,7 +2407,7 @@ mod tests {
             serde_json::json!({"key": "auth", "value": "jwt", "reason": "stateless"});
         edda_core::event::finalize_event(&mut evt);
         let decision_ts = evt.ts.clone();
-        ledger.append_event(&evt, false).unwrap();
+        ledger.append_event(&evt).unwrap();
 
         // Write a session note
         let tags_s = vec!["session".to_string()];
@@ -2419,7 +2419,7 @@ mod tests {
             &tags_s,
         )
         .unwrap();
-        ledger.append_event(&evt2, false).unwrap();
+        ledger.append_event(&evt2).unwrap();
 
         let (decisions, notes) =
             collect_session_ledger_extras(workspace.to_str().unwrap(), Some(&decision_ts));
@@ -2454,7 +2454,7 @@ mod tests {
         evt.payload["source"] = serde_json::json!("bridge:session_digest");
         edda_core::event::finalize_event(&mut evt);
         let ts = evt.ts.clone();
-        ledger.append_event(&evt, false).unwrap();
+        ledger.append_event(&evt).unwrap();
 
         let (decisions, notes) =
             collect_session_ledger_extras(workspace.to_str().unwrap(), Some(&ts));

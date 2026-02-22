@@ -100,7 +100,7 @@ pub fn execute(p: CommitCliParams<'_>) -> anyhow::Result<()> {
         evidence,
         labels: p.labels,
     })?;
-    ledger.append_event(&event, true)?;
+    ledger.append_event(&event)?;
 
     rebuild_all(&ledger)?;
 

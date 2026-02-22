@@ -230,7 +230,7 @@ pub fn decide(
 
     // Re-finalize after payload/refs mutation
     edda_core::event::finalize_event(&mut event);
-    ledger.append_event(&event, false)?;
+    ledger.append_event(&event)?;
 
     println!("Decision recorded: {key} = {value}");
     if let Some(r) = reason {
@@ -577,7 +577,7 @@ mod tests {
         .unwrap();
         event.payload["decision"] = serde_json::json!({"key": "db.engine", "value": "postgres"});
         edda_core::event::finalize_event(&mut event);
-        ledger.append_event(&event, false).unwrap();
+        ledger.append_event(&event).unwrap();
 
         let result = ledger.find_active_decision(&branch, "db.engine").unwrap();
         assert!(result.is_some(), "should find active decision");
@@ -593,7 +593,9 @@ mod tests {
         let (tmp, ledger) = setup_workspace();
         let branch = ledger.head_branch().unwrap();
 
-        let result = ledger.find_active_decision(&branch, "nonexistent.key").unwrap();
+        let result = ledger
+            .find_active_decision(&branch, "nonexistent.key")
+            .unwrap();
         assert!(result.is_none(), "should not find anything");
 
         let _ = std::fs::remove_dir_all(&tmp);

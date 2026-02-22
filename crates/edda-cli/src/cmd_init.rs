@@ -67,7 +67,7 @@ actors: {}
         "init edda workspace",
         &[],
     )?;
-    ledger.append_event(&event, true)?;
+    ledger.append_event(&event)?;
 
     // Build derived views immediately so they're available right after init
     rebuild_all(&ledger)?;
