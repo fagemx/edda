@@ -8,8 +8,9 @@ $ edda decide "db=SQLite" --reason "single-user, no deployment overhead, FTS5 fo
 Recorded: db=SQLite
 
 $ edda ask "database"
-[2026-02-15 session-7a] db=SQLite
-  reason: single-user, no deployment overhead, FTS5 for search
+── Decisions ──────────────────────────
+  db = SQLite — single-user, no deployment overhead, FTS5 for search
+  branch: main | 2026-02-15 | active
 
 # Next session — your agent sees this automatically
 $ edda context
@@ -34,21 +35,20 @@ cargo install edda
 ## Quick Start
 
 ```bash
-# Initialize in your project
+# Initialize in your project (auto-detects Claude Code / OpenClaw)
 edda init
-
-# Install Claude Code hooks (auto-captures decisions)
-edda bridge claude install
 
 # Done. Start a Claude Code session.
 # Edda captures decisions automatically.
 ```
 
+If `.claude/` exists, `edda init` auto-installs hooks. Use `--no-hooks` to skip.
+
 ## How Edda Compares
 
 |  | MEMORY.md | RAG / Vector DB | LLM Summary | **Edda** |
 |--|-----------|----------------|-------------|----------|
-| **Storage** | Markdown file | Vector embeddings | LLM-generated text | Append-only JSONL |
+| **Storage** | Markdown file | Vector embeddings | LLM-generated text | Append-only SQLite |
 | **Retrieval** | Agent reads whole file | Semantic similarity | LLM re-summarizes | FTS5 keyword + structured query |
 | **Needs LLM?** | No | Yes (embeddings) | Yes (every read/write) | **No** |
 | **Needs vector DB?** | No | Yes | No | **No** |
@@ -76,12 +76,13 @@ Recorded note.
 
 ```bash
 $ edda ask "cache"
-[2026-02-18 session-3f] cache=Redis
-  reason: need TTL, pub/sub for invalidation
+── Decisions ──────────────────────────
+  cache = Redis — need TTL, pub/sub for invalidation
+  branch: main | 2026-02-18 | active
 
-[2026-02-17 session-2a] cache=None
-  reason: premature optimization, revisit after benchmarks
-  (superseded)
+── Timeline ───────────────────────────
+  2026-02-17  cache = None  (superseded)
+  2026-02-18  cache = Redis  (active)
 ```
 
 ### Search across session transcripts
@@ -139,7 +140,7 @@ Approved.
 
 ## How It Works
 
-After `edda init` and `edda bridge claude install`, **you don't need to do anything**. Edda runs automatically in the background:
+After `edda init`, **you don't need to do anything**. Edda runs automatically in the background:
 
 | When | What Edda does | You do |
 |------|---------------|--------|
@@ -148,7 +149,7 @@ After `edda init` and `edda bridge claude install`, **you don't need to do anyth
 | Session ends | Writes session digest to the ledger | Nothing |
 | Next session starts | Agent sees relevant decisions from all prior sessions | Nothing |
 
-The `decide`, `note`, and `query` commands exist for **manual use** — when you want to record something yourself or look something up. Day-to-day, the hooks handle everything.
+The `decide`, `note`, and `ask` commands exist for **manual use** — when you want to record something yourself or look something up. Day-to-day, the hooks handle everything.
 
 ```
 Claude Code session
@@ -168,17 +169,15 @@ Claude Code session
 
 ```
 .edda/
+├── ledger.db             # SQLite: events, HEAD, branches (append-only, hash-chained)
 ├── ledger/
-│   ├── events.jsonl      # append-only, hash-chained
 │   └── blobs/            # large payloads
-├── cache/                # derived views, digests
 ├── branches/             # branch metadata
 ├── drafts/               # pending proposals
-├── refs/
-│   ├── HEAD              # current branch
-│   └── branches.json
+├── patterns/             # classification patterns
 ├── actors.yaml           # roles (lead, reviewer)
-└── policy.yaml           # approval rules
+├── policy.yaml           # approval rules
+└── config.json           # workspace config
 ```
 
 Every event is a single JSON line, hash-chained:
@@ -203,14 +202,15 @@ Every event is a single JSON line, hash-chained:
 ## All Commands
 
 ```
-edda init          Initialize .edda/ in your project
+edda init          Initialize .edda/ (auto-installs hooks if .claude/ detected)
 edda decide        Record a binding decision
 edda note          Record a note
 edda ask           Query decisions, history, and conversations
-edda search        Full-text search across transcripts (FTS5)
+edda search        Full-text search across transcripts (Tantivy)
 edda log           Query events with filters (type, date, tag, branch)
 edda context       Output context snapshot (what the agent sees)
 edda status        Show workspace status
+edda watch         Real-time TUI: peers, events, decisions
 edda commit        Create a commit event
 edda branch        Branch operations
 edda switch        Switch branch
@@ -221,6 +221,8 @@ edda doctor        Health check
 edda config        Read/write workspace config
 edda pattern       Manage classification patterns
 edda mcp           Start MCP server (stdio JSON-RPC 2.0)
+edda conduct       Multi-phase plan orchestration
+edda plan          Plan scaffolding and templates
 edda run           Run a command and record output
 edda blob          Manage blob metadata
 edda gc            Garbage collect expired content
@@ -228,49 +230,58 @@ edda gc            Garbage collect expired content
 
 ## Integration
 
-**Claude Code** — fully supported via bridge hooks. Auto-captures decisions, digests sessions, injects context.
+**Claude Code** — fully supported via bridge hooks. Auto-captures decisions, digests sessions, injects context. Hooks are auto-installed by `edda init` when `.claude/` is detected.
 
 ```bash
-edda bridge claude install    # one command, done
+edda init    # detects Claude Code, installs hooks automatically
 ```
 
-**Other tools** — MCP server available (experimental):
+**OpenClaw** — supported via bridge plugin.
 
 ```bash
-edda mcp serve    # stdio JSON-RPC 2.0, works with any MCP client
+edda bridge openclaw install    # installs global plugin
+```
+
+**Any MCP client** (Cursor, Windsurf, etc.) — 7 tools via MCP server:
+
+```bash
+edda mcp serve    # stdio JSON-RPC 2.0
+# Tools: edda_status, edda_note, edda_decide, edda_ask, edda_log, edda_context, edda_draft_inbox
 ```
 
 ## Architecture
 
-12 Rust crates:
+15 Rust crates:
 
 | Crate | What it does |
 |-------|-------------|
 | `edda-core` | Event model, hash chain, schema, provenance |
-| `edda-ledger` | Append-only ledger, blob store, locking |
+| `edda-ledger` | Append-only ledger (SQLite), blob store, locking |
 | `edda-cli` | All commands |
+| `edda-tui` | Real-time TUI (ratatui): peers, events, decisions |
 | `edda-bridge-claude` | Claude Code hooks, transcript ingest, context injection |
-| `edda-mcp` | MCP server |
+| `edda-bridge-openclaw` | OpenClaw hooks and plugin |
+| `edda-mcp` | MCP server (7 tools) |
+| `edda-ask` | Cross-source decision query engine |
 | `edda-derive` | View rebuilding, tiered history |
 | `edda-pack` | Context generation, budget controls |
 | `edda-transcript` | Transcript delta ingest, classification |
 | `edda-store` | Per-user store, atomic writes |
-| `edda-search-fts` | FTS5 SQLite search |
+| `edda-search-fts` | Full-text search (Tantivy) |
 | `edda-index` | Transcript index |
-| `edda-conductor` | Multi-phase plan orchestration *(experimental)* |
+| `edda-conductor` | Multi-phase plan orchestration |
 
 ## Status
 
-539 tests · 0 clippy warnings · MIT license
+MIT license
 
 ## Roadmap
 
 - [ ] Prebuilt binaries (macOS, Linux, Windows)
-- [ ] Second bridge (Cursor / generic MCP client)
 - [ ] npm wrapper (`npx edda init`)
 - [ ] Decision recall metrics
-- [ ] Multi-session coordination
 - [ ] Cross-project decision search
+- [ ] tmux-based multi-pane TUI (L3)
 
 ## License
 
