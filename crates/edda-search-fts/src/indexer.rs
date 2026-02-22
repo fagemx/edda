@@ -4,20 +4,29 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
 use tantivy::schema::*;
-use tantivy::{doc, IndexWriter};
+use tantivy::{doc, IndexWriter, Term};
 
 /// Index all ledger events into Tantivy.
 ///
-/// Reads events via `iter_fn` and creates one Tantivy document per event.
+/// Deletes existing event documents first (dedup by rebuild), then re-adds all.
 /// Returns the number of documents added.
-pub fn index_events<F>(writer: &IndexWriter, schema: &Schema, iter_fn: F) -> anyhow::Result<usize>
+pub fn index_events<F>(
+    writer: &IndexWriter,
+    schema: &Schema,
+    project_id: &str,
+    iter_fn: F,
+) -> anyhow::Result<usize>
 where
     F: FnOnce() -> anyhow::Result<Vec<edda_core::Event>>,
 {
+    // Delete all existing event docs to avoid duplicates on re-index
+    let f_doc_type = schema.get_field("doc_type")?;
+    writer.delete_term(Term::from_field_text(f_doc_type, "event"));
+
     let events = iter_fn()?;
     let mut count = 0;
     for event in &events {
-        add_event_doc(writer, schema, event)?;
+        add_event_doc(writer, schema, project_id, event)?;
         count += 1;
     }
     Ok(count)
@@ -29,6 +38,7 @@ where
 pub fn add_event_doc(
     writer: &IndexWriter,
     schema: &Schema,
+    project_id: &str,
     event: &edda_core::Event,
 ) -> anyhow::Result<()> {
     let f_doc_type = schema.get_field("doc_type")?;
@@ -46,17 +56,14 @@ pub fn add_event_doc(
     let (title, body) = extract_event_title_body(event);
     let tags = extract_event_tags(event);
 
-    // Events don't carry session_id directly; leave empty for events
-    let session_id = "";
-
     writer.add_document(doc!(
         f_doc_type => "event",
         f_event_type => event.event_type.as_str(),
         f_branch => event.branch.as_str(),
         f_ts => event.ts.as_str(),
         f_doc_id => event.event_id.as_str(),
-        f_session_id => session_id,
-        f_project_id => "", // events don't carry project_id; filtered at query time
+        f_session_id => "",
+        f_project_id => project_id,
         f_title => title.as_str(),
         f_body => body.as_str(),
         f_tags => tags.as_str(),
@@ -511,7 +518,7 @@ mod tests {
             event_level: None,
         };
 
-        add_event_doc(&writer, &schema, &event).unwrap();
+        add_event_doc(&writer, &schema, "p1", &event).unwrap();
         writer.commit().unwrap();
 
         let reader = index.reader().unwrap();
@@ -556,13 +563,56 @@ mod tests {
             },
         ];
 
-        let count = index_events(&writer, &schema, || Ok(events)).unwrap();
+        let count = index_events(&writer, &schema, "p1", || Ok(events)).unwrap();
         writer.commit().unwrap();
         assert_eq!(count, 2);
 
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
         assert_eq!(searcher.num_docs(), 2);
+    }
+
+    #[test]
+    fn index_events_dedup_on_reindex() {
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+
+        let make_events = || {
+            Ok(vec![edda_core::Event {
+                event_id: "evt_dedup".to_string(),
+                ts: "2026-02-17T12:00:00Z".to_string(),
+                event_type: "note".to_string(),
+                branch: "main".to_string(),
+                parent_hash: None,
+                hash: "abc".to_string(),
+                payload: serde_json::json!({"text": "hello"}),
+                refs: Default::default(),
+                schema_version: 1,
+                digests: Vec::new(),
+                event_family: None,
+                event_level: None,
+            }])
+        };
+
+        // First index
+        let count = index_events(&writer, &schema, "p1", make_events).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(count, 1);
+
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        assert_eq!(searcher.num_docs(), 1);
+
+        // Second index — should delete old events then re-add, NOT duplicate
+        let count2 = index_events(&writer, &schema, "p1", make_events).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(count2, 1);
+
+        // Reload reader to see merged segments
+        let reader2 = index.reader().unwrap();
+        let searcher2 = reader2.searcher();
+        assert_eq!(searcher2.num_docs(), 1, "events should not be duplicated on re-index");
     }
 
     #[test]
