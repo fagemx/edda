@@ -62,6 +62,27 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Claim a scope for coordination (shortcut for `bridge claude claim`)
+    Claim {
+        /// Short label for this session's scope (e.g. "auth", "billing")
+        label: String,
+        /// File path patterns this scope covers (e.g. "src/auth/*")
+        #[arg(long)]
+        paths: Vec<String>,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Send a request to another session (shortcut for `bridge claude request`)
+    Request {
+        /// Target session label
+        to: String,
+        /// Request message
+        message: String,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Query project decisions, history, and conversations
     Ask {
         /// Query string (keyword, domain, or exact key like "db.engine"). Omit for all active decisions.
@@ -762,6 +783,16 @@ fn main() -> anyhow::Result<()> {
             reason,
             session,
         } => cmd_bridge::decide(&repo_root, &decision, reason.as_deref(), session.as_deref()),
+        Command::Claim {
+            label,
+            paths,
+            session,
+        } => cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref()),
+        Command::Request {
+            to,
+            message,
+            session,
+        } => cmd_bridge::request(&repo_root, &to, &message, session.as_deref()),
         Command::Ask {
             query,
             limit,
