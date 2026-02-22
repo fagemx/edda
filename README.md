@@ -23,6 +23,10 @@
 </p>
 
 <p align="center">
+  English · <a href="./docs/README_zh-TW.md">繁體中文</a>
+</p>
+
+<p align="center">
   <img src="https://github.com/user-attachments/assets/b818396d-3d70-4af7-9ea4-a7c5e67f7244" width="700" alt="Edda overview" />
 </p>
 
