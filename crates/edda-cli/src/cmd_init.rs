@@ -9,6 +9,9 @@ pub fn execute(repo_root: &Path) -> anyhow::Result<()> {
     let paths = EddaPaths::discover(repo_root);
 
     if paths.is_initialized() {
+        // Ensure schema and HEAD exist even if .edda/ dir was partially created
+        ledger::init_workspace(&paths)?;
+        ledger::init_head(&paths, "main")?;
         println!("Already initialized at {}", paths.edda_dir.display());
         return Ok(());
     }
