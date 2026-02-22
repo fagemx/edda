@@ -33,7 +33,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Initialize a new .edda/ workspace
-    Init,
+    Init {
+        /// Skip auto-detection and installation of bridge hooks
+        #[arg(long)]
+        no_hooks: bool,
+    },
     /// Record a note event
     Note {
         /// Note text
@@ -746,7 +750,7 @@ fn main() -> anyhow::Result<()> {
     let repo_root = std::env::current_dir()?;
 
     match cli.cmd {
-        Command::Init => cmd_init::execute(&repo_root),
+        Command::Init { no_hooks } => cmd_init::execute(&repo_root, no_hooks),
         Command::Note { text, role, tags } => cmd_note::execute(&repo_root, &text, &role, &tags),
         Command::Decide {
             decision,

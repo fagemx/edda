@@ -1283,7 +1283,7 @@ mod tests {
 
     /// Initialize a temp edda workspace for testing.
     fn init_workspace(root: &Path) {
-        crate::cmd_init::execute(root).expect("init should succeed");
+        crate::cmd_init::execute(root, true).expect("init should succeed");
     }
 
     /// Write a minimal draft file directly (bypasses propose logic).
