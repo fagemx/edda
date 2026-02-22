@@ -168,17 +168,17 @@ main() {
     say "  to: ${INSTALL_DIR}"
 
     # Create temp directory with cleanup trap
-    TMPDIR="$(mktemp -d)"
-    trap 'rm -rf "$TMPDIR"' EXIT
+    _tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$_tmpdir"' EXIT
 
     # Download archive and checksum
     say "Downloading ${ARCHIVE_NAME}..."
-    download "${BASE_URL}/${ARCHIVE_NAME}" "${TMPDIR}/${ARCHIVE_NAME}"
-    download "${BASE_URL}/${ARCHIVE_NAME}.sha256" "${TMPDIR}/${ARCHIVE_NAME}.sha256" || true
+    download "${BASE_URL}/${ARCHIVE_NAME}" "${_tmpdir}/${ARCHIVE_NAME}"
+    download "${BASE_URL}/${ARCHIVE_NAME}.sha256" "${_tmpdir}/${ARCHIVE_NAME}.sha256" || true
 
     # Verify checksum if .sha256 was downloaded
-    if [ -f "${TMPDIR}/${ARCHIVE_NAME}.sha256" ]; then
-        if verify_checksum "${TMPDIR}/${ARCHIVE_NAME}" "${TMPDIR}/${ARCHIVE_NAME}.sha256"; then
+    if [ -f "${_tmpdir}/${ARCHIVE_NAME}.sha256" ]; then
+        if verify_checksum "${_tmpdir}/${ARCHIVE_NAME}" "${_tmpdir}/${ARCHIVE_NAME}.sha256"; then
             say "Checksum verified."
         else
             err "checksum verification failed — the download may be corrupted"
@@ -188,11 +188,11 @@ main() {
     fi
 
     # Extract
-    tar xzf "${TMPDIR}/${ARCHIVE_NAME}" -C "${TMPDIR}"
+    tar xzf "${_tmpdir}/${ARCHIVE_NAME}" -C "${_tmpdir}"
 
     # Install binary
     mkdir -p "${INSTALL_DIR}"
-    cp "${TMPDIR}"/edda-*/"${BINARY}" "${INSTALL_DIR}/${BINARY}"
+    cp "${_tmpdir}"/edda-*/"${BINARY}" "${INSTALL_DIR}/${BINARY}"
     chmod +x "${INSTALL_DIR}/${BINARY}"
 
     say ""
