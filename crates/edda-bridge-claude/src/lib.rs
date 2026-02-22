@@ -4,6 +4,7 @@ pub mod peers;
 pub mod redact;
 pub mod render;
 pub mod state;
+pub mod watch;
 
 mod admin;
 mod dispatch;

@@ -7,7 +7,7 @@ use crate::parse::now_rfc3339;
 // ── Session Signals (extracted from transcript) ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct TaskSnapshot {
+pub struct TaskSnapshot {
     pub id: String,
     pub subject: String,
     pub status: String,
