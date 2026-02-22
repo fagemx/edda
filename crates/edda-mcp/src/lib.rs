@@ -50,6 +50,8 @@ struct AskParams {
     limit: Option<usize>,
     /// Include superseded decisions (default: false)
     include_superseded: Option<bool>,
+    /// Filter by branch (default: all branches)
+    branch: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -261,7 +263,7 @@ impl EddaServer {
         let opts = edda_ask::AskOptions {
             limit: params.limit.unwrap_or(10),
             include_superseded: params.include_superseded.unwrap_or(false),
-            branch: None,
+            branch: params.branch,
         };
 
         let result = edda_ask::ask(&ledger, q, &opts, None).map_err(to_mcp_err)?;
@@ -751,6 +753,7 @@ mod tests {
                 query: Some("postgres".to_string()),
                 limit: None,
                 include_superseded: None,
+                branch: None,
             }))
             .await
             .unwrap();
@@ -787,6 +790,7 @@ mod tests {
                 query: None,
                 limit: None,
                 include_superseded: None,
+                branch: None,
             }))
             .await
             .unwrap();
@@ -829,6 +833,7 @@ mod tests {
                 query: Some("db".to_string()),
                 limit: None,
                 include_superseded: None,
+                branch: None,
             }))
             .await
             .unwrap();
@@ -849,6 +854,7 @@ mod tests {
                 query: Some("nonexistent".to_string()),
                 limit: None,
                 include_superseded: None,
+                branch: None,
             }))
             .await
             .unwrap();

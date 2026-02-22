@@ -120,6 +120,14 @@ pub fn ask(
     let domains = ledger.list_domains()?;
     let input_type = detect_input_type(query, &domains);
 
+    // Branch filter helper: keep only decisions matching the requested branch
+    let branch_filter = |hits: Vec<DecisionHit>| -> Vec<DecisionHit> {
+        match &opts.branch {
+            Some(b) => hits.into_iter().filter(|d| d.branch == *b).collect(),
+            None => hits,
+        }
+    };
+
     let (decisions, timeline) = match &input_type {
         InputType::ExactKey(key) => {
             let all = ledger
@@ -127,6 +135,7 @@ pub fn ask(
                 .into_iter()
                 .map(|r| to_decision_hit(&r))
                 .collect::<Vec<_>>();
+            let all = branch_filter(all);
             let active: Vec<DecisionHit> = if opts.include_superseded {
                 all.clone()
             } else {
@@ -135,31 +144,42 @@ pub fn ask(
             (active, all)
         }
         InputType::Domain(domain) => {
-            let active = ledger
-                .active_decisions(Some(domain), None)?
-                .into_iter()
-                .map(|r| to_decision_hit(&r))
-                .collect();
-            let tl = ledger
-                .domain_timeline(domain)?
-                .into_iter()
-                .map(|r| to_decision_hit(&r))
-                .collect();
+            let active = branch_filter(
+                ledger
+                    .active_decisions(Some(domain), None)?
+                    .into_iter()
+                    .map(|r| to_decision_hit(&r))
+                    .collect(),
+            );
+            let tl = branch_filter(
+                ledger
+                    .domain_timeline(domain)?
+                    .into_iter()
+                    .map(|r| to_decision_hit(&r))
+                    .collect(),
+            );
             (active, tl)
         }
         InputType::Keyword(kw) => {
-            let mut hits = ledger
-                .active_decisions(None, Some(kw))?
-                .into_iter()
-                .map(|r| to_decision_hit(&r))
-                .collect::<Vec<_>>();
+            let mut hits = branch_filter(
+                ledger
+                    .active_decisions(None, Some(kw))?
+                    .into_iter()
+                    .map(|r| to_decision_hit(&r))
+                    .collect(),
+            );
             if opts.include_superseded {
                 // Also scan all events for superseded decisions matching keyword
                 let events = ledger.iter_events()?;
+                let kw_lower = kw.to_lowercase();
                 for event in &events {
+                    if let Some(ref b) = opts.branch {
+                        if event.branch != *b {
+                            continue;
+                        }
+                    }
                     if is_decision_event(event) {
                         let (key, value, reason) = extract_decision_fields(event);
-                        let kw_lower = kw.to_lowercase();
                         if key.to_lowercase().contains(&kw_lower)
                             || value.to_lowercase().contains(&kw_lower)
                             || reason.to_lowercase().contains(&kw_lower)
@@ -184,11 +204,13 @@ pub fn ask(
             (hits, vec![])
         }
         InputType::Overview => {
-            let active = ledger
-                .active_decisions(None, None)?
-                .into_iter()
-                .map(|r| to_decision_hit(&r))
-                .collect();
+            let active = branch_filter(
+                ledger
+                    .active_decisions(None, None)?
+                    .into_iter()
+                    .map(|r| to_decision_hit(&r))
+                    .collect(),
+            );
             (active, vec![])
         }
     };
@@ -201,8 +223,11 @@ pub fn ask(
         .collect();
 
     let q = query.trim();
-    let related_commits = find_related_commits(ledger, &decision_event_ids, q, opts.limit)?;
-    let related_notes = find_related_notes(ledger, q, opts.limit)?;
+    // Load events once for both commit and note searches
+    let events = ledger.iter_events()?;
+    let related_commits =
+        find_related_commits(&events, &decision_event_ids, q, opts.limit, &opts.branch);
+    let related_notes = find_related_notes(&events, q, opts.limit, &opts.branch);
 
     let conversations = match transcript_search {
         Some(search_fn) if !q.is_empty() => search_fn(q, opts.limit),
@@ -230,18 +255,23 @@ pub fn ask(
 // ── Related event helpers ────────────────────────────────────────────
 
 fn find_related_commits(
-    ledger: &Ledger,
+    events: &[Event],
     decision_event_ids: &[&str],
     query: &str,
     limit: usize,
-) -> anyhow::Result<Vec<CommitHit>> {
-    let events = ledger.iter_events()?;
+    branch: &Option<String>,
+) -> Vec<CommitHit> {
     let mut hits: Vec<CommitHit> = Vec::new();
     let q_lower = query.to_lowercase();
 
     for event in events.iter().rev() {
         if event.event_type != "commit" {
             continue;
+        }
+        if let Some(b) = branch {
+            if event.branch != *b {
+                continue;
+            }
         }
 
         let title = event
@@ -302,21 +332,30 @@ fn find_related_commits(
         }
     }
 
-    Ok(hits)
+    hits
 }
 
-fn find_related_notes(ledger: &Ledger, query: &str, limit: usize) -> anyhow::Result<Vec<NoteHit>> {
+fn find_related_notes(
+    events: &[Event],
+    query: &str,
+    limit: usize,
+    branch: &Option<String>,
+) -> Vec<NoteHit> {
     if query.is_empty() {
-        return Ok(vec![]);
+        return vec![];
     }
 
-    let events = ledger.iter_events()?;
     let q_lower = query.to_lowercase();
     let mut hits: Vec<NoteHit> = Vec::new();
 
     for event in events.iter().rev() {
         if event.event_type != "note" {
             continue;
+        }
+        if let Some(b) = branch {
+            if event.branch != *b {
+                continue;
+            }
         }
         // Skip decision notes — those are already in decisions section
         if is_decision_event(event) {
@@ -342,7 +381,7 @@ fn find_related_notes(ledger: &Ledger, query: &str, limit: usize) -> anyhow::Res
         }
     }
 
-    Ok(hits)
+    hits
 }
 
 // ── Human-readable formatting ────────────────────────────────────────
@@ -816,6 +855,44 @@ mod tests {
         let result = ask(&ledger, "postgres", &AskOptions::default(), None).unwrap();
         // Decision note should NOT appear in related_notes
         assert!(result.related_notes.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ask_branch_filter() {
+        let (tmp, ledger) = setup();
+        ledger
+            .append_event(&make_decision(
+                "main",
+                "db.engine",
+                "postgres",
+                Some("prod"),
+                None,
+            ))
+            .unwrap();
+        ledger
+            .append_event(&make_decision(
+                "dev",
+                "db.engine",
+                "sqlite",
+                Some("dev speed"),
+                None,
+            ))
+            .unwrap();
+
+        // No branch filter → both
+        let result = ask(&ledger, "", &AskOptions::default(), None).unwrap();
+        assert_eq!(result.decisions.len(), 2);
+
+        // Filter to dev → only sqlite
+        let opts = AskOptions {
+            branch: Some("dev".into()),
+            ..Default::default()
+        };
+        let result = ask(&ledger, "", &opts, None).unwrap();
+        assert_eq!(result.decisions.len(), 1);
+        assert_eq!(result.decisions[0].value, "sqlite");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
