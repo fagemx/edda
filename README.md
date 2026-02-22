@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Automatic decision memory for Claude Code with cross-session persistence.</strong><br/>
-  Local, deterministic, and zero-cost — no LLM, no embeddings, no cloud.
+  Local, deterministic, and zero API cost — no LLM, no embeddings, no cloud.
 </p>
 
 <p align="center">
@@ -15,6 +15,7 @@
 <p align="center">
   <a href="#what-is-edda">What is Edda?</a> ·
   <a href="#install">Install</a> ·
+  <a href="#quick-start">Quick Start</a> ·
   <a href="#how-it-works">How It Works</a> ·
   <a href="#how-edda-compares">Comparison</a> ·
   <a href="#integration">Integration</a> ·
@@ -50,7 +51,7 @@ Session 1                          Session 2
   Edda digests transcript            Agent continues where it left off
 ```
 
-**Everything local** — plain files in `.edda/`, no cloud, no accounts, no API calls.
+**Everything stays local** — data lives in `.edda/` (SQLite + local files), with no cloud, no accounts, and no API calls.
 
 ## Install
 
@@ -236,7 +237,7 @@ edda watch                 # real-time TUI: peers, events, decisions
 └── config.json           # workspace config
 ```
 
-Every event is a single JSON line, hash-chained:
+Every event follows a hash-chained JSON schema (stored in the local SQLite ledger):
 
 ```json
 {
