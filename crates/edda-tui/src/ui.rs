@@ -77,16 +77,16 @@ fn render_events(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .borders(Borders::ALL)
         .border_style(panel_style(app, Panel::Events));
 
+    let max_preview = area.width.saturating_sub(24) as usize; // 24 = borders + time(5) + type(10) + spaces
     let items: Vec<ListItem> = app
         .events
         .iter()
         .skip(app.event_scroll)
         .map(|evt| {
-            let ts = &evt.ts[..19.min(evt.ts.len())];
+            let ts = &evt.ts[11..19.min(evt.ts.len())]; // HH:MM:SS only
             let etype = &evt.event_type;
-            let preview = serde_json::to_string(&evt.payload)
-                .unwrap_or_default();
-            let preview = truncate_str(&preview, 60);
+            let preview = event_preview(&evt.payload, etype);
+            let preview = truncate_str(&preview, max_preview);
             let line = format!(" {ts}  {etype:<10} {preview}");
             ListItem::new(Line::from(line))
         })
@@ -187,6 +187,28 @@ fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     };
     let bar = Paragraph::new(Line::from(Span::styled(text, style)));
     f.render_widget(bar, area);
+}
+
+/// Extract a human-readable preview from an event payload.
+fn event_preview(payload: &serde_json::Value, event_type: &str) -> String {
+    match event_type {
+        "note" => payload["text"].as_str().unwrap_or("").to_string(),
+        "decision" => {
+            let key = payload["key"].as_str().unwrap_or("?");
+            let val = payload["value"].as_str().unwrap_or("?");
+            format!("{key} = {val}")
+        }
+        "commit" => payload["title"].as_str().unwrap_or("").to_string(),
+        "merge" => {
+            let src = payload["src"].as_str().unwrap_or("?");
+            let dst = payload["dst"].as_str().unwrap_or("?");
+            format!("{src} -> {dst}")
+        }
+        _ => {
+            // Fallback: compact JSON
+            serde_json::to_string(payload).unwrap_or_default()
+        }
+    }
 }
 
 /// Truncate a string to at most `max_chars` characters, appending "..." if truncated.
