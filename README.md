@@ -22,6 +22,10 @@
   <a href="#architecture">Architecture</a>
 </p>
 
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/48dafc6a-68dd-4d00-b393-25c1dd444c31" width="700" alt="Edda overview" />
+</p>
+
 ---
 
 ## What is Edda?
