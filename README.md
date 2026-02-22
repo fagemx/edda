@@ -25,9 +25,9 @@
 
 ## What is Edda?
 
-Claude Code loses all context when a session ends. The next session starts from scratch — no memory of what was decided, what was tried, or why.
+Claude Code can compress context mid-session (compact), but decisions get diluted in noise, and everything is gone when the session ends.
 
-Edda runs in the background and **automatically** captures decisions from your agent's conversations, stores them in a local append-only ledger, and injects relevant context when the next session starts. Also works with OpenClaw and any MCP client.
+Edda **extracts** decisions instead of compressing everything. It runs in the background, captures what matters — structured decisions with rationale — persists them in a local ledger, and injects relevant context when the next session starts. The agent can query past decisions, see why they were made, and **continue tasks across sessions**. Also works with OpenClaw and any MCP client.
 
 **You don't need to do anything.** After `edda init`, hooks handle everything:
 
