@@ -413,14 +413,8 @@ mod tests {
             md_content.contains("edda:coordination"),
             "coordination marker"
         );
-        assert!(
-            md_content.contains("edda claim"),
-            "claim instruction"
-        );
-        assert!(
-            md_content.contains("edda request"),
-            "request instruction"
-        );
+        assert!(md_content.contains("edda claim"), "claim instruction");
+        assert!(md_content.contains("edda request"), "request instruction");
 
         uninstall(tmp.path()).unwrap();
         let content = fs::read_to_string(&path).unwrap();
@@ -458,10 +452,7 @@ mod tests {
             content.contains("edda:coordination"),
             "coordination section appended"
         );
-        assert!(
-            content.contains("edda claim"),
-            "claim instruction present"
-        );
+        assert!(content.contains("edda claim"), "claim instruction present");
     }
 
     #[test]
@@ -531,14 +522,8 @@ mod tests {
             content.contains("edda:coordination"),
             "coordination section appended"
         );
-        assert!(
-            content.contains("edda claim"),
-            "claim instruction present"
-        );
-        assert!(
-            content.contains("Off-limits"),
-            "off-limits rule present"
-        );
+        assert!(content.contains("edda claim"), "claim instruction present");
+        assert!(content.contains("Off-limits"), "off-limits rule present");
         assert_eq!(
             content.matches("edda:decision-tracking").count(),
             1,
