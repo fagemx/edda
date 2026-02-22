@@ -280,7 +280,6 @@ edda mcp serve    # stdio JSON-RPC 2.0
 
 - [x] Prebuilt binaries (macOS, Linux, Windows)
 - [x] One-line install script (`curl | sh`)
-- [ ] npm wrapper (`npx edda init`)
 - [ ] Decision recall metrics
 - [ ] Cross-project decision search
 - [ ] tmux-based multi-pane TUI (L3)
