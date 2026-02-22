@@ -25,11 +25,11 @@ Your coding agent forgets every decision when the session ends. Edda makes them 
 ## Install
 
 ```bash
-# From source
-cargo install edda
-
-# Or download a prebuilt binary
+# Download a prebuilt binary
 # → https://github.com/fagemx/edda/releases
+
+# Or build from source
+cargo install --git https://github.com/fagemx/edda edda-cli
 ```
 
 ## Quick Start
@@ -49,7 +49,7 @@ If `.claude/` exists, `edda init` auto-installs hooks. Use `--no-hooks` to skip.
 |  | MEMORY.md | RAG / Vector DB | LLM Summary | **Edda** |
 |--|-----------|----------------|-------------|----------|
 | **Storage** | Markdown file | Vector embeddings | LLM-generated text | Append-only SQLite |
-| **Retrieval** | Agent reads whole file | Semantic similarity | LLM re-summarizes | FTS5 keyword + structured query |
+| **Retrieval** | Agent reads whole file | Semantic similarity | LLM re-summarizes | Tantivy full-text + structured query |
 | **Needs LLM?** | No | Yes (embeddings) | Yes (every read/write) | **No** |
 | **Needs vector DB?** | No | Yes | No | **No** |
 | **Tamper-evident?** | No | No | No | **Yes** (hash chain) |
@@ -272,11 +272,11 @@ edda mcp serve    # stdio JSON-RPC 2.0
 
 ## Status
 
-MIT license
+MIT OR Apache-2.0
 
 ## Roadmap
 
-- [ ] Prebuilt binaries (macOS, Linux, Windows)
+- [x] Prebuilt binaries (macOS, Linux, Windows)
 - [ ] npm wrapper (`npx edda init`)
 - [ ] Decision recall metrics
 - [ ] Cross-project decision search
@@ -284,7 +284,7 @@ MIT license
 
 ## License
 
-MIT
+MIT OR Apache-2.0
 
 ---
 
