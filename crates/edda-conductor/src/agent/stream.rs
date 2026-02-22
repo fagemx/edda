@@ -488,13 +488,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let tee_path = dir.path().join("transcript.jsonl");
 
-        // Spawn a process that writes lines to stdout
-        let mut child = Command::new("cmd")
-            .args(["/C", "echo line_one & echo line_two"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
+        // Spawn a process that writes lines to stdout (cross-platform)
+        let mut child = if cfg!(windows) {
+            Command::new("cmd")
+                .args(["/C", "echo line_one & echo line_two"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        } else {
+            Command::new("sh")
+                .args(["-c", "echo line_one; echo line_two"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap()
+        };
 
         let stdout = child.stdout.take().unwrap();
         let mut monitor = StreamMonitor::new(stdout).with_tee(Some(tee_path.clone()));

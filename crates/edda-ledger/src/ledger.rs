@@ -261,8 +261,7 @@ mod tests {
     #[test]
     fn open_or_init_creates_workspace() {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let tmp =
-            std::env::temp_dir().join(format!("edda_auto_init_{}_{n}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("edda_auto_init_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 

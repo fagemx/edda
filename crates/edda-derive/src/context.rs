@@ -539,6 +539,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_digest_note_with_tasks(
         branch: &str,
         session_id: &str,
@@ -562,6 +563,7 @@ mod tests {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_digest_note_full(
         branch: &str,
         session_id: &str,

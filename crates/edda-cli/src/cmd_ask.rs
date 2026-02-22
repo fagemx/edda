@@ -1,4 +1,4 @@
-use edda_ask::{ask, format_human, AskOptions, ConversationHit};
+use edda_ask::{ask, format_human, AskOptions, ConversationHit, TranscriptSearchFn};
 use edda_ledger::Ledger;
 use std::path::Path;
 
@@ -37,9 +37,7 @@ pub fn execute(
 }
 
 /// Build a transcript search callback using Tantivy, if index exists.
-fn build_transcript_callback(
-    repo_root: &Path,
-) -> Option<Box<dyn Fn(&str, usize) -> Vec<ConversationHit>>> {
+fn build_transcript_callback(repo_root: &Path) -> Option<Box<TranscriptSearchFn>> {
     let project_id = edda_store::project_id(repo_root);
     let index_dir = edda_store::project_dir(&project_id)
         .join("search")
