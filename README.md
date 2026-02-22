@@ -25,6 +25,9 @@ Your coding agent forgets every decision when the session ends. Edda makes them 
 ## Install
 
 ```bash
+# One-line install (Linux / macOS)
+curl -sSf https://raw.githubusercontent.com/fagemx/edda/main/install.sh | sh
+
 # macOS / Linux (Homebrew)
 brew install fagemx/tap/edda
 
