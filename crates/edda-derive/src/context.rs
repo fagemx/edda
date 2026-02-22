@@ -492,7 +492,7 @@ mod tests {
         // Add a todo note (becomes a signal)
         let todo_tags = vec!["todo".to_string()];
         let note = new_note_event("main", None, "user", "fix the bug", &todo_tags).unwrap();
-        ledger.append_event(&note, false).unwrap();
+        ledger.append_event(&note).unwrap();
 
         // Add a commit
         let mut params = CommitEventParams {
@@ -506,7 +506,7 @@ mod tests {
             labels: vec![],
         };
         let commit = new_commit_event(&mut params).unwrap();
-        ledger.append_event(&commit, false).unwrap();
+        ledger.append_event(&commit).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -680,7 +680,7 @@ mod tests {
             &["cargo check -p edda-mcp"],
             45,
         );
-        ledger.append_event(&digest, false).unwrap();
+        ledger.append_event(&digest).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -724,7 +724,7 @@ mod tests {
                 &[],
                 i * 15,
             );
-            ledger.append_event(&digest, false).unwrap();
+            ledger.append_event(&digest).unwrap();
         }
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
@@ -757,7 +757,7 @@ mod tests {
 
         // Only a regular note, no session_digest
         let note = new_note_event("main", None, "user", "hello", &[]).unwrap();
-        ledger.append_event(&note, false).unwrap();
+        ledger.append_event(&note).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -787,7 +787,7 @@ mod tests {
                 ("Deploy", "pending"),
             ],
         );
-        ledger.append_event(&digest, false).unwrap();
+        ledger.append_event(&digest).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -818,7 +818,7 @@ mod tests {
 
         // Digest with no tasks_snapshot — should fall back to tool call counts
         let digest = make_digest_note("main", "sess-notask", 8, &[], &[], &[], 20);
-        ledger.append_event(&digest, false).unwrap();
+        ledger.append_event(&digest).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -849,7 +849,7 @@ mod tests {
             &[("Fix build", "in_progress")],
             "error_stuck",
         );
-        ledger.append_event(&digest, false).unwrap();
+        ledger.append_event(&digest).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -867,7 +867,7 @@ mod tests {
 
         let digest =
             make_digest_note_full("main", "sess-ok", 10, &[], &[], &[], 30, &[], "completed");
-        ledger.append_event(&digest, false).unwrap();
+        ledger.append_event(&digest).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -918,7 +918,7 @@ mod tests {
                 stderr_blob: "",
             })
             .unwrap();
-            ledger.append_event(&cmd, false).unwrap();
+            ledger.append_event(&cmd).unwrap();
         }
         let argv2 = vec!["cargo".to_string(), "test".to_string()];
         let cmd2 = new_cmd_event(&CmdEventParams {
@@ -932,7 +932,7 @@ mod tests {
             stderr_blob: "",
         })
         .unwrap();
-        ledger.append_event(&cmd2, false).unwrap();
+        ledger.append_event(&cmd2).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -966,7 +966,7 @@ mod tests {
             stderr_blob: "",
         })
         .unwrap();
-        ledger.append_event(&cmd, false).unwrap();
+        ledger.append_event(&cmd).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -990,8 +990,8 @@ mod tests {
         // Add notes without any commit
         let n1 = new_note_event("main", None, "user", "note 1", &[]).unwrap();
         let n2 = new_note_event("main", None, "user", "note 2", &[]).unwrap();
-        ledger.append_event(&n1, false).unwrap();
-        ledger.append_event(&n2, false).unwrap();
+        ledger.append_event(&n1).unwrap();
+        ledger.append_event(&n2).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1033,8 +1033,8 @@ mod tests {
             &tags,
         )
         .unwrap();
-        ledger.append_event(&d1, false).unwrap();
-        ledger.append_event(&d2, false).unwrap();
+        ledger.append_event(&d1).unwrap();
+        ledger.append_event(&d2).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1095,7 +1095,7 @@ mod tests {
             event_level: None,
         };
         finalize_event(&mut event);
-        ledger.append_event(&event, false).unwrap();
+        ledger.append_event(&event).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1119,7 +1119,7 @@ mod tests {
         // Only a todo note, no decision
         let tags = vec!["todo".to_string()];
         let note = new_note_event("main", None, "user", "fix bug", &tags).unwrap();
-        ledger.append_event(&note, false).unwrap();
+        ledger.append_event(&note).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1142,7 +1142,7 @@ mod tests {
         let tags = vec!["decision".to_string()];
         let d1 = new_note_event("main", None, "system", "db: mysql", &tags).unwrap();
         let d1_id = d1.event_id.clone();
-        ledger.append_event(&d1, false).unwrap();
+        ledger.append_event(&d1).unwrap();
 
         // Second decision: db = postgres, supersedes d1
         let payload = serde_json::json!({
@@ -1173,7 +1173,7 @@ mod tests {
             event_level: None,
         };
         finalize_event(&mut d2);
-        ledger.append_event(&d2, false).unwrap();
+        ledger.append_event(&d2).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1201,7 +1201,7 @@ mod tests {
         // A: db = sqlite
         let a = new_note_event("main", None, "system", "db: sqlite", &tags).unwrap();
         let a_id = a.event_id.clone();
-        ledger.append_event(&a, false).unwrap();
+        ledger.append_event(&a).unwrap();
 
         // B: db = mysql, supersedes A
         let mut b = new_note_event("main", None, "system", "db: mysql", &tags).unwrap();
@@ -1212,7 +1212,7 @@ mod tests {
             note: None,
         });
         finalize_event(&mut b);
-        ledger.append_event(&b, false).unwrap();
+        ledger.append_event(&b).unwrap();
 
         // C: db = postgres, supersedes B
         let mut c = new_note_event("main", None, "system", "db: postgres", &tags).unwrap();
@@ -1222,7 +1222,7 @@ mod tests {
             note: None,
         });
         finalize_event(&mut c);
-        ledger.append_event(&c, false).unwrap();
+        ledger.append_event(&c).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1256,7 +1256,7 @@ mod tests {
             &tags,
         )
         .unwrap();
-        ledger.append_event(&d, false).unwrap();
+        ledger.append_event(&d).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1285,7 +1285,7 @@ mod tests {
             30,
             &["Switched to JWT auth approach", "TODO: revisit caching"],
         );
-        ledger.append_event(&digest, false).unwrap();
+        ledger.append_event(&digest).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1315,7 +1315,7 @@ mod tests {
 
         // Digest without notes field (backward compat)
         let digest = make_digest_note("main", "sess-old", 10, &[], &[], &[], 30);
-        ledger.append_event(&digest, false).unwrap();
+        ledger.append_event(&digest).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1345,7 +1345,7 @@ mod tests {
                 &[],
                 i * 10,
             );
-            ledger.append_event(&digest, false).unwrap();
+            ledger.append_event(&digest).unwrap();
         }
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
@@ -1434,7 +1434,7 @@ mod tests {
                 &tags,
             )
             .unwrap();
-            ledger.append_event(&d, false).unwrap();
+            ledger.append_event(&d).unwrap();
         }
 
         // Render with depth=1 — decisions should still show up to 5
@@ -1473,8 +1473,8 @@ mod tests {
             20,
             &["Switched to JWT auth approach because session tokens were unreliable"],
         );
-        ledger.append_event(&d2, false).unwrap();
-        ledger.append_event(&d1, false).unwrap();
+        ledger.append_event(&d2).unwrap();
+        ledger.append_event(&d1).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1505,8 +1505,8 @@ mod tests {
             &[],
             20,
         );
-        ledger.append_event(&d2, false).unwrap();
-        ledger.append_event(&d1, false).unwrap();
+        ledger.append_event(&d2).unwrap();
+        ledger.append_event(&d1).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1540,8 +1540,8 @@ mod tests {
             20,
             &["Short note"],
         );
-        ledger.append_event(&d2, false).unwrap();
-        ledger.append_event(&d1, false).unwrap();
+        ledger.append_event(&d2).unwrap();
+        ledger.append_event(&d1).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1563,7 +1563,7 @@ mod tests {
         let (tmp, ledger) = setup_workspace();
 
         let d = make_digest_note_with_ts("main", "sess-001", "2026-02-17T10:00:00Z", &[], &[]);
-        ledger.append_event(&d, false).unwrap();
+        ledger.append_event(&d).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1582,9 +1582,9 @@ mod tests {
         let d1 = make_digest_note_with_ts("main", "sess-001", "2026-02-12T10:00:00Z", &[], &["c1"]);
         let d2 = make_digest_note_with_ts("main", "sess-002", "2026-02-14T10:00:00Z", &[], &["c2"]);
         let d3 = make_digest_note_with_ts("main", "sess-003", "2026-02-17T10:00:00Z", &[], &["c3"]);
-        ledger.append_event(&d1, false).unwrap();
-        ledger.append_event(&d2, false).unwrap();
-        ledger.append_event(&d3, false).unwrap();
+        ledger.append_event(&d1).unwrap();
+        ledger.append_event(&d2).unwrap();
+        ledger.append_event(&d3).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1601,7 +1601,7 @@ mod tests {
         let (tmp, ledger) = setup_workspace();
 
         let note = new_note_event("main", None, "user", "hello", &[]).unwrap();
-        ledger.append_event(&note, false).unwrap();
+        ledger.append_event(&note).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1629,7 +1629,7 @@ mod tests {
                 30,
                 &[("Add OAuth", "pending")],
             );
-            ledger.append_event(&d, false).unwrap();
+            ledger.append_event(&d).unwrap();
         }
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
@@ -1681,9 +1681,9 @@ mod tests {
             30,
             &[("Fix auth", "completed")],
         );
-        ledger.append_event(&d1, false).unwrap();
-        ledger.append_event(&d2, false).unwrap();
-        ledger.append_event(&d3, false).unwrap();
+        ledger.append_event(&d1).unwrap();
+        ledger.append_event(&d2).unwrap();
+        ledger.append_event(&d3).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1713,7 +1713,7 @@ mod tests {
             30,
             &[("Add OAuth", "pending")],
         );
-        ledger.append_event(&d, false).unwrap();
+        ledger.append_event(&d).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
@@ -1740,7 +1740,7 @@ mod tests {
                 &[],
                 i * 10,
             );
-            ledger.append_event(&digest, false).unwrap();
+            ledger.append_event(&digest).unwrap();
         }
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();

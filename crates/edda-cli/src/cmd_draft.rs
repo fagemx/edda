@@ -625,7 +625,7 @@ pub fn propose(p: ProposeParams<'_>) -> anyhow::Result<()> {
                 assignees: &stage.assignees,
                 reason: &reason,
             })?;
-            ledger.append_event(&req_event, true)?;
+            ledger.append_event(&req_event)?;
         }
         rebuild_all(&ledger)?;
     }
@@ -920,7 +920,7 @@ pub fn approve(
             stage_id: sid,
             role: &stage_role,
         })?;
-        ledger.append_event(&event, true)?;
+        ledger.append_event(&event)?;
 
         // Update stage
         let stage = draft.stages.iter_mut().find(|s| s.stage_id == sid).unwrap();
@@ -975,7 +975,7 @@ pub fn approve(
             stage_id: "",
             role: "",
         })?;
-        ledger.append_event(&event, true)?;
+        ledger.append_event(&event)?;
 
         draft.approvals.push(ApprovalRecord {
             ts: now_rfc3339(),
@@ -1077,7 +1077,7 @@ pub fn reject(
             stage_id: sid,
             role: &stage_role,
         })?;
-        ledger.append_event(&event, true)?;
+        ledger.append_event(&event)?;
 
         let stage = draft.stages.iter_mut().find(|s| s.stage_id == sid).unwrap();
         stage.status = "rejected".to_string();
@@ -1114,7 +1114,7 @@ pub fn reject(
             stage_id: "",
             role: "",
         })?;
-        ledger.append_event(&event, true)?;
+        ledger.append_event(&event)?;
 
         draft.approvals.push(ApprovalRecord {
             ts: now_rfc3339(),
@@ -1240,7 +1240,7 @@ pub fn apply(repo_root: &Path, id: &str, dry_run: bool, delete_after: bool) -> a
         return Ok(());
     }
 
-    ledger.append_event(&event, true)?;
+    ledger.append_event(&event)?;
     rebuild_all(&ledger)?;
 
     draft.status = "applied".to_string();

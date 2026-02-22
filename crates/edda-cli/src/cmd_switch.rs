@@ -25,7 +25,7 @@ pub fn execute(repo_root: &Path, name: &str) -> anyhow::Result<()> {
 
     // Write switch event on target branch
     let event = new_branch_switch_event(name, parent_hash.as_deref(), &from, name)?;
-    ledger.append_event(&event, true)?;
+    ledger.append_event(&event)?;
 
     ledger.set_head_branch(name)?;
 

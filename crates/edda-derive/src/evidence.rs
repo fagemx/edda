@@ -174,7 +174,7 @@ mod tests {
         // Add a todo note
         let todo_tags = vec!["todo".to_string()];
         let note = new_note_event("main", None, "user", "remember to test", &todo_tags).unwrap();
-        ledger.append_event(&note, false).unwrap();
+        ledger.append_event(&note).unwrap();
 
         // Add a failed command
         let argv = vec!["cargo".to_string(), "test".to_string()];
@@ -189,11 +189,11 @@ mod tests {
             stderr_blob: "blob:sha256:err123",
         })
         .unwrap();
-        ledger.append_event(&cmd, false).unwrap();
+        ledger.append_event(&cmd).unwrap();
 
         // Add a regular note (not evidence)
         let note2 = new_note_event("main", None, "user", "just a note", &[]).unwrap();
-        ledger.append_event(&note2, false).unwrap();
+        ledger.append_event(&note2).unwrap();
 
         let result = build_auto_evidence(&ledger, "main", 20).unwrap();
 
@@ -228,7 +228,7 @@ mod tests {
             labels: vec![],
         };
         let c1 = new_commit_event(&mut params).unwrap();
-        ledger.append_event(&c1, false).unwrap();
+        ledger.append_event(&c1).unwrap();
 
         // Second commit
         let mut params2 = CommitEventParams {
@@ -242,7 +242,7 @@ mod tests {
             labels: vec![],
         };
         let c2 = new_commit_event(&mut params2).unwrap();
-        ledger.append_event(&c2, false).unwrap();
+        ledger.append_event(&c2).unwrap();
 
         let result = last_commit_contribution(&ledger, "main").unwrap();
         assert_eq!(result.as_deref(), Some("beta work"));

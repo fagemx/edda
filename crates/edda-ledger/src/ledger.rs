@@ -43,10 +43,7 @@ impl Ledger {
     // ── Events ──────────────────────────────────────────────────────
 
     /// Append an event to the ledger. Append-only (CONTRACT LEDGER-02).
-    ///
-    /// The `_fsync` parameter is kept for API compatibility but ignored
-    /// (SQLite WAL mode handles durability).
-    pub fn append_event(&self, event: &Event, _fsync: bool) -> anyhow::Result<()> {
+    pub fn append_event(&self, event: &Event) -> anyhow::Result<()> {
         self.sqlite.append_event(event)
     }
 
@@ -173,11 +170,11 @@ mod tests {
     fn append_and_read_back() {
         let (tmp, ledger) = setup_workspace();
         let e1 = new_note_event("main", None, "system", "init", &[]).unwrap();
-        ledger.append_event(&e1, false).unwrap();
+        ledger.append_event(&e1).unwrap();
         assert_eq!(ledger.last_event_hash().unwrap(), Some(e1.hash.clone()));
 
         let e2 = new_note_event("main", Some(&e1.hash), "user", "hello", &[]).unwrap();
-        ledger.append_event(&e2, false).unwrap();
+        ledger.append_event(&e2).unwrap();
         assert_eq!(ledger.last_event_hash().unwrap(), Some(e2.hash.clone()));
 
         let events = ledger.iter_events().unwrap();

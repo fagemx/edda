@@ -656,7 +656,7 @@ mod tests {
 
         let mut event = new_note_event("main", None, "system", "test", &[]).unwrap();
         event.refs.blobs.push(ref_a.clone());
-        ledger.append_event(&event, false).unwrap();
+        ledger.append_event(&event).unwrap();
 
         let hex_b = ref_b.strip_prefix("blob:sha256:").unwrap();
         set_file_time_old(&paths.blobs_dir.join(hex_b));

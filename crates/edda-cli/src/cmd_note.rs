@@ -11,7 +11,7 @@ pub fn execute(repo_root: &Path, text: &str, role: &str, tags: &[String]) -> any
     let parent_hash = ledger.last_event_hash()?;
 
     let event = new_note_event(&branch, parent_hash.as_deref(), role, text, tags)?;
-    ledger.append_event(&event, false)?;
+    ledger.append_event(&event)?;
 
     println!("Wrote NOTE {}", event.event_id);
     Ok(())

@@ -40,7 +40,7 @@ pub fn execute(repo_root: &Path, argv: &[String]) -> anyhow::Result<()> {
         stdout_blob: &stdout_blob,
         stderr_blob: &stderr_blob,
     })?;
-    ledger.append_event(&event, false)?;
+    ledger.append_event(&event)?;
 
     // Replay output to terminal
     std::io::stdout().write_all(&output.stdout)?;

@@ -347,7 +347,7 @@ mod tests {
             stderr_blob: "",
         })
         .unwrap();
-        ledger.append_event(&phantom, false).unwrap();
+        ledger.append_event(&phantom).unwrap();
 
         // A real failed cmd: duration_ms > 0
         let argv_real = vec!["cargo".to_string(), "test".to_string()];
@@ -362,7 +362,7 @@ mod tests {
             stderr_blob: "",
         })
         .unwrap();
-        ledger.append_event(&real, false).unwrap();
+        ledger.append_event(&real).unwrap();
 
         let snap = build_branch_snapshot(&ledger, "main").unwrap();
 

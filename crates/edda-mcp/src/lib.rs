@@ -158,7 +158,7 @@ impl EddaServer {
         let event = new_note_event(&branch, parent_hash.as_deref(), &role, &params.text, &tags)
             .map_err(to_mcp_err)?;
 
-        ledger.append_event(&event, false).map_err(to_mcp_err)?;
+        ledger.append_event(&event).map_err(to_mcp_err)?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Wrote NOTE {}",
@@ -182,7 +182,9 @@ impl EddaServer {
     }
 
     /// Record a binding decision (key=value) with optional reason and auto-supersede
-    #[tool(description = "Record a binding decision (key=value) with optional reason and auto-supersede detection")]
+    #[tool(
+        description = "Record a binding decision (key=value) with optional reason and auto-supersede detection"
+    )]
     async fn edda_decide(
         &self,
         Parameters(params): Parameters<DecideParams>,
@@ -208,9 +210,8 @@ impl EddaServer {
         };
         let tags = vec!["decision".to_string()];
 
-        let mut event =
-            new_note_event(&branch, parent_hash.as_deref(), "system", &text, &tags)
-                .map_err(to_mcp_err)?;
+        let mut event = new_note_event(&branch, parent_hash.as_deref(), "system", &text, &tags)
+            .map_err(to_mcp_err)?;
 
         // Inject structured decision object into payload
         let decision_obj = match &params.reason {
@@ -239,7 +240,7 @@ impl EddaServer {
 
         // Re-finalize after payload/refs mutation
         finalize_event(&mut event);
-        ledger.append_event(&event, false).map_err(to_mcp_err)?;
+        ledger.append_event(&event).map_err(to_mcp_err)?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "Decision recorded: {key} = {value} [{}]{supersede_info}",
@@ -248,7 +249,9 @@ impl EddaServer {
     }
 
     /// Search decisions by keyword (case-insensitive match on key/value/reason)
-    #[tool(description = "Search decisions by keyword (case-insensitive match on key/value/reason)")]
+    #[tool(
+        description = "Search decisions by keyword (case-insensitive match on key/value/reason)"
+    )]
     async fn edda_query(
         &self,
         Parameters(params): Parameters<QueryParams>,
@@ -292,11 +295,7 @@ impl EddaServer {
                     return false;
                 }
                 // Match against key, value, reason, or text
-                let text = e
-                    .payload
-                    .get("text")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let text = e.payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let dec_key = e
                     .payload
                     .get("decision")

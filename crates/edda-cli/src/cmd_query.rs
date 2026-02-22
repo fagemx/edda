@@ -23,7 +23,7 @@ pub fn execute(
     let ledger = Ledger::open(repo_root)?;
 
     // --- Source 1: Ledger decisions ---
-    let decisions = query_decisions_sqlite(&ledger, query_str, limit, all)?;
+    let decisions = query_decisions(&ledger, query_str, limit, all)?;
 
     // --- Source 2: Transcript turns (FTS5) ---
     let conversations = search_transcripts(repo_root, query_str, limit);
@@ -95,7 +95,7 @@ pub fn execute(
 }
 
 /// SQLite fast path: query the decisions table directly.
-fn query_decisions_sqlite(
+fn query_decisions(
     ledger: &Ledger,
     query_str: &str,
     limit: usize,
