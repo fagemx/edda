@@ -841,8 +841,8 @@ mod tests {
 
         let events = store.iter_events().unwrap();
         assert_eq!(events.len(), 10);
-        for i in 0..10 {
-            assert_eq!(events[i].payload["text"], format!("event {i}"));
+        for (i, event) in events.iter().enumerate() {
+            assert_eq!(event.payload["text"], format!("event {i}"));
         }
         // Verify hash chain
         for i in 1..10 {

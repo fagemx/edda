@@ -732,7 +732,7 @@ mod tests {
                 if entry
                     .file_name()
                     .to_str()
-                    .map_or(false, |n| n.starts_with("session."))
+                    .is_some_and(|n| n.starts_with("session."))
                 {
                     let _ = std::fs::remove_file(entry.path());
                 }

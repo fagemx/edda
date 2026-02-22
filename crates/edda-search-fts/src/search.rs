@@ -69,8 +69,7 @@ pub fn search(
                 parser.set_field_fuzzy(f_title, true, 1, true);
                 parser.set_field_fuzzy(f_body, true, 1, true);
             }
-            let parsed = parser.parse_query(query_str)?;
-            parsed
+            parser.parse_query(query_str)?
         };
 
     // Build filter queries
