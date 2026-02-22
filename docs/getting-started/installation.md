@@ -39,7 +39,7 @@ Each archive contains the `edda` binary, and a SHA256 checksum sidecar file.
 Requires [Rust toolchain](https://rustup.rs/) (1.75+).
 
 ```bash
-cargo install --git https://github.com/fagemx/edda edda-cli
+cargo install --git https://github.com/fagemx/edda edda
 ```
 
 ## Verify installation

@@ -14,7 +14,7 @@ members = [
     "crates/edda-ask",
     "crates/edda-search-fts",
     "crates/edda-conductor",
-    "crates/edda-cli",
+    "crates/edda-cli",  # crate name: "edda"
 ]
 
 [workspace.package]

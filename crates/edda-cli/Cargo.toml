@@ -1,6 +1,6 @@
 [package]
-name = "edda-cli"
-description = "CLI and TUI for Edda — decision memory for coding agents"
+name = "edda"
+description = "Decision memory for coding agents — CLI and TUI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

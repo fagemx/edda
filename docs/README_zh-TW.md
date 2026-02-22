@@ -74,7 +74,7 @@ brew install fagemx/tap/edda
 # → https://github.com/fagemx/edda/releases
 
 # 或從原始碼編譯
-cargo install --git https://github.com/fagemx/edda edda-cli
+cargo install --git https://github.com/fagemx/edda edda
 ```
 
 ## 快速開始

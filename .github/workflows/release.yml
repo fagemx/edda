@@ -73,7 +73,7 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} -p edda-cli
+        run: cargo build --release --target ${{ matrix.target }} -p edda
 
       - name: Prepare archive (unix)
         if: matrix.archive == 'tar.gz'

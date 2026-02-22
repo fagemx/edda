@@ -74,7 +74,7 @@ brew install fagemx/tap/edda
 # → https://github.com/fagemx/edda/releases
 
 # Or build from source
-cargo install --git https://github.com/fagemx/edda edda-cli
+cargo install --git https://github.com/fagemx/edda edda
 ```
 
 ## Quick Start
