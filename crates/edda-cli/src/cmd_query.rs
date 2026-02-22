@@ -52,7 +52,7 @@ pub fn execute(
         for r in &conversations {
             results.push(serde_json::json!({
                 "source": "conversation",
-                "turn_id": r.turn_id,
+                "turn_id": r.doc_id,
                 "session_id": r.session_id,
                 "ts": r.ts,
                 "snippet": r.snippet,
@@ -194,27 +194,32 @@ fn extract_decision_fields(event: &edda_core::Event) -> (String, String, String)
     (k.to_string(), v.to_string(), r.to_string())
 }
 
-/// Search transcript turns via FTS5. Returns empty vec if index doesn't exist.
+/// Search transcript turns via Tantivy. Returns empty vec if index doesn't exist.
 fn search_transcripts(
     repo_root: &Path,
     query_str: &str,
     limit: usize,
 ) -> Vec<edda_search_fts::search::SearchResult> {
     let project_id = edda_store::project_id(repo_root);
-    let db_path = edda_store::project_dir(&project_id)
+    let index_dir = edda_store::project_dir(&project_id)
         .join("search")
-        .join("fts.sqlite");
+        .join("tantivy");
 
-    if !db_path.exists() {
+    if !index_dir.exists() {
         return Vec::new();
     }
 
-    let conn = match edda_search_fts::schema::ensure_db(&db_path) {
-        Ok(c) => c,
+    let index = match edda_search_fts::schema::ensure_index(&index_dir) {
+        Ok(i) => i,
         Err(_) => return Vec::new(),
     };
 
-    edda_search_fts::search::search(&conn, query_str, Some(&project_id), None, limit)
+    let opts = edda_search_fts::search::SearchOptions {
+        project_id: Some(&project_id),
+        doc_type: Some("turn"),
+        ..Default::default()
+    };
+    edda_search_fts::search::search(&index, query_str, &opts, limit)
         .unwrap_or_default()
 }
 

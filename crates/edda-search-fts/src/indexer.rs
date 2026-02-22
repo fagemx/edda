@@ -3,16 +3,124 @@ use edda_index::{fetch_store_line, IndexRecordV1};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
+use tantivy::schema::*;
+use tantivy::{doc, IndexWriter};
 
-/// Index a single session's transcript records into the FTS5 database.
+/// Index all ledger events into Tantivy.
+///
+/// Reads events via `iter_fn` and creates one Tantivy document per event.
+/// Returns the number of documents added.
+pub fn index_events<F>(writer: &IndexWriter, schema: &Schema, iter_fn: F) -> anyhow::Result<usize>
+where
+    F: FnOnce() -> anyhow::Result<Vec<edda_core::Event>>,
+{
+    let events = iter_fn()?;
+    let mut count = 0;
+    for event in &events {
+        add_event_doc(writer, schema, event)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Add a single ledger event as a Tantivy document.
+///
+/// Used both by bulk `index_events` and by append-time indexing.
+pub fn add_event_doc(
+    writer: &IndexWriter,
+    schema: &Schema,
+    event: &edda_core::Event,
+) -> anyhow::Result<()> {
+    let f_doc_type = schema.get_field("doc_type")?;
+    let f_event_type = schema.get_field("event_type")?;
+    let f_branch = schema.get_field("branch")?;
+    let f_ts = schema.get_field("ts")?;
+    let f_doc_id = schema.get_field("doc_id")?;
+    let f_session_id = schema.get_field("session_id")?;
+    let f_project_id = schema.get_field("project_id")?;
+    let f_title = schema.get_field("title")?;
+    let f_body = schema.get_field("body")?;
+    let f_tags = schema.get_field("tags")?;
+    let f_tokens = schema.get_field("tokens")?;
+
+    let (title, body) = extract_event_title_body(event);
+    let tags = extract_event_tags(event);
+
+    // Events don't carry session_id directly; leave empty for events
+    let session_id = "";
+
+    writer.add_document(doc!(
+        f_doc_type => "event",
+        f_event_type => event.event_type.as_str(),
+        f_branch => event.branch.as_str(),
+        f_ts => event.ts.as_str(),
+        f_doc_id => event.event_id.as_str(),
+        f_session_id => session_id,
+        f_project_id => "", // events don't carry project_id; filtered at query time
+        f_title => title.as_str(),
+        f_body => body.as_str(),
+        f_tags => tags.as_str(),
+        f_tokens => "",
+    ))?;
+
+    Ok(())
+}
+
+/// Extract title and body from an event for search indexing.
+fn extract_event_title_body(event: &edda_core::Event) -> (String, String) {
+    let payload = &event.payload;
+
+    // Decision events: title = key, body = "value — reason"
+    if let Some(d) = payload.get("decision") {
+        let key = d.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        let value = d.get("value").and_then(|v| v.as_str()).unwrap_or("");
+        let reason = d.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        let body = if reason.is_empty() {
+            value.to_string()
+        } else {
+            format!("{value} — {reason}")
+        };
+        return (key.to_string(), body);
+    }
+
+    // Commit events: title = first line of text, body = rest
+    if event.event_type == "commit" {
+        let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let (title, body) = text.split_once('\n').unwrap_or((text, ""));
+        return (title.to_string(), body.to_string());
+    }
+
+    // Generic: title empty, body = text field
+    let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    (String::new(), text.to_string())
+}
+
+/// Extract space-separated tags from event payload.
+fn extract_event_tags(event: &edda_core::Event) -> String {
+    event
+        .payload
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| t.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default()
+}
+
+/// Index a single session's transcript records into Tantivy + turns_meta.
 ///
 /// Reads index records from `<project_dir>/index/<session_id>.jsonl`,
 /// fetches raw transcript data from `<project_dir>/transcripts/<session_id>.jsonl`,
-/// and inserts turn-level entries into `turns_fts` + `turns_meta`.
+/// and creates Tantivy documents + turns_meta entries.
 ///
 /// Returns the number of newly indexed turns.
 pub fn index_session(
-    conn: &Connection,
+    writer: &IndexWriter,
+    schema: &Schema,
+    meta_conn: &Connection,
     project_dir: &Path,
     project_id: &str,
     session_id: &str,
@@ -44,12 +152,23 @@ pub fn index_session(
         .filter(|r| r.record_type == "assistant")
         .collect();
 
-    let tx = conn.unchecked_transaction()?;
+    let f_doc_type = schema.get_field("doc_type")?;
+    let f_event_type = schema.get_field("event_type")?;
+    let f_branch = schema.get_field("branch")?;
+    let f_ts = schema.get_field("ts")?;
+    let f_doc_id = schema.get_field("doc_id")?;
+    let f_session_id = schema.get_field("session_id")?;
+    let f_project_id = schema.get_field("project_id")?;
+    let f_title = schema.get_field("title")?;
+    let f_body = schema.get_field("body")?;
+    let f_tags = schema.get_field("tags")?;
+    let f_tokens = schema.get_field("tokens")?;
+
+    let tx = meta_conn.unchecked_transaction()?;
     let mut count = 0;
 
     for asst_rec in &assistants {
-        // Build a turn_id from user_uuid + assistant_uuid
-        // First, find the root user prompt by walking up the parent chain
+        // Walk parent chain to find root user prompt
         let mut current_parent = asst_rec.parent_uuid.as_deref();
         let mut user_rec: Option<&IndexRecordV1> = None;
         let mut depth = 0;
@@ -64,7 +183,6 @@ pub fn index_session(
                 None => break,
             };
             if parent.record_type == "user" {
-                // Check if this is a real user prompt (not tool_result)
                 if let Ok(raw) =
                     fetch_store_line(&store_path, parent.store_offset, parent.store_len)
                 {
@@ -89,7 +207,7 @@ pub fn index_session(
 
         let turn_id = format!("{}:{}", user_rec.uuid, asst_rec.uuid);
 
-        // Check if already indexed
+        // Check if already indexed (via turns_meta)
         let exists: bool = tx
             .query_row(
                 "SELECT 1 FROM turns_meta WHERE turn_id = ?1",
@@ -129,37 +247,33 @@ pub fn index_session(
 
         let ts = &asst_rec.ts;
         let git_branch = asst_rec.git_branch.as_deref().unwrap_or("");
-        let cwd = asst_rec.cwd.as_deref().unwrap_or("");
 
-        // Build tokens: concat of key identifiers for exact-match search
-        let tokens = format!(
-            "{} {} {} {}",
-            &tool_names, &tool_commands, &file_paths, git_branch
-        );
+        let body = if user_text.is_empty() {
+            assistant_text.clone()
+        } else if assistant_text.is_empty() {
+            user_text.clone()
+        } else {
+            format!("{user_text}\n\n{assistant_text}")
+        };
 
-        // Insert into FTS5
-        tx.execute(
-            "INSERT INTO turns_fts (turn_id, project_id, session_id, ts, git_branch, cwd, \
-             user_text, assistant_text, tool_names, tool_commands, file_paths, tokens) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                turn_id,
-                project_id,
-                session_id,
-                ts,
-                git_branch,
-                cwd,
-                user_text,
-                assistant_text,
-                tool_names,
-                tool_commands,
-                file_paths,
-                tokens,
-            ],
-        )
-        .context("insert turns_fts")?;
+        let tokens = format!("{tool_names} {tool_commands} {file_paths}");
 
-        // Insert into turns_meta
+        // Add Tantivy document
+        writer.add_document(doc!(
+            f_doc_type => "turn",
+            f_event_type => "",
+            f_branch => git_branch,
+            f_ts => ts.as_str(),
+            f_doc_id => turn_id.as_str(),
+            f_session_id => session_id,
+            f_project_id => project_id,
+            f_title => "",
+            f_body => body.as_str(),
+            f_tags => "",
+            f_tokens => tokens.as_str(),
+        ))?;
+
+        // Insert into turns_meta (for show command byte offsets)
         tx.execute(
             "INSERT INTO turns_meta (turn_id, project_id, session_id, ts, \
              user_uuid, assistant_uuid, \
@@ -193,7 +307,9 @@ pub fn index_session(
 /// Scans `<project_dir>/index/` for `*.jsonl` files and indexes each session.
 /// Returns total number of newly indexed turns.
 pub fn index_project(
-    conn: &Connection,
+    writer: &IndexWriter,
+    schema: &Schema,
+    meta_conn: &Connection,
     project_dir: &Path,
     project_id: &str,
 ) -> anyhow::Result<usize> {
@@ -215,7 +331,7 @@ pub fn index_project(
             if session_id.is_empty() {
                 continue;
             }
-            match index_session(conn, project_dir, project_id, &session_id) {
+            match index_session(writer, schema, meta_conn, project_dir, project_id, &session_id) {
                 Ok(n) => total += n,
                 Err(e) => {
                     eprintln!("warn: indexing session {session_id}: {e}");
@@ -318,7 +434,7 @@ fn extract_assistant_fields(asst_json: &serde_json::Value) -> (String, String, S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::ensure_db_memory;
+    use crate::schema::{ensure_index_ram, ensure_meta_db_memory, index_writer};
 
     #[test]
     fn extract_user_text_string_content() {
@@ -371,10 +487,92 @@ mod tests {
     }
 
     #[test]
+    fn add_event_doc_decision() {
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+
+        let event = edda_core::Event {
+            event_id: "evt_001".to_string(),
+            ts: "2026-02-17T12:00:00Z".to_string(),
+            event_type: "note".to_string(),
+            branch: "main".to_string(),
+            parent_hash: None,
+            hash: "abc".to_string(),
+            payload: serde_json::json!({
+                "text": "db: postgres — need JSONB",
+                "tags": ["decision"],
+                "decision": {"key": "db.engine", "value": "postgres", "reason": "need JSONB"}
+            }),
+            refs: Default::default(),
+            schema_version: 1,
+            digests: Vec::new(),
+            event_family: None,
+            event_level: None,
+        };
+
+        add_event_doc(&writer, &schema, &event).unwrap();
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        assert_eq!(searcher.num_docs(), 1);
+    }
+
+    #[test]
+    fn index_events_multiple() {
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+
+        let events = vec![
+            edda_core::Event {
+                event_id: "evt_001".to_string(),
+                ts: "2026-02-17T12:00:00Z".to_string(),
+                event_type: "note".to_string(),
+                branch: "main".to_string(),
+                parent_hash: None,
+                hash: "abc".to_string(),
+                payload: serde_json::json!({"text": "hello world", "tags": ["note"]}),
+                refs: Default::default(),
+                schema_version: 1,
+                digests: Vec::new(),
+                event_family: None,
+                event_level: None,
+            },
+            edda_core::Event {
+                event_id: "evt_002".to_string(),
+                ts: "2026-02-17T12:01:00Z".to_string(),
+                event_type: "commit".to_string(),
+                branch: "main".to_string(),
+                parent_hash: None,
+                hash: "def".to_string(),
+                payload: serde_json::json!({"text": "feat: add search\ndetails here"}),
+                refs: Default::default(),
+                schema_version: 1,
+                digests: Vec::new(),
+                event_family: None,
+                event_level: None,
+            },
+        ];
+
+        let count = index_events(&writer, &schema, || Ok(events)).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(count, 2);
+
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        assert_eq!(searcher.num_docs(), 2);
+    }
+
+    #[test]
     fn index_session_empty_project_dir() {
-        let conn = ensure_db_memory().unwrap();
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let writer = index_writer(&index).unwrap();
+        let meta_conn = ensure_meta_db_memory().unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        let result = index_session(&conn, tmp.path(), "p1", "nonexistent");
+        let result = index_session(&writer, &schema, &meta_conn, tmp.path(), "p1", "nonexistent");
         assert_eq!(result.unwrap(), 0);
     }
 
@@ -423,7 +621,7 @@ mod tests {
         let asst_line = serde_json::to_string(&assistant_record).unwrap();
 
         let user_offset = 0u64;
-        let user_len = user_line.len() as u64 + 1; // +newline
+        let user_len = user_line.len() as u64 + 1;
         let asst_offset = user_len;
         let asst_len = asst_line.len() as u64 + 1;
 
@@ -468,18 +666,23 @@ mod tests {
         edda_index::append_index(&index_path, &asst_index).unwrap();
 
         // Index the session
-        let conn = ensure_db_memory().unwrap();
-        let count = index_session(&conn, project_dir, "p1", "s1").unwrap();
-        assert_eq!(count, 1);
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+        let meta_conn = ensure_meta_db_memory().unwrap();
 
-        // Verify FTS5 data
-        let fts_count: i64 = conn
-            .query_row("SELECT count(*) FROM turns_fts", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(fts_count, 1);
+        let count =
+            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(count, 1);
+        writer.commit().unwrap();
+
+        // Verify Tantivy has the document
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        assert_eq!(searcher.num_docs(), 1);
 
         // Verify turns_meta
-        let turn_id: String = conn
+        let turn_id: String = meta_conn
             .query_row(
                 "SELECT turn_id FROM turns_meta WHERE project_id = ?1",
                 params!["p1"],
@@ -488,8 +691,9 @@ mod tests {
             .unwrap();
         assert_eq!(turn_id, "u1:a1");
 
-        // Re-index is idempotent (dedup)
-        let count2 = index_session(&conn, project_dir, "p1", "s1").unwrap();
+        // Re-index is idempotent (dedup via turns_meta check)
+        let count2 =
+            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
         assert_eq!(count2, 0);
     }
 }

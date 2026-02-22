@@ -1,24 +1,35 @@
 use edda_index::fetch_store_line;
+use edda_ledger::Ledger;
 use edda_search_fts::{indexer, schema, search};
 use edda_store::project_dir;
 use std::path::Path;
 
-/// Execute `edda search <query>` — keyword search over FTS5 index.
+/// Execute `edda search <query>` — full-text search over Tantivy index.
 pub fn query(
     project_id: &str,
     query_str: &str,
     session_id: Option<&str>,
+    doc_type: Option<&str>,
+    event_type: Option<&str>,
+    exact: bool,
     limit: usize,
 ) -> anyhow::Result<()> {
     let proj_dir = project_dir(project_id);
-    let db_path = proj_dir.join("search").join("fts.sqlite");
-    if !db_path.exists() {
-        eprintln!("No search index found. Run `edda search index --project {project_id}` first.");
+    let index_dir = proj_dir.join("search").join("tantivy");
+    if !index_dir.exists() {
+        eprintln!("No search index found. Run `edda search index` first.");
         return Ok(());
     }
 
-    let conn = schema::ensure_db(&db_path)?;
-    let results = search::search(&conn, query_str, Some(project_id), session_id, limit)?;
+    let index = schema::ensure_index(&index_dir)?;
+    let opts = search::SearchOptions {
+        project_id: Some(project_id),
+        session_id,
+        doc_type,
+        event_type,
+        exact,
+    };
+    let results = search::search(&index, query_str, &opts, limit)?;
 
     if results.is_empty() {
         println!("No results found for: {query_str}");
@@ -27,49 +38,75 @@ pub fn query(
 
     println!("Found {} result(s) for: {query_str}\n", results.len());
     for (i, r) in results.iter().enumerate() {
+        let type_label = if r.doc_type == "event" {
+            format!("[{}]", r.event_type)
+        } else {
+            "[turn]".to_string()
+        };
+        let sid_display = if r.session_id.is_empty() {
+            String::new()
+        } else {
+            format!(" session={}", &r.session_id[..r.session_id.len().min(8)])
+        };
         println!(
-            "  {}. [{}] session={} ts={}",
+            "  {}. {} {}{} ts={}",
             i + 1,
-            r.turn_id,
-            &r.session_id[..r.session_id.len().min(8)],
+            type_label,
+            r.doc_id,
+            sid_display,
             r.ts,
         );
-        println!("     {}\n", r.snippet.replace('\n', " "));
+        if !r.snippet.is_empty() {
+            println!("     {}\n", r.snippet.replace('\n', " "));
+        } else {
+            println!();
+        }
     }
 
     Ok(())
 }
 
-/// Execute `edda search index` — build/update FTS5 index for a project.
-pub fn index(project_id: &str, session_id: Option<&str>) -> anyhow::Result<()> {
+/// Execute `edda search index` — build/update Tantivy index for a project.
+pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> anyhow::Result<()> {
     let proj_dir = project_dir(project_id);
     if !proj_dir.exists() {
         anyhow::bail!("Project directory not found: {}", proj_dir.display());
     }
 
-    let db_path = proj_dir.join("search").join("fts.sqlite");
-    let conn = schema::ensure_db(&db_path)?;
+    let index_dir = proj_dir.join("search").join("tantivy");
+    let index = schema::ensure_index(&index_dir)?;
+    let tantivy_schema = index.schema();
+    let mut writer = schema::index_writer(&index)?;
 
-    let count = if let Some(sid) = session_id {
-        indexer::index_session(&conn, &proj_dir, project_id, sid)?
+    // Index ledger events
+    let ledger = Ledger::open(repo_root)?;
+    let event_count = indexer::index_events(&writer, &tantivy_schema, || ledger.iter_events())?;
+
+    // Index transcript turns
+    let meta_db_path = proj_dir.join("search").join("meta.sqlite");
+    let meta_conn = schema::ensure_meta_db(&meta_db_path)?;
+    let turn_count = if let Some(sid) = session_id {
+        indexer::index_session(&writer, &tantivy_schema, &meta_conn, &proj_dir, project_id, sid)?
     } else {
-        indexer::index_project(&conn, &proj_dir, project_id)?
+        indexer::index_project(&writer, &tantivy_schema, &meta_conn, &proj_dir, project_id)?
     };
 
-    println!("Indexed {count} new turn(s) for project {project_id}");
+    writer.commit()?;
+
+    println!("Indexed {event_count} event(s) + {turn_count} turn(s) for project {project_id}");
     Ok(())
 }
 
 /// Execute `edda search show` — retrieve full turn content by turn_id.
 pub fn show(project_id: &str, turn_id: &str) -> anyhow::Result<()> {
     let proj_dir = project_dir(project_id);
-    let db_path = proj_dir.join("search").join("fts.sqlite");
-    if !db_path.exists() {
-        anyhow::bail!("No search index found. Run `edda search index` first.");
+    let meta_db_path = proj_dir.join("search").join("meta.sqlite");
+    if !meta_db_path.exists() {
+        anyhow::bail!("No search metadata found. Run `edda search index` first.");
     }
 
-    let conn = schema::ensure_db(&db_path)?;
-    let meta = match search::get_turn_meta(&conn, turn_id)? {
+    let meta_conn = schema::ensure_meta_db(&meta_db_path)?;
+    let meta = match search::get_turn_meta(&meta_conn, turn_id)? {
         Some(m) => m,
         None => {
             println!("Turn not found: {turn_id}");
