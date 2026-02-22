@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get tag
+        id: tag
+        run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+      - name: Create draft release
+        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-release:
+    name: Build (${{ matrix.name }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+          - name: macos-x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Build release binaries
+        run: cargo build --release -p edda-cli -p edda-tui
+
+      - name: Prepare archive (unix)
+        if: matrix.archive == 'tar.gz'
+        run: |
+          TAG="${{ needs.create-release.outputs.tag }}"
+          ARCHIVE="edda-${TAG}-${{ matrix.target }}"
+          mkdir "$ARCHIVE"
+          cp target/release/edda target/release/edda-tui "$ARCHIVE/"
+          cp LICENSE-MIT LICENSE-APACHE "$ARCHIVE/"
+          tar czf "${ARCHIVE}.tar.gz" "$ARCHIVE"
+          shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
+          echo "ASSET=${ARCHIVE}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Prepare archive (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $TAG = "${{ needs.create-release.outputs.tag }}"
+          $ARCHIVE = "edda-${TAG}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $ARCHIVE
+          Copy-Item "target\release\edda.exe" "$ARCHIVE\"
+          Copy-Item "target\release\edda-tui.exe" "$ARCHIVE\"
+          Copy-Item "LICENSE-MIT" "$ARCHIVE\"
+          Copy-Item "LICENSE-APACHE" "$ARCHIVE\"
+          Compress-Archive -Path "$ARCHIVE\*" -DestinationPath "${ARCHIVE}.zip"
+          $hash = (Get-FileHash "${ARCHIVE}.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${ARCHIVE}.zip" | Out-File -Encoding ASCII "${ARCHIVE}.zip.sha256"
+          echo "ASSET=${ARCHIVE}.zip" >> $env:GITHUB_ENV
+
+      - name: Upload assets
+        run: gh release upload "${{ needs.create-release.outputs.tag }}" "${{ env.ASSET }}" "${{ env.ASSET }}.sha256"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

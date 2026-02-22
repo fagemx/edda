@@ -41,3 +41,8 @@ tempfile = "3"
 globset = "0.4"
 regex = "1"
 uuid = { version = "1", features = ["v5"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
