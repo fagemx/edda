@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 edda-store = { path = "../edda-store" }
 edda-index = { path = "../edda-index" }
+edda-core = { path = "../edda-core" }
+tantivy = { version = "0.25", default-features = false, features = ["mmap", "lz4-compression"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true

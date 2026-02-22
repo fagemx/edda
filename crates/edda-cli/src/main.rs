@@ -216,7 +216,7 @@ enum Command {
         #[command(subcommand)]
         cmd: McpCommand,
     },
-    /// Cross-session FTS5 search
+    /// Full-text search (Tantivy)
     Search {
         #[command(subcommand)]
         cmd: SearchCmd,
@@ -648,7 +648,7 @@ enum BlobCmd {
 
 #[derive(Subcommand)]
 enum SearchCmd {
-    /// Build or update FTS5 search index
+    /// Build or update search index (Tantivy)
     Index {
         /// Project ID (defaults to current repo)
         #[arg(long)]
@@ -657,9 +657,9 @@ enum SearchCmd {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Search for turns matching a query
+    /// Search for events and transcript turns
     Query {
-        /// Search query string
+        /// Search query (supports fuzzy, "exact", /regex/)
         query: String,
         /// Project ID (defaults to current repo)
         #[arg(long)]
@@ -667,6 +667,15 @@ enum SearchCmd {
         /// Session ID filter
         #[arg(long)]
         session: Option<String>,
+        /// Filter by document type: event or turn
+        #[arg(long, name = "type")]
+        doc_type: Option<String>,
+        /// Filter by event type: note, commit, merge, etc.
+        #[arg(long)]
+        event_type: Option<String>,
+        /// Exact match (disable fuzzy)
+        #[arg(long)]
+        exact: bool,
         /// Maximum results (default: 20)
         #[arg(long, default_value_t = 20)]
         limit: usize,
@@ -1011,16 +1020,27 @@ fn main() -> anyhow::Result<()> {
             match cmd {
                 SearchCmd::Index { project, session } => {
                     let pid = project.as_deref().unwrap_or(&default_pid);
-                    cmd_search::index(pid, session.as_deref())
+                    cmd_search::index(&repo_root, pid, session.as_deref())
                 }
                 SearchCmd::Query {
                     query,
                     project,
                     session,
+                    doc_type,
+                    event_type,
+                    exact,
                     limit,
                 } => {
                     let pid = project.as_deref().unwrap_or(&default_pid);
-                    cmd_search::query(pid, &query, session.as_deref(), limit)
+                    cmd_search::query(
+                        pid,
+                        &query,
+                        session.as_deref(),
+                        doc_type.as_deref(),
+                        event_type.as_deref(),
+                        exact,
+                        limit,
+                    )
                 }
                 SearchCmd::Show { turn, project } => {
                     let pid = project.as_deref().unwrap_or(&default_pid);
