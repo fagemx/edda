@@ -23,6 +23,21 @@ impl Ledger {
         Ok(Self { paths, sqlite })
     }
 
+    /// Open a workspace, auto-initializing `.edda/` if missing.
+    ///
+    /// Use this for read-path consumers (e.g. `edda watch`) that should
+    /// work without requiring the user to run `edda init` first.
+    pub fn open_or_init(repo_root: impl Into<std::path::PathBuf>) -> anyhow::Result<Self> {
+        let root = repo_root.into();
+        let paths = EddaPaths::discover(&root);
+        if !paths.is_initialized() {
+            init_workspace(&paths)?;
+            init_head(&paths, "main")?;
+            init_branches_json(&paths, "main")?;
+        }
+        Self::open(root)
+    }
+
     /// Convenience: open from a Path ref (avoids Into<PathBuf> ambiguity).
     pub fn open_path(repo_root: &Path) -> anyhow::Result<Self> {
         Self::open(repo_root.to_path_buf())
@@ -220,6 +235,29 @@ mod tests {
         ledger.set_branches_json(&new_json).unwrap();
         let loaded = ledger.branches_json().unwrap();
         assert_eq!(loaded, new_json);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn open_or_init_creates_workspace() {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let tmp =
+            std::env::temp_dir().join(format!("edda_auto_init_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // No .edda/ exists yet
+        assert!(!tmp.join(".edda").exists());
+
+        // open_or_init should create it
+        let ledger = Ledger::open_or_init(&tmp).unwrap();
+        assert!(tmp.join(".edda").exists());
+        assert_eq!(ledger.head_branch().unwrap(), "main");
+
+        // Second call is idempotent
+        let ledger2 = Ledger::open_or_init(&tmp).unwrap();
+        assert_eq!(ledger2.head_branch().unwrap(), "main");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

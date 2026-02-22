@@ -13,6 +13,10 @@ fn main() -> color_eyre::Result<()> {
     let repo_root = std::env::current_dir()?;
     let project_id = edda_store::project_id(&repo_root);
 
+    // Auto-init: ensure .edda/ and store dirs exist (no manual `edda init` needed)
+    let _ = edda_store::ensure_dirs(&project_id);
+    let _ = edda_ledger::Ledger::open_or_init(&repo_root);
+
     let mut terminal = ratatui::init();
     let result = run(&mut terminal, project_id, repo_root);
     ratatui::restore();
