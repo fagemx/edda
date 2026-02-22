@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/48dafc6a-68dd-4d00-b393-25c1dd444c31" width="700" alt="Edda overview" />
+  <img src="https://github.com/user-attachments/assets/17f76977-d947-484e-8f0e-1fdae8a54ca5" width="700" alt="Edda overview" />
 </p>
 
 ---
