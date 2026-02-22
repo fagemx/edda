@@ -85,6 +85,16 @@ impl Ledger {
         self.sqlite.decision_timeline(key)
     }
 
+    /// All decisions for a domain (active + superseded), ordered by time.
+    pub fn domain_timeline(&self, domain: &str) -> anyhow::Result<Vec<DecisionRow>> {
+        self.sqlite.domain_timeline(domain)
+    }
+
+    /// Distinct domain values from active decisions.
+    pub fn list_domains(&self) -> anyhow::Result<Vec<String>> {
+        self.sqlite.list_domains()
+    }
+
     /// Find the active decision for a specific key on a branch.
     pub fn find_active_decision(
         &self,

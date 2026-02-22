@@ -92,6 +92,10 @@ pub fn workspace(cwd: &str, budget: usize) -> Option<String> {
             // If edda ledger has no commit events, fall back to `git log`
             supplement_git_commits(&mut section, cwd_path, d);
             if section.len() <= budget {
+                // Hint for LLM agents to discover the ask tool
+                section.push_str(
+                    "\n> Use edda_ask MCP tool or `edda ask <keyword>` for detailed decision history\n",
+                );
                 return Some(section);
             }
         }

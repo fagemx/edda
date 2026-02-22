@@ -1,0 +1,15 @@
+[package]
+name = "edda-ask"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edda-ledger = { path = "../edda-ledger" }
+edda-core = { path = "../edda-core" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+ulid = { workspace = true }
+time = { workspace = true }

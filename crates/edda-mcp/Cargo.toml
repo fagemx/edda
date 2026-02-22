@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+edda-ask = { path = "../edda-ask" }
 edda-core = { path = "../edda-core" }
 edda-ledger = { path = "../edda-ledger" }
 edda-derive = { path = "../edda-derive" }

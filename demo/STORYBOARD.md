@@ -377,7 +377,7 @@ Starting plan "api-decisions" (4 phases)
 
 You: What architectural decisions have we made so far?
 
-Codex: [calling edda.query...]
+Codex: [calling edda_ask...]
 
 Based on your decision history:
 - REST API (decided 2026-02-16)
