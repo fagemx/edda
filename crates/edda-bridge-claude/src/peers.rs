@@ -39,7 +39,7 @@ fn env_label() -> Option<String> {
 /// Per-session heartbeat file.
 /// Location: ~/.edda/projects/{pid}/state/session.{sid}.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SessionHeartbeat {
+pub struct SessionHeartbeat {
     pub session_id: String,
     pub started_at: String,
     pub last_heartbeat: String,
@@ -73,7 +73,7 @@ pub(crate) enum CoordEventType {
 
 /// A scope claim by a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ClaimEntry {
+pub struct ClaimEntry {
     pub session_id: String,
     pub label: String,
     pub paths: Vec<String>,
@@ -82,7 +82,7 @@ pub(crate) struct ClaimEntry {
 
 /// A binding entry in the coordination log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct BindingEntry {
+pub struct BindingEntry {
     pub key: String,
     pub value: String,
     pub by_session: String,
@@ -92,7 +92,7 @@ pub(crate) struct BindingEntry {
 
 /// A cross-agent request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RequestEntry {
+pub struct RequestEntry {
     pub from_session: String,
     pub from_label: String,
     pub to_label: String,
@@ -102,7 +102,7 @@ pub(crate) struct RequestEntry {
 
 /// Computed board state from coordination.jsonl.
 #[derive(Debug, Default)]
-pub(crate) struct BoardState {
+pub struct BoardState {
     pub claims: Vec<ClaimEntry>,
     pub bindings: Vec<BindingEntry>,
     pub requests: Vec<RequestEntry>,
@@ -394,7 +394,7 @@ pub fn find_binding_conflict(
 // ── Board State Computation ──
 
 /// Read coordination.jsonl and compute current board state.
-pub(crate) fn compute_board_state(project_id: &str) -> BoardState {
+pub fn compute_board_state(project_id: &str) -> BoardState {
     let path = coordination_path(project_id);
     let content = match fs::read_to_string(&path) {
         Ok(c) => c,
