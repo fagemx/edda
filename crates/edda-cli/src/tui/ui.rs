@@ -348,17 +348,72 @@ fn event_display(payload: &serde_json::Value, event_type: &str) -> (String, Stri
 
             if has_tag("session_digest") {
                 let stats = &payload["session_stats"];
-                let sid = payload["session_id"].as_str().unwrap_or("?");
-                let tools = stats["tool_calls"].as_u64().unwrap_or(0);
                 let dur = stats["duration_minutes"].as_u64().unwrap_or(0);
                 let outcome = stats["outcome"].as_str().unwrap_or("?");
                 let icon = if outcome == "completed" { "✓" } else { "✗" };
                 let dur_str = format_duration(dur);
-                (
-                    "digest".into(),
-                    format!("{icon} {:.8} — {tools} tools, {dur_str}", sid),
-                    Style::default().fg(Color::DarkGray),
-                )
+                let decides = stats["decide_count"].as_u64().unwrap_or(0);
+                let files_mod = stats["files_modified"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let commits = stats["commits_made"]
+                    .as_array()
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+
+                // Build narrative: what happened in this session
+                let mut parts: Vec<String> = Vec::new();
+                if commits > 0 {
+                    parts.push(format!(
+                        "{commits} commit{}",
+                        if commits > 1 { "s" } else { "" }
+                    ));
+                }
+                if decides > 0 {
+                    parts.push(format!(
+                        "{decides} decision{}",
+                        if decides > 1 { "s" } else { "" }
+                    ));
+                }
+                if files_mod > 0 {
+                    parts.push(format!(
+                        "{files_mod} file{}",
+                        if files_mod > 1 { "s" } else { "" }
+                    ));
+                }
+                let summary = if parts.is_empty() {
+                    dur_str.clone()
+                } else {
+                    format!("{}, {dur_str}", parts.join(", "))
+                };
+
+                // Show first task subject or first commit as headline
+                let headline = stats["tasks_snapshot"]
+                    .as_array()
+                    .and_then(|a| a.first())
+                    .and_then(|t| t["subject"].as_str())
+                    .or_else(|| {
+                        stats["commits_made"]
+                            .as_array()
+                            .and_then(|a| a.last())
+                            .and_then(|c| c.as_str())
+                    });
+
+                let preview = if let Some(h) = headline {
+                    let h = first_line(h);
+                    let h = truncate_str(h, 40);
+                    format!("{icon} {h} ({summary})")
+                } else {
+                    format!("{icon} session ({summary})")
+                };
+
+                let style = if outcome == "completed" {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Red)
+                };
+                ("digest".into(), preview, style)
             } else if has_tag("decision") {
                 let d = &payload["decision"];
                 let key = d["key"].as_str().unwrap_or("?");
@@ -508,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn digest_completed_shows_checkmark() {
+    fn digest_with_task_shows_narrative() {
         let payload = json!({
             "text": "Session abc: 15 tools...",
             "tags": ["session_digest"],
@@ -516,19 +571,63 @@ mod tests {
             "session_stats": {
                 "tool_calls": 15,
                 "duration_minutes": 42,
-                "outcome": "completed"
+                "outcome": "completed",
+                "commits_made": ["feat: add auth"],
+                "decide_count": 2,
+                "files_modified": ["src/auth.rs", "src/main.rs"],
+                "tasks_snapshot": [{"subject": "Add user authentication", "status": "completed"}]
             }
         });
         let (dtype, preview, _) = event_display(&payload, "note");
         assert_eq!(dtype, "digest");
-        assert!(preview.starts_with("✓"));
-        assert!(preview.contains("abc12345"));
-        assert!(preview.contains("15 tools"));
-        assert!(preview.contains("42m"));
+        assert!(preview.starts_with("✓"), "got: {preview}");
+        assert!(
+            preview.contains("Add user authentication"),
+            "got: {preview}"
+        );
+        assert!(preview.contains("1 commit"), "got: {preview}");
+        assert!(preview.contains("2 decisions"), "got: {preview}");
+        assert!(preview.contains("42m"), "got: {preview}");
     }
 
     #[test]
-    fn digest_interrupted_shows_cross() {
+    fn digest_no_task_shows_commit() {
+        let payload = json!({
+            "text": "Session abc: ...",
+            "tags": ["session_digest"],
+            "session_id": "abc12345-long-id",
+            "session_stats": {
+                "tool_calls": 10,
+                "duration_minutes": 5,
+                "outcome": "completed",
+                "commits_made": ["fix: resolve login bug"],
+                "files_modified": ["src/login.rs"]
+            }
+        });
+        let (_, preview, _) = event_display(&payload, "note");
+        assert!(preview.starts_with("✓"), "got: {preview}");
+        assert!(preview.contains("fix: resolve login bug"), "got: {preview}");
+    }
+
+    #[test]
+    fn digest_empty_session_shows_fallback() {
+        let payload = json!({
+            "text": "Session xyz: ...",
+            "tags": ["session_digest"],
+            "session_id": "xyz99999",
+            "session_stats": {
+                "tool_calls": 0,
+                "duration_minutes": 1,
+                "outcome": "completed"
+            }
+        });
+        let (_, preview, _) = event_display(&payload, "note");
+        assert!(preview.starts_with("✓"), "got: {preview}");
+        assert!(preview.contains("session"), "got: {preview}");
+    }
+
+    #[test]
+    fn digest_interrupted_shows_cross_red() {
         let payload = json!({
             "text": "Session xyz: interrupted",
             "tags": ["session_digest"],
@@ -539,9 +638,10 @@ mod tests {
                 "outcome": "interrupted"
             }
         });
-        let (_, preview, _) = event_display(&payload, "note");
-        assert!(preview.starts_with("✗"));
-        assert!(preview.contains("2h"));
+        let (_, preview, style) = event_display(&payload, "note");
+        assert!(preview.starts_with("✗"), "got: {preview}");
+        assert!(preview.contains("2h"), "got: {preview}");
+        assert_eq!(style.fg, Some(Color::Red));
     }
 
     #[test]
