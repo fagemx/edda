@@ -235,10 +235,11 @@ fn render_bindings_grouped(f: &mut Frame, app: &App, area: ratatui::layout::Rect
         }
     }
 
+    // Apply scroll offset
+    let items: Vec<ListItem> = items.into_iter().skip(app.decision_scroll).collect();
+
     let binding_block = Block::default().title(" Bindings ").borders(Borders::TOP);
-    let list = List::new(items)
-        .block(binding_block)
-        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    let list = List::new(items).block(binding_block);
     f.render_widget(list, area);
 }
 

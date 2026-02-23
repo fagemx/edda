@@ -157,7 +157,7 @@ impl App {
         // Find which domain is at the current scroll position
         let groups = crate::tui::ui::group_bindings(&self.board.bindings);
         let mut row = 0;
-        for (domain, _bindings) in &groups {
+        for (domain, bindings) in &groups {
             if row == self.decision_scroll {
                 let domain = (*domain).to_string();
                 if self.expanded_domains.contains(&domain) {
@@ -171,9 +171,24 @@ impl App {
             let is_internal = !is_user_facing_domain(domain);
             let expanded = self.expanded_domains.contains(*domain);
             if !is_internal || expanded {
-                row += _bindings.len();
+                row += bindings.len();
             }
         }
+    }
+
+    /// Count total visible rows in the grouped decisions view.
+    fn decisions_row_count(&self) -> usize {
+        let groups = crate::tui::ui::group_bindings(&self.board.bindings);
+        let mut rows = 0;
+        for (domain, bindings) in &groups {
+            rows += 1; // domain header
+            let is_internal = !is_user_facing_domain(domain);
+            let expanded = self.expanded_domains.contains(*domain);
+            if !is_internal || expanded {
+                rows += bindings.len();
+            }
+        }
+        rows
     }
 
     fn scroll_down(&mut self) {
@@ -190,9 +205,9 @@ impl App {
 
     fn active_scroll_and_max(&self) -> (usize, usize) {
         match self.active_panel {
-            Panel::Peers => (self.peer_scroll, self.peers.len()),
-            Panel::Events => (self.event_scroll, self.events.len()),
-            Panel::Decisions => (self.decision_scroll, self.board.bindings.len()),
+            Panel::Peers => (self.peer_scroll, self.active_peers().len()),
+            Panel::Events => (self.event_scroll, self.visible_events().len()),
+            Panel::Decisions => (self.decision_scroll, self.decisions_row_count()),
         }
     }
 
