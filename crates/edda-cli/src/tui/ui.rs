@@ -1,10 +1,13 @@
-use ratatui::layout::{Constraint, Direction, Layout};
+use std::collections::BTreeMap;
+
+use edda_bridge_claude::peers::BindingEntry;
+use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use super::app::{App, Panel};
+use super::app::{is_user_facing_domain, App, Panel};
 
 /// Render the full TUI frame.
 pub fn render(f: &mut Frame, app: &App) {
@@ -16,18 +19,38 @@ pub fn render(f: &mut Frame, app: &App) {
         ])
         .split(f.area());
 
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(30), // peers
-            Constraint::Percentage(40), // events
-            Constraint::Percentage(30), // decisions
-        ])
-        .split(chunks[0]);
+    let active_peers = app.active_peers();
+    let has_peers = !active_peers.is_empty();
+    let has_claims_or_requests = !app.board.claims.is_empty() || !app.board.requests.is_empty();
 
-    render_peers(f, app, main_chunks[0]);
-    render_events(f, app, main_chunks[1]);
-    render_decisions(f, app, main_chunks[2]);
+    if has_peers || has_claims_or_requests {
+        // 3-column layout
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(25), // peers
+                Constraint::Percentage(50), // events
+                Constraint::Percentage(25), // decisions
+            ])
+            .split(chunks[0]);
+
+        render_peers(f, app, main_chunks[0]);
+        render_events(f, app, main_chunks[1]);
+        render_decisions(f, app, main_chunks[2]);
+    } else {
+        // 2-column layout (no active peers)
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(60), // events
+                Constraint::Percentage(40), // decisions
+            ])
+            .split(chunks[0]);
+
+        render_events(f, app, main_chunks[0]);
+        render_decisions(f, app, main_chunks[1]);
+    }
+
     render_status_bar(f, app, chunks[1]);
 }
 
@@ -40,25 +63,39 @@ fn panel_style(app: &App, panel: Panel) -> Style {
 }
 
 fn render_peers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let title = format!(" Peers ({}) ", app.peers.len());
+    let active = app.active_peers();
+    let total = app.peers.len();
+    let title = if active.len() == total {
+        format!(" Peers ({}) ", active.len())
+    } else {
+        format!(" Peers ({} active) ", active.len())
+    };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(panel_style(app, Panel::Peers));
 
-    let items: Vec<ListItem> = app
-        .peers
+    if active.is_empty() {
+        let msg = Paragraph::new("No active peers")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray))
+            .block(block);
+        f.render_widget(msg, area);
+        return;
+    }
+
+    let items: Vec<ListItem> = active
         .iter()
         .enumerate()
         .skip(app.peer_scroll)
         .flat_map(|(i, peer)| {
-            let status = if peer.age_secs < 120 { "+" } else { "-" };
+            let indicator = if peer.age_secs < 120 { "●" } else { "○" };
             let label = if peer.label.is_empty() {
-                "?"
+                "unknown"
             } else {
                 &peer.label
             };
-            let header = format!(" {status} {label}  ({:.8})", peer.session_id);
+            let header = format!(" {indicator} {label}");
             let style = if app.active_panel == Panel::Peers && i == app.peer_scroll {
                 Style::default().add_modifier(Modifier::BOLD)
             } else {
@@ -69,9 +106,15 @@ fn render_peers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
                 let files: Vec<&str> = peer
                     .focus_files
                     .iter()
+                    .take(5)
                     .map(|f| f.rsplit(['/', '\\']).next().unwrap_or(f))
                     .collect();
-                let detail = format!("     {}", files.join(", "));
+                let branch_str = peer
+                    .branch
+                    .as_deref()
+                    .map(|b| format!("  ({b})"))
+                    .unwrap_or_default();
+                let detail = format!("   {}{branch_str}", files.join(", "));
                 lines.push(ListItem::new(Line::from(Span::styled(
                     detail,
                     Style::default().fg(Color::DarkGray),
@@ -79,7 +122,7 @@ fn render_peers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             }
             if !peer.task_subjects.is_empty() {
                 let task = truncate_str(&peer.task_subjects[0], 30);
-                let detail = format!("     >> {task}");
+                let detail = format!("   >> {task}");
                 lines.push(ListItem::new(Line::from(Span::styled(
                     detail,
                     Style::default().fg(Color::Yellow),
@@ -94,19 +137,28 @@ fn render_peers(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn render_events(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let title = format!(" Events ({}) ", app.events.len());
+    let visible = app.visible_events();
+    let total = app.events.len();
+    let title = if visible.len() == total {
+        format!(" Events ({}) ", visible.len())
+    } else {
+        format!(" Events ({}/{}) ", visible.len(), total)
+    };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(panel_style(app, Panel::Events));
 
-    let max_preview = area.width.saturating_sub(24) as usize; // 24 = borders + time(8) + type(10) + spaces
-    let items: Vec<ListItem> = app
-        .events
+    let max_preview = area.width.saturating_sub(22) as usize; // borders + time(5) + type(10) + spaces
+    let items: Vec<ListItem> = visible
         .iter()
         .skip(app.event_scroll)
         .map(|evt| {
-            let ts = &evt.ts[11..19.min(evt.ts.len())]; // HH:MM:SS only
+            let ts = if evt.ts.len() >= 16 {
+                &evt.ts[11..16] // HH:MM only
+            } else {
+                &evt.ts
+            };
             let (dtype, preview, style) = event_display(&evt.payload, &evt.event_type);
             let preview = truncate_str(&preview, max_preview);
             let line = format!(" {ts}  {dtype:<10} {preview}");
@@ -119,70 +171,122 @@ fn render_events(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn render_decisions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let has_claims_or_requests = !app.board.claims.is_empty() || !app.board.requests.is_empty();
+
     let title = format!(" Decisions ({}) ", app.board.bindings.len());
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_style(panel_style(app, Panel::Decisions));
 
-    let inner_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(50), // bindings
-            Constraint::Percentage(25), // claims
-            Constraint::Percentage(25), // requests
-        ])
-        .split(block.inner(area));
+    if has_claims_or_requests {
+        // Split: bindings top, claims+requests bottom
+        let inner_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(60), // bindings
+                Constraint::Percentage(20), // claims
+                Constraint::Percentage(20), // requests
+            ])
+            .split(block.inner(area));
 
-    f.render_widget(block, area);
+        f.render_widget(block, area);
+        render_bindings_grouped(f, app, inner_chunks[0]);
+        render_claims(f, app, inner_chunks[1]);
+        render_requests(f, app, inner_chunks[2]);
+    } else {
+        // Full space for bindings
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        render_bindings_grouped(f, app, inner);
+    }
+}
 
-    // Bindings
-    let binding_items: Vec<ListItem> = app
-        .board
-        .bindings
-        .iter()
-        .skip(app.decision_scroll)
-        .map(|b| {
-            let line = format!(" {} = {} ({})", b.key, b.value, b.by_label);
-            ListItem::new(Line::from(line))
-        })
-        .collect();
+fn render_bindings_grouped(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let groups = group_bindings(&app.board.bindings);
+
+    let mut items: Vec<ListItem> = Vec::new();
+
+    for (domain, bindings) in &groups {
+        let is_internal = !is_user_facing_domain(domain);
+        let expanded = app.expanded_domains.contains(*domain) || !is_internal;
+
+        // Domain header
+        let arrow = if expanded { "▾" } else { "▸" };
+        let header = format!(" {arrow} {domain} ({})", bindings.len());
+        let header_style = if is_internal {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().add_modifier(Modifier::BOLD)
+        };
+        items.push(ListItem::new(Line::from(Span::styled(
+            header,
+            header_style,
+        ))));
+
+        if expanded {
+            for b in bindings {
+                let short_key = b.key.strip_prefix(&format!("{domain}.")).unwrap_or(&b.key);
+                let line = format!("   {short_key} = {}", b.value);
+                items.push(ListItem::new(Line::from(Span::styled(
+                    line,
+                    Style::default(),
+                ))));
+            }
+        }
+    }
+
+    // Apply scroll offset
+    let items: Vec<ListItem> = items.into_iter().skip(app.decision_scroll).collect();
+
     let binding_block = Block::default().title(" Bindings ").borders(Borders::TOP);
-    let binding_list = List::new(binding_items).block(binding_block);
-    f.render_widget(binding_list, inner_chunks[0]);
+    let list = List::new(items).block(binding_block);
+    f.render_widget(list, area);
+}
 
-    // Claims
-    let claim_items: Vec<ListItem> = app
+fn render_claims(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let items: Vec<ListItem> = app
         .board
         .claims
         .iter()
         .map(|c| {
-            let paths = c.paths.join(", ");
-            let line = format!(" {} [{}]", c.label, paths);
+            let paths: Vec<&str> = c
+                .paths
+                .iter()
+                .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p))
+                .collect();
+            let line = format!(" {} [{}]", c.label, paths.join(", "));
             ListItem::new(Line::from(line))
         })
         .collect();
-    let claim_block = Block::default().title(" Claims ").borders(Borders::TOP);
-    let claim_list = List::new(claim_items).block(claim_block);
-    f.render_widget(claim_list, inner_chunks[1]);
+    let block = Block::default().title(" Claims ").borders(Borders::TOP);
+    let list = List::new(items).block(block);
+    f.render_widget(list, area);
+}
 
-    // Requests
-    let request_items: Vec<ListItem> = app
+fn render_requests(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let items: Vec<ListItem> = app
         .board
         .requests
         .iter()
         .map(|r| {
-            let line = format!(" {} -> {}: {}", r.from_label, r.to_label, r.message);
+            let msg = truncate_str(&r.message, 40);
+            let line = format!(" {} → {}: {msg}", r.from_label, r.to_label);
             ListItem::new(Line::from(line))
         })
         .collect();
-    let request_block = Block::default().title(" Requests ").borders(Borders::TOP);
-    let request_list = List::new(request_items).block(request_block);
-    f.render_widget(request_list, inner_chunks[2]);
+    let block = Block::default().title(" Requests ").borders(Borders::TOP);
+    let list = List::new(items).block(block);
+    f.render_widget(list, area);
 }
 
 fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let pause_indicator = if app.paused { " [PAUSED]" } else { "" };
+    let cmd_indicator = if app.show_cmd_events {
+        ""
+    } else {
+        " [cmd:hidden]"
+    };
     let panel_name = match app.active_panel {
         Panel::Peers => "Peers",
         Panel::Events => "Events",
@@ -196,7 +300,7 @@ fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     } else {
         (
             format!(
-                " edda watch | {panel_name}{pause_indicator} | Tab:switch  j/k:scroll  Space:pause  q:quit"
+                " edda watch | {panel_name}{pause_indicator}{cmd_indicator} | Tab:switch  c:cmd  j/k:scroll  Space:pause  q:quit"
             ),
             Style::default().fg(Color::White).bg(Color::DarkGray),
         )
@@ -204,6 +308,35 @@ fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let bar = Paragraph::new(Line::from(Span::styled(text, style)));
     f.render_widget(bar, area);
 }
+
+// ── Public helpers ──
+
+/// Group bindings by domain prefix (part before first `.`).
+/// Returns sorted groups: user-facing domains first, then internal.
+pub fn group_bindings(bindings: &[BindingEntry]) -> Vec<(&str, Vec<&BindingEntry>)> {
+    let mut map: BTreeMap<&str, Vec<&BindingEntry>> = BTreeMap::new();
+    for b in bindings {
+        let domain = b.key.split('.').next().unwrap_or(&b.key);
+        map.entry(domain).or_default().push(b);
+    }
+
+    let mut user_facing: Vec<(&str, Vec<&BindingEntry>)> = Vec::new();
+    let mut internal: Vec<(&str, Vec<&BindingEntry>)> = Vec::new();
+
+    for (domain, entries) in map {
+        if is_user_facing_domain(domain) {
+            user_facing.push((domain, entries));
+        } else {
+            internal.push((domain, entries));
+        }
+    }
+
+    // User-facing first, then internal
+    user_facing.extend(internal);
+    user_facing
+}
+
+// ── Event formatting ──
 
 /// Extract display type, preview text, and style from an event.
 fn event_display(payload: &serde_json::Value, event_type: &str) -> (String, String, Style) {
@@ -219,9 +352,11 @@ fn event_display(payload: &serde_json::Value, event_type: &str) -> (String, Stri
                 let tools = stats["tool_calls"].as_u64().unwrap_or(0);
                 let dur = stats["duration_minutes"].as_u64().unwrap_or(0);
                 let outcome = stats["outcome"].as_str().unwrap_or("?");
+                let icon = if outcome == "completed" { "✓" } else { "✗" };
+                let dur_str = format_duration(dur);
                 (
                     "digest".into(),
-                    format!("{:.8} {outcome} ({tools} tools, {dur}m)", sid),
+                    format!("{icon} {:.8} — {tools} tools, {dur_str}", sid),
                     Style::default().fg(Color::DarkGray),
                 )
             } else if has_tag("decision") {
@@ -268,12 +403,20 @@ fn event_display(payload: &serde_json::Value, event_type: &str) -> (String, Stri
         }
         "commit" => {
             let title = first_line(payload["title"].as_str().unwrap_or(""));
-            ("commit".into(), title.to_string(), default)
+            (
+                "commit".into(),
+                format!("● {title}"),
+                Style::default().fg(Color::Green),
+            )
         }
         "merge" => {
             let src = payload["src"].as_str().unwrap_or("?");
             let dst = payload["dst"].as_str().unwrap_or("?");
-            ("merge".into(), format!("{src} -> {dst}"), default)
+            (
+                "merge".into(),
+                format!("◆ {src} → {dst}"),
+                Style::default().fg(Color::Cyan),
+            )
         }
         other => {
             // Fallback: try text or message fields before raw JSON
@@ -286,6 +429,23 @@ fn event_display(payload: &serde_json::Value, event_type: &str) -> (String, Stri
             };
             (other.to_string(), preview, default)
         }
+    }
+}
+
+// ── Utility functions ──
+
+/// Format duration in minutes to a human-readable string.
+fn format_duration(minutes: u64) -> String {
+    if minutes >= 60 {
+        let h = minutes / 60;
+        let m = minutes % 60;
+        if m == 0 {
+            format!("{h}h")
+        } else {
+            format!("{h}h{m}m")
+        }
+    } else {
+        format!("{minutes}m")
     }
 }
 
@@ -348,9 +508,9 @@ mod tests {
     }
 
     #[test]
-    fn note_session_digest_shows_compact() {
+    fn digest_completed_shows_checkmark() {
         let payload = json!({
-            "text": "Session abc: 15 tools...\nFailed: ...",
+            "text": "Session abc: 15 tools...",
             "tags": ["session_digest"],
             "session_id": "abc12345-long-id",
             "session_stats": {
@@ -361,10 +521,35 @@ mod tests {
         });
         let (dtype, preview, _) = event_display(&payload, "note");
         assert_eq!(dtype, "digest");
+        assert!(preview.starts_with("✓"));
         assert!(preview.contains("abc12345"));
-        assert!(preview.contains("completed"));
         assert!(preview.contains("15 tools"));
         assert!(preview.contains("42m"));
+    }
+
+    #[test]
+    fn digest_interrupted_shows_cross() {
+        let payload = json!({
+            "text": "Session xyz: interrupted",
+            "tags": ["session_digest"],
+            "session_id": "xyz99999-long-id",
+            "session_stats": {
+                "tool_calls": 100,
+                "duration_minutes": 120,
+                "outcome": "interrupted"
+            }
+        });
+        let (_, preview, _) = event_display(&payload, "note");
+        assert!(preview.starts_with("✗"));
+        assert!(preview.contains("2h"));
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(format_duration(304), "5h4m");
+        assert_eq!(format_duration(60), "1h");
+        assert_eq!(format_duration(42), "42m");
+        assert_eq!(format_duration(0), "0m");
     }
 
     #[test]
@@ -389,6 +574,23 @@ mod tests {
         let (dtype, preview, _) = event_display(&payload, "note");
         assert_eq!(dtype, "note");
         assert_eq!(preview, "first line");
+    }
+
+    #[test]
+    fn commit_shows_green_dot() {
+        let payload = json!({ "title": "feat: add user auth" });
+        let (dtype, preview, style) = event_display(&payload, "commit");
+        assert_eq!(dtype, "commit");
+        assert!(preview.starts_with("●"));
+        assert_eq!(style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn merge_shows_arrow() {
+        let payload = json!({ "src": "feat/auth", "dst": "main" });
+        let (_, preview, style) = event_display(&payload, "merge");
+        assert!(preview.contains("→"));
+        assert_eq!(style.fg, Some(Color::Cyan));
     }
 
     #[test]
@@ -422,5 +624,56 @@ mod tests {
         let (dtype, preview, _) = event_display(&payload, "custom_evt");
         assert_eq!(dtype, "custom_evt");
         assert_eq!(preview, "some info");
+    }
+
+    #[test]
+    fn group_bindings_by_domain() {
+        let bindings = vec![
+            BindingEntry {
+                key: "api.framework".into(),
+                value: "fastapi".into(),
+                by_session: "s1".into(),
+                by_label: "cli".into(),
+                ts: "2026-01-01T00:00:00Z".into(),
+            },
+            BindingEntry {
+                key: "bridge.auto_claim".into(),
+                value: "stateful".into(),
+                by_session: "s1".into(),
+                by_label: "cli".into(),
+                ts: "2026-01-01T00:00:00Z".into(),
+            },
+            BindingEntry {
+                key: "api.storage".into(),
+                value: "memory".into(),
+                by_session: "s1".into(),
+                by_label: "cli".into(),
+                ts: "2026-01-01T00:00:00Z".into(),
+            },
+            BindingEntry {
+                key: "ci.pipeline".into(),
+                value: "github".into(),
+                by_session: "s1".into(),
+                by_label: "cli".into(),
+                ts: "2026-01-01T00:00:00Z".into(),
+            },
+        ];
+        let groups = group_bindings(&bindings);
+        // User-facing first: api, ci; then internal: bridge
+        assert_eq!(groups[0].0, "api");
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].0, "ci");
+        assert_eq!(groups[1].1.len(), 1);
+        assert_eq!(groups[2].0, "bridge");
+        assert_eq!(groups[2].1.len(), 1);
+    }
+
+    #[test]
+    fn user_facing_domains_recognized() {
+        assert!(is_user_facing_domain("api"));
+        assert!(is_user_facing_domain("ci"));
+        assert!(is_user_facing_domain("testing"));
+        assert!(!is_user_facing_domain("bridge"));
+        assert!(!is_user_facing_domain("search"));
     }
 }
