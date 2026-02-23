@@ -21,8 +21,7 @@ pub fn render(f: &mut Frame, app: &App) {
 
     let active_peers = app.active_peers();
     let has_peers = !active_peers.is_empty();
-    let has_claims_or_requests =
-        !app.board.claims.is_empty() || !app.board.requests.is_empty();
+    let has_claims_or_requests = !app.board.claims.is_empty() || !app.board.requests.is_empty();
 
     if has_peers || has_claims_or_requests {
         // 3-column layout
@@ -172,8 +171,7 @@ fn render_events(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 }
 
 fn render_decisions(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let has_claims_or_requests =
-        !app.board.claims.is_empty() || !app.board.requests.is_empty();
+    let has_claims_or_requests = !app.board.claims.is_empty() || !app.board.requests.is_empty();
 
     let title = format!(" Decisions ({}) ", app.board.bindings.len());
     let block = Block::default()
@@ -221,7 +219,10 @@ fn render_bindings_grouped(f: &mut Frame, app: &App, area: ratatui::layout::Rect
         } else {
             Style::default().add_modifier(Modifier::BOLD)
         };
-        items.push(ListItem::new(Line::from(Span::styled(header, header_style))));
+        items.push(ListItem::new(Line::from(Span::styled(
+            header,
+            header_style,
+        ))));
 
         if expanded {
             for b in bindings {

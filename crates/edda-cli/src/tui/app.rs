@@ -296,10 +296,10 @@ mod tests {
     fn active_peers_hides_stale_unlabeled() {
         let mut app = App::new("test".into(), PathBuf::from("/tmp"));
         app.peers = vec![
-            make_peer("worker-1", 30),   // active, labeled → show
-            make_peer("", 200),          // stale, no label → hide
-            make_peer("worker-2", 200),  // stale, labeled → show
-            make_peer("", 50),           // active, no label → show
+            make_peer("worker-1", 30),  // active, labeled → show
+            make_peer("", 200),         // stale, no label → hide
+            make_peer("worker-2", 200), // stale, labeled → show
+            make_peer("", 50),          // active, no label → show
         ];
         let active = app.active_peers();
         assert_eq!(active.len(), 3);
