@@ -269,7 +269,7 @@ impl SqliteStore {
         )?;
 
         // Materialize decision if applicable
-        if edda_core::decision::is_decision(&event.payload) {
+        if event.event_type == "note" && edda_core::decision::is_decision(&event.payload) {
             if let Some(dp) = edda_core::decision::extract_decision(&event.payload) {
                 let domain = edda_core::decision::extract_domain(&dp.key);
                 let reason = dp.reason.as_deref().unwrap_or("");

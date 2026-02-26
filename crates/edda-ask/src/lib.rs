@@ -183,23 +183,22 @@ pub fn ask(
                     {
                         if let Some(dp) = edda_core::decision::extract_decision(&event.payload) {
                             let reason_str = dp.reason.as_deref().unwrap_or("").to_string();
-                            if dp.key.to_lowercase().contains(&kw_lower)
+                            if (dp.key.to_lowercase().contains(&kw_lower)
                                 || dp.value.to_lowercase().contains(&kw_lower)
-                                || reason_str.to_lowercase().contains(&kw_lower)
+                                || reason_str.to_lowercase().contains(&kw_lower))
+                                && !hits.iter().any(|h| h.event_id == event.event_id)
                             {
-                                if !hits.iter().any(|h| h.event_id == event.event_id) {
-                                    let domain = edda_core::decision::extract_domain(&dp.key);
-                                    hits.push(DecisionHit {
-                                        event_id: event.event_id.clone(),
-                                        key: dp.key,
-                                        value: dp.value,
-                                        reason: reason_str,
-                                        domain,
-                                        branch: event.branch.clone(),
-                                        ts: event.ts.clone(),
-                                        is_active: false,
-                                    });
-                                }
+                                let domain = edda_core::decision::extract_domain(&dp.key);
+                                hits.push(DecisionHit {
+                                    event_id: event.event_id.clone(),
+                                    key: dp.key,
+                                    value: dp.value,
+                                    reason: reason_str,
+                                    domain,
+                                    branch: event.branch.clone(),
+                                    ts: event.ts.clone(),
+                                    is_active: false,
+                                });
                             }
                         }
                     }
