@@ -29,7 +29,7 @@ impl Channel {
         }
     }
 
-    fn display_name(&self) -> String {
+    pub fn display_name(&self) -> String {
         match self {
             Channel::Ntfy { url, .. } => format!("ntfy({})", url),
             Channel::Webhook { url, .. } => format!("webhook({})", url),
