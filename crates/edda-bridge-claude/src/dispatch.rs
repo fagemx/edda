@@ -588,6 +588,9 @@ fn dispatch_session_end(
         signal_count,
     );
 
+    // 2d. Push notification (best-effort, fire-and-forget)
+    notify_session_end(project_id, cwd, session_id);
+
     // 3. Clean up session-scoped state files
     cleanup_session_state(project_id, session_id, peers_active);
 
@@ -597,6 +600,41 @@ fn dispatch_session_end(
     } else {
         Ok(HookResult::empty())
     }
+}
+
+/// Best-effort push notification for session end.
+/// Reads prev_digest.json (just written) for real outcome/duration data.
+fn notify_session_end(project_id: &str, cwd: &str, session_id: &str) {
+    let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(cwd)) else {
+        return;
+    };
+    let paths = edda_ledger::EddaPaths::discover(&root);
+    let config = edda_notify::NotifyConfig::load(&paths);
+    if config.channels.is_empty() {
+        return;
+    }
+    // Read the digest snapshot we just wrote for real session data
+    let (outcome, duration_minutes, summary) = match crate::digest::read_prev_digest(project_id) {
+        Some(d) => {
+            let tasks: Vec<&str> = d.completed_tasks.iter().map(|s| s.as_str()).collect();
+            let summary = if tasks.is_empty() {
+                String::new()
+            } else {
+                format!("Completed: {}", tasks.join(", "))
+            };
+            (d.outcome, d.duration_minutes, summary)
+        }
+        None => ("completed".to_string(), 0, String::new()),
+    };
+    edda_notify::dispatch(
+        &config,
+        &edda_notify::NotifyEvent::SessionEnd {
+            session_id: session_id.to_string(),
+            outcome,
+            duration_minutes,
+            summary,
+        },
+    );
 }
 
 /// Remove session-scoped state files that are no longer needed.
@@ -1194,6 +1232,20 @@ fn try_write_phase_change_event(
     };
     if let Ok(event) = edda_core::event::new_agent_phase_change_event(&params) {
         let _ = ledger.append_event(&event);
+    }
+
+    // Push notification (best-effort)
+    let config = edda_notify::NotifyConfig::load(&ledger.paths);
+    if !config.channels.is_empty() {
+        edda_notify::dispatch(
+            &config,
+            &edda_notify::NotifyEvent::PhaseChange {
+                session_id: transition.state.session_id.clone(),
+                from: transition.from.to_string(),
+                to: transition.to.to_string(),
+                issue: transition.state.issue,
+            },
+        );
     }
 }
 

@@ -26,6 +26,7 @@ edda-index = { path = "../edda-index", version = "0.1.0" }
 edda-pack = { path = "../edda-pack", version = "0.1.0" }
 edda-mcp = { path = "../edda-mcp", version = "0.1.0" }
 edda-serve = { path = "../edda-serve", version = "0.1.0" }
+edda-notify = { path = "../edda-notify", version = "0.1.0" }
 edda-search-fts = { path = "../edda-search-fts", version = "0.1.0" }
 edda-conductor = { path = "../edda-conductor", version = "0.1.0" }
 ratatui = { version = "0.29", optional = true }

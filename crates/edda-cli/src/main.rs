@@ -14,6 +14,7 @@ mod cmd_intake;
 mod cmd_log;
 mod cmd_merge;
 mod cmd_note;
+mod cmd_notify;
 mod cmd_pattern;
 mod cmd_phase;
 mod cmd_pipeline;
@@ -309,6 +310,11 @@ enum Command {
     },
     /// Launch the real-time peer status and event TUI
     Watch,
+    /// Push notification management
+    Notify {
+        #[command(subcommand)]
+        cmd: cmd_notify::NotifyCmd,
+    },
     /// Start HTTP API server
     Serve {
         /// Bind address
@@ -908,6 +914,7 @@ fn main() -> anyhow::Result<()> {
             BundleCmd::List { status } => cmd_bundle::execute_list(&repo_root, status.as_deref()),
         },
         Command::Watch => cmd_watch::execute(&repo_root),
+        Command::Notify { cmd } => cmd_notify::run(cmd, &repo_root),
         Command::Serve { bind, port } => cmd_serve::execute(&repo_root, &bind, port),
         Command::Gc {
             dry_run,

@@ -776,6 +776,22 @@ pub fn propose(p: ProposeParams<'_>) -> anyhow::Result<()> {
             ledger.append_event(&req_event)?;
         }
         rebuild_all(&ledger)?;
+
+        // Push notification for each pending approval (best-effort)
+        let notify_config = edda_notify::NotifyConfig::load(&ledger.paths);
+        if !notify_config.channels.is_empty() {
+            for stage in &draft_stages {
+                edda_notify::dispatch(
+                    &notify_config,
+                    &edda_notify::NotifyEvent::ApprovalPending {
+                        draft_id: draft_id.clone(),
+                        title: p.title.to_string(),
+                        stage_id: stage.stage_id.clone(),
+                        role: stage.role.clone(),
+                    },
+                );
+            }
+        }
     }
 
     // Print summary
