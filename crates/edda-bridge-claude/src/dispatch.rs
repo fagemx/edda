@@ -188,7 +188,7 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
         "UserPromptSubmit" => {
             dispatch_user_prompt_submit(&project_id, &session_id, &transcript_path, &cwd)
         }
-        "PreToolUse" => dispatch_pre_tool_use(&raw, &cwd),
+        "PreToolUse" => dispatch_pre_tool_use(&raw, &cwd, &project_id, &session_id),
         "PostToolUse" => dispatch_post_tool_use(&raw, &project_id, &session_id),
         "PostToolUseFailure" => Ok(HookResult::empty()),
         "PreCompact" => {
@@ -909,11 +909,27 @@ fn read_workspace_config_usize(cwd: &str, key: &str) -> Option<usize> {
     render::config_usize(cwd, key)
 }
 
-fn dispatch_pre_tool_use(raw: &serde_json::Value, cwd: &str) -> anyhow::Result<HookResult> {
+fn dispatch_pre_tool_use(
+    raw: &serde_json::Value,
+    cwd: &str,
+    project_id: &str,
+    session_id: &str,
+) -> anyhow::Result<HookResult> {
     let auto_approve = std::env::var("EDDA_CLAUDE_AUTO_APPROVE").unwrap_or_else(|_| "1".into());
 
     // Pattern matching (only for Edit/Write)
     let pattern_ctx = match_tool_patterns(raw, cwd);
+
+    // Check for pending requests (with cooldown: once per 3 tool calls)
+    let request_nudge = check_pending_requests(project_id, session_id);
+
+    // Combine pattern context and request nudge
+    let combined_ctx = match (pattern_ctx, request_nudge) {
+        (Some(p), Some(r)) => Some(format!("{p}\n\n{r}")),
+        (Some(p), None) => Some(p),
+        (None, Some(r)) => Some(r),
+        (None, None) => None,
+    };
 
     if auto_approve == "1" {
         let mut hook_output = serde_json::json!({
@@ -921,13 +937,13 @@ fn dispatch_pre_tool_use(raw: &serde_json::Value, cwd: &str) -> anyhow::Result<H
             "permissionDecision": "allow",
             "permissionDecisionReason": "edda auto-approved (M8)"
         });
-        if let Some(ctx) = pattern_ctx {
+        if let Some(ctx) = combined_ctx {
             hook_output["additionalContext"] =
                 serde_json::Value::String(wrap_context_boundary(&ctx));
         }
         let output = serde_json::json!({ "hookSpecificOutput": hook_output });
         Ok(HookResult::output(serde_json::to_string(&output)?))
-    } else if let Some(ctx) = pattern_ctx {
+    } else if let Some(ctx) = combined_ctx {
         let output = serde_json::json!({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
@@ -938,6 +954,29 @@ fn dispatch_pre_tool_use(raw: &serde_json::Value, cwd: &str) -> anyhow::Result<H
     } else {
         Ok(HookResult::empty())
     }
+}
+
+/// Check for pending coordination requests addressed to this session.
+/// Uses a cooldown counter: only returns a nudge every 3rd PreToolUse call.
+fn check_pending_requests(project_id: &str, session_id: &str) -> Option<String> {
+    let counter = read_counter(project_id, session_id, "request_nudge_count");
+    increment_counter(project_id, session_id, "request_nudge_count");
+    if !counter.is_multiple_of(3) {
+        return None;
+    }
+
+    let pending = crate::peers::pending_requests_for_session(project_id, session_id);
+    if pending.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec![
+        "**Pending requests** (ack with `edda request-ack <from>`):".to_string(),
+    ];
+    for r in &pending {
+        lines.push(format!("  - From **{}**: {}", r.from_label, r.message));
+    }
+    Some(lines.join("\n"))
 }
 
 /// Best-effort write of a `commit` event to the workspace ledger.
@@ -1017,6 +1056,14 @@ fn dispatch_post_tool_use(
     project_id: &str,
     session_id: &str,
 ) -> anyhow::Result<HookResult> {
+    // Real-time auto-claim: on Edit/Write, track the file and update claim scope.
+    let tool_name = get_str(raw, "tool_name");
+    if tool_name == "Edit" || tool_name == "Write" {
+        if let Some(fp) = raw.pointer("/input/file_path").and_then(|v| v.as_str()) {
+            crate::peers::maybe_auto_claim_file(project_id, session_id, fp);
+        }
+    }
+
     let signal = match crate::nudge::detect_signal(raw) {
         Some(s) => s,
         None => return Ok(HookResult::empty()),
@@ -2565,5 +2612,119 @@ mod tests {
         });
         // No cwd field — should silently skip
         try_write_commit_event(&raw, "test");
+    }
+
+    // ── Auto-claim in PostToolUse (#56) ──
+
+    #[test]
+    fn post_tool_use_edit_triggers_auto_claim() {
+        let pid = "test_post_edit_autoclaim";
+        let sid = "sess-autoclaim-1";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+
+        let raw = serde_json::json!({
+            "tool_name": "Edit",
+            "input": { "file_path": "crates/edda-store/src/lib.rs" }
+        });
+        let _ = dispatch_post_tool_use(&raw, pid, sid);
+
+        // Should have auto-claimed edda-store
+        let board = crate::peers::compute_board_state(pid);
+        let claim = board.claims.iter().find(|c| c.session_id == sid);
+        assert!(claim.is_some(), "Edit should trigger auto-claim");
+        assert_eq!(claim.unwrap().label, "edda-store");
+
+        crate::peers::remove_autoclaim_state(pid, sid);
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn post_tool_use_write_triggers_auto_claim() {
+        let pid = "test_post_write_autoclaim";
+        let sid = "sess-autoclaim-2";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+
+        let raw = serde_json::json!({
+            "tool_name": "Write",
+            "input": { "file_path": "crates/edda-bridge-claude/src/dispatch.rs" }
+        });
+        let _ = dispatch_post_tool_use(&raw, pid, sid);
+
+        let board = crate::peers::compute_board_state(pid);
+        let claim = board.claims.iter().find(|c| c.session_id == sid);
+        assert!(claim.is_some(), "Write should trigger auto-claim");
+        assert_eq!(claim.unwrap().label, "edda-bridge-claude");
+
+        crate::peers::remove_autoclaim_state(pid, sid);
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn post_tool_use_bash_does_not_auto_claim() {
+        let pid = "test_post_bash_no_autoclaim";
+        let sid = "sess-autoclaim-3";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "ls" }
+        });
+        let _ = dispatch_post_tool_use(&raw, pid, sid);
+
+        let board = crate::peers::compute_board_state(pid);
+        let claim = board.claims.iter().find(|c| c.session_id == sid);
+        assert!(claim.is_none(), "Bash should NOT trigger auto-claim");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Request nudge in PreToolUse (#56) ──
+
+    #[test]
+    fn pre_tool_use_request_nudge_cooldown() {
+        let pid = "test_pre_req_nudge_cd";
+        let sid = "sess-req-nudge-1";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Setup: pending request for this session
+        crate::peers::write_claim(pid, sid, "auth", &["src/auth/*".into()]);
+        crate::peers::write_request(pid, "s2", "billing", "auth", "Need AuthToken export");
+
+        // Counter starts at 0 → 0 % 3 == 0 → should nudge
+        let nudge0 = check_pending_requests(pid, sid);
+        assert!(nudge0.is_some(), "counter=0: should nudge");
+        assert!(nudge0.unwrap().contains("Need AuthToken export"));
+
+        // Counter is now 1 → 1 % 3 != 0 → no nudge
+        let nudge1 = check_pending_requests(pid, sid);
+        assert!(nudge1.is_none(), "counter=1: cooldown, no nudge");
+
+        // Counter is now 2 → 2 % 3 != 0 → no nudge
+        let nudge2 = check_pending_requests(pid, sid);
+        assert!(nudge2.is_none(), "counter=2: cooldown, no nudge");
+
+        // Counter is now 3 → 3 % 3 == 0 → should nudge again
+        let nudge3 = check_pending_requests(pid, sid);
+        assert!(nudge3.is_some(), "counter=3: should nudge again");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn pre_tool_use_no_pending_no_nudge() {
+        let pid = "test_pre_no_pending";
+        let sid = "sess-req-nudge-2";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+
+        // No requests at all → no nudge even at counter=0
+        let nudge = check_pending_requests(pid, sid);
+        assert!(nudge.is_none(), "no pending requests → no nudge");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }

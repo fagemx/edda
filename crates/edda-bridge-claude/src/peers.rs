@@ -84,6 +84,7 @@ pub(crate) enum CoordEventType {
     #[serde(alias = "decision")]
     Binding,
     Request,
+    RequestAck,
 }
 
 /// A scope claim by a session.
@@ -115,12 +116,21 @@ pub struct RequestEntry {
     pub ts: String,
 }
 
+/// A request acknowledgement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestAckEntry {
+    pub acker_session: String,
+    pub from_label: String,
+    pub ts: String,
+}
+
 /// Computed board state from coordination.jsonl.
 #[derive(Debug, Default)]
 pub struct BoardState {
     pub claims: Vec<ClaimEntry>,
     pub bindings: Vec<BindingEntry>,
     pub requests: Vec<RequestEntry>,
+    pub request_acks: Vec<RequestAckEntry>,
 }
 
 /// Summary of a peer session for rendering.
@@ -148,11 +158,14 @@ pub struct BindingConflict {
 
 /// Persisted auto-claim state for dedup (avoid repeated writes to coordination.jsonl).
 /// Location: ~/.edda/projects/{pid}/state/autoclaim.{sid}.json
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct AutoClaimState {
     label: String,
     paths: Vec<String>,
     ts: String,
+    /// Incrementally tracked files for real-time auto-claim.
+    #[serde(default)]
+    files: std::collections::HashSet<String>,
 }
 
 // ── Path Helpers ──
@@ -386,6 +399,17 @@ pub fn write_request(
     append_coord_event(project_id, &event);
 }
 
+/// Write a request acknowledgement event.
+pub fn write_request_ack(project_id: &str, session_id: &str, from_label: &str) {
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: session_id.to_string(),
+        event_type: CoordEventType::RequestAck,
+        payload: serde_json::json!({ "from_label": from_label }),
+    };
+    append_coord_event(project_id, &event);
+}
+
 /// Check if a binding conflict exists for the given key in coordination.jsonl.
 ///
 /// Returns `Some(BindingConflict)` if a binding with the same key but a
@@ -423,6 +447,7 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
         std::collections::HashMap::new();
     let mut bindings: Vec<BindingEntry> = Vec::new();
     let mut requests: Vec<RequestEntry> = Vec::new();
+    let mut request_acks: Vec<RequestAckEntry> = Vec::new();
 
     for line in content.lines() {
         let event: CoordEvent = match serde_json::from_str(line) {
@@ -483,6 +508,17 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
                     ts: event.ts,
                 });
             }
+            CoordEventType::RequestAck => {
+                let from_label = event.payload["from_label"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                request_acks.push(RequestAckEntry {
+                    acker_session: event.session_id,
+                    from_label,
+                    ts: event.ts,
+                });
+            }
         }
     }
 
@@ -494,6 +530,7 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
         },
         bindings,
         requests,
+        request_acks,
     }
 }
 
@@ -1129,7 +1166,75 @@ pub(crate) fn maybe_auto_claim(project_id: &str, session_id: &str, signals: &Ses
         label,
         paths,
         ts: now_rfc3339(),
+        files: Default::default(),
     };
+    if let Ok(data) = serde_json::to_string_pretty(&state) {
+        let _ = edda_store::write_atomic(&state_path, data.as_bytes());
+    }
+}
+
+/// Real-time auto-claim from a single file edit (PostToolUse path).
+///
+/// Maintains an incremental file set in the auto-claim state file.
+/// On each call, adds the file, re-derives scope, and writes a claim
+/// only if the scope changed.
+pub(crate) fn maybe_auto_claim_file(project_id: &str, session_id: &str, file_path: &str) {
+    let state_path = autoclaim_state_path(project_id, session_id);
+
+    // Read existing auto-claim state
+    let mut state: AutoClaimState = fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
+
+    // If session has a manual claim (claim exists but no auto-claim state file was loaded),
+    // we already loaded default state above. Check coordination for manual claim.
+    if state.label.is_empty() && state.files.is_empty() {
+        let board = compute_board_state(project_id);
+        if board.claims.iter().any(|c| c.session_id == session_id) {
+            // Manual claim exists, no auto-claim state → skip
+            return;
+        }
+    }
+
+    // Add file to tracked set
+    let normalized = file_path.replace('\\', "/");
+    if !state.files.insert(normalized) {
+        // File already tracked, scope won't change
+        return;
+    }
+
+    // Derive scope from all tracked files
+    let file_counts: Vec<FileEditCount> = state
+        .files
+        .iter()
+        .map(|p| FileEditCount {
+            path: p.clone(),
+            count: 1,
+        })
+        .collect();
+    let Some((label, paths)) = derive_scope_from_files(&file_counts) else {
+        // Save files set even if no scope derived yet
+        if let Ok(data) = serde_json::to_string_pretty(&state) {
+            let _ = edda_store::write_atomic(&state_path, data.as_bytes());
+        }
+        return;
+    };
+
+    // Dedup: skip claim write if scope unchanged
+    if state.label == label && state.paths == paths {
+        // Save updated files set
+        if let Ok(data) = serde_json::to_string_pretty(&state) {
+            let _ = edda_store::write_atomic(&state_path, data.as_bytes());
+        }
+        return;
+    }
+
+    // Write claim
+    write_claim(project_id, session_id, &label, &paths);
+    state.label = label;
+    state.paths = paths;
+    state.ts = now_rfc3339();
     if let Ok(data) = serde_json::to_string_pretty(&state) {
         let _ = edda_store::write_atomic(&state_path, data.as_bytes());
     }
@@ -1138,6 +1243,43 @@ pub(crate) fn maybe_auto_claim(project_id: &str, session_id: &str, signals: &Ses
 /// Remove auto-claim state file on session end.
 pub(crate) fn remove_autoclaim_state(project_id: &str, session_id: &str) {
     let _ = fs::remove_file(autoclaim_state_path(project_id, session_id));
+}
+
+/// Return pending (un-acked) requests addressed to the given session.
+///
+/// Resolves the session's label from its claim or heartbeat, then filters
+/// board requests to those targeting that label, excluding any that have
+/// been acknowledged by this session.
+pub(crate) fn pending_requests_for_session(
+    project_id: &str,
+    session_id: &str,
+) -> Vec<RequestEntry> {
+    let board = compute_board_state(project_id);
+
+    // Resolve my label from claim or heartbeat
+    let my_label: String = board
+        .claims
+        .iter()
+        .find(|c| c.session_id == session_id)
+        .map(|c| c.label.clone())
+        .or_else(|| read_heartbeat(project_id, session_id).map(|hb| hb.label))
+        .unwrap_or_default();
+
+    if my_label.is_empty() {
+        return Vec::new();
+    }
+
+    board
+        .requests
+        .into_iter()
+        .filter(|r| r.to_label == my_label)
+        .filter(|r| {
+            !board
+                .request_acks
+                .iter()
+                .any(|a| a.from_label == r.from_label && a.acker_session == session_id)
+        })
+        .collect()
 }
 
 // ── Helpers ──
@@ -2704,6 +2846,197 @@ mod tests {
         let result = render_peer_updates_with(&peers, &board, pid, "solo-session");
 
         assert!(result.is_none(), "solo with no bindings should return None");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Auto-claim file incremental tests (#56) ──
+
+    #[test]
+    fn auto_claim_file_incremental_same_crate() {
+        let pid = "test_autoclaim_file_incr";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Edit 3 files in same crate → single claim written
+        maybe_auto_claim_file(pid, "s1", "crates/edda-store/src/lib.rs");
+        maybe_auto_claim_file(pid, "s1", "crates/edda-store/src/paths.rs");
+        maybe_auto_claim_file(pid, "s1", "crates/edda-store/src/event.rs");
+
+        let board = compute_board_state(pid);
+        let claims: Vec<_> = board
+            .claims
+            .iter()
+            .filter(|c| c.session_id == "s1")
+            .collect();
+        assert_eq!(claims.len(), 1, "should have exactly one claim");
+        assert_eq!(claims[0].label, "edda-store");
+
+        // Verify state file has all 3 files tracked
+        let state_path = autoclaim_state_path(pid, "s1");
+        let state: AutoClaimState =
+            serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
+        assert_eq!(state.files.len(), 3);
+
+        remove_autoclaim_state(pid, "s1");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn auto_claim_file_scope_change() {
+        let pid = "test_autoclaim_file_scope_change";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // First file in edda-store
+        maybe_auto_claim_file(pid, "s1", "crates/edda-store/src/lib.rs");
+        let board = compute_board_state(pid);
+        let claim = board.claims.iter().find(|c| c.session_id == "s1").unwrap();
+        assert_eq!(claim.label, "edda-store");
+
+        // Second file in different crate → scope should change
+        maybe_auto_claim_file(pid, "s1", "crates/edda-bridge-claude/src/dispatch.rs");
+        let board2 = compute_board_state(pid);
+        let claim2 = board2.claims.iter().find(|c| c.session_id == "s1").unwrap();
+        // With 2 crates, label should be updated (might become multi-crate or dominant one)
+        assert!(
+            !claim2.label.is_empty(),
+            "label should be non-empty after cross-crate edit"
+        );
+
+        remove_autoclaim_state(pid, "s1");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn auto_claim_file_skips_manual_claim() {
+        let pid = "test_autoclaim_file_manual";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Manual claim exists
+        write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+
+        // Auto-claim file should be skipped (no state file, manual claim exists)
+        maybe_auto_claim_file(pid, "s1", "crates/edda-store/src/lib.rs");
+
+        // Claim should still be "auth" (manual), not "edda-store" (auto)
+        let board = compute_board_state(pid);
+        let claim = board.claims.iter().find(|c| c.session_id == "s1").unwrap();
+        assert_eq!(claim.label, "auth", "manual claim should not be overwritten");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn auto_claim_file_dedup_no_extra_writes() {
+        let pid = "test_autoclaim_file_dedup";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Same file twice → only one claim event
+        maybe_auto_claim_file(pid, "s1", "crates/edda-store/src/lib.rs");
+        maybe_auto_claim_file(pid, "s1", "crates/edda-store/src/lib.rs");
+
+        let board = compute_board_state(pid);
+        let claims: Vec<_> = board
+            .claims
+            .iter()
+            .filter(|c| c.session_id == "s1")
+            .collect();
+        assert_eq!(claims.len(), 1, "dedup: same file should produce one claim");
+
+        remove_autoclaim_state(pid, "s1");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Request ack tests (#56) ──
+
+    #[test]
+    fn request_ack_filters_pending() {
+        let pid = "test_req_ack_filters";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Setup: s1 claims "auth", s2 sends request to "auth"
+        write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+        write_request(pid, "s2", "billing", "auth", "Export AuthToken type");
+
+        // s1 should see the pending request
+        let pending = pending_requests_for_session(pid, "s1");
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message, "Export AuthToken type");
+
+        // s1 acks the request
+        write_request_ack(pid, "s1", "billing");
+
+        // Now pending should be empty for s1
+        let pending_after = pending_requests_for_session(pid, "s1");
+        assert!(
+            pending_after.is_empty(),
+            "acked request should not appear as pending"
+        );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn request_ack_only_for_acker_session() {
+        let pid = "test_req_ack_session_scope";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // s1 and s3 both claim "auth"
+        write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+        write_claim(pid, "s3", "auth", &["src/auth/*".into()]);
+        write_request(pid, "s2", "billing", "auth", "Export AuthToken");
+
+        // s1 acks
+        write_request_ack(pid, "s1", "billing");
+
+        // s1 should no longer see it
+        let pending_s1 = pending_requests_for_session(pid, "s1");
+        assert!(pending_s1.is_empty(), "s1 acked, should not see request");
+
+        // s3 should still see it (different session, same label)
+        let pending_s3 = pending_requests_for_session(pid, "s3");
+        assert_eq!(
+            pending_s3.len(),
+            1,
+            "s3 has not acked, should still see request"
+        );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn request_ack_in_board_state() {
+        let pid = "test_req_ack_board";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_request_ack(pid, "s1", "billing");
+        let board = compute_board_state(pid);
+        assert_eq!(board.request_acks.len(), 1);
+        assert_eq!(board.request_acks[0].acker_session, "s1");
+        assert_eq!(board.request_acks[0].from_label, "billing");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn pending_requests_no_label_returns_empty() {
+        let pid = "test_pending_no_label";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // s1 has no claim and no heartbeat → no label → no pending requests
+        write_request(pid, "s2", "billing", "auth", "Need auth API");
+        let pending = pending_requests_for_session(pid, "s1");
+        assert!(
+            pending.is_empty(),
+            "session with no label should have no pending requests"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
