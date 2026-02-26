@@ -83,6 +83,11 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Setup a bridge integration (shortcut for `bridge <platform> install`)
+    Setup {
+        #[command(subcommand)]
+        cmd: SetupCmd,
+    },
     /// Query project decisions, history, and conversations
     Ask {
         /// Query string (keyword, domain, or exact key like "db.engine"). Omit for all active decisions.
@@ -298,6 +303,361 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum BranchCmd {
+    /// Create a new branch
+    Create {
+        /// Branch name
+        name: String,
+        /// Purpose of this branch
+        #[arg(short = 'm', long = "purpose")]
+        purpose: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PlanCmd {
+    /// Scan codebase and suggest a plan
+    Scan {
+        /// High-level intent for the plan (injected into purpose field)
+        #[arg(long)]
+        purpose: Option<String>,
+    },
+    /// Generate plan.yaml from built-in template
+    Init {
+        /// Template name (rust-cli, rust-lib, python-api, node-app, fullstack, minimal)
+        template: Option<String>,
+        /// Output file path
+        #[arg(short, long, default_value = "plan.yaml")]
+        output: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupCmd {
+    /// Install OpenClaw bridge plugin (~/.openclaw/extensions/)
+    Openclaw {
+        /// Custom target directory
+        #[arg(long)]
+        target: Option<String>,
+        /// Uninstall instead of install
+        #[arg(long)]
+        uninstall: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum BridgeCmd {
+    /// Claude Code bridge operations
+    Claude {
+        #[command(subcommand)]
+        cmd: BridgeClaudeCmd,
+    },
+    /// OpenClaw bridge operations
+    Openclaw {
+        #[command(subcommand)]
+        cmd: BridgeOpenclawCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum BridgeClaudeCmd {
+    /// Install edda hooks into .claude/settings.local.json
+    Install {
+        /// Skip writing edda section to .claude/CLAUDE.md
+        #[arg(long)]
+        no_claude_md: bool,
+    },
+    /// Uninstall edda hooks from .claude/settings.local.json
+    Uninstall,
+    /// Manually digest a session into workspace ledger
+    Digest {
+        /// Session ID to digest
+        #[arg(long)]
+        session: Option<String>,
+        /// Digest all pending sessions
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show active peer sessions for current project
+    Peers,
+    /// Claim a scope for coordination (e.g. "auth", "billing")
+    Claim {
+        /// Short label for this session's scope
+        label: String,
+        /// File path patterns this scope covers (e.g. "src/auth/*")
+        #[arg(long)]
+        paths: Vec<String>,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Record a binding decision for all sessions
+    Decide {
+        /// Decision in key=value format (e.g. "auth.method=JWT RS256")
+        decision: String,
+        /// Reason for the decision
+        #[arg(long)]
+        reason: Option<String>,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Send a request to another session
+    Request {
+        /// Target session label
+        to: String,
+        /// Request message
+        message: String,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Render write-back protocol (static teaching text)
+    RenderWriteback,
+    /// Render workspace context from .edda/ ledger
+    RenderWorkspace {
+        /// Max chars budget
+        #[arg(long, default_value = "2500")]
+        budget: usize,
+    },
+    /// Render L2 coordination protocol
+    RenderCoordination {
+        /// Session ID (auto-inferred if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Render hot pack (recent turns summary, reads last-built pack)
+    RenderPack,
+    /// Render active plan excerpt
+    RenderPlan,
+    /// Write session heartbeat for peer discovery
+    HeartbeatWrite {
+        /// Session label (e.g. "auth", "billing")
+        #[arg(long)]
+        label: String,
+        /// Session ID (auto-inferred if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Touch heartbeat timestamp (liveness ping)
+    HeartbeatTouch {
+        /// Session ID (auto-inferred if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Remove session heartbeat
+    HeartbeatRemove {
+        /// Session ID (auto-inferred if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BridgeOpenclawCmd {
+    /// Install edda OpenClaw plugin
+    Install {
+        /// Custom target directory (default: ~/.openclaw/extensions/edda-bridge/)
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Uninstall edda OpenClaw plugin
+    Uninstall {
+        /// Custom target directory
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Manually digest a session into workspace ledger
+    Digest {
+        /// Session ID to digest
+        #[arg(long)]
+        session: Option<String>,
+        /// Digest all pending sessions
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum HookCmd {
+    /// Claude Code hook entrypoint (reads stdin JSON)
+    Claude,
+    /// OpenClaw hook entrypoint (reads stdin JSON)
+    Openclaw,
+}
+
+#[derive(Subcommand)]
+enum DoctorCmd {
+    /// Check Claude Code bridge health
+    Claude,
+    /// Check OpenClaw bridge health
+    Openclaw,
+}
+
+#[derive(Subcommand)]
+enum IndexCmd {
+    /// Verify index entries match store records
+    Verify {
+        /// Project ID
+        #[arg(long)]
+        project: String,
+        /// Session ID
+        #[arg(long)]
+        session: String,
+        /// Number of records to sample
+        #[arg(long, default_value_t = 50)]
+        sample: usize,
+        /// Check all records
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Set a config value
+    Set {
+        /// Config key (e.g. skill_guide)
+        key: String,
+        /// Config value (true/false/number/string)
+        value: String,
+    },
+    /// Get a config value
+    Get {
+        /// Config key
+        key: String,
+    },
+    /// List all config values
+    List,
+}
+
+#[derive(Subcommand)]
+enum PatternCmd {
+    /// Add a new pattern
+    Add {
+        /// Pattern ID (e.g. test-no-db)
+        #[arg(long)]
+        id: String,
+        /// File glob patterns (repeatable)
+        #[arg(long = "glob")]
+        globs: Vec<String>,
+        /// Rule description
+        #[arg(long)]
+        rule: String,
+        /// Source reference (e.g. "PR #2587")
+        #[arg(long, default_value = "")]
+        source: String,
+    },
+    /// Remove a pattern
+    Remove {
+        /// Pattern ID
+        id: String,
+    },
+    /// List all patterns
+    List,
+    /// Test which patterns match a file path
+    Test {
+        /// File path to test
+        file_path: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DraftCmd {
+    /// Create a draft commit (does not write to ledger)
+    Propose {
+        /// Draft title
+        #[arg(short, long)]
+        title: String,
+        /// Purpose of this commit
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Contribution description (defaults to title)
+        #[arg(long)]
+        contrib: Option<String>,
+        /// Evidence refs: evt_* or blob:sha256:* (repeatable)
+        #[arg(long = "evidence")]
+        evidence: Vec<String>,
+        /// Labels (repeatable)
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Enable auto-evidence collection (also auto-enabled when no --evidence given)
+        #[arg(long)]
+        auto: bool,
+        /// Maximum number of auto-evidence items
+        #[arg(long, default_value_t = 20)]
+        max_evidence: usize,
+    },
+    /// Show a draft by ID
+    Show {
+        /// Draft ID (drf_*)
+        id: String,
+    },
+    /// List all drafts
+    List {
+        /// Output as JSON lines (one object per draft)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a draft commit to the ledger (with rebase)
+    Apply {
+        /// Draft ID (drf_*)
+        id: String,
+        /// Preview without writing to ledger
+        #[arg(long)]
+        dry_run: bool,
+        /// Delete draft after successful apply
+        #[arg(long)]
+        delete: bool,
+    },
+    /// Delete a draft
+    Delete {
+        /// Draft ID (drf_*)
+        id: String,
+    },
+    /// Approve a draft
+    Approve {
+        /// Draft ID (drf_*)
+        id: String,
+        /// Actor name
+        #[arg(long, default_value = "human")]
+        by: String,
+        /// Approval note
+        #[arg(long, default_value = "")]
+        note: String,
+        /// Stage ID (required for multi-stage drafts)
+        #[arg(long)]
+        stage: Option<String>,
+    },
+    /// Reject a draft
+    Reject {
+        /// Draft ID (drf_*)
+        id: String,
+        /// Actor name
+        #[arg(long, default_value = "human")]
+        by: String,
+        /// Rejection note
+        #[arg(long, default_value = "")]
+        note: String,
+        /// Stage ID (required for multi-stage drafts)
+        #[arg(long)]
+        stage: Option<String>,
+    },
+    /// Show pending approval items
+    Inbox {
+        /// Filter by actor name
+        #[arg(long)]
+        by: Option<String>,
+        /// Filter by role
+        #[arg(long)]
+        role: Option<String>,
+        /// Output as JSON lines (one object per item)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum McpCommand {
     /// Start MCP server (stdio transport, JSON-RPC 2.0)
     Serve,
@@ -325,6 +685,16 @@ fn main() -> anyhow::Result<()> {
             message,
             session,
         } => cmd_bridge::request(&repo_root, &to, &message, session.as_deref()),
+        Command::Setup { cmd } => match cmd {
+            SetupCmd::Openclaw { target, uninstall } => {
+                let path = target.as_deref().map(std::path::Path::new);
+                if uninstall {
+                    cmd_bridge::uninstall_openclaw(path)
+                } else {
+                    cmd_bridge::install_openclaw(path)
+                }
+            }
+        },
         Command::Ask {
             query,
             limit,
