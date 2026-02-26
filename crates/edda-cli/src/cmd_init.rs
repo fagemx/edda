@@ -98,9 +98,7 @@ fn auto_install_bridges(repo_root: &Path) {
 
     // OpenClaw: global plugin (~/.openclaw/extensions/) — hint only, don't auto-install
     if repo_root.join(".openclaw").is_dir() {
-        println!(
-            "Detected OpenClaw project. Run 'edda setup openclaw' to enable edda hooks."
-        );
+        println!("Detected OpenClaw project. Run 'edda setup openclaw' to enable edda hooks.");
     }
 }
 
