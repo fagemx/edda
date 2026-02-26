@@ -2923,7 +2923,10 @@ mod tests {
         // Claim should still be "auth" (manual), not "edda-store" (auto)
         let board = compute_board_state(pid);
         let claim = board.claims.iter().find(|c| c.session_id == "s1").unwrap();
-        assert_eq!(claim.label, "auth", "manual claim should not be overwritten");
+        assert_eq!(
+            claim.label, "auth",
+            "manual claim should not be overwritten"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }

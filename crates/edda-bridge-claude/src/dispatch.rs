@@ -970,9 +970,7 @@ fn check_pending_requests(project_id: &str, session_id: &str) -> Option<String> 
         return None;
     }
 
-    let mut lines = vec![
-        "**Pending requests** (ack with `edda request-ack <from>`):".to_string(),
-    ];
+    let mut lines = vec!["**Pending requests** (ack with `edda request-ack <from>`):".to_string()];
     for r in &pending {
         lines.push(format!("  - From **{}**: {}", r.from_label, r.message));
     }
