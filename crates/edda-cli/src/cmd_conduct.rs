@@ -4,6 +4,12 @@ use edda_conductor::agent::budget::BudgetTracker;
 use edda_conductor::agent::launcher::{phase_session_id, ClaudeCodeLauncher};
 use edda_conductor::check::engine::CheckEngine;
 use edda_conductor::plan::parser::load_plan;
+use edda_conductor::runner::notify::StdoutNotifier;
+use edda_conductor::runner::sequential::run_plan;
+use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
+use edda_conductor::state::persist::{load_state, save_state};
+use std::path::Path;
+use tokio_util::sync::CancellationToken;
 
 // ── CLI Schema ──
 
@@ -59,7 +65,7 @@ pub enum ConductCmd {
 
 // ── Dispatch ──
 
-pub fn run_cmd(cmd: ConductCmd, repo_root: &std::path::Path) -> Result<()> {
+pub fn run_cmd(cmd: ConductCmd, repo_root: &Path) -> Result<()> {
     match cmd {
         ConductCmd::Run {
             plan_file,
@@ -67,8 +73,8 @@ pub fn run_cmd(cmd: ConductCmd, repo_root: &std::path::Path) -> Result<()> {
             dry_run,
             quiet,
         } => run(
-            std::path::Path::new(&plan_file),
-            cwd.as_deref().map(std::path::Path::new),
+            Path::new(&plan_file),
+            cwd.as_deref().map(Path::new),
             dry_run,
             !quiet,
         ),
@@ -84,12 +90,6 @@ pub fn run_cmd(cmd: ConductCmd, repo_root: &std::path::Path) -> Result<()> {
 }
 
 // ── Command Implementations ──
-use edda_conductor::runner::notify::StdoutNotifier;
-use edda_conductor::runner::sequential::run_plan;
-use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
-use edda_conductor::state::persist::{load_state, save_state};
-use std::path::Path;
-use tokio_util::sync::CancellationToken;
 
 /// Execute `edda conduct run <plan.yaml>`
 pub fn run(
