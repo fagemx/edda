@@ -908,9 +908,14 @@ mod tests {
         let (tmp, ledger) = setup();
         // Create a session digest note containing a keyword
         let tags = vec!["session_digest".to_string()];
-        let mut digest =
-            new_note_event("main", None, "system", "discussed postgres migration", &tags)
-                .unwrap();
+        let mut digest = new_note_event(
+            "main",
+            None,
+            "system",
+            "discussed postgres migration",
+            &tags,
+        )
+        .unwrap();
         digest.payload["session_stats"] = serde_json::json!({
             "tool_calls": 10,
             "tasks_snapshot": [{"subject": "Fix postgres pool", "status": "completed"}],
