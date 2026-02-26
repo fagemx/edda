@@ -1,0 +1,27 @@
+[package]
+name = "edda-serve"
+description = "HTTP API server for edda workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+edda-ask = { path = "../edda-ask", version = "0.1.0" }
+edda-core = { path = "../edda-core", version = "0.1.0" }
+edda-derive = { path = "../edda-derive", version = "0.1.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.0" }
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+tower-http = { version = "0.6", features = ["cors"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower = { version = "0.5", features = ["util"] }
