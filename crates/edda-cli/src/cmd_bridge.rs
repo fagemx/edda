@@ -12,6 +12,9 @@ pub fn uninstall(repo_root: &Path) -> anyhow::Result<()> {
 }
 
 /// `edda hook claude` — read stdin, dispatch hook
+///
+/// Resilience: catch_unwind + configurable timeout (EDDA_HOOK_TIMEOUT_MS).
+/// On panic or timeout, exits 0 — never blocks the host agent.
 pub fn hook_claude() -> anyhow::Result<()> {
     let mut stdin_buf = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
@@ -25,8 +28,17 @@ pub fn hook_claude() -> anyhow::Result<()> {
         &stdin_buf[..stdin_buf.len().min(200)]
     ));
 
-    match edda_bridge_claude::hook_entrypoint_from_stdin(&stdin_buf) {
-        Ok(result) => {
+    let timeout_ms = hook_timeout_ms();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            edda_bridge_claude::hook_entrypoint_from_stdin(&stdin_buf)
+        }));
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+        Ok(Ok(Ok(result))) => {
             if let Some(output) = &result.stdout {
                 debug_log(&format!("OK output({} bytes)", output.len()));
                 print!("{output}");
@@ -43,12 +55,32 @@ pub fn hook_claude() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Err(e) => {
+        Ok(Ok(Err(e))) => {
             debug_log(&format!("ERROR: {e}"));
-            // Exit 0 on internal errors — never block the host agent
+            Ok(())
+        }
+        Ok(Err(panic_info)) => {
+            let msg = panic_info
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic_info.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            debug_log(&format!("PANIC: {msg}"));
+            Ok(())
+        }
+        Err(_) => {
+            debug_log(&format!("TIMEOUT after {timeout_ms}ms — graceful exit"));
             Ok(())
         }
     }
+}
+
+/// Hook timeout in milliseconds. Configurable via `EDDA_HOOK_TIMEOUT_MS` (default: 10s).
+fn hook_timeout_ms() -> u64 {
+    std::env::var("EDDA_HOOK_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10_000)
 }
 
 fn debug_log(msg: &str) {
@@ -498,6 +530,9 @@ pub fn uninstall_openclaw(target: Option<&Path>) -> anyhow::Result<()> {
 }
 
 /// `edda hook openclaw` — read stdin, dispatch hook
+///
+/// Resilience: catch_unwind + configurable timeout (EDDA_HOOK_TIMEOUT_MS).
+/// On panic or timeout, exits 0 — never blocks the host agent.
 pub fn hook_openclaw() -> anyhow::Result<()> {
     let mut stdin_buf = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut stdin_buf) {
@@ -511,8 +546,17 @@ pub fn hook_openclaw() -> anyhow::Result<()> {
         &stdin_buf[..stdin_buf.len().min(200)]
     ));
 
-    match edda_bridge_openclaw::hook_entrypoint_from_stdin(&stdin_buf) {
-        Ok(result) => {
+    let timeout_ms = hook_timeout_ms();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            edda_bridge_openclaw::hook_entrypoint_from_stdin(&stdin_buf)
+        }));
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(std::time::Duration::from_millis(timeout_ms)) {
+        Ok(Ok(Ok(result))) => {
             if let Some(output) = &result.stdout {
                 debug_log(&format!("OPENCLAW OK output({} bytes)", output.len()));
                 print!("{output}");
@@ -527,9 +571,21 @@ pub fn hook_openclaw() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Err(e) => {
+        Ok(Ok(Err(e))) => {
             debug_log(&format!("OPENCLAW ERROR: {e}"));
-            // Exit 0 on internal errors — never block the host agent
+            Ok(())
+        }
+        Ok(Err(panic_info)) => {
+            let msg = panic_info
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic_info.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            debug_log(&format!("OPENCLAW PANIC: {msg}"));
+            Ok(())
+        }
+        Err(_) => {
+            debug_log(&format!("OPENCLAW TIMEOUT after {timeout_ms}ms — graceful exit"));
             Ok(())
         }
     }
