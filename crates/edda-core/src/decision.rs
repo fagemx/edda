@@ -12,6 +12,15 @@ pub fn is_decision(payload: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// Check if a payload represents a session digest event (note with "session_digest" tag).
+pub fn is_session_digest(payload: &Value) -> bool {
+    payload
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(|t| t.as_str() == Some("session_digest")))
+        .unwrap_or(false)
+}
+
 /// Extract `DecisionPayload` from an event payload.
 /// Prefers structured `payload.decision` object, falls back to text parse
 /// for backward compatibility with legacy events.
@@ -145,6 +154,24 @@ mod tests {
             "decision": {"value": "v"}
         });
         assert!(extract_decision(&payload).is_none());
+    }
+
+    #[test]
+    fn is_session_digest_with_tag() {
+        let payload = serde_json::json!({
+            "tags": ["session_digest"],
+            "text": "Session abc: 42 tool calls"
+        });
+        assert!(is_session_digest(&payload));
+    }
+
+    #[test]
+    fn is_session_digest_without_tag() {
+        let payload = serde_json::json!({
+            "tags": ["decision"],
+            "text": "db.engine: postgres"
+        });
+        assert!(!is_session_digest(&payload));
     }
 
     #[test]

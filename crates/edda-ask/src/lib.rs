@@ -365,7 +365,7 @@ fn find_related_notes(
             continue;
         }
         // Skip session digest notes — those are session summaries, not research notes
-        if is_session_digest(event) {
+        if edda_core::decision::is_session_digest(&event.payload) {
             continue;
         }
 
@@ -432,13 +432,17 @@ pub fn format_human(result: &AskResult) -> String {
     if !result.related_notes.is_empty() {
         out.push_str("── Related Notes ──────────────────────\n");
         for n in &result.related_notes {
-            let display = if n.text.len() > 120 {
+            if n.text.len() > 120 {
                 let end = n.text.floor_char_boundary(117);
-                format!("{}...", &n.text[..end])
+                out.push_str(&format!(
+                    "  \"{}...\" ({}, {})\n\n",
+                    &n.text[..end],
+                    n.ts,
+                    n.branch
+                ));
             } else {
-                n.text.clone()
-            };
-            out.push_str(&format!("  \"{display}\" ({}, {})\n\n", n.ts, n.branch));
+                out.push_str(&format!("  \"{}\" ({}, {})\n\n", n.text, n.ts, n.branch));
+            }
         }
     }
 
@@ -475,16 +479,6 @@ fn to_decision_hit(row: &DecisionRow) -> DecisionHit {
 }
 
 // Decision helpers centralized in edda_core::decision.
-
-fn is_session_digest(event: &Event) -> bool {
-    event.event_type == "note"
-        && event
-            .payload
-            .get("tags")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(|t| t.as_str() == Some("session_digest")))
-            .unwrap_or(false)
-}
 
 // ── Tests ────────────────────────────────────────────────────────────
 
