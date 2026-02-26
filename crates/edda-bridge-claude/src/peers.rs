@@ -64,6 +64,8 @@ pub struct SessionHeartbeat {
     pub recent_commits: Vec<String>,
     #[serde(default)]
     pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_phase: Option<String>,
 }
 
 /// Append-only coordination event.
@@ -145,6 +147,7 @@ pub struct PeerSummary {
     pub recent_commits: Vec<String>,
     pub claimed_paths: Vec<String>,
     pub branch: Option<String>,
+    pub current_phase: Option<String>,
 }
 
 /// Conflict info when a binding with the same key but different value exists.
@@ -239,6 +242,8 @@ pub(crate) fn write_heartbeat(
             .map(|c| format!("{} {}", &c.hash[..7.min(c.hash.len())], c.message))
             .collect(),
         branch: detect_git_branch(),
+        current_phase: crate::agent_phase::read_phase_state(project_id, session_id)
+            .map(|ps| ps.phase.to_string()),
     };
 
     let data = match serde_json::to_string_pretty(&heartbeat) {
@@ -303,6 +308,7 @@ pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str) 
         total_edits: 0,
         recent_commits: Vec::new(),
         branch: detect_git_branch(),
+        current_phase: None,
     };
 
     let data = match serde_json::to_string_pretty(&heartbeat) {
@@ -675,6 +681,7 @@ pub fn discover_active_peers(project_id: &str, current_session_id: &str) -> Vec<
             recent_commits: hb.recent_commits,
             claimed_paths,
             branch: hb.branch,
+            current_phase: hb.current_phase,
         });
     }
 
@@ -739,6 +746,7 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
             recent_commits: hb.recent_commits,
             claimed_paths,
             branch: hb.branch,
+            current_phase: hb.current_phase,
         });
     }
 
@@ -887,11 +895,7 @@ pub fn render_coordination_protocol_with(
         lines.push("### Peers Working On".to_string());
         for p in active_peers.iter().take(5) {
             let age = format_age(p.age_secs);
-            let branch_suffix = p
-                .branch
-                .as_deref()
-                .map(|b| format!(" [branch: {b}]"))
-                .unwrap_or_default();
+            let branch_suffix = format_peer_suffix(p.branch.as_deref(), p.current_phase.as_deref());
             if !p.task_subjects.is_empty() {
                 for t in p.task_subjects.iter().take(2) {
                     lines.push(format!("- {} ({age}){branch_suffix}: {t}", p.label));
@@ -1027,11 +1031,7 @@ pub(crate) fn render_peer_updates_with(
     // Peer activity (tasks → focus files → bare label)
     for p in peers.iter().take(3) {
         let age = format_age(p.age_secs);
-        let branch_suffix = p
-            .branch
-            .as_deref()
-            .map(|b| format!(" [branch: {b}]"))
-            .unwrap_or_default();
+        let branch_suffix = format_peer_suffix(p.branch.as_deref(), p.current_phase.as_deref());
         if !p.task_subjects.is_empty() {
             for t in p.task_subjects.iter().take(1) {
                 lines.push(format!("- {} ({age}){branch_suffix}: {t}", p.label));
@@ -1339,6 +1339,16 @@ fn auto_label(signals: &SessionSignals) -> String {
 }
 
 /// Format age in human-readable form.
+/// Format the bracket suffix for a peer line: `[branch: x, phase]` or `[branch: x]` etc.
+fn format_peer_suffix(branch: Option<&str>, phase: Option<&str>) -> String {
+    match (branch, phase) {
+        (Some(b), Some(p)) => format!(" [branch: {b}, {p}]"),
+        (Some(b), None) => format!(" [branch: {b}]"),
+        (None, Some(p)) => format!(" [{p}]"),
+        (None, None) => String::new(),
+    }
+}
+
 pub fn format_age(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s ago")
