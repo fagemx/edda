@@ -589,7 +589,7 @@ fn dispatch_session_end(
     );
 
     // 2d. Push notification (best-effort, fire-and-forget)
-    notify_session_end(cwd, session_id);
+    notify_session_end(project_id, cwd, session_id);
 
     // 3. Clean up session-scoped state files
     cleanup_session_state(project_id, session_id, peers_active);
@@ -603,7 +603,8 @@ fn dispatch_session_end(
 }
 
 /// Best-effort push notification for session end.
-fn notify_session_end(cwd: &str, session_id: &str) {
+/// Reads prev_digest.json (just written) for real outcome/duration data.
+fn notify_session_end(project_id: &str, cwd: &str, session_id: &str) {
     let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(cwd)) else {
         return;
     };
@@ -612,13 +613,26 @@ fn notify_session_end(cwd: &str, session_id: &str) {
     if config.channels.is_empty() {
         return;
     }
+    // Read the digest snapshot we just wrote for real session data
+    let (outcome, duration_minutes, summary) = match crate::digest::read_prev_digest(project_id) {
+        Some(d) => {
+            let tasks: Vec<&str> = d.completed_tasks.iter().map(|s| s.as_str()).collect();
+            let summary = if tasks.is_empty() {
+                String::new()
+            } else {
+                format!("Completed: {}", tasks.join(", "))
+            };
+            (d.outcome, d.duration_minutes, summary)
+        }
+        None => ("completed".to_string(), 0, String::new()),
+    };
     edda_notify::dispatch(
         &config,
         &edda_notify::NotifyEvent::SessionEnd {
             session_id: session_id.to_string(),
-            outcome: "completed".to_string(),
-            duration_minutes: 0,
-            summary: String::new(),
+            outcome,
+            duration_minutes,
+            summary,
         },
     );
 }

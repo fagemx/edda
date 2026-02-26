@@ -165,15 +165,23 @@ impl NotifyEvent {
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+fn make_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(TIMEOUT))
+        .build()
+        .new_agent()
+}
+
 /// Send notifications to all channels matching this event.
 /// Errors are logged to stderr but never propagated.
 pub fn dispatch(config: &NotifyConfig, event: &NotifyEvent) {
+    let agent = make_agent();
     for channel in &config.channels {
         if !channel.matches(event) {
             continue;
         }
         let name = channel.display_name();
-        if let Err(e) = send(channel, event) {
+        if let Err(e) = send(&agent, channel, event) {
             eprintln!("[edda-notify] failed to send to {name}: {e}");
         }
     }
@@ -188,35 +196,32 @@ pub fn test_channels(config: &NotifyConfig) -> Vec<(String, Result<(), String>)>
         duration_minutes: 0,
         summary: "edda notify test — if you see this, notifications are working!".to_string(),
     };
+    let agent = make_agent();
     config
         .channels
         .iter()
         .map(|ch| {
             let name = ch.display_name();
-            let result = send(ch, &test_event).map_err(|e| e.to_string());
+            let result = send(&agent, ch, &test_event).map_err(|e| e.to_string());
             (name, result)
         })
         .collect()
 }
 
-fn send(channel: &Channel, event: &NotifyEvent) -> anyhow::Result<()> {
+fn send(agent: &ureq::Agent, channel: &Channel, event: &NotifyEvent) -> anyhow::Result<()> {
     match channel {
-        Channel::Ntfy { url, .. } => send_ntfy(url, event),
-        Channel::Webhook { url, .. } => send_webhook(url, event),
+        Channel::Ntfy { url, .. } => send_ntfy(agent, url, event),
+        Channel::Webhook { url, .. } => send_webhook(agent, url, event),
         Channel::Telegram {
             bot_token, chat_id, ..
-        } => send_telegram(bot_token, chat_id, event),
+        } => send_telegram(agent, bot_token, chat_id, event),
     }
 }
 
 // ── ntfy ──
 
-fn send_ntfy(url: &str, event: &NotifyEvent) -> anyhow::Result<()> {
+fn send_ntfy(agent: &ureq::Agent, url: &str, event: &NotifyEvent) -> anyhow::Result<()> {
     let (title, body, priority) = format_ntfy(event);
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .build()
-        .new_agent();
     agent
         .post(url)
         .header("Title", &title)
@@ -272,12 +277,8 @@ fn format_ntfy(event: &NotifyEvent) -> (String, String, String) {
 
 // ── Webhook (generic JSON POST) ──
 
-fn send_webhook(url: &str, event: &NotifyEvent) -> anyhow::Result<()> {
+fn send_webhook(agent: &ureq::Agent, url: &str, event: &NotifyEvent) -> anyhow::Result<()> {
     let payload = format_webhook(event);
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .build()
-        .new_agent();
     agent
         .post(url)
         .header("Content-Type", "application/json")
@@ -294,18 +295,19 @@ fn format_webhook(event: &NotifyEvent) -> serde_json::Value {
 
 // ── Telegram ──
 
-fn send_telegram(bot_token: &str, chat_id: &str, event: &NotifyEvent) -> anyhow::Result<()> {
+fn send_telegram(
+    agent: &ureq::Agent,
+    bot_token: &str,
+    chat_id: &str,
+    event: &NotifyEvent,
+) -> anyhow::Result<()> {
     let text = format_telegram(event);
     let url = format!("https://api.telegram.org/bot{bot_token}/sendMessage");
     let body = serde_json::json!({
         "chat_id": chat_id,
         "text": text,
-        "parse_mode": "Markdown",
+        "parse_mode": "HTML",
     });
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        .build()
-        .new_agent();
     agent
         .post(&url)
         .header("Content-Type", "application/json")
@@ -321,21 +323,30 @@ fn format_telegram(event: &NotifyEvent) -> String {
             draft_id,
             ..
         } => {
-            format!("*Approval needed*\n{title}\nDraft `{draft_id}` requires _{role}_ approval")
+            let t = escape_html(title);
+            let d = escape_html(draft_id);
+            let r = escape_html(role);
+            format!(
+                "<b>Approval needed</b>\n{t}\nDraft <code>{d}</code> requires <i>{r}</i> approval"
+            )
         }
         NotifyEvent::PhaseChange {
             from, to, issue, ..
         } => {
-            let issue_str = issue.map_or(String::new(), |i| format!(" (#{i})"));
-            format!("*Phase change*{issue_str}\n{from} → {to}")
+            let issue_str = issue.map_or(String::new(), |i| format!(" (#{})", i));
+            let f = escape_html(from);
+            let t = escape_html(to);
+            format!("<b>Phase change</b>{issue_str}\n{f} \u{2192} {t}")
         }
         NotifyEvent::SessionEnd {
             outcome, summary, ..
         } => {
+            let o = escape_html(outcome);
             if summary.is_empty() {
-                format!("*Session ended*: {outcome}")
+                format!("<b>Session ended</b>: {o}")
             } else {
-                format!("*Session ended*: {outcome}\n{summary}")
+                let s = escape_html(summary);
+                format!("<b>Session ended</b>: {o}\n{s}")
             }
         }
         NotifyEvent::Anomaly {
@@ -343,9 +354,17 @@ fn format_telegram(event: &NotifyEvent) -> String {
             count,
             detail,
         } => {
-            format!("*Anomaly detected*\n{signal_type} x{count}\n{detail}")
+            let st = escape_html(signal_type);
+            let d = escape_html(detail);
+            format!("<b>Anomaly detected</b>\n{st} x{count}\n{d}")
         }
     }
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 // ── Tests ──
@@ -484,9 +503,21 @@ mod tests {
             role: "ops".into(),
         };
         let text = format_telegram(&event);
-        assert!(text.contains("*Approval needed*"));
+        assert!(text.contains("<b>Approval needed</b>"));
         assert!(text.contains("Deploy v2"));
-        assert!(text.contains("`drf_1`"));
-        assert!(text.contains("_ops_"));
+        assert!(text.contains("<code>drf_1</code>"));
+        assert!(text.contains("<i>ops</i>"));
+    }
+
+    #[test]
+    fn format_telegram_escapes_html() {
+        let event = NotifyEvent::ApprovalPending {
+            draft_id: "d1".into(),
+            title: "Fix <script> & stuff".into(),
+            stage_id: "s1".into(),
+            role: "dev".into(),
+        };
+        let text = format_telegram(&event);
+        assert!(text.contains("Fix &lt;script&gt; &amp; stuff"));
     }
 }
