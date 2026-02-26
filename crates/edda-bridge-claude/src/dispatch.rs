@@ -189,7 +189,7 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
             dispatch_user_prompt_submit(&project_id, &session_id, &transcript_path, &cwd)
         }
         "PreToolUse" => dispatch_pre_tool_use(&raw, &cwd, &project_id, &session_id),
-        "PostToolUse" => dispatch_post_tool_use(&raw, &project_id, &session_id),
+        "PostToolUse" => dispatch_post_tool_use(&raw, &project_id, &session_id, &cwd),
         "PostToolUseFailure" => Ok(HookResult::empty()),
         "PreCompact" => {
             // PreCompact hooks cannot inject context via hookSpecificOutput —
@@ -619,6 +619,8 @@ fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool)
     let _ = fs::remove_file(state_dir.join(format!("peer_count.{session_id}")));
     // Auto-claim state file (#24)
     crate::peers::remove_autoclaim_state(project_id, session_id);
+    // Agent phase state file (#55)
+    let _ = fs::remove_file(state_dir.join(format!("phase.{session_id}.json")));
     // Peer heartbeat + unclaim (L2 — keep remove_heartbeat unconditional as idempotent cleanup)
     crate::peers::remove_heartbeat(project_id, session_id);
     if peers_active {
@@ -830,6 +832,12 @@ fn dispatch_session_start(
     // Write-back protocol (L1 — always, solo or multi-session).
     if let Some(wb) = render_write_back_protocol(cwd) {
         tail.push_str(&format!("\n\n{wb}"));
+    }
+
+    // Agent phase nudge (if phase state exists from previous session or detected).
+    if let Some(phase_state) = crate::agent_phase::read_phase_state(project_id, session_id) {
+        let nudge = edda_core::agent_phase::format_phase_nudge(&phase_state);
+        tail.push_str(&format!("\n\n{nudge}"));
     }
 
     // Coordination protocol for multi-session awareness.
@@ -1054,11 +1062,12 @@ fn try_write_merge_event(raw: &serde_json::Value, src: &str, strategy: &str) {
     }
 }
 
-/// Dispatch PostToolUse — detect decision signals and nudge.
+/// Dispatch PostToolUse — detect decision signals, nudge, and update agent phase.
 fn dispatch_post_tool_use(
     raw: &serde_json::Value,
     project_id: &str,
     session_id: &str,
+    cwd: &str,
 ) -> anyhow::Result<HookResult> {
     // Real-time auto-claim: on Edit/Write, track the file and update claim scope.
     let tool_name = get_str(raw, "tool_name");
@@ -1067,6 +1076,9 @@ fn dispatch_post_tool_use(
             crate::peers::maybe_auto_claim_file(project_id, session_id, fp);
         }
     }
+
+    // Agent phase detection (best-effort, lightweight).
+    try_update_agent_phase(raw, project_id, session_id, cwd);
 
     let signal = match crate::nudge::detect_signal(raw) {
         Some(s) => s,
@@ -1110,6 +1122,113 @@ fn dispatch_post_tool_use(
         }
     });
     Ok(HookResult::output(serde_json::to_string(&output)?))
+}
+
+/// Detect agent phase and emit transition event if changed (best-effort).
+fn try_update_agent_phase(raw: &serde_json::Value, project_id: &str, session_id: &str, cwd: &str) {
+    let label = std::env::var("EDDA_SESSION_LABEL").ok();
+    let branch = detect_git_branch_cached(cwd);
+    let active_tasks = read_active_task_names(project_id);
+
+    let cwd_path = Path::new(cwd);
+    let current = crate::agent_phase::detect_current_phase(
+        session_id,
+        label.as_deref(),
+        branch.as_deref(),
+        &active_tasks,
+        cwd_path,
+        None,
+    );
+
+    let previous = crate::agent_phase::read_phase_state(project_id, session_id);
+    let config = crate::agent_phase::DetectorConfig::default();
+
+    if let Some(transition) =
+        crate::agent_phase::detect_transition(&current, previous.as_ref(), &config)
+    {
+        // Write updated phase state
+        let _ = crate::agent_phase::write_phase_state(project_id, &transition.state);
+
+        // Emit ledger event (best-effort, try-lock)
+        try_write_phase_change_event(raw, &transition);
+    } else {
+        // Always persist latest state (updates detected_at for staleness tracking)
+        let _ = crate::agent_phase::write_phase_state(project_id, &current);
+    }
+}
+
+/// Write an agent_phase_change event to the workspace ledger (best-effort).
+fn try_write_phase_change_event(
+    raw: &serde_json::Value,
+    transition: &edda_core::agent_phase::AgentPhaseTransition,
+) {
+    let cwd = get_str(raw, "cwd");
+    if cwd.is_empty() {
+        return;
+    }
+    let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(&cwd)) else {
+        return;
+    };
+    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
+        return;
+    };
+    let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
+        return; // locked by another process — skip
+    };
+    let Ok(branch) = ledger.head_branch() else {
+        return;
+    };
+    let Ok(parent_hash) = ledger.last_event_hash() else {
+        return;
+    };
+    let params = edda_core::event::AgentPhaseChangeParams {
+        branch: &branch,
+        parent_hash: parent_hash.as_deref(),
+        session_id: &transition.state.session_id,
+        label: transition.state.label.as_deref(),
+        from: &transition.from.to_string(),
+        to: &transition.to.to_string(),
+        issue: transition.state.issue,
+        confidence: transition.state.confidence,
+        signals: &transition.state.signals,
+    };
+    if let Ok(event) = edda_core::event::new_agent_phase_change_event(&params) {
+        let _ = ledger.append_event(&event);
+    }
+}
+
+/// Read active task names from state file for phase detection heuristics.
+fn read_active_task_names(project_id: &str) -> Vec<String> {
+    let path = edda_store::project_dir(project_id)
+        .join("state")
+        .join("active_tasks.json");
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let val: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    val.get("tasks")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let status = item.get("status")?.as_str()?;
+                    if status != "in_progress" {
+                        return None;
+                    }
+                    Some(item.get("subject")?.as_str()?.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Get git branch for the given working directory.
+fn detect_git_branch_cached(cwd: &str) -> Option<String> {
+    crate::peers::detect_git_branch_in(cwd)
 }
 
 /// Check if patterns are enabled and match tool input against Pattern Store.
@@ -1821,7 +1940,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "git commit -m \"feat: switch to postgres\"" }
         });
-        let result = dispatch_post_tool_use(&raw, pid, sid).unwrap();
+        let result = dispatch_post_tool_use(&raw, pid, sid, ".").unwrap();
         assert!(result.stdout.is_some(), "should produce nudge output");
         let output: serde_json::Value =
             serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
@@ -1851,14 +1970,14 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "edda decide \"db=postgres\"" }
         });
-        dispatch_post_tool_use(&decide_raw, pid, sid).unwrap();
+        dispatch_post_tool_use(&decide_raw, pid, sid, ".").unwrap();
 
         // SelfRecord does NOT set cooldown timestamp, so the first real signal fires.
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "git commit -m \"feat: add redis cache\"" }
         });
-        let result = dispatch_post_tool_use(&raw, pid, sid).unwrap();
+        let result = dispatch_post_tool_use(&raw, pid, sid, ".").unwrap();
         assert!(
             result.stdout.is_some(),
             "should nudge after decide (no global suppression)"
@@ -1878,7 +1997,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "git commit -m \"feat: first commit\"" }
         });
-        let result = dispatch_post_tool_use(&raw, pid, sid).unwrap();
+        let result = dispatch_post_tool_use(&raw, pid, sid, ".").unwrap();
         assert!(result.stdout.is_some(), "first commit should nudge");
 
         // Second commit immediately → no nudge (cooldown)
@@ -1886,7 +2005,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "git commit -m \"feat: second commit\"" }
         });
-        let result2 = dispatch_post_tool_use(&raw2, pid, sid).unwrap();
+        let result2 = dispatch_post_tool_use(&raw2, pid, sid, ".").unwrap();
         assert!(
             result2.stdout.is_none(),
             "second commit should be suppressed by cooldown"
@@ -1905,7 +2024,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "edda decide \"db=postgres\" --reason \"need JSONB\"" }
         });
-        let result = dispatch_post_tool_use(&raw, pid, sid).unwrap();
+        let result = dispatch_post_tool_use(&raw, pid, sid, ".").unwrap();
         assert!(
             result.stdout.is_none(),
             "self-record should not produce output"
@@ -1996,7 +2115,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "git commit -m \"feat: first\"" }
         });
-        let result = dispatch_post_tool_use(&raw, pid, sid).unwrap();
+        let result = dispatch_post_tool_use(&raw, pid, sid, ".").unwrap();
         assert!(result.stdout.is_some(), "should produce nudge");
         assert_eq!(read_counter(pid, sid, "nudge_count"), 1);
 
@@ -2009,7 +2128,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "git commit -m \"feat: second\"" }
         });
-        let result2 = dispatch_post_tool_use(&raw2, pid, sid).unwrap();
+        let result2 = dispatch_post_tool_use(&raw2, pid, sid, ".").unwrap();
         assert!(
             result2.stdout.is_some(),
             "should produce nudge after cooldown reset"
@@ -2029,7 +2148,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "edda decide \"db=postgres\" --reason \"need JSONB\"" }
         });
-        dispatch_post_tool_use(&raw, pid, sid).unwrap();
+        dispatch_post_tool_use(&raw, pid, sid, ".").unwrap();
         assert_eq!(read_counter(pid, sid, "decide_count"), 1);
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -2069,7 +2188,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "git commit -m \"feat: add auth\"" }
         });
-        dispatch_post_tool_use(&raw1, pid, sid).unwrap();
+        dispatch_post_tool_use(&raw1, pid, sid, ".").unwrap();
         assert_eq!(read_counter(pid, sid, "signal_count"), 1);
 
         // SelfRecord signal → signal_count +1 (even though no nudge sent)
@@ -2077,7 +2196,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "edda decide \"db=postgres\"" }
         });
-        dispatch_post_tool_use(&raw2, pid, sid).unwrap();
+        dispatch_post_tool_use(&raw2, pid, sid, ".").unwrap();
         assert_eq!(read_counter(pid, sid, "signal_count"), 2);
 
         // DependencyAdd signal → signal_count +1 (suppressed by cooldown)
@@ -2085,7 +2204,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "cargo add serde" }
         });
-        dispatch_post_tool_use(&raw3, pid, sid).unwrap();
+        dispatch_post_tool_use(&raw3, pid, sid, ".").unwrap();
         assert_eq!(read_counter(pid, sid, "signal_count"), 3);
 
         // signal_count >= nudge_count always
@@ -2631,7 +2750,7 @@ mod tests {
             "tool_name": "Edit",
             "input": { "file_path": "crates/edda-store/src/lib.rs" }
         });
-        let _ = dispatch_post_tool_use(&raw, pid, sid);
+        let _ = dispatch_post_tool_use(&raw, pid, sid, ".");
 
         // Should have auto-claimed edda-store
         let board = crate::peers::compute_board_state(pid);
@@ -2654,7 +2773,7 @@ mod tests {
             "tool_name": "Write",
             "input": { "file_path": "crates/edda-bridge-claude/src/dispatch.rs" }
         });
-        let _ = dispatch_post_tool_use(&raw, pid, sid);
+        let _ = dispatch_post_tool_use(&raw, pid, sid, ".");
 
         let board = crate::peers::compute_board_state(pid);
         let claim = board.claims.iter().find(|c| c.session_id == sid);
@@ -2676,7 +2795,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "ls" }
         });
-        let _ = dispatch_post_tool_use(&raw, pid, sid);
+        let _ = dispatch_post_tool_use(&raw, pid, sid, ".");
 
         let board = crate::peers::compute_board_state(pid);
         let claim = board.claims.iter().find(|c| c.session_id == sid);

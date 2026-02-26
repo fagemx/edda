@@ -15,11 +15,13 @@ mod cmd_log;
 mod cmd_merge;
 mod cmd_note;
 mod cmd_pattern;
+mod cmd_phase;
 mod cmd_pipeline;
 mod cmd_plan;
 mod cmd_rebuild;
 mod cmd_run;
 mod cmd_search;
+mod cmd_serve;
 mod cmd_status;
 mod cmd_switch;
 mod cmd_watch;
@@ -289,6 +291,12 @@ enum Command {
         #[command(subcommand)]
         cmd: IntakeCmd,
     },
+    /// Show agent phase detection status
+    Phase {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Auto-execution pipeline — skill chain with approval gates
     Pipeline {
         #[command(subcommand)]
@@ -301,6 +309,15 @@ enum Command {
     },
     /// Launch the real-time peer status and event TUI
     Watch,
+    /// Start HTTP API server
+    Serve {
+        /// Bind address
+        #[arg(long, default_value = "127.0.0.1")]
+        bind: String,
+        /// Port number
+        #[arg(long, default_value_t = 7433)]
+        port: u16,
+    },
     /// Garbage collect expired blobs and transcripts
     Gc {
         /// Preview without deleting
@@ -869,6 +886,7 @@ fn main() -> anyhow::Result<()> {
         Command::Intake { cmd } => match cmd {
             IntakeCmd::Github { issue_id } => cmd_intake::execute_github(&repo_root, issue_id),
         },
+        Command::Phase { json } => cmd_phase::execute(&repo_root, json),
         Command::Pipeline { cmd } => match cmd {
             PipelineCmd::Run { issue_id, dry_run } => {
                 cmd_pipeline::execute_run(&repo_root, issue_id, dry_run)
@@ -890,6 +908,7 @@ fn main() -> anyhow::Result<()> {
             BundleCmd::List { status } => cmd_bundle::execute_list(&repo_root, status.as_deref()),
         },
         Command::Watch => cmd_watch::execute(&repo_root),
+        Command::Serve { bind, port } => cmd_serve::execute(&repo_root, &bind, port),
         Command::Gc {
             dry_run,
             keep_days,
