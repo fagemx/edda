@@ -587,6 +587,20 @@ pub fn compute_board_state_for_compaction(project_id: &str) -> Vec<String> {
         }
     }
 
+    for ack in &board.request_acks {
+        let event = CoordEvent {
+            ts: ack.ts.clone(),
+            session_id: ack.acker_session.clone(),
+            event_type: CoordEventType::RequestAck,
+            payload: serde_json::json!({
+                "from_label": ack.from_label,
+            }),
+        };
+        if let Ok(line) = serde_json::to_string(&event) {
+            lines.push(line);
+        }
+    }
+
     lines
 }
 
@@ -3023,6 +3037,43 @@ mod tests {
         assert_eq!(board.request_acks.len(), 1);
         assert_eq!(board.request_acks[0].acker_session, "s1");
         assert_eq!(board.request_acks[0].from_label, "billing");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn compaction_preserves_request_acks() {
+        let pid = "test_compaction_acks";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+        write_request(pid, "s2", "billing", "auth", "Export AuthToken");
+        write_request_ack(pid, "s1", "billing");
+
+        // Before compaction: ack should exist
+        let board_before = compute_board_state(pid);
+        assert_eq!(board_before.request_acks.len(), 1);
+        let pending_before = pending_requests_for_session(pid, "s1");
+        assert!(pending_before.is_empty(), "acked request should not be pending");
+
+        // Compact
+        let lines = compute_board_state_for_compaction(pid);
+        assert_eq!(lines.len(), 3, "claim + request + ack = 3 lines");
+
+        // Write compacted back
+        let path = coordination_path(pid);
+        let content = lines.join("\n");
+        fs::write(&path, format!("{content}\n")).unwrap();
+
+        // After compaction: ack should still exist
+        let board_after = compute_board_state(pid);
+        assert_eq!(board_after.request_acks.len(), 1);
+        let pending_after = pending_requests_for_session(pid, "s1");
+        assert!(
+            pending_after.is_empty(),
+            "acked request should still not be pending after compaction"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
