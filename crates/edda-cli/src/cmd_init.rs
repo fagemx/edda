@@ -136,6 +136,15 @@ mod tests {
             content.contains("edda hook claude"),
             "should contain edda hook"
         );
+        // MCP server configured
+        assert!(
+            content.contains("mcpServers"),
+            "MCP server config should exist"
+        );
+        assert!(
+            content.contains(r#""command": "edda""#),
+            "edda MCP server should be configured"
+        );
         // CLAUDE.md created
         assert!(tmp.join(".claude").join("CLAUDE.md").exists());
 
