@@ -1,4 +1,37 @@
+use clap::Subcommand;
 use std::path::Path;
+
+// ── CLI Schema ──
+
+#[derive(Subcommand)]
+pub enum ConfigCmd {
+    /// Set a config value
+    Set {
+        /// Config key (e.g. skill_guide)
+        key: String,
+        /// Config value (true/false/number/string)
+        value: String,
+    },
+    /// Get a config value
+    Get {
+        /// Config key
+        key: String,
+    },
+    /// List all config values
+    List,
+}
+
+// ── Dispatch ──
+
+pub fn run(cmd: ConfigCmd, repo_root: &Path) -> anyhow::Result<()> {
+    match cmd {
+        ConfigCmd::Set { key, value } => set(repo_root, &key, &value),
+        ConfigCmd::Get { key } => get(repo_root, &key),
+        ConfigCmd::List => list(repo_root),
+    }
+}
+
+// ── Command Implementations ──
 
 /// Read config from `.edda/config.json`. Returns empty map if file doesn't exist.
 fn read_config(path: &Path) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {

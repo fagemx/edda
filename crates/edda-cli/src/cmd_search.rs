@@ -1,8 +1,94 @@
+use clap::Subcommand;
 use edda_index::fetch_store_line;
 use edda_ledger::Ledger;
 use edda_search_fts::{indexer, schema, search};
 use edda_store::project_dir;
 use std::path::Path;
+
+// ── CLI Schema ──
+
+#[derive(Subcommand)]
+pub enum SearchCmd {
+    /// Build or update search index (Tantivy)
+    Index {
+        /// Project ID (defaults to current repo)
+        #[arg(long)]
+        project: Option<String>,
+        /// Session ID (index single session instead of all)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Search for events and transcript turns
+    Query {
+        /// Search query (supports fuzzy, "exact", /regex/)
+        query: String,
+        /// Project ID (defaults to current repo)
+        #[arg(long)]
+        project: Option<String>,
+        /// Session ID filter
+        #[arg(long)]
+        session: Option<String>,
+        /// Filter by document type: event or turn
+        #[arg(long, name = "type")]
+        doc_type: Option<String>,
+        /// Filter by event type: note, commit, merge, etc.
+        #[arg(long)]
+        event_type: Option<String>,
+        /// Exact match (disable fuzzy)
+        #[arg(long)]
+        exact: bool,
+        /// Maximum results (default: 20)
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Show full content of a specific turn
+    Show {
+        /// Turn ID (from search results)
+        #[arg(long)]
+        turn: String,
+        /// Project ID (defaults to current repo)
+        #[arg(long)]
+        project: Option<String>,
+    },
+}
+
+// ── Dispatch ──
+
+pub fn run_cmd(cmd: SearchCmd, repo_root: &Path) -> anyhow::Result<()> {
+    let default_pid = resolve_project_id(repo_root);
+    match cmd {
+        SearchCmd::Index { project, session } => {
+            let pid = project.as_deref().unwrap_or(&default_pid);
+            index(repo_root, pid, session.as_deref())
+        }
+        SearchCmd::Query {
+            query: q,
+            project,
+            session,
+            doc_type,
+            event_type,
+            exact,
+            limit,
+        } => {
+            let pid = project.as_deref().unwrap_or(&default_pid);
+            query(
+                pid,
+                &q,
+                session.as_deref(),
+                doc_type.as_deref(),
+                event_type.as_deref(),
+                exact,
+                limit,
+            )
+        }
+        SearchCmd::Show { turn, project } => {
+            let pid = project.as_deref().unwrap_or(&default_pid);
+            show(pid, &turn)
+        }
+    }
+}
+
+// ── Command Implementations ──
 
 /// Execute `edda search <query>` — full-text search over Tantivy index.
 pub fn query(
