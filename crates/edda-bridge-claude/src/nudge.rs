@@ -626,7 +626,10 @@ mod tests {
 
     #[test]
     fn format_nudge_merge_gentle() {
-        let nudge = format_nudge(&NudgeSignal::Merge("feature/auth".into(), "merge".into()), 1);
+        let nudge = format_nudge(
+            &NudgeSignal::Merge("feature/auth".into(), "merge".into()),
+            1,
+        );
         assert!(nudge.contains("feature/auth"));
         assert!(nudge.contains("edda decide"));
         assert!(!nudge.contains("\u{26a0}\u{fe0f}"));

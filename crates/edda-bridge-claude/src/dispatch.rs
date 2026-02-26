@@ -2502,10 +2502,7 @@ mod tests {
         // Verify event was written
         let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
         let events = ledger.iter_events().unwrap();
-        let commit_events: Vec<_> = events
-            .iter()
-            .filter(|e| e.event_type == "commit")
-            .collect();
+        let commit_events: Vec<_> = events.iter().filter(|e| e.event_type == "commit").collect();
         assert_eq!(commit_events.len(), 1);
         assert_eq!(
             commit_events[0].payload["title"].as_str().unwrap(),
@@ -2538,10 +2535,7 @@ mod tests {
         // Verify event was written
         let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
         let events = ledger.iter_events().unwrap();
-        let merge_events: Vec<_> = events
-            .iter()
-            .filter(|e| e.event_type == "merge")
-            .collect();
+        let merge_events: Vec<_> = events.iter().filter(|e| e.event_type == "merge").collect();
         assert_eq!(merge_events.len(), 1);
         assert_eq!(merge_events[0].payload["src"].as_str().unwrap(), "PR#42");
         assert_eq!(
