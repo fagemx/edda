@@ -364,6 +364,10 @@ fn find_related_notes(
         if event.event_type == "note" && edda_core::decision::is_decision(&event.payload) {
             continue;
         }
+        // Skip session digest notes — those are session summaries, not research notes
+        if edda_core::decision::is_session_digest(&event.payload) {
+            continue;
+        }
 
         let text = event
             .payload
@@ -428,7 +432,17 @@ pub fn format_human(result: &AskResult) -> String {
     if !result.related_notes.is_empty() {
         out.push_str("── Related Notes ──────────────────────\n");
         for n in &result.related_notes {
-            out.push_str(&format!("  \"{}\" ({}, {})\n\n", n.text, n.ts, n.branch));
+            if n.text.len() > 120 {
+                let end = n.text.floor_char_boundary(117);
+                out.push_str(&format!(
+                    "  \"{}...\" ({}, {})\n\n",
+                    &n.text[..end],
+                    n.ts,
+                    n.branch
+                ));
+            } else {
+                out.push_str(&format!("  \"{}\" ({}, {})\n\n", n.text, n.ts, n.branch));
+            }
         }
     }
 
@@ -881,6 +895,64 @@ mod tests {
         assert!(output.contains("postgres"));
         assert!(output.contains("Related Commits"));
         assert!(output.contains("feat: migrate"));
+    }
+
+    #[test]
+    fn find_related_notes_excludes_session_digests() {
+        let (tmp, ledger) = setup();
+        // Create a session digest note containing a keyword
+        let tags = vec!["session_digest".to_string()];
+        let mut digest = new_note_event(
+            "main",
+            None,
+            "system",
+            "discussed postgres migration",
+            &tags,
+        )
+        .unwrap();
+        digest.payload["session_stats"] = serde_json::json!({
+            "tool_calls": 10,
+            "tasks_snapshot": [{"subject": "Fix postgres pool", "status": "completed"}],
+        });
+        finalize_event(&mut digest);
+        ledger.append_event(&digest).unwrap();
+
+        let result = ask(&ledger, "postgres", &AskOptions::default(), None).unwrap();
+        // Session digest note should NOT appear in related_notes
+        assert!(
+            result.related_notes.is_empty(),
+            "session digest should be filtered: {:?}",
+            result.related_notes
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn format_human_truncates_long_notes() {
+        let long_text = "a".repeat(200);
+        let result = AskResult {
+            query: "test".into(),
+            input_type: "keyword".into(),
+            decisions: vec![],
+            timeline: vec![],
+            related_commits: vec![],
+            related_notes: vec![NoteHit {
+                event_id: "n1".into(),
+                text: long_text,
+                ts: "2026-02-26".into(),
+                branch: "main".into(),
+            }],
+            conversations: vec![],
+        };
+
+        let output = format_human(&result);
+        assert!(output.contains("..."), "long note should be truncated");
+        // Should not contain the full 200-char string
+        assert!(
+            !output.contains(&"a".repeat(200)),
+            "should not contain full text"
+        );
     }
 
     #[test]
