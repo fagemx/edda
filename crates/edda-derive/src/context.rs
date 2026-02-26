@@ -23,6 +23,28 @@ fn cmd_base_key(signal_text: &str) -> String {
     }
 }
 
+/// Format a task list line with count and optional truncation.
+///
+/// - Always shows count: `Done (5): ...`
+/// - If <= 5 tasks: show all
+/// - If > 5 tasks: show first 3, then `(+N more)`
+fn format_task_line(label: &str, tasks: &[&str]) -> String {
+    let count = tasks.len();
+    const DISPLAY_LIMIT: usize = 5;
+    const SHOWN_WHEN_OVER: usize = 3;
+
+    if count <= DISPLAY_LIMIT {
+        format!("- {label} ({count}): {}\n", tasks.join(", "))
+    } else {
+        let shown = &tasks[..SHOWN_WHEN_OVER];
+        format!(
+            "- {label} ({count}): {} (+{} more)\n",
+            shown.join(", "),
+            count - SHOWN_WHEN_OVER,
+        )
+    }
+}
+
 /// Detect tasks that appear non-completed across 2+ session digests.
 ///
 /// Returns a rendered "### Persistent Tasks" sub-section, or empty string if none found.
@@ -133,10 +155,10 @@ fn render_session_history(digests: &[SessionDigestEntry]) -> String {
             .map(|t| t.subject.as_str())
             .collect();
         if !done.is_empty() {
-            out.push_str(&format!("- Done: {}\n", done.join(", ")));
+            out.push_str(&format_task_line("Done", &done));
         }
         if !wip.is_empty() {
-            out.push_str(&format!("- WIP: {}\n", wip.join(", ")));
+            out.push_str(&format_task_line("WIP", &wip));
         }
     } else {
         out.push_str(&format!(
@@ -793,13 +815,13 @@ mod tests {
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
 
-        // Should show Done/WIP instead of tool call counts
+        // Should show Done/WIP with counts instead of tool call counts
         assert!(
-            ctx.contains("- Done: Fix auth bug"),
+            ctx.contains("- Done (1): Fix auth bug"),
             "missing Done in:\n{ctx}"
         );
         assert!(
-            ctx.contains("- WIP: Add tests, Deploy"),
+            ctx.contains("- WIP (2): Add tests, Deploy"),
             "missing WIP in:\n{ctx}"
         );
         // Should NOT show tool call counts when tasks are present
@@ -1773,6 +1795,61 @@ mod tests {
         assert!(
             ctx.contains("3 commits, 3 files modified"),
             "missing aggregate stats in:\n{ctx}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn session_digest_truncates_large_task_list() {
+        let (tmp, ledger) = setup_workspace();
+
+        // Create 20 completed tasks + 2 WIP
+        let mut tasks: Vec<(&str, &str)> = Vec::new();
+        let task_names: Vec<String> = (1..=20).map(|i| format!("Task {i}")).collect();
+        for name in &task_names {
+            tasks.push((name.as_str(), "completed"));
+        }
+        tasks.push(("WIP item 1", "in_progress"));
+        tasks.push(("WIP item 2", "pending"));
+
+        let digest = make_digest_note_with_tasks(
+            "main",
+            "sess-big",
+            50,
+            &["/src/lib.rs"],
+            &["feat: big change"],
+            &[],
+            60,
+            &tasks,
+        );
+        ledger.append_event(&digest).unwrap();
+
+        let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
+
+        // Should show count
+        assert!(
+            ctx.contains("- Done (20):"),
+            "missing Done count in:\n{ctx}"
+        );
+        // Should show first 3 tasks
+        assert!(ctx.contains("Task 1"), "missing Task 1 in:\n{ctx}");
+        assert!(ctx.contains("Task 2"), "missing Task 2 in:\n{ctx}");
+        assert!(ctx.contains("Task 3"), "missing Task 3 in:\n{ctx}");
+        // Should show "+N more"
+        assert!(
+            ctx.contains("(+17 more)"),
+            "missing truncation suffix in:\n{ctx}"
+        );
+        // Should NOT show all 20 tasks
+        assert!(
+            !ctx.contains("Task 10"),
+            "should not show Task 10 in:\n{ctx}"
+        );
+        // WIP should show all (only 2)
+        assert!(
+            ctx.contains("- WIP (2): WIP item 1, WIP item 2"),
+            "WIP should show all items in:\n{ctx}"
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
