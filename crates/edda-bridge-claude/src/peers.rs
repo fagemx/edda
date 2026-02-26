@@ -758,6 +758,19 @@ pub fn render_coordination_protocol(
 ) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);
     let board = compute_board_state(project_id);
+    render_coordination_protocol_with(&peers, &board, project_id, session_id)
+}
+
+/// Render full coordination protocol using pre-computed peers and board state.
+///
+/// "Pre-computed" refers to `peers` and `board` only — heartbeat writes and
+/// other per-session I/O still happen at the call site in `dispatch.rs`.
+pub fn render_coordination_protocol_with(
+    peers: &[PeerSummary],
+    board: &BoardState,
+    project_id: &str,
+    session_id: &str,
+) -> Option<String> {
     let budget = protocol_budget();
 
     if peers.is_empty() {
@@ -918,10 +931,23 @@ pub fn render_coordination_protocol(
 /// - Multi-session: peers header + tasks + bindings + requests.
 /// - Solo with bindings: binding lines only (no header).
 /// - Solo without bindings: returns None.
+#[cfg(test)]
 pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);
     let board = compute_board_state(project_id);
+    render_peer_updates_with(&peers, &board, project_id, session_id)
+}
 
+/// Render lightweight peer updates using pre-computed peers and board state.
+///
+/// "Pre-computed" refers to `peers` and `board` only — heartbeat writes and
+/// other per-session I/O still happen at the call site in `dispatch.rs`.
+pub(crate) fn render_peer_updates_with(
+    peers: &[PeerSummary],
+    board: &BoardState,
+    project_id: &str,
+    session_id: &str,
+) -> Option<String> {
     if peers.is_empty() {
         // Solo mode: only render bindings (if any)
         if board.bindings.is_empty() {
@@ -2571,6 +2597,114 @@ mod tests {
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Precomputed _with variants match original output (#83) ──
+
+    #[test]
+    fn render_peer_updates_with_matches_original() {
+        let pid = "test_updates_with_match";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let signals = SessionSignals {
+            tasks: vec![TaskSnapshot {
+                id: "1".into(),
+                subject: "Fix auth bug".into(),
+                status: "in_progress".into(),
+            }],
+            ..Default::default()
+        };
+        write_heartbeat(pid, "s1", &signals, Some("auth"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+        write_binding(pid, "s1", "auth", "db.engine", "postgres");
+
+        // Call original wrapper
+        let original = render_peer_updates(pid, "s2");
+
+        // Call _with variant with same data
+        let peers = discover_active_peers(pid, "s2");
+        let board = compute_board_state(pid);
+        let precomputed = render_peer_updates_with(&peers, &board, pid, "s2");
+
+        assert_eq!(
+            original, precomputed,
+            "precomputed variant should match original"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_coordination_protocol_with_matches_original() {
+        let pid = "test_protocol_with_match";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let signals = SessionSignals {
+            tasks: vec![TaskSnapshot {
+                id: "1".into(),
+                subject: "Implement billing".into(),
+                status: "in_progress".into(),
+            }],
+            ..Default::default()
+        };
+        write_heartbeat(pid, "s1", &signals, Some("billing"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+        write_binding(pid, "s1", "billing", "payment.provider", "stripe");
+
+        // Call original wrapper
+        let original = render_coordination_protocol(pid, "s2", ".");
+
+        // Call _with variant with same data
+        let peers = discover_active_peers(pid, "s2");
+        let board = compute_board_state(pid);
+        let precomputed = render_coordination_protocol_with(&peers, &board, pid, "s2");
+
+        assert_eq!(
+            original, precomputed,
+            "precomputed variant should match original"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_peer_updates_with_solo_bindings() {
+        let pid = "test_updates_with_solo";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // No heartbeats (solo), but write bindings
+        write_binding(pid, "s1", "auth", "auth.method", "JWT RS256");
+
+        let peers = discover_active_peers(pid, "solo-session");
+        let board = compute_board_state(pid);
+        let result = render_peer_updates_with(&peers, &board, pid, "solo-session");
+
+        assert!(result.is_some(), "solo with bindings should render");
+        assert!(result.unwrap().contains("JWT RS256"), "should show binding");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn render_peer_updates_with_solo_no_bindings() {
+        let pid = "test_updates_with_solo_empty";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        let peers = discover_active_peers(pid, "solo-session");
+        let board = compute_board_state(pid);
+        let result = render_peer_updates_with(&peers, &board, pid, "solo-session");
+
+        assert!(result.is_none(), "solo with no bindings should return None");
+
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }

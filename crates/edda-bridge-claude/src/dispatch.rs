@@ -162,10 +162,6 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
     // Append to session ledger
     let _ = append_to_session_ledger(&envelope);
 
-    // Solo gate: only used to skip coordination log writes (write_unclaim).
-    // Heartbeat writes remain unconditional — they ARE the peer discovery mechanism.
-    let peers_active = !session_id.is_empty() && has_active_peers(&project_id, &session_id);
-
     // Update peer heartbeat timestamp (lightweight touch for liveness)
     if !session_id.is_empty() {
         crate::peers::touch_heartbeat(&project_id, &session_id);
@@ -206,13 +202,18 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
             set_compact_pending(&project_id);
             Ok(HookResult::empty())
         }
-        "SessionEnd" => dispatch_session_end(
-            &project_id,
-            &session_id,
-            &transcript_path,
-            &cwd,
-            peers_active,
-        ),
+        "SessionEnd" => {
+            // Solo gate: only used to skip coordination log writes (write_unclaim).
+            // Computed here (not at top) so non-SessionEnd hooks avoid the dir scan (#83).
+            let peers_active = !session_id.is_empty() && has_active_peers(&project_id, &session_id);
+            dispatch_session_end(
+                &project_id,
+                &session_id,
+                &transcript_path,
+                &cwd,
+                peers_active,
+            )
+        }
         _ => Ok(HookResult::empty()),
     }
 }
@@ -328,18 +329,23 @@ fn dispatch_with_workspace_only(
         .unwrap_or(2500);
     let mut ws = render_workspace_section(cwd, workspace_budget);
 
+    // Compute peers + board ONCE for the entire dispatch (#83).
+    // Before: discover_active_peers called 2-3×, compute_board_state 3-4× per hook.
+    let peers = crate::peers::discover_active_peers(project_id, session_id);
+    let board = crate::peers::compute_board_state(project_id);
+
     // Detect solo → multi-session transition for late peer detection (#11).
     // On 0→N transition, inject the full coordination protocol instead of
     // lightweight peer updates so the agent learns L2 commands and sees
     // peer scope claims.
-    let peers = crate::peers::discover_active_peers(project_id, session_id);
     let prev_count = read_peer_count(project_id, session_id);
     let first_peers = prev_count == 0 && !peers.is_empty();
     write_peer_count(project_id, session_id, peers.len());
 
     if first_peers {
         // First time seeing peers — inject full coordination protocol
-        if let Some(coord) = crate::peers::render_coordination_protocol(project_id, session_id, cwd)
+        if let Some(coord) =
+            crate::peers::render_coordination_protocol_with(&peers, &board, project_id, session_id)
         {
             ws = Some(match ws {
                 Some(w) => format!("{w}\n\n{coord}"),
@@ -348,7 +354,9 @@ fn dispatch_with_workspace_only(
         }
     } else {
         // Normal: lightweight peer updates
-        if let Some(updates) = crate::peers::render_peer_updates(project_id, session_id) {
+        if let Some(updates) =
+            crate::peers::render_peer_updates_with(&peers, &board, project_id, session_id)
+        {
             ws = Some(match ws {
                 Some(w) => format!("{w}\n{updates}"),
                 None => updates,
