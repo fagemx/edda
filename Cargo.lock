@@ -647,6 +647,7 @@ dependencies = [
  "edda-mcp",
  "edda-pack",
  "edda-search-fts",
+ "edda-serve",
  "edda-store",
  "edda-transcript",
  "hex",

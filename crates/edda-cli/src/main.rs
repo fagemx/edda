@@ -2,6 +2,7 @@ mod cmd_ask;
 mod cmd_blob;
 mod cmd_branch;
 mod cmd_bridge;
+mod cmd_bundle;
 mod cmd_commit;
 mod cmd_conduct;
 mod cmd_config;
@@ -301,6 +302,11 @@ enum Command {
         #[command(subcommand)]
         cmd: PipelineCmd,
     },
+    /// Create and manage review bundles for rapid approval
+    Bundle {
+        #[command(subcommand)]
+        cmd: BundleCmd,
+    },
     /// Launch the real-time peer status and event TUI
     Watch,
     /// Start HTTP API server
@@ -364,6 +370,33 @@ enum PipelineCmd {
     Status {
         /// Issue number
         issue_id: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BundleCmd {
+    /// Create a review bundle from current changes
+    Create {
+        /// Git diff reference (default: HEAD~1)
+        #[arg(long)]
+        diff: Option<String>,
+        /// Test command (default: cargo test --workspace)
+        #[arg(long)]
+        test_cmd: Option<String>,
+        /// Skip running tests
+        #[arg(long)]
+        skip_tests: bool,
+    },
+    /// Show a review bundle
+    Show {
+        /// Bundle ID (bun_...)
+        bundle_id: String,
+    },
+    /// List review bundles
+    List {
+        /// Filter by status: pending, approved, rejected
+        #[arg(long)]
+        status: Option<String>,
     },
 }
 
@@ -859,6 +892,20 @@ fn main() -> anyhow::Result<()> {
                 cmd_pipeline::execute_run(&repo_root, issue_id, dry_run)
             }
             PipelineCmd::Status { issue_id } => cmd_pipeline::execute_status(&repo_root, issue_id),
+        },
+        Command::Bundle { cmd } => match cmd {
+            BundleCmd::Create {
+                diff,
+                test_cmd,
+                skip_tests,
+            } => cmd_bundle::execute_create(
+                &repo_root,
+                diff.as_deref(),
+                test_cmd.as_deref(),
+                skip_tests,
+            ),
+            BundleCmd::Show { bundle_id } => cmd_bundle::execute_show(&repo_root, &bundle_id),
+            BundleCmd::List { status } => cmd_bundle::execute_list(&repo_root, status.as_deref()),
         },
         Command::Watch => cmd_watch::execute(&repo_root),
         Command::Serve { bind, port } => cmd_serve::execute(&repo_root, &bind, port),

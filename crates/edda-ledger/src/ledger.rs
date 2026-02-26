@@ -1,5 +1,5 @@
 use crate::paths::EddaPaths;
-use crate::sqlite_store::{DecisionRow, SqliteStore};
+use crate::sqlite_store::{BundleRow, DecisionRow, SqliteStore};
 use edda_core::Event;
 use std::path::Path;
 
@@ -91,6 +91,11 @@ impl Ledger {
         self.sqlite.iter_events()
     }
 
+    /// Get a single event by event_id.
+    pub fn get_event(&self, event_id: &str) -> anyhow::Result<Option<Event>> {
+        self.sqlite.get_event(event_id)
+    }
+
     // ── Branches JSON ───────────────────────────────────────────────
 
     /// Read branches.json content.
@@ -136,6 +141,18 @@ impl Ledger {
         key: &str,
     ) -> anyhow::Result<Option<DecisionRow>> {
         self.sqlite.find_active_decision(branch, key)
+    }
+
+    // ── Review Bundles ───────────────────────────────────────────────
+
+    /// Get a review bundle by bundle_id.
+    pub fn get_bundle(&self, bundle_id: &str) -> anyhow::Result<Option<BundleRow>> {
+        self.sqlite.get_bundle(bundle_id)
+    }
+
+    /// List review bundles, optionally filtered by status.
+    pub fn list_bundles(&self, status: Option<&str>) -> anyhow::Result<Vec<BundleRow>> {
+        self.sqlite.list_bundles(status)
     }
 }
 

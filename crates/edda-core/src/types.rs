@@ -61,6 +61,7 @@ pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'
         ),
         "task_intake" => (Some(event_family::SIGNAL), Some(event_level::INFO)),
         "agent_phase_change" => (Some(event_family::SIGNAL), Some(event_level::INFO)),
+        "review_bundle" => (Some(event_family::GOVERNANCE), Some(event_level::MILESTONE)),
         _ => (None, None),
     }
 }
