@@ -183,7 +183,7 @@ pub fn uninstall(repo_root: &Path) -> anyhow::Result<()> {
     if settings
         .get("mcpServers")
         .and_then(|m| m.as_object())
-        .map_or(false, |m| m.is_empty())
+        .is_some_and(|m| m.is_empty())
     {
         settings.as_object_mut().unwrap().remove("mcpServers");
     }
