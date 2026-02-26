@@ -932,4 +932,57 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }
+
+    // ── Hook resilience tests (#83) ──
+
+    #[test]
+    fn catch_unwind_recovers_from_panic() {
+        // Verify catch_unwind pattern works with panicking closures
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<String> {
+                panic!("test panic in hook");
+            }));
+            let _ = tx.send(result);
+        });
+
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(5));
+        assert!(outcome.is_ok(), "channel should receive");
+        let inner = outcome.unwrap();
+        assert!(inner.is_err(), "should be a caught panic");
+        let panic_info = inner.unwrap_err();
+        let msg = panic_info
+            .downcast_ref::<&str>()
+            .copied()
+            .unwrap_or("unknown");
+        assert_eq!(msg, "test panic in hook");
+    }
+
+    #[test]
+    fn timeout_fires_on_slow_hook() {
+        let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<String>>();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+            let _ = tx.send(Ok("too late".to_string()));
+        });
+
+        let outcome = rx.recv_timeout(std::time::Duration::from_millis(50));
+        assert!(
+            outcome.is_err(),
+            "should timeout before slow hook completes"
+        );
+    }
+
+    #[test]
+    fn hook_timeout_ms_defaults_to_10s() {
+        std::env::remove_var("EDDA_HOOK_TIMEOUT_MS");
+        assert_eq!(hook_timeout_ms(), 10_000);
+    }
+
+    #[test]
+    fn hook_timeout_ms_reads_env() {
+        std::env::set_var("EDDA_HOOK_TIMEOUT_MS", "5000");
+        assert_eq!(hook_timeout_ms(), 5000);
+        std::env::remove_var("EDDA_HOOK_TIMEOUT_MS");
+    }
 }
