@@ -758,6 +758,17 @@ pub fn render_coordination_protocol(
 ) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);
     let board = compute_board_state(project_id);
+    render_coordination_protocol_with(&peers, &board, project_id, session_id)
+}
+
+/// Render full coordination protocol using pre-computed peers and board state.
+/// Avoids redundant I/O when caller already has this data.
+pub fn render_coordination_protocol_with(
+    peers: &[PeerSummary],
+    board: &BoardState,
+    project_id: &str,
+    session_id: &str,
+) -> Option<String> {
     let budget = protocol_budget();
 
     if peers.is_empty() {
@@ -918,10 +929,21 @@ pub fn render_coordination_protocol(
 /// - Multi-session: peers header + tasks + bindings + requests.
 /// - Solo with bindings: binding lines only (no header).
 /// - Solo without bindings: returns None.
+#[allow(dead_code)] // Used by tests; production hot path uses render_peer_updates_with
 pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);
     let board = compute_board_state(project_id);
+    render_peer_updates_with(&peers, &board, project_id, session_id)
+}
 
+/// Render lightweight peer updates using pre-computed peers and board state.
+/// Avoids redundant I/O when caller already has this data.
+pub(crate) fn render_peer_updates_with(
+    peers: &[PeerSummary],
+    board: &BoardState,
+    project_id: &str,
+    session_id: &str,
+) -> Option<String> {
     if peers.is_empty() {
         // Solo mode: only render bindings (if any)
         if board.bindings.is_empty() {
