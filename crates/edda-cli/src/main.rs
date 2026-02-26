@@ -14,6 +14,7 @@ mod cmd_log;
 mod cmd_merge;
 mod cmd_note;
 mod cmd_pattern;
+mod cmd_pipeline;
 mod cmd_plan;
 mod cmd_rebuild;
 mod cmd_run;
@@ -21,6 +22,7 @@ mod cmd_search;
 mod cmd_status;
 mod cmd_switch;
 mod cmd_watch;
+mod pipeline_templates;
 #[cfg(feature = "tui")]
 mod tui;
 
@@ -286,6 +288,11 @@ enum Command {
         #[command(subcommand)]
         cmd: IntakeCmd,
     },
+    /// Auto-execution pipeline — skill chain with approval gates
+    Pipeline {
+        #[command(subcommand)]
+        cmd: PipelineCmd,
+    },
     /// Launch the real-time peer status and event TUI
     Watch,
     /// Garbage collect expired blobs and transcripts
@@ -323,6 +330,23 @@ enum IntakeCmd {
     Github {
         /// GitHub issue number
         issue_id: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum PipelineCmd {
+    /// Generate and run a pipeline for an intake task
+    Run {
+        /// Issue number (must have a task_intake event in ledger)
+        issue_id: u64,
+        /// Preview generated plan without executing
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show pipeline status
+    Status {
+        /// Issue number
+        issue_id: Option<u64>,
     },
 }
 
@@ -811,6 +835,12 @@ fn main() -> anyhow::Result<()> {
         Command::Conduct { cmd } => cmd_conduct::run_cmd(cmd, &repo_root),
         Command::Intake { cmd } => match cmd {
             IntakeCmd::Github { issue_id } => cmd_intake::execute_github(&repo_root, issue_id),
+        },
+        Command::Pipeline { cmd } => match cmd {
+            PipelineCmd::Run { issue_id, dry_run } => {
+                cmd_pipeline::execute_run(&repo_root, issue_id, dry_run)
+            }
+            PipelineCmd::Status { issue_id } => cmd_pipeline::execute_status(&repo_root, issue_id),
         },
         Command::Watch => cmd_watch::execute(&repo_root),
         Command::Gc {

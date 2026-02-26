@@ -3054,7 +3054,10 @@ mod tests {
         let board_before = compute_board_state(pid);
         assert_eq!(board_before.request_acks.len(), 1);
         let pending_before = pending_requests_for_session(pid, "s1");
-        assert!(pending_before.is_empty(), "acked request should not be pending");
+        assert!(
+            pending_before.is_empty(),
+            "acked request should not be pending"
+        );
 
         // Compact
         let lines = compute_board_state_for_compaction(pid);
