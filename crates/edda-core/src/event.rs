@@ -1,6 +1,8 @@
 use crate::canon::canonical_json_bytes;
 use crate::hash::sha256_hex;
-use crate::types::{classify_event_type, Digest, Event, Refs, CANON_EDDA_V1, SCHEMA_VERSION};
+use crate::types::{
+    classify_event_type, DecisionPayload, Digest, Event, Refs, CANON_EDDA_V1, SCHEMA_VERSION,
+};
 
 /// Compute the hash for an event: serialize without the `hash` field,
 /// canonical JSON sort, then SHA-256.
@@ -82,6 +84,25 @@ pub fn new_note_event(
         event_level: None,
     };
 
+    finalize(&mut event);
+    Ok(event)
+}
+
+/// Create a new `decision` event (a note event with structured decision payload).
+pub fn new_decision_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    role: &str,
+    decision: &DecisionPayload,
+) -> anyhow::Result<Event> {
+    let text = match &decision.reason {
+        Some(r) => format!("{}: {} \u{2014} {}", decision.key, decision.value, r),
+        None => format!("{}: {}", decision.key, decision.value),
+    };
+    let tags = vec!["decision".to_string()];
+    let mut event = new_note_event(branch, parent_hash, role, &text, &tags)?;
+    event.payload["decision"] =
+        serde_json::to_value(decision).expect("DecisionPayload serialization should not fail");
     finalize(&mut event);
     Ok(event)
 }
@@ -437,6 +458,54 @@ mod tests {
         assert_eq!(event.digests[0].alg, "sha256");
         assert_eq!(event.digests[0].canon, CANON_EDDA_V1);
         assert_eq!(event.digests[0].value, event.hash);
+    }
+
+    #[test]
+    fn decision_event_has_structured_payload() {
+        let dp = DecisionPayload {
+            key: "db.engine".to_string(),
+            value: "sqlite".to_string(),
+            reason: Some("embedded, zero-config".to_string()),
+        };
+        let event = new_decision_event("main", None, "system", &dp).unwrap();
+        assert_eq!(event.event_type, "note");
+        assert_eq!(event.payload["decision"]["key"], "db.engine");
+        assert_eq!(event.payload["decision"]["value"], "sqlite");
+        assert_eq!(event.payload["decision"]["reason"], "embedded, zero-config");
+        assert_eq!(
+            event.payload["text"],
+            "db.engine: sqlite \u{2014} embedded, zero-config"
+        );
+        let tags = event.payload["tags"].as_array().unwrap();
+        assert!(tags.iter().any(|t| t.as_str() == Some("decision")));
+        assert_eq!(event.schema_version, SCHEMA_VERSION);
+        assert_eq!(event.digests[0].value, event.hash);
+    }
+
+    #[test]
+    fn decision_event_without_reason() {
+        let dp = DecisionPayload {
+            key: "auth.method".to_string(),
+            value: "JWT".to_string(),
+            reason: None,
+        };
+        let event = new_decision_event("main", None, "system", &dp).unwrap();
+        assert_eq!(event.payload["decision"]["key"], "auth.method");
+        assert_eq!(event.payload["decision"]["value"], "JWT");
+        assert!(event.payload["decision"].get("reason").is_none());
+        assert_eq!(event.payload["text"], "auth.method: JWT");
+    }
+
+    #[test]
+    fn decision_event_extractable() {
+        let dp = DecisionPayload {
+            key: "api.style".to_string(),
+            value: "REST".to_string(),
+            reason: Some("compatibility".to_string()),
+        };
+        let event = new_decision_event("main", None, "system", &dp).unwrap();
+        let extracted = crate::decision::extract_decision(&event.payload).unwrap();
+        assert_eq!(extracted, dp);
     }
 
     #[test]

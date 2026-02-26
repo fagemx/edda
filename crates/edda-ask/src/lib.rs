@@ -178,20 +178,23 @@ pub fn ask(
                             continue;
                         }
                     }
-                    if is_decision_event(event) {
-                        let (key, value, reason) = extract_decision_fields(event);
-                        if key.to_lowercase().contains(&kw_lower)
-                            || value.to_lowercase().contains(&kw_lower)
-                            || reason.to_lowercase().contains(&kw_lower)
-                        {
-                            // Check if already in hits
-                            if !hits.iter().any(|h| h.event_id == event.event_id) {
+                    if event.event_type == "note"
+                        && edda_core::decision::is_decision(&event.payload)
+                    {
+                        if let Some(dp) = edda_core::decision::extract_decision(&event.payload) {
+                            let reason_str = dp.reason.as_deref().unwrap_or("").to_string();
+                            if (dp.key.to_lowercase().contains(&kw_lower)
+                                || dp.value.to_lowercase().contains(&kw_lower)
+                                || reason_str.to_lowercase().contains(&kw_lower))
+                                && !hits.iter().any(|h| h.event_id == event.event_id)
+                            {
+                                let domain = edda_core::decision::extract_domain(&dp.key);
                                 hits.push(DecisionHit {
                                     event_id: event.event_id.clone(),
-                                    key,
-                                    value,
-                                    reason,
-                                    domain: extract_domain(event),
+                                    key: dp.key,
+                                    value: dp.value,
+                                    reason: reason_str,
+                                    domain,
                                     branch: event.branch.clone(),
                                     ts: event.ts.clone(),
                                     is_active: false,
@@ -358,7 +361,7 @@ fn find_related_notes(
             }
         }
         // Skip decision notes — those are already in decisions section
-        if is_decision_event(event) {
+        if event.event_type == "note" && edda_core::decision::is_decision(&event.payload) {
             continue;
         }
 
@@ -461,59 +464,7 @@ fn to_decision_hit(row: &DecisionRow) -> DecisionHit {
     }
 }
 
-fn is_decision_event(event: &Event) -> bool {
-    event.event_type == "note"
-        && event
-            .payload
-            .get("tags")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
-            .unwrap_or(false)
-}
-
-fn extract_decision_fields(event: &Event) -> (String, String, String) {
-    if let Some(d) = event.payload.get("decision") {
-        let key = d
-            .get("key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let value = d
-            .get("value")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let reason = d
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        return (key, value, reason);
-    }
-    let text = event
-        .payload
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let (key, rest) = match text.split_once(": ") {
-        Some((k, r)) => (k.to_string(), r),
-        None => return (String::new(), text.to_string(), String::new()),
-    };
-    let (value, reason) = match rest.split_once(" — ") {
-        Some((v, r)) => (v.to_string(), r.to_string()),
-        None => (rest.to_string(), String::new()),
-    };
-    (key, value, reason)
-}
-
-fn extract_domain(event: &Event) -> String {
-    if let Some(d) = event.payload.get("decision") {
-        if let Some(key) = d.get("key").and_then(|v| v.as_str()) {
-            return key.split('.').next().unwrap_or(key).to_string();
-        }
-    }
-    String::new()
-}
+// Decision helpers centralized in edda_core::decision.
 
 // ── Tests ────────────────────────────────────────────────────────────
 

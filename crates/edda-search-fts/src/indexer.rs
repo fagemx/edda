@@ -78,16 +78,12 @@ fn extract_event_title_body(event: &edda_core::Event) -> (String, String) {
     let payload = &event.payload;
 
     // Decision events: title = key, body = "value — reason"
-    if let Some(d) = payload.get("decision") {
-        let key = d.get("key").and_then(|v| v.as_str()).unwrap_or("");
-        let value = d.get("value").and_then(|v| v.as_str()).unwrap_or("");
-        let reason = d.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-        let body = if reason.is_empty() {
-            value.to_string()
-        } else {
-            format!("{value} — {reason}")
+    if let Some(dp) = edda_core::decision::extract_decision(payload) {
+        let body = match &dp.reason {
+            Some(r) => format!("{} \u{2014} {}", dp.value, r),
+            None => dp.value.clone(),
         };
-        return (key.to_string(), body);
+        return (dp.key, body);
     }
 
     // Commit events: title = first line of text, body = rest

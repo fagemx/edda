@@ -183,49 +183,40 @@ pub fn decide(
     edda_bridge_claude::peers::write_binding(&project_id, &session_id, &label, key, value);
 
     // 2. Write to workspace ledger (permanent)
-    let text = match reason {
-        Some(r) => format!("{key}: {value} — {r}"),
-        None => format!("{key}: {value}"),
-    };
-    let tags = vec!["decision".to_string()];
     let ledger = edda_ledger::Ledger::open(repo_root)?;
     let _lock = edda_ledger::lock::WorkspaceLock::acquire(&ledger.paths)?;
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;
 
-    // Build event with structured decision fields alongside text
     // Use resolved label as actor (not hardcoded "system")
     let actor = if session_id.starts_with("cli-") {
         "system"
     } else {
         &label
     };
-    let mut event =
-        edda_core::event::new_note_event(&branch, parent_hash.as_deref(), actor, &text, &tags)?;
-
-    // Inject structured decision object into payload
-    let decision_obj = match reason {
-        Some(r) => serde_json::json!({"key": key, "value": value, "reason": r}),
-        None => serde_json::json!({"key": key, "value": value}),
+    let dp = edda_core::types::DecisionPayload {
+        key: key.to_string(),
+        value: value.to_string(),
+        reason: reason.map(|r| r.to_string()),
     };
-    event.payload["decision"] = decision_obj;
+    let mut event =
+        edda_core::event::new_decision_event(&branch, parent_hash.as_deref(), actor, &dp)?;
 
-    // Check for prior decision with same key → supersede via provenance
+    // Check for prior decision with same key → supersede via provenance (only if value differs)
     let prior = ledger.find_active_decision(&branch, key)?;
     if let Some(prior_row) = &prior {
-        // L1 conflict warning: different value in workspace ledger
         if prior_row.value != value {
             eprintln!(
                 "\u{26a0} Conflict: key \"{key}\" previously decided as \"{}\" in this workspace",
                 prior_row.value
             );
             eprintln!("  Recording new value \"{value}\" (supersedes prior decision)");
+            event.refs.provenance.push(edda_core::types::Provenance {
+                target: prior_row.event_id.clone(),
+                rel: edda_core::types::rel::SUPERSEDES.to_string(),
+                note: Some(format!("key '{}' re-decided", key)),
+            });
         }
-        event.refs.provenance.push(edda_core::types::Provenance {
-            target: prior_row.event_id.clone(),
-            rel: edda_core::types::rel::SUPERSEDES.to_string(),
-            note: Some(format!("key '{}' re-decided", key)),
-        });
     }
 
     // Re-finalize after payload/refs mutation

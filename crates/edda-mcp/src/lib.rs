@@ -10,8 +10,8 @@ use rmcp::{
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use edda_core::event::{finalize_event, new_note_event};
-use edda_core::types::{rel, Provenance};
+use edda_core::event::{finalize_event, new_decision_event, new_note_event};
+use edda_core::types::{rel, DecisionPayload, Provenance};
 use edda_derive::{rebuild_branch, render_context, DeriveOptions};
 use edda_ledger::lock::WorkspaceLock;
 use edda_ledger::Ledger;
@@ -206,21 +206,13 @@ impl EddaServer {
         let branch = ledger.head_branch().map_err(to_mcp_err)?;
         let parent_hash = ledger.last_event_hash().map_err(to_mcp_err)?;
 
-        let text = match &params.reason {
-            Some(r) => format!("{key}: {value} — {r}"),
-            None => format!("{key}: {value}"),
+        let dp = DecisionPayload {
+            key: key.to_string(),
+            value: value.to_string(),
+            reason: params.reason.clone(),
         };
-        let tags = vec!["decision".to_string()];
-
-        let mut event = new_note_event(&branch, parent_hash.as_deref(), "system", &text, &tags)
+        let mut event = new_decision_event(&branch, parent_hash.as_deref(), "system", &dp)
             .map_err(to_mcp_err)?;
-
-        // Inject structured decision object into payload
-        let decision_obj = match &params.reason {
-            Some(r) => serde_json::json!({"key": key, "value": value, "reason": r}),
-            None => serde_json::json!({"key": key, "value": value}),
-        };
-        event.payload["decision"] = decision_obj;
 
         // Auto-supersede: find prior decision with same key (skip if idempotent)
         let prior = find_prior_decision(&ledger, &branch, key);
@@ -503,32 +495,11 @@ fn find_prior_decision(
         .iter()
         .rev()
         .filter(|e| e.branch == branch && e.event_type == "note")
-        .filter(|e| {
-            e.payload
-                .get("tags")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
-                .unwrap_or(false)
-        })
+        .filter(|e| edda_core::decision::is_decision(&e.payload))
         .find_map(|e| {
-            // Prefer structured decision.key, fall back to text parse
-            let event_key = e
-                .payload
-                .get("decision")
-                .and_then(|d| d.get("key"))
-                .and_then(|k| k.as_str())
-                .or_else(|| {
-                    let text = e.payload.get("text")?.as_str()?;
-                    text.split_once(": ").map(|(k, _)| k)
-                });
-            if event_key == Some(key) {
-                let event_value = e
-                    .payload
-                    .get("decision")
-                    .and_then(|d| d.get("value"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                Some((e.event_id.clone(), event_value))
+            let dp = edda_core::decision::extract_decision(&e.payload)?;
+            if dp.key == key {
+                Some((e.event_id.clone(), Some(dp.value)))
             } else {
                 None
             }
