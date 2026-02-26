@@ -178,15 +178,18 @@ impl SqliteStore {
                 Err(_) => continue,
             };
 
-            if !is_decision_payload(&payload) {
+            if !edda_core::decision::is_decision(&payload) {
                 continue;
             }
 
-            let (key, value, reason) = extract_decision_from_payload(&payload);
-            if key.is_empty() && value.is_empty() {
-                continue;
-            }
-            let domain = extract_domain(&key);
+            let dp = match edda_core::decision::extract_decision(&payload) {
+                Some(dp) => dp,
+                None => continue,
+            };
+            let key = &dp.key;
+            let value = &dp.value;
+            let reason = dp.reason.as_deref().unwrap_or("");
+            let domain = edda_core::decision::extract_domain(key);
 
             let provenance: Vec<Provenance> = serde_json::from_str(prov_str).unwrap_or_default();
             let supersedes_id = provenance
@@ -266,10 +269,12 @@ impl SqliteStore {
         )?;
 
         // Materialize decision if applicable
-        if is_decision_event(event) {
-            let (key, value, reason) = extract_decision_from_payload(&event.payload);
-            if !key.is_empty() || !value.is_empty() {
-                let domain = extract_domain(&key);
+        if edda_core::decision::is_decision(&event.payload) {
+            if let Some(dp) = edda_core::decision::extract_decision(&event.payload) {
+                let domain = edda_core::decision::extract_domain(&dp.key);
+                let reason = dp.reason.as_deref().unwrap_or("");
+                let key = &dp.key;
+                let value = &dp.value;
                 let supersedes_id = event
                     .refs
                     .provenance
@@ -520,65 +525,7 @@ impl Drop for SqliteStore {
 }
 
 // ── Decision helpers ────────────────────────────────────────────────
-
-/// Check if an event is a decision (note with "decision" tag).
-fn is_decision_event(event: &Event) -> bool {
-    event.event_type == "note"
-        && event
-            .payload
-            .get("tags")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
-            .unwrap_or(false)
-}
-
-/// Check if a payload JSON contains a "decision" tag.
-fn is_decision_payload(payload: &serde_json::Value) -> bool {
-    payload
-        .get("tags")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
-        .unwrap_or(false)
-}
-
-/// Extract (key, value, reason) from a payload.
-/// Prefers structured `payload.decision`, falls back to text parse.
-fn extract_decision_from_payload(payload: &serde_json::Value) -> (String, String, String) {
-    if let Some(d) = payload.get("decision") {
-        let key = d
-            .get("key")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let value = d
-            .get("value")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let reason = d
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        return (key, value, reason);
-    }
-    // Fallback: parse text "key: value — reason"
-    let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
-    let (key, rest) = match text.split_once(": ") {
-        Some((k, r)) => (k.to_string(), r),
-        None => return (String::new(), text.to_string(), String::new()),
-    };
-    let (value, reason) = match rest.split_once(" — ") {
-        Some((v, r)) => (v.to_string(), r.to_string()),
-        None => (rest.to_string(), String::new()),
-    };
-    (key, value, reason)
-}
-
-/// Extract domain from a decision key: "db.engine" → "db".
-fn extract_domain(key: &str) -> String {
-    key.split('.').next().unwrap_or(key).to_string()
-}
+// Centralized in edda_core::decision — detection, extraction, domain parsing.
 
 fn map_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRow> {
     Ok(DecisionRow {

@@ -701,48 +701,34 @@ fn harvest_inferred_decisions(
             continue;
         }
 
-        let payload = serde_json::json!({
-            "role": "system",
-            "text": format!("Inferred decision: added dependency {pkg}"),
-            "tags": ["decision", "inferred"],
-            "source": "bridge:passive_harvest",
-            "session_id": session_id,
-            "decision": {
-                "key": format!("dep.{pkg}"),
-                "value": pkg,
-                "reason": reason,
-            }
+        let dp = edda_core::types::DecisionPayload {
+            key: format!("dep.{pkg}"),
+            value: pkg.to_string(),
+            reason: Some(reason.clone()),
+        };
+        let mut event =
+            edda_core::event::new_decision_event(branch, chain_hash.as_deref(), "system", &dp)
+                .expect("decision event creation should not fail");
+
+        // Add harvest-specific metadata
+        event.payload["source"] = serde_json::json!("bridge:passive_harvest");
+        event.payload["session_id"] = serde_json::json!(session_id);
+        if let Some(tags) = event.payload.get_mut("tags").and_then(|v| v.as_array_mut()) {
+            tags.push(serde_json::json!("inferred"));
+        }
+
+        // Add provenance link to session
+        event.refs.provenance.push(Provenance {
+            target: format!("session:{session_id}"),
+            rel: "inferred_from".to_string(),
+            note: Some(format!(
+                "passive harvest from session {}",
+                &session_id[..session_id.len().min(8)]
+            )),
         });
 
-        let event_id = format!("evt_{}", ulid::Ulid::new().to_string().to_lowercase());
-        let ts = now_rfc3339();
-
-        let mut event = Event {
-            event_id: event_id.clone(),
-            ts,
-            event_type: "note".to_string(),
-            branch: branch.to_string(),
-            parent_hash: chain_hash.clone(),
-            hash: String::new(),
-            payload,
-            refs: Refs {
-                provenance: vec![Provenance {
-                    target: format!("session:{session_id}"),
-                    rel: "inferred_from".to_string(),
-                    note: Some(format!(
-                        "passive harvest from session {}",
-                        &session_id[..session_id.len().min(8)]
-                    )),
-                }],
-                ..Default::default()
-            },
-            schema_version: SCHEMA_VERSION,
-            digests: Vec::new(),
-            event_family: None,
-            event_level: None,
-        };
-
         finalize_event(&mut event);
+        let event_id = event.event_id.clone();
 
         if ledger.append_event(&event).is_ok() {
             chain_hash = Some(event.hash.clone());
@@ -1344,20 +1330,14 @@ pub fn collect_session_ledger_extras(
             .unwrap_or_default();
 
         if tags.contains(&"decision") {
-            // Structured decision: payload.decision.{key, value, reason}
-            if let Some(d) = event.payload.get("decision") {
-                let key = d.get("key").and_then(|v| v.as_str()).unwrap_or("?");
-                let value = d.get("value").and_then(|v| v.as_str()).unwrap_or("?");
-                let formatted = match d.get("reason").and_then(|v| v.as_str()) {
-                    Some(r) if !r.is_empty() => format!("{key}={value} ({r})"),
-                    _ => format!("{key}={value}"),
+            if let Some(dp) = edda_core::decision::extract_decision(&event.payload) {
+                let formatted = match &dp.reason {
+                    Some(r) => format!("{}={} ({})", dp.key, dp.value, r),
+                    None => format!("{}={}", dp.key, dp.value),
                 };
                 decisions.push(formatted);
-            } else {
-                // Fallback: parse from text "key: value"
-                if let Some(text) = event.payload.get("text").and_then(|v| v.as_str()) {
-                    decisions.push(text.to_string());
-                }
+            } else if let Some(text) = event.payload.get("text").and_then(|v| v.as_str()) {
+                decisions.push(text.to_string());
             }
         } else if tags.contains(&"session") {
             // Session note written by agent via `edda note --tag session`
@@ -2448,13 +2428,12 @@ mod tests {
         let branch = ledger.head_branch().unwrap();
 
         // Write a decision event
-        let tags_d = vec!["decision".to_string()];
-        let mut evt =
-            edda_core::event::new_note_event(&branch, None, "system", "auth: jwt", &tags_d)
-                .unwrap();
-        evt.payload["decision"] =
-            serde_json::json!({"key": "auth", "value": "jwt", "reason": "stateless"});
-        edda_core::event::finalize_event(&mut evt);
+        let dp = edda_core::types::DecisionPayload {
+            key: "auth".to_string(),
+            value: "jwt".to_string(),
+            reason: Some("stateless".to_string()),
+        };
+        let evt = edda_core::event::new_decision_event(&branch, None, "system", &dp).unwrap();
         let decision_ts = evt.ts.clone();
         ledger.append_event(&evt).unwrap();
 

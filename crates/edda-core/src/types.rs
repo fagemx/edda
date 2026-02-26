@@ -63,6 +63,15 @@ pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'
     }
 }
 
+/// Structured decision payload for decision events.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DecisionPayload {
+    pub key: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Well-known relation types for provenance links.
 pub mod rel {
     pub const BASED_ON: &str = "based_on";
