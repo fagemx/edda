@@ -762,7 +762,9 @@ pub fn render_coordination_protocol(
 }
 
 /// Render full coordination protocol using pre-computed peers and board state.
-/// Avoids redundant I/O when caller already has this data.
+///
+/// "Pre-computed" refers to `peers` and `board` only — heartbeat writes and
+/// other per-session I/O still happen at the call site in `dispatch.rs`.
 pub fn render_coordination_protocol_with(
     peers: &[PeerSummary],
     board: &BoardState,
@@ -929,7 +931,7 @@ pub fn render_coordination_protocol_with(
 /// - Multi-session: peers header + tasks + bindings + requests.
 /// - Solo with bindings: binding lines only (no header).
 /// - Solo without bindings: returns None.
-#[allow(dead_code)] // Used by tests; production hot path uses render_peer_updates_with
+#[cfg(test)]
 pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);
     let board = compute_board_state(project_id);
@@ -937,7 +939,9 @@ pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<
 }
 
 /// Render lightweight peer updates using pre-computed peers and board state.
-/// Avoids redundant I/O when caller already has this data.
+///
+/// "Pre-computed" refers to `peers` and `board` only — heartbeat writes and
+/// other per-session I/O still happen at the call site in `dispatch.rs`.
 pub(crate) fn render_peer_updates_with(
     peers: &[PeerSummary],
     board: &BoardState,
