@@ -91,6 +91,11 @@ impl Ledger {
         self.sqlite.iter_events()
     }
 
+    /// Get a single event by event_id.
+    pub fn get_event(&self, event_id: &str) -> anyhow::Result<Option<Event>> {
+        self.sqlite.get_event(event_id)
+    }
+
     // ── Branches JSON ───────────────────────────────────────────────
 
     /// Read branches.json content.

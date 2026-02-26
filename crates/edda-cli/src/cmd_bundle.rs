@@ -80,11 +80,10 @@ pub fn execute_show(repo_root: &Path, bundle_id: &str) -> Result<()> {
     };
 
     // Fetch full event payload for detailed display
-    let events = ledger.iter_events()?;
-    let event = events.iter().find(|e| e.event_id == row.event_id);
+    let event = ledger.get_event(&row.event_id)?;
 
     if let Some(event) = event {
-        let bundle: ReviewBundle = serde_json::from_value(event.payload.clone())?;
+        let bundle: ReviewBundle = serde_json::from_value(event.payload)?;
         print_bundle_card(&bundle);
         println!("\nStatus: {}", row.status);
     } else {
@@ -381,7 +380,15 @@ fn suggest_action(risk: &RiskAssessment, tests: &TestResults) -> (SuggestedActio
         ),
         _ => (
             SuggestedAction::Approve,
-            format!("All tests pass, {:?} risk", risk.level),
+            format!(
+                "All tests pass, {} risk",
+                match risk.level {
+                    RiskLevel::Low => "low",
+                    RiskLevel::Medium => "medium",
+                    RiskLevel::High => "high",
+                    RiskLevel::Critical => "critical",
+                }
+            ),
         ),
     }
 }
@@ -464,10 +471,14 @@ fn print_bundle_row(row: &edda_ledger::BundleRow) {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max - 3])
+        return s.to_string();
     }
+    // Walk back from desired byte offset to find a valid char boundary
+    let mut end = max - 3;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
 }
 
 // ── Tests ───────────────────────────────────────────────────────────

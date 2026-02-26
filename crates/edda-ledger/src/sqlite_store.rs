@@ -290,58 +290,10 @@ impl SqliteStore {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            self.materialize_bundle(event_id, ts, branch, &payload)?;
+            materialize_bundle_sql(&self.conn, event_id, ts, branch, &payload)?;
         }
 
         self.set_schema_version(3)?;
-        Ok(())
-    }
-
-    fn materialize_bundle(
-        &self,
-        event_id: &str,
-        ts: &str,
-        branch: &str,
-        payload: &serde_json::Value,
-    ) -> anyhow::Result<()> {
-        let bundle_id = payload["bundle_id"].as_str().unwrap_or("");
-        let risk_level = payload["risk_assessment"]["level"]
-            .as_str()
-            .unwrap_or("low");
-        let total_added = payload["change_summary"]["total_added"]
-            .as_i64()
-            .unwrap_or(0);
-        let total_deleted = payload["change_summary"]["total_deleted"]
-            .as_i64()
-            .unwrap_or(0);
-        let files_changed = payload["change_summary"]["files"]
-            .as_array()
-            .map(|a| a.len() as i64)
-            .unwrap_or(0);
-        let tests_passed = payload["test_results"]["passed"].as_i64().unwrap_or(0);
-        let tests_failed = payload["test_results"]["failed"].as_i64().unwrap_or(0);
-        let suggested_action = payload["suggested_action"].as_str().unwrap_or("review");
-
-        self.conn.execute(
-            "INSERT OR IGNORE INTO review_bundles
-             (event_id, bundle_id, status, risk_level, total_added, total_deleted,
-              files_changed, tests_passed, tests_failed, suggested_action, branch, created_at)
-             VALUES (?1, ?2, 'pending', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                event_id,
-                bundle_id,
-                risk_level,
-                total_added,
-                total_deleted,
-                files_changed,
-                tests_passed,
-                tests_failed,
-                suggested_action,
-                branch,
-                ts,
-            ],
-        )?;
-
         Ok(())
     }
 
@@ -424,48 +376,12 @@ impl SqliteStore {
 
         // Materialize review bundle if applicable
         if event.event_type == "review_bundle" {
-            let bundle_id = event.payload["bundle_id"].as_str().unwrap_or("");
-            let risk_level = event.payload["risk_assessment"]["level"]
-                .as_str()
-                .unwrap_or("low");
-            let total_added = event.payload["change_summary"]["total_added"]
-                .as_i64()
-                .unwrap_or(0);
-            let total_deleted = event.payload["change_summary"]["total_deleted"]
-                .as_i64()
-                .unwrap_or(0);
-            let files_changed = event.payload["change_summary"]["files"]
-                .as_array()
-                .map(|a| a.len() as i64)
-                .unwrap_or(0);
-            let tests_passed = event.payload["test_results"]["passed"]
-                .as_i64()
-                .unwrap_or(0);
-            let tests_failed = event.payload["test_results"]["failed"]
-                .as_i64()
-                .unwrap_or(0);
-            let suggested_action = event.payload["suggested_action"]
-                .as_str()
-                .unwrap_or("review");
-
-            tx.execute(
-                "INSERT INTO review_bundles
-                 (event_id, bundle_id, status, risk_level, total_added, total_deleted,
-                  files_changed, tests_passed, tests_failed, suggested_action, branch, created_at)
-                 VALUES (?1, ?2, 'pending', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                params![
-                    event.event_id,
-                    bundle_id,
-                    risk_level,
-                    total_added,
-                    total_deleted,
-                    files_changed,
-                    tests_passed,
-                    tests_failed,
-                    suggested_action,
-                    event.branch,
-                    event.ts,
-                ],
+            materialize_bundle_sql(
+                &tx,
+                &event.event_id,
+                &event.ts,
+                &event.branch,
+                &event.payload,
             )?;
         }
 
@@ -510,6 +426,49 @@ impl SqliteStore {
             .collect::<Result<Vec<_>, _>>()?;
 
         events.into_iter().map(row_to_event).collect()
+    }
+
+    /// Get a single event by event_id.
+    pub fn get_event(&self, event_id: &str) -> anyhow::Result<Option<Event>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT event_id, ts, event_type, branch, parent_hash, hash,
+                        payload, refs_blobs, refs_events, refs_provenance,
+                        schema_version, digests, event_family, event_level
+                 FROM events WHERE event_id = ?1",
+                params![event_id],
+                |row| {
+                    let payload_str: String = row.get(6)?;
+                    let refs_blobs_str: String = row.get(7)?;
+                    let refs_events_str: String = row.get(8)?;
+                    let refs_prov_str: String = row.get(9)?;
+                    let digests_str: String = row.get(11)?;
+
+                    Ok(EventRow {
+                        event_id: row.get(0)?,
+                        ts: row.get(1)?,
+                        event_type: row.get(2)?,
+                        branch: row.get(3)?,
+                        parent_hash: row.get(4)?,
+                        hash: row.get(5)?,
+                        payload_str,
+                        refs_blobs_str,
+                        refs_events_str,
+                        refs_prov_str,
+                        schema_version: row.get(10)?,
+                        digests_str,
+                        event_family: row.get(12)?,
+                        event_level: row.get(13)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        match row {
+            Some(r) => Ok(Some(row_to_event(r)?)),
+            None => Ok(None),
+        }
     }
 
     /// Get the hash of the last event.
@@ -735,6 +694,56 @@ impl Drop for SqliteStore {
 
 // ── Decision helpers ────────────────────────────────────────────────
 // Centralized in edda_core::decision — detection, extraction, domain parsing.
+
+/// Shared materialization logic for review bundles.
+/// Accepts `&Connection` — works with both `Connection` and `Transaction` (via deref coercion).
+fn materialize_bundle_sql(
+    conn: &Connection,
+    event_id: &str,
+    ts: &str,
+    branch: &str,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let bundle_id = payload["bundle_id"].as_str().unwrap_or("");
+    let risk_level = payload["risk_assessment"]["level"]
+        .as_str()
+        .unwrap_or("low");
+    let total_added = payload["change_summary"]["total_added"]
+        .as_i64()
+        .unwrap_or(0);
+    let total_deleted = payload["change_summary"]["total_deleted"]
+        .as_i64()
+        .unwrap_or(0);
+    let files_changed = payload["change_summary"]["files"]
+        .as_array()
+        .map(|a| a.len() as i64)
+        .unwrap_or(0);
+    let tests_passed = payload["test_results"]["passed"].as_i64().unwrap_or(0);
+    let tests_failed = payload["test_results"]["failed"].as_i64().unwrap_or(0);
+    let suggested_action = payload["suggested_action"].as_str().unwrap_or("review");
+
+    conn.execute(
+        "INSERT OR IGNORE INTO review_bundles
+         (event_id, bundle_id, status, risk_level, total_added, total_deleted,
+          files_changed, tests_passed, tests_failed, suggested_action, branch, created_at)
+         VALUES (?1, ?2, 'pending', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            event_id,
+            bundle_id,
+            risk_level,
+            total_added,
+            total_deleted,
+            files_changed,
+            tests_passed,
+            tests_failed,
+            suggested_action,
+            branch,
+            ts,
+        ],
+    )?;
+
+    Ok(())
+}
 
 fn map_bundle_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BundleRow> {
     Ok(BundleRow {
