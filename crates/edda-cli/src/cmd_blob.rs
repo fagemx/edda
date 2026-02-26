@@ -1,7 +1,56 @@
+use clap::Subcommand;
 use edda_ledger::blob_meta::{self, BlobClass};
 use edda_ledger::blob_store::{blob_list, blob_list_archived};
 use edda_ledger::{EddaPaths, Ledger};
 use std::path::Path;
+
+// ── CLI Schema ──
+
+#[derive(Subcommand)]
+pub enum BlobCmd {
+    /// Classify a blob (artifact, decision_evidence, trace_noise)
+    Classify {
+        /// Blob hash or prefix
+        hash: String,
+        /// Classification: artifact, decision_evidence, trace_noise
+        #[arg(long)]
+        class: String,
+    },
+    /// Pin a blob (prevent GC from removing it)
+    Pin {
+        /// Blob hash or prefix
+        hash: String,
+    },
+    /// Unpin a blob (allow GC to remove it)
+    Unpin {
+        /// Blob hash or prefix
+        hash: String,
+    },
+    /// Show blob info (hash, size, class, pinned, location)
+    Info {
+        /// Blob hash or prefix
+        hash: String,
+    },
+    /// Show blob store statistics
+    Stats,
+    /// List tombstones (deleted blob records)
+    Tombstones,
+}
+
+// ── Dispatch ──
+
+pub fn run(cmd: BlobCmd, repo_root: &Path) -> anyhow::Result<()> {
+    match cmd {
+        BlobCmd::Classify { hash, class } => classify(repo_root, &hash, &class),
+        BlobCmd::Pin { hash } => pin(repo_root, &hash),
+        BlobCmd::Unpin { hash } => unpin(repo_root, &hash),
+        BlobCmd::Info { hash } => info(repo_root, &hash),
+        BlobCmd::Stats => stats(repo_root),
+        BlobCmd::Tombstones => tombstones(repo_root),
+    }
+}
+
+// ── Command Implementations ──
 
 /// `edda blob classify <hash> --class <class>`
 pub fn classify(repo_root: &Path, hash: &str, class_str: &str) -> anyhow::Result<()> {

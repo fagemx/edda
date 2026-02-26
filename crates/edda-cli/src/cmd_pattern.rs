@@ -1,4 +1,56 @@
+use clap::Subcommand;
 use std::path::Path;
+
+// ── CLI Schema ──
+
+#[derive(Subcommand)]
+pub enum PatternCmd {
+    /// Add a new pattern
+    Add {
+        /// Pattern ID (e.g. test-no-db)
+        #[arg(long)]
+        id: String,
+        /// File glob patterns (repeatable)
+        #[arg(long = "glob")]
+        globs: Vec<String>,
+        /// Rule description
+        #[arg(long)]
+        rule: String,
+        /// Source reference (e.g. "PR #2587")
+        #[arg(long, default_value = "")]
+        source: String,
+    },
+    /// Remove a pattern
+    Remove {
+        /// Pattern ID
+        id: String,
+    },
+    /// List all patterns
+    List,
+    /// Test which patterns match a file path
+    Test {
+        /// File path to test
+        file_path: String,
+    },
+}
+
+// ── Dispatch ──
+
+pub fn run(cmd: PatternCmd, repo_root: &Path) -> anyhow::Result<()> {
+    match cmd {
+        PatternCmd::Add {
+            id,
+            globs,
+            rule,
+            source,
+        } => add(repo_root, &id, &globs, &rule, &source),
+        PatternCmd::Remove { id } => remove(repo_root, &id),
+        PatternCmd::List => list(repo_root),
+        PatternCmd::Test { file_path } => test(repo_root, &file_path),
+    }
+}
+
+// ── Command Implementations ──
 
 pub fn add(
     repo_root: &Path,

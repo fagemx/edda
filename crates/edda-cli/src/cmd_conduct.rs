@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use clap::Subcommand;
 use edda_conductor::agent::budget::BudgetTracker;
 use edda_conductor::agent::launcher::{phase_session_id, ClaudeCodeLauncher};
 use edda_conductor::check::engine::CheckEngine;
@@ -9,6 +10,86 @@ use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
 use edda_conductor::state::persist::{load_state, save_state};
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
+
+// ── CLI Schema ──
+
+#[derive(Subcommand)]
+pub enum ConductCmd {
+    /// Run a plan from a YAML file
+    Run {
+        /// Path to plan.yaml
+        plan_file: String,
+        /// Override working directory
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Preview plan without executing
+        #[arg(long)]
+        dry_run: bool,
+        /// Suppress live agent activity output
+        #[arg(short, long)]
+        quiet: bool,
+    },
+    /// Show status of running/completed plans
+    Status {
+        /// Plan name (auto-detects if only one)
+        plan_name: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reset a failed/stale phase to Pending
+    Retry {
+        /// Phase ID to retry
+        phase_id: String,
+        /// Plan name (auto-detects if only one)
+        #[arg(long)]
+        plan: Option<String>,
+    },
+    /// Skip a failed/stale/pending phase
+    Skip {
+        /// Phase ID to skip
+        phase_id: String,
+        /// Reason for skipping
+        #[arg(long)]
+        reason: Option<String>,
+        /// Plan name (auto-detects if only one)
+        #[arg(long)]
+        plan: Option<String>,
+    },
+    /// Abort a running plan
+    Abort {
+        /// Plan name (auto-detects if only one)
+        plan_name: Option<String>,
+    },
+}
+
+// ── Dispatch ──
+
+pub fn run_cmd(cmd: ConductCmd, repo_root: &Path) -> Result<()> {
+    match cmd {
+        ConductCmd::Run {
+            plan_file,
+            cwd,
+            dry_run,
+            quiet,
+        } => run(
+            Path::new(&plan_file),
+            cwd.as_deref().map(Path::new),
+            dry_run,
+            !quiet,
+        ),
+        ConductCmd::Status { plan_name, json } => status(repo_root, plan_name.as_deref(), json),
+        ConductCmd::Retry { phase_id, plan } => retry(repo_root, &phase_id, plan.as_deref()),
+        ConductCmd::Skip {
+            phase_id,
+            reason,
+            plan,
+        } => skip(repo_root, &phase_id, reason.as_deref(), plan.as_deref()),
+        ConductCmd::Abort { plan_name } => abort(repo_root, plan_name.as_deref()),
+    }
+}
+
+// ── Command Implementations ──
 
 /// Execute `edda conduct run <plan.yaml>`
 pub fn run(

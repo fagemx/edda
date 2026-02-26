@@ -1,8 +1,33 @@
+use clap::Subcommand;
 use edda_core::event::{new_branch_create_event, new_note_event};
 use edda_derive::{rebuild_all, rebuild_branch};
 use edda_ledger::lock::WorkspaceLock;
 use edda_ledger::Ledger;
 use std::path::Path;
+
+// ── CLI Schema ──
+
+#[derive(Subcommand)]
+pub enum BranchCmd {
+    /// Create a new branch
+    Create {
+        /// Branch name
+        name: String,
+        /// Purpose of this branch
+        #[arg(short = 'm', long = "purpose")]
+        purpose: String,
+    },
+}
+
+// ── Dispatch ──
+
+pub fn run(cmd: BranchCmd, repo_root: &Path) -> anyhow::Result<()> {
+    match cmd {
+        BranchCmd::Create { name, purpose } => create(repo_root, &name, &purpose),
+    }
+}
+
+// ── Command Implementations ──
 
 fn validate_branch_name(name: &str) -> anyhow::Result<()> {
     if name.is_empty() || name.len() > 64 {

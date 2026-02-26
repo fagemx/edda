@@ -1,5 +1,35 @@
+use clap::Subcommand;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
+
+// ── CLI Schema ──
+
+#[derive(Subcommand)]
+pub enum PlanCmd {
+    /// Scan codebase and suggest a plan
+    Scan {
+        /// High-level intent for the plan (injected into purpose field)
+        #[arg(long)]
+        purpose: Option<String>,
+    },
+    /// Generate plan.yaml from built-in template
+    Init {
+        /// Template name (rust-cli, rust-lib, python-api, node-app, fullstack, minimal)
+        template: Option<String>,
+        /// Output file path
+        #[arg(short, long, default_value = "plan.yaml")]
+        output: String,
+    },
+}
+
+// ── Dispatch ──
+
+pub fn run(cmd: PlanCmd, repo_root: &Path) -> anyhow::Result<()> {
+    match cmd {
+        PlanCmd::Scan { purpose } => scan(repo_root, purpose.as_deref()),
+        PlanCmd::Init { template, output } => init(repo_root, template.as_deref(), &output),
+    }
+}
 
 // ── Scan ──
 

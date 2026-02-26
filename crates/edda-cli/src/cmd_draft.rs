@@ -1,14 +1,162 @@
+use clap::Subcommand;
 use edda_core::event::{
     new_approval_event, new_approval_request_event, new_commit_event, ApprovalEventParams,
     ApprovalRequestParams, CommitEventParams,
 };
 use edda_derive::{build_auto_evidence, last_commit_contribution, rebuild_all};
+use std::path::Path;
+
+// ── CLI Schema ──
+
+#[derive(Subcommand)]
+pub enum DraftCmd {
+    /// Create a draft commit (does not write to ledger)
+    Propose {
+        /// Draft title
+        #[arg(short, long)]
+        title: String,
+        /// Purpose of this commit
+        #[arg(long)]
+        purpose: Option<String>,
+        /// Contribution description (defaults to title)
+        #[arg(long)]
+        contrib: Option<String>,
+        /// Evidence refs: evt_* or blob:sha256:* (repeatable)
+        #[arg(long = "evidence")]
+        evidence: Vec<String>,
+        /// Labels (repeatable)
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Enable auto-evidence collection (also auto-enabled when no --evidence given)
+        #[arg(long)]
+        auto: bool,
+        /// Maximum number of auto-evidence items
+        #[arg(long, default_value_t = 20)]
+        max_evidence: usize,
+    },
+    /// Show a draft by ID
+    Show {
+        /// Draft ID (drf_*)
+        id: String,
+    },
+    /// List all drafts
+    List {
+        /// Output as JSON lines (one object per draft)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply a draft commit to the ledger (with rebase)
+    Apply {
+        /// Draft ID (drf_*)
+        id: String,
+        /// Preview without writing to ledger
+        #[arg(long)]
+        dry_run: bool,
+        /// Delete draft after successful apply
+        #[arg(long)]
+        delete: bool,
+    },
+    /// Delete a draft
+    Delete {
+        /// Draft ID (drf_*)
+        id: String,
+    },
+    /// Approve a draft
+    Approve {
+        /// Draft ID (drf_*)
+        id: String,
+        /// Actor name
+        #[arg(long, default_value = "human")]
+        by: String,
+        /// Approval note
+        #[arg(long, default_value = "")]
+        note: String,
+        /// Stage ID (required for multi-stage drafts)
+        #[arg(long)]
+        stage: Option<String>,
+    },
+    /// Reject a draft
+    Reject {
+        /// Draft ID (drf_*)
+        id: String,
+        /// Actor name
+        #[arg(long, default_value = "human")]
+        by: String,
+        /// Rejection note
+        #[arg(long, default_value = "")]
+        note: String,
+        /// Stage ID (required for multi-stage drafts)
+        #[arg(long)]
+        stage: Option<String>,
+    },
+    /// Show pending approval items
+    Inbox {
+        /// Filter by actor name
+        #[arg(long)]
+        by: Option<String>,
+        /// Filter by role
+        #[arg(long)]
+        role: Option<String>,
+        /// Output as JSON lines (one object per item)
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+// ── Dispatch ──
+
+pub fn run(cmd: DraftCmd, repo_root: &Path) -> anyhow::Result<()> {
+    match cmd {
+        DraftCmd::Propose {
+            title,
+            purpose,
+            contrib,
+            evidence,
+            labels,
+            auto,
+            max_evidence,
+        } => propose(ProposeParams {
+            repo_root,
+            title: &title,
+            purpose: purpose.as_deref(),
+            contrib: contrib.as_deref(),
+            evidence_args: &evidence,
+            labels,
+            auto,
+            max_evidence,
+        }),
+        DraftCmd::Show { id } => show(repo_root, &id),
+        DraftCmd::List { json } => list(repo_root, json),
+        DraftCmd::Apply {
+            id,
+            dry_run,
+            delete,
+        } => apply(repo_root, &id, dry_run, delete),
+        DraftCmd::Delete { id } => delete(repo_root, &id),
+        DraftCmd::Approve {
+            id,
+            by,
+            note,
+            stage,
+        } => approve(repo_root, &id, &by, &note, stage.as_deref()),
+        DraftCmd::Reject {
+            id,
+            by,
+            note,
+            stage,
+        } => reject(repo_root, &id, &by, &note, stage.as_deref()),
+        DraftCmd::Inbox { by, role, json } => {
+            inbox(repo_root, by.as_deref(), role.as_deref(), json)
+        }
+    }
+}
+
+// ── Command Implementations ──
 use edda_ledger::lock::WorkspaceLock;
 use edda_ledger::Ledger;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
 
 // ── Policy v2 data model ──
 
