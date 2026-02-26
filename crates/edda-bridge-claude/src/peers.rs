@@ -9,7 +9,7 @@ use crate::signals::{FileEditCount, SessionSignals, TaskSnapshot};
 // ── Configuration ──
 
 /// Staleness threshold: peers not heard from in this many seconds are considered dead.
-fn stale_secs() -> u64 {
+pub(crate) fn stale_secs() -> u64 {
     std::env::var("EDDA_PEER_STALE_SECS")
         .ok()
         .and_then(|v| v.parse().ok())

@@ -335,7 +335,8 @@ mod tests {
     #[test]
     fn mobile_context_summary_truncates() {
         let state = sample_state();
-        let decisions = vec!["a very long decision description that takes up lots of space".to_string()];
+        let decisions =
+            vec!["a very long decision description that takes up lots of space".to_string()];
         let commits = vec!["a very long commit message that also takes space".to_string()];
         let summary = mobile_context_summary(&state, &decisions, &commits, 50);
         assert!(summary.len() <= 50);
