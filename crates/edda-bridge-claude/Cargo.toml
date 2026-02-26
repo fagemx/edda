@@ -16,6 +16,7 @@ edda-transcript = { path = "../edda-transcript", version = "0.1.0" }
 edda-index = { path = "../edda-index", version = "0.1.0" }
 edda-pack = { path = "../edda-pack", version = "0.1.0" }
 edda-ledger = { path = "../edda-ledger", version = "0.1.0" }
+edda-notify = { path = "../edda-notify", version = "0.1.0" }
 edda-derive = { path = "../edda-derive", version = "0.1.0" }
 anyhow.workspace = true
 thiserror.workspace = true

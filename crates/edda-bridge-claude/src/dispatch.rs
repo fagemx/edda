@@ -588,6 +588,9 @@ fn dispatch_session_end(
         signal_count,
     );
 
+    // 2d. Push notification (best-effort, fire-and-forget)
+    notify_session_end(cwd, session_id);
+
     // 3. Clean up session-scoped state files
     cleanup_session_state(project_id, session_id, peers_active);
 
@@ -597,6 +600,27 @@ fn dispatch_session_end(
     } else {
         Ok(HookResult::empty())
     }
+}
+
+/// Best-effort push notification for session end.
+fn notify_session_end(cwd: &str, session_id: &str) {
+    let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(cwd)) else {
+        return;
+    };
+    let paths = edda_ledger::EddaPaths::discover(&root);
+    let config = edda_notify::NotifyConfig::load(&paths);
+    if config.channels.is_empty() {
+        return;
+    }
+    edda_notify::dispatch(
+        &config,
+        &edda_notify::NotifyEvent::SessionEnd {
+            session_id: session_id.to_string(),
+            outcome: "completed".to_string(),
+            duration_minutes: 0,
+            summary: String::new(),
+        },
+    );
 }
 
 /// Remove session-scoped state files that are no longer needed.
@@ -1194,6 +1218,20 @@ fn try_write_phase_change_event(
     };
     if let Ok(event) = edda_core::event::new_agent_phase_change_event(&params) {
         let _ = ledger.append_event(&event);
+    }
+
+    // Push notification (best-effort)
+    let config = edda_notify::NotifyConfig::load(&ledger.paths);
+    if !config.channels.is_empty() {
+        edda_notify::dispatch(
+            &config,
+            &edda_notify::NotifyEvent::PhaseChange {
+                session_id: transition.state.session_id.clone(),
+                from: transition.from.to_string(),
+                to: transition.to.to_string(),
+                issue: transition.state.issue,
+            },
+        );
     }
 }
 
