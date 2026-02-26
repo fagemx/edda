@@ -441,6 +441,52 @@ pub fn new_approval_request_event(p: &ApprovalRequestParams<'_>) -> anyhow::Resu
     Ok(event)
 }
 
+/// Parameters for creating a `task_intake` event.
+pub struct TaskIntakeParams {
+    pub branch: String,
+    pub parent_hash: Option<String>,
+    pub source: String,
+    pub source_id: String,
+    pub source_url: String,
+    pub title: String,
+    pub intent: String,
+    pub labels: Vec<String>,
+    pub priority: String,
+    pub constraints: Vec<String>,
+}
+
+/// Create a new `task_intake` event.
+pub fn new_task_intake_event(params: &TaskIntakeParams) -> anyhow::Result<Event> {
+    let payload = serde_json::json!({
+        "source": params.source,
+        "source_id": params.source_id,
+        "source_url": params.source_url,
+        "title": params.title,
+        "intent": params.intent,
+        "labels": params.labels,
+        "priority": params.priority,
+        "constraints": params.constraints,
+    });
+
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: "task_intake".to_string(),
+        branch: params.branch.clone(),
+        parent_hash: params.parent_hash.clone(),
+        hash: String::new(),
+        payload,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event);
+    Ok(event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -938,5 +984,60 @@ mod tests {
         assert_eq!(rel::SUPERSEDES, "supersedes");
         assert_eq!(rel::CONTINUES, "continues");
         assert_eq!(rel::REVIEWS, "reviews");
+    }
+
+    #[test]
+    fn task_intake_event_has_correct_structure() {
+        let params = TaskIntakeParams {
+            branch: "main".to_string(),
+            parent_hash: None,
+            source: "github_issue".to_string(),
+            source_id: "45".to_string(),
+            source_url: "https://github.com/owner/repo/issues/45".to_string(),
+            title: "Add user authentication".to_string(),
+            intent: "implement".to_string(),
+            labels: vec!["enhancement".to_string()],
+            priority: "normal".to_string(),
+            constraints: vec![],
+        };
+        let event = new_task_intake_event(&params).unwrap();
+        assert_eq!(event.event_type, "task_intake");
+        assert!(event.event_id.starts_with("evt_"));
+        assert_eq!(event.hash.len(), 64);
+        assert_eq!(event.branch, "main");
+        assert_eq!(event.payload["source"], "github_issue");
+        assert_eq!(event.payload["source_id"], "45");
+        assert_eq!(event.payload["title"], "Add user authentication");
+        assert_eq!(event.payload["intent"], "implement");
+        assert_eq!(event.payload["labels"][0], "enhancement");
+        assert_eq!(event.payload["priority"], "normal");
+    }
+
+    #[test]
+    fn task_intake_classification() {
+        use crate::types::{classify_event_type, event_family, event_level};
+        let (f, l) = classify_event_type("task_intake");
+        assert_eq!(f, Some(event_family::SIGNAL));
+        assert_eq!(l, Some(event_level::INFO));
+    }
+
+    #[test]
+    fn task_intake_taxonomy_auto_set() {
+        let params = TaskIntakeParams {
+            branch: "main".to_string(),
+            parent_hash: Some("abc123".to_string()),
+            source: "github_issue".to_string(),
+            source_id: "112".to_string(),
+            source_url: "https://github.com/owner/repo/issues/112".to_string(),
+            title: "feat: task intake".to_string(),
+            intent: "implement".to_string(),
+            labels: vec![],
+            priority: "normal".to_string(),
+            constraints: vec![],
+        };
+        let event = new_task_intake_event(&params).unwrap();
+        assert_eq!(event.event_family.as_deref(), Some("signal"));
+        assert_eq!(event.event_level.as_deref(), Some("info"));
+        assert_eq!(event.parent_hash.as_deref(), Some("abc123"));
     }
 }

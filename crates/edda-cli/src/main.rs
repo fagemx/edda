@@ -9,6 +9,7 @@ mod cmd_context;
 mod cmd_draft;
 mod cmd_gc;
 mod cmd_init;
+mod cmd_intake;
 mod cmd_log;
 mod cmd_merge;
 mod cmd_note;
@@ -271,6 +272,11 @@ enum Command {
         #[command(subcommand)]
         cmd: cmd_conduct::ConductCmd,
     },
+    /// Task intake — ingest external tasks into the ledger
+    Intake {
+        #[command(subcommand)]
+        cmd: IntakeCmd,
+    },
     /// Launch the real-time peer status and event TUI
     Watch,
     /// Garbage collect expired blobs and transcripts
@@ -299,6 +305,15 @@ enum Command {
         /// Also clean session ledgers, index files, and stale state files
         #[arg(long)]
         include_sessions: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum IntakeCmd {
+    /// Ingest a GitHub issue into the edda ledger
+    Github {
+        /// GitHub issue number
+        issue_id: u64,
     },
 }
 
@@ -782,6 +797,9 @@ fn main() -> anyhow::Result<()> {
         Command::Blob { cmd } => cmd_blob::run(cmd, &repo_root),
         Command::Plan { cmd } => cmd_plan::run(cmd, &repo_root),
         Command::Conduct { cmd } => cmd_conduct::run_cmd(cmd, &repo_root),
+        Command::Intake { cmd } => match cmd {
+            IntakeCmd::Github { issue_id } => cmd_intake::execute_github(&repo_root, issue_id),
+        },
         Command::Watch => cmd_watch::execute(&repo_root),
         Command::Gc {
             dry_run,

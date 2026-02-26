@@ -59,6 +59,7 @@ pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'
             Some(event_family::GOVERNANCE),
             Some(event_level::GOVERNANCE),
         ),
+        "task_intake" => (Some(event_family::SIGNAL), Some(event_level::INFO)),
         _ => (None, None),
     }
 }
