@@ -271,14 +271,7 @@ pub(crate) fn build_branch_snapshot(ledger: &Ledger, branch: &str) -> Result<Bra
                     .get("exit_code")
                     .and_then(|x| x.as_i64())
                     .unwrap_or(0);
-                // Skip phantom commands (bridge-ingested records that were never
-                // actually executed: duration_ms == 0 with a failure exit code).
-                let duration_ms = ev
-                    .payload
-                    .get("duration_ms")
-                    .and_then(|x| x.as_u64())
-                    .unwrap_or(0);
-                if exit_code != 0 && duration_ms > 0 {
+                if exit_code != 0 {
                     let argv = fmt_cmd_argv(&ev.payload);
                     signals.push(SignalEntry {
                         ts: ev.ts.clone(),
@@ -331,15 +324,15 @@ mod tests {
     use edda_core::event::{new_cmd_event, CmdEventParams};
 
     #[test]
-    fn phantom_cmd_not_a_signal() {
+    fn failed_cmd_produces_signal_regardless_of_duration() {
         let (_, ledger) = crate::test_support::setup_workspace();
 
-        // A phantom cmd (bridge-ingested, never executed): duration_ms = 0
-        let argv_phantom = vec!["cargo".to_string(), "check".to_string()];
-        let phantom = new_cmd_event(&CmdEventParams {
+        // A bridge cmd event (duration_ms = 0 because bridge lacks timing data)
+        let argv_bridge = vec!["cargo".to_string(), "check".to_string()];
+        let bridge_cmd = new_cmd_event(&CmdEventParams {
             branch: "main",
             parent_hash: None,
-            argv: &argv_phantom,
+            argv: &argv_bridge,
             cwd: ".",
             exit_code: -1,
             duration_ms: 0,
@@ -347,9 +340,9 @@ mod tests {
             stderr_blob: "",
         })
         .unwrap();
-        ledger.append_event(&phantom).unwrap();
+        ledger.append_event(&bridge_cmd).unwrap();
 
-        // A real failed cmd: duration_ms > 0
+        // A directly executed failed cmd (duration_ms > 0)
         let argv_real = vec!["cargo".to_string(), "test".to_string()];
         let real = new_cmd_event(&CmdEventParams {
             branch: "main",
@@ -366,8 +359,31 @@ mod tests {
 
         let snap = build_branch_snapshot(&ledger, "main").unwrap();
 
-        // Only the real cmd should produce a signal
-        assert_eq!(snap.signals.len(), 1);
-        assert!(snap.signals[0].text.contains("cargo test"));
+        // Both failed cmds should produce signals
+        assert_eq!(snap.signals.len(), 2);
+        assert!(snap.signals[0].text.contains("cargo check"));
+        assert!(snap.signals[1].text.contains("cargo test"));
+    }
+
+    #[test]
+    fn successful_cmd_not_a_signal() {
+        let (_, ledger) = crate::test_support::setup_workspace();
+
+        let argv = vec!["cargo".to_string(), "build".to_string()];
+        let cmd = new_cmd_event(&CmdEventParams {
+            branch: "main",
+            parent_hash: None,
+            argv: &argv,
+            cwd: ".",
+            exit_code: 0,
+            duration_ms: 500,
+            stdout_blob: "",
+            stderr_blob: "",
+        })
+        .unwrap();
+        ledger.append_event(&cmd).unwrap();
+
+        let snap = build_branch_snapshot(&ledger, "main").unwrap();
+        assert_eq!(snap.signals.len(), 0);
     }
 }
