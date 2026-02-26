@@ -102,10 +102,30 @@ pub fn install(repo_root: &Path, no_claude_md: bool) -> anyhow::Result<()> {
         hooks_obj.insert(key, serde_json::Value::Array(groups));
     }
 
+    // Add MCP server config (mcpServers.edda)
+    let mcp_servers = settings
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("settings is not an object"))?
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+
+    if let Some(mcp_obj) = mcp_servers.as_object_mut() {
+        if !mcp_obj.contains_key("edda") {
+            mcp_obj.insert(
+                "edda".to_string(),
+                serde_json::json!({
+                    "command": "edda",
+                    "args": ["mcp", "serve"]
+                }),
+            );
+        }
+    }
+
     let output = serde_json::to_string_pretty(&settings)?;
     fs::write(&path, output.as_bytes())?;
 
     println!("Installed edda hooks into {}", path.display());
+    println!("Configured MCP server (edda mcp serve)");
 
     // Onboard CLAUDE.md with edda decision-tracking instructions.
     // B1.5 testing showed CLAUDE.md is the decisive factor for agent compliance:
@@ -149,6 +169,23 @@ pub fn uninstall(repo_root: &Path) -> anyhow::Result<()> {
                 }
             }
         }
+    }
+
+    // Remove edda MCP server config
+    if let Some(mcp_servers) = settings
+        .as_object_mut()
+        .and_then(|obj| obj.get_mut("mcpServers"))
+        .and_then(|m| m.as_object_mut())
+    {
+        mcp_servers.remove("edda");
+    }
+    // Clean up empty mcpServers object
+    if settings
+        .get("mcpServers")
+        .and_then(|m| m.as_object())
+        .is_some_and(|m| m.is_empty())
+    {
+        settings.as_object_mut().unwrap().remove("mcpServers");
     }
 
     let output = serde_json::to_string_pretty(&settings)?;
@@ -416,9 +453,27 @@ mod tests {
         assert!(md_content.contains("edda claim"), "claim instruction");
         assert!(md_content.contains("edda request"), "request instruction");
 
+        // Verify MCP server config
+        assert_eq!(
+            settings["mcpServers"]["edda"]["command"].as_str().unwrap(),
+            "edda",
+            "MCP command"
+        );
+        assert_eq!(
+            settings["mcpServers"]["edda"]["args"],
+            serde_json::json!(["mcp", "serve"]),
+            "MCP args"
+        );
+
         uninstall(tmp.path()).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert!(!content.contains("edda hook"));
+        // MCP config should also be removed
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(
+            settings.get("mcpServers").is_none(),
+            "mcpServers should be removed after uninstall"
+        );
     }
 
     #[test]
@@ -551,6 +606,74 @@ mod tests {
             content.matches("edda:coordination").count(),
             1,
             "should not duplicate coordination section"
+        );
+    }
+
+    #[test]
+    fn install_preserves_existing_mcp_servers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        fs::create_dir_all(&claude_dir).unwrap();
+
+        // Pre-populate with another MCP server
+        let settings = serde_json::json!({
+            "mcpServers": {
+                "other-tool": {
+                    "command": "other-tool",
+                    "args": ["serve"]
+                }
+            }
+        });
+        let path = claude_dir.join("settings.local.json");
+        fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+        install(tmp.path(), true).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Both MCP servers should exist
+        assert!(
+            settings["mcpServers"]["other-tool"].is_object(),
+            "existing MCP server preserved"
+        );
+        assert!(
+            settings["mcpServers"]["edda"].is_object(),
+            "edda MCP server added"
+        );
+
+        // Uninstall should only remove edda, keep other-tool
+        uninstall(tmp.path()).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(
+            settings["mcpServers"]["other-tool"].is_object(),
+            "other MCP server preserved after uninstall"
+        );
+        assert!(
+            settings["mcpServers"].get("edda").is_none(),
+            "edda MCP server removed after uninstall"
+        );
+    }
+
+    #[test]
+    fn install_idempotent_mcp_config() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        install(tmp.path(), true).unwrap();
+        install(tmp.path(), true).unwrap();
+
+        let path = tmp.path().join(".claude").join("settings.local.json");
+        let content = fs::read_to_string(&path).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+        // Should have exactly one edda entry
+        let mcp = settings["mcpServers"].as_object().unwrap();
+        assert_eq!(mcp.len(), 1, "only one MCP server entry");
+        assert_eq!(
+            mcp["edda"]["command"].as_str().unwrap(),
+            "edda",
+            "correct command"
         );
     }
 }
