@@ -252,6 +252,7 @@ mod tests {
             recent_commits: vec![],
             claimed_paths: vec![],
             branch: None,
+            current_phase: None,
         }
     }
 

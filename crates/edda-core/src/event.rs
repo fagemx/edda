@@ -487,6 +487,54 @@ pub fn new_task_intake_event(params: &TaskIntakeParams) -> anyhow::Result<Event>
     Ok(event)
 }
 
+/// Parameters for creating an agent_phase_change event.
+pub struct AgentPhaseChangeParams<'a> {
+    pub branch: &'a str,
+    pub parent_hash: Option<&'a str>,
+    pub session_id: &'a str,
+    pub label: Option<&'a str>,
+    pub from: &'a str,
+    pub to: &'a str,
+    pub issue: Option<u64>,
+    pub confidence: f32,
+    pub signals: &'a [String],
+}
+
+/// Create a new `agent_phase_change` event.
+pub fn new_agent_phase_change_event(p: &AgentPhaseChangeParams<'_>) -> anyhow::Result<Event> {
+    let mut payload = serde_json::json!({
+        "session_id": p.session_id,
+        "from": p.from,
+        "to": p.to,
+        "confidence": p.confidence,
+        "signals": p.signals,
+    });
+    if let Some(label) = p.label {
+        payload["label"] = serde_json::json!(label);
+    }
+    if let Some(issue) = p.issue {
+        payload["issue"] = serde_json::json!(issue);
+    }
+
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: "agent_phase_change".to_string(),
+        branch: p.branch.to_string(),
+        parent_hash: p.parent_hash.map(|s| s.to_string()),
+        hash: String::new(),
+        payload,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event);
+    Ok(event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1039,5 +1087,69 @@ mod tests {
         assert_eq!(event.event_family.as_deref(), Some("signal"));
         assert_eq!(event.event_level.as_deref(), Some("info"));
         assert_eq!(event.parent_hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn agent_phase_change_event_fields() {
+        let signals = vec!["branch feat/auth-45 exists".to_string()];
+        let event = new_agent_phase_change_event(&AgentPhaseChangeParams {
+            branch: "main",
+            parent_hash: None,
+            session_id: "sess-abc",
+            label: Some("feature-worker"),
+            from: "research",
+            to: "implement",
+            issue: Some(45),
+            confidence: 0.85,
+            signals: &signals,
+        })
+        .unwrap();
+        assert_eq!(event.event_type, "agent_phase_change");
+        assert_eq!(event.payload["session_id"], "sess-abc");
+        assert_eq!(event.payload["label"], "feature-worker");
+        assert_eq!(event.payload["from"], "research");
+        assert_eq!(event.payload["to"], "implement");
+        assert_eq!(event.payload["issue"], 45);
+        let conf = event.payload["confidence"].as_f64().unwrap();
+        assert!((conf - 0.85).abs() < 0.001);
+        assert_eq!(event.schema_version, SCHEMA_VERSION);
+        assert_eq!(event.digests[0].value, event.hash);
+    }
+
+    #[test]
+    fn agent_phase_change_event_minimal() {
+        let event = new_agent_phase_change_event(&AgentPhaseChangeParams {
+            branch: "main",
+            parent_hash: None,
+            session_id: "sess-xyz",
+            label: None,
+            from: "triage",
+            to: "research",
+            issue: None,
+            confidence: 0.6,
+            signals: &[],
+        })
+        .unwrap();
+        assert_eq!(event.event_type, "agent_phase_change");
+        assert!(event.payload.get("label").is_none());
+        assert!(event.payload.get("issue").is_none());
+    }
+
+    #[test]
+    fn taxonomy_agent_phase_change_is_signal_info() {
+        let event = new_agent_phase_change_event(&AgentPhaseChangeParams {
+            branch: "main",
+            parent_hash: None,
+            session_id: "sess-test",
+            label: None,
+            from: "triage",
+            to: "research",
+            issue: None,
+            confidence: 0.7,
+            signals: &[],
+        })
+        .unwrap();
+        assert_eq!(event.event_family.as_deref(), Some("signal"));
+        assert_eq!(event.event_level.as_deref(), Some("info"));
     }
 }

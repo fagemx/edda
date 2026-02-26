@@ -14,6 +14,7 @@ mod cmd_log;
 mod cmd_merge;
 mod cmd_note;
 mod cmd_pattern;
+mod cmd_phase;
 mod cmd_pipeline;
 mod cmd_plan;
 mod cmd_rebuild;
@@ -287,6 +288,12 @@ enum Command {
     Intake {
         #[command(subcommand)]
         cmd: IntakeCmd,
+    },
+    /// Show agent phase detection status
+    Phase {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Auto-execution pipeline — skill chain with approval gates
     Pipeline {
@@ -836,6 +843,7 @@ fn main() -> anyhow::Result<()> {
         Command::Intake { cmd } => match cmd {
             IntakeCmd::Github { issue_id } => cmd_intake::execute_github(&repo_root, issue_id),
         },
+        Command::Phase { json } => cmd_phase::execute(&repo_root, json),
         Command::Pipeline { cmd } => match cmd {
             PipelineCmd::Run { issue_id, dry_run } => {
                 cmd_pipeline::execute_run(&repo_root, issue_id, dry_run)

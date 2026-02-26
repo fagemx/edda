@@ -1,3 +1,4 @@
+pub mod agent_phase;
 pub mod digest;
 pub mod pattern;
 pub mod peers;
