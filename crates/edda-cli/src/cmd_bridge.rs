@@ -545,6 +545,20 @@ pub fn request(
     Ok(())
 }
 
+/// `edda request-ack <from>` — acknowledge a pending request
+pub fn request_ack(
+    repo_root: &Path,
+    from_label: &str,
+    cli_session: Option<&str>,
+) -> anyhow::Result<()> {
+    let project_id = edda_store::project_id(repo_root);
+    let (session_id, _label) = resolve_session_id(cli_session, &project_id, "cli");
+
+    edda_bridge_claude::peers::write_request_ack(&project_id, &session_id, from_label);
+    println!("Acknowledged request from [{from_label}]");
+    Ok(())
+}
+
 /// Resolve session identity via 4-tier fallback:
 ///
 /// 1. `--session` CLI flag (explicit override)

@@ -84,6 +84,15 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Acknowledge a pending request from another session
+    #[command(name = "request-ack")]
+    RequestAck {
+        /// Label of the session whose request to acknowledge
+        from: String,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Setup a bridge integration (shortcut for `bridge <platform> install`)
     Setup {
         #[command(subcommand)]
@@ -701,6 +710,9 @@ fn main() -> anyhow::Result<()> {
             message,
             session,
         } => cmd_bridge::request(&repo_root, &to, &message, session.as_deref()),
+        Command::RequestAck { from, session } => {
+            cmd_bridge::request_ack(&repo_root, &from, session.as_deref())
+        }
         Command::Setup { cmd } => match cmd {
             SetupCmd::Openclaw { target, uninstall } => {
                 let path = target.as_deref().map(std::path::Path::new);
