@@ -1,3 +1,4 @@
+pub mod agent_phase;
 pub mod canon;
 pub mod decision;
 pub mod event;
