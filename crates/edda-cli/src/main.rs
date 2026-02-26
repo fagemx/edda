@@ -665,7 +665,8 @@ enum McpCommand {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let repo_root = std::env::current_dir()?;
+    let cwd = std::env::current_dir()?;
+    let repo_root = edda_ledger::EddaPaths::find_root(&cwd).unwrap_or(cwd);
 
     match cli.cmd {
         Command::Init { no_hooks } => cmd_init::execute(&repo_root, no_hooks),
