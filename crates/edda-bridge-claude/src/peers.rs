@@ -2624,7 +2624,10 @@ mod tests {
         let board = compute_board_state(pid);
         let precomputed = render_peer_updates_with(&peers, &board, pid, "s2");
 
-        assert_eq!(original, precomputed, "precomputed variant should match original");
+        assert_eq!(
+            original, precomputed,
+            "precomputed variant should match original"
+        );
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");
@@ -2657,7 +2660,10 @@ mod tests {
         let board = compute_board_state(pid);
         let precomputed = render_coordination_protocol_with(&peers, &board, pid, "s2");
 
-        assert_eq!(original, precomputed, "precomputed variant should match original");
+        assert_eq!(
+            original, precomputed,
+            "precomputed variant should match original"
+        );
 
         remove_heartbeat(pid, "s1");
         remove_heartbeat(pid, "s2");

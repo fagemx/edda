@@ -205,8 +205,7 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
         "SessionEnd" => {
             // Solo gate: only used to skip coordination log writes (write_unclaim).
             // Computed here (not at top) so non-SessionEnd hooks avoid the dir scan (#83).
-            let peers_active =
-                !session_id.is_empty() && has_active_peers(&project_id, &session_id);
+            let peers_active = !session_id.is_empty() && has_active_peers(&project_id, &session_id);
             dispatch_session_end(
                 &project_id,
                 &session_id,

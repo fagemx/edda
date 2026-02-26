@@ -571,6 +571,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "edda"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "ctrlc",
+ "edda-ask",
+ "edda-bridge-claude",
+ "edda-bridge-openclaw",
+ "edda-conductor",
+ "edda-core",
+ "edda-derive",
+ "edda-index",
+ "edda-ledger",
+ "edda-mcp",
+ "edda-pack",
+ "edda-search-fts",
+ "edda-store",
+ "edda-transcript",
+ "hex",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-util",
+ "ulid",
+]
+
+[[package]]
 name = "edda-ask"
 version = "0.1.0"
 dependencies = [
@@ -621,40 +655,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "time",
-]
-
-[[package]]
-name = "edda-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "ctrlc",
- "edda-ask",
- "edda-bridge-claude",
- "edda-bridge-openclaw",
- "edda-conductor",
- "edda-core",
- "edda-derive",
- "edda-index",
- "edda-ledger",
- "edda-mcp",
- "edda-pack",
- "edda-search-fts",
- "edda-store",
- "edda-transcript",
- "hex",
- "ratatui",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tempfile",
- "time",
- "tokio",
- "tokio-util",
- "ulid",
 ]
 
 [[package]]

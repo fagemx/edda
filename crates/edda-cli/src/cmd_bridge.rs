@@ -585,7 +585,9 @@ pub fn hook_openclaw() -> anyhow::Result<()> {
             Ok(())
         }
         Err(_) => {
-            debug_log(&format!("OPENCLAW TIMEOUT after {timeout_ms}ms — graceful exit"));
+            debug_log(&format!(
+                "OPENCLAW TIMEOUT after {timeout_ms}ms — graceful exit"
+            ));
             Ok(())
         }
     }
@@ -940,9 +942,11 @@ mod tests {
         // Verify catch_unwind pattern works with panicking closures
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<String> {
-                panic!("test panic in hook");
-            }));
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || -> anyhow::Result<String> {
+                    panic!("test panic in hook");
+                },
+            ));
             let _ = tx.send(result);
         });
 
