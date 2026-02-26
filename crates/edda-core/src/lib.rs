@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod canon;
 pub mod decision;
 pub mod event;

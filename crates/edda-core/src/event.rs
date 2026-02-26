@@ -487,6 +487,36 @@ pub fn new_task_intake_event(params: &TaskIntakeParams) -> anyhow::Result<Event>
     Ok(event)
 }
 
+/// Parameters for creating a `review_bundle` event.
+pub struct ReviewBundleParams {
+    pub branch: String,
+    pub parent_hash: Option<String>,
+    pub bundle: crate::bundle::ReviewBundle,
+}
+
+/// Create a new `review_bundle` event.
+pub fn new_review_bundle_event(params: &ReviewBundleParams) -> anyhow::Result<Event> {
+    let payload = serde_json::to_value(&params.bundle)?;
+
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: "review_bundle".to_string(),
+        branch: params.branch.clone(),
+        parent_hash: params.parent_hash.clone(),
+        hash: String::new(),
+        payload,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event);
+    Ok(event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1039,5 +1069,61 @@ mod tests {
         assert_eq!(event.event_family.as_deref(), Some("signal"));
         assert_eq!(event.event_level.as_deref(), Some("info"));
         assert_eq!(event.parent_hash.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn review_bundle_event_fields() {
+        use crate::bundle::*;
+
+        let bundle = ReviewBundle {
+            bundle_id: "bun_test".into(),
+            change_summary: ChangeSummary {
+                files: vec![FileChange {
+                    path: "src/main.rs".into(),
+                    added: 10,
+                    deleted: 3,
+                }],
+                total_added: 10,
+                total_deleted: 3,
+                diff_ref: "HEAD~1".into(),
+            },
+            test_results: TestResults {
+                passed: 50,
+                failed: 0,
+                ignored: 2,
+                total: 52,
+                failures: vec![],
+                command: "cargo test".into(),
+            },
+            risk_assessment: RiskAssessment {
+                level: RiskLevel::Low,
+                factors: vec![],
+            },
+            suggested_action: SuggestedAction::Approve,
+            suggested_reason: "All tests pass".into(),
+        };
+
+        let params = ReviewBundleParams {
+            branch: "main".into(),
+            parent_hash: None,
+            bundle,
+        };
+        let event = new_review_bundle_event(&params).unwrap();
+        assert_eq!(event.event_type, "review_bundle");
+        assert!(event.event_id.starts_with("evt_"));
+        assert_eq!(event.hash.len(), 64);
+        assert_eq!(event.payload["bundle_id"], "bun_test");
+        assert_eq!(event.payload["change_summary"]["total_added"], 10);
+        assert_eq!(event.payload["test_results"]["passed"], 50);
+        assert_eq!(event.payload["risk_assessment"]["level"], "low");
+        assert_eq!(event.payload["suggested_action"], "approve");
+    }
+
+    #[test]
+    fn review_bundle_taxonomy() {
+        use crate::types::{classify_event_type, event_family, event_level};
+        let (f, l) = classify_event_type("review_bundle");
+        assert_eq!(f, Some(event_family::GOVERNANCE));
+        assert_eq!(l, Some(event_level::MILESTONE));
     }
 }

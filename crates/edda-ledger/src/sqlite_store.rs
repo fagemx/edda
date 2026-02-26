@@ -63,6 +63,25 @@ CREATE INDEX IF NOT EXISTS idx_decisions_active ON decisions(is_active) WHERE is
 CREATE INDEX IF NOT EXISTS idx_decisions_branch_key ON decisions(branch, key);
 ";
 
+const SCHEMA_V3_SQL: &str = "
+CREATE TABLE IF NOT EXISTS review_bundles (
+    event_id TEXT PRIMARY KEY REFERENCES events(event_id),
+    bundle_id TEXT UNIQUE NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    risk_level TEXT NOT NULL,
+    total_added INTEGER NOT NULL DEFAULT 0,
+    total_deleted INTEGER NOT NULL DEFAULT 0,
+    files_changed INTEGER NOT NULL DEFAULT 0,
+    tests_passed INTEGER NOT NULL DEFAULT 0,
+    tests_failed INTEGER NOT NULL DEFAULT 0,
+    suggested_action TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bundles_status ON review_bundles(status);
+CREATE INDEX IF NOT EXISTS idx_bundles_bundle_id ON review_bundles(bundle_id);
+";
+
 /// A row from the `decisions` table.
 #[derive(Debug, Clone)]
 pub struct DecisionRow {
@@ -75,6 +94,23 @@ pub struct DecisionRow {
     pub supersedes_id: Option<String>,
     pub is_active: bool,
     pub ts: Option<String>,
+}
+
+/// A row from the `review_bundles` table.
+#[derive(Debug, Clone)]
+pub struct BundleRow {
+    pub event_id: String,
+    pub bundle_id: String,
+    pub status: String,
+    pub risk_level: String,
+    pub total_added: i64,
+    pub total_deleted: i64,
+    pub files_changed: i64,
+    pub tests_passed: i64,
+    pub tests_failed: i64,
+    pub suggested_action: String,
+    pub branch: String,
+    pub created_at: String,
 }
 
 /// SQLite-backed storage engine.
@@ -126,6 +162,12 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 2 {
             self.migrate_v1_to_v2()?;
+        }
+
+        // Migrate to v3 if needed
+        let current = self.schema_version()?;
+        if current < 3 {
+            self.migrate_v2_to_v3()?;
         }
 
         Ok(())
@@ -229,6 +271,80 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn migrate_v2_to_v3(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V3_SQL)?;
+
+        // Backfill: scan existing review_bundle events
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, branch, payload FROM events
+             WHERE event_type = 'review_bundle' ORDER BY rowid",
+        )?;
+        let rows: Vec<(String, String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (event_id, ts, branch, payload_str) in &rows {
+            let payload: serde_json::Value = match serde_json::from_str(payload_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            self.materialize_bundle(event_id, ts, branch, &payload)?;
+        }
+
+        self.set_schema_version(3)?;
+        Ok(())
+    }
+
+    fn materialize_bundle(
+        &self,
+        event_id: &str,
+        ts: &str,
+        branch: &str,
+        payload: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let bundle_id = payload["bundle_id"].as_str().unwrap_or("");
+        let risk_level = payload["risk_assessment"]["level"]
+            .as_str()
+            .unwrap_or("low");
+        let total_added = payload["change_summary"]["total_added"]
+            .as_i64()
+            .unwrap_or(0);
+        let total_deleted = payload["change_summary"]["total_deleted"]
+            .as_i64()
+            .unwrap_or(0);
+        let files_changed = payload["change_summary"]["files"]
+            .as_array()
+            .map(|a| a.len() as i64)
+            .unwrap_or(0);
+        let tests_passed = payload["test_results"]["passed"].as_i64().unwrap_or(0);
+        let tests_failed = payload["test_results"]["failed"].as_i64().unwrap_or(0);
+        let suggested_action = payload["suggested_action"].as_str().unwrap_or("review");
+
+        self.conn.execute(
+            "INSERT OR IGNORE INTO review_bundles
+             (event_id, bundle_id, status, risk_level, total_added, total_deleted,
+              files_changed, tests_passed, tests_failed, suggested_action, branch, created_at)
+             VALUES (?1, ?2, 'pending', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                event_id,
+                bundle_id,
+                risk_level,
+                total_added,
+                total_deleted,
+                files_changed,
+                tests_passed,
+                tests_failed,
+                suggested_action,
+                branch,
+                ts,
+            ],
+        )?;
+
+        Ok(())
+    }
+
     // ── Events ──────────────────────────────────────────────────────
 
     /// Append an event. Append-only (CONTRACT LEDGER-02).
@@ -304,6 +420,53 @@ impl SqliteStore {
                     ],
                 )?;
             }
+        }
+
+        // Materialize review bundle if applicable
+        if event.event_type == "review_bundle" {
+            let bundle_id = event.payload["bundle_id"].as_str().unwrap_or("");
+            let risk_level = event.payload["risk_assessment"]["level"]
+                .as_str()
+                .unwrap_or("low");
+            let total_added = event.payload["change_summary"]["total_added"]
+                .as_i64()
+                .unwrap_or(0);
+            let total_deleted = event.payload["change_summary"]["total_deleted"]
+                .as_i64()
+                .unwrap_or(0);
+            let files_changed = event.payload["change_summary"]["files"]
+                .as_array()
+                .map(|a| a.len() as i64)
+                .unwrap_or(0);
+            let tests_passed = event.payload["test_results"]["passed"]
+                .as_i64()
+                .unwrap_or(0);
+            let tests_failed = event.payload["test_results"]["failed"]
+                .as_i64()
+                .unwrap_or(0);
+            let suggested_action = event.payload["suggested_action"]
+                .as_str()
+                .unwrap_or("review");
+
+            tx.execute(
+                "INSERT INTO review_bundles
+                 (event_id, bundle_id, status, risk_level, total_added, total_deleted,
+                  files_changed, tests_passed, tests_failed, suggested_action, branch, created_at)
+                 VALUES (?1, ?2, 'pending', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                params![
+                    event.event_id,
+                    bundle_id,
+                    risk_level,
+                    total_added,
+                    total_deleted,
+                    files_changed,
+                    tests_passed,
+                    tests_failed,
+                    suggested_action,
+                    event.branch,
+                    event.ts,
+                ],
+            )?;
         }
 
         tx.commit()?;
@@ -493,6 +656,52 @@ impl SqliteStore {
             .map_err(|e| anyhow::anyhow!("list domains query failed: {e}"))
     }
 
+    // ── Review Bundles ────────────────────────────────────────────────
+
+    /// Get a review bundle by bundle_id.
+    pub fn get_bundle(&self, bundle_id: &str) -> anyhow::Result<Option<BundleRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, bundle_id, status, risk_level, total_added, total_deleted,
+                    files_changed, tests_passed, tests_failed, suggested_action, branch, created_at
+             FROM review_bundles WHERE bundle_id = ?1",
+        )?;
+        let result = stmt.query_map(params![bundle_id], map_bundle_row)?.next();
+        match result {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(anyhow::anyhow!("bundle query failed: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// List review bundles, optionally filtered by status.
+    pub fn list_bundles(&self, status: Option<&str>) -> anyhow::Result<Vec<BundleRow>> {
+        let (sql, param) = match status {
+            Some(s) => (
+                "SELECT event_id, bundle_id, status, risk_level, total_added, total_deleted,
+                        files_changed, tests_passed, tests_failed, suggested_action, branch, created_at
+                 FROM review_bundles WHERE status = ?1
+                 ORDER BY created_at DESC",
+                Some(s.to_string()),
+            ),
+            None => (
+                "SELECT event_id, bundle_id, status, risk_level, total_added, total_deleted,
+                        files_changed, tests_passed, tests_failed, suggested_action, branch, created_at
+                 FROM review_bundles ORDER BY created_at DESC",
+                None,
+            ),
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = if let Some(p) = &param {
+            stmt.query_map(params![p], map_bundle_row)?
+        } else {
+            stmt.query_map([], map_bundle_row)?
+        };
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("bundle list query failed: {e}"))
+    }
+
     /// Find the active decision for a specific key on a branch.
     pub fn find_active_decision(
         &self,
@@ -526,6 +735,23 @@ impl Drop for SqliteStore {
 
 // ── Decision helpers ────────────────────────────────────────────────
 // Centralized in edda_core::decision — detection, extraction, domain parsing.
+
+fn map_bundle_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BundleRow> {
+    Ok(BundleRow {
+        event_id: row.get(0)?,
+        bundle_id: row.get(1)?,
+        status: row.get(2)?,
+        risk_level: row.get(3)?,
+        total_added: row.get(4)?,
+        total_deleted: row.get(5)?,
+        files_changed: row.get(6)?,
+        tests_passed: row.get(7)?,
+        tests_failed: row.get(8)?,
+        suggested_action: row.get(9)?,
+        branch: row.get(10)?,
+        created_at: row.get(11)?,
+    })
+}
 
 fn map_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRow> {
     Ok(DecisionRow {
@@ -1136,7 +1362,7 @@ mod tests {
 
         // Open with open_or_create — should trigger v1→v2 migration
         let store = SqliteStore::open_or_create(&db_path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 2);
+        assert!(store.schema_version().unwrap() >= 2);
 
         // Verify decisions table was populated by backfill
         let active = store.active_decisions(None, None).unwrap();
@@ -1298,6 +1524,144 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(tables.contains(&"decisions".to_string()));
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Review bundle tests ────────────────────────────────────────
+
+    fn make_bundle_event(branch: &str, bundle_id: &str, risk: &str, failed: u32) -> Event {
+        use edda_core::bundle::*;
+        use edda_core::event::{new_review_bundle_event, ReviewBundleParams};
+
+        let bundle = ReviewBundle {
+            bundle_id: bundle_id.into(),
+            change_summary: ChangeSummary {
+                files: vec![FileChange {
+                    path: "src/main.rs".into(),
+                    added: 10,
+                    deleted: 3,
+                }],
+                total_added: 10,
+                total_deleted: 3,
+                diff_ref: "HEAD~1".into(),
+            },
+            test_results: TestResults {
+                passed: 50,
+                failed,
+                ignored: 0,
+                total: 50 + failed,
+                failures: if failed > 0 {
+                    vec!["some::test".into()]
+                } else {
+                    vec![]
+                },
+                command: "cargo test".into(),
+            },
+            risk_assessment: RiskAssessment {
+                level: match risk {
+                    "low" => RiskLevel::Low,
+                    "medium" => RiskLevel::Medium,
+                    "high" => RiskLevel::High,
+                    _ => RiskLevel::Critical,
+                },
+                factors: vec![],
+            },
+            suggested_action: if failed > 0 {
+                SuggestedAction::Reject
+            } else {
+                SuggestedAction::Approve
+            },
+            suggested_reason: "test".into(),
+        };
+
+        new_review_bundle_event(&ReviewBundleParams {
+            branch: branch.into(),
+            parent_hash: None,
+            bundle,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn review_bundle_materialized_on_append() {
+        let (dir, store) = tmp_db();
+        let e = make_bundle_event("main", "bun_test1", "low", 0);
+        store.append_event(&e).unwrap();
+
+        let bundles = store.list_bundles(None).unwrap();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].bundle_id, "bun_test1");
+        assert_eq!(bundles[0].status, "pending");
+        assert_eq!(bundles[0].risk_level, "low");
+        assert_eq!(bundles[0].total_added, 10);
+        assert_eq!(bundles[0].tests_passed, 50);
+        assert_eq!(bundles[0].tests_failed, 0);
+        assert_eq!(bundles[0].suggested_action, "approve");
+        assert_eq!(bundles[0].branch, "main");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_bundle_by_id() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_bundle_event("main", "bun_abc", "high", 1))
+            .unwrap();
+
+        let found = store.get_bundle("bun_abc").unwrap();
+        assert!(found.is_some());
+        let b = found.unwrap();
+        assert_eq!(b.risk_level, "high");
+        assert_eq!(b.tests_failed, 1);
+        assert_eq!(b.suggested_action, "reject");
+
+        let not_found = store.get_bundle("bun_nonexistent").unwrap();
+        assert!(not_found.is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_bundles_filter_by_status() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_bundle_event("main", "bun_1", "low", 0))
+            .unwrap();
+        store
+            .append_event(&make_bundle_event("main", "bun_2", "medium", 0))
+            .unwrap();
+
+        // All are "pending" initially
+        let all = store.list_bundles(None).unwrap();
+        assert_eq!(all.len(), 2);
+
+        let pending = store.list_bundles(Some("pending")).unwrap();
+        assert_eq!(pending.len(), 2);
+
+        let approved = store.list_bundles(Some("approved")).unwrap();
+        assert!(approved.is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_bundles_table_in_schema() {
+        let (dir, store) = tmp_db();
+        let tables: Vec<String> = store
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(tables.contains(&"review_bundles".to_string()));
+        assert_eq!(store.schema_version().unwrap(), 3);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
