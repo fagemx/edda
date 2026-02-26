@@ -940,6 +940,77 @@ fn dispatch_pre_tool_use(raw: &serde_json::Value, cwd: &str) -> anyhow::Result<H
     }
 }
 
+/// Best-effort write of a `commit` event to the workspace ledger.
+/// Uses try-lock: silently skips if workspace is locked by another process.
+fn try_write_commit_event(raw: &serde_json::Value, msg: &str) {
+    let cwd = get_str(raw, "cwd");
+    if cwd.is_empty() {
+        return;
+    }
+    let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(&cwd)) else {
+        return;
+    };
+    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
+        return;
+    };
+    let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
+        return; // locked by another process — skip
+    };
+    let Ok(branch) = ledger.head_branch() else {
+        return;
+    };
+    let Ok(parent_hash) = ledger.last_event_hash() else {
+        return;
+    };
+    let mut params = edda_core::event::CommitEventParams {
+        branch: &branch,
+        parent_hash: parent_hash.as_deref(),
+        title: msg,
+        purpose: None,
+        prev_summary: "",
+        contribution: msg,
+        evidence: vec![],
+        labels: vec!["auto_detect".to_string()],
+    };
+    if let Ok(event) = edda_core::event::new_commit_event(&mut params) {
+        let _ = ledger.append_event(&event);
+    }
+}
+
+/// Best-effort write of a `merge` event to the workspace ledger.
+/// Uses try-lock: silently skips if workspace is locked by another process.
+fn try_write_merge_event(raw: &serde_json::Value, src: &str, strategy: &str) {
+    let cwd = get_str(raw, "cwd");
+    if cwd.is_empty() {
+        return;
+    }
+    let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(&cwd)) else {
+        return;
+    };
+    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
+        return;
+    };
+    let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
+        return;
+    };
+    let Ok(branch) = ledger.head_branch() else {
+        return;
+    };
+    let Ok(parent_hash) = ledger.last_event_hash() else {
+        return;
+    };
+    if let Ok(event) = edda_core::event::new_merge_event(
+        &branch,
+        parent_hash.as_deref(),
+        src,
+        &branch,
+        strategy,
+        &[],
+    ) {
+        let _ = ledger.append_event(&event);
+    }
+}
+
 /// Dispatch PostToolUse — detect decision signals and nudge.
 fn dispatch_post_tool_use(
     raw: &serde_json::Value,
@@ -953,6 +1024,15 @@ fn dispatch_post_tool_use(
 
     // Count every detected signal (including SelfRecord and cooldown-suppressed ones).
     increment_counter(project_id, session_id, "signal_count");
+
+    // Auto-write events to workspace ledger (best-effort, try-lock).
+    match &signal {
+        crate::nudge::NudgeSignal::Commit(msg) => try_write_commit_event(raw, msg),
+        crate::nudge::NudgeSignal::Merge(src, strategy) => {
+            try_write_merge_event(raw, src, strategy)
+        }
+        _ => {}
+    }
 
     // Agent is recording a decision → increment counter, but do NOT suppress future nudges.
     // This allows the agent to receive nudges for subsequent signals after cooldown.
@@ -2398,5 +2478,98 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Auto-write ledger event tests ──
+
+    #[test]
+    fn try_write_commit_event_creates_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+        let paths = edda_ledger::EddaPaths::discover(&workspace);
+        edda_ledger::ledger::init_workspace(&paths).unwrap();
+        edda_ledger::ledger::init_head(&paths, "main").unwrap();
+        edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
+
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git commit -m \"feat: add auth\"" },
+            "cwd": workspace.to_str().unwrap()
+        });
+
+        try_write_commit_event(&raw, "feat: add auth");
+
+        // Verify event was written
+        let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+        let events = ledger.iter_events().unwrap();
+        let commit_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == "commit")
+            .collect();
+        assert_eq!(commit_events.len(), 1);
+        assert_eq!(
+            commit_events[0].payload["title"].as_str().unwrap(),
+            "feat: add auth"
+        );
+        assert!(commit_events[0].payload["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l.as_str() == Some("auto_detect")));
+    }
+
+    #[test]
+    fn try_write_merge_event_creates_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+        let paths = edda_ledger::EddaPaths::discover(&workspace);
+        edda_ledger::ledger::init_workspace(&paths).unwrap();
+        edda_ledger::ledger::init_head(&paths, "main").unwrap();
+        edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
+
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "gh pr merge 42 --squash" },
+            "cwd": workspace.to_str().unwrap()
+        });
+
+        try_write_merge_event(&raw, "PR#42", "squash");
+
+        // Verify event was written
+        let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+        let events = ledger.iter_events().unwrap();
+        let merge_events: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == "merge")
+            .collect();
+        assert_eq!(merge_events.len(), 1);
+        assert_eq!(merge_events[0].payload["src"].as_str().unwrap(), "PR#42");
+        assert_eq!(
+            merge_events[0].payload["reason"].as_str().unwrap(),
+            "squash"
+        );
+    }
+
+    #[test]
+    fn try_write_commit_event_skips_when_no_workspace() {
+        // cwd with no .edda workspace — should silently skip
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git commit -m \"test\"" },
+            "cwd": tmp.path().to_str().unwrap()
+        });
+        // Should not panic or error
+        try_write_commit_event(&raw, "test");
+    }
+
+    #[test]
+    fn try_write_commit_event_skips_when_empty_cwd() {
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git commit -m \"test\"" }
+        });
+        // No cwd field — should silently skip
+        try_write_commit_event(&raw, "test");
     }
 }

@@ -18,6 +18,8 @@ pub enum NudgeSignal {
     SchemaChange(String),
     /// Agent created a new module entry point. Contains file path.
     NewModule(String),
+    /// Agent merged a branch. Contains (source_branch, strategy).
+    Merge(String, String),
 }
 
 /// Scan PostToolUse `raw` payload for decision-like signals.
@@ -47,6 +49,16 @@ pub fn detect_signal(raw: &Value) -> Option<NudgeSignal> {
         // Dependency add detection
         if let Some(pkg) = extract_dependency_add(command) {
             return Some(NudgeSignal::DependencyAdd(pkg));
+        }
+
+        // Git merge detection
+        if let Some(branch) = extract_merge_branch(command) {
+            return Some(NudgeSignal::Merge(branch, "merge".into()));
+        }
+
+        // gh pr merge detection
+        if let Some((src, strategy)) = extract_gh_pr_merge(command) {
+            return Some(NudgeSignal::Merge(src, strategy));
         }
     } else if tool_name == "Edit" || tool_name == "Write" {
         let file_path = raw
@@ -134,6 +146,7 @@ fn format_nudge_strong(signal: &NudgeSignal) -> String {
             let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
             format!("created module entry '{name}'")
         }
+        NudgeSignal::Merge(src, _strategy) => format!("merged '{src}'"),
     };
     format!(
         "\u{26a0}\u{fe0f} You haven't recorded any decisions this session yet. You just {action}.\n\
@@ -177,6 +190,12 @@ fn format_nudge_gentle(signal: &NudgeSignal) -> String {
             format!(
                 "You created module entry '{name}'. If this establishes a new boundary, record it:\n\
                  `edda decide \"module=...\" --reason \"purpose\"`"
+            )
+        }
+        NudgeSignal::Merge(src, _strategy) => {
+            format!(
+                "You merged '{src}'. If this involves an architectural decision, record it:\n\
+                 `edda decide \"key=value\" --reason \"why\"`"
             )
         }
     }
@@ -256,6 +275,49 @@ pub fn extract_dependency_add(command: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract branch name from `git merge <branch>`.
+fn extract_merge_branch(command: &str) -> Option<String> {
+    let idx = command.find("git merge ")?;
+    let after = &command[idx + "git merge ".len()..];
+    let token = after.split_whitespace().next()?;
+    // Skip flags like --no-ff, --squash
+    if token.starts_with('-') {
+        // Look for the next non-flag token
+        for t in after.split_whitespace() {
+            if !t.starts_with('-') {
+                return Some(t.to_string());
+            }
+        }
+        return None;
+    }
+    Some(token.to_string())
+}
+
+/// Extract PR number and strategy from `gh pr merge <N> [--squash|--rebase|--merge]`.
+fn extract_gh_pr_merge(command: &str) -> Option<(String, String)> {
+    let idx = command.find("gh pr merge")?;
+    let after = &command[idx + "gh pr merge".len()..];
+    let mut pr_number = String::new();
+    let mut strategy = "merge".to_string();
+
+    for token in after.split_whitespace() {
+        if token == "--squash" {
+            strategy = "squash".to_string();
+        } else if token == "--rebase" {
+            strategy = "rebase".to_string();
+        } else if token == "--merge" {
+            strategy = "merge".to_string();
+        } else if !token.starts_with('-') && pr_number.is_empty() {
+            pr_number = format!("PR#{token}");
+        }
+    }
+
+    if pr_number.is_empty() {
+        pr_number = "PR".to_string();
+    }
+    Some((pr_number, strategy))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -498,5 +560,82 @@ mod tests {
             Some(NudgeSignal::Commit(msg)) => assert!(msg.len() <= 83), // 80 + "..."
             other => panic!("expected Commit, got {other:?}"),
         }
+    }
+
+    // ── Merge detection tests ──
+
+    #[test]
+    fn detect_signal_git_merge() {
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git merge feature/auth" }
+        });
+        assert_eq!(
+            detect_signal(&raw),
+            Some(NudgeSignal::Merge("feature/auth".into(), "merge".into()))
+        );
+    }
+
+    #[test]
+    fn detect_signal_git_merge_with_flags() {
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git merge --no-ff feature/billing" }
+        });
+        assert_eq!(
+            detect_signal(&raw),
+            Some(NudgeSignal::Merge("feature/billing".into(), "merge".into()))
+        );
+    }
+
+    #[test]
+    fn detect_signal_gh_pr_merge_squash() {
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "gh pr merge 42 --squash --delete-branch" }
+        });
+        assert_eq!(
+            detect_signal(&raw),
+            Some(NudgeSignal::Merge("PR#42".into(), "squash".into()))
+        );
+    }
+
+    #[test]
+    fn detect_signal_gh_pr_merge_default() {
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "gh pr merge 99" }
+        });
+        assert_eq!(
+            detect_signal(&raw),
+            Some(NudgeSignal::Merge("PR#99".into(), "merge".into()))
+        );
+    }
+
+    #[test]
+    fn detect_signal_gh_pr_merge_rebase() {
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "gh pr merge 7 --rebase" }
+        });
+        assert_eq!(
+            detect_signal(&raw),
+            Some(NudgeSignal::Merge("PR#7".into(), "rebase".into()))
+        );
+    }
+
+    #[test]
+    fn format_nudge_merge_gentle() {
+        let nudge = format_nudge(&NudgeSignal::Merge("feature/auth".into(), "merge".into()), 1);
+        assert!(nudge.contains("feature/auth"));
+        assert!(nudge.contains("edda decide"));
+        assert!(!nudge.contains("\u{26a0}\u{fe0f}"));
+    }
+
+    #[test]
+    fn format_nudge_merge_strong() {
+        let nudge = format_nudge(&NudgeSignal::Merge("PR#42".into(), "squash".into()), 0);
+        assert!(nudge.contains("\u{26a0}\u{fe0f}"));
+        assert!(nudge.contains("merged 'PR#42'"));
     }
 }
