@@ -1206,29 +1206,29 @@ fn read_active_task_names(project_id: &str) -> Vec<String> {
         Ok(c) => c,
         Err(_) => return Vec::new(),
     };
-    let tasks: Vec<TaskSnapshot> = match serde_json::from_str(&content) {
-        Ok(t) => t,
+    let val: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
         Err(_) => return Vec::new(),
     };
-    tasks
-        .into_iter()
-        .filter(|t| t.status == "in_progress")
-        .map(|t| t.subject)
-        .collect()
+    val.get("tasks")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let status = item.get("status")?.as_str()?;
+                    if status != "in_progress" {
+                        return None;
+                    }
+                    Some(item.get("subject")?.as_str()?.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-/// Get cached git branch (from heartbeat if available, else detect).
+/// Get git branch for the given working directory.
 fn detect_git_branch_cached(cwd: &str) -> Option<String> {
-    // Lightweight: just detect the branch (same as peers.rs does)
-    std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(cwd)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    crate::peers::detect_git_branch_in(cwd)
 }
 
 /// Check if patterns are enabled and match tool input against Pattern Store.
@@ -2750,7 +2750,7 @@ mod tests {
             "tool_name": "Edit",
             "input": { "file_path": "crates/edda-store/src/lib.rs" }
         });
-        let _ = dispatch_post_tool_use(&raw, pid, sid);
+        let _ = dispatch_post_tool_use(&raw, pid, sid, ".");
 
         // Should have auto-claimed edda-store
         let board = crate::peers::compute_board_state(pid);
@@ -2773,7 +2773,7 @@ mod tests {
             "tool_name": "Write",
             "input": { "file_path": "crates/edda-bridge-claude/src/dispatch.rs" }
         });
-        let _ = dispatch_post_tool_use(&raw, pid, sid);
+        let _ = dispatch_post_tool_use(&raw, pid, sid, ".");
 
         let board = crate::peers::compute_board_state(pid);
         let claim = board.claims.iter().find(|c| c.session_id == sid);
@@ -2795,7 +2795,7 @@ mod tests {
             "tool_name": "Bash",
             "tool_input": { "command": "ls" }
         });
-        let _ = dispatch_post_tool_use(&raw, pid, sid);
+        let _ = dispatch_post_tool_use(&raw, pid, sid, ".");
 
         let board = crate::peers::compute_board_state(pid);
         let claim = board.claims.iter().find(|c| c.session_id == sid);

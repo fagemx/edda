@@ -191,7 +191,15 @@ pub fn mobile_context_summary(
     if joined.len() <= budget_chars {
         joined
     } else {
-        let mut truncated = joined[..budget_chars.saturating_sub(3)].to_string();
+        // Find a char boundary at or before the target length to avoid panicking on multi-byte chars
+        let target = budget_chars.saturating_sub(3);
+        let boundary = joined
+            .char_indices()
+            .take_while(|(i, _)| *i <= target)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let mut truncated = joined[..boundary].to_string();
         truncated.push_str("...");
         truncated
     }

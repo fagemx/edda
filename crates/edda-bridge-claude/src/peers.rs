@@ -37,8 +37,14 @@ fn env_label() -> Option<String> {
 /// Detect the current git branch via `git rev-parse --abbrev-ref HEAD`.
 /// Returns `None` if not in a git repo or git is unavailable.
 fn detect_git_branch() -> Option<String> {
+    detect_git_branch_in(".")
+}
+
+/// Detect git branch in a specific directory.
+pub(crate) fn detect_git_branch_in(cwd: &str) -> Option<String> {
     std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(cwd)
         .output()
         .ok()
         .filter(|o| o.status.success())

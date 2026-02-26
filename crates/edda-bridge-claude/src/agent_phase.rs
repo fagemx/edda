@@ -344,7 +344,7 @@ fn heartbeat_age_secs(project_id: &str, session_id: &str, now_epoch: u64) -> u64
 fn parse_rfc3339_to_epoch(ts: &str) -> Option<u64> {
     time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339)
         .ok()
-        .map(|dt| dt.unix_timestamp() as u64)
+        .and_then(|dt| u64::try_from(dt.unix_timestamp()).ok())
 }
 
 fn now_rfc3339() -> String {
