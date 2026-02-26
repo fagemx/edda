@@ -1195,21 +1195,20 @@ pub(crate) fn maybe_auto_claim(project_id: &str, session_id: &str, signals: &Ses
 pub(crate) fn maybe_auto_claim_file(project_id: &str, session_id: &str, file_path: &str) {
     let state_path = autoclaim_state_path(project_id, session_id);
 
-    // Read existing auto-claim state
-    let mut state: AutoClaimState = fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_default();
-
-    // If session has a manual claim (claim exists but no auto-claim state file was loaded),
-    // we already loaded default state above. Check coordination for manual claim.
-    if state.label.is_empty() && state.files.is_empty() {
+    // Fast path: if no state file exists, check for manual claim via coordination.jsonl.
+    // This only happens once per session (first Edit); subsequent calls find the state file.
+    let state_file_content = fs::read_to_string(&state_path).ok();
+    if state_file_content.is_none() {
         let board = compute_board_state(project_id);
         if board.claims.iter().any(|c| c.session_id == session_id) {
             // Manual claim exists, no auto-claim state → skip
             return;
         }
     }
+
+    let mut state: AutoClaimState = state_file_content
+        .and_then(|c| serde_json::from_str(&c).ok())
+        .unwrap_or_default();
 
     // Add file to tracked set
     let normalized = file_path.replace('\\', "/");

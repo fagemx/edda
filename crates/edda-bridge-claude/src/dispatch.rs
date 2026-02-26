@@ -958,7 +958,13 @@ fn dispatch_pre_tool_use(
 
 /// Check for pending coordination requests addressed to this session.
 /// Uses a cooldown counter: only returns a nudge every 3rd PreToolUse call.
+/// Skips all I/O for solo sessions (no peers).
 fn check_pending_requests(project_id: &str, session_id: &str) -> Option<String> {
+    // Solo gate: skip counter I/O entirely when no peers are active.
+    if read_peer_count(project_id, session_id) == 0 {
+        return None;
+    }
+
     let counter = read_counter(project_id, session_id, "request_nudge_count");
     increment_counter(project_id, session_id, "request_nudge_count");
     if !counter.is_multiple_of(3) {
@@ -2691,6 +2697,8 @@ mod tests {
         // Setup: pending request for this session
         crate::peers::write_claim(pid, sid, "auth", &["src/auth/*".into()]);
         crate::peers::write_request(pid, "s2", "billing", "auth", "Need AuthToken export");
+        // Must have peer_count > 0 for solo gate to pass
+        write_peer_count(pid, sid, 1);
 
         // Counter starts at 0 → 0 % 3 == 0 → should nudge
         let nudge0 = check_pending_requests(pid, sid);
@@ -2719,9 +2727,35 @@ mod tests {
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
         let _ = edda_store::ensure_dirs(pid);
 
-        // No requests at all → no nudge even at counter=0
+        // peer_count > 0 but no requests → no nudge
+        write_peer_count(pid, sid, 1);
         let nudge = check_pending_requests(pid, sid);
         assert!(nudge.is_none(), "no pending requests → no nudge");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn pre_tool_use_solo_skips_counter_io() {
+        let pid = "test_pre_solo_skip";
+        let sid = "sess-req-nudge-3";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Solo session (peer_count=0) with pending request → still no nudge
+        crate::peers::write_claim(pid, sid, "auth", &["src/auth/*".into()]);
+        crate::peers::write_request(pid, "s2", "billing", "auth", "Need AuthToken");
+        // peer_count defaults to 0 (solo)
+
+        let nudge = check_pending_requests(pid, sid);
+        assert!(nudge.is_none(), "solo session should skip nudge entirely");
+
+        // Counter should NOT have been incremented
+        assert_eq!(
+            read_counter(pid, sid, "request_nudge_count"),
+            0,
+            "solo gate should skip counter I/O"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
