@@ -46,6 +46,9 @@ enum Command {
         /// Skip auto-detection and installation of bridge hooks
         #[arg(long)]
         no_hooks: bool,
+        /// Overwrite existing coordination skills with latest embedded versions
+        #[arg(long)]
+        force_skills: bool,
     },
     /// Record a note event
     Note {
@@ -781,7 +784,10 @@ fn main() -> anyhow::Result<()> {
     let repo_root = edda_ledger::EddaPaths::find_root(&cwd).unwrap_or(cwd);
 
     match cli.cmd {
-        Command::Init { no_hooks } => cmd_init::execute(&repo_root, no_hooks),
+        Command::Init {
+            no_hooks,
+            force_skills,
+        } => cmd_init::execute(&repo_root, no_hooks, force_skills),
         Command::Note { text, role, tags } => cmd_note::execute(&repo_root, &text, &role, &tags),
         Command::Decide {
             decision,

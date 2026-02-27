@@ -5,7 +5,15 @@ use edda_ledger::paths::EddaPaths;
 use edda_ledger::{ledger, Ledger};
 use std::path::Path;
 
-pub fn execute(repo_root: &Path, no_hooks: bool) -> anyhow::Result<()> {
+/// Embedded coordination skill templates — canonical versions that ship with the binary.
+const SKILLS: &[(&str, &str)] = &[
+    ("coord-sync", include_str!("skills/coord-sync.md")),
+    ("coord-handoff", include_str!("skills/coord-handoff.md")),
+    ("coord-request", include_str!("skills/coord-request.md")),
+    ("coord-review", include_str!("skills/coord-review.md")),
+];
+
+pub fn execute(repo_root: &Path, no_hooks: bool, force_skills: bool) -> anyhow::Result<()> {
     let paths = EddaPaths::discover(repo_root);
 
     if paths.is_initialized() {
@@ -82,6 +90,11 @@ actors: {}
         auto_install_bridges(repo_root);
     }
 
+    // Scaffold coordination skills into .claude/skills/
+    if repo_root.join(".claude").is_dir() {
+        scaffold_skills(repo_root, force_skills);
+    }
+
     Ok(())
 }
 
@@ -99,6 +112,33 @@ fn auto_install_bridges(repo_root: &Path) {
     // OpenClaw: global plugin (~/.openclaw/extensions/) — hint only, don't auto-install
     if repo_root.join(".openclaw").is_dir() {
         println!("Detected OpenClaw project. Run 'edda setup openclaw' to enable edda hooks.");
+    }
+}
+
+/// Write embedded coord skill templates to `.claude/skills/coord-*/SKILL.md`.
+/// Skips files that already exist unless `force` is true.
+fn scaffold_skills(repo_root: &Path, force: bool) {
+    let skills_dir = repo_root.join(".claude").join("skills");
+    for &(name, content) in SKILLS {
+        let dir = skills_dir.join(name);
+        let path = dir.join("SKILL.md");
+        if path.exists() && !force {
+            continue;
+        }
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("Warning: could not create {}: {e}", dir.display());
+            continue;
+        }
+        let already_existed = path.exists();
+        if let Err(e) = std::fs::write(&path, content) {
+            eprintln!("Warning: could not write {}: {e}", path.display());
+            continue;
+        }
+        if already_existed {
+            println!("  Updated skill: {name}");
+        } else {
+            println!("  Scaffolded skill: {name}");
+        }
     }
 }
 
@@ -122,7 +162,7 @@ mod tests {
         let tmp = temp_dir();
         std::fs::create_dir_all(tmp.join(".claude")).unwrap();
 
-        execute(&tmp, false).unwrap();
+        execute(&tmp, false, false).unwrap();
 
         // Workspace created
         assert!(tmp.join(".edda").is_dir());
@@ -154,7 +194,7 @@ mod tests {
         let tmp = temp_dir();
         std::fs::create_dir_all(tmp.join(".claude")).unwrap();
 
-        execute(&tmp, true).unwrap();
+        execute(&tmp, true, false).unwrap();
 
         // Workspace created
         assert!(tmp.join(".edda").is_dir());
@@ -171,7 +211,7 @@ mod tests {
     fn init_without_claude_dir_no_error() {
         let tmp = temp_dir();
 
-        execute(&tmp, false).unwrap();
+        execute(&tmp, false, false).unwrap();
 
         // Workspace created
         assert!(tmp.join(".edda").is_dir());
@@ -186,19 +226,74 @@ mod tests {
         let tmp = temp_dir();
 
         // First init — no .claude/ dir
-        execute(&tmp, false).unwrap();
+        execute(&tmp, false, false).unwrap();
         assert!(tmp.join(".edda").is_dir());
         assert!(!tmp.join(".claude").join("settings.local.json").exists());
 
         // Now add .claude/ and re-init
         std::fs::create_dir_all(tmp.join(".claude")).unwrap();
-        execute(&tmp, false).unwrap();
+        execute(&tmp, false, false).unwrap();
 
         // Hooks should now be installed
         let settings = tmp.join(".claude").join("settings.local.json");
         assert!(settings.exists(), "hooks should be installed on re-init");
         let content = std::fs::read_to_string(&settings).unwrap();
         assert!(content.contains("edda hook claude"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn init_scaffolds_coord_skills() {
+        let tmp = temp_dir();
+        std::fs::create_dir_all(tmp.join(".claude")).unwrap();
+
+        execute(&tmp, true, false).unwrap();
+
+        for name in ["coord-sync", "coord-handoff", "coord-request", "coord-review"] {
+            let path = tmp.join(".claude").join("skills").join(name).join("SKILL.md");
+            assert!(path.exists(), "{name}/SKILL.md should be scaffolded");
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                content.contains(&format!("name: {name}")),
+                "{name} should have correct frontmatter"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn init_skips_existing_skills() {
+        let tmp = temp_dir();
+        let skill_dir = tmp.join(".claude").join("skills").join("coord-sync");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "custom content").unwrap();
+
+        execute(&tmp, true, false).unwrap();
+
+        // Should NOT be overwritten
+        let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+        assert_eq!(content, "custom content", "should not overwrite existing skill");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn init_force_skills_overwrites() {
+        let tmp = temp_dir();
+        let skill_dir = tmp.join(".claude").join("skills").join("coord-sync");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "custom content").unwrap();
+
+        execute(&tmp, true, true).unwrap();
+
+        // Should be overwritten with embedded version
+        let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+        assert!(
+            content.contains("name: coord-sync"),
+            "should overwrite with embedded version"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
