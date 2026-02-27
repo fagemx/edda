@@ -100,11 +100,7 @@ enum Command {
         session: Option<String>,
     },
     /// Show active peer sessions (shortcut for `bridge claude peers`)
-    Peers {
-        /// Session ID (auto-inferred from active heartbeats if omitted)
-        #[arg(long)]
-        session: Option<String>,
-    },
+    Peers,
     /// Show coordination state (shortcut for `bridge claude render-coordination`)
     Coord {
         /// Session ID (auto-inferred from active heartbeats if omitted)
