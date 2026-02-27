@@ -70,10 +70,16 @@ karvi board.json
 | `planId` | `tags: ["dispatch:{planId}"]` | Tracking only |
 | `message` | `purpose` | Injected into every phase prompt |
 | `timeoutSec` | `timeout_sec` | Plan-level timeout |
-| `controlsSnapshot.max_review_attempts` | `max_attempts` | Phase retry limit |
 | `artifacts[].summary` | `phases[0].context` | Upstream context injection |
 | `requiredSkills` | `phases[].allowed_tools` | Tool filtering |
 | `mode` ("redispatch") | `env: { REDISPATCH: "1" }` | Retry signal |
+| `createdAt` | `env: { DISPATCH_CREATED_AT: "..." }` | Dispatch timing audit |
+
+**Note on `max_attempts`**: edda plan's `max_attempts` (phase execution retry count) is NOT derived from karvi's `controlsSnapshot.max_review_attempts` (review cycle count). These are different concepts:
+- karvi `max_review_attempts` = how many times karvi reviews output and may redispatch the entire task
+- edda `max_attempts` = how many times a single phase retries when its check fails
+
+runtime-edda.js should use a hardcoded default (3) or a separate config for edda's `max_attempts`.
 
 ### Fields NOT Mapped (karvi-only, not in edda plan)
 
@@ -82,6 +88,7 @@ karvi board.json
 | `runtimeHint` | Selector for which runtime to use — not part of plan |
 | `agentId` | Edda manages its own agent sessions |
 | `modelHint` | Passed as env var if needed, not a plan field |
+| `controlsSnapshot.max_review_attempts` | Karvi review cycles — semantically different from edda phase retries |
 | `codexRole` | Not applicable — edda uses Claude Code |
 | `sessionId` | Edda generates deterministic UUIDv5 per phase+attempt |
 | `upstreamTaskIds` | Resolved into `artifacts` before dispatch |
@@ -124,7 +131,7 @@ karvi board.json
 name: karvi-T5
 purpose: "Add user authentication with JWT. Use middleware pattern."
 timeout_sec: 600
-max_attempts: 3
+max_attempts: 3  # hardcoded default, NOT from karvi max_review_attempts
 tags:
   - "karvi:T5"
   - "dispatch:disp_abc123"
@@ -205,10 +212,9 @@ The edda brief uses karvi's scoped board format (`meta` + `controls` + `log` ske
   "completedPhases": 1,
 
   "cost": {
-    "total_usd": 1.23,
+    "total_usd": 0.85,
     "by_phase": {
-      "implement": 0.85,
-      "test": 0.38
+      "implement": 0.85
     }
   },
 
@@ -432,7 +438,7 @@ PATCH 8: { cost: { total_usd: 1.45 } }
 
 **1. Same dispatch as Example A**
 
-**2. events.jsonl sequence (test phase fails twice)**
+**2. events.jsonl sequence (test phase fails three times)**
 
 ```jsonl
 {"seq":1,"ts":"...","type":"PlanStart","plan_name":"karvi-T5","phase_count":3}
