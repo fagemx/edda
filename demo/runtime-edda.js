@@ -98,9 +98,6 @@ function buildPlanYaml(plan) {
   if (plan.taskId) tags.push(`karvi:${plan.taskId}`);
   if (plan.planId) tags.push(`dispatch:${plan.planId}`);
 
-  const env =
-    plan.mode === "redispatch" ? "\n  env:\n    REDISPATCH: '1'" : "";
-
   return [
     `name: "${name}"`,
     `max_attempts: ${maxAttempts}`,
@@ -110,7 +107,8 @@ function buildPlanYaml(plan) {
     `  - id: main`,
     `    prompt: |`,
     ...prompt.split("\n").map((l) => `      ${l}`),
-    env ? `    ${env.trim()}` : null,
+    plan.mode === "redispatch" ? `    env:` : null,
+    plan.mode === "redispatch" ? `      REDISPATCH: '1'` : null,
   ]
     .filter(Boolean)
     .join("\n");

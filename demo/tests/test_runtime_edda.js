@@ -54,6 +54,7 @@ function testBuildPlanYamlRedispatch() {
   };
   const yaml = buildPlanYaml(plan);
   assert(yaml.includes("REDISPATCH"), "should include REDISPATCH env");
+  assert(yaml.includes("    env:\n      REDISPATCH:"), "env value must be indented under env key");
   console.log("  PASS: buildPlanYaml redispatch");
 }
 
