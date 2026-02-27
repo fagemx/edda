@@ -1165,10 +1165,17 @@ pub(crate) fn maybe_auto_claim(project_id: &str, session_id: &str, signals: &Ses
         return;
     }
 
-    // 2. Derive scope from edited files
+    // 2. Derive scope from edited files, fallback to git branch
     let (label, paths) = match derive_scope_from_files(&signals.files_modified) {
         Some(v) => v,
-        None => return,
+        None => {
+            // No file edits yet (fresh session) — use git branch as fallback label
+            // so the peer is visible in `edda watch` immediately (#128)
+            match detect_git_branch() {
+                Some(branch) => (branch, vec!["**/*".to_string()]),
+                None => return,
+            }
+        }
     };
 
     // 3. Dedup: skip if scope unchanged from last auto-claim
