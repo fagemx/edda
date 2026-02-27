@@ -858,10 +858,12 @@ fn suggest_claim_command(label: &str, heartbeat: &Option<SessionHeartbeat>) -> S
         if let Some(ref branch) = hb.branch {
             let branch_label = branch.split('/').next_back().unwrap_or(branch);
             if !branch_label.is_empty() && branch_label != "main" && branch_label != "master" {
-                let claim_label = if !label.is_empty() { label } else { branch_label };
-                return format!(
-                    "`edda claim \"{claim_label}\" --paths \"<your-scope>/*\"`"
-                );
+                let claim_label = if !label.is_empty() {
+                    label
+                } else {
+                    branch_label
+                };
+                return format!("`edda claim \"{claim_label}\" --paths \"<your-scope>/*\"`");
             }
         }
     }
@@ -935,9 +937,7 @@ pub fn render_coordination_protocol_with(
             "**Claim your scope** so peers know what you're working on:\n{suggested}",
         ));
     }
-    lines.push(
-        "Message a peer: `edda request \"peer-label\" \"your message\"`".to_string(),
-    );
+    lines.push("Message a peer: `edda request \"peer-label\" \"your message\"`".to_string());
 
     // Peer activity (tasks + focus files)
     let active_peers: Vec<&PeerSummary> = peers
