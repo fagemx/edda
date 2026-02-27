@@ -63,6 +63,7 @@ pub struct FullEvent {
 pub struct EventLogger {
     jsonl_path: PathBuf,
     seq: u32,
+    stdout_json: bool,
 }
 
 impl EventLogger {
@@ -73,7 +74,17 @@ impl EventLogger {
             .join("conductor")
             .join(plan_name)
             .join("events.jsonl");
-        Self { jsonl_path, seq: 0 }
+        Self {
+            jsonl_path,
+            seq: 0,
+            stdout_json: false,
+        }
+    }
+
+    /// Enable tee-ing events to stdout as JSONL (for `--json` mode).
+    pub fn with_stdout_json(mut self, enabled: bool) -> Self {
+        self.stdout_json = enabled;
+        self
     }
 
     /// Record an event. Best-effort: silently ignores write failures.
@@ -87,6 +98,9 @@ impl EventLogger {
 
         if let Ok(line) = serde_json::to_string(&full) {
             let _ = append_line(&self.jsonl_path, &line);
+            if self.stdout_json {
+                let _ = writeln!(std::io::stdout(), "{line}");
+            }
         }
     }
 }
@@ -227,6 +241,23 @@ mod tests {
         assert_eq!(second["seq"], 1);
         assert_eq!(first["type"], "plan_start");
         assert_eq!(second["type"], "phase_start");
+    }
+
+    #[test]
+    fn event_logger_with_stdout_json_builder() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = EventLogger::new(dir.path(), "test-plan").with_stdout_json(true);
+        assert!(logger.stdout_json);
+
+        let logger2 = EventLogger::new(dir.path(), "test-plan").with_stdout_json(false);
+        assert!(!logger2.stdout_json);
+    }
+
+    #[test]
+    fn event_logger_default_no_stdout_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let logger = EventLogger::new(dir.path(), "test-plan");
+        assert!(!logger.stdout_json);
     }
 
     #[test]
