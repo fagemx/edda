@@ -801,7 +801,7 @@ fn main() -> anyhow::Result<()> {
         Command::RequestAck { from, session } => {
             cmd_bridge::request_ack(&repo_root, &from, session.as_deref())
         }
-        Command::Peers { .. } => cmd_bridge::peers(&repo_root),
+        Command::Peers => cmd_bridge::peers(&repo_root),
         Command::Coord { session } => {
             cmd_bridge::render_coordination(&repo_root, session.as_deref())
         }
