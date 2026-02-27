@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use super::app::{is_user_facing_domain, App, Panel};
+use super::app::{is_internal_domain, App, Panel};
 
 /// Render the full TUI frame.
 pub fn render(f: &mut Frame, app: &App) {
@@ -208,7 +208,7 @@ fn render_bindings_grouped(f: &mut Frame, app: &App, area: ratatui::layout::Rect
     let mut items: Vec<ListItem> = Vec::new();
 
     for (domain, bindings) in &groups {
-        let is_internal = !is_user_facing_domain(domain);
+        let is_internal = is_internal_domain(domain);
         let expanded = app.expanded_domains.contains(*domain) || !is_internal;
 
         // Domain header
@@ -324,7 +324,7 @@ pub fn group_bindings(bindings: &[BindingEntry]) -> Vec<(&str, Vec<&BindingEntry
     let mut internal: Vec<(&str, Vec<&BindingEntry>)> = Vec::new();
 
     for (domain, entries) in map {
-        if is_user_facing_domain(domain) {
+        if !is_internal_domain(domain) {
             user_facing.push((domain, entries));
         } else {
             internal.push((domain, entries));
@@ -769,11 +769,11 @@ mod tests {
     }
 
     #[test]
-    fn user_facing_domains_recognized() {
-        assert!(is_user_facing_domain("api"));
-        assert!(is_user_facing_domain("ci"));
-        assert!(is_user_facing_domain("testing"));
-        assert!(!is_user_facing_domain("bridge"));
-        assert!(!is_user_facing_domain("search"));
+    fn internal_domains_collapsed_by_default() {
+        assert!(is_internal_domain("bridge"));
+        assert!(is_internal_domain("search"));
+        assert!(!is_internal_domain("api"));
+        assert!(!is_internal_domain("coordination"));
+        assert!(!is_internal_domain("runtime"));
     }
 }

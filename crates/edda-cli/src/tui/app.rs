@@ -4,14 +4,13 @@ use std::path::PathBuf;
 use edda_bridge_claude::peers::{BoardState, PeerSummary};
 use edda_bridge_claude::watch;
 
-/// Domains considered user-facing (shown expanded by default).
-const USER_FACING_DOMAINS: &[&str] = &[
-    "api", "auth", "ci", "db", "install", "readme", "release", "storage", "testing",
-];
+/// Domains considered internal (shown collapsed by default).
+/// All other domains are expanded by default.
+const INTERNAL_DOMAINS: &[&str] = &["bridge", "search"];
 
-/// Check if a domain prefix is user-facing (shown expanded by default).
-pub fn is_user_facing_domain(domain: &str) -> bool {
-    USER_FACING_DOMAINS.contains(&domain)
+/// Check if a domain prefix is internal (shown collapsed by default).
+pub fn is_internal_domain(domain: &str) -> bool {
+    INTERNAL_DOMAINS.contains(&domain)
 }
 
 /// Which panel is currently focused.
@@ -168,7 +167,7 @@ impl App {
                 return;
             }
             row += 1; // domain header
-            let is_internal = !is_user_facing_domain(domain);
+            let is_internal = is_internal_domain(domain);
             let expanded = self.expanded_domains.contains(*domain);
             if !is_internal || expanded {
                 row += bindings.len();
@@ -182,7 +181,7 @@ impl App {
         let mut rows = 0;
         for (domain, bindings) in &groups {
             rows += 1; // domain header
-            let is_internal = !is_user_facing_domain(domain);
+            let is_internal = is_internal_domain(domain);
             let expanded = self.expanded_domains.contains(*domain);
             if !is_internal || expanded {
                 rows += bindings.len();
