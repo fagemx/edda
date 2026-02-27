@@ -928,19 +928,16 @@ pub fn render_coordination_protocol_with(
             claim.label,
             claim.paths.join(", ")
         ));
-        lines.push(
-            "Message a peer: `edda request \"peer-label\" \"your message\"`".to_string(),
-        );
     } else {
         // No claim yet — provide actionable nudge with specific suggestion
         let suggested = suggest_claim_command(my_label, &my_heartbeat);
         lines.push(format!(
             "**Claim your scope** so peers know what you're working on:\n{suggested}",
         ));
-        lines.push(
-            "Message a peer: `edda request \"peer-label\" \"your message\"`".to_string(),
-        );
     }
+    lines.push(
+        "Message a peer: `edda request \"peer-label\" \"your message\"`".to_string(),
+    );
 
     // Peer activity (tasks + focus files)
     let active_peers: Vec<&PeerSummary> = peers
