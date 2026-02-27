@@ -826,6 +826,53 @@ pub fn render_coordination_protocol(
     render_coordination_protocol_with(&peers, &board, project_id, session_id)
 }
 
+/// Generate a suggested `edda claim` command based on available session context.
+///
+/// Priority: focus_files → branch name → heartbeat label → generic template.
+fn suggest_claim_command(label: &str, heartbeat: &Option<SessionHeartbeat>) -> String {
+    if let Some(hb) = heartbeat {
+        // Try to derive paths from focus files
+        if !hb.focus_files.is_empty() {
+            let files: Vec<FileEditCount> = hb
+                .focus_files
+                .iter()
+                .map(|p| FileEditCount {
+                    path: p.clone(),
+                    count: 1,
+                })
+                .collect();
+            if let Some((derived_label, paths)) = derive_scope_from_files(&files) {
+                let claim_label = if !label.is_empty() {
+                    label
+                } else {
+                    &derived_label
+                };
+                return format!(
+                    "`edda claim \"{}\" --paths \"{}\"`",
+                    claim_label,
+                    paths.join("\" --paths \"")
+                );
+            }
+        }
+        // Try branch-based suggestion (label wins over branch if available)
+        if let Some(ref branch) = hb.branch {
+            let branch_label = branch.split('/').next_back().unwrap_or(branch);
+            if !branch_label.is_empty() && branch_label != "main" && branch_label != "master" {
+                let claim_label = if !label.is_empty() { label } else { branch_label };
+                return format!(
+                    "`edda claim \"{claim_label}\" --paths \"<your-scope>/*\"`"
+                );
+            }
+        }
+    }
+    // Fallback with label or generic
+    if !label.is_empty() {
+        format!("`edda claim \"{label}\" --paths \"<your-scope>/*\"`")
+    } else {
+        "`edda claim \"<your-task>\" --paths \"<your-scope>/*\"`".to_string()
+    }
+}
+
 /// Render full coordination protocol using pre-computed peers and board state.
 ///
 /// "Pre-computed" refers to `peers` and `board` only — heartbeat writes and
@@ -874,23 +921,23 @@ pub fn render_coordination_protocol_with(
         peers.len() + 1
     ));
 
-    // L2 command instructions (compact)
-    lines.push(
-        "Claim your scope: `edda claim \"label\" --paths \"src/scope/*\"`\n\
-         Message a peer: `edda request \"peer-label\" \"your message\"`"
-            .to_string(),
-    );
-
-    // My scope
+    // My scope + L2 command instructions
     if let Some(claim) = my_claim {
         lines.push(format!(
             "Your scope: **{}** ({})",
             claim.label,
             claim.paths.join(", ")
         ));
-    } else if !my_label.is_empty() {
-        lines.push(format!("Your scope: **{my_label}**"));
+    } else {
+        // No claim yet — provide actionable nudge with specific suggestion
+        let suggested = suggest_claim_command(my_label, &my_heartbeat);
+        lines.push(format!(
+            "**Claim your scope** so peers know what you're working on:\n{suggested}",
+        ));
     }
+    lines.push(
+        "Message a peer: `edda request \"peer-label\" \"your message\"`".to_string(),
+    );
 
     // Peer activity (tasks + focus files)
     let active_peers: Vec<&PeerSummary> = peers
@@ -2409,14 +2456,14 @@ mod tests {
         write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
 
         let result = render_coordination_protocol(pid, "s2", ".").unwrap();
+        // Without a claim, should show actionable nudge with label-based suggestion
         assert!(
-            result.contains("Your scope: **auth**"),
-            "should show heartbeat-derived scope, got:\n{result}"
+            result.contains("**Claim your scope**"),
+            "should show claim nudge when no claim exists, got:\n{result}"
         );
-        // Should NOT have paths (no claim, just heartbeat)
         assert!(
-            !result.contains("Your scope: **auth** ("),
-            "heartbeat scope should not have paths, got:\n{result}"
+            result.contains("edda claim \"auth\""),
+            "should suggest claim with heartbeat label, got:\n{result}"
         );
 
         remove_heartbeat(pid, "s1");
@@ -2845,6 +2892,179 @@ mod tests {
         assert_eq!(
             original, precomputed,
             "precomputed variant should match original"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn suggest_claim_command_from_focus_files() {
+        let hb = SessionHeartbeat {
+            session_id: "s1".into(),
+            started_at: String::new(),
+            last_heartbeat: String::new(),
+            label: "worker".into(),
+            focus_files: vec!["crates/edda-cli/src/main.rs".into()],
+            active_tasks: Vec::new(),
+            files_modified_count: 0,
+            total_edits: 0,
+            recent_commits: Vec::new(),
+            branch: Some("feat/issue-131".into()),
+            current_phase: None,
+        };
+        let result = suggest_claim_command("worker", &Some(hb));
+        assert!(result.contains("edda claim"), "should contain edda claim");
+        assert!(
+            result.contains("edda-cli"),
+            "should derive crate name: {result}"
+        );
+    }
+
+    #[test]
+    fn suggest_claim_command_from_branch() {
+        let hb = SessionHeartbeat {
+            session_id: "s1".into(),
+            started_at: String::new(),
+            last_heartbeat: String::new(),
+            label: String::new(),
+            focus_files: Vec::new(),
+            active_tasks: Vec::new(),
+            files_modified_count: 0,
+            total_edits: 0,
+            recent_commits: Vec::new(),
+            branch: Some("feat/auth-refactor".into()),
+            current_phase: None,
+        };
+        let result = suggest_claim_command("", &Some(hb));
+        assert!(
+            result.contains("auth-refactor"),
+            "should use branch suffix: {result}"
+        );
+    }
+
+    #[test]
+    fn suggest_claim_command_fallback_label() {
+        let result = suggest_claim_command("my-task", &None);
+        assert!(
+            result.contains("my-task"),
+            "should use provided label: {result}"
+        );
+    }
+
+    #[test]
+    fn suggest_claim_command_generic_fallback() {
+        let result = suggest_claim_command("", &None);
+        assert!(
+            result.contains("<your-task>"),
+            "should use generic placeholder: {result}"
+        );
+    }
+
+    #[test]
+    fn protocol_no_claim_shows_nudge() {
+        let pid = "test_protocol_no_claim_nudge";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // s1 is a peer, s2 is our session — neither has a claim
+        let signals = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "crates/edda-cli/src/main.rs".into(),
+                count: 1,
+            }],
+            ..Default::default()
+        };
+        write_heartbeat(pid, "s1", &signals, Some("peer-agent"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("my-agent"));
+
+        let peers = discover_active_peers(pid, "s2");
+        let board = compute_board_state(pid);
+        let result = render_coordination_protocol_with(&peers, &board, pid, "s2");
+
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(
+            text.contains("**Claim your scope**"),
+            "should contain claim nudge: {text}"
+        );
+        assert!(
+            text.contains("edda claim"),
+            "should contain edda claim command: {text}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn protocol_with_claim_shows_scope() {
+        let pid = "test_protocol_with_claim_scope";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer-agent"));
+        write_heartbeat(pid, "s2", &SessionSignals::default(), Some("my-agent"));
+        write_claim(pid, "s2", "my-agent", &["crates/edda-cli/*".to_string()]);
+
+        let peers = discover_active_peers(pid, "s2");
+        let board = compute_board_state(pid);
+        let result = render_coordination_protocol_with(&peers, &board, pid, "s2");
+
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(
+            text.contains("Your scope: **my-agent**"),
+            "should show claimed scope: {text}"
+        );
+        assert!(
+            !text.contains("**Claim your scope**"),
+            "should NOT show nudge when claimed: {text}"
+        );
+
+        remove_heartbeat(pid, "s1");
+        remove_heartbeat(pid, "s2");
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn protocol_nudge_uses_branch_context() {
+        let pid = "test_protocol_nudge_branch";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        // Create heartbeat with branch info but no label — branch should be used
+        let hb = SessionHeartbeat {
+            session_id: "s2".into(),
+            started_at: now_rfc3339(),
+            last_heartbeat: now_rfc3339(),
+            label: String::new(),
+            focus_files: Vec::new(),
+            active_tasks: Vec::new(),
+            files_modified_count: 0,
+            total_edits: 0,
+            recent_commits: Vec::new(),
+            branch: Some("feat/billing-v2".into()),
+            current_phase: None,
+        };
+        let hb_path = heartbeat_path(pid, "s2");
+        let _ = fs::create_dir_all(hb_path.parent().unwrap());
+        let _ = fs::write(&hb_path, serde_json::to_string_pretty(&hb).unwrap());
+
+        // Create peer
+        write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer-agent"));
+
+        let peers = discover_active_peers(pid, "s2");
+        let board = compute_board_state(pid);
+        let result = render_coordination_protocol_with(&peers, &board, pid, "s2");
+
+        assert!(result.is_some());
+        let text = result.unwrap();
+        assert!(
+            text.contains("billing-v2"),
+            "should derive claim label from branch: {text}"
         );
 
         remove_heartbeat(pid, "s1");
