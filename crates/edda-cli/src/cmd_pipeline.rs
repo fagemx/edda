@@ -66,7 +66,7 @@ pub fn execute_run(repo_root: &Path, issue_id: u64, dry_run: bool) -> Result<()>
     println!("Plan written to {}", plan_file.display());
 
     // 6. Delegate to conductor
-    crate::cmd_conduct::run(&plan_file, Some(repo_root), false, true)
+    crate::cmd_conduct::run(&plan_file, Some(repo_root), false, true, false)
 }
 
 /// Execute `edda pipeline status [issue-id]`.

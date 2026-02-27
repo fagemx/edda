@@ -28,6 +28,9 @@ pub enum ConductCmd {
         /// Suppress live agent activity output
         #[arg(short, long)]
         quiet: bool,
+        /// Output events as JSONL to stdout (for machine consumption)
+        #[arg(long)]
+        json: bool,
     },
     /// Show status of running/completed plans
     Status {
@@ -72,11 +75,13 @@ pub fn run_cmd(cmd: ConductCmd, repo_root: &Path) -> Result<()> {
             cwd,
             dry_run,
             quiet,
+            json,
         } => run(
             Path::new(&plan_file),
             cwd.as_deref().map(Path::new),
             dry_run,
             !quiet,
+            json,
         ),
         ConductCmd::Status { plan_name, json } => status(repo_root, plan_name.as_deref(), json),
         ConductCmd::Retry { phase_id, plan } => retry(repo_root, &phase_id, plan.as_deref()),
@@ -97,6 +102,7 @@ pub fn run(
     cwd_override: Option<&Path>,
     dry_run: bool,
     verbose: bool,
+    json_events: bool,
 ) -> Result<()> {
     let plan = load_plan(plan_file)?;
     let cwd = cwd_override
@@ -113,18 +119,25 @@ pub fn run(
         cwd
     };
 
+    // When --json, suppress human-readable output (verbose/TUI)
+    let verbose = if json_events { false } else { verbose };
+
     // Load or create state
     let mut state = match load_state(&cwd, &plan.name)? {
         Some(s) => {
-            println!("Resuming plan \"{}\"", plan.name);
+            if !json_events {
+                println!("Resuming plan \"{}\"", plan.name);
+            }
             s
         }
         None => {
-            println!(
-                "Starting plan \"{}\" ({} phases)",
-                plan.name,
-                plan.phases.len()
-            );
+            if !json_events {
+                println!(
+                    "Starting plan \"{}\" ({} phases)",
+                    plan.name,
+                    plan.phases.len()
+                );
+            }
             PlanState::from_plan(&plan, &plan_file.display().to_string())
         }
     };
@@ -187,6 +200,7 @@ pub fn run(
         cancel,
         &cwd,
         interactive,
+        json_events,
     ))?;
 
     Ok(())

@@ -31,10 +31,11 @@ pub async fn run_plan(
     cancel: CancellationToken,
     cwd: &Path,
     interactive: bool,
+    json_events: bool,
 ) -> Result<()> {
     let order = topo_sort(plan)?;
     let total_phases = order.len();
-    let mut event_log = EventLogger::new(cwd, &plan.name);
+    let mut event_log = EventLogger::new(cwd, &plan.name).with_stdout_json(json_events);
 
     // Initialize edda ledger if available
     edda::ensure_init(cwd);
@@ -726,6 +727,7 @@ mod tests {
             cancel,
             dir.path(),
             false, // non-interactive in tests
+            false, // no json events in tests
         )
         .await
         .unwrap();
@@ -965,6 +967,7 @@ phases:
             cancel,
             dir.path(),
             false,
+            false,
         )
         .await
         .unwrap();
@@ -1110,6 +1113,7 @@ phases:
             &mut budget,
             cancel,
             dir.path(),
+            false,
             false,
         )
         .await
