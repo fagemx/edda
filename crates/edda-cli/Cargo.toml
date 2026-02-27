@@ -14,21 +14,21 @@ name = "edda"
 path = "src/main.rs"
 
 [dependencies]
-edda-ask = { path = "../edda-ask", version = "0.1.0" }
-edda-core = { path = "../edda-core", version = "0.1.0" }
-edda-ledger = { path = "../edda-ledger", version = "0.1.0" }
-edda-derive = { path = "../edda-derive", version = "0.1.0" }
-edda-store = { path = "../edda-store", version = "0.1.0" }
-edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.1.0" }
-edda-bridge-openclaw = { path = "../edda-bridge-openclaw", version = "0.1.0" }
-edda-transcript = { path = "../edda-transcript", version = "0.1.0" }
-edda-index = { path = "../edda-index", version = "0.1.0" }
-edda-pack = { path = "../edda-pack", version = "0.1.0" }
-edda-mcp = { path = "../edda-mcp", version = "0.1.0" }
-edda-serve = { path = "../edda-serve", version = "0.1.0" }
-edda-notify = { path = "../edda-notify", version = "0.1.0" }
-edda-search-fts = { path = "../edda-search-fts", version = "0.1.0" }
-edda-conductor = { path = "../edda-conductor", version = "0.1.0" }
+edda-ask = { path = "../edda-ask", version = "0.1.1" }
+edda-core = { path = "../edda-core", version = "0.1.1" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
+edda-derive = { path = "../edda-derive", version = "0.1.1" }
+edda-store = { path = "../edda-store", version = "0.1.1" }
+edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.1.1" }
+edda-bridge-openclaw = { path = "../edda-bridge-openclaw", version = "0.1.1" }
+edda-transcript = { path = "../edda-transcript", version = "0.1.1" }
+edda-index = { path = "../edda-index", version = "0.1.1" }
+edda-pack = { path = "../edda-pack", version = "0.1.1" }
+edda-mcp = { path = "../edda-mcp", version = "0.1.1" }
+edda-serve = { path = "../edda-serve", version = "0.1.1" }
+edda-notify = { path = "../edda-notify", version = "0.1.1" }
+edda-search-fts = { path = "../edda-search-fts", version = "0.1.1" }
+edda-conductor = { path = "../edda-conductor", version = "0.1.1" }
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 clap.workspace = true

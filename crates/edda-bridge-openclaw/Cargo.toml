@@ -10,11 +10,11 @@ categories.workspace = true
 keywords.workspace = true
 
 [dependencies]
-edda-core = { path = "../edda-core", version = "0.1.0" }
-edda-store = { path = "../edda-store", version = "0.1.0" }
-edda-ledger = { path = "../edda-ledger", version = "0.1.0" }
-edda-derive = { path = "../edda-derive", version = "0.1.0" }
-edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.1.0" }
+edda-core = { path = "../edda-core", version = "0.1.1" }
+edda-store = { path = "../edda-store", version = "0.1.1" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
+edda-derive = { path = "../edda-derive", version = "0.1.1" }
+edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.1.1" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

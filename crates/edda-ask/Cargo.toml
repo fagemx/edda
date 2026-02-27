@@ -10,8 +10,8 @@ categories.workspace = true
 keywords.workspace = true
 
 [dependencies]
-edda-ledger = { path = "../edda-ledger", version = "0.1.0" }
-edda-core = { path = "../edda-core", version = "0.1.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
+edda-core = { path = "../edda-core", version = "0.1.1" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
