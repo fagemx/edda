@@ -99,6 +99,14 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Show active peer sessions (shortcut for `bridge claude peers`)
+    Peers,
+    /// Show coordination state (shortcut for `bridge claude render-coordination`)
+    Coord {
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Setup a bridge integration (shortcut for `bridge <platform> install`)
     Setup {
         #[command(subcommand)]
@@ -792,6 +800,10 @@ fn main() -> anyhow::Result<()> {
         } => cmd_bridge::request(&repo_root, &to, &message, session.as_deref()),
         Command::RequestAck { from, session } => {
             cmd_bridge::request_ack(&repo_root, &from, session.as_deref())
+        }
+        Command::Peers { .. } => cmd_bridge::peers(&repo_root),
+        Command::Coord { session } => {
+            cmd_bridge::render_coordination(&repo_root, session.as_deref())
         }
         Command::Setup { cmd } => match cmd {
             SetupCmd::Openclaw { target, uninstall } => {
