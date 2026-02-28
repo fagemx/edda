@@ -214,6 +214,31 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
                 peers_active,
             )
         }
+        "SubagentStart" => {
+            // Inject peer context BEFORE writing heartbeat so the sub-agent
+            // doesn't see itself in the peer list.
+            let result = dispatch_subagent_context(&project_id, &session_id);
+            let agent_id = get_str(&raw, "agent_id");
+            let agent_type = get_str(&raw, "agent_type");
+            if !agent_id.is_empty() {
+                let label = format!("sub:{agent_type}");
+                crate::peers::write_subagent_heartbeat(
+                    &project_id,
+                    &agent_id,
+                    &session_id,
+                    &label,
+                    &cwd,
+                );
+            }
+            result
+        }
+        "SubagentStop" => {
+            let agent_id = get_str(&raw, "agent_id");
+            if !agent_id.is_empty() {
+                crate::peers::remove_heartbeat(&project_id, &agent_id);
+            }
+            Ok(HookResult::empty())
+        }
         _ => Ok(HookResult::empty()),
     }
 }
@@ -557,6 +582,34 @@ fn dispatch_user_prompt_submit(
     }
 }
 
+// ── SubagentStart ──
+
+/// Inject lightweight coordination context into a sub-agent at spawn time.
+fn dispatch_subagent_context(project_id: &str, session_id: &str) -> anyhow::Result<HookResult> {
+    let peers = crate::peers::discover_active_peers(project_id, session_id);
+    if peers.is_empty() {
+        return Ok(HookResult::empty());
+    }
+    let mut lines = vec!["## Active Peers (from edda)".to_string()];
+    for p in &peers {
+        let suffix =
+            crate::peers::format_peer_suffix(p.branch.as_deref(), p.current_phase.as_deref());
+        lines.push(format!("- {} {suffix}", p.label));
+        if !p.claimed_paths.is_empty() {
+            lines.push(format!("  claimed: {}", p.claimed_paths.join(", ")));
+        }
+    }
+    let ctx = lines.join("\n");
+    let wrapped = wrap_context_boundary(&ctx);
+    let output = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SubagentStart",
+            "additionalContext": wrapped
+        }
+    });
+    Ok(HookResult::output(serde_json::to_string(&output)?))
+}
+
 // ── SessionEnd ──
 
 /// Dispatch SessionEnd — auto-digest, cleanup state, warn about pending tasks.
@@ -659,6 +712,8 @@ fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool)
     crate::peers::remove_autoclaim_state(project_id, session_id);
     // Agent phase state file (#55)
     let _ = fs::remove_file(state_dir.join(format!("phase.{session_id}.json")));
+    // Clean up any orphaned sub-agent heartbeats belonging to this session
+    crate::peers::cleanup_subagent_heartbeats(project_id, session_id);
     // Peer heartbeat + unclaim (L2 — keep remove_heartbeat unconditional as idempotent cleanup)
     crate::peers::remove_heartbeat(project_id, session_id);
     if peers_active {
@@ -976,9 +1031,7 @@ fn dispatch_pre_tool_use(
             if RE_GIT_COMMIT.is_match(command) && !command.contains("--amend") {
                 if let Some(hb) = crate::peers::read_heartbeat(project_id, session_id) {
                     if let Some(claimed) = &hb.branch {
-                        if let Some(actual) =
-                            crate::peers::detect_git_branch_in(cwd)
-                        {
+                        if let Some(actual) = crate::peers::detect_git_branch_in(cwd) {
                             if claimed != &actual {
                                 let reason = format!(
                                     "Branch mismatch: session claimed '{}' but current branch is '{}'. Run: git checkout {}",
@@ -3000,6 +3053,7 @@ mod tests {
             recent_commits: vec![],
             branch: branch.map(|s| s.to_string()),
             current_phase: None,
+            parent_session_id: None,
         };
         let path = edda_store::project_dir(pid)
             .join("state")
@@ -3057,7 +3111,10 @@ mod tests {
             .pointer("/hookSpecificOutput/permissionDecisionReason")
             .and_then(|d| d.as_str())
             .unwrap();
-        assert!(reason.contains("nonexistent-branch-xyz"), "reason should mention claimed branch");
+        assert!(
+            reason.contains("nonexistent-branch-xyz"),
+            "reason should mention claimed branch"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
@@ -3103,7 +3160,10 @@ mod tests {
                 .pointer("/hookSpecificOutput/permissionDecision")
                 .and_then(|d| d.as_str())
                 .unwrap_or("allow");
-            assert_ne!(decision, "block", "git commit --amend should not be guarded");
+            assert_ne!(
+                decision, "block",
+                "git commit --amend should not be guarded"
+            );
         }
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -3152,6 +3212,99 @@ mod tests {
                 .unwrap_or("allow");
             assert_ne!(decision, "block", "no claimed branch should not block");
         }
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn subagent_start_creates_heartbeat() {
+        let pid = "test_subagent_start";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Directly call write_subagent_heartbeat (what SubagentStart dispatch does)
+        crate::peers::write_subagent_heartbeat(pid, "agent-xyz", "parent-sess", "sub:Explore", ".");
+
+        let hb = crate::peers::read_heartbeat(pid, "agent-xyz")
+            .expect("sub-agent heartbeat should exist");
+        assert_eq!(hb.label, "sub:Explore");
+        assert_eq!(hb.parent_session_id.as_deref(), Some("parent-sess"));
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn subagent_stop_removes_heartbeat() {
+        let pid = "test_subagent_stop";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Create heartbeat
+        crate::peers::write_subagent_heartbeat(pid, "agent-abc", "parent-sess", "sub:Plan", ".");
+        assert!(crate::peers::read_heartbeat(pid, "agent-abc").is_some());
+
+        // Remove it (what SubagentStop dispatch does)
+        crate::peers::remove_heartbeat(pid, "agent-abc");
+
+        assert!(
+            crate::peers::read_heartbeat(pid, "agent-abc").is_none(),
+            "heartbeat should be removed after SubagentStop"
+        );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn subagent_orphan_cleanup_on_session_end() {
+        let pid = "test_subagent_orphan";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Create parent heartbeat
+        write_test_heartbeat(pid, "parent-sess", Some("main"));
+
+        // Create sub-agent heartbeats
+        crate::peers::write_subagent_heartbeat(pid, "sub-1", "parent-sess", "sub:Explore", ".");
+        crate::peers::write_subagent_heartbeat(pid, "sub-2", "parent-sess", "sub:Plan", ".");
+
+        // Run cleanup (what SessionEnd does)
+        cleanup_session_state(pid, "parent-sess", false);
+
+        // All sub-agent heartbeats should be cleaned up
+        assert!(
+            crate::peers::read_heartbeat(pid, "sub-1").is_none(),
+            "sub-1 should be cleaned up on parent SessionEnd"
+        );
+        assert!(
+            crate::peers::read_heartbeat(pid, "sub-2").is_none(),
+            "sub-2 should be cleaned up on parent SessionEnd"
+        );
+        // Parent heartbeat also removed (standard behavior)
+        assert!(crate::peers::read_heartbeat(pid, "parent-sess").is_none());
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn subagent_start_no_agent_id_is_noop() {
+        let pid = "test_subagent_no_id";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Empty agent_id should not create any heartbeat
+        crate::peers::write_subagent_heartbeat(pid, "", "parent-sess", "sub:Explore", ".");
+
+        // Heartbeat file for empty id would be "session..json" — should not exist
+        // or at least not be discoverable as a valid peer
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let heartbeat_files: Vec<_> = fs::read_dir(&state_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("session.") && n.ends_with(".json") && n != "session..json"
+            })
+            .collect();
+        assert!(
+            heartbeat_files.is_empty(),
+            "no valid heartbeat should be created for empty agent_id"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
