@@ -215,6 +215,9 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
             )
         }
         "SubagentStart" => {
+            // Inject peer context BEFORE writing heartbeat so the sub-agent
+            // doesn't see itself in the peer list.
+            let result = dispatch_subagent_context(&project_id, &session_id);
             let agent_id = get_str(&raw, "agent_id");
             let agent_type = get_str(&raw, "agent_type");
             if !agent_id.is_empty() {
@@ -227,7 +230,7 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
                     &cwd,
                 );
             }
-            dispatch_subagent_context(&project_id, &session_id, &cwd)
+            result
         }
         "SubagentStop" => {
             let agent_id = get_str(&raw, "agent_id");
@@ -582,11 +585,7 @@ fn dispatch_user_prompt_submit(
 // ── SubagentStart ──
 
 /// Inject lightweight coordination context into a sub-agent at spawn time.
-fn dispatch_subagent_context(
-    project_id: &str,
-    session_id: &str,
-    _cwd: &str,
-) -> anyhow::Result<HookResult> {
+fn dispatch_subagent_context(project_id: &str, session_id: &str) -> anyhow::Result<HookResult> {
     let peers = crate::peers::discover_active_peers(project_id, session_id);
     if peers.is_empty() {
         return Ok(HookResult::empty());
@@ -3279,6 +3278,33 @@ mod tests {
         );
         // Parent heartbeat also removed (standard behavior)
         assert!(crate::peers::read_heartbeat(pid, "parent-sess").is_none());
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn subagent_start_no_agent_id_is_noop() {
+        let pid = "test_subagent_no_id";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Empty agent_id should not create any heartbeat
+        crate::peers::write_subagent_heartbeat(pid, "", "parent-sess", "sub:Explore", ".");
+
+        // Heartbeat file for empty id would be "session..json" — should not exist
+        // or at least not be discoverable as a valid peer
+        let state_dir = edda_store::project_dir(pid).join("state");
+        let heartbeat_files: Vec<_> = fs::read_dir(&state_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("session.") && n.ends_with(".json") && n != "session..json"
+            })
+            .collect();
+        assert!(
+            heartbeat_files.is_empty(),
+            "no valid heartbeat should be created for empty agent_id"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
