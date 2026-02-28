@@ -961,6 +961,45 @@ fn dispatch_pre_tool_use(
     project_id: &str,
     session_id: &str,
 ) -> anyhow::Result<HookResult> {
+    // ── Branch guard: block git commit on wrong branch ──
+    if std::env::var("EDDA_BRANCH_GUARD").unwrap_or_else(|_| "1".into()) != "0" {
+        let tool_name = get_str(raw, "tool_name");
+        if tool_name == "Bash" {
+            let command = raw
+                .pointer("/tool_input/command")
+                .or_else(|| raw.pointer("/input/command"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            use std::sync::LazyLock;
+            static RE_GIT_COMMIT: LazyLock<regex::Regex> =
+                LazyLock::new(|| regex::Regex::new(r"\bgit\s+commit\b").unwrap());
+            if RE_GIT_COMMIT.is_match(command) && !command.contains("--amend") {
+                if let Some(hb) = crate::peers::read_heartbeat(project_id, session_id) {
+                    if let Some(claimed) = &hb.branch {
+                        if let Some(actual) =
+                            crate::peers::detect_git_branch_in(cwd)
+                        {
+                            if claimed != &actual {
+                                let reason = format!(
+                                    "Branch mismatch: session claimed '{}' but current branch is '{}'. Run: git checkout {}",
+                                    claimed, actual, claimed
+                                );
+                                let output = serde_json::json!({
+                                    "hookSpecificOutput": {
+                                        "hookEventName": "PreToolUse",
+                                        "permissionDecision": "block",
+                                        "permissionDecisionReason": reason
+                                    }
+                                });
+                                return Ok(HookResult::output(serde_json::to_string(&output)?));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let auto_approve = std::env::var("EDDA_CLAUDE_AUTO_APPROVE").unwrap_or_else(|_| "1".into());
 
     // Pattern matching (only for Edit/Write)
@@ -1112,6 +1151,19 @@ fn dispatch_post_tool_use(
     if tool_name == "Edit" || tool_name == "Write" {
         if let Some(fp) = raw.pointer("/input/file_path").and_then(|v| v.as_str()) {
             crate::peers::maybe_auto_claim_file(project_id, session_id, fp);
+        }
+    }
+
+    // Update heartbeat branch when actual branch differs from heartbeat.
+    // Runs on every Bash PostToolUse (~10ms git rev-parse) instead of guessing
+    // intent from command strings, which is fragile.
+    if tool_name == "Bash" {
+        if let Some(actual) = crate::peers::detect_git_branch_in(cwd) {
+            if let Some(hb) = crate::peers::read_heartbeat(project_id, session_id) {
+                if hb.branch.as_deref() != Some(actual.as_str()) {
+                    crate::peers::update_heartbeat_branch(project_id, session_id, &actual);
+                }
+            }
         }
     }
 
@@ -2927,6 +2979,179 @@ mod tests {
             0,
             "solo gate should skip counter I/O"
         );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Branch Guard Tests ──
+
+    /// Helper: write a heartbeat with a specific branch for testing.
+    fn write_test_heartbeat(pid: &str, sid: &str, branch: Option<&str>) {
+        let _ = edda_store::ensure_dirs(pid);
+        let hb = crate::peers::SessionHeartbeat {
+            session_id: sid.to_string(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            last_heartbeat: "2026-01-01T00:00:00Z".to_string(),
+            label: "test".to_string(),
+            focus_files: vec![],
+            active_tasks: vec![],
+            files_modified_count: 0,
+            total_edits: 0,
+            recent_commits: vec![],
+            branch: branch.map(|s| s.to_string()),
+            current_phase: None,
+        };
+        let path = edda_store::project_dir(pid)
+            .join("state")
+            .join(format!("session.{sid}.json"));
+        let _ = fs::create_dir_all(path.parent().unwrap());
+        fs::write(&path, serde_json::to_string_pretty(&hb).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn branch_guard_match_allows() {
+        let pid = "test_branch_guard_match";
+        let sid = "s1";
+        // Write heartbeat with current branch so it matches
+        let current = crate::peers::detect_git_branch_in(".").unwrap_or("main".into());
+        write_test_heartbeat(pid, sid, Some(&current));
+
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git commit -m \"test\"" }
+        });
+        let result = dispatch_pre_tool_use(&raw, ".", pid, sid).unwrap();
+        // Should not block (either allow or empty)
+        if let Some(out) = &result.stdout {
+            let v: serde_json::Value = serde_json::from_str(out).unwrap();
+            let decision = v
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(|d| d.as_str())
+                .unwrap_or("allow");
+            assert_ne!(decision, "block", "matching branch should not block");
+        }
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn branch_guard_mismatch_blocks() {
+        let pid = "test_branch_guard_mismatch";
+        let sid = "s1";
+        // Write heartbeat with a branch that won't match
+        write_test_heartbeat(pid, sid, Some("nonexistent-branch-xyz"));
+
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git commit -m \"test\"" }
+        });
+        let result = dispatch_pre_tool_use(&raw, ".", pid, sid).unwrap();
+        let out = result.stdout.expect("should produce output on block");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let decision = v
+            .pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|d| d.as_str())
+            .unwrap();
+        assert_eq!(decision, "block", "mismatched branch should block");
+        let reason = v
+            .pointer("/hookSpecificOutput/permissionDecisionReason")
+            .and_then(|d| d.as_str())
+            .unwrap();
+        assert!(reason.contains("nonexistent-branch-xyz"), "reason should mention claimed branch");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn branch_guard_no_heartbeat_allows() {
+        let pid = "test_branch_guard_no_hb";
+        let sid = "s_no_hb";
+        let _ = edda_store::ensure_dirs(pid);
+        // No heartbeat written — guard should allow
+
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git commit -m \"test\"" }
+        });
+        let result = dispatch_pre_tool_use(&raw, ".", pid, sid).unwrap();
+        if let Some(out) = &result.stdout {
+            let v: serde_json::Value = serde_json::from_str(out).unwrap();
+            let decision = v
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(|d| d.as_str())
+                .unwrap_or("allow");
+            assert_ne!(decision, "block", "no heartbeat should not block");
+        }
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn branch_guard_amend_allows() {
+        let pid = "test_branch_guard_amend";
+        let sid = "s1";
+        write_test_heartbeat(pid, sid, Some("nonexistent-branch-xyz"));
+
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git commit --amend -m \"fix\"" }
+        });
+        let result = dispatch_pre_tool_use(&raw, ".", pid, sid).unwrap();
+        if let Some(out) = &result.stdout {
+            let v: serde_json::Value = serde_json::from_str(out).unwrap();
+            let decision = v
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(|d| d.as_str())
+                .unwrap_or("allow");
+            assert_ne!(decision, "block", "git commit --amend should not be guarded");
+        }
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn branch_guard_non_commit_allows() {
+        let pid = "test_branch_guard_non_commit";
+        let sid = "s1";
+        write_test_heartbeat(pid, sid, Some("nonexistent-branch-xyz"));
+
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "cargo build" }
+        });
+        let result = dispatch_pre_tool_use(&raw, ".", pid, sid).unwrap();
+        if let Some(out) = &result.stdout {
+            let v: serde_json::Value = serde_json::from_str(out).unwrap();
+            let decision = v
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(|d| d.as_str())
+                .unwrap_or("allow");
+            assert_ne!(decision, "block", "non-commit commands should not block");
+        }
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn branch_guard_no_claimed_branch_allows() {
+        // Heartbeat exists but branch is None — should allow (no claim to enforce)
+        let pid = "test_branch_guard_no_claim";
+        let sid = "s1";
+        write_test_heartbeat(pid, sid, None);
+
+        let raw = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "git commit -m \"test\"" }
+        });
+        let result = dispatch_pre_tool_use(&raw, ".", pid, sid).unwrap();
+        if let Some(out) = &result.stdout {
+            let v: serde_json::Value = serde_json::from_str(out).unwrap();
+            let decision = v
+                .pointer("/hookSpecificOutput/permissionDecision")
+                .and_then(|d| d.as_str())
+                .unwrap_or("allow");
+            assert_ne!(decision, "block", "no claimed branch should not block");
+        }
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
