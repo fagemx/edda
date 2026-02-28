@@ -72,6 +72,10 @@ pub struct SessionHeartbeat {
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_phase: Option<String>,
+    /// Set for sub-agent heartbeats to link back to the parent session.
+    /// Used for orphan cleanup and extended stale threshold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
 }
 
 /// Append-only coordination event.
@@ -250,6 +254,7 @@ pub(crate) fn write_heartbeat(
         branch: detect_git_branch(),
         current_phase: crate::agent_phase::read_phase_state(project_id, session_id)
             .map(|ps| ps.phase.to_string()),
+        parent_session_id: None,
     };
 
     let data = match serde_json::to_string_pretty(&heartbeat) {
@@ -327,6 +332,7 @@ pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str) 
         recent_commits: Vec::new(),
         branch: detect_git_branch(),
         current_phase: None,
+        parent_session_id: None,
     };
 
     let data = match serde_json::to_string_pretty(&heartbeat) {
@@ -334,6 +340,61 @@ pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str) 
         Err(_) => return,
     };
     let _ = edda_store::write_atomic(&path, data.as_bytes());
+}
+
+/// Write a heartbeat for a sub-agent spawned via Claude Code's Task tool.
+/// Uses agent_id as session identifier and records parent session for cleanup.
+pub(crate) fn write_subagent_heartbeat(
+    project_id: &str,
+    agent_id: &str,
+    parent_session_id: &str,
+    label: &str,
+    cwd: &str,
+) {
+    let now = now_rfc3339();
+    let path = heartbeat_path(project_id, agent_id);
+    let heartbeat = SessionHeartbeat {
+        session_id: agent_id.to_string(),
+        started_at: now.clone(),
+        last_heartbeat: now,
+        label: label.to_string(),
+        focus_files: Vec::new(),
+        active_tasks: Vec::new(),
+        files_modified_count: 0,
+        total_edits: 0,
+        recent_commits: Vec::new(),
+        branch: detect_git_branch_in(cwd),
+        current_phase: None,
+        parent_session_id: Some(parent_session_id.to_string()),
+    };
+    let data = match serde_json::to_string_pretty(&heartbeat) {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let _ = edda_store::write_atomic(&path, data.as_bytes());
+}
+
+/// Remove all sub-agent heartbeats belonging to a parent session.
+/// Called during parent's SessionEnd cleanup to prevent orphans.
+pub(crate) fn cleanup_subagent_heartbeats(project_id: &str, parent_session_id: &str) {
+    let state_dir = edda_store::project_dir(project_id).join("state");
+    let entries = match fs::read_dir(&state_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("session.") || !name.ends_with(".json") {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(entry.path()) {
+            if let Ok(hb) = serde_json::from_str::<SessionHeartbeat>(&content) {
+                if hb.parent_session_id.as_deref() == Some(parent_session_id) {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
 }
 
 /// Read a single session's heartbeat file.
@@ -670,7 +731,14 @@ pub fn discover_active_peers(project_id: &str, current_session_id: &str) -> Vec<
         let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
         let age = now.saturating_sub(hb_epoch);
 
-        if age > stale_threshold {
+        // Sub-agents can't touch_heartbeat (no hook events fire during execution),
+        // so use a much longer stale threshold (15x = ~30min at default 120s).
+        let effective_threshold = if hb.parent_session_id.is_some() {
+            stale_threshold * 15
+        } else {
+            stale_threshold
+        };
+        if age > effective_threshold {
             continue;
         }
 
@@ -1412,7 +1480,7 @@ fn auto_label(signals: &SessionSignals) -> String {
 
 /// Format age in human-readable form.
 /// Format the bracket suffix for a peer line: `[branch: x, phase]` or `[branch: x]` etc.
-fn format_peer_suffix(branch: Option<&str>, phase: Option<&str>) -> String {
+pub(crate) fn format_peer_suffix(branch: Option<&str>, phase: Option<&str>) -> String {
     match (branch, phase) {
         (Some(b), Some(p)) => format!(" [branch: {b}, {p}]"),
         (Some(b), None) => format!(" [branch: {b}]"),
@@ -2925,6 +2993,7 @@ mod tests {
             recent_commits: Vec::new(),
             branch: Some("feat/issue-131".into()),
             current_phase: None,
+            parent_session_id: None,
         };
         let result = suggest_claim_command("worker", &Some(hb));
         assert!(result.contains("edda claim"), "should contain edda claim");
@@ -2948,6 +3017,7 @@ mod tests {
             recent_commits: Vec::new(),
             branch: Some("feat/auth-refactor".into()),
             current_phase: None,
+            parent_session_id: None,
         };
         let result = suggest_claim_command("", &Some(hb));
         assert!(
@@ -3060,6 +3130,7 @@ mod tests {
             recent_commits: Vec::new(),
             branch: Some("feat/billing-v2".into()),
             current_phase: None,
+            parent_session_id: None,
         };
         let hb_path = heartbeat_path(pid, "s2");
         let _ = fs::create_dir_all(hb_path.parent().unwrap());
@@ -3347,6 +3418,123 @@ mod tests {
         assert!(
             pending.is_empty(),
             "session with no label should have no pending requests"
+        );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn write_subagent_heartbeat_sets_parent() {
+        let pid = "test_subagent_heartbeat";
+        let _ = edda_store::ensure_dirs(pid);
+
+        write_subagent_heartbeat(pid, "agent-123", "parent-session", "sub:Explore", ".");
+
+        let hb = read_heartbeat(pid, "agent-123").expect("heartbeat should exist");
+        assert_eq!(hb.session_id, "agent-123");
+        assert_eq!(hb.label, "sub:Explore");
+        assert_eq!(
+            hb.parent_session_id.as_deref(),
+            Some("parent-session"),
+            "parent_session_id should be set"
+        );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn cleanup_subagent_heartbeats_selective() {
+        let pid = "test_cleanup_subagent";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Create parent heartbeat
+        write_heartbeat_minimal(pid, "parent-1", "main-session");
+        // Create two sub-agent heartbeats for parent-1
+        write_subagent_heartbeat(pid, "sub-a", "parent-1", "sub:Explore", ".");
+        write_subagent_heartbeat(pid, "sub-b", "parent-1", "sub:Plan", ".");
+        // Create a sub-agent heartbeat for a different parent
+        write_subagent_heartbeat(pid, "sub-c", "parent-2", "sub:Bash", ".");
+
+        // Cleanup for parent-1 only
+        cleanup_subagent_heartbeats(pid, "parent-1");
+
+        assert!(
+            read_heartbeat(pid, "sub-a").is_none(),
+            "sub-a should be cleaned up"
+        );
+        assert!(
+            read_heartbeat(pid, "sub-b").is_none(),
+            "sub-b should be cleaned up"
+        );
+        assert!(
+            read_heartbeat(pid, "sub-c").is_some(),
+            "sub-c belongs to parent-2 and should survive"
+        );
+        assert!(
+            read_heartbeat(pid, "parent-1").is_some(),
+            "parent heartbeat should survive"
+        );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn heartbeat_backwards_compatible_no_parent() {
+        // Heartbeat JSON without parent_session_id should deserialize correctly
+        let json = serde_json::json!({
+            "session_id": "old-session",
+            "started_at": "2026-01-01T00:00:00Z",
+            "last_heartbeat": "2026-01-01T00:00:00Z",
+            "label": "worker",
+            "focus_files": [],
+            "active_tasks": [],
+            "files_modified_count": 0,
+            "total_edits": 0,
+            "recent_commits": []
+        });
+        let hb: SessionHeartbeat =
+            serde_json::from_value(json).expect("should deserialize without parent_session_id");
+        assert!(
+            hb.parent_session_id.is_none(),
+            "missing parent_session_id should default to None"
+        );
+    }
+
+    #[test]
+    fn subagent_stale_threshold_extended() {
+        let pid = "test_subagent_stale";
+        let _ = edda_store::ensure_dirs(pid);
+
+        // Write a sub-agent heartbeat with a last_heartbeat 5 minutes ago
+        // (stale for normal sessions at 120s, but within 15x = 30min threshold)
+        let five_min_ago = {
+            let now = time::OffsetDateTime::now_utc() - time::Duration::seconds(300);
+            now.format(&time::format_description::well_known::Rfc3339)
+                .unwrap()
+        };
+        let hb = SessionHeartbeat {
+            session_id: "sub-stale".to_string(),
+            started_at: five_min_ago.clone(),
+            last_heartbeat: five_min_ago,
+            label: "sub:Explore".to_string(),
+            focus_files: Vec::new(),
+            active_tasks: Vec::new(),
+            files_modified_count: 0,
+            total_edits: 0,
+            recent_commits: Vec::new(),
+            branch: None,
+            current_phase: None,
+            parent_session_id: Some("parent-session".to_string()),
+        };
+        let path = heartbeat_path(pid, "sub-stale");
+        let _ = fs::create_dir_all(path.parent().unwrap());
+        let _ = fs::write(&path, serde_json::to_string_pretty(&hb).unwrap());
+
+        // Discover peers — sub-agent at 5min old should NOT be stale (threshold is 30min)
+        let peers = discover_active_peers(pid, "other-session");
+        assert!(
+            peers.iter().any(|p| p.session_id == "sub-stale"),
+            "sub-agent at 5min should still be active with extended threshold"
         );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));

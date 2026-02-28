@@ -16,6 +16,8 @@ const HOOK_EVENTS: &[&str] = &[
     "UserPromptSubmit",
     "PreCompact",
     "SessionEnd",
+    "SubagentStart",
+    "SubagentStop",
 ];
 
 /// Check if a matcher group (Claude Code hook format) contains a edda hook.
