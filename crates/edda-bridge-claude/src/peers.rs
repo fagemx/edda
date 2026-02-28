@@ -271,6 +271,18 @@ pub fn touch_heartbeat(project_id: &str, session_id: &str) {
     // If no existing heartbeat, skip touch (write_heartbeat will create it)
 }
 
+/// Update the branch field in an existing heartbeat.
+/// Called when the agent intentionally switches branch (git checkout / git switch).
+pub(crate) fn update_heartbeat_branch(project_id: &str, session_id: &str, branch: &str) {
+    let path = heartbeat_path(project_id, session_id);
+    if let Some(mut hb) = read_heartbeat(project_id, session_id) {
+        hb.branch = Some(branch.to_string());
+        if let Ok(data) = serde_json::to_string_pretty(&hb) {
+            let _ = edda_store::write_atomic(&path, data.as_bytes());
+        }
+    }
+}
+
 /// Ensure a heartbeat file exists for this session.
 /// If one already exists (e.g. written by `ingest_and_build_pack`), it is preserved.
 /// If none exists, writes a minimal heartbeat with empty signals so that other
@@ -325,7 +337,7 @@ pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str) 
 }
 
 /// Read a single session's heartbeat file.
-fn read_heartbeat(project_id: &str, session_id: &str) -> Option<SessionHeartbeat> {
+pub(crate) fn read_heartbeat(project_id: &str, session_id: &str) -> Option<SessionHeartbeat> {
     let path = heartbeat_path(project_id, session_id);
     let content = fs::read_to_string(path).ok()?;
     serde_json::from_str(&content).ok()
