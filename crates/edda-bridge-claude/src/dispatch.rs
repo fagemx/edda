@@ -970,7 +970,10 @@ fn dispatch_pre_tool_use(
                 .or_else(|| raw.pointer("/input/command"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if command.contains("git commit") && !command.contains("--amend") {
+            use std::sync::LazyLock;
+            static RE_GIT_COMMIT: LazyLock<regex::Regex> =
+                LazyLock::new(|| regex::Regex::new(r"\bgit\s+commit\b").unwrap());
+            if RE_GIT_COMMIT.is_match(command) && !command.contains("--amend") {
                 if let Some(hb) = crate::peers::read_heartbeat(project_id, session_id) {
                     if let Some(claimed) = &hb.branch {
                         if let Some(actual) =
@@ -1151,18 +1154,15 @@ fn dispatch_post_tool_use(
         }
     }
 
-    // Update heartbeat branch on intentional branch switch (git checkout / git switch).
+    // Update heartbeat branch when actual branch differs from heartbeat.
+    // Runs on every Bash PostToolUse (~10ms git rev-parse) instead of guessing
+    // intent from command strings, which is fragile.
     if tool_name == "Bash" {
-        let command = raw
-            .pointer("/tool_input/command")
-            .or_else(|| raw.pointer("/input/command"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if (command.contains("git checkout") || command.contains("git switch"))
-            && !command.contains("-- ")
-        {
-            if let Some(branch) = crate::peers::detect_git_branch_in(cwd) {
-                crate::peers::update_heartbeat_branch(project_id, session_id, &branch);
+        if let Some(actual) = crate::peers::detect_git_branch_in(cwd) {
+            if let Some(hb) = crate::peers::read_heartbeat(project_id, session_id) {
+                if hb.branch.as_deref() != Some(actual.as_str()) {
+                    crate::peers::update_heartbeat_branch(project_id, session_id, &actual);
+                }
             }
         }
     }
