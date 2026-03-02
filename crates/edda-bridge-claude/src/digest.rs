@@ -4,6 +4,7 @@
 //! `edda_core::Event` milestone summarizing the session — without LLM,
 //! without touching the workspace ledger.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io::BufRead;
 use std::path::Path;
@@ -77,12 +78,29 @@ pub struct SessionStats {
     pub signal_count: u64,
     /// Dependency packages added during this session (for passive harvest).
     pub deps_added: Vec<String>,
+    /// Per-file edit counts: (file_path, count).
+    pub file_edit_counts: Vec<(String, u64)>,
+    /// Per-tool call counts (e.g. "Read" -> 15, "Edit" -> 8).
+    pub tool_call_breakdown: BTreeMap<String, u64>,
+    /// Model name used in this session.
+    pub model: String,
+    /// Total input tokens consumed.
+    pub input_tokens: u64,
+    /// Total output tokens consumed.
+    pub output_tokens: u64,
+    /// Total cache-read input tokens.
+    pub cache_read_tokens: u64,
+    /// Total cache-creation input tokens.
+    pub cache_creation_tokens: u64,
+    /// Estimated cost in USD.
+    pub estimated_cost_usd: f64,
 }
 
 /// Extract statistics from a session ledger file.
 pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats> {
     let mut stats = SessionStats::default();
     let mut files_set: BTreeSet<String> = BTreeSet::new();
+    let mut file_edit_map: BTreeMap<String, u64> = BTreeMap::new();
 
     // Track session outcome: last event type + trailing failure count
     let mut last_event_name = String::new();
@@ -142,10 +160,17 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
                     })
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
+                if !tool_name.is_empty() {
+                    *stats
+                        .tool_call_breakdown
+                        .entry(tool_name.to_string())
+                        .or_insert(0) += 1;
+                }
                 if tool_name == "Edit" || tool_name == "Write" {
                     if let Some(fp) = extract_file_path(&envelope) {
                         if !crate::signals::is_noise_file(&fp) {
-                            files_set.insert(fp);
+                            files_set.insert(fp.clone());
+                            *file_edit_map.entry(fp).or_insert(0) += 1;
                         }
                     }
                 }
@@ -198,6 +223,7 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
     }
 
     stats.files_modified = files_set.into_iter().collect();
+    stats.file_edit_counts = file_edit_map.into_iter().collect();
     stats.duration_minutes = compute_duration_minutes(&stats.first_ts, &stats.last_ts);
 
     // Determine session outcome
@@ -309,7 +335,66 @@ pub fn render_digest_text(session_id: &str, stats: &SessionStats) -> String {
         }
     }
 
+    // Tool breakdown
+    if !stats.tool_call_breakdown.is_empty() {
+        let breakdown: Vec<String> = stats
+            .tool_call_breakdown
+            .iter()
+            .map(|(k, v)| format!("{k}:{v}"))
+            .collect();
+        lines.push(format!("Tools: {}", breakdown.join(", ")));
+        let edit_ratio = compute_edit_ratio(&stats.tool_call_breakdown, stats.tool_calls);
+        let search_ratio = compute_search_ratio(&stats.tool_call_breakdown, stats.tool_calls);
+        if edit_ratio > 0.0 || search_ratio > 0.0 {
+            lines.push(format!(
+                "Ratios: edit={:.0}% search={:.0}%",
+                edit_ratio * 100.0,
+                search_ratio * 100.0
+            ));
+        }
+    }
+
+    // Usage summary
+    if stats.input_tokens > 0 || stats.output_tokens > 0 {
+        let model_label = if stats.model.is_empty() {
+            "unknown".to_string()
+        } else {
+            stats.model.clone()
+        };
+        let total = stats.input_tokens + stats.output_tokens;
+        let cost_str = if stats.estimated_cost_usd > 0.0 {
+            format!(", ${:.4}", stats.estimated_cost_usd)
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "Usage: {model_label} -- {total} tokens (in:{} out:{}){cost_str}",
+            stats.input_tokens, stats.output_tokens
+        ));
+    }
+
     lines.join("\n")
+}
+
+/// Compute the fraction of tool calls that are file modifications (Edit/Write).
+fn compute_edit_ratio(breakdown: &BTreeMap<String, u64>, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    let edits =
+        breakdown.get("Edit").copied().unwrap_or(0) + breakdown.get("Write").copied().unwrap_or(0);
+    edits as f64 / total as f64
+}
+
+/// Compute the fraction of tool calls that are searches (Read/Grep/Glob).
+fn compute_search_ratio(breakdown: &BTreeMap<String, u64>, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    let searches = breakdown.get("Read").copied().unwrap_or(0)
+        + breakdown.get("Grep").copied().unwrap_or(0)
+        + breakdown.get("Glob").copied().unwrap_or(0);
+    searches as f64 / total as f64
 }
 
 /// Build a milestone `Event` from session stats.
@@ -345,6 +430,16 @@ pub fn build_digest_event(
             "nudge_count": stats.nudge_count,
             "decide_count": stats.decide_count,
             "signal_count": stats.signal_count,
+            "deps_added": stats.deps_added,
+            "tool_call_breakdown": stats.tool_call_breakdown,
+            "edit_ratio": compute_edit_ratio(&stats.tool_call_breakdown, stats.tool_calls),
+            "search_ratio": compute_search_ratio(&stats.tool_call_breakdown, stats.tool_calls),
+            "model": stats.model,
+            "input_tokens": stats.input_tokens,
+            "output_tokens": stats.output_tokens,
+            "cache_read_tokens": stats.cache_read_tokens,
+            "cache_creation_tokens": stats.cache_creation_tokens,
+            "estimated_cost_usd": stats.estimated_cost_usd,
             "notes": notes,
         }
     });
@@ -834,6 +929,19 @@ fn digest_one_session(
     // Enrich with tasks snapshot from state file
     stats.tasks_snapshot = load_tasks_for_digest(project_id);
 
+    // Enrich with usage data (model, tokens, cost) from transcript signals
+    {
+        let usage = crate::signals::read_usage_state(project_id);
+        if !usage.model.is_empty() {
+            stats.model = usage.model.clone();
+        }
+        stats.input_tokens = usage.input_tokens;
+        stats.output_tokens = usage.output_tokens;
+        stats.cache_read_tokens = usage.cache_read_tokens;
+        stats.cache_creation_tokens = usage.cache_creation_tokens;
+        stats.estimated_cost_usd = crate::signals::estimate_cost(&usage);
+    }
+
     // Collect session notes and decisions from workspace ledger
     let (decisions, notes) = collect_session_ledger_extras(cwd, stats.first_ts.as_deref());
 
@@ -1189,6 +1297,24 @@ pub struct PrevDigest {
     /// Total decision-worthy signals detected (including suppressed ones).
     #[serde(default)]
     pub signal_count: u64,
+    /// Model name used in this session.
+    #[serde(default)]
+    pub model: String,
+    /// Total input tokens consumed.
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Total output tokens consumed.
+    #[serde(default)]
+    pub output_tokens: u64,
+    /// Total cache-read input tokens.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// Total cache-creation input tokens.
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
+    /// Estimated cost in USD.
+    #[serde(default)]
+    pub estimated_cost_usd: f64,
 }
 
 /// Write prev_digest.json from SessionStats + optional ledger extras.
@@ -1231,6 +1357,12 @@ pub fn write_prev_digest(
         nudge_count: stats.nudge_count,
         decide_count: stats.decide_count,
         signal_count: stats.signal_count,
+        model: stats.model.clone(),
+        input_tokens: stats.input_tokens,
+        output_tokens: stats.output_tokens,
+        cache_read_tokens: stats.cache_read_tokens,
+        cache_creation_tokens: stats.cache_creation_tokens,
+        estimated_cost_usd: stats.estimated_cost_usd,
     };
 
     let path = edda_store::project_dir(project_id)
@@ -1382,6 +1514,18 @@ pub fn write_prev_digest_from_store(
     stats.nudge_count = nudge_count;
     stats.decide_count = decide_count;
     stats.signal_count = signal_count;
+    // Supplement usage data from transcript signals
+    {
+        let usage = crate::signals::read_usage_state(project_id);
+        if !usage.model.is_empty() {
+            stats.model = usage.model.clone();
+        }
+        stats.input_tokens = usage.input_tokens;
+        stats.output_tokens = usage.output_tokens;
+        stats.cache_read_tokens = usage.cache_read_tokens;
+        stats.cache_creation_tokens = usage.cache_creation_tokens;
+        stats.estimated_cost_usd = crate::signals::estimate_cost(&usage);
+    }
     // Collect decisions + notes from workspace ledger before writing
     let (decisions, notes) = collect_session_ledger_extras(cwd, stats.first_ts.as_deref());
     write_prev_digest(project_id, session_id, &stats, decisions, notes);
