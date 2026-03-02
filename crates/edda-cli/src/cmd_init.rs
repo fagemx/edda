@@ -85,6 +85,11 @@ actors: {}
         println!("  {}", event.event_id);
     }
 
+    // Register in user-level project registry (~/.edda/registry.json)
+    if let Err(e) = edda_store::registry::register_project(repo_root) {
+        eprintln!("Warning: failed to register project: {e}");
+    }
+
     // Auto-detect and install bridge hooks (unless --no-hooks)
     if !no_hooks {
         auto_install_bridges(repo_root);
