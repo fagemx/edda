@@ -296,7 +296,10 @@ fn format_session_digest_detail(event: &Event) -> String {
     let mut parts = vec![format!("{tool_calls} calls, {duration}m, {outcome}")];
 
     // Tool breakdown
-    if let Some(tb) = ss.and_then(|s| s.get("tool_call_breakdown")).and_then(|v| v.as_object()) {
+    if let Some(tb) = ss
+        .and_then(|s| s.get("tool_call_breakdown"))
+        .and_then(|v| v.as_object())
+    {
         let breakdown: Vec<String> = tb
             .iter()
             .filter(|(_, v)| v.as_u64().unwrap_or(0) > 0)
@@ -308,12 +311,18 @@ fn format_session_digest_detail(event: &Event) -> String {
     }
 
     // Edit/search ratios
-    if let Some(edit_ratio) = ss.and_then(|s| s.get("edit_ratio")).and_then(|v| v.as_f64()) {
+    if let Some(edit_ratio) = ss
+        .and_then(|s| s.get("edit_ratio"))
+        .and_then(|v| v.as_f64())
+    {
         if edit_ratio > 0.0 {
             parts.push(format!("edit:{:.0}%", edit_ratio * 100.0));
         }
     }
-    if let Some(search_ratio) = ss.and_then(|s| s.get("search_ratio")).and_then(|v| v.as_f64()) {
+    if let Some(search_ratio) = ss
+        .and_then(|s| s.get("search_ratio"))
+        .and_then(|v| v.as_f64())
+    {
         if search_ratio > 0.0 {
             parts.push(format!("search:{:.0}%", search_ratio * 100.0));
         }
@@ -363,7 +372,7 @@ fn shorten_model_name(model: &str) -> String {
     // Match patterns like "claude-{family}-{version}-{date}"
     if lower.starts_with("claude-") {
         let without_prefix = &model[7..]; // skip "claude-"
-        // Remove trailing date (YYYYMMDD)
+                                          // Remove trailing date (YYYYMMDD)
         let trimmed = if without_prefix.len() > 9 {
             let last_dash = without_prefix.rfind('-').unwrap_or(without_prefix.len());
             let after_dash = &without_prefix[last_dash + 1..];
@@ -388,9 +397,7 @@ fn format_token_count(tokens: u64) -> String {
         format!("{tokens}")
     } else if tokens < 1_000_000 {
         let k = tokens as f64 / 1_000.0;
-        if k >= 100.0 {
-            format!("{:.0}k", k)
-        } else if k >= 10.0 {
+        if k >= 10.0 {
             format!("{:.0}k", k)
         } else {
             format!("{:.1}k", k)
@@ -435,23 +442,11 @@ mod tests {
 
     #[test]
     fn test_shorten_model_name() {
-        assert_eq!(
-            shorten_model_name("claude-sonnet-4-20250514"),
-            "sonnet-4"
-        );
-        assert_eq!(
-            shorten_model_name("claude-opus-4-20250514"),
-            "opus-4"
-        );
-        assert_eq!(
-            shorten_model_name("claude-haiku-3-5-20250514"),
-            "haiku-3-5"
-        );
+        assert_eq!(shorten_model_name("claude-sonnet-4-20250514"), "sonnet-4");
+        assert_eq!(shorten_model_name("claude-opus-4-20250514"), "opus-4");
+        assert_eq!(shorten_model_name("claude-haiku-3-5-20250514"), "haiku-3-5");
         assert_eq!(shorten_model_name("gpt-4o"), "gpt-4o");
-        assert_eq!(
-            shorten_model_name("claude-sonnet-4"),
-            "sonnet-4"
-        );
+        assert_eq!(shorten_model_name("claude-sonnet-4"), "sonnet-4");
     }
 
     #[test]
@@ -562,7 +557,7 @@ mod tests {
         let detail = format_event_detail(&event);
         assert!(detail.contains("gpt-4o"), "detail: {detail}");
         assert!(detail.contains("60k"), "detail: {detail}"); // 50k+10k
-        // Should NOT contain $ when cost is 0
+                                                             // Should NOT contain $ when cost is 0
         assert!(!detail.contains("$"), "detail: {detail}");
     }
 }

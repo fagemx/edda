@@ -4,8 +4,8 @@
 //! `edda_core::Event` milestone summarizing the session — without LLM,
 //! without touching the workspace ledger.
 
-use std::collections::BTreeSet;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::io::BufRead;
 use std::path::Path;
 
@@ -161,7 +161,10 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if !tool_name.is_empty() {
-                    *stats.tool_call_breakdown.entry(tool_name.to_string()).or_insert(0) += 1;
+                    *stats
+                        .tool_call_breakdown
+                        .entry(tool_name.to_string())
+                        .or_insert(0) += 1;
                 }
                 if tool_name == "Edit" || tool_name == "Write" {
                     if let Some(fp) = extract_file_path(&envelope) {
@@ -378,8 +381,8 @@ fn compute_edit_ratio(breakdown: &BTreeMap<String, u64>, total: u64) -> f64 {
     if total == 0 {
         return 0.0;
     }
-    let edits = breakdown.get("Edit").copied().unwrap_or(0)
-        + breakdown.get("Write").copied().unwrap_or(0);
+    let edits =
+        breakdown.get("Edit").copied().unwrap_or(0) + breakdown.get("Write").copied().unwrap_or(0);
     edits as f64 / total as f64
 }
 
@@ -1303,6 +1306,12 @@ pub struct PrevDigest {
     /// Total output tokens consumed.
     #[serde(default)]
     pub output_tokens: u64,
+    /// Total cache-read input tokens.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    /// Total cache-creation input tokens.
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
     /// Estimated cost in USD.
     #[serde(default)]
     pub estimated_cost_usd: f64,
@@ -1351,6 +1360,8 @@ pub fn write_prev_digest(
         model: stats.model.clone(),
         input_tokens: stats.input_tokens,
         output_tokens: stats.output_tokens,
+        cache_read_tokens: stats.cache_read_tokens,
+        cache_creation_tokens: stats.cache_creation_tokens,
         estimated_cost_usd: stats.estimated_cost_usd,
     };
 

@@ -48,6 +48,7 @@ pub struct UsageSnapshot {
 }
 
 impl UsageSnapshot {
+    #[cfg(test)]
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens + self.output_tokens
     }
@@ -519,12 +520,27 @@ fn lookup_pricing_from_env(model: &str) -> Option<ModelPricing> {
 }
 
 /// Estimate cost in USD from a UsageSnapshot.
+/// Estimate session cost in USD.
+///
+/// Note: cache-read tokens are priced at ~10% of input and cache-creation
+/// tokens at ~125% of input on the Anthropic API.  We approximate by
+/// subtracting the cached portion from full-price input and adding it back
+/// at the discounted rate.  When cache breakdown is unavailable the flat
+/// input rate is used (slight overestimate for cache-heavy sessions).
 pub fn estimate_cost(usage: &UsageSnapshot) -> f64 {
     let pricing = match lookup_pricing(&usage.model) {
         Some(p) => p,
         None => return 0.0,
     };
-    let input_cost = (usage.input_tokens as f64 / 1_000_000.0) * pricing.input_per_m;
+
+    // Cache-aware input cost: full-price tokens + discounted cache tokens
+    let cache_read = usage.cache_read_tokens;
+    let cache_create = usage.cache_creation_tokens;
+    let full_price_input = usage.input_tokens.saturating_sub(cache_read + cache_create);
+
+    let input_cost = (full_price_input as f64 / 1_000_000.0) * pricing.input_per_m
+        + (cache_read as f64 / 1_000_000.0) * pricing.input_per_m * 0.1
+        + (cache_create as f64 / 1_000_000.0) * pricing.input_per_m * 1.25;
     let output_cost = (usage.output_tokens as f64 / 1_000_000.0) * pricing.output_per_m;
     input_cost + output_cost
 }
@@ -1508,6 +1524,25 @@ mod tests {
         let cost = estimate_cost(&usage);
         // input: 0.5M * $15/M = $7.50, output: 0.05M * $75/M = $3.75 -> $11.25
         assert!((cost - 11.25).abs() < 0.01, "cost={cost}");
+    }
+
+    #[test]
+    fn estimate_cost_cache_aware() {
+        let usage = UsageSnapshot {
+            model: "claude-sonnet-4-20250514".into(),
+            // 1M total input, 600k are cache-read, 100k are cache-create
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            cache_read_tokens: 600_000,
+            cache_creation_tokens: 100_000,
+        };
+        let cost = estimate_cost(&usage);
+        // full-price input: (1M - 600k - 100k) = 300k * $3/M = $0.90
+        // cache-read: 600k * $3/M * 0.1 = $0.18
+        // cache-create: 100k * $3/M * 1.25 = $0.375
+        // output: 100k * $15/M = $1.50
+        // total ≈ $2.955
+        assert!((cost - 2.955).abs() < 0.01, "cost={cost}");
     }
 
     #[test]
