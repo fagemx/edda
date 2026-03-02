@@ -4,8 +4,7 @@
 //! `edda_core::Event` milestone summarizing the session — without LLM,
 //! without touching the workspace ledger.
 
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::BufRead;
 use std::path::Path;
 
@@ -150,7 +149,7 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
         match event_name {
             "PostToolUse" => {
                 stats.tool_calls += 1;
-                // Extract file_path from Edit/Write tool calls
+                // Extract tool_name and accumulate per-tool breakdown
                 let tool_name = envelope
                     .get("tool_name")
                     .or_else(|| {
@@ -343,8 +342,8 @@ pub fn render_digest_text(session_id: &str, stats: &SessionStats) -> String {
             .map(|(k, v)| format!("{k}:{v}"))
             .collect();
         lines.push(format!("Tools: {}", breakdown.join(", ")));
-        let edit_ratio = compute_edit_ratio(&stats.tool_call_breakdown, stats.tool_calls);
-        let search_ratio = compute_search_ratio(&stats.tool_call_breakdown, stats.tool_calls);
+        let (edit_ratio, search_ratio) =
+            compute_tool_ratios(&stats.tool_call_breakdown, stats.tool_calls);
         if edit_ratio > 0.0 || search_ratio > 0.0 {
             lines.push(format!(
                 "Ratios: edit={:.0}% search={:.0}%",
@@ -376,25 +375,26 @@ pub fn render_digest_text(session_id: &str, stats: &SessionStats) -> String {
     lines.join("\n")
 }
 
-/// Compute the fraction of tool calls that are file modifications (Edit/Write).
-fn compute_edit_ratio(breakdown: &BTreeMap<String, u64>, total: u64) -> f64 {
+/// Compute edit and search ratios from the tool call breakdown.
+///
+/// - `edit_ratio` = (Edit + Write + NotebookEdit) / total
+/// - `search_ratio` = (Read + Grep + Glob + Agent) / total
+fn compute_tool_ratios(breakdown: &BTreeMap<String, u64>, total: u64) -> (f64, f64) {
     if total == 0 {
-        return 0.0;
+        return (0.0, 0.0);
     }
-    let edits =
-        breakdown.get("Edit").copied().unwrap_or(0) + breakdown.get("Write").copied().unwrap_or(0);
-    edits as f64 / total as f64
-}
-
-/// Compute the fraction of tool calls that are searches (Read/Grep/Glob).
-fn compute_search_ratio(breakdown: &BTreeMap<String, u64>, total: u64) -> f64 {
-    if total == 0 {
-        return 0.0;
-    }
-    let searches = breakdown.get("Read").copied().unwrap_or(0)
-        + breakdown.get("Grep").copied().unwrap_or(0)
-        + breakdown.get("Glob").copied().unwrap_or(0);
-    searches as f64 / total as f64
+    let edit_tools: u64 = ["Edit", "Write", "NotebookEdit"]
+        .iter()
+        .filter_map(|t| breakdown.get(*t))
+        .sum();
+    let search_tools: u64 = ["Read", "Grep", "Glob", "Agent"]
+        .iter()
+        .filter_map(|t| breakdown.get(*t))
+        .sum();
+    (
+        edit_tools as f64 / total as f64,
+        search_tools as f64 / total as f64,
+    )
 }
 
 /// Build a milestone `Event` from session stats.
@@ -410,6 +410,9 @@ pub fn build_digest_event(
     notes: &[String],
 ) -> anyhow::Result<Event> {
     let text = render_digest_text(session_id, stats);
+
+    let (edit_ratio, search_ratio) =
+        compute_tool_ratios(&stats.tool_call_breakdown, stats.tool_calls);
 
     let payload = serde_json::json!({
         "role": "system",
@@ -432,8 +435,8 @@ pub fn build_digest_event(
             "signal_count": stats.signal_count,
             "deps_added": stats.deps_added,
             "tool_call_breakdown": stats.tool_call_breakdown,
-            "edit_ratio": compute_edit_ratio(&stats.tool_call_breakdown, stats.tool_calls),
-            "search_ratio": compute_search_ratio(&stats.tool_call_breakdown, stats.tool_calls),
+            "edit_ratio": edit_ratio,
+            "search_ratio": search_ratio,
             "model": stats.model,
             "input_tokens": stats.input_tokens,
             "output_tokens": stats.output_tokens,
@@ -1297,6 +1300,15 @@ pub struct PrevDigest {
     /// Total decision-worthy signals detected (including suppressed ones).
     #[serde(default)]
     pub signal_count: u64,
+    /// Per-tool call counts (e.g. "Read" -> 15, "Edit" -> 8).
+    #[serde(default)]
+    pub tool_call_breakdown: BTreeMap<String, u64>,
+    /// Ratio of edit tools (Edit, Write, NotebookEdit) to total tool calls.
+    #[serde(default)]
+    pub edit_ratio: f64,
+    /// Ratio of search tools (Read, Grep, Glob, Agent) to total tool calls.
+    #[serde(default)]
+    pub search_ratio: f64,
     /// Model name used in this session.
     #[serde(default)]
     pub model: String,
@@ -1341,6 +1353,9 @@ pub fn write_prev_digest(
     // Read total_edits from state/files_modified.json (still alive at SessionEnd)
     let total_edits = read_total_edits(project_id);
 
+    let (edit_ratio, search_ratio) =
+        compute_tool_ratios(&stats.tool_call_breakdown, stats.tool_calls);
+
     let digest = PrevDigest {
         session_id: session_id.to_string(),
         completed_at: now_rfc3339(),
@@ -1357,6 +1372,9 @@ pub fn write_prev_digest(
         nudge_count: stats.nudge_count,
         decide_count: stats.decide_count,
         signal_count: stats.signal_count,
+        tool_call_breakdown: stats.tool_call_breakdown.clone(),
+        edit_ratio,
+        search_ratio,
         model: stats.model.clone(),
         input_tokens: stats.input_tokens,
         output_tokens: stats.output_tokens,
@@ -2977,6 +2995,40 @@ mod tests {
 
         let digest = read_prev_digest(pid).expect("should read prev_digest");
         assert_eq!(digest.signal_count, 5);
+
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn prev_digest_has_tool_breakdown() {
+        let pid = "test_prev_digest_tool_bd";
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+        let _ = edda_store::ensure_dirs(pid);
+
+        let mut breakdown = BTreeMap::new();
+        breakdown.insert("Read".into(), 15);
+        breakdown.insert("Edit".into(), 8);
+        breakdown.insert("Grep".into(), 5);
+        breakdown.insert("Bash".into(), 3);
+
+        let stats = SessionStats {
+            tool_calls: 31,
+            tool_call_breakdown: breakdown,
+            duration_minutes: 20,
+            outcome: SessionOutcome::Completed,
+            ..Default::default()
+        };
+        write_prev_digest(pid, "test-tool-bd", &stats, vec![], vec![]);
+
+        let digest = read_prev_digest(pid).expect("should read prev_digest");
+        assert_eq!(digest.tool_call_breakdown.get("Read"), Some(&15));
+        assert_eq!(digest.tool_call_breakdown.get("Edit"), Some(&8));
+        assert_eq!(digest.tool_call_breakdown.get("Grep"), Some(&5));
+        assert_eq!(digest.tool_call_breakdown.get("Bash"), Some(&3));
+        // edit_ratio = 8 / 31
+        assert!((digest.edit_ratio - 8.0 / 31.0).abs() < 1e-6);
+        // search_ratio = (15 + 5) / 31
+        assert!((digest.search_ratio - 20.0 / 31.0).abs() < 1e-6);
 
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }

@@ -262,6 +262,23 @@ pub(crate) fn build_branch_snapshot(ledger: &Ledger, branch: &str) -> Result<Bra
                                     .collect()
                             })
                             .unwrap_or_default(),
+                        tool_call_breakdown: stats
+                            .and_then(|s| s.get("tool_call_breakdown"))
+                            .and_then(|x| x.as_object())
+                            .map(|obj| {
+                                obj.iter()
+                                    .filter_map(|(k, v)| v.as_u64().map(|c| (k.clone(), c)))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        edit_ratio: stats
+                            .and_then(|s| s.get("edit_ratio"))
+                            .and_then(|x| x.as_f64())
+                            .unwrap_or(0.0),
+                        search_ratio: stats
+                            .and_then(|s| s.get("search_ratio"))
+                            .and_then(|x| x.as_f64())
+                            .unwrap_or(0.0),
                     });
                 }
             }
@@ -385,5 +402,70 @@ mod tests {
 
         let snap = build_branch_snapshot(&ledger, "main").unwrap();
         assert_eq!(snap.signals.len(), 0);
+    }
+
+    #[test]
+    fn session_digest_parses_tool_call_breakdown() {
+        use edda_core::event::finalize_event;
+        use edda_core::types::{Refs, SCHEMA_VERSION};
+
+        let (_, ledger) = crate::test_support::setup_workspace();
+
+        let payload = serde_json::json!({
+            "role": "system",
+            "text": "Session digest",
+            "tags": ["session_digest"],
+            "session_id": "sess-001",
+            "session_stats": {
+                "tool_calls": 31,
+                "tool_failures": 1,
+                "user_prompts": 5,
+                "duration_minutes": 20,
+                "files_modified": ["src/lib.rs"],
+                "failed_commands": [],
+                "commits_made": ["feat: something"],
+                "tasks_snapshot": [],
+                "outcome": "completed",
+                "notes": [],
+                "tool_call_breakdown": {
+                    "Read": 15,
+                    "Edit": 8,
+                    "Grep": 5,
+                    "Bash": 3
+                },
+                "edit_ratio": 0.258,
+                "search_ratio": 0.645
+            }
+        });
+
+        let mut event = edda_core::types::Event {
+            event_id: "evt_test_digest".to_string(),
+            ts: "2025-01-01T00:00:00Z".to_string(),
+            event_type: "note".to_string(),
+            branch: "main".to_string(),
+            parent_hash: None,
+            hash: String::new(),
+            payload,
+            refs: Refs::default(),
+            schema_version: SCHEMA_VERSION,
+            digests: Vec::new(),
+            event_family: None,
+            event_level: None,
+        };
+        finalize_event(&mut event);
+        ledger.append_event(&event).unwrap();
+
+        let snap = build_branch_snapshot(&ledger, "main").unwrap();
+        assert_eq!(snap.session_digests.len(), 1);
+
+        let digest = &snap.session_digests[0];
+        assert_eq!(digest.session_id, "sess-001");
+        assert_eq!(digest.tool_calls, 31);
+        assert_eq!(digest.tool_call_breakdown.get("Read"), Some(&15));
+        assert_eq!(digest.tool_call_breakdown.get("Edit"), Some(&8));
+        assert_eq!(digest.tool_call_breakdown.get("Grep"), Some(&5));
+        assert_eq!(digest.tool_call_breakdown.get("Bash"), Some(&3));
+        assert!((digest.edit_ratio - 0.258).abs() < 1e-6);
+        assert!((digest.search_ratio - 0.645).abs() < 1e-6);
     }
 }
