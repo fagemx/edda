@@ -10,10 +10,8 @@ categories.workspace = true
 keywords.workspace = true
 
 [dependencies]
-edda-aggregate = { path = "../edda-aggregate", version = "0.1.1" }
 edda-ask = { path = "../edda-ask", version = "0.1.1" }
 edda-core = { path = "../edda-core", version = "0.1.1" }
-edda-store = { path = "../edda-store", version = "0.1.1" }
 edda-derive = { path = "../edda-derive", version = "0.1.1" }
 edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
 axum = "0.8"

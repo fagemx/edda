@@ -89,7 +89,11 @@ pub enum UserConfigCmd {
 pub fn execute(cmd: UserCmd) -> anyhow::Result<()> {
     match cmd {
         UserCmd::Projects { prune, json } => execute_projects(prune, json),
-        UserCmd::Overview { after, before, json } => execute_overview(after, before, json),
+        UserCmd::Overview {
+            after,
+            before,
+            json,
+        } => execute_overview(after, before, json),
         UserCmd::Commits {
             after,
             before,
@@ -97,7 +101,11 @@ pub fn execute(cmd: UserCmd) -> anyhow::Result<()> {
             json,
         } => execute_commits(after, before, limit, json),
         UserCmd::Decisions { json } => execute_decisions(json),
-        UserCmd::Rollup { tool, refresh, json } => execute_rollup(&tool, refresh, json),
+        UserCmd::Rollup {
+            tool,
+            refresh,
+            json,
+        } => execute_rollup(&tool, refresh, json),
         UserCmd::Config { cmd } => execute_config(cmd),
     }
 }
@@ -129,8 +137,8 @@ fn execute_projects(prune: bool, json: bool) -> anyhow::Result<()> {
     }
 
     println!("Registered projects ({}):\n", projects.len());
+    let (valid, _) = registry::validate_projects();
     for p in &projects {
-        let (valid, _) = registry::validate_projects();
         let status = if valid.iter().any(|v| v.project_id == p.project_id) {
             "ok"
         } else {
@@ -145,7 +153,11 @@ fn execute_projects(prune: bool, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn execute_overview(after: Option<String>, before: Option<String>, json: bool) -> anyhow::Result<()> {
+fn execute_overview(
+    after: Option<String>,
+    before: Option<String>,
+    json: bool,
+) -> anyhow::Result<()> {
     let projects = registry::list_projects();
     let range = DateRange { after, before };
     let result = aggregate::aggregate_overview(&projects, &range);
@@ -275,8 +287,8 @@ fn execute_config(cmd: UserConfigCmd) -> anyhow::Result<()> {
             Ok(())
         }
         UserConfigCmd::Set { key, value } => {
-            let parsed: serde_json::Value = serde_json::from_str(&value)
-                .unwrap_or_else(|_| serde_json::Value::String(value));
+            let parsed: serde_json::Value =
+                serde_json::from_str(&value).unwrap_or_else(|_| serde_json::Value::String(value));
             user_config::set_user_config(&key, parsed)?;
             println!("Set {key}");
             Ok(())

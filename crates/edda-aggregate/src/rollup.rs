@@ -57,7 +57,7 @@ pub fn rollup_path(tool: &str) -> PathBuf {
 /// Ensure the collabs directory structure exists.
 pub fn ensure_collabs_dir(tool: &str) -> anyhow::Result<()> {
     let dir = collabs_dir(tool);
-    std::fs::create_dir_all(dir.join("writings"))?;
+    std::fs::create_dir_all(&dir)?;
     Ok(())
 }
 
@@ -99,24 +99,19 @@ pub fn compute_rollup(projects: &[ProjectEntry], range: &DateRange, tool: &str) 
 }
 
 /// Incremental rollup: compute only new data since last update, then merge.
-pub fn compute_rollup_incremental(
-    projects: &[ProjectEntry],
-    tool: &str,
-) -> anyhow::Result<Rollup> {
+pub fn compute_rollup_incremental(projects: &[ProjectEntry], tool: &str) -> anyhow::Result<Rollup> {
     let existing = load_rollup(tool);
 
     let range = if let Some(ref existing) = existing {
-        // Only fetch events since last update date
-        let last_date = existing
-            .daily
-            .last()
-            .map(|d| d.date.clone())
-            .unwrap_or_default();
+        // Only fetch events since last_updated (not last daily entry date).
+        let cutoff = &existing.last_updated;
         DateRange {
-            after: if last_date.is_empty() {
+            after: if cutoff.is_empty() {
                 None
             } else {
-                Some(last_date)
+                // Use the date portion (YYYY-MM-DD) of last_updated as the
+                // "after" boundary so we re-scan the partial day.
+                Some(cutoff.chars().take(10).collect())
             },
             before: None,
         }
@@ -230,13 +225,12 @@ fn build_monthly_stats(daily: &[DayStat]) -> Vec<MonthStat> {
 
 /// Given a date string "YYYY-MM-DD", return the ISO Monday of that week as "YYYY-MM-DD".
 fn iso_week_start(date_str: &str) -> Option<String> {
-    let format =
-        time::format_description::parse("[year]-[month]-[day]").ok()?;
+    let format = time::format_description::parse("[year]-[month]-[day]").ok()?;
     let date = time::Date::parse(date_str, &format).ok()?;
     let weekday = date.weekday();
     let days_since_monday = weekday.number_days_from_monday();
     let monday = date - time::Duration::days(i64::from(days_since_monday));
-    Some(monday.format(&format).ok()?)
+    monday.format(&format).ok()
 }
 
 #[cfg(test)]
@@ -267,8 +261,18 @@ mod tests {
             tool: "test".to_string(),
             last_updated: "old".to_string(),
             daily: vec![
-                DayStat { date: "2026-03-01".into(), events: 5, commits: 1, sessions: 0 },
-                DayStat { date: "2026-03-02".into(), events: 3, commits: 0, sessions: 0 },
+                DayStat {
+                    date: "2026-03-01".into(),
+                    events: 5,
+                    commits: 1,
+                    sessions: 0,
+                },
+                DayStat {
+                    date: "2026-03-02".into(),
+                    events: 3,
+                    commits: 0,
+                    sessions: 0,
+                },
             ],
             weekly: vec![],
             monthly: vec![],
@@ -277,8 +281,18 @@ mod tests {
             tool: "test".to_string(),
             last_updated: "new".to_string(),
             daily: vec![
-                DayStat { date: "2026-03-02".into(), events: 10, commits: 2, sessions: 0 },
-                DayStat { date: "2026-03-03".into(), events: 7, commits: 3, sessions: 0 },
+                DayStat {
+                    date: "2026-03-02".into(),
+                    events: 10,
+                    commits: 2,
+                    sessions: 0,
+                },
+                DayStat {
+                    date: "2026-03-03".into(),
+                    events: 7,
+                    commits: 3,
+                    sessions: 0,
+                },
             ],
             weekly: vec![],
             monthly: vec![],
@@ -289,7 +303,11 @@ mod tests {
         assert_eq!(merged.last_updated, "new");
 
         // March 2 should have new data (10 events, not 3)
-        let mar2 = merged.daily.iter().find(|d| d.date == "2026-03-02").unwrap();
+        let mar2 = merged
+            .daily
+            .iter()
+            .find(|d| d.date == "2026-03-02")
+            .unwrap();
         assert_eq!(mar2.events, 10);
     }
 

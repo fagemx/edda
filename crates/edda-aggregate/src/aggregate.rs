@@ -99,10 +99,10 @@ pub fn aggregate_overview(projects: &[ProjectEntry], range: &DateRange) -> Aggre
 
         let filtered: Vec<&Event> = events.iter().filter(|e| range.matches(&e.ts)).collect();
         let commit_count = filtered.iter().filter(|e| e.event_type == "commit").count();
-        let decision_count = ledger
-            .active_decisions(None, None)
-            .map(|d| d.len())
-            .unwrap_or(0);
+        let decision_count = filtered
+            .iter()
+            .filter(|e| e.event_type == "decision")
+            .count();
         let session_count = count_unique_sessions(&filtered);
 
         summaries.push(ProjectSummary {
@@ -214,10 +214,7 @@ pub fn aggregate_decisions(projects: &[ProjectEntry]) -> Vec<DecisionRecord> {
 }
 
 /// Count events by date (YYYY-MM-DD) across all projects.
-pub fn events_by_date(
-    projects: &[ProjectEntry],
-    range: &DateRange,
-) -> BTreeMap<String, usize> {
+pub fn events_by_date(projects: &[ProjectEntry], range: &DateRange) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
 
     for entry in projects {
@@ -245,10 +242,7 @@ pub fn events_by_date(
 }
 
 /// Count commits by date (YYYY-MM-DD) across all projects.
-pub fn commits_by_date(
-    projects: &[ProjectEntry],
-    range: &DateRange,
-) -> BTreeMap<String, usize> {
+pub fn commits_by_date(projects: &[ProjectEntry], range: &DateRange) -> BTreeMap<String, usize> {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
 
     for entry in projects {
@@ -349,7 +343,8 @@ mod tests {
         edda_ledger::ledger::init_head(&paths, "main").unwrap();
 
         let ledger = Ledger::open(root).unwrap();
-        let event = edda_core::event::new_note_event("main", None, "system", "test note", &[]).unwrap();
+        let event =
+            edda_core::event::new_note_event("main", None, "system", "test note", &[]).unwrap();
         ledger.append_event(&event).unwrap();
 
         let entry = ProjectEntry {

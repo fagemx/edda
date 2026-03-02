@@ -147,66 +147,81 @@ pub fn validate_projects() -> (Vec<ProjectEntry>, Vec<ProjectEntry>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize registry tests so EDDA_STORE_ROOT env var doesn't conflict.
+    static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run a closure with `EDDA_STORE_ROOT` pointing to an isolated tempdir.
+    fn with_isolated_store(f: impl FnOnce()) {
+        let _guard = REGISTRY_LOCK.lock().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        std::env::set_var("EDDA_STORE_ROOT", store.path());
+        f();
+        std::env::remove_var("EDDA_STORE_ROOT");
+    }
 
     #[test]
     fn register_and_list_roundtrip() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Create a fake .edda/ so validate_projects considers it valid
-        std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
+        with_isolated_store(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
 
-        register_project(tmp.path()).unwrap();
-        let projects = list_projects();
-        let pid = project_id(tmp.path());
+            register_project(tmp.path()).unwrap();
+            let projects = list_projects();
+            let pid = project_id(tmp.path());
 
-        assert!(projects.iter().any(|p| p.project_id == pid));
-
-        // Cleanup
-        unregister_project(&pid).unwrap();
+            assert!(projects.iter().any(|p| p.project_id == pid));
+        });
     }
 
     #[test]
     fn register_is_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
+        with_isolated_store(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
 
-        register_project(tmp.path()).unwrap();
-        register_project(tmp.path()).unwrap();
+            register_project(tmp.path()).unwrap();
+            register_project(tmp.path()).unwrap();
 
-        let pid = project_id(tmp.path());
-        let reg = load_registry();
-        let count = reg.projects.values().filter(|p| p.project_id == pid).count();
-        assert_eq!(count, 1, "should not create duplicates");
-
-        unregister_project(&pid).unwrap();
+            let pid = project_id(tmp.path());
+            let reg = load_registry();
+            let count = reg
+                .projects
+                .values()
+                .filter(|p| p.project_id == pid)
+                .count();
+            assert_eq!(count, 1, "should not create duplicates");
+        });
     }
 
     #[test]
     fn unregister_removes_entry() {
-        let tmp = tempfile::tempdir().unwrap();
-        let pid = project_id(tmp.path());
+        with_isolated_store(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            let pid = project_id(tmp.path());
 
-        register_project(tmp.path()).unwrap();
-        assert!(get_project(&pid).is_some());
+            register_project(tmp.path()).unwrap();
+            assert!(get_project(&pid).is_some());
 
-        unregister_project(&pid).unwrap();
-        assert!(get_project(&pid).is_none());
+            unregister_project(&pid).unwrap();
+            assert!(get_project(&pid).is_none());
+        });
     }
 
     #[test]
     fn validate_detects_stale() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
-        register_project(tmp.path()).unwrap();
+        with_isolated_store(|| {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
+            register_project(tmp.path()).unwrap();
 
-        let pid = project_id(tmp.path());
+            let pid = project_id(tmp.path());
+            std::fs::remove_dir_all(tmp.path().join(".edda")).unwrap();
 
-        // Remove .edda/ to make it stale
-        std::fs::remove_dir_all(tmp.path().join(".edda")).unwrap();
-
-        let (valid, stale) = validate_projects();
-        assert!(stale.iter().any(|p| p.project_id == pid));
-        assert!(!valid.iter().any(|p| p.project_id == pid));
-
-        unregister_project(&pid).unwrap();
+            let (valid, stale) = validate_projects();
+            assert!(stale.iter().any(|p| p.project_id == pid));
+            assert!(!valid.iter().any(|p| p.project_id == pid));
+        });
     }
 }

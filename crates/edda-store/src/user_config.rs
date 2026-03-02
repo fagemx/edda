@@ -46,32 +46,34 @@ pub fn set_user_config(key: &str, value: Value) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn load_returns_empty_when_no_file() {
-        // This test relies on the default store_root; just verify it doesn't panic
-        let _ = load_user_config();
+    /// Run a closure with `EDDA_STORE_ROOT` pointing to an isolated tempdir.
+    fn with_isolated_store(f: impl FnOnce()) {
+        let store = tempfile::tempdir().unwrap();
+        // Safety: these tests are independent since each gets its own tempdir
+        std::env::set_var("EDDA_STORE_ROOT", store.path());
+        f();
+        std::env::remove_var("EDDA_STORE_ROOT");
     }
 
-    // Note: set/get tests use the global ~/.edda/config.json and must be run
-    // sequentially to avoid Windows file-locking races. We combine them into
-    // a single test to avoid concurrency issues.
+    #[test]
+    fn load_returns_empty_when_no_file() {
+        with_isolated_store(|| {
+            let config = load_user_config();
+            assert!(config.is_empty());
+        });
+    }
+
     #[test]
     fn set_get_and_overwrite_roundtrip() {
-        let key = &format!("test_key_{}", std::process::id());
+        with_isolated_store(|| {
+            set_user_config("test_key", Value::String("hello".into())).unwrap();
+            let val = get_user_config("test_key");
+            assert_eq!(val, Some(Value::String("hello".into())));
 
-        // Initial set
-        set_user_config(key, Value::String("hello".into())).unwrap();
-        let val = get_user_config(key);
-        assert_eq!(val, Some(Value::String("hello".into())));
-
-        // Overwrite
-        set_user_config(key, Value::Number(42.into())).unwrap();
-        let val = get_user_config(key);
-        assert_eq!(val, Some(Value::Number(42.into())));
-
-        // Cleanup
-        let mut config = load_user_config();
-        config.remove(key);
-        let _ = save_user_config(&config);
+            // Overwrite
+            set_user_config("test_key", Value::Number(42.into())).unwrap();
+            let val = get_user_config("test_key");
+            assert_eq!(val, Some(Value::Number(42.into())));
+        });
     }
 }
