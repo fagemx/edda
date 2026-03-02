@@ -1,3 +1,6 @@
+pub mod registry;
+pub mod user_config;
+
 use fs2::FileExt;
 use std::fs;
 use std::io::Write;
@@ -69,7 +72,12 @@ fn normalize_path(p: &Path) -> String {
 
 /// Return the per-user store root: `~/.edda/`
 /// Windows: `%APPDATA%\edda\` (falls back to `%USERPROFILE%\.edda\`)
+///
+/// Override with `EDDA_STORE_ROOT` env var (useful for testing).
 pub fn store_root() -> PathBuf {
+    if let Ok(custom) = std::env::var("EDDA_STORE_ROOT") {
+        return PathBuf::from(custom);
+    }
     if let Some(data_dir) = dirs::data_dir() {
         data_dir.join("edda")
     } else if let Some(home) = dirs::home_dir() {

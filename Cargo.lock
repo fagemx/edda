@@ -642,6 +642,7 @@ dependencies = [
  "clap",
  "crossterm",
  "ctrlc",
+ "edda-aggregate",
  "edda-ask",
  "edda-bridge-claude",
  "edda-bridge-openclaw",
@@ -668,6 +669,20 @@ dependencies = [
  "tokio",
  "tokio-util",
  "ulid",
+]
+
+[[package]]
+name = "edda-aggregate"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "edda-core",
+ "edda-ledger",
+ "edda-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
 ]
 
 [[package]]
@@ -859,10 +874,12 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
+ "edda-aggregate",
  "edda-ask",
  "edda-core",
  "edda-derive",
  "edda-ledger",
+ "edda-store",
  "serde",
  "serde_json",
  "tempfile",
@@ -883,6 +900,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "time",
 ]
 
 [[package]]
