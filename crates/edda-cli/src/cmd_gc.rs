@@ -288,6 +288,23 @@ pub fn execute(params: &GcParams) -> anyhow::Result<()> {
         }
     }
 
+    // Phase 4d: Registry cleanup (prune stale project entries)
+    if params.global {
+        let (_valid, stale) = edda_store::registry::validate_projects();
+        if !stale.is_empty() {
+            for entry in &stale {
+                if !params.dry_run {
+                    let _ = edda_store::registry::unregister_project(&entry.project_id);
+                }
+            }
+            println!(
+                "  {} stale project(s) {} from registry",
+                stale.len(),
+                if params.dry_run { "found" } else { "removed" }
+            );
+        }
+    }
+
     // Phase 5: Execute or dry-run
     let total_items = candidates.len() + transcript_candidates.len() + session_candidates.len();
     if total_items == 0 {
