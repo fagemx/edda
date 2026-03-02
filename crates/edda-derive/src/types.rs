@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 // ── Data structures ──
 
 #[derive(Debug, Clone)]
@@ -63,6 +65,12 @@ pub struct SessionDigestEntry {
     pub outcome: String,
     /// Session notes written by agent via `edda note --tag session`.
     pub notes: Vec<String>,
+    /// Per-tool call counts (e.g. "Read" -> 15, "Edit" -> 8).
+    pub tool_call_breakdown: BTreeMap<String, u64>,
+    /// Ratio of edit tools (Edit, Write, NotebookEdit) to total tool calls.
+    pub edit_ratio: f64,
+    /// Ratio of search tools (Read, Grep, Glob, Agent) to total tool calls.
+    pub search_ratio: f64,
 }
 
 pub struct BranchSnapshot {
