@@ -25,6 +25,7 @@ mod cmd_search;
 mod cmd_serve;
 mod cmd_status;
 mod cmd_switch;
+mod cmd_user;
 mod cmd_watch;
 mod pipeline_templates;
 #[cfg(feature = "tui")]
@@ -364,6 +365,11 @@ enum Command {
         /// Also clean session ledgers, index files, and stale state files
         #[arg(long)]
         include_sessions: bool,
+    },
+    /// User-level aggregation (cross-repo queries, rollup, config)
+    User {
+        #[command(subcommand)]
+        cmd: cmd_user::UserCmd,
     },
 }
 
@@ -959,5 +965,6 @@ fn main() -> anyhow::Result<()> {
             archive_keep_days,
             include_sessions,
         }),
+        Command::User { cmd } => cmd_user::execute(cmd),
     }
 }
