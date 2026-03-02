@@ -147,14 +147,9 @@ pub fn validate_projects() -> (Vec<ProjectEntry>, Vec<ProjectEntry>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Serialize registry tests so EDDA_STORE_ROOT env var doesn't conflict.
-    static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
-
     /// Run a closure with `EDDA_STORE_ROOT` pointing to an isolated tempdir.
     fn with_isolated_store(f: impl FnOnce()) {
-        let _guard = REGISTRY_LOCK.lock().unwrap();
+        let _guard = crate::ENV_STORE_LOCK.lock().unwrap();
         let store = tempfile::tempdir().unwrap();
         std::env::set_var("EDDA_STORE_ROOT", store.path());
         f();
