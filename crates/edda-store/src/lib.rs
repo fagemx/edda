@@ -1,3 +1,6 @@
+pub mod registry;
+pub mod user_config;
+
 use fs2::FileExt;
 use std::fs;
 use std::io::Write;

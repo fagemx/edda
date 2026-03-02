@@ -18,3 +18,4 @@ blake3.workspace = true
 dirs.workspace = true
 tempfile.workspace = true
 fs2.workspace = true
+time.workspace = true
