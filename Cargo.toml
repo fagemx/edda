@@ -16,6 +16,7 @@ members = [
     "crates/edda-conductor",
     "crates/edda-serve",
     "crates/edda-notify",
+    "crates/edda-postmortem",
     "crates/edda-cli",  # crate name: "edda"
 ]
 

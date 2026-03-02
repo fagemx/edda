@@ -1589,7 +1589,7 @@ mod tests {
                 hash: "abc1234".into(),
                 message: "feat: add JWT auth".into(),
             }],
-            failed_commands: vec![],
+            ..Default::default()
         };
 
         write_heartbeat(pid, sid, &signals, Some("auth"));

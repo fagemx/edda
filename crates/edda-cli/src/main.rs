@@ -20,6 +20,7 @@ mod cmd_phase;
 mod cmd_pipeline;
 mod cmd_plan;
 mod cmd_rebuild;
+mod cmd_rules;
 mod cmd_run;
 mod cmd_search;
 mod cmd_serve;
@@ -169,7 +170,7 @@ enum Command {
     },
     /// Query events from the ledger with filters
     Log {
-        /// Filter by event type (note, cmd, commit, merge, etc.)
+        /// Filter by event type (note, cmd, commit, merge, session, etc.)
         #[arg(long = "type")]
         event_type: Option<String>,
         /// Filter by event family (signal, milestone, admin, governance)
@@ -190,6 +191,9 @@ enum Command {
         /// Filter by branch name
         #[arg(long)]
         branch: Option<String>,
+        /// Filter session digests by tool name (e.g. Edit, Read, Bash)
+        #[arg(long)]
+        tool: Option<String>,
         /// Maximum number of events to show (0 = unlimited)
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -272,6 +276,11 @@ enum Command {
     Pattern {
         #[command(subcommand)]
         cmd: cmd_pattern::PatternCmd,
+    },
+    /// Manage learned rules from L3 post-mortem analysis
+    Rules {
+        #[command(subcommand)]
+        cmd: cmd_rules::RulesCmd,
     },
     /// MCP server operations
     Mcp {
@@ -865,6 +874,7 @@ fn main() -> anyhow::Result<()> {
             after,
             before,
             branch,
+            tool,
             limit,
             json,
         } => cmd_log::execute(&cmd_log::LogParams {
@@ -876,6 +886,7 @@ fn main() -> anyhow::Result<()> {
             after: after.as_deref(),
             before: before.as_deref(),
             branch: branch.as_deref(),
+            tool: tool.as_deref(),
             limit,
             json,
         }),
@@ -897,6 +908,7 @@ fn main() -> anyhow::Result<()> {
         Command::Index { cmd } => cmd_bridge::run_index(cmd),
         Command::Config { cmd } => cmd_config::run(cmd, &repo_root),
         Command::Pattern { cmd } => cmd_pattern::run(cmd, &repo_root),
+        Command::Rules { cmd } => cmd_rules::run(cmd, &repo_root),
         Command::Mcp { cmd } => match cmd {
             McpCommand::Serve => {
                 tokio::runtime::Runtime::new()?.block_on(edda_mcp::serve(&repo_root))?;

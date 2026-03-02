@@ -182,7 +182,7 @@ mod tests {
                 hash: "abc1234".into(),
                 message: "fix: bug".into(),
             }],
-            failed_commands: vec![],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 
@@ -256,6 +256,7 @@ mod tests {
                 stderr_snippet: "thread 'test' panicked".into(),
                 count: 2,
             }],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 
@@ -326,7 +327,7 @@ mod tests {
                     message: "second commit".into(),
                 },
             ],
-            failed_commands: vec![],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 
@@ -354,8 +355,7 @@ mod tests {
                     count: 30,
                 },
             ],
-            commits: vec![],
-            failed_commands: vec![],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 

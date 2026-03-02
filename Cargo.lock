@@ -653,6 +653,7 @@ dependencies = [
  "edda-mcp",
  "edda-notify",
  "edda-pack",
+ "edda-postmortem",
  "edda-search-fts",
  "edda-serve",
  "edda-store",
@@ -695,6 +696,7 @@ dependencies = [
  "edda-ledger",
  "edda-notify",
  "edda-pack",
+ "edda-postmortem",
  "edda-store",
  "edda-transcript",
  "globset",
@@ -835,6 +837,22 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "edda-postmortem"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "edda-core",
+ "edda-store",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "time",
+ "ulid",
 ]
 
 [[package]]

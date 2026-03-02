@@ -1,0 +1,24 @@
+[package]
+name = "edda-postmortem"
+description = "L3 post-mortem analysis and learned rules with TTL decay for Edda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+edda-core = { path = "../edda-core", version = "0.1.1" }
+edda-store = { path = "../edda-store", version = "0.1.1" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+ulid.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
