@@ -654,6 +654,7 @@ dependencies = [
  "edda-mcp",
  "edda-notify",
  "edda-pack",
+ "edda-postmortem",
  "edda-search-fts",
  "edda-serve",
  "edda-store",
@@ -710,6 +711,7 @@ dependencies = [
  "edda-ledger",
  "edda-notify",
  "edda-pack",
+ "edda-postmortem",
  "edda-store",
  "edda-transcript",
  "globset",
@@ -853,6 +855,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "edda-postmortem"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "edda-core",
+ "edda-store",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "time",
+ "ulid",
+]
+
+[[package]]
 name = "edda-search-fts"
 version = "0.1.1"
 dependencies = [
@@ -874,12 +892,10 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
- "edda-aggregate",
  "edda-ask",
  "edda-core",
  "edda-derive",
  "edda-ledger",
- "edda-store",
  "serde",
  "serde_json",
  "tempfile",

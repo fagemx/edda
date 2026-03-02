@@ -255,8 +255,17 @@ mod tests {
 
         execute(&tmp, true, false).unwrap();
 
-        for name in ["coord-sync", "coord-handoff", "coord-request", "coord-review"] {
-            let path = tmp.join(".claude").join("skills").join(name).join("SKILL.md");
+        for name in [
+            "coord-sync",
+            "coord-handoff",
+            "coord-request",
+            "coord-review",
+        ] {
+            let path = tmp
+                .join(".claude")
+                .join("skills")
+                .join(name)
+                .join("SKILL.md");
             assert!(path.exists(), "{name}/SKILL.md should be scaffolded");
             let content = std::fs::read_to_string(&path).unwrap();
             assert!(
@@ -279,7 +288,10 @@ mod tests {
 
         // Should NOT be overwritten
         let content = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-        assert_eq!(content, "custom content", "should not overwrite existing skill");
+        assert_eq!(
+            content, "custom content",
+            "should not overwrite existing skill"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

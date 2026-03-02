@@ -641,6 +641,9 @@ fn dispatch_session_end(
         signal_count,
     );
 
+    // 2e. L3 post-mortem analysis (best-effort, fire-and-forget)
+    run_postmortem(project_id, session_id, cwd);
+
     // 2d. Push notification (best-effort, fire-and-forget)
     notify_session_end(project_id, cwd, session_id);
 
@@ -687,6 +690,102 @@ fn notify_session_end(project_id: &str, cwd: &str, session_id: &str) {
             duration_minutes,
             summary,
         },
+    );
+}
+
+/// L3 post-mortem analysis: evaluate triggers, propose rules, store lessons.
+///
+/// Best-effort — all errors are silently swallowed. The session-end hook must
+/// never fail because of post-mortem logic.
+fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
+    if std::env::var("EDDA_POSTMORTEM").unwrap_or_else(|_| "1".into()) == "0" {
+        return;
+    }
+
+    let store_path = edda_store::project_dir(project_id)
+        .join("ledger")
+        .join(format!("{session_id}.jsonl"));
+    if !store_path.exists() {
+        return;
+    }
+    let stats = match crate::digest::extract_stats(&store_path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let summary = edda_postmortem::trigger::SessionSummary {
+        session_id: session_id.to_string(),
+        user_prompts: stats.user_prompts,
+        tool_failures: stats.tool_failures,
+        failed_commands: stats.failed_commands.clone(),
+        file_edit_counts: stats.file_edit_counts.clone(),
+        decisions_superseded: 0,
+        had_conflict: false,
+        outcome: stats.outcome.to_string(),
+    };
+
+    let trigger = edda_postmortem::trigger::evaluate_triggers(&summary);
+    if !trigger.should_analyze {
+        return;
+    }
+
+    let input = edda_postmortem::analyzer::AnalysisInput {
+        session_id: session_id.to_string(),
+        user_prompts: stats.user_prompts,
+        tool_failures: stats.tool_failures,
+        failed_commands: stats.failed_commands.clone(),
+        files_modified: stats.files_modified.clone(),
+        file_edit_counts: stats.file_edit_counts.clone(),
+        commits_made: stats.commits_made.clone(),
+        decisions_superseded: 0,
+        had_conflict: false,
+        outcome: stats.outcome.to_string(),
+        duration_minutes: stats.duration_minutes,
+    };
+
+    let result = edda_postmortem::analyzer::analyze(&trigger, &input);
+
+    let mut rules_store = edda_postmortem::RulesStore::load_project(project_id);
+    for proposal in &result.rule_proposals {
+        rules_store.propose_rule(
+            proposal.trigger.clone(),
+            proposal.action.clone(),
+            proposal.anchor_file.clone(),
+            proposal.category.clone(),
+            session_id.to_string(),
+            None,
+        );
+    }
+
+    // Rate-limited decay: only run once per day
+    let should_decay = match &rules_store.last_decay_run {
+        Some(last) => {
+            let today = time::OffsetDateTime::now_utc().date().to_string();
+            !last.starts_with(&today)
+        }
+        None => true,
+    };
+    if should_decay {
+        rules_store.run_decay_cycle();
+    }
+
+    let _ = rules_store.save_project(project_id);
+
+    let mut lessons_store = edda_postmortem::lessons::LessonsStore::load_project(project_id);
+    lessons_store.add_lessons(&result.lessons, session_id);
+    let _ = lessons_store.save_project(project_id);
+
+    // Sync top lessons to CLAUDE.md (best-effort)
+    let claude_md_path = Path::new(cwd).join("CLAUDE.md");
+    if claude_md_path.exists() {
+        let _ = lessons_store.sync_to_claude_md(&claude_md_path, 10);
+    }
+
+    eprintln!(
+        "[edda L3] post-mortem: {} triggers, {} lessons, {} rule proposals",
+        result.triggers.len(),
+        result.lessons.len(),
+        result.rule_proposals.len(),
     );
 }
 
@@ -1061,12 +1160,18 @@ fn dispatch_pre_tool_use(
     // Check for pending requests (with cooldown: once per 3 tool calls)
     let request_nudge = check_pending_requests(project_id, session_id);
 
-    // Combine pattern context and request nudge
-    let combined_ctx = match (pattern_ctx, request_nudge) {
-        (Some(p), Some(r)) => Some(format!("{p}\n\n{r}")),
-        (Some(p), None) => Some(p),
-        (None, Some(r)) => Some(r),
-        (None, None) => None,
+    // L3: evaluate learned rules (warn-only, via additionalContext)
+    let rules_warning = evaluate_learned_rules(raw, project_id, cwd);
+
+    // Combine pattern context, request nudge, and rules warning
+    let combined_ctx = [pattern_ctx, request_nudge, rules_warning]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let combined_ctx = if combined_ctx.is_empty() {
+        None
+    } else {
+        Some(combined_ctx.join("\n\n"))
     };
 
     if auto_approve == "1" {
@@ -1119,6 +1224,49 @@ fn check_pending_requests(project_id: &str, session_id: &str) -> Option<String> 
         lines.push(format!("  - From **{}**: {}", r.from_label, r.message));
     }
     Some(lines.join("\n"))
+}
+
+/// L3: evaluate learned rules against the current PreToolUse hook context.
+/// Returns a warning string if any rules triggered, None otherwise.
+fn evaluate_learned_rules(raw: &serde_json::Value, project_id: &str, cwd: &str) -> Option<String> {
+    if std::env::var("EDDA_POSTMORTEM").unwrap_or_else(|_| "1".into()) == "0" {
+        return None;
+    }
+
+    let mut rules_store = edda_postmortem::RulesStore::load_project(project_id);
+    if rules_store.active_rules().is_empty() {
+        return None;
+    }
+
+    let tool_name = get_str(raw, "tool_name");
+    let file_path = raw
+        .pointer("/tool_input/file_path")
+        .or_else(|| raw.pointer("/input/file_path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let files_touched = if file_path.is_empty() {
+        vec![]
+    } else {
+        vec![file_path]
+    };
+
+    let hook_ctx = edda_postmortem::hooks::HookContext {
+        hook_event: "PreToolUse".to_string(),
+        tool_name,
+        files_touched,
+        cwd: cwd.to_string(),
+    };
+
+    let result = edda_postmortem::hooks::evaluate_rules(&rules_store, &hook_ctx);
+
+    // Record hits so matched rules get their TTL reset
+    if !result.matched_rule_ids.is_empty() {
+        edda_postmortem::hooks::record_matched_hits(&mut rules_store, &result.matched_rule_ids);
+        let _ = rules_store.save_project(project_id);
+    }
+
+    edda_postmortem::hooks::format_warnings(&result)
 }
 
 /// Best-effort write of a `commit` event to the workspace ledger.

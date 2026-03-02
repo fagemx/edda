@@ -20,6 +20,7 @@ mod cmd_phase;
 mod cmd_pipeline;
 mod cmd_plan;
 mod cmd_rebuild;
+mod cmd_rules;
 mod cmd_run;
 mod cmd_search;
 mod cmd_serve;
@@ -370,6 +371,11 @@ enum Command {
     User {
         #[command(subcommand)]
         cmd: cmd_user::UserCmd,
+    },
+    /// L3 post-mortem learned rules management
+    Rules {
+        #[command(subcommand)]
+        cmd: cmd_rules::RulesCmd,
     },
 }
 
@@ -966,5 +972,6 @@ fn main() -> anyhow::Result<()> {
             include_sessions,
         }),
         Command::User { cmd } => cmd_user::execute(cmd),
+        Command::Rules { cmd } => cmd_rules::execute(cmd, &repo_root),
     }
 }

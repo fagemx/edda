@@ -17,6 +17,7 @@ edda-index = { path = "../edda-index", version = "0.1.1" }
 edda-pack = { path = "../edda-pack", version = "0.1.1" }
 edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
 edda-notify = { path = "../edda-notify", version = "0.1.1" }
+edda-postmortem = { path = "../edda-postmortem", version = "0.1.1" }
 edda-derive = { path = "../edda-derive", version = "0.1.1" }
 anyhow.workspace = true
 thiserror.workspace = true
