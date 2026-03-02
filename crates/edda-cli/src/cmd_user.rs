@@ -288,7 +288,7 @@ fn execute_config(cmd: UserConfigCmd) -> anyhow::Result<()> {
         }
         UserConfigCmd::Set { key, value } => {
             let parsed: serde_json::Value =
-                serde_json::from_str(&value).unwrap_or_else(|_| serde_json::Value::String(value));
+                serde_json::from_str(&value).unwrap_or(serde_json::Value::String(value));
             user_config::set_user_config(&key, parsed)?;
             println!("Set {key}");
             Ok(())

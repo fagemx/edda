@@ -28,6 +28,7 @@ edda-pack = { path = "../edda-pack", version = "0.1.1" }
 edda-mcp = { path = "../edda-mcp", version = "0.1.1" }
 edda-serve = { path = "../edda-serve", version = "0.1.1" }
 edda-notify = { path = "../edda-notify", version = "0.1.1" }
+edda-postmortem = { path = "../edda-postmortem", version = "0.1.1" }
 edda-search-fts = { path = "../edda-search-fts", version = "0.1.1" }
 edda-conductor = { path = "../edda-conductor", version = "0.1.1" }
 ratatui = { version = "0.29", optional = true }

@@ -134,6 +134,10 @@ pub fn lock_file(path: &Path) -> anyhow::Result<LockGuard> {
     Ok(LockGuard { _file: file })
 }
 
+/// Serialize tests that mutate `EDDA_STORE_ROOT` env var to avoid races.
+#[cfg(test)]
+pub(crate) static ENV_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;

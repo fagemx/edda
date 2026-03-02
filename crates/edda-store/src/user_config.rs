@@ -48,8 +48,8 @@ mod tests {
 
     /// Run a closure with `EDDA_STORE_ROOT` pointing to an isolated tempdir.
     fn with_isolated_store(f: impl FnOnce()) {
+        let _guard = crate::ENV_STORE_LOCK.lock().unwrap();
         let store = tempfile::tempdir().unwrap();
-        // Safety: these tests are independent since each gets its own tempdir
         std::env::set_var("EDDA_STORE_ROOT", store.path());
         f();
         std::env::remove_var("EDDA_STORE_ROOT");
