@@ -1673,6 +1673,7 @@ mod tests {
                 message: "fix: the bug".into(),
             }],
             failed_commands: vec![],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 

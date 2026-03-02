@@ -169,7 +169,7 @@ enum Command {
     },
     /// Query events from the ledger with filters
     Log {
-        /// Filter by event type (note, cmd, commit, merge, etc.)
+        /// Filter by event type (note, cmd, commit, merge, session, etc.)
         #[arg(long = "type")]
         event_type: Option<String>,
         /// Filter by event family (signal, milestone, admin, governance)
@@ -190,6 +190,9 @@ enum Command {
         /// Filter by branch name
         #[arg(long)]
         branch: Option<String>,
+        /// Filter session digests by tool name (e.g. Edit, Read, Bash)
+        #[arg(long)]
+        tool: Option<String>,
         /// Maximum number of events to show (0 = unlimited)
         #[arg(long, default_value_t = 50)]
         limit: usize,
@@ -865,6 +868,7 @@ fn main() -> anyhow::Result<()> {
             after,
             before,
             branch,
+            tool,
             limit,
             json,
         } => cmd_log::execute(&cmd_log::LogParams {
@@ -876,6 +880,7 @@ fn main() -> anyhow::Result<()> {
             after: after.as_deref(),
             before: before.as_deref(),
             branch: branch.as_deref(),
+            tool: tool.as_deref(),
             limit,
             json,
         }),

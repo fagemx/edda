@@ -32,6 +32,27 @@ pub(crate) struct FailedBashCmd {
     pub count: usize,
 }
 
+/// Accumulated token usage from assistant messages in a transcript.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct UsageSnapshot {
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
+}
+
+impl UsageSnapshot {
+    pub fn total_tokens(&self) -> u64 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
 /// All signals extracted from a single transcript scan.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SessionSignals {
@@ -40,6 +61,8 @@ pub(crate) struct SessionSignals {
     pub commits: Vec<CommitInfo>,
     #[serde(default)]
     pub failed_commands: Vec<FailedBashCmd>,
+    #[serde(default)]
+    pub usage: UsageSnapshot,
 }
 
 /// One-pass transcript scan: extract tasks, files modified, and commits.
@@ -50,6 +73,8 @@ pub(crate) fn extract_session_signals(transcript_store_path: &Path) -> SessionSi
         Ok(f) => f,
         Err(_) => return SessionSignals::default(),
     };
+
+    let mut usage = UsageSnapshot::default();
 
     let mut tasks: std::collections::HashMap<String, TaskSnapshot> =
         std::collections::HashMap::new();
@@ -80,7 +105,40 @@ pub(crate) fn extract_session_signals(transcript_store_path: &Path) -> SessionSi
         let record_type = record.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
         match record_type {
+            "system" => {
+                // Extract model from system record
+                if let Some(model) = record.get("model").and_then(|m| m.as_str()) {
+                    if !model.is_empty() {
+                        usage.model = model.to_string();
+                    }
+                }
+            }
             "assistant" => {
+                // Accumulate usage from assistant messages
+                if let Some(u) = record.get("message").and_then(|m| m.get("usage")) {
+                    usage.input_tokens +=
+                        u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    usage.output_tokens +=
+                        u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    usage.cache_read_tokens += u
+                        .get("cache_read_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    usage.cache_creation_tokens += u
+                        .get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                }
+                // Also try model from assistant message
+                if usage.model.is_empty() {
+                    if let Some(model) = record
+                        .get("message")
+                        .and_then(|m| m.get("model"))
+                        .and_then(|m| m.as_str())
+                    {
+                        usage.model = model.to_string();
+                    }
+                }
                 let content = match record
                     .get("message")
                     .and_then(|m| m.get("content"))
@@ -256,6 +314,7 @@ pub(crate) fn extract_session_signals(transcript_store_path: &Path) -> SessionSi
         files_modified: sorted_files,
         commits,
         failed_commands,
+        usage,
     }
 }
 
@@ -354,6 +413,18 @@ pub(crate) fn save_session_signals(project_id: &str, session_id: &str, signals: 
         // Clean up stale file if no failures
         let _ = fs::remove_file(state_dir.join("failed_commands.json"));
     }
+    // Usage
+    {
+        let mut p = serde_json::json!({
+            "session_id": session_id,
+            "updated_at": now_rfc3339(),
+        });
+        p["usage"] = serde_json::to_value(&signals.usage).unwrap_or_default();
+        let _ = fs::write(
+            state_dir.join("usage.json"),
+            serde_json::to_string_pretty(&p).unwrap_or_default(),
+        );
+    }
 }
 
 pub(crate) fn load_state_vec<T: serde::de::DeserializeOwned>(
@@ -375,6 +446,87 @@ pub(crate) fn load_state_vec<T: serde::de::DeserializeOwned>(
     val.get(key)
         .and_then(|t| serde_json::from_value::<Vec<T>>(t.clone()).ok())
         .unwrap_or_default()
+}
+
+/// Read the usage state from the state directory.
+pub fn read_usage_state(project_id: &str) -> UsageSnapshot {
+    let path = edda_store::project_dir(project_id)
+        .join("state")
+        .join("usage.json");
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return UsageSnapshot::default(),
+    };
+    let val: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return UsageSnapshot::default(),
+    };
+    val.get("usage")
+        .and_then(|u| serde_json::from_value::<UsageSnapshot>(u.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// Per-model pricing (USD per million tokens).
+struct ModelPricing {
+    input_per_m: f64,
+    output_per_m: f64,
+}
+
+/// Look up pricing for a model name. Returns None for unknown models.
+fn lookup_pricing(model: &str) -> Option<ModelPricing> {
+    // Check env override first: EDDA_MODEL_PRICING="model:in:out,model2:in:out"
+    if let Some(p) = lookup_pricing_from_env(model) {
+        return Some(p);
+    }
+    // Built-in pricing (Anthropic API rates as of 2025-05)
+    let lower = model.to_lowercase();
+    if lower.contains("opus") {
+        Some(ModelPricing {
+            input_per_m: 15.0,
+            output_per_m: 75.0,
+        })
+    } else if lower.contains("sonnet") {
+        Some(ModelPricing {
+            input_per_m: 3.0,
+            output_per_m: 15.0,
+        })
+    } else if lower.contains("haiku") {
+        Some(ModelPricing {
+            input_per_m: 0.25,
+            output_per_m: 1.25,
+        })
+    } else {
+        None
+    }
+}
+
+/// Parse EDDA_MODEL_PRICING env var for custom pricing.
+fn lookup_pricing_from_env(model: &str) -> Option<ModelPricing> {
+    let env_val = std::env::var("EDDA_MODEL_PRICING").ok()?;
+    let lower_model = model.to_lowercase();
+    for entry in env_val.split(',') {
+        let parts: Vec<&str> = entry.trim().split(':').collect();
+        if parts.len() == 3 && lower_model.contains(&parts[0].to_lowercase()) {
+            let input: f64 = parts[1].parse().ok()?;
+            let output: f64 = parts[2].parse().ok()?;
+            return Some(ModelPricing {
+                input_per_m: input,
+                output_per_m: output,
+            });
+        }
+    }
+    None
+}
+
+/// Estimate cost in USD from a UsageSnapshot.
+pub fn estimate_cost(usage: &UsageSnapshot) -> f64 {
+    let pricing = match lookup_pricing(&usage.model) {
+        Some(p) => p,
+        None => return 0.0,
+    };
+    let input_cost = (usage.input_tokens as f64 / 1_000_000.0) * pricing.input_per_m;
+    let output_cost = (usage.output_tokens as f64 / 1_000_000.0) * pricing.output_per_m;
+    input_cost + output_cost
 }
 
 pub(crate) fn render_blocking_section(project_id: &str) -> Option<String> {
@@ -797,6 +949,7 @@ mod tests {
                 message: "fix".into(),
             }],
             failed_commands: vec![],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 
@@ -1005,6 +1158,7 @@ mod tests {
             ],
             commits: vec![],
             failed_commands: vec![],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 
@@ -1049,6 +1203,7 @@ mod tests {
             ],
             commits: vec![],
             failed_commands: vec![],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 
@@ -1325,5 +1480,118 @@ mod tests {
         let signals = extract_session_signals(&path);
         assert!(signals.failed_commands.is_empty());
         let _ = fs::remove_file(&path);
+    }
+
+    // ── Usage / Cost tests ──
+
+    #[test]
+    fn estimate_cost_sonnet() {
+        let usage = UsageSnapshot {
+            model: "claude-sonnet-4-20250514".into(),
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            ..Default::default()
+        };
+        let cost = estimate_cost(&usage);
+        // input: 1M * $3/M = $3.00, output: 0.1M * $15/M = $1.50 -> $4.50
+        assert!((cost - 4.50).abs() < 0.01, "cost={cost}");
+    }
+
+    #[test]
+    fn estimate_cost_opus() {
+        let usage = UsageSnapshot {
+            model: "claude-opus-4-20250514".into(),
+            input_tokens: 500_000,
+            output_tokens: 50_000,
+            ..Default::default()
+        };
+        let cost = estimate_cost(&usage);
+        // input: 0.5M * $15/M = $7.50, output: 0.05M * $75/M = $3.75 -> $11.25
+        assert!((cost - 11.25).abs() < 0.01, "cost={cost}");
+    }
+
+    #[test]
+    fn estimate_cost_unknown_model() {
+        let usage = UsageSnapshot {
+            model: "gpt-4o".into(),
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            ..Default::default()
+        };
+        let cost = estimate_cost(&usage);
+        assert_eq!(cost, 0.0, "unknown model should return 0");
+    }
+
+    #[test]
+    fn signals_extract_usage_from_transcript() {
+        let records = vec![
+            serde_json::json!({
+                "type": "system",
+                "model": "claude-sonnet-4-20250514"
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "usage": {
+                        "input_tokens": 1000,
+                        "output_tokens": 500,
+                        "cache_read_input_tokens": 200,
+                        "cache_creation_input_tokens": 50
+                    },
+                    "content": [{ "type": "text", "text": "Hello" }]
+                }
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": 2000,
+                        "output_tokens": 800,
+                        "cache_read_input_tokens": 100,
+                        "cache_creation_input_tokens": 0
+                    },
+                    "content": [{ "type": "text", "text": "World" }]
+                }
+            }),
+        ];
+        let path = make_transcript(&records);
+        let signals = extract_session_signals(&path);
+        assert_eq!(signals.usage.model, "claude-sonnet-4-20250514");
+        assert_eq!(signals.usage.input_tokens, 3000);
+        assert_eq!(signals.usage.output_tokens, 1300);
+        assert_eq!(signals.usage.cache_read_tokens, 300);
+        assert_eq!(signals.usage.cache_creation_tokens, 50);
+        assert_eq!(signals.usage.total_tokens(), 4300);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn usage_save_and_read_round_trip() {
+        let pid = "test_usage_rt_00";
+        let _ = edda_store::ensure_dirs(pid);
+
+        let signals = SessionSignals {
+            usage: UsageSnapshot {
+                model: "claude-sonnet-4-20250514".into(),
+                input_tokens: 5000,
+                output_tokens: 2000,
+                cache_read_tokens: 100,
+                cache_creation_tokens: 50,
+            },
+            ..Default::default()
+        };
+        save_session_signals(pid, "test-session", &signals);
+
+        let loaded = read_usage_state(pid);
+        assert_eq!(loaded.model, "claude-sonnet-4-20250514");
+        assert_eq!(loaded.input_tokens, 5000);
+        assert_eq!(loaded.output_tokens, 2000);
+        assert_eq!(loaded.cache_read_tokens, 100);
+        assert_eq!(loaded.cache_creation_tokens, 50);
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }

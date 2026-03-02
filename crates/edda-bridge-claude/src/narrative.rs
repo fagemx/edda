@@ -183,6 +183,7 @@ mod tests {
                 message: "fix: bug".into(),
             }],
             failed_commands: vec![],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 
@@ -256,6 +257,7 @@ mod tests {
                 stderr_snippet: "thread 'test' panicked".into(),
                 count: 2,
             }],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 
@@ -327,6 +329,7 @@ mod tests {
                 },
             ],
             failed_commands: vec![],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 
@@ -356,6 +359,7 @@ mod tests {
             ],
             commits: vec![],
             failed_commands: vec![],
+            ..Default::default()
         };
         save_session_signals(pid, "test-session", &signals);
 
