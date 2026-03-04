@@ -19,6 +19,7 @@ mod cmd_pattern;
 mod cmd_phase;
 mod cmd_pipeline;
 mod cmd_plan;
+mod cmd_prs;
 mod cmd_rebuild;
 mod cmd_rules;
 mod cmd_run;
@@ -313,6 +314,11 @@ enum Command {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Scan and record PR events from GitHub
+    Prs {
+        #[command(subcommand)]
+        cmd: cmd_prs::PrsCmd,
     },
     /// Auto-execution pipeline — skill chain with approval gates
     Pipeline {
@@ -928,6 +934,7 @@ fn main() -> anyhow::Result<()> {
             IntakeCmd::Github { issue_id } => cmd_intake::execute_github(&repo_root, issue_id),
         },
         Command::Phase { json } => cmd_phase::execute(&repo_root, json),
+        Command::Prs { cmd } => cmd_prs::run_prs(cmd, &repo_root),
         Command::Pipeline { cmd } => match cmd {
             PipelineCmd::Run { issue_id, dry_run } => {
                 cmd_pipeline::execute_run(&repo_root, issue_id, dry_run)
