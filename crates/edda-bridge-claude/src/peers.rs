@@ -1224,16 +1224,8 @@ pub(crate) fn render_peer_updates_with(
 
 // ── Auto-Claim ──
 
-/// Derive a scope label and path globs from edited file paths.
-///
-/// Groups files by crate/package directory, returns the dominant group.
-/// Returns `None` if no files modified or no clear grouping.
-fn derive_scope_from_files(files: &[FileEditCount]) -> Option<(String, Vec<String>)> {
-    if files.is_empty() {
-        return None;
-    }
-
-    // Group by crate: look for "crates/{name}" or "packages/{name}" pattern
+/// Try to derive scope from crates/{name} or packages/{name} pattern.
+fn try_crate_pattern(files: &[FileEditCount]) -> Option<(String, Vec<String>)> {
     let mut groups: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for f in files {
         let normalized = f.path.replace('\\', "/");
@@ -1246,28 +1238,80 @@ fn derive_scope_from_files(files: &[FileEditCount]) -> Option<(String, Vec<Strin
         }
     }
 
-    if let Some((label, _)) = groups.iter().max_by_key(|(_, c)| *c) {
-        let paths = vec![format!("crates/{}/*", label)];
-        return Some((label.clone(), paths));
-    }
+    groups
+        .iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(label, _)| (label.clone(), vec![format!("crates/{}/*", label)]))
+}
 
-    // Fallback: use src/{module} grouping
-    let mut src_groups: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+/// Try to derive scope from src/{module} pattern.
+fn try_src_pattern(files: &[FileEditCount]) -> Option<(String, Vec<String>)> {
+    let mut groups: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for f in files {
         let normalized = f.path.replace('\\', "/");
         let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
         if let Some(src_pos) = segments.iter().position(|s| *s == "src") {
             if let Some(module) = segments.get(src_pos + 1) {
                 if !module.contains('.') {
-                    *src_groups.entry(module.to_string()).or_default() += f.count;
+                    *groups.entry(module.to_string()).or_default() += f.count;
                 }
             }
         }
     }
 
-    if let Some((label, _)) = src_groups.iter().max_by_key(|(_, c)| *c) {
-        let paths = vec![format!("src/{}/*", label)];
-        return Some((label.clone(), paths));
+    groups
+        .iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(label, _)| (label.clone(), vec![format!("src/{}/*", label)]))
+}
+
+/// Try to derive scope from top-level directory pattern.
+/// Handles non-Rust projects (JS, Python, Go, etc.).
+fn try_top_level_directory(files: &[FileEditCount]) -> Option<(String, Vec<String>)> {
+    let mut groups: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+    for f in files {
+        let normalized = f.path.replace('\\', "/");
+        let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
+
+        // Get first directory segment
+        if let Some(first_seg) = segments.first() {
+            // Skip hidden directories (start with '.')
+            // Skip root-level files (no directory)
+            if !first_seg.starts_with('.') && segments.len() > 1 {
+                *groups.entry(first_seg.to_string()).or_default() += f.count;
+            }
+        }
+    }
+
+    groups
+        .iter()
+        .max_by_key(|(_, c)| *c)
+        .map(|(label, _)| (label.clone(), vec![format!("{}/*", label)]))
+}
+
+/// Derive a scope label and path globs from edited file paths.
+///
+/// Groups files by crate/package directory, returns the dominant group.
+/// Returns `None` if no files modified or no clear grouping.
+fn derive_scope_from_files(files: &[FileEditCount]) -> Option<(String, Vec<String>)> {
+    if files.is_empty() {
+        return None;
+    }
+
+    // Try 1: crates/{name} or packages/{name}
+    if let Some(result) = try_crate_pattern(files) {
+        return Some(result);
+    }
+
+    // Try 2: src/{module}
+    if let Some(result) = try_src_pattern(files) {
+        return Some(result);
+    }
+
+    // Try 3: top-level directory (for non-Rust projects)
+    if let Some(result) = try_top_level_directory(files) {
+        return Some(result);
     }
 
     None
@@ -3539,5 +3583,153 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // Tests for derive_scope_from_files
+    mod derive_scope_tests {
+        use super::*;
+
+        #[test]
+        fn test_top_level_directory_basic() {
+            let files = vec![
+                FileEditCount {
+                    path: "server/vault.js".to_string(),
+                    count: 2,
+                },
+                FileEditCount {
+                    path: "server/api.js".to_string(),
+                    count: 1,
+                },
+            ];
+
+            let result = derive_scope_from_files(&files);
+            assert_eq!(
+                result,
+                Some(("server".to_string(), vec!["server/*".to_string()]))
+            );
+        }
+
+        #[test]
+        fn test_top_level_directory_mixed() {
+            let files = vec![
+                FileEditCount {
+                    path: "app/hooks/useSSE.ts".to_string(),
+                    count: 3,
+                },
+                FileEditCount {
+                    path: "lib/utils.py".to_string(),
+                    count: 1,
+                },
+            ];
+
+            let result = derive_scope_from_files(&files);
+            // "app" has higher count
+            assert_eq!(result, Some(("app".to_string(), vec!["app/*".to_string()])));
+        }
+
+        #[test]
+        fn test_skip_hidden_directories() {
+            let files = vec![
+                FileEditCount {
+                    path: ".github/workflows/ci.yml".to_string(),
+                    count: 1,
+                },
+                FileEditCount {
+                    path: "server/api.js".to_string(),
+                    count: 2,
+                },
+            ];
+
+            let result = derive_scope_from_files(&files);
+            // Should skip .github and use server
+            assert_eq!(
+                result,
+                Some(("server".to_string(), vec!["server/*".to_string()]))
+            );
+        }
+
+        #[test]
+        fn test_skip_root_level_files() {
+            let files = vec![
+                FileEditCount {
+                    path: "README.md".to_string(),
+                    count: 1,
+                },
+                FileEditCount {
+                    path: "Cargo.toml".to_string(),
+                    count: 1,
+                },
+            ];
+
+            let result = derive_scope_from_files(&files);
+            // Root-level files should not produce a scope
+            assert_eq!(result, None);
+        }
+
+        #[test]
+        fn test_backward_compat_crates() {
+            let files = vec![
+                FileEditCount {
+                    path: "crates/edda-store/src/lib.rs".to_string(),
+                    count: 1,
+                },
+                FileEditCount {
+                    path: "crates/edda-bridge/src/main.rs".to_string(),
+                    count: 2,
+                },
+            ];
+
+            let result = derive_scope_from_files(&files);
+            // Should still use crate-level grouping
+            assert_eq!(
+                result,
+                Some((
+                    "edda-bridge".to_string(),
+                    vec!["crates/edda-bridge/*".to_string()]
+                ))
+            );
+        }
+
+        #[test]
+        fn test_backward_compat_src() {
+            let files = vec![
+                FileEditCount {
+                    path: "src/auth/login.rs".to_string(),
+                    count: 2,
+                },
+                FileEditCount {
+                    path: "src/db/connection.rs".to_string(),
+                    count: 1,
+                },
+            ];
+
+            let result = derive_scope_from_files(&files);
+            // Should still use src/module grouping
+            assert_eq!(
+                result,
+                Some(("auth".to_string(), vec!["src/auth/*".to_string()]))
+            );
+        }
+
+        #[test]
+        fn test_windows_paths() {
+            let files = vec![
+                FileEditCount {
+                    path: "server\\vault.js".to_string(),
+                    count: 1,
+                },
+                FileEditCount {
+                    path: "server\\api.js".to_string(),
+                    count: 2,
+                },
+            ];
+
+            let result = derive_scope_from_files(&files);
+            // Should normalize backslashes
+            assert_eq!(
+                result,
+                Some(("server".to_string(), vec!["server/*".to_string()]))
+            );
+        }
     }
 }
