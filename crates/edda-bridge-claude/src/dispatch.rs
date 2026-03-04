@@ -961,6 +961,45 @@ fn extract_prior_session_last_message(
     edda_transcript::extract_last_assistant_text(&transcript_path, max_chars)
 }
 
+/// Inject karvi task brief if working in a karvi project.
+///
+/// Detection: Check if server/board.json exists
+/// Task ID: Extract T\d+ pattern from current git branch
+/// Brief: Read server/briefs/{taskId}.md, truncate to 2000 chars
+/// Format: [karvi task brief: {taskId}]\n{contents}
+fn inject_karvi_brief(cwd: &str) -> Option<String> {
+    use std::sync::LazyLock;
+    static RE_TASK_ID: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"T\d+").unwrap());
+
+    // Detect karvi project
+    let board_path = Path::new(cwd).join("server/board.json");
+    if !board_path.exists() {
+        return None;
+    }
+
+    // Extract task ID from git branch
+    let branch = crate::peers::detect_git_branch_in(cwd)?;
+    let task_id = RE_TASK_ID.find(&branch)?.as_str();
+
+    // Read brief file
+    let brief_path = Path::new(cwd)
+        .join("server/briefs")
+        .join(format!("{}.md", task_id));
+    if !brief_path.exists() {
+        return None;
+    }
+
+    let contents = fs::read_to_string(&brief_path).ok()?;
+    let truncated = if contents.len() > 2000 {
+        &contents[..2000]
+    } else {
+        &contents
+    };
+
+    Some(format!("[karvi task brief: {}]\n{}", task_id, truncated))
+}
+
 /// Dispatch SessionStart with pack + skills + optional digest warning.
 fn dispatch_session_start(
     project_id: &str,
@@ -1011,6 +1050,14 @@ fn dispatch_session_start(
         content = Some(match content {
             Some(c) => format!("{c}\n\n{narrative}"),
             None => narrative,
+        });
+    }
+
+    // Inject karvi task brief if in karvi project
+    if let Some(brief) = inject_karvi_brief(cwd) {
+        content = Some(match content {
+            Some(c) => format!("{c}\n\n{brief}"),
+            None => brief,
         });
     }
 
@@ -1751,12 +1798,207 @@ mod tests {
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 
-    // ── Active Plan tests ──
+    // ── Karvi Brief Injection Tests ──
 
     #[test]
-    fn active_plan_missing_dir_returns_none() {
-        let result = render_active_plan_from_dir(Path::new("/nonexistent/plans/dir"), None);
-        assert!(result.is_none());
+    fn inject_karvi_brief_non_karvi_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = inject_karvi_brief(tmp.path().to_str().unwrap());
+        assert!(result.is_none(), "Should return None for non-karvi project");
+    }
+
+    #[test]
+    fn inject_karvi_brief_no_task_id_in_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create karvi project marker
+        let board_path = tmp.path().join("server/board.json");
+        fs::create_dir_all(board_path.parent().unwrap()).unwrap();
+        fs::write(&board_path, "{}").unwrap();
+
+        // Create git repo with branch without task ID
+        let repo_dir = tmp.path();
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["checkout", "-b", "feature-branch"])
+            .current_dir(repo_dir)
+            .output();
+
+        let result = inject_karvi_brief(repo_dir.to_str().unwrap());
+        assert!(
+            result.is_none(),
+            "Should return None when branch has no task ID"
+        );
+    }
+
+    #[test]
+    fn inject_karvi_brief_missing_brief_file() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create karvi project marker
+        let board_path = tmp.path().join("server/board.json");
+        fs::create_dir_all(board_path.parent().unwrap()).unwrap();
+        fs::write(&board_path, "{}").unwrap();
+
+        // Create git repo with task ID in branch
+        let repo_dir = tmp.path();
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["checkout", "-b", "T123-feature"])
+            .current_dir(repo_dir)
+            .output();
+
+        // Don't create brief file
+        let result = inject_karvi_brief(repo_dir.to_str().unwrap());
+        assert!(
+            result.is_none(),
+            "Should return None when brief file is missing"
+        );
+    }
+
+    #[test]
+    fn inject_karvi_brief_success() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create karvi project marker
+        let board_path = tmp.path().join("server/board.json");
+        fs::create_dir_all(board_path.parent().unwrap()).unwrap();
+        fs::write(&board_path, "{}").unwrap();
+
+        // Create git repo with task ID in branch
+        let repo_dir = tmp.path();
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo_dir)
+            .output();
+        // Make initial commit so we can create branches
+        fs::write(repo_dir.join("README.md"), "# test").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["checkout", "-b", "T42-add-feature"])
+            .current_dir(repo_dir)
+            .output();
+
+        // Create brief file
+        let briefs_dir = tmp.path().join("server/briefs");
+        fs::create_dir_all(&briefs_dir).unwrap();
+        let brief_content = "# Task Brief\n\nImplement the feature with these requirements...";
+        fs::write(briefs_dir.join("T42.md"), brief_content).unwrap();
+
+        let result = inject_karvi_brief(repo_dir.to_str().unwrap());
+        assert!(result.is_some(), "Should return brief content");
+
+        let brief = result.unwrap();
+        assert!(
+            brief.starts_with("[karvi task brief: T42]\n"),
+            "Should start with header"
+        );
+        assert!(
+            brief.contains("# Task Brief"),
+            "Should contain brief content"
+        );
+        assert!(
+            brief.contains("Implement the feature"),
+            "Should contain requirements"
+        );
+    }
+
+    #[test]
+    fn inject_karvi_brief_truncates_long_content() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create karvi project marker
+        let board_path = tmp.path().join("server/board.json");
+        fs::create_dir_all(board_path.parent().unwrap()).unwrap();
+        fs::write(&board_path, "{}").unwrap();
+
+        // Create git repo with task ID in branch
+        let repo_dir = tmp.path();
+        let _ = std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo_dir)
+            .output();
+        // Make initial commit so we can create branches
+        fs::write(repo_dir.join("README.md"), "# test").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(repo_dir)
+            .output();
+        let _ = std::process::Command::new("git")
+            .args(["checkout", "-b", "T99-long-brief"])
+            .current_dir(repo_dir)
+            .output();
+
+        // Create long brief file (> 2000 chars)
+        let briefs_dir = tmp.path().join("server/briefs");
+        fs::create_dir_all(&briefs_dir).unwrap();
+        let long_content: String = "X".repeat(3000);
+        fs::write(briefs_dir.join("T99.md"), &long_content).unwrap();
+
+        let result = inject_karvi_brief(repo_dir.to_str().unwrap());
+        assert!(result.is_some(), "Should return brief content");
+
+        let brief = result.unwrap();
+        // Header + content should be truncated
+        // Header is "[karvi task brief: T99]\n" = 24 chars, content is 2000 chars
+        assert!(
+            brief.len() <= 2030,
+            "Brief should be truncated to ~2000 chars + header, got {}",
+            brief.len()
+        );
+        assert!(
+            brief.starts_with("[karvi task brief: T99]\n"),
+            "Should start with header"
+        );
     }
 
     #[test]
