@@ -1340,6 +1340,86 @@ fn try_write_merge_event(raw: &serde_json::Value, src: &str, strategy: &str) {
     }
 }
 
+/// Check if current directory is a karvi project (has server/board.json).
+fn is_karvi_project(cwd: &str) -> bool {
+    Path::new(cwd).join("server/board.json").exists()
+}
+
+/// Extract karvi task ID from branch name (e.g., "feat/task-T2-auth" -> "T2").
+fn extract_task_id(branch: &str) -> Option<String> {
+    let re = regex::Regex::new(r"T\d+").ok()?;
+    re.find(branch).map(|m| m.as_str().to_string())
+}
+
+/// Post milestone signal to karvi API (fire-and-forget, best-effort).
+fn try_post_karvi_signal(
+    cwd: &str,
+    signal: &crate::nudge::NudgeSignal,
+    session_id: &str,
+    project_id: &str,
+) {
+    let branch = crate::peers::detect_git_branch_in(cwd);
+    let branch_str = branch.as_deref().unwrap_or("");
+
+    let task_ids: Vec<String> = extract_task_id(branch_str)
+        .map(|id| vec![id])
+        .unwrap_or_default();
+
+    let (signal_type, content) = match signal {
+        crate::nudge::NudgeSignal::Commit(msg) => ("COMMIT", format!("Committed: {}", msg)),
+        crate::nudge::NudgeSignal::Merge(src, strategy) => {
+            ("MERGE", format!("Merged {} ({})", src, strategy))
+        }
+        crate::nudge::NudgeSignal::DependencyAdd(pkg) => {
+            ("DEPENDENCY", format!("Added dependency: {}", pkg))
+        }
+        crate::nudge::NudgeSignal::ConfigChange(file) => {
+            let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+            ("CONFIG", format!("Modified config: {}", name))
+        }
+        crate::nudge::NudgeSignal::SchemaChange(file) => {
+            let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+            ("SCHEMA", format!("Modified schema: {}", name))
+        }
+        crate::nudge::NudgeSignal::NewModule(file) => {
+            let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+            ("MODULE", format!("Created module: {}", name))
+        }
+        crate::nudge::NudgeSignal::SelfRecord => return, // Don't post self-record
+    };
+
+    let karvi_url =
+        std::env::var("KARVI_URL").unwrap_or_else(|_| "http://localhost:3461".to_string());
+    let url = format!("{}/api/signals", karvi_url);
+
+    let payload = serde_json::json!({
+        "type": "agent_milestone",
+        "by": format!("edda:{}", session_id),
+        "content": content,
+        "refs": task_ids,
+        "data": {
+            "signal_type": signal_type,
+            "branch": branch_str,
+            "session_id": session_id,
+            "project_id": project_id,
+        }
+    });
+
+    // Fire-and-forget HTTP POST with timeout
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .new_agent();
+
+    if let Err(e) = agent
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .send(payload.to_string())
+    {
+        eprintln!("[edda-bridge-claude] karvi write-back failed: {}", e);
+    }
+}
+
 /// Dispatch PostToolUse — detect decision signals, nudge, and update agent phase.
 fn dispatch_post_tool_use(
     raw: &serde_json::Value,
@@ -1386,6 +1466,11 @@ fn dispatch_post_tool_use(
             try_write_merge_event(raw, src, strategy)
         }
         _ => {}
+    }
+
+    // Write-back to karvi API if this is a karvi project (fire-and-forget).
+    if is_karvi_project(cwd) {
+        try_post_karvi_signal(cwd, &signal, session_id, project_id);
     }
 
     // Agent is recording a decision → increment counter, but do NOT suppress future nudges.
@@ -3456,5 +3541,38 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    // ── Karvi integration tests ──
+
+    #[test]
+    fn extract_task_id_from_branch() {
+        assert_eq!(extract_task_id("feat/task-T2-auth"), Some("T2".to_string()));
+        assert_eq!(extract_task_id("fix/T5-login-bug"), Some("T5".to_string()));
+        assert_eq!(
+            extract_task_id("feature/T123-complex-feature"),
+            Some("T123".to_string())
+        );
+        assert_eq!(extract_task_id("main"), None);
+        assert_eq!(extract_task_id("feature/no-task-id"), None);
+    }
+
+    #[test]
+    fn is_karvi_project_detection() {
+        use std::fs;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path();
+
+        // Not a karvi project initially
+        assert!(!is_karvi_project(path.to_str().unwrap()));
+
+        // Create server/board.json
+        fs::create_dir_all(path.join("server")).unwrap();
+        fs::write(path.join("server/board.json"), "{}").unwrap();
+
+        // Now it's a karvi project
+        assert!(is_karvi_project(path.to_str().unwrap()));
     }
 }

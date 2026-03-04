@@ -722,6 +722,7 @@ dependencies = [
  "thiserror",
  "time",
  "ulid",
+ "ureq",
 ]
 
 [[package]]
