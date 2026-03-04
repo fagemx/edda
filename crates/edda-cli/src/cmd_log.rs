@@ -297,8 +297,14 @@ fn format_session_digest_detail(event: &Event) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
+    let activity_tag = if activity == "unknown" {
+        String::new()
+    } else {
+        format!(" [{activity}]")
+    };
+
     let mut parts = vec![format!(
-        "{tool_calls} calls, {duration}m, {outcome} [{activity}]"
+        "{tool_calls} calls, {duration}m, {outcome}{activity_tag}"
     )];
 
     // Tool breakdown

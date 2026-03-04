@@ -40,7 +40,7 @@ pub fn reclassify_activity(
 
     // Find session digest event by session_id prefix match
     let events = ledger.iter_events()?;
-    let target_event = events
+    let _target_event = events
         .iter()
         .rev()
         .find(|e| {
