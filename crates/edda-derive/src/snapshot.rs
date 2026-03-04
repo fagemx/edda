@@ -279,6 +279,11 @@ pub(crate) fn build_branch_snapshot(ledger: &Ledger, branch: &str) -> Result<Bra
                             .and_then(|s| s.get("search_ratio"))
                             .and_then(|x| x.as_f64())
                             .unwrap_or(0.0),
+                        activity: stats
+                            .and_then(|s| s.get("activity"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("unknown")
+                            .to_string(),
                     });
                 }
             }

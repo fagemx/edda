@@ -50,6 +50,38 @@ impl std::fmt::Display for SessionOutcome {
     }
 }
 
+/// Activity classification for a session.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityType {
+    #[default]
+    Unknown,
+    Feature,
+    Fix,
+    Debug,
+    Refactor,
+    Docs,
+    Research,
+    Chat,
+    Ops,
+}
+
+impl std::fmt::Display for ActivityType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ActivityType::Unknown => write!(f, "unknown"),
+            ActivityType::Feature => write!(f, "feature"),
+            ActivityType::Fix => write!(f, "fix"),
+            ActivityType::Debug => write!(f, "debug"),
+            ActivityType::Refactor => write!(f, "refactor"),
+            ActivityType::Docs => write!(f, "docs"),
+            ActivityType::Research => write!(f, "research"),
+            ActivityType::Chat => write!(f, "chat"),
+            ActivityType::Ops => write!(f, "ops"),
+        }
+    }
+}
+
 /// Statistics extracted from a session ledger.
 #[derive(Debug, Clone, Default)]
 pub struct SessionStats {
@@ -93,6 +125,8 @@ pub struct SessionStats {
     pub cache_creation_tokens: u64,
     /// Estimated cost in USD.
     pub estimated_cost_usd: f64,
+    /// Activity classification for this session.
+    pub activity: ActivityType,
 }
 
 /// Extract statistics from a session ledger file.
@@ -233,6 +267,9 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
     } else {
         SessionOutcome::Completed
     };
+
+    // Classify activity based on tool patterns
+    stats.activity = classify_activity(&stats);
 
     Ok(stats)
 }
@@ -397,6 +434,79 @@ fn compute_tool_ratios(breakdown: &BTreeMap<String, u64>, total: u64) -> (f64, f
     )
 }
 
+/// Classify session activity based on tool call patterns and file types.
+fn classify_activity(stats: &SessionStats) -> ActivityType {
+    if stats.tool_calls == 0 && stats.user_prompts == 0 {
+        return ActivityType::Unknown;
+    }
+
+    let total = stats.tool_calls;
+    if total == 0 {
+        // Only user prompts, no tools
+        return ActivityType::Chat;
+    }
+
+    let breakdown = &stats.tool_call_breakdown;
+
+    // Compute ratios
+    let edit_count: u64 = ["Edit", "Write"]
+        .iter()
+        .filter_map(|t| breakdown.get(*t))
+        .sum();
+    let search_count: u64 = ["Read", "Grep", "Glob", "Agent"]
+        .iter()
+        .filter_map(|t| breakdown.get(*t))
+        .sum();
+    let bash_count = breakdown.get("Bash").unwrap_or(&0);
+
+    let edit_ratio = edit_count as f64 / total as f64;
+    let search_ratio = search_count as f64 / total as f64;
+    let bash_ratio = *bash_count as f64 / total as f64;
+
+    // Check for docs-only edits
+    let all_docs = stats.files_modified.iter().all(|f| f.ends_with(".md"));
+    if all_docs && edit_ratio > 0.0 && !stats.files_modified.is_empty() {
+        return ActivityType::Docs;
+    }
+
+    // High search, low edit = research
+    if search_ratio > 0.6 && edit_ratio < 0.1 {
+        return ActivityType::Research;
+    }
+
+    // Many failures = debugging
+    if stats.tool_failures > 3 && stats.tool_failures as f64 / total as f64 > 0.2 {
+        return ActivityType::Debug;
+    }
+
+    // Git commits + edits = feature or fix
+    if !stats.commits_made.is_empty() && edit_ratio > 0.1 {
+        // Check commit messages for fix/bug keywords
+        let commit_text = stats.commits_made.join(" ").to_lowercase();
+        if commit_text.contains("fix") || commit_text.contains("bug") {
+            return ActivityType::Fix;
+        }
+        return ActivityType::Feature;
+    }
+
+    // Bash-heavy = ops
+    if bash_ratio > 0.4 {
+        return ActivityType::Ops;
+    }
+
+    // High edit ratio = feature
+    if edit_ratio > 0.3 {
+        return ActivityType::Feature;
+    }
+
+    // Low tool calls = chat
+    if stats.tool_calls < 5 {
+        return ActivityType::Chat;
+    }
+
+    ActivityType::Unknown
+}
+
 /// Build a milestone `Event` from session stats.
 ///
 /// The returned Event has `branch` and `parent_hash` set to the provided
@@ -443,6 +553,7 @@ pub fn build_digest_event(
             "cache_read_tokens": stats.cache_read_tokens,
             "cache_creation_tokens": stats.cache_creation_tokens,
             "estimated_cost_usd": stats.estimated_cost_usd,
+            "activity": stats.activity.to_string(),
             "notes": notes,
         }
     });
@@ -1327,6 +1438,9 @@ pub struct PrevDigest {
     /// Estimated cost in USD.
     #[serde(default)]
     pub estimated_cost_usd: f64,
+    /// Activity classification for this session.
+    #[serde(default)]
+    pub activity: String,
 }
 
 /// Write prev_digest.json from SessionStats + optional ledger extras.
@@ -1381,6 +1495,7 @@ pub fn write_prev_digest(
         cache_read_tokens: stats.cache_read_tokens,
         cache_creation_tokens: stats.cache_creation_tokens,
         estimated_cost_usd: stats.estimated_cost_usd,
+        activity: stats.activity.to_string(),
     };
 
     let path = edda_store::project_dir(project_id)
@@ -3031,5 +3146,72 @@ mod tests {
         assert!((digest.search_ratio - 20.0 / 31.0).abs() < 1e-6);
 
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn classify_docs_only() {
+        let mut stats = SessionStats::default();
+        stats.tool_calls = 10;
+        stats.tool_call_breakdown.insert("Edit".to_string(), 5);
+        stats.files_modified = vec!["README.md".to_string(), "docs/api.md".to_string()];
+        assert_eq!(classify_activity(&stats), ActivityType::Docs);
+    }
+
+    #[test]
+    fn classify_research_heavy() {
+        let mut stats = SessionStats::default();
+        stats.tool_calls = 20;
+        stats.tool_call_breakdown.insert("Read".to_string(), 12);
+        stats.tool_call_breakdown.insert("Grep".to_string(), 5);
+        assert_eq!(classify_activity(&stats), ActivityType::Research);
+    }
+
+    #[test]
+    fn classify_debug_failures() {
+        let mut stats = SessionStats::default();
+        stats.tool_calls = 15;
+        stats.tool_failures = 5;
+        stats.tool_call_breakdown.insert("Bash".to_string(), 10);
+        assert_eq!(classify_activity(&stats), ActivityType::Debug);
+    }
+
+    #[test]
+    fn classify_feature_with_commits() {
+        let mut stats = SessionStats::default();
+        stats.tool_calls = 20;
+        stats.tool_call_breakdown.insert("Edit".to_string(), 8);
+        stats.commits_made = vec!["feat: add new feature".to_string()];
+        assert_eq!(classify_activity(&stats), ActivityType::Feature);
+    }
+
+    #[test]
+    fn classify_fix_with_bug_keyword() {
+        let mut stats = SessionStats::default();
+        stats.tool_calls = 20;
+        stats.tool_call_breakdown.insert("Edit".to_string(), 8);
+        stats.commits_made = vec!["fix: resolve bug in auth".to_string()];
+        assert_eq!(classify_activity(&stats), ActivityType::Fix);
+    }
+
+    #[test]
+    fn classify_ops_bash_heavy() {
+        let mut stats = SessionStats::default();
+        stats.tool_calls = 10;
+        stats.tool_call_breakdown.insert("Bash".to_string(), 6);
+        assert_eq!(classify_activity(&stats), ActivityType::Ops);
+    }
+
+    #[test]
+    fn classify_chat_low_tools() {
+        let mut stats = SessionStats::default();
+        stats.tool_calls = 3;
+        stats.user_prompts = 5;
+        assert_eq!(classify_activity(&stats), ActivityType::Chat);
+    }
+
+    #[test]
+    fn classify_unknown_no_activity() {
+        let stats = SessionStats::default();
+        assert_eq!(classify_activity(&stats), ActivityType::Unknown);
     }
 }
