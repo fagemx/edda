@@ -9,11 +9,13 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
+use edda_aggregate::aggregate::{aggregate_overview, DateRange};
 use edda_core::event::{finalize_event, new_decision_event, new_note_event};
 use edda_core::types::{rel, DecisionPayload, Provenance};
 use edda_derive::{rebuild_branch, render_context, DeriveOptions};
 use edda_ledger::lock::WorkspaceLock;
 use edda_ledger::Ledger;
+use edda_store::registry::list_projects;
 
 // ── Config ──
 
@@ -26,6 +28,11 @@ pub struct ServeConfig {
 
 struct AppState {
     repo_root: PathBuf,
+    chronicle: Option<ChronicleContext>,
+}
+
+struct ChronicleContext {
+    store_root: PathBuf,
 }
 
 impl AppState {
@@ -59,8 +66,16 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         anyhow::bail!("not a edda workspace (run `edda init` first)");
     }
 
+    let store_root = edda_store::store_root();
+    let chronicle = if store_root.exists() {
+        Some(ChronicleContext { store_root })
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         repo_root: repo_root.to_path_buf(),
+        chronicle,
     });
 
     let app = Router::new()
@@ -72,6 +87,10 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/drafts", get(get_drafts))
         .route("/api/note", post(post_note))
         .route("/api/decide", post(post_decide))
+        .route("/api/recap", get(get_recap))
+        .route("/api/recap/cached", get(get_recap_cached))
+        .route("/api/overview", get(get_overview))
+        .route("/api/projects", get(get_projects))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -84,8 +103,16 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
 
 /// Build the router (for testing without binding to a port).
 pub fn router(repo_root: &Path) -> Router {
+    let store_root = edda_store::store_root();
+    let chronicle = if store_root.exists() {
+        Some(ChronicleContext { store_root })
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         repo_root: repo_root.to_path_buf(),
+        chronicle,
     });
     Router::new()
         .route("/api/health", get(health))
@@ -96,6 +123,10 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/drafts", get(get_drafts))
         .route("/api/note", post(post_note))
         .route("/api/decide", post(post_decide))
+        .route("/api/recap", get(get_recap))
+        .route("/api/recap/cached", get(get_recap_cached))
+        .route("/api/overview", get(get_overview))
+        .route("/api/projects", get(get_projects))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -480,6 +511,273 @@ fn find_prior_decision(
         })
 }
 
+// ── GET /api/recap ──
+
+#[derive(Deserialize)]
+struct RecapQuery {
+    project: Option<String>,
+    query: Option<String>,
+    since: Option<String>,
+    week: Option<bool>,
+    scope: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RecapAnchor {
+    #[serde(rename = "type")]
+    anchor_type: String,
+    value: String,
+}
+
+#[derive(Serialize)]
+struct NeedsYouItem {
+    severity: String,
+    summary: String,
+    action: String,
+}
+
+#[derive(Serialize)]
+struct DecisionItem {
+    key: String,
+    value: String,
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct RelatedItem {
+    summary: String,
+    relevance: String,
+}
+
+#[derive(Serialize)]
+struct RecapLayers {
+    net_result: String,
+    needs_you: Vec<NeedsYouItem>,
+    decisions: Vec<DecisionItem>,
+    related: Vec<RelatedItem>,
+}
+
+#[derive(Serialize)]
+struct RecapMeta {
+    sessions_analyzed: usize,
+    llm_used: bool,
+    cached: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cost_usd: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fallback: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RecapResponse {
+    anchor: RecapAnchor,
+    layers: RecapLayers,
+    meta: RecapMeta,
+}
+
+async fn get_recap(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RecapQuery>,
+) -> Result<Json<RecapResponse>, AppError> {
+    if state.chronicle.is_none() {
+        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+    }
+
+    let anchor = if let Some(ref project) = params.project {
+        RecapAnchor {
+            anchor_type: "project".to_string(),
+            value: project.clone(),
+        }
+    } else if let Some(ref query) = params.query {
+        RecapAnchor {
+            anchor_type: "query".to_string(),
+            value: query.clone(),
+        }
+    } else if params.week.unwrap_or(false) {
+        RecapAnchor {
+            anchor_type: "time".to_string(),
+            value: "week".to_string(),
+        }
+    } else if params.scope.as_deref() == Some("all") {
+        RecapAnchor {
+            anchor_type: "scope".to_string(),
+            value: "all".to_string(),
+        }
+    } else {
+        RecapAnchor {
+            anchor_type: "default".to_string(),
+            value: "current".to_string(),
+        }
+    };
+
+    // TODO: Replace with actual edda-chronicle integration when #173 is complete
+    // For now, return a stub response
+    let response = RecapResponse {
+        anchor,
+        layers: RecapLayers {
+            net_result: "Recap engine not yet integrated (depends on #173)".to_string(),
+            needs_you: vec![],
+            decisions: vec![],
+            related: vec![],
+        },
+        meta: RecapMeta {
+            sessions_analyzed: 0,
+            llm_used: false,
+            cached: false,
+            cost_usd: None,
+            fallback: Some("stub".to_string()),
+        },
+    };
+
+    Ok(Json(response))
+}
+
+// ── GET /api/recap/cached ──
+
+#[derive(Deserialize)]
+struct RecapCachedQuery {
+    project: Option<String>,
+}
+
+async fn get_recap_cached(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RecapCachedQuery>,
+) -> Result<Json<RecapResponse>, AppError> {
+    if state.chronicle.is_none() {
+        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+    }
+
+    let anchor = if let Some(ref project) = params.project {
+        RecapAnchor {
+            anchor_type: "project".to_string(),
+            value: project.clone(),
+        }
+    } else {
+        RecapAnchor {
+            anchor_type: "default".to_string(),
+            value: "current".to_string(),
+        }
+    };
+
+    // TODO: Replace with actual cache lookup when #176 is complete
+    // For now, return a 404-like response
+    let response = RecapResponse {
+        anchor,
+        layers: RecapLayers {
+            net_result: "No cached recap available".to_string(),
+            needs_you: vec![],
+            decisions: vec![],
+            related: vec![],
+        },
+        meta: RecapMeta {
+            sessions_analyzed: 0,
+            llm_used: false,
+            cached: true,
+            cost_usd: None,
+            fallback: Some("cache_miss".to_string()),
+        },
+    };
+
+    Ok(Json(response))
+}
+
+// ── GET /api/overview ──
+
+#[derive(Serialize)]
+struct OverviewRedItem {
+    project: String,
+    summary: String,
+    action: String,
+    blocked_count: usize,
+}
+
+#[derive(Serialize)]
+struct OverviewYellowItem {
+    project: String,
+    summary: String,
+    eta: String,
+}
+
+#[derive(Serialize)]
+struct OverviewGreenItem {
+    project: String,
+    summary: String,
+}
+
+#[derive(Serialize)]
+struct OverviewResponse {
+    red: Vec<OverviewRedItem>,
+    yellow: Vec<OverviewYellowItem>,
+    green: Vec<OverviewGreenItem>,
+    updated_at: String,
+}
+
+async fn get_overview(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<OverviewResponse>, AppError> {
+    if state.chronicle.is_none() {
+        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+    }
+
+    let projects = list_projects();
+    let range = DateRange::default();
+    let _aggregate = aggregate_overview(&projects, &range);
+
+    // TODO: Implement actual attention routing logic
+    // For now, return empty lists
+    let now = time::OffsetDateTime::now_utc();
+    let updated_at = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let response = OverviewResponse {
+        red: vec![],
+        yellow: vec![],
+        green: vec![],
+        updated_at,
+    };
+
+    Ok(Json(response))
+}
+
+// ── GET /api/projects ──
+
+#[derive(Serialize)]
+struct ProjectStatus {
+    name: String,
+    id: String,
+    last_activity: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+struct ProjectsResponse {
+    projects: Vec<ProjectStatus>,
+}
+
+async fn get_projects(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ProjectsResponse>, AppError> {
+    if state.chronicle.is_none() {
+        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+    }
+
+    let projects = list_projects();
+    let project_statuses: Vec<ProjectStatus> = projects
+        .into_iter()
+        .map(|p| ProjectStatus {
+            name: p.name,
+            id: p.project_id,
+            last_activity: p.last_seen,
+            status: "unknown".to_string(), // TODO: Calculate from overview
+        })
+        .collect();
+
+    Ok(Json(ProjectsResponse {
+        projects: project_statuses,
+    }))
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -702,5 +1000,107 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["drafts"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn projects_returns_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["projects"].is_array());
+    }
+
+    #[tokio::test]
+    async fn overview_returns_empty_structure() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["red"].as_array().unwrap().is_empty());
+        assert!(json["yellow"].as_array().unwrap().is_empty());
+        assert!(json["green"].as_array().unwrap().is_empty());
+        assert!(json["updated_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn recap_returns_stub_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/recap")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["anchor"].is_object());
+        assert!(json["layers"].is_object());
+        assert!(json["meta"].is_object());
+    }
+
+    #[tokio::test]
+    async fn recap_cached_returns_stub_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/recap/cached")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["anchor"].is_object());
+        assert!(json["meta"]["cached"].is_boolean());
     }
 }
