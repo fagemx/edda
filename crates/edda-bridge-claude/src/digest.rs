@@ -3150,17 +3150,21 @@ mod tests {
 
     #[test]
     fn classify_docs_only() {
-        let mut stats = SessionStats::default();
-        stats.tool_calls = 10;
+        let mut stats = SessionStats {
+            tool_calls: 10,
+            files_modified: vec!["README.md".to_string(), "docs/api.md".to_string()],
+            ..Default::default()
+        };
         stats.tool_call_breakdown.insert("Edit".to_string(), 5);
-        stats.files_modified = vec!["README.md".to_string(), "docs/api.md".to_string()];
         assert_eq!(classify_activity(&stats), ActivityType::Docs);
     }
 
     #[test]
     fn classify_research_heavy() {
-        let mut stats = SessionStats::default();
-        stats.tool_calls = 20;
+        let mut stats = SessionStats {
+            tool_calls: 20,
+            ..Default::default()
+        };
         stats.tool_call_breakdown.insert("Read".to_string(), 12);
         stats.tool_call_breakdown.insert("Grep".to_string(), 5);
         assert_eq!(classify_activity(&stats), ActivityType::Research);
@@ -3168,44 +3172,54 @@ mod tests {
 
     #[test]
     fn classify_debug_failures() {
-        let mut stats = SessionStats::default();
-        stats.tool_calls = 15;
-        stats.tool_failures = 5;
+        let mut stats = SessionStats {
+            tool_calls: 15,
+            tool_failures: 5,
+            ..Default::default()
+        };
         stats.tool_call_breakdown.insert("Bash".to_string(), 10);
         assert_eq!(classify_activity(&stats), ActivityType::Debug);
     }
 
     #[test]
     fn classify_feature_with_commits() {
-        let mut stats = SessionStats::default();
-        stats.tool_calls = 20;
+        let mut stats = SessionStats {
+            tool_calls: 20,
+            commits_made: vec!["feat: add new feature".to_string()],
+            ..Default::default()
+        };
         stats.tool_call_breakdown.insert("Edit".to_string(), 8);
-        stats.commits_made = vec!["feat: add new feature".to_string()];
         assert_eq!(classify_activity(&stats), ActivityType::Feature);
     }
 
     #[test]
     fn classify_fix_with_bug_keyword() {
-        let mut stats = SessionStats::default();
-        stats.tool_calls = 20;
+        let mut stats = SessionStats {
+            tool_calls: 20,
+            commits_made: vec!["fix: resolve bug in auth".to_string()],
+            ..Default::default()
+        };
         stats.tool_call_breakdown.insert("Edit".to_string(), 8);
-        stats.commits_made = vec!["fix: resolve bug in auth".to_string()];
         assert_eq!(classify_activity(&stats), ActivityType::Fix);
     }
 
     #[test]
     fn classify_ops_bash_heavy() {
-        let mut stats = SessionStats::default();
-        stats.tool_calls = 10;
+        let mut stats = SessionStats {
+            tool_calls: 10,
+            ..Default::default()
+        };
         stats.tool_call_breakdown.insert("Bash".to_string(), 6);
         assert_eq!(classify_activity(&stats), ActivityType::Ops);
     }
 
     #[test]
     fn classify_chat_low_tools() {
-        let mut stats = SessionStats::default();
-        stats.tool_calls = 3;
-        stats.user_prompts = 5;
+        let stats = SessionStats {
+            tool_calls: 3,
+            user_prompts: 5,
+            ..Default::default()
+        };
         assert_eq!(classify_activity(&stats), ActivityType::Chat);
     }
 
