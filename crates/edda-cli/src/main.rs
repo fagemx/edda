@@ -20,6 +20,7 @@ mod cmd_phase;
 mod cmd_pipeline;
 mod cmd_plan;
 mod cmd_rebuild;
+mod cmd_recap;
 mod cmd_rules;
 mod cmd_run;
 mod cmd_search;
@@ -133,6 +134,26 @@ enum Command {
         /// Filter by branch
         #[arg(long)]
         branch: Option<String>,
+    },
+    /// Chronicle synthesis - cognitive zoom across sessions
+    Recap {
+        /// Topic query (e.g. "auth", "postgres")
+        query: Option<String>,
+        /// Project name filter
+        #[arg(long)]
+        project: Option<String>,
+        /// Time filter: last week
+        #[arg(long)]
+        week: bool,
+        /// Time filter: since date (ISO 8601)
+        #[arg(long)]
+        since: Option<String>,
+        /// Cross-repo: all projects
+        #[arg(long)]
+        all: bool,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Run a command and record its output
     Run {
@@ -849,6 +870,22 @@ fn main() -> anyhow::Result<()> {
             json,
             all,
             branch.as_deref(),
+        ),
+        Command::Recap {
+            query,
+            project,
+            week,
+            since,
+            all,
+            json,
+        } => cmd_recap::execute(
+            &repo_root,
+            query.as_deref(),
+            project.as_deref(),
+            week,
+            since.as_deref(),
+            all,
+            json,
         ),
         Command::Run { argv } => cmd_run::execute(&repo_root, &argv),
         Command::Status => cmd_status::execute(&repo_root),

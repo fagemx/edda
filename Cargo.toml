@@ -18,6 +18,7 @@ members = [
     "crates/edda-notify",
     "crates/edda-aggregate",
     "crates/edda-postmortem",
+    "crates/edda-chronicle",
     "crates/edda-cli",  # crate name: "edda"
 ]
 
