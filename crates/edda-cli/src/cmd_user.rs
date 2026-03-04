@@ -272,6 +272,17 @@ fn execute_rollup(tool: &str, refresh: bool, json: bool) -> anyhow::Result<()> {
         }
     }
 
+    if let Some(latest) = rollup_data.daily.last() {
+        if !latest.file_edits.is_empty() {
+            println!("\nTop files edited on {}:", latest.date);
+            let mut files: Vec<_> = latest.file_edits.iter().collect();
+            files.sort_by(|a, b| b.1.edits.cmp(&a.1.edits));
+            for (file, stat) in files.iter().take(10) {
+                println!("  {} ({} edits, {} agents)", file, stat.edits, stat.agents);
+            }
+        }
+    }
+
     Ok(())
 }
 

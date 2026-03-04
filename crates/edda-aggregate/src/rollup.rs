@@ -16,6 +16,7 @@ pub struct DayStat {
     pub events: usize,
     pub commits: usize,
     pub sessions: usize,
+    pub file_edits: BTreeMap<String, FileEditStat>,
 }
 
 /// Weekly statistics.
@@ -24,6 +25,7 @@ pub struct WeekStat {
     pub week_start: String,
     pub events: usize,
     pub commits: usize,
+    pub file_edits: BTreeMap<String, FileEditStat>,
 }
 
 /// Monthly statistics.
@@ -32,6 +34,15 @@ pub struct MonthStat {
     pub month: String,
     pub events: usize,
     pub commits: usize,
+    pub file_edits: BTreeMap<String, FileEditStat>,
+}
+
+/// Per-file edit statistics.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FileEditStat {
+    pub edits: u64,
+    pub reverts: u64,
+    pub agents: usize,
 }
 
 /// The full rollup cache.
@@ -79,8 +90,9 @@ pub fn save_rollup(rollup: &Rollup) -> anyhow::Result<()> {
 pub fn compute_rollup(projects: &[ProjectEntry], range: &DateRange, tool: &str) -> Rollup {
     let events_map = aggregate::events_by_date(projects, range);
     let commits_map = aggregate::commits_by_date(projects, range);
+    let file_edits_map = aggregate::file_edits_by_date(projects, range);
 
-    let daily = build_daily_stats(&events_map, &commits_map);
+    let daily = build_daily_stats(&events_map, &commits_map, &file_edits_map);
     let weekly = build_weekly_stats(&daily);
     let monthly = build_monthly_stats(&daily);
 
@@ -159,12 +171,16 @@ pub fn merge_rollups(base: &Rollup, new: &Rollup) -> Rollup {
 fn build_daily_stats(
     events_map: &BTreeMap<String, usize>,
     commits_map: &BTreeMap<String, usize>,
+    file_edits_map: &BTreeMap<String, BTreeMap<String, FileEditStat>>,
 ) -> Vec<DayStat> {
     let mut all_dates: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for key in events_map.keys() {
         all_dates.insert(key.as_str());
     }
     for key in commits_map.keys() {
+        all_dates.insert(key.as_str());
+    }
+    for key in file_edits_map.keys() {
         all_dates.insert(key.as_str());
     }
 
@@ -174,53 +190,72 @@ fn build_daily_stats(
             date: date.to_string(),
             events: events_map.get(date).copied().unwrap_or(0),
             commits: commits_map.get(date).copied().unwrap_or(0),
-            sessions: 0, // sessions don't have a natural daily granularity
+            sessions: 0,
+            file_edits: file_edits_map.get(date).cloned().unwrap_or_default(),
         })
         .collect()
 }
 
 /// Build weekly stats from daily stats.
 fn build_weekly_stats(daily: &[DayStat]) -> Vec<WeekStat> {
-    let mut weekly_map: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut weekly_map: BTreeMap<String, (usize, usize, BTreeMap<String, FileEditStat>)> =
+        BTreeMap::new();
 
     for d in daily {
-        // Parse the date to find the Monday of its ISO week
         if let Some(week_start) = iso_week_start(&d.date) {
-            let entry = weekly_map.entry(week_start).or_insert((0, 0));
+            let entry = weekly_map.entry(week_start).or_default();
             entry.0 += d.events;
             entry.1 += d.commits;
+            merge_file_edits(&mut entry.2, &d.file_edits);
         }
     }
 
     weekly_map
         .into_iter()
-        .map(|(week_start, (events, commits))| WeekStat {
+        .map(|(week_start, (events, commits, file_edits))| WeekStat {
             week_start,
             events,
             commits,
+            file_edits,
         })
         .collect()
 }
 
 /// Build monthly stats from daily stats.
 fn build_monthly_stats(daily: &[DayStat]) -> Vec<MonthStat> {
-    let mut monthly_map: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut monthly_map: BTreeMap<String, (usize, usize, BTreeMap<String, FileEditStat>)> =
+        BTreeMap::new();
 
     for d in daily {
         let month = &d.date[..7.min(d.date.len())]; // "YYYY-MM"
-        let entry = monthly_map.entry(month.to_string()).or_insert((0, 0));
+        let entry = monthly_map.entry(month.to_string()).or_default();
         entry.0 += d.events;
         entry.1 += d.commits;
+        merge_file_edits(&mut entry.2, &d.file_edits);
     }
 
     monthly_map
         .into_iter()
-        .map(|(month, (events, commits))| MonthStat {
+        .map(|(month, (events, commits, file_edits))| MonthStat {
             month,
             events,
             commits,
+            file_edits,
         })
         .collect()
+}
+
+/// Merge file edits from source into destination.
+fn merge_file_edits(
+    dest: &mut BTreeMap<String, FileEditStat>,
+    source: &BTreeMap<String, FileEditStat>,
+) {
+    for (file, source_stat) in source {
+        let entry = dest.entry(file.clone()).or_default();
+        entry.edits += source_stat.edits;
+        entry.reverts += source_stat.reverts;
+        entry.agents = entry.agents.max(source_stat.agents);
+    }
 }
 
 /// Given a date string "YYYY-MM-DD", return the ISO Monday of that week as "YYYY-MM-DD".
@@ -266,12 +301,14 @@ mod tests {
                     events: 5,
                     commits: 1,
                     sessions: 0,
+                    file_edits: BTreeMap::new(),
                 },
                 DayStat {
                     date: "2026-03-02".into(),
                     events: 3,
                     commits: 0,
                     sessions: 0,
+                    file_edits: BTreeMap::new(),
                 },
             ],
             weekly: vec![],
@@ -286,12 +323,14 @@ mod tests {
                     events: 10,
                     commits: 2,
                     sessions: 0,
+                    file_edits: BTreeMap::new(),
                 },
                 DayStat {
                     date: "2026-03-03".into(),
                     events: 7,
                     commits: 3,
                     sessions: 0,
+                    file_edits: BTreeMap::new(),
                 },
             ],
             weekly: vec![],
@@ -321,7 +360,9 @@ mod tests {
         commits.insert("2026-03-01".to_string(), 2);
         commits.insert("2026-03-03".to_string(), 1);
 
-        let daily = build_daily_stats(&events, &commits);
+        let file_edits = BTreeMap::new();
+
+        let daily = build_daily_stats(&events, &commits, &file_edits);
         assert_eq!(daily.len(), 3);
         assert_eq!(daily[0].date, "2026-03-01");
         assert_eq!(daily[0].events, 5);

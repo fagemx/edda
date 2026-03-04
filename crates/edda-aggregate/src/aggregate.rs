@@ -2,6 +2,7 @@
 //!
 //! Lazy aggregation: reads each project's ledger on demand, no persistent DB.
 
+use crate::rollup::FileEditStat;
 use edda_core::Event;
 use edda_ledger::Ledger;
 use edda_store::registry::ProjectEntry;
@@ -270,6 +271,72 @@ pub fn commits_by_date(projects: &[ProjectEntry], range: &DateRange) -> BTreeMap
     }
 
     counts
+}
+
+/// Aggregate file edit counts by date across all projects.
+pub fn file_edits_by_date(
+    projects: &[ProjectEntry],
+    range: &DateRange,
+) -> BTreeMap<String, BTreeMap<String, FileEditStat>> {
+    let mut result: BTreeMap<String, BTreeMap<String, FileEditStat>> = BTreeMap::new();
+
+    for entry in projects {
+        let root = Path::new(&entry.path);
+        let ledger = match Ledger::open(root) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        let events = match ledger.iter_events() {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for event in events.iter().filter(|e| range.matches(&e.ts)) {
+            let date = event.ts.chars().take(10).collect::<String>();
+
+            if let Some(stats) = event.payload.get("session_stats") {
+                if let Some(file_edits) = stats.get("file_edit_counts") {
+                    if let Some(edits_arr) = file_edits.as_array() {
+                        for edit in edits_arr {
+                            if let (Some(path), Some(count)) = (
+                                edit.get("0").and_then(|v| v.as_str()),
+                                edit.get("1").and_then(|v| v.as_u64()),
+                            ) {
+                                let entry = result
+                                    .entry(date.clone())
+                                    .or_default()
+                                    .entry(path.to_string())
+                                    .or_insert(FileEditStat::default());
+                                entry.edits += count;
+                            }
+                        }
+                    }
+                }
+
+                if let Some(_session_id) = event.payload.get("session_id").and_then(|v| v.as_str())
+                {
+                    if let Some(stats) = event.payload.get("session_stats") {
+                        if let Some(file_edits) = stats.get("file_edit_counts") {
+                            if let Some(edits_arr) = file_edits.as_array() {
+                                for edit in edits_arr {
+                                    if let Some(path) = edit.get("0").and_then(|v| v.as_str()) {
+                                        if let Some(file_entry) =
+                                            result.get_mut(&date).and_then(|m| m.get_mut(path))
+                                        {
+                                            file_entry.agents += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
 }
 
 /// Count unique session IDs from events.
