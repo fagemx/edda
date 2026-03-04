@@ -307,7 +307,7 @@ pub fn file_edits_by_date(
                                     .entry(date.clone())
                                     .or_default()
                                     .entry(path.to_string())
-                                    .or_insert(FileEditStat::default());
+                                    .or_default();
                                 entry.edits += count;
                             }
                         }

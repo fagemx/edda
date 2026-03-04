@@ -212,6 +212,13 @@ pub fn plan(project_id: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn wrap_boundary_adds_markers() {
@@ -239,14 +246,16 @@ mod tests {
 
     #[test]
     fn context_budget_uses_env_var() {
+        let _guard = env_lock();
         std::env::set_var("EDDA_MAX_CONTEXT_CHARS", "1234");
         let budget = context_budget("");
-        assert_eq!(budget, 1234);
         std::env::remove_var("EDDA_MAX_CONTEXT_CHARS");
+        assert_eq!(budget, 1234);
     }
 
     #[test]
     fn context_budget_default_without_config() {
+        let _guard = env_lock();
         std::env::remove_var("EDDA_MAX_CONTEXT_CHARS");
         let budget = context_budget("/nonexistent/dir");
         assert_eq!(budget, DEFAULT_MAX_CONTEXT_CHARS);
