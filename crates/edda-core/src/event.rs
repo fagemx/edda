@@ -565,6 +565,55 @@ pub fn new_review_bundle_event(params: &ReviewBundleParams) -> anyhow::Result<Ev
     Ok(event)
 }
 
+/// Parameters for creating a `pr` event.
+#[derive(Debug, Clone)]
+pub struct PrEventParams {
+    pub branch: String,
+    pub parent_hash: Option<String>,
+    pub pr_number: u64,
+    pub pr_status: String,
+    pub review_result: Option<String>,
+    pub blocker_count: u32,
+    pub time_to_merge_hours: Option<f64>,
+    pub created_at: String,
+    pub merged_at: Option<String>,
+    pub author: String,
+    pub title: String,
+}
+
+/// Create a new `pr` event.
+pub fn new_pr_event(params: &PrEventParams) -> anyhow::Result<Event> {
+    let payload = serde_json::json!({
+        "pr_number": params.pr_number,
+        "pr_status": params.pr_status,
+        "review_result": params.review_result,
+        "blocker_count": params.blocker_count,
+        "time_to_merge_hours": params.time_to_merge_hours,
+        "created_at": params.created_at,
+        "merged_at": params.merged_at,
+        "author": params.author,
+        "title": params.title,
+    });
+
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: "pr".to_string(),
+        branch: params.branch.clone(),
+        parent_hash: params.parent_hash.clone(),
+        hash: String::new(),
+        payload,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event);
+    Ok(event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
