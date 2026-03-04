@@ -79,6 +79,13 @@ enum Command {
         #[arg(long = "tag")]
         tags: Vec<String>,
     },
+    /// Reclassify a session's activity type
+    Reclassify {
+        /// Session ID (short form, e.g. first 8 chars)
+        session: String,
+        /// New activity type (feature/fix/debug/refactor/docs/research/chat/ops)
+        activity: String,
+    },
     /// Record a binding decision (shortcut for `bridge claude decide`)
     Decide {
         /// Decision in key=value format (e.g. "db=PostgreSQL")
@@ -923,6 +930,9 @@ fn main() -> anyhow::Result<()> {
         } => cmd_init::execute(&repo_root, no_hooks, force_skills),
         Command::Actor { cmd } => cmd_actor::run(cmd, &repo_root),
         Command::Note { text, role, tags } => cmd_note::execute(&repo_root, &text, &role, &tags),
+        Command::Reclassify { session, activity } => {
+            cmd_note::reclassify_activity(&repo_root, &session, &activity)
+        }
         Command::Decide {
             decision,
             reason,
