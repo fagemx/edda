@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 edda-aggregate = { path = "../edda-aggregate", version = "0.1.1" }
 edda-ask = { path = "../edda-ask", version = "0.1.1" }
+edda-chronicle = { path = "../edda-chronicle", version = "0.1.1" }
 edda-core = { path = "../edda-core", version = "0.1.1" }
 edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
 edda-derive = { path = "../edda-derive", version = "0.1.1" }
@@ -45,6 +46,7 @@ sha2.workspace = true
 hex.workspace = true
 ulid.workspace = true
 time.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
 
 [features]
 default = ["tui"]

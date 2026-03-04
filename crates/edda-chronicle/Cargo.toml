@@ -1,0 +1,29 @@
+[package]
+name = "edda-chronicle"
+description = "Chronicle synthesis engine for Edda - recap and cognitive zoom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+edda-core = { path = "../edda-core", version = "0.1.1" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
+edda-store = { path = "../edda-store", version = "0.1.1" }
+edda-transcript = { path = "../edda-transcript", version = "0.1.1" }
+edda-index = { path = "../edda-index", version = "0.1.1" }
+edda-search-fts = { path = "../edda-search-fts", version = "0.1.1" }
+edda-aggregate = { path = "../edda-aggregate", version = "0.1.1" }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
