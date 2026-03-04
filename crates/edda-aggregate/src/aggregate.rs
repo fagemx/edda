@@ -296,40 +296,29 @@ pub fn file_edits_by_date(
             let date = event.ts.chars().take(10).collect::<String>();
 
             if let Some(stats) = event.payload.get("session_stats") {
-                if let Some(file_edits) = stats.get("file_edit_counts") {
-                    if let Some(edits_arr) = file_edits.as_array() {
-                        for edit in edits_arr {
-                            if let (Some(path), Some(count)) = (
-                                edit.get("0").and_then(|v| v.as_str()),
-                                edit.get("1").and_then(|v| v.as_u64()),
-                            ) {
-                                let entry = result
-                                    .entry(date.clone())
-                                    .or_default()
-                                    .entry(path.to_string())
-                                    .or_default();
-                                entry.edits += count;
-                            }
-                        }
-                    }
-                }
-
-                if let Some(_session_id) = event.payload.get("session_id").and_then(|v| v.as_str())
+                if let Some(edits_arr) = stats
+                    .get("file_edit_counts")
+                    .and_then(|v| v.as_array())
                 {
-                    if let Some(stats) = event.payload.get("session_stats") {
-                        if let Some(file_edits) = stats.get("file_edit_counts") {
-                            if let Some(edits_arr) = file_edits.as_array() {
-                                for edit in edits_arr {
-                                    if let Some(path) = edit.get("0").and_then(|v| v.as_str()) {
-                                        if let Some(file_entry) =
-                                            result.get_mut(&date).and_then(|m| m.get_mut(path))
-                                        {
-                                            file_entry.agents += 1;
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    for edit in edits_arr {
+                        // Vec<(String, u64)> serializes as JSON array ["path", count]
+                        let arr = match edit.as_array() {
+                            Some(a) => a,
+                            None => continue,
+                        };
+                        let path = match arr.first().and_then(|v| v.as_str()) {
+                            Some(p) => p,
+                            None => continue,
+                        };
+                        let count = arr.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+                        let stat = result
+                            .entry(date.clone())
+                            .or_default()
+                            .entry(path.to_string())
+                            .or_default();
+                        stat.edits += count;
+                        // Each session_stats event represents one agent session
+                        stat.agents += 1;
                     }
                 }
             }
@@ -426,5 +415,83 @@ mod tests {
         assert_eq!(result.total_events, 1);
         assert_eq!(result.projects.len(), 1);
         assert_eq!(result.projects[0].event_count, 1);
+    }
+
+    #[test]
+    fn file_edits_by_date_parses_tuples_correctly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let paths = edda_ledger::EddaPaths::discover(root);
+        edda_ledger::ledger::init_workspace(&paths).unwrap();
+        edda_ledger::ledger::init_head(&paths, "main").unwrap();
+
+        let ledger = Ledger::open(root).unwrap();
+
+        // Vec<(String, u64)> serializes as [["path", count], ...] in serde_json
+        let event = edda_core::types::Event {
+            event_id: "evt_test001".to_string(),
+            ts: "2026-03-01T10:00:00Z".to_string(),
+            event_type: "note".to_string(),
+            branch: "main".to_string(),
+            parent_hash: None,
+            hash: String::new(),
+            payload: serde_json::json!({
+                "session_stats": {
+                    "file_edit_counts": [
+                        ["src/main.rs", 5],
+                        ["src/lib.rs", 3]
+                    ]
+                }
+            }),
+            refs: edda_core::types::Refs::default(),
+            schema_version: 1,
+            digests: vec![],
+            event_family: None,
+            event_level: None,
+        };
+        ledger.append_event(&event).unwrap();
+
+        // Second session editing the same file on the same day
+        let event2 = edda_core::types::Event {
+            event_id: "evt_test002".to_string(),
+            ts: "2026-03-01T14:00:00Z".to_string(),
+            event_type: "note".to_string(),
+            branch: "main".to_string(),
+            parent_hash: None,
+            hash: String::new(),
+            payload: serde_json::json!({
+                "session_stats": {
+                    "file_edit_counts": [
+                        ["src/main.rs", 2]
+                    ]
+                }
+            }),
+            refs: edda_core::types::Refs::default(),
+            schema_version: 1,
+            digests: vec![],
+            event_family: None,
+            event_level: None,
+        };
+        ledger.append_event(&event2).unwrap();
+
+        let entry = ProjectEntry {
+            project_id: "test".to_string(),
+            path: root.to_string_lossy().to_string(),
+            name: "test-project".to_string(),
+            registered_at: "2026-03-01T00:00:00Z".to_string(),
+            last_seen: "2026-03-01T00:00:00Z".to_string(),
+        };
+
+        let result = file_edits_by_date(&[entry], &DateRange::default());
+
+        let day = result.get("2026-03-01").expect("date should exist");
+        let main_rs = day.get("src/main.rs").expect("src/main.rs should exist");
+        assert_eq!(main_rs.edits, 7, "edits should be summed across sessions");
+        assert_eq!(main_rs.agents, 2, "two sessions touched src/main.rs");
+
+        let lib_rs = day.get("src/lib.rs").expect("src/lib.rs should exist");
+        assert_eq!(lib_rs.edits, 3);
+        assert_eq!(lib_rs.agents, 1);
     }
 }

@@ -254,7 +254,7 @@ fn merge_file_edits(
         let entry = dest.entry(file.clone()).or_default();
         entry.edits += source_stat.edits;
         entry.reverts += source_stat.reverts;
-        entry.agents = entry.agents.max(source_stat.agents);
+        entry.agents += source_stat.agents;
     }
 }
 
