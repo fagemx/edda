@@ -71,6 +71,8 @@ pub struct SessionDigestEntry {
     pub edit_ratio: f64,
     /// Ratio of search tools (Read, Grep, Glob, Agent) to total tool calls.
     pub search_ratio: f64,
+    /// Activity classification for this session.
+    pub activity: String,
 }
 
 pub struct BranchSnapshot {

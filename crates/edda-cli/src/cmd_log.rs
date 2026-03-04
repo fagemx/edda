@@ -292,8 +292,20 @@ fn format_session_digest_detail(event: &Event) -> String {
         .and_then(|s| s.get("outcome"))
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
+    let activity = ss
+        .and_then(|s| s.get("activity"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
 
-    let mut parts = vec![format!("{tool_calls} calls, {duration}m, {outcome}")];
+    let activity_tag = if activity == "unknown" {
+        String::new()
+    } else {
+        format!(" [{activity}]")
+    };
+
+    let mut parts = vec![format!(
+        "{tool_calls} calls, {duration}m, {outcome}{activity_tag}"
+    )];
 
     // Tool breakdown
     if let Some(tb) = ss
