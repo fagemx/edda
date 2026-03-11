@@ -95,7 +95,11 @@ fn extract_coding_turns(records: &[serde_json::Value], max_turns: usize) -> Vec<
         }
     }
 
-    turns.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
+    turns.sort_by(|a, b| {
+        b.relevance_score
+            .partial_cmp(&a.relevance_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     turns.into_iter().take(max_turns).collect()
 }
 
@@ -158,7 +162,11 @@ fn extract_research_turns(records: &[serde_json::Value], max_turns: usize) -> Ve
         }
     }
 
-    turns.sort_by(|a, b| b.relevance_score.partial_cmp(&a.relevance_score).unwrap());
+    turns.sort_by(|a, b| {
+        b.relevance_score
+            .partial_cmp(&a.relevance_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     turns.into_iter().take(max_turns).collect()
 }
 

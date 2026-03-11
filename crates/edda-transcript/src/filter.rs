@@ -74,13 +74,13 @@ pub fn update_progress_last(progress_map: &mut HashMap<String, Value>, record: &
             .map(|s| s.len() > max_output_chars)
             .unwrap_or(false);
         if needs_truncate {
-            let output = data["output"].as_str().unwrap();
-            // Find a valid char boundary at or before max_output_chars
-            let end = floor_char_boundary(output, max_output_chars);
-            let truncated = output[..end].to_string();
-            data.as_object_mut()
-                .unwrap()
-                .insert("output".into(), Value::String(truncated));
+            if let Some(output) = data["output"].as_str() {
+                let end = floor_char_boundary(output, max_output_chars);
+                let truncated = output[..end].to_string();
+                if let Some(obj) = data.as_object_mut() {
+                    obj.insert("output".into(), Value::String(truncated));
+                }
+            }
         }
     }
 
