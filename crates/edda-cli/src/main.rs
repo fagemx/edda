@@ -72,6 +72,9 @@ enum Command {
         /// Reason for the decision
         #[arg(long)]
         reason: Option<String>,
+        /// Decision keys this decision depends on (repeatable)
+        #[arg(long = "refs")]
+        refs: Vec<String>,
         /// Session ID (auto-inferred from active heartbeats if omitted)
         #[arg(long)]
         session: Option<String>,
@@ -135,6 +138,9 @@ enum Command {
         /// Filter by branch
         #[arg(long)]
         branch: Option<String>,
+        /// Show impact analysis for override safety
+        #[arg(long)]
+        impact: bool,
     },
     /// Chronicle synthesis - cognitive zoom across sessions
     Recap {
@@ -555,6 +561,9 @@ enum BridgeClaudeCmd {
         /// Reason for the decision
         #[arg(long)]
         reason: Option<String>,
+        /// Decision keys this decision depends on (repeatable)
+        #[arg(long = "refs")]
+        refs: Vec<String>,
         /// Session ID (auto-inferred from active heartbeats if omitted)
         #[arg(long)]
         session: Option<String>,
@@ -834,8 +843,15 @@ fn main() -> anyhow::Result<()> {
         Command::Decide {
             decision,
             reason,
+            refs,
             session,
-        } => cmd_bridge::decide(&repo_root, &decision, reason.as_deref(), session.as_deref()),
+        } => cmd_bridge::decide(
+            &repo_root,
+            &decision,
+            reason.as_deref(),
+            &refs,
+            session.as_deref(),
+        ),
         Command::Claim {
             label,
             paths,
@@ -869,6 +885,7 @@ fn main() -> anyhow::Result<()> {
             json,
             all,
             branch,
+            impact,
         } => cmd_ask::execute(
             &repo_root,
             query.as_deref(),
@@ -876,6 +893,7 @@ fn main() -> anyhow::Result<()> {
             json,
             all,
             branch.as_deref(),
+            impact,
         ),
         Command::Recap {
             query,

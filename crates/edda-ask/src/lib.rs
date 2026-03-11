@@ -47,6 +47,10 @@ pub struct AskResult {
     pub related_commits: Vec<CommitHit>,
     pub related_notes: Vec<NoteHit>,
     pub conversations: Vec<ConversationHit>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dependents: Vec<DependentHit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub override_risk: Option<OverrideRisk>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -88,12 +92,29 @@ pub struct ConversationHit {
     pub rank: f64,
 }
 
+// ── Impact types ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DependentHit {
+    pub key: String,
+    pub value: String,
+    pub dep_type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OverrideRisk {
+    pub level: String,
+    pub dependent_count: usize,
+    pub suggestion: Option<String>,
+}
+
 // ── Options ──────────────────────────────────────────────────────────
 
 pub struct AskOptions {
     pub limit: usize,
     pub include_superseded: bool,
     pub branch: Option<String>,
+    pub impact: bool,
 }
 
 impl Default for AskOptions {
@@ -102,6 +123,7 @@ impl Default for AskOptions {
             limit: 20,
             include_superseded: false,
             branch: None,
+            impact: false,
         }
     }
 }
@@ -244,6 +266,18 @@ pub fn ask(
         InputType::Overview => "overview",
     };
 
+    // Impact analysis: only for ExactKey queries with --impact
+    let (dependents, override_risk) = if opts.impact && matches!(input_type, InputType::ExactKey(_))
+    {
+        if let InputType::ExactKey(ref key) = input_type {
+            compute_impact(ledger, key)?
+        } else {
+            (vec![], None)
+        }
+    } else {
+        (vec![], None)
+    };
+
     Ok(AskResult {
         query: q.to_string(),
         input_type: input_type_str.to_string(),
@@ -252,7 +286,57 @@ pub fn ask(
         related_commits,
         related_notes,
         conversations,
+        dependents,
+        override_risk,
     })
+}
+
+// ── Impact analysis helpers ──────────────────────────────────────────
+
+fn compute_impact(
+    ledger: &Ledger,
+    key: &str,
+) -> anyhow::Result<(Vec<DependentHit>, Option<OverrideRisk>)> {
+    let active_deps = ledger.active_dependents_of(key)?;
+    let dependents: Vec<DependentHit> = active_deps
+        .iter()
+        .map(|(dep, decision)| DependentHit {
+            key: decision.key.clone(),
+            value: decision.value.clone(),
+            dep_type: dep.dep_type.clone(),
+        })
+        .collect();
+    let risk = compute_override_risk(&dependents);
+    Ok((dependents, Some(risk)))
+}
+
+fn compute_override_risk(dependents: &[DependentHit]) -> OverrideRisk {
+    let count = dependents.len();
+    let explicit_count = dependents
+        .iter()
+        .filter(|d| d.dep_type == "explicit")
+        .count();
+
+    let level = if count == 0 || (count <= 2 && explicit_count == 0) {
+        "LOW"
+    } else if count <= 3 {
+        "MEDIUM"
+    } else {
+        "HIGH"
+    };
+
+    let suggestion = if count > 0 {
+        let keys: Vec<&str> = dependents.iter().map(|d| d.key.as_str()).collect();
+        Some(format!("先覆蓋下游 {}", keys.join(", ")))
+    } else {
+        None
+    };
+
+    OverrideRisk {
+        level: level.to_string(),
+        dependent_count: count,
+        suggestion,
+    }
 }
 
 // ── Related event helpers ────────────────────────────────────────────
@@ -444,6 +528,34 @@ pub fn format_human(result: &AskResult) -> String {
                 out.push_str(&format!("  \"{}\" ({}, {})\n\n", n.text, n.ts, n.branch));
             }
         }
+    }
+
+    if !result.dependents.is_empty() {
+        out.push_str("── Dependents ─────────────────────────\n");
+        for d in &result.dependents {
+            out.push_str(&format!(
+                "  \u{2192} {} = {} ({})\n",
+                d.key, d.value, d.dep_type
+            ));
+        }
+        out.push('\n');
+    }
+
+    if let Some(ref risk) = result.override_risk {
+        out.push_str("── Override Risk ──────────────────────\n");
+        let emoji = match risk.level.as_str() {
+            "HIGH" => "\u{1f534}",
+            "MEDIUM" => "\u{1f7e1}",
+            _ => "\u{1f7e2}",
+        };
+        out.push_str(&format!(
+            "  {} {} ({} dependents)\n",
+            emoji, risk.level, risk.dependent_count
+        ));
+        if let Some(ref suggestion) = risk.suggestion {
+            out.push_str(&format!("  {suggestion}\n"));
+        }
+        out.push('\n');
     }
 
     if !result.conversations.is_empty() {
@@ -888,6 +1000,8 @@ mod tests {
             }],
             related_notes: vec![],
             conversations: vec![],
+            dependents: vec![],
+            override_risk: None,
         };
 
         let output = format_human(&result);
@@ -944,6 +1058,8 @@ mod tests {
                 branch: "main".into(),
             }],
             conversations: vec![],
+            dependents: vec![],
+            override_risk: None,
         };
 
         let output = format_human(&result);
@@ -965,6 +1081,8 @@ mod tests {
             related_commits: vec![],
             related_notes: vec![],
             conversations: vec![],
+            dependents: vec![],
+            override_risk: None,
         };
 
         let output = format_human(&result);

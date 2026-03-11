@@ -57,6 +57,9 @@ pub enum BridgeClaudeCmd {
         /// Reason for the decision
         #[arg(long)]
         reason: Option<String>,
+        /// Decision keys this decision depends on (repeatable)
+        #[arg(long = "refs")]
+        refs: Vec<String>,
         /// Session ID (auto-inferred from active heartbeats if omitted)
         #[arg(long)]
         session: Option<String>,
@@ -189,8 +192,15 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
             BridgeClaudeCmd::Decide {
                 decision,
                 reason,
+                refs,
                 session,
-            } => decide(repo_root, &decision, reason.as_deref(), session.as_deref()),
+            } => decide(
+                repo_root,
+                &decision,
+                reason.as_deref(),
+                &refs,
+                session.as_deref(),
+            ),
             BridgeClaudeCmd::Request {
                 to,
                 message,
@@ -456,6 +466,7 @@ pub fn decide(
     repo_root: &Path,
     decision: &str,
     reason: Option<&str>,
+    refs: &[String],
     cli_session: Option<&str>,
 ) -> anyhow::Result<()> {
     let (key, value) = decision.split_once('=').ok_or_else(|| {
@@ -519,9 +530,41 @@ pub fn decide(
         }
     }
 
+    // Add depends_on provenance for each --refs key
+    for ref_key in refs {
+        if let Some(ref_row) = ledger.find_active_decision(&branch, ref_key)? {
+            event.refs.provenance.push(edda_core::types::Provenance {
+                target: ref_row.event_id.clone(),
+                rel: edda_core::types::rel::DEPENDS_ON.to_string(),
+                note: Some(ref_key.to_string()),
+            });
+        } else {
+            eprintln!("\u{26a0} ref '{ref_key}' not found, skipping");
+        }
+    }
+
     // Re-finalize after payload/refs mutation
     edda_core::event::finalize_event(&mut event);
     ledger.append_event(&event)?;
+
+    // Insert dependency edges
+    let domain = edda_core::decision::extract_domain(key);
+
+    // Explicit refs → dep edges
+    for ref_key in refs {
+        // Only insert if the ref key actually exists
+        if ledger.find_active_decision(&branch, ref_key)?.is_some() {
+            ledger.insert_dep(key, ref_key, "explicit", Some(&event.event_id))?;
+        }
+    }
+
+    // Auto-link: star-shaped within same domain
+    let same_domain = ledger.active_decisions(Some(&domain), None)?;
+    for d in &same_domain {
+        if d.key != key {
+            ledger.insert_dep(key, &d.key, "auto_domain", Some(&event.event_id))?;
+        }
+    }
 
     println!("Decision recorded: {key} = {value}");
     if let Some(r) = reason {
@@ -893,7 +936,7 @@ mod tests {
         std::env::set_var("EDDA_SESSION_ID", "test-decide-bind-s1");
         std::env::set_var("EDDA_SESSION_LABEL", "auth");
 
-        decide(&tmp, "db.engine=postgres", Some("need JSONB"), None).unwrap();
+        decide(&tmp, "db.engine=postgres", Some("need JSONB"), &[], None).unwrap();
 
         // Verify binding was written via L2 conflict check API
         let conflict = edda_bridge_claude::peers::find_binding_conflict(&pid, "db.engine", "OTHER");
@@ -923,7 +966,14 @@ mod tests {
         std::env::set_var("EDDA_SESSION_ID", "test-decide-ledger-s2");
         std::env::set_var("EDDA_SESSION_LABEL", "billing");
 
-        decide(&tmp, "auth.method=JWT RS256", Some("stateless auth"), None).unwrap();
+        decide(
+            &tmp,
+            "auth.method=JWT RS256",
+            Some("stateless auth"),
+            &[],
+            None,
+        )
+        .unwrap();
 
         let events = ledger.iter_events().unwrap();
         assert_eq!(events.len(), 1, "should have 1 event");
@@ -955,8 +1005,8 @@ mod tests {
         std::env::set_var("EDDA_SESSION_ID", "test-decide-super-s3");
         std::env::set_var("EDDA_SESSION_LABEL", "infra");
 
-        decide(&tmp, "db.engine=SQLite", None, None).unwrap();
-        decide(&tmp, "db.engine=PostgreSQL", Some("need JSONB"), None).unwrap();
+        decide(&tmp, "db.engine=SQLite", None, &[], None).unwrap();
+        decide(&tmp, "db.engine=PostgreSQL", Some("need JSONB"), &[], None).unwrap();
 
         let events = ledger.iter_events().unwrap();
         assert_eq!(events.len(), 2, "should have 2 events");

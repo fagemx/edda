@@ -82,6 +82,7 @@ pub mod rel {
     pub const SUPERSEDES: &str = "supersedes";
     pub const CONTINUES: &str = "continues";
     pub const REVIEWS: &str = "reviews";
+    pub const DEPENDS_ON: &str = "depends_on";
 }
 
 /// References to other events and blobs

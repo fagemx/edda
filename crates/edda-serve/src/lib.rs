@@ -214,6 +214,7 @@ async fn get_decisions(
         limit: params.limit.unwrap_or(20),
         include_superseded: params.all.unwrap_or(false),
         branch: params.branch,
+        impact: false,
     };
     let result = edda_ask::ask(&ledger, q, &opts, None)?;
     Ok(Json(result))
