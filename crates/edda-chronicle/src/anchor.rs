@@ -2,7 +2,7 @@ use crate::state::load_state;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Anchor {
@@ -38,7 +38,7 @@ pub fn resolve_anchor(
     }
 }
 
-fn resolve_default_anchor(edda_root: &PathBuf) -> Result<ResolvedAnchor> {
+fn resolve_default_anchor(edda_root: &Path) -> Result<ResolvedAnchor> {
     let state = load_state(edda_root)?;
     let now = Utc::now();
 

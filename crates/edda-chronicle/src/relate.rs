@@ -12,7 +12,7 @@ pub struct RelatedContent {
 
 pub fn find_related_content(
     _query: &str,
-    project_root: &std::path::PathBuf,
+    project_root: &std::path::Path,
     _max_results: usize,
 ) -> Result<Vec<RelatedContent>> {
     let search_dir = project_root.join("search").join("tantivy");
@@ -28,7 +28,7 @@ pub fn find_related_content(
     Ok(vec![])
 }
 
-pub fn build_search_index_if_needed(project_root: &std::path::PathBuf) -> Result<()> {
+pub fn build_search_index_if_needed(project_root: &std::path::Path) -> Result<()> {
     let search_dir = project_root.join("search").join("tantivy");
 
     if !search_dir.exists() {
