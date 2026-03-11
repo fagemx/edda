@@ -99,6 +99,8 @@ pub struct DependentHit {
     pub key: String,
     pub value: String,
     pub dep_type: String,
+    /// Hop distance from the queried key (1 = direct dependent).
+    pub depth: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -266,13 +268,12 @@ pub fn ask(
         InputType::Overview => "overview",
     };
 
-    // Impact analysis: only for ExactKey queries with --impact
-    let (dependents, override_risk) = if opts.impact && matches!(input_type, InputType::ExactKey(_))
-    {
-        if let InputType::ExactKey(ref key) = input_type {
-            compute_impact(ledger, key)?
-        } else {
-            (vec![], None)
+    // Impact analysis: ExactKey or Domain queries with --impact
+    let (dependents, override_risk) = if opts.impact {
+        match &input_type {
+            InputType::ExactKey(key) => compute_impact(ledger, key)?,
+            InputType::Domain(domain) => compute_domain_impact(ledger, domain)?,
+            _ => (vec![], None),
         }
     } else {
         (vec![], None)
@@ -297,13 +298,14 @@ fn compute_impact(
     ledger: &Ledger,
     key: &str,
 ) -> anyhow::Result<(Vec<DependentHit>, Option<OverrideRisk>)> {
-    let active_deps = ledger.active_dependents_of(key)?;
-    let dependents: Vec<DependentHit> = active_deps
+    let transitive_deps = ledger.transitive_dependents_of(key, 3)?;
+    let dependents: Vec<DependentHit> = transitive_deps
         .iter()
-        .map(|(dep, decision)| DependentHit {
+        .map(|(dep, decision, depth)| DependentHit {
             key: decision.key.clone(),
             value: decision.value.clone(),
             dep_type: dep.dep_type.clone(),
+            depth: *depth,
         })
         .collect();
     let risk = compute_override_risk(&dependents);
@@ -312,22 +314,47 @@ fn compute_impact(
 
 fn compute_override_risk(dependents: &[DependentHit]) -> OverrideRisk {
     let count = dependents.len();
-    let explicit_count = dependents
-        .iter()
-        .filter(|d| d.dep_type == "explicit")
-        .count();
 
-    let level = if count == 0 || (count <= 2 && explicit_count == 0) {
+    // Weighted scoring:
+    //   explicit direct deps  x3
+    //   auto_domain direct    x1
+    //   transitive deps       x2  (depth > 1)
+    //   cross-domain spread   x2
+    let explicit_direct: usize = dependents
+        .iter()
+        .filter(|d| d.dep_type == "explicit" && d.depth == 1)
+        .count();
+    let auto_domain_direct: usize = dependents
+        .iter()
+        .filter(|d| d.dep_type == "auto_domain" && d.depth == 1)
+        .count();
+    let transitive: usize = dependents.iter().filter(|d| d.depth > 1).count();
+
+    // Count distinct domains among dependents
+    let mut domains: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for d in dependents {
+        if let Some(dom) = d.key.split('.').next() {
+            domains.insert(dom);
+        }
+    }
+    let cross_domain_bonus = if domains.len() > 1 { domains.len() } else { 0 };
+
+    let score = explicit_direct * 3 + auto_domain_direct + transitive * 2 + cross_domain_bonus * 2;
+
+    let level = if score <= 2 {
         "LOW"
-    } else if count <= 3 {
+    } else if score <= 6 {
         "MEDIUM"
     } else {
         "HIGH"
     };
 
+    // Suggestion: reverse BFS order = override leaves first
     let suggestion = if count > 0 {
-        let keys: Vec<&str> = dependents.iter().map(|d| d.key.as_str()).collect();
-        Some(format!("先覆蓋下游 {}", keys.join(", ")))
+        let mut sorted: Vec<&DependentHit> = dependents.iter().collect();
+        sorted.sort_by(|a, b| b.depth.cmp(&a.depth));
+        let keys: Vec<&str> = sorted.iter().map(|d| d.key.as_str()).collect();
+        Some(format!("建議覆蓋順序: {}", keys.join(" → ")))
     } else {
         None
     };
@@ -337,6 +364,41 @@ fn compute_override_risk(dependents: &[DependentHit]) -> OverrideRisk {
         dependent_count: count,
         suggestion,
     }
+}
+
+/// Aggregate impact across all active keys in a domain.
+fn compute_domain_impact(
+    ledger: &Ledger,
+    domain: &str,
+) -> anyhow::Result<(Vec<DependentHit>, Option<OverrideRisk>)> {
+    let keys_in_domain = ledger.active_decisions(Some(domain), None)?;
+    if keys_in_domain.is_empty() {
+        return Ok((vec![], None));
+    }
+
+    let mut all_dependents: Vec<DependentHit> = Vec::new();
+    let mut seen_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for decision in &keys_in_domain {
+        let (deps, _) = compute_impact(ledger, &decision.key)?;
+        for d in deps {
+            if seen_keys.insert(d.key.clone()) {
+                all_dependents.push(d);
+            }
+        }
+    }
+
+    let risk = if all_dependents.is_empty() {
+        Some(OverrideRisk {
+            level: "LOW".to_string(),
+            dependent_count: 0,
+            suggestion: None,
+        })
+    } else {
+        Some(compute_override_risk(&all_dependents))
+    };
+
+    Ok((all_dependents, risk))
 }
 
 // ── Related event helpers ────────────────────────────────────────────
@@ -534,8 +596,8 @@ pub fn format_human(result: &AskResult) -> String {
         out.push_str("── Dependents ─────────────────────────\n");
         for d in &result.dependents {
             out.push_str(&format!(
-                "  \u{2192} {} = {} ({})\n",
-                d.key, d.value, d.dep_type
+                "  \u{2192} {} = {} ({}, depth {})\n",
+                d.key, d.value, d.dep_type, d.depth
             ));
         }
         out.push('\n');
@@ -1087,5 +1149,310 @@ mod tests {
 
         let output = format_human(&result);
         assert!(output.contains("No results found"));
+    }
+
+    // ── Impact analysis tests ───────────────────────────────────────
+
+    #[test]
+    fn impact_no_dependents() {
+        let (tmp, ledger) = setup();
+        let d1 = make_decision("main", "db.engine", "postgres", Some("JSONB"), None);
+        ledger.append_event(&d1).unwrap();
+
+        let opts = AskOptions {
+            impact: true,
+            ..Default::default()
+        };
+        let result = ask(&ledger, "db.engine", &opts, None).unwrap();
+        assert!(result.dependents.is_empty());
+        assert_eq!(result.override_risk.as_ref().unwrap().level, "LOW");
+        assert_eq!(result.override_risk.as_ref().unwrap().dependent_count, 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn impact_single_explicit_dep() {
+        let (tmp, ledger) = setup();
+        let d1 = make_decision("main", "db.engine", "postgres", Some("JSONB"), None);
+        ledger.append_event(&d1).unwrap();
+
+        let d2 = make_decision("main", "db.schema", "JSONB", Some("needs postgres"), None);
+        ledger.append_event(&d2).unwrap();
+
+        // db.schema depends on db.engine (explicit)
+        ledger
+            .insert_dep("db.schema", "db.engine", "explicit", None)
+            .unwrap();
+
+        let opts = AskOptions {
+            impact: true,
+            ..Default::default()
+        };
+        let result = ask(&ledger, "db.engine", &opts, None).unwrap();
+        assert_eq!(result.dependents.len(), 1);
+        assert_eq!(result.dependents[0].key, "db.schema");
+        assert_eq!(result.dependents[0].dep_type, "explicit");
+        assert_eq!(result.dependents[0].depth, 1);
+        // 1 explicit direct dep => score = 3 => MEDIUM
+        assert_eq!(result.override_risk.as_ref().unwrap().level, "MEDIUM");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn impact_multiple_auto_domain() {
+        let (tmp, ledger) = setup();
+        let d1 = make_decision("main", "db.engine", "postgres", None, None);
+        ledger.append_event(&d1).unwrap();
+        let d2 = make_decision("main", "db.pool", "10", None, None);
+        ledger.append_event(&d2).unwrap();
+        let d3 = make_decision("main", "db.timeout", "30s", None, None);
+        ledger.append_event(&d3).unwrap();
+
+        // auto_domain deps
+        ledger
+            .insert_dep("db.pool", "db.engine", "auto_domain", None)
+            .unwrap();
+        ledger
+            .insert_dep("db.timeout", "db.engine", "auto_domain", None)
+            .unwrap();
+
+        let opts = AskOptions {
+            impact: true,
+            ..Default::default()
+        };
+        let result = ask(&ledger, "db.engine", &opts, None).unwrap();
+        assert_eq!(result.dependents.len(), 2);
+        // 2 auto_domain direct deps => score = 2 => LOW
+        assert_eq!(result.override_risk.as_ref().unwrap().level, "LOW");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn impact_transitive_chain() {
+        let (tmp, ledger) = setup();
+        let d1 = make_decision("main", "db.engine", "postgres", None, None);
+        ledger.append_event(&d1).unwrap();
+        let d2 = make_decision("main", "db.schema", "JSONB", None, None);
+        ledger.append_event(&d2).unwrap();
+        let d3 = make_decision("main", "api.format", "JSON", None, None);
+        ledger.append_event(&d3).unwrap();
+
+        // db.schema -> db.engine, api.format -> db.schema
+        ledger
+            .insert_dep("db.schema", "db.engine", "explicit", None)
+            .unwrap();
+        ledger
+            .insert_dep("api.format", "db.schema", "explicit", None)
+            .unwrap();
+
+        let opts = AskOptions {
+            impact: true,
+            ..Default::default()
+        };
+        let result = ask(&ledger, "db.engine", &opts, None).unwrap();
+        assert_eq!(result.dependents.len(), 2);
+
+        // Check depths
+        let schema_hit = result
+            .dependents
+            .iter()
+            .find(|d| d.key == "db.schema")
+            .unwrap();
+        assert_eq!(schema_hit.depth, 1);
+        let api_hit = result
+            .dependents
+            .iter()
+            .find(|d| d.key == "api.format")
+            .unwrap();
+        assert_eq!(api_hit.depth, 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn impact_cross_domain() {
+        let (tmp, ledger) = setup();
+        let d1 = make_decision("main", "db.engine", "postgres", None, None);
+        ledger.append_event(&d1).unwrap();
+        let d2 = make_decision("main", "db.schema", "JSONB", None, None);
+        ledger.append_event(&d2).unwrap();
+        let d3 = make_decision("main", "api.format", "JSON", None, None);
+        ledger.append_event(&d3).unwrap();
+        let d4 = make_decision("main", "cache.strategy", "redis", None, None);
+        ledger.append_event(&d4).unwrap();
+
+        // All depend on db.engine via explicit
+        ledger
+            .insert_dep("db.schema", "db.engine", "explicit", None)
+            .unwrap();
+        ledger
+            .insert_dep("api.format", "db.engine", "explicit", None)
+            .unwrap();
+        ledger
+            .insert_dep("cache.strategy", "db.engine", "explicit", None)
+            .unwrap();
+
+        let opts = AskOptions {
+            impact: true,
+            ..Default::default()
+        };
+        let result = ask(&ledger, "db.engine", &opts, None).unwrap();
+        assert_eq!(result.dependents.len(), 3);
+        // 3 explicit direct (9) + cross_domain: 3 domains × 2 (6) => score = 15 => HIGH
+        assert_eq!(result.override_risk.as_ref().unwrap().level, "HIGH");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn impact_high_risk_scenario() {
+        let (tmp, ledger) = setup();
+        let d1 = make_decision("main", "db.engine", "postgres", None, None);
+        ledger.append_event(&d1).unwrap();
+
+        // Create 4 explicit dependents + 1 transitive
+        for (i, key) in ["db.schema", "db.pool", "api.format", "auth.store"]
+            .iter()
+            .enumerate()
+        {
+            let d = make_decision("main", key, &format!("val{i}"), None, None);
+            ledger.append_event(&d).unwrap();
+            ledger
+                .insert_dep(key, "db.engine", "explicit", None)
+                .unwrap();
+        }
+        // Transitive: cache.ttl -> api.format -> db.engine
+        let d_cache = make_decision("main", "cache.ttl", "60s", None, None);
+        ledger.append_event(&d_cache).unwrap();
+        ledger
+            .insert_dep("cache.ttl", "api.format", "explicit", None)
+            .unwrap();
+
+        let opts = AskOptions {
+            impact: true,
+            ..Default::default()
+        };
+        let result = ask(&ledger, "db.engine", &opts, None).unwrap();
+        assert_eq!(result.dependents.len(), 5);
+        assert_eq!(result.override_risk.as_ref().unwrap().level, "HIGH");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn impact_domain_query() {
+        let (tmp, ledger) = setup();
+        let d1 = make_decision("main", "db.engine", "postgres", None, None);
+        ledger.append_event(&d1).unwrap();
+        let d2 = make_decision("main", "db.pool", "10", None, None);
+        ledger.append_event(&d2).unwrap();
+
+        // api.format depends on db.engine
+        let d3 = make_decision("main", "api.format", "JSON", None, None);
+        ledger.append_event(&d3).unwrap();
+        ledger
+            .insert_dep("api.format", "db.engine", "explicit", None)
+            .unwrap();
+
+        let opts = AskOptions {
+            impact: true,
+            ..Default::default()
+        };
+        let result = ask(&ledger, "db", &opts, None).unwrap();
+        assert_eq!(result.input_type, "domain");
+        // api.format is a dependent of db.engine
+        assert!(
+            result.dependents.iter().any(|d| d.key == "api.format"),
+            "domain impact should find api.format as dependent"
+        );
+        assert!(result.override_risk.is_some());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn impact_flag_ignored_for_keyword() {
+        let (tmp, ledger) = setup();
+        let d1 = make_decision("main", "db.engine", "postgres", Some("JSONB"), None);
+        ledger.append_event(&d1).unwrap();
+
+        let opts = AskOptions {
+            impact: true,
+            ..Default::default()
+        };
+        let result = ask(&ledger, "postgres", &opts, None).unwrap();
+        assert_eq!(result.input_type, "keyword");
+        // Impact should be empty for keyword queries
+        assert!(result.dependents.is_empty());
+        assert!(result.override_risk.is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn format_human_with_impact() {
+        let result = AskResult {
+            query: "db.engine".into(),
+            input_type: "exact_key".into(),
+            decisions: vec![DecisionHit {
+                event_id: "e1".into(),
+                key: "db.engine".into(),
+                value: "postgres".into(),
+                reason: "JSONB".into(),
+                domain: "db".into(),
+                branch: "main".into(),
+                ts: "2026-02-15".into(),
+                is_active: true,
+            }],
+            timeline: vec![],
+            related_commits: vec![],
+            related_notes: vec![],
+            conversations: vec![],
+            dependents: vec![
+                DependentHit {
+                    key: "db.schema".into(),
+                    value: "JSONB".into(),
+                    dep_type: "explicit".into(),
+                    depth: 1,
+                },
+                DependentHit {
+                    key: "api.format".into(),
+                    value: "JSON".into(),
+                    dep_type: "auto_domain".into(),
+                    depth: 2,
+                },
+            ],
+            override_risk: Some(OverrideRisk {
+                level: "HIGH".to_string(),
+                dependent_count: 2,
+                suggestion: Some("建議覆蓋順序: api.format → db.schema".into()),
+            }),
+        };
+
+        let output = format_human(&result);
+        assert!(
+            output.contains("Dependents"),
+            "should have Dependents section"
+        );
+        assert!(
+            output.contains("depth 1"),
+            "should show depth for dependents"
+        );
+        assert!(
+            output.contains("depth 2"),
+            "should show depth for transitive"
+        );
+        assert!(
+            output.contains("Override Risk"),
+            "should have Override Risk section"
+        );
+        assert!(output.contains("HIGH"), "should show HIGH risk level");
+        assert!(
+            output.contains("建議覆蓋順序"),
+            "should show override order suggestion"
+        );
     }
 }

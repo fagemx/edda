@@ -870,6 +870,40 @@ impl SqliteStore {
             .map_err(|e| anyhow::anyhow!("dependents_of query failed: {e}"))
     }
 
+    /// Transitive dependents of `key` via BFS, up to `max_depth` hops.
+    /// Returns `(DepRow, DecisionRow, depth)` tuples, deduplicated by key
+    /// (shortest path wins). Only active decisions are included.
+    pub fn transitive_dependents_of(
+        &self,
+        key: &str,
+        max_depth: usize,
+    ) -> anyhow::Result<Vec<(DepRow, DecisionRow, usize)>> {
+        use std::collections::{HashSet, VecDeque};
+
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(key.to_string());
+        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
+        queue.push_back((key.to_string(), 0));
+
+        let mut results: Vec<(DepRow, DecisionRow, usize)> = Vec::new();
+
+        while let Some((current_key, depth)) = queue.pop_front() {
+            if depth >= max_depth {
+                continue;
+            }
+            let deps = self.active_dependents_of(&current_key)?;
+            for (dep, decision) in deps {
+                if visited.insert(decision.key.clone()) {
+                    let next_depth = depth + 1;
+                    queue.push_back((decision.key.clone(), next_depth));
+                    results.push((dep, decision, next_depth));
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Who depends on `key`, joined with active decisions only.
     pub fn active_dependents_of(&self, key: &str) -> anyhow::Result<Vec<(DepRow, DecisionRow)>> {
         let mut stmt = self.conn.prepare(
