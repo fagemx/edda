@@ -18,3 +18,4 @@ sha2.workspace = true
 hex.workspace = true
 ulid.workspace = true
 time.workspace = true
+serde_yaml.workspace = true
