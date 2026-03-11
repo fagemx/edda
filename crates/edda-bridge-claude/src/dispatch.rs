@@ -1014,7 +1014,7 @@ fn extract_prior_session_last_message(
 fn inject_karvi_brief(cwd: &str) -> Option<String> {
     use std::sync::LazyLock;
     static RE_TASK_ID: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"T\d+").unwrap());
+        LazyLock::new(|| regex::Regex::new(r"T\d+").expect("static regex"));
 
     // Detect karvi project
     let board_path = Path::new(cwd).join("server/board.json");
@@ -1217,7 +1217,7 @@ fn dispatch_pre_tool_use(
                 .unwrap_or("");
             use std::sync::LazyLock;
             static RE_GIT_COMMIT: LazyLock<regex::Regex> =
-                LazyLock::new(|| regex::Regex::new(r"\bgit\s+commit\b").unwrap());
+                LazyLock::new(|| regex::Regex::new(r"\bgit\s+commit\b").expect("static regex"));
             if RE_GIT_COMMIT.is_match(command) && !command.contains("--amend") {
                 if let Some(hb) = crate::peers::read_heartbeat(project_id, session_id) {
                     if let Some(claimed) = &hb.branch {

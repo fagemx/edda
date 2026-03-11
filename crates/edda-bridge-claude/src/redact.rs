@@ -7,32 +7,32 @@ static SECRET_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| 
     vec![
         // OpenAI / Anthropic API keys: sk-..., sk-ant-...
         (
-            Regex::new(r"\b(sk-[a-zA-Z0-9_-]{20,})").unwrap(),
+            Regex::new(r"\b(sk-[a-zA-Z0-9_-]{20,})").expect("static regex"),
             "[REDACTED_API_KEY]",
         ),
         // GitHub tokens: ghp_, gho_, ghs_, ghu_, github_pat_
         (
-            Regex::new(r"\b(ghp_[a-zA-Z0-9]{36,}|gho_[a-zA-Z0-9]{36,}|ghs_[a-zA-Z0-9]{36,}|ghu_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{22,})").unwrap(),
+            Regex::new(r"\b(ghp_[a-zA-Z0-9]{36,}|gho_[a-zA-Z0-9]{36,}|ghs_[a-zA-Z0-9]{36,}|ghu_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{22,})").expect("static regex"),
             "[REDACTED_GITHUB_TOKEN]",
         ),
         // GitLab tokens: glpat-
         (
-            Regex::new(r"\b(glpat-[a-zA-Z0-9\-]{20,})").unwrap(),
+            Regex::new(r"\b(glpat-[a-zA-Z0-9\-]{20,})").expect("static regex"),
             "[REDACTED_GITLAB_TOKEN]",
         ),
         // AWS access key IDs: AKIA followed by 16 uppercase alphanumeric
         (
-            Regex::new(r"\b(AKIA[A-Z0-9]{16})\b").unwrap(),
+            Regex::new(r"\b(AKIA[A-Z0-9]{16})\b").expect("static regex"),
             "[REDACTED_AWS_KEY]",
         ),
         // Bearer tokens (common in Authorization headers)
         (
-            Regex::new(r"(?i)(Bearer\s+)[a-zA-Z0-9._\-]{20,}").unwrap(),
+            Regex::new(r"(?i)(Bearer\s+)[a-zA-Z0-9._\-]{20,}").expect("static regex"),
             "${1}[REDACTED_BEARER]",
         ),
         // Shell export of sensitive env vars
         (
-            Regex::new(r#"(?mi)^(export\s+\w*(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)\w*\s*=\s*)\S+"#).unwrap(),
+            Regex::new(r#"(?mi)^(export\s+\w*(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)\w*\s*=\s*)\S+"#).expect("static regex"),
             "${1}[REDACTED]",
         ),
     ]
