@@ -180,6 +180,24 @@ impl Ledger {
         self.sqlite.active_dependents_of(key)
     }
 
+    // ── Decision Outcomes ─────────────────────────────────────────────
+
+    /// Get aggregated outcome metrics for a decision.
+    pub fn decision_outcomes(
+        &self,
+        decision_event_id: &str,
+    ) -> anyhow::Result<Option<crate::sqlite_store::OutcomeMetrics>> {
+        self.sqlite.decision_outcomes(decision_event_id)
+    }
+
+    /// Get all execution events linked to a decision via `based_on` provenance.
+    pub fn executions_for_decision(
+        &self,
+        decision_event_id: &str,
+    ) -> anyhow::Result<Vec<crate::sqlite_store::ExecutionLinked>> {
+        self.sqlite.executions_for_decision(decision_event_id)
+    }
+
     // ── Review Bundles ───────────────────────────────────────────────
 
     /// Get a review bundle by bundle_id.

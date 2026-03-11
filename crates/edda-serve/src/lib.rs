@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -84,6 +84,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/status", get(get_status))
         .route("/api/context", get(get_context))
         .route("/api/decisions", get(get_decisions))
+        .route("/api/decisions/{event_id}/outcomes", get(get_decision_outcomes))
         .route("/api/log", get(get_log))
         .route("/api/drafts", get(get_drafts))
         .route("/api/note", post(post_note))
@@ -121,6 +122,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/context", get(get_context))
         .route("/api/decisions", get(get_decisions))
+        .route("/api/decisions/{event_id}/outcomes", get(get_decision_outcomes))
         .route("/api/log", get(get_log))
         .route("/api/drafts", get(get_drafts))
         .route("/api/note", post(post_note))
@@ -221,6 +223,27 @@ async fn get_decisions(
     };
     let result = edda_ask::ask(&ledger, q, &opts, None)?;
     Ok(Json(result))
+}
+
+// ── GET /api/decisions/:event_id/outcomes ──
+
+async fn get_decision_outcomes(
+    State(state): State<Arc<AppState>>,
+    AxumPath(event_id): AxumPath<String>,
+) -> Result<Response, AppError> {
+    let ledger = state.open_ledger()?;
+    let outcomes = ledger.decision_outcomes(&event_id)?;
+
+    match outcomes {
+        Some(metrics) => {
+            let json = serde_json::to_value(metrics)?;
+            Ok(Json(json).into_response())
+        }
+        None => {
+            let body = serde_json::json!({ "error": format!("decision not found: {}", event_id) });
+            Ok((StatusCode::NOT_FOUND, Json(body)).into_response())
+        }
+    }
 }
 
 // ── GET /api/log ──
@@ -1420,5 +1443,114 @@ mod tests {
         assert_eq!(event.refs.provenance.len(), 1);
         assert_eq!(event.refs.provenance[0].target, "evt_decision_xyz");
         assert_eq!(event.refs.provenance[0].rel, "based_on");
+    }
+
+    #[tokio::test]
+    async fn get_decision_outcomes_returns_metrics() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = Router::new().merge(router(tmp.path()));
+
+        // Create a decision
+        let decide_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "db.engine=postgres", "reason": "test"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decide_resp.status(), StatusCode::OK);
+
+        let decide_body = axum::body::to_bytes(decide_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let decide_json: serde_json::Value = serde_json::from_slice(&decide_body).unwrap();
+        let decision_event_id = decide_json["event_id"].as_str().unwrap();
+
+        // Add execution events linked to the decision
+        let exec_body = serde_json::json!({
+            "version": "karvi.event.v1",
+            "event_id": "evt_exec_1",
+            "event_type": "step_completed",
+            "occurred_at": "2026-03-01T10:00:00Z",
+            "trace_id": "trace_1",
+            "task_id": "task_1",
+            "step_id": "step_1",
+            "project": "test/repo",
+            "runtime": "opencode",
+            "model": "gpt-4",
+            "actor": { "kind": "agent", "id": "test" },
+            "usage": { "token_in": 100, "token_out": 50, "cost_usd": 0.01, "latency_ms": 500 },
+            "result": { "status": "success" },
+            "decision_ref": decision_event_id
+        });
+
+        let _exec_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/events/karvi")
+                    .header("content-type", "application/json")
+                    .body(Body::from(exec_body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Query outcomes
+        let outcomes_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&format!("/api/decisions/{}/outcomes", decision_event_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcomes_resp.status(), StatusCode::OK);
+        let outcomes_body = axum::body::to_bytes(outcomes_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let outcomes_json: serde_json::Value = serde_json::from_slice(&outcomes_body).unwrap();
+
+        assert_eq!(outcomes_json["decision_key"], "db.engine");
+        assert_eq!(outcomes_json["decision_value"], "postgres");
+        assert_eq!(outcomes_json["total_executions"], 1);
+        assert_eq!(outcomes_json["success_count"], 1);
+        assert_eq!(outcomes_json["failed_count"], 0);
+        assert!((outcomes_json["success_rate"].as_f64().unwrap() - 100.0).abs() < 0.01);
+        assert!((outcomes_json["total_cost_usd"].as_f64().unwrap() - 0.01).abs() < 0.0001);
+        assert_eq!(outcomes_json["total_tokens_in"], 100);
+        assert_eq!(outcomes_json["total_tokens_out"], 50);
+    }
+
+    #[tokio::test]
+    async fn get_decision_outcomes_404_for_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = Router::new().merge(router(tmp.path()));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/decisions/evt_nonexistent/outcomes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

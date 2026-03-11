@@ -136,6 +136,40 @@ pub struct DepRow {
     pub created_at: String,
 }
 
+/// Aggregated outcome metrics for a decision.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OutcomeMetrics {
+    pub decision_event_id: String,
+    pub decision_key: String,
+    pub decision_value: String,
+    pub decision_ts: String,
+    pub total_executions: u64,
+    pub success_count: u64,
+    pub failed_count: u64,
+    pub cancelled_count: u64,
+    pub success_rate: f64,
+    pub total_cost_usd: f64,
+    pub total_tokens_in: u64,
+    pub total_tokens_out: u64,
+    pub avg_latency_ms: f64,
+    pub first_execution_ts: Option<String>,
+    pub last_execution_ts: Option<String>,
+}
+
+/// An execution event linked to a decision.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExecutionLinked {
+    pub event_id: String,
+    pub ts: String,
+    pub status: String,
+    pub runtime: Option<String>,
+    pub model: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub token_in: Option<u64>,
+    pub token_out: Option<u64>,
+    pub latency_ms: Option<u64>,
+}
+
 /// SQLite-backed storage engine.
 pub struct SqliteStore {
     conn: Connection,
@@ -870,6 +904,173 @@ impl SqliteStore {
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("active_dependents_of query failed: {e}"))
+    }
+
+    // ── Decision Outcomes ─────────────────────────────────────────────
+
+    /// Get aggregated outcome metrics for a decision.
+    ///
+    /// Queries execution_events that have a `based_on` provenance link to the
+    /// given decision event_id, then aggregates success rate, cost, and latency.
+    pub fn decision_outcomes(
+        &self,
+        decision_event_id: &str,
+    ) -> anyhow::Result<Option<OutcomeMetrics>> {
+        let decision = self.get_event(decision_event_id)?;
+        let decision = match decision {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        let dp = edda_core::decision::extract_decision(&decision.payload);
+        let (decision_key, decision_value) = match dp {
+            Some(d) => (d.key, d.value),
+            None => return Ok(None),
+        };
+
+        let executions = self.executions_for_decision(decision_event_id)?;
+
+        if executions.is_empty() {
+            return Ok(Some(OutcomeMetrics {
+                decision_event_id: decision_event_id.to_string(),
+                decision_key: decision_key.clone(),
+                decision_value: decision_value.clone(),
+                decision_ts: decision.ts.clone(),
+                total_executions: 0,
+                success_count: 0,
+                failed_count: 0,
+                cancelled_count: 0,
+                success_rate: 0.0,
+                total_cost_usd: 0.0,
+                total_tokens_in: 0,
+                total_tokens_out: 0,
+                avg_latency_ms: 0.0,
+                first_execution_ts: None,
+                last_execution_ts: None,
+            }));
+        }
+
+        let total_executions = executions.len() as u64;
+        let success_count = executions.iter().filter(|e| e.status == "success").count() as u64;
+        let failed_count = executions.iter().filter(|e| e.status == "failed").count() as u64;
+        let cancelled_count = executions
+            .iter()
+            .filter(|e| e.status == "cancelled")
+            .count() as u64;
+
+        let success_rate = if total_executions > 0 {
+            (success_count as f64 / total_executions as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let total_cost_usd: f64 = executions.iter().filter_map(|e| e.cost_usd).sum();
+        let total_tokens_in: u64 = executions.iter().filter_map(|e| e.token_in).sum();
+        let total_tokens_out: u64 = executions.iter().filter_map(|e| e.token_out).sum();
+
+        let latencies: Vec<u64> = executions.iter().filter_map(|e| e.latency_ms).collect();
+        let avg_latency_ms = if !latencies.is_empty() {
+            latencies.iter().sum::<u64>() as f64 / latencies.len() as f64
+        } else {
+            0.0
+        };
+
+        let first_execution_ts = executions
+            .iter()
+            .map(|e| e.ts.as_str())
+            .min()
+            .map(|s| s.to_string());
+        let last_execution_ts = executions
+            .iter()
+            .map(|e| e.ts.as_str())
+            .max()
+            .map(|s| s.to_string());
+
+        Ok(Some(OutcomeMetrics {
+            decision_event_id: decision_event_id.to_string(),
+            decision_key,
+            decision_value,
+            decision_ts: decision.ts,
+            total_executions,
+            success_count,
+            failed_count,
+            cancelled_count,
+            success_rate,
+            total_cost_usd,
+            total_tokens_in,
+            total_tokens_out,
+            avg_latency_ms,
+            first_execution_ts,
+            last_execution_ts,
+        }))
+    }
+
+    /// Get all execution events linked to a decision via `based_on` provenance.
+    pub fn executions_for_decision(
+        &self,
+        decision_event_id: &str,
+    ) -> anyhow::Result<Vec<ExecutionLinked>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, payload, refs_provenance FROM events
+             WHERE event_type = 'execution_event'
+             ORDER BY ts",
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+
+        let mut results = Vec::new();
+        for row_result in rows {
+            let (event_id, ts, payload_str, refs_prov_str) = row_result?;
+            let provenance: Vec<Provenance> = match serde_json::from_str(&refs_prov_str) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let has_link = provenance
+                .iter()
+                .any(|p| p.rel == "based_on" && p.target == decision_event_id);
+
+            if !has_link {
+                continue;
+            }
+
+            let payload: serde_json::Value = match serde_json::from_str(&payload_str) {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let status = payload["result"]["status"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_string();
+            let runtime = payload["runtime"].as_str().map(|s| s.to_string());
+            let model = payload["model"].as_str().map(|s| s.to_string());
+            let cost_usd = payload["usage"]["cost_usd"].as_f64();
+            let token_in = payload["usage"]["token_in"].as_u64();
+            let token_out = payload["usage"]["token_out"].as_u64();
+            let latency_ms = payload["usage"]["latency_ms"].as_u64();
+
+            results.push(ExecutionLinked {
+                event_id,
+                ts,
+                status,
+                runtime,
+                model,
+                cost_usd,
+                token_in,
+                token_out,
+                latency_ms,
+            });
+        }
+
+        Ok(results)
     }
 }
 
@@ -1945,6 +2146,259 @@ mod tests {
         let deps = store.deps_of("db.pool").unwrap();
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0].target_key, "db.engine");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Decision outcome tests ───────────────────────────────────────
+
+    fn make_execution_event_with_decision_ref(
+        branch: &str,
+        event_id: &str,
+        ts: &str,
+        decision_ref: Option<&str>,
+        status: &str,
+        cost_usd: f64,
+        token_in: u64,
+        token_out: u64,
+        latency_ms: u64,
+    ) -> Event {
+        use edda_core::types::{Provenance, Refs};
+        use edda_core::SCHEMA_VERSION;
+
+        let refs = if let Some(dr) = decision_ref {
+            Refs {
+                provenance: vec![Provenance {
+                    target: dr.to_string(),
+                    rel: "based_on".to_string(),
+                    note: Some("karvi decision_ref".to_string()),
+                }],
+                ..Default::default()
+            }
+        } else {
+            Refs::default()
+        };
+
+        let payload = serde_json::json!({
+            "version": "karvi.event.v1",
+            "event_id": event_id,
+            "event_type": "step_completed",
+            "occurred_at": ts,
+            "trace_id": format!("trace_{}", event_id),
+            "task_id": format!("task_{}", event_id),
+            "step_id": format!("step_{}", event_id),
+            "project": "test/repo",
+            "runtime": "opencode",
+            "model": "gpt-4",
+            "actor": { "kind": "agent", "id": "test-agent" },
+            "usage": { "token_in": token_in, "token_out": token_out, "cost_usd": cost_usd, "latency_ms": latency_ms },
+            "result": { "status": status, "error_code": null, "retryable": false },
+            "decision_ref": decision_ref,
+        });
+
+        let mut event = Event {
+            event_id: event_id.to_string(),
+            ts: ts.to_string(),
+            event_type: "execution_event".to_string(),
+            branch: branch.to_string(),
+            parent_hash: None,
+            hash: String::new(),
+            payload,
+            refs,
+            schema_version: SCHEMA_VERSION,
+            digests: Vec::new(),
+            event_family: None,
+            event_level: None,
+        };
+        edda_core::event::finalize_event(&mut event);
+        event
+    }
+
+    #[test]
+    fn decision_outcomes_empty_when_no_executions() {
+        let (dir, store) = tmp_db();
+        let d1 = make_decision_event("main", "db.engine", "postgres", Some("JSONB"), None);
+        let d1_id = d1.event_id.clone();
+        store.append_event(&d1).unwrap();
+
+        let outcomes = store.decision_outcomes(&d1_id).unwrap();
+        assert!(outcomes.is_some());
+        let m = outcomes.unwrap();
+        assert_eq!(m.decision_key, "db.engine");
+        assert_eq!(m.decision_value, "postgres");
+        assert_eq!(m.total_executions, 0);
+        assert_eq!(m.success_rate, 0.0);
+        assert_eq!(m.total_cost_usd, 0.0);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decision_outcomes_aggregates_metrics() {
+        let (dir, store) = tmp_db();
+        let d1 = make_decision_event("main", "db.engine", "postgres", Some("JSONB"), None);
+        let d1_id = d1.event_id.clone();
+        store.append_event(&d1).unwrap();
+
+        // Add 3 execution events linked to the decision
+        let e1 = make_execution_event_with_decision_ref(
+            "main",
+            "evt_exec_1",
+            "2026-03-01T10:00:00Z",
+            Some(&d1_id),
+            "success",
+            0.01,
+            100,
+            50,
+            500,
+        );
+        store.append_event(&e1).unwrap();
+
+        let e2 = make_execution_event_with_decision_ref(
+            "main",
+            "evt_exec_2",
+            "2026-03-01T11:00:00Z",
+            Some(&d1_id),
+            "success",
+            0.02,
+            200,
+            100,
+            600,
+        );
+        store.append_event(&e2).unwrap();
+
+        let e3 = make_execution_event_with_decision_ref(
+            "main",
+            "evt_exec_3",
+            "2026-03-01T12:00:00Z",
+            Some(&d1_id),
+            "failed",
+            0.015,
+            150,
+            75,
+            400,
+        );
+        store.append_event(&e3).unwrap();
+
+        // Add an execution NOT linked to this decision (should be ignored)
+        let e4 = make_execution_event_with_decision_ref(
+            "main",
+            "evt_exec_4",
+            "2026-03-01T13:00:00Z",
+            None,
+            "success",
+            0.5,
+            1000,
+            500,
+            1000,
+        );
+        store.append_event(&e4).unwrap();
+
+        let outcomes = store.decision_outcomes(&d1_id).unwrap();
+        assert!(outcomes.is_some());
+        let m = outcomes.unwrap();
+
+        assert_eq!(m.decision_key, "db.engine");
+        assert_eq!(m.decision_value, "postgres");
+        assert_eq!(m.total_executions, 3);
+        assert_eq!(m.success_count, 2);
+        assert_eq!(m.failed_count, 1);
+        assert_eq!(m.cancelled_count, 0);
+        assert!((m.success_rate - 66.66666666666666).abs() < 0.01);
+        assert!((m.total_cost_usd - 0.045).abs() < 0.0001);
+        assert_eq!(m.total_tokens_in, 450);
+        assert_eq!(m.total_tokens_out, 225);
+        assert!((m.avg_latency_ms - 500.0).abs() < 0.01);
+        assert_eq!(
+            m.first_execution_ts,
+            Some("2026-03-01T10:00:00Z".to_string())
+        );
+        assert_eq!(
+            m.last_execution_ts,
+            Some("2026-03-01T12:00:00Z".to_string())
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn decision_outcomes_returns_none_for_nonexistent() {
+        let (dir, store) = tmp_db();
+        let outcomes = store.decision_outcomes("evt_nonexistent").unwrap();
+        assert!(outcomes.is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn executions_for_decision_filters_correctly() {
+        let (dir, store) = tmp_db();
+        let d1 = make_decision_event("main", "db.engine", "postgres", None, None);
+        let d1_id = d1.event_id.clone();
+        store.append_event(&d1).unwrap();
+
+        let d2 = make_decision_event("main", "cache.strategy", "redis", None, None);
+        let d2_id = d2.event_id.clone();
+        store.append_event(&d2).unwrap();
+
+        // Execution linked to d1
+        let e1 = make_execution_event_with_decision_ref(
+            "main",
+            "evt_exec_d1",
+            "2026-03-01T10:00:00Z",
+            Some(&d1_id),
+            "success",
+            0.01,
+            100,
+            50,
+            500,
+        );
+        store.append_event(&e1).unwrap();
+
+        // Execution linked to d2
+        let e2 = make_execution_event_with_decision_ref(
+            "main",
+            "evt_exec_d2",
+            "2026-03-01T11:00:00Z",
+            Some(&d2_id),
+            "failed",
+            0.02,
+            200,
+            100,
+            600,
+        );
+        store.append_event(&e2).unwrap();
+
+        // Execution with no decision_ref
+        let e3 = make_execution_event_with_decision_ref(
+            "main",
+            "evt_exec_none",
+            "2026-03-01T12:00:00Z",
+            None,
+            "success",
+            0.03,
+            300,
+            150,
+            700,
+        );
+        store.append_event(&e3).unwrap();
+
+        let d1_execs = store.executions_for_decision(&d1_id).unwrap();
+        assert_eq!(d1_execs.len(), 1);
+        assert_eq!(d1_execs[0].event_id, "evt_exec_d1");
+        assert_eq!(d1_execs[0].status, "success");
+        assert_eq!(d1_execs[0].runtime, Some("opencode".to_string()));
+        assert_eq!(d1_execs[0].model, Some("gpt-4".to_string()));
+        assert!((d1_execs[0].cost_usd.unwrap() - 0.01).abs() < 0.0001);
+
+        let d2_execs = store.executions_for_decision(&d2_id).unwrap();
+        assert_eq!(d2_execs.len(), 1);
+        assert_eq!(d2_execs[0].event_id, "evt_exec_d2");
+        assert_eq!(d2_execs[0].status, "failed");
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
