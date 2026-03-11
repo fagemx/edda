@@ -165,9 +165,10 @@ pub fn evaluate_authz(
             continue;
         }
         // Check if any of actor's roles match the grant's roles
-        let role_match = grant.roles.iter().any(|r| {
-            r == "*" || actor_roles.iter().any(|ar| ar == r)
-        });
+        let role_match = grant
+            .roles
+            .iter()
+            .any(|r| r == "*" || actor_roles.iter().any(|ar| ar == r));
         if role_match {
             return AuthzResult {
                 allowed: true,
@@ -272,10 +273,7 @@ mod tests {
                 roles: roles.iter().map(|s| s.to_string()).collect(),
             },
         );
-        ActorsConfig {
-            version: 1,
-            actors,
-        }
+        ActorsConfig { version: 1, actors }
     }
 
     #[test]
@@ -435,6 +433,10 @@ permissions:
         };
         let result = evaluate_authz(&req, &policy, &actors);
         assert!(!result.allowed);
-        assert!(result.reason.as_ref().unwrap().contains("no permissions section"));
+        assert!(result
+            .reason
+            .as_ref()
+            .unwrap()
+            .contains("no permissions section"));
     }
 }

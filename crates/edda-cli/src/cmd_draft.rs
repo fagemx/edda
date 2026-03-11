@@ -4,9 +4,7 @@ use edda_core::event::{
     new_approval_event, new_approval_request_event, new_commit_event, ApprovalEventParams,
     ApprovalRequestParams, CommitEventParams,
 };
-use edda_core::policy::{
-    ActorsConfig, PolicyRule, PolicyStageDef, PolicyV2Config, PolicyWhen,
-};
+use edda_core::policy::{ActorsConfig, PolicyRule, PolicyStageDef, PolicyV2Config, PolicyWhen};
 use edda_derive::{build_auto_evidence, last_commit_contribution, rebuild_all};
 use std::path::Path;
 
