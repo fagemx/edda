@@ -10,6 +10,7 @@ pub fn execute(
     json: bool,
     all: bool,
     branch: Option<&str>,
+    impact: bool,
 ) -> anyhow::Result<()> {
     let ledger = Ledger::open(repo_root)?;
     let q = query.unwrap_or("");
@@ -18,6 +19,7 @@ pub fn execute(
         limit,
         include_superseded: all,
         branch: branch.map(|s| s.to_string()),
+        impact,
     };
 
     // Build transcript search callback

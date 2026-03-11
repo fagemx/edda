@@ -63,6 +63,19 @@ CREATE INDEX IF NOT EXISTS idx_decisions_active ON decisions(is_active) WHERE is
 CREATE INDEX IF NOT EXISTS idx_decisions_branch_key ON decisions(branch, key);
 ";
 
+const SCHEMA_V4_SQL: &str = "
+CREATE TABLE IF NOT EXISTS decision_deps (
+    source_key TEXT NOT NULL,
+    target_key TEXT NOT NULL,
+    dep_type TEXT NOT NULL,
+    created_event TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (source_key, target_key)
+);
+CREATE INDEX IF NOT EXISTS idx_deps_target ON decision_deps(target_key);
+CREATE INDEX IF NOT EXISTS idx_deps_source ON decision_deps(source_key);
+";
+
 const SCHEMA_V3_SQL: &str = "
 CREATE TABLE IF NOT EXISTS review_bundles (
     event_id TEXT PRIMARY KEY REFERENCES events(event_id),
@@ -110,6 +123,16 @@ pub struct BundleRow {
     pub tests_failed: i64,
     pub suggested_action: String,
     pub branch: String,
+    pub created_at: String,
+}
+
+/// A row from the `decision_deps` table.
+#[derive(Debug, Clone)]
+pub struct DepRow {
+    pub source_key: String,
+    pub target_key: String,
+    pub dep_type: String,
+    pub created_event: Option<String>,
     pub created_at: String,
 }
 
@@ -168,6 +191,12 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 3 {
             self.migrate_v2_to_v3()?;
+        }
+
+        // Migrate to v4 if needed
+        let current = self.schema_version()?;
+        if current < 4 {
+            self.migrate_v3_to_v4()?;
         }
 
         Ok(())
@@ -294,6 +323,49 @@ impl SqliteStore {
         }
 
         self.set_schema_version(3)?;
+        Ok(())
+    }
+
+    fn migrate_v3_to_v4(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V4_SQL)?;
+
+        // Backfill: create star-shaped auto_domain edges for existing active decisions
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, domain FROM decisions WHERE is_active = TRUE ORDER BY rowid")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        // Group by domain
+        let mut domain_keys: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for (key, domain) in &rows {
+            domain_keys
+                .entry(domain.clone())
+                .or_default()
+                .push(key.clone());
+        }
+
+        let now = time_now_rfc3339();
+        for keys in domain_keys.values() {
+            if keys.len() < 2 {
+                continue;
+            }
+            // Star-shaped: each key after the first depends_on all prior keys
+            for i in 1..keys.len() {
+                for j in 0..i {
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO decision_deps
+                         (source_key, target_key, dep_type, created_event, created_at)
+                         VALUES (?1, ?2, 'auto_domain', NULL, ?3)",
+                        params![keys[i], keys[j], now],
+                    )?;
+                }
+            }
+        }
+
+        self.set_schema_version(4)?;
         Ok(())
     }
 
@@ -683,6 +755,83 @@ impl SqliteStore {
             None => Ok(None),
         }
     }
+    // ── Decision Dependencies ────────────────────────────────────────
+
+    /// Insert a dependency edge.
+    pub fn insert_dep(
+        &self,
+        source_key: &str,
+        target_key: &str,
+        dep_type: &str,
+        created_event: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let now = time_now_rfc3339();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO decision_deps
+             (source_key, target_key, dep_type, created_event, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![source_key, target_key, dep_type, created_event, now],
+        )?;
+        Ok(())
+    }
+
+    /// What does `key` depend on?
+    pub fn deps_of(&self, key: &str) -> anyhow::Result<Vec<DepRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_key, target_key, dep_type, created_event, created_at
+             FROM decision_deps WHERE source_key = ?1",
+        )?;
+        let rows = stmt.query_map(params![key], map_dep_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("deps_of query failed: {e}"))
+    }
+
+    /// Who depends on `key`?
+    pub fn dependents_of(&self, key: &str) -> anyhow::Result<Vec<DepRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_key, target_key, dep_type, created_event, created_at
+             FROM decision_deps WHERE target_key = ?1",
+        )?;
+        let rows = stmt.query_map(params![key], map_dep_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("dependents_of query failed: {e}"))
+    }
+
+    /// Who depends on `key`, joined with active decisions only.
+    pub fn active_dependents_of(&self, key: &str) -> anyhow::Result<Vec<(DepRow, DecisionRow)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT dd.source_key, dd.target_key, dd.dep_type, dd.created_event, dd.created_at,
+                    d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                    d.supersedes_id, d.is_active, e.ts
+             FROM decision_deps dd
+             JOIN decisions d ON d.key = dd.source_key AND d.is_active = TRUE
+             JOIN events e ON d.event_id = e.event_id
+             WHERE dd.target_key = ?1",
+        )?;
+        let rows = stmt.query_map(params![key], |row| {
+            let dep = DepRow {
+                source_key: row.get(0)?,
+                target_key: row.get(1)?,
+                dep_type: row.get(2)?,
+                created_event: row.get(3)?,
+                created_at: row.get(4)?,
+            };
+            let decision = DecisionRow {
+                event_id: row.get(5)?,
+                key: row.get(6)?,
+                value: row.get(7)?,
+                reason: row.get(8)?,
+                domain: row.get(9)?,
+                branch: row.get(10)?,
+                supersedes_id: row.get(11)?,
+                is_active: row.get(12)?,
+                ts: row.get(13)?,
+            };
+            Ok((dep, decision))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("active_dependents_of query failed: {e}"))
+    }
 }
 
 impl Drop for SqliteStore {
@@ -762,6 +911,16 @@ fn map_bundle_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BundleRow> {
     })
 }
 
+fn map_dep_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DepRow> {
+    Ok(DepRow {
+        source_key: row.get(0)?,
+        target_key: row.get(1)?,
+        dep_type: row.get(2)?,
+        created_event: row.get(3)?,
+        created_at: row.get(4)?,
+    })
+}
+
 fn map_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRow> {
     Ok(DecisionRow {
         event_id: row.get(0)?,
@@ -777,6 +936,12 @@ fn map_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRow> {
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
+
+fn time_now_rfc3339() -> String {
+    let now = time::OffsetDateTime::now_utc();
+    now.format(&time::format_description::well_known::Rfc3339)
+        .expect("RFC3339 formatting should not fail")
+}
 
 /// Intermediate row struct for deserialization.
 struct EventRow {
@@ -1670,7 +1835,78 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(tables.contains(&"review_bundles".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 3);
+        assert!(tables.contains(&"decision_deps".to_string()));
+        assert_eq!(store.schema_version().unwrap(), 4);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Decision dependency tests ───────────────────────────────────
+
+    #[test]
+    fn test_insert_and_query_deps() {
+        let (dir, store) = tmp_db();
+        store
+            .insert_dep("db.schema", "db.engine", "explicit", Some("evt_1"))
+            .unwrap();
+        store
+            .insert_dep("db.pool", "db.engine", "auto_domain", Some("evt_2"))
+            .unwrap();
+
+        let deps = store.deps_of("db.schema").unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].target_key, "db.engine");
+        assert_eq!(deps[0].dep_type, "explicit");
+
+        let dependents = store.dependents_of("db.engine").unwrap();
+        assert_eq!(dependents.len(), 2);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_active_dependents_join() {
+        let (dir, store) = tmp_db();
+        // Create two decisions in same domain
+        let d1 = make_decision_event("main", "db.engine", "postgres", Some("JSONB"), None);
+        store.append_event(&d1).unwrap();
+        let d2 = make_decision_event("main", "db.schema", "JSONB", Some("postgres feature"), None);
+        store.append_event(&d2).unwrap();
+
+        // Add explicit dep
+        store
+            .insert_dep("db.schema", "db.engine", "explicit", Some(&d2.event_id))
+            .unwrap();
+
+        let active = store.active_dependents_of("db.engine").unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].1.key, "db.schema");
+        assert_eq!(active[0].1.value, "JSONB");
+        assert_eq!(active[0].0.dep_type, "explicit");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_schema_v4_migration_backfill() {
+        let (dir, store) = tmp_db();
+        // After fresh creation, schema is v4 and decision_deps exists
+        let d1 = make_decision_event("main", "db.engine", "postgres", None, None);
+        store.append_event(&d1).unwrap();
+        let d2 = make_decision_event("main", "db.pool", "10", None, None);
+        store.append_event(&d2).unwrap();
+
+        // Insert dep manually (simulating what cmd_bridge.rs does)
+        store
+            .insert_dep("db.pool", "db.engine", "auto_domain", Some(&d2.event_id))
+            .unwrap();
+
+        let deps = store.deps_of("db.pool").unwrap();
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].target_key, "db.engine");
+
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

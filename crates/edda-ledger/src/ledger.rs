@@ -143,6 +143,38 @@ impl Ledger {
         self.sqlite.find_active_decision(branch, key)
     }
 
+    // ── Decision Dependencies ────────────────────────────────────────
+
+    /// Insert a dependency edge between two decision keys.
+    pub fn insert_dep(
+        &self,
+        source_key: &str,
+        target_key: &str,
+        dep_type: &str,
+        created_event: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.sqlite
+            .insert_dep(source_key, target_key, dep_type, created_event)
+    }
+
+    /// What does `key` depend on?
+    pub fn deps_of(&self, key: &str) -> anyhow::Result<Vec<crate::sqlite_store::DepRow>> {
+        self.sqlite.deps_of(key)
+    }
+
+    /// Who depends on `key`?
+    pub fn dependents_of(&self, key: &str) -> anyhow::Result<Vec<crate::sqlite_store::DepRow>> {
+        self.sqlite.dependents_of(key)
+    }
+
+    /// Who depends on `key`, joined with active decisions only.
+    pub fn active_dependents_of(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<Vec<(crate::sqlite_store::DepRow, DecisionRow)>> {
+        self.sqlite.active_dependents_of(key)
+    }
+
     // ── Review Bundles ───────────────────────────────────────────────
 
     /// Get a review bundle by bundle_id.
