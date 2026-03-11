@@ -665,6 +665,17 @@ fn dispatch_session_end(
     // 2e. L3 post-mortem analysis (best-effort, fire-and-forget)
     run_postmortem(project_id, session_id, cwd);
 
+    // 2f. Background decision extraction (non-blocking, best-effort)
+    if crate::bg_extract::should_run(project_id, session_id) {
+        let pid = project_id.to_string();
+        let sid = session_id.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = crate::bg_extract::run_extraction(&pid, &sid) {
+                eprintln!("[edda-bg] decision extraction failed: {e}");
+            }
+        });
+    }
+
     // 2d. Push notification (best-effort, fire-and-forget)
     notify_session_end(project_id, cwd, session_id);
 

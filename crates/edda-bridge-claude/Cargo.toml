@@ -28,6 +28,7 @@ ulid.workspace = true
 globset.workspace = true
 dirs.workspace = true
 regex.workspace = true
+blake3.workspace = true
 ureq = "3"
 
 [dev-dependencies]

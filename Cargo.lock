@@ -737,6 +737,7 @@ name = "edda-bridge-claude"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "blake3",
  "dirs",
  "edda-core",
  "edda-derive",
