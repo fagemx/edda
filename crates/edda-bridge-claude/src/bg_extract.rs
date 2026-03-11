@@ -11,15 +11,15 @@ use std::path::{Path, PathBuf};
 
 // ── Configuration ──
 
-const DEFAULT_MODEL: &str = "claude-3-5-haiku-20241022";
-const DEFAULT_MAX_TRANSCRIPT_CHARS: usize = 30_000;
+pub(crate) const DEFAULT_MODEL: &str = "claude-3-5-haiku-20241022";
+pub(crate) const DEFAULT_MAX_TRANSCRIPT_CHARS: usize = 30_000;
 const DEFAULT_DAILY_BUDGET_USD: f64 = 0.50;
 const DEFAULT_CONFIDENCE_THRESHOLD: f64 = 0.7;
-const API_TIMEOUT_SECS: u64 = 30;
+pub(crate) const API_TIMEOUT_SECS: u64 = 30;
 
 // Haiku pricing (per token)
-const HAIKU_INPUT_COST_PER_TOKEN: f64 = 0.000_001; // $1 / 1M input tokens
-const HAIKU_OUTPUT_COST_PER_TOKEN: f64 = 0.000_005; // $5 / 1M output tokens
+pub(crate) const HAIKU_INPUT_COST_PER_TOKEN: f64 = 0.000_001; // $1 / 1M input tokens
+pub(crate) const HAIKU_OUTPUT_COST_PER_TOKEN: f64 = 0.000_005; // $5 / 1M output tokens
 
 // ── Data Structures ──
 
@@ -109,36 +109,36 @@ struct AuditEntry {
 
 // Anthropic API types (sync, ureq-based)
 #[derive(Debug, Serialize)]
-struct AnthropicRequest {
-    model: String,
-    max_tokens: u32,
-    messages: Vec<ApiMessage>,
+pub(crate) struct AnthropicRequest {
+    pub model: String,
+    pub max_tokens: u32,
+    pub messages: Vec<ApiMessage>,
 }
 
 #[derive(Debug, Serialize)]
-struct ApiMessage {
-    role: String,
-    content: String,
+pub(crate) struct ApiMessage {
+    pub role: String,
+    pub content: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct AnthropicResponse {
-    content: Vec<ContentBlock>,
+pub(crate) struct AnthropicResponse {
+    pub content: Vec<ContentBlock>,
     #[serde(default)]
-    usage: Option<Usage>,
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ContentBlock {
-    text: String,
+pub(crate) struct ContentBlock {
+    pub text: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct Usage {
+pub(crate) struct Usage {
     #[serde(default)]
-    input_tokens: u64,
+    pub input_tokens: u64,
     #[serde(default)]
-    output_tokens: u64,
+    pub output_tokens: u64,
 }
 
 // ── Public API ──
@@ -450,7 +450,7 @@ fn save_extraction_state(project_id: &str, result: &ExtractionResult) -> Result<
     Ok(())
 }
 
-fn check_daily_budget(project_id: &str) -> Result<bool> {
+pub(crate) fn check_daily_budget(project_id: &str) -> Result<bool> {
     let budget = env_f64("EDDA_BG_DAILY_BUDGET_USD", DEFAULT_DAILY_BUDGET_USD);
     let path = daily_cost_path(project_id);
 
@@ -470,7 +470,7 @@ fn check_daily_budget(project_id: &str) -> Result<bool> {
     Ok(cost.total_usd < budget)
 }
 
-fn update_daily_cost(project_id: &str, cost_usd: f64) -> Result<()> {
+pub(crate) fn update_daily_cost(project_id: &str, cost_usd: f64) -> Result<()> {
     let path = daily_cost_path(project_id);
     let today = today_date();
 
@@ -541,7 +541,7 @@ fn append_audit_log(project_id: &str, entry: &AuditEntry) -> Result<()> {
 }
 
 /// Read a stored transcript JSONL and assemble user/assistant turns into text.
-fn read_transcript_turns(transcript_path: &Path) -> Result<String> {
+pub(crate) fn read_transcript_turns(transcript_path: &Path) -> Result<String> {
     let content = fs::read_to_string(transcript_path)
         .with_context(|| format!("Failed to read transcript: {}", transcript_path.display()))?;
 
@@ -598,13 +598,13 @@ fn extract_text_from_content(content: &serde_json::Value) -> String {
     String::new()
 }
 
-fn compute_file_hash(path: &Path) -> Result<String> {
+pub(crate) fn compute_file_hash(path: &Path) -> Result<String> {
     let content = fs::read(path)?;
     let hash = blake3::hash(&content);
     Ok(format!("blake3:{}", hash.to_hex()))
 }
 
-fn truncate_text(text: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_text(text: &str, max_chars: usize) -> String {
     if text.len() <= max_chars {
         return text.to_string();
     }
@@ -830,7 +830,11 @@ Enhancement 項目格式：
 }
 
 /// Synchronous Anthropic API call via ureq.
-fn call_anthropic_sync(api_key: &str, model: &str, prompt: &str) -> Result<(String, u64, u64)> {
+pub(crate) fn call_anthropic_sync(
+    api_key: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<(String, u64, u64)> {
     let request = AnthropicRequest {
         model: model.to_string(),
         max_tokens: 2048,
@@ -971,7 +975,7 @@ fn extract_json_array(text: &str) -> String {
     trimmed.to_string()
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     let now = time::OffsetDateTime::now_utc();
     now.format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_else(|_| "unknown".to_string())
@@ -987,7 +991,7 @@ fn today_date() -> String {
     )
 }
 
-fn env_f64(name: &str, default: f64) -> f64 {
+pub(crate) fn env_f64(name: &str, default: f64) -> f64 {
     std::env::var(name)
         .ok()
         .and_then(|v| v.parse().ok())

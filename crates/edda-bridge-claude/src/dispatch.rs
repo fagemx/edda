@@ -676,6 +676,18 @@ fn dispatch_session_end(
         });
     }
 
+    // 2g. Background session digest (non-blocking, best-effort)
+    if crate::bg_digest::should_run(project_id, session_id) {
+        let pid = project_id.to_string();
+        let sid = session_id.to_string();
+        let cwd_str = cwd.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = crate::bg_digest::run_digest(&pid, &sid, &cwd_str) {
+                eprintln!("[edda-bg] session digest failed: {e}");
+            }
+        });
+    }
+
     // 2d. Push notification (best-effort, fire-and-forget)
     notify_session_end(project_id, cwd, session_id);
 
