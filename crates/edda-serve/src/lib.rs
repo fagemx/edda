@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
 use edda_aggregate::aggregate::{aggregate_overview, DateRange};
+use edda_aggregate::quality::{model_quality_from_events, QualityReport};
 use edda_core::event::{finalize_event, new_decision_event, new_execution_event, new_note_event};
 use edda_core::types::{rel, DecisionPayload, Provenance};
 use edda_derive::{rebuild_branch, render_context, DeriveOptions};
@@ -132,6 +133,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
         .route("/api/projects", get(get_projects))
+        .route("/api/metrics/quality", get(get_quality_metrics))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -915,6 +917,28 @@ async fn get_projects(
     }))
 }
 
+// ── GET /api/metrics/quality ──
+
+#[derive(Deserialize)]
+struct QualityQuery {
+    after: Option<String>,
+    before: Option<String>,
+}
+
+async fn get_quality_metrics(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<QualityQuery>,
+) -> Result<Json<QualityReport>, AppError> {
+    let range = DateRange {
+        after: params.after,
+        before: params.before,
+    };
+    let ledger = state.open_ledger()?;
+    let events = ledger.iter_events_by_type("execution_event")?;
+    let report = model_quality_from_events(&events, &range);
+    Ok(Json(report))
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -1552,5 +1576,125 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn quality_endpoint_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/metrics/quality")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["total_steps"], 0);
+        assert_eq!(json["overall_success_rate"], 0.0);
+        assert!(json["models"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn quality_endpoint_with_events() {
+        use edda_core::event::new_execution_event;
+
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let branch = ledger.head_branch().unwrap();
+
+        let payload1 = serde_json::json!({
+            "runtime": "claude", "model": "claude-3-opus",
+            "usage": { "token_in": 100, "token_out": 50, "cost_usd": 0.01, "latency_ms": 500 },
+            "result": { "status": "success" },
+            "event_type": "step_completed",
+        });
+        let e1 = new_execution_event(
+            &branch, None, "evt_q1", "2026-03-11T00:00:00Z", payload1, None,
+        ).unwrap();
+        ledger.append_event(&e1).unwrap();
+
+        let payload2 = serde_json::json!({
+            "runtime": "claude", "model": "claude-3-opus",
+            "usage": { "token_in": 200, "token_out": 80, "cost_usd": 0.02, "latency_ms": 700 },
+            "result": { "status": "failed" },
+            "event_type": "step_failed",
+        });
+        let e2 = new_execution_event(
+            &branch, Some(&e1.hash), "evt_q2", "2026-03-11T01:00:00Z", payload2, None,
+        ).unwrap();
+        ledger.append_event(&e2).unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/metrics/quality")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report: QualityReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report.total_steps, 2);
+        assert_eq!(report.models.len(), 1);
+        assert_eq!(report.models[0].model, "claude-3-opus");
+        assert_eq!(report.models[0].success_count, 1);
+        assert_eq!(report.models[0].failed_count, 1);
+        assert!((report.overall_success_rate - 0.5).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn quality_endpoint_with_date_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let app1 = router(tmp.path());
+        let body1 = karvi_event_json("evt_qf1", "step_completed");
+        app1.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/events/karvi")
+                .header("content-type", "application/json")
+                .body(Body::from(body1.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let app2 = router(tmp.path());
+        let resp = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/api/metrics/quality?after=2099-01-01T00:00:00Z")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let report: QualityReport = serde_json::from_slice(&body).unwrap();
+        assert_eq!(report.total_steps, 0);
     }
 }
