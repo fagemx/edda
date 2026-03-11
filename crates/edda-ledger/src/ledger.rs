@@ -268,7 +268,7 @@ fn time_now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use edda_core::event::{finalize_event, new_note_event};
+    use edda_core::event::new_note_event;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);

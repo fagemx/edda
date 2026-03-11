@@ -2187,6 +2187,7 @@ mod tests {
 
     // ── Decision outcome tests ───────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn make_execution_event_with_decision_ref(
         branch: &str,
         event_id: &str,

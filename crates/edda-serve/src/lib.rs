@@ -1510,7 +1510,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri(&format!("/api/decisions/{}/outcomes", decision_event_id))
+                    .uri(format!("/api/decisions/{}/outcomes", decision_event_id))
                     .body(Body::empty())
                     .unwrap(),
             )

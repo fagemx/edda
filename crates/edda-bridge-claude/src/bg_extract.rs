@@ -1380,7 +1380,7 @@ That's it."#;
         let path = dir.path().join("test.jsonl");
 
         // Write a transcript with edda decide commands
-        let lines = vec![
+        let lines = [
             r#"{"type":"assistant","message":{"content":"Let me record this."},"tool_input":{"command":"edda decide \"db.engine=sqlite\" --reason \"for now\""}}"#,
             r#"{"type":"human","message":{"content":"ok"}}"#,
             r#"{"type":"assistant","message":{"content":"Another decision."},"tool_input":{"command":"edda decide \"auth.method=JWT\""}}"#,
