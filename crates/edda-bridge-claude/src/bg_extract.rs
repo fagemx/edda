@@ -23,6 +23,17 @@ const HAIKU_OUTPUT_COST_PER_TOKEN: f64 = 0.000_005; // $5 / 1M output tokens
 
 // ── Data Structures ──
 
+/// Distinguishes background-extracted decisions from reason enhancements.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum DecisionKind {
+    /// A new decision found by the background extractor.
+    #[default]
+    Extraction,
+    /// An enhanced reason for a decision already recorded via `edda decide`.
+    Enhancement,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedDecision {
     pub key: String,
@@ -35,6 +46,11 @@ pub struct ExtractedDecision {
     pub source_turn: usize,
     #[serde(default)]
     pub status: DraftStatus,
+    #[serde(default)]
+    pub kind: DecisionKind,
+    /// For `Enhancement` kind: the original (vague) reason that was enhanced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -245,8 +261,15 @@ pub fn extract_decisions(
     let max_chars = env_usize("EDDA_BG_MAX_TRANSCRIPT_CHARS", DEFAULT_MAX_TRANSCRIPT_CHARS);
     let truncated = truncate_text(&transcript_text, max_chars);
 
-    // Build prompt
-    let prompt = build_extraction_prompt(&truncated);
+    // Find recorded decisions with vague reasons for enhancement
+    let recorded = extract_recorded_decisions_from_transcript(&transcript_path);
+    let vague: Vec<RecordedDecision> = recorded
+        .into_iter()
+        .filter(|d| is_vague_reason(d.reason.as_deref()))
+        .collect();
+
+    // Build prompt (includes enhancement section if vague decisions found)
+    let prompt = build_extraction_prompt(&truncated, &vague);
 
     // Call LLM
     let model = std::env::var("EDDA_BG_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
@@ -595,7 +618,182 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     format!("[... transcript truncated ...]\n\n{}", &text[start..])
 }
 
-fn build_extraction_prompt(transcript: &str) -> String {
+/// A decision recorded by the agent via `edda decide`, parsed from transcript.
+#[derive(Debug, Clone)]
+struct RecordedDecision {
+    key: String,
+    value: String,
+    reason: Option<String>,
+}
+
+/// Returns `true` if the reason is missing, too short, or a generic/vague phrase.
+fn is_vague_reason(reason: Option<&str>) -> bool {
+    let Some(r) = reason else {
+        return true;
+    };
+    let r = r.trim();
+    if r.len() < 15 {
+        return true;
+    }
+    let vague_patterns = [
+        "for now",
+        "just",
+        "simple",
+        "easier",
+        "because",
+        "暫時",
+        "先這樣",
+        "好了",
+        "方便",
+    ];
+    let lower = r.to_lowercase();
+    // Only match if the entire reason is a vague phrase (possibly with trailing period)
+    vague_patterns
+        .iter()
+        .any(|p| lower == *p || lower == format!("{p}."))
+}
+
+/// Parse `edda decide "key=value" --reason "reason"` commands from a transcript JSONL file.
+fn extract_recorded_decisions_from_transcript(transcript_path: &Path) -> Vec<RecordedDecision> {
+    let content = match fs::read_to_string(transcript_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut decisions = Vec::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+
+        // Look for tool_input.command containing "edda decide"
+        let command = record
+            .get("tool_input")
+            .and_then(|ti| ti.get("command"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+
+        if !command.contains("edda decide") {
+            // Also check in message.content for assistant messages
+            let msg_text = record
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .map(extract_text_from_content)
+                .unwrap_or_default();
+            if !msg_text.contains("edda decide") {
+                continue;
+            }
+            // Try to parse from message text
+            if let Some(d) = parse_edda_decide_command(&msg_text) {
+                decisions.push(d);
+            }
+            continue;
+        }
+
+        if let Some(d) = parse_edda_decide_command(command) {
+            decisions.push(d);
+        }
+    }
+
+    decisions
+}
+
+/// Parse an `edda decide "key=value" --reason "reason"` command string.
+fn parse_edda_decide_command(text: &str) -> Option<RecordedDecision> {
+    // Find the "edda decide" part and extract arguments after it
+    let decide_idx = text.find("edda decide")?;
+    let after = &text[decide_idx + "edda decide".len()..];
+
+    // Extract the key=value argument (may be quoted or unquoted)
+    let after = after.trim();
+    let kv = if let Some(stripped) = after.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        &stripped[..end]
+    } else if let Some(stripped) = after.strip_prefix('\'') {
+        let end = stripped.find('\'')?;
+        &stripped[..end]
+    } else {
+        // Unquoted: take until whitespace
+        after.split_whitespace().next()?
+    };
+
+    let (key, value) = kv.split_once('=')?;
+
+    // Extract --reason
+    let reason = if let Some(reason_idx) = after.find("--reason") {
+        let after_flag = after[reason_idx + "--reason".len()..].trim();
+        if let Some(stripped) = after_flag.strip_prefix('"') {
+            let end = stripped.find('"');
+            end.map(|e| stripped[..e].to_string())
+        } else if let Some(stripped) = after_flag.strip_prefix('\'') {
+            let end = stripped.find('\'');
+            end.map(|e| stripped[..e].to_string())
+        } else {
+            // Unquoted: take rest of line
+            let val = after_flag.split('\n').next().unwrap_or("").trim();
+            if val.is_empty() {
+                None
+            } else {
+                Some(val.to_string())
+            }
+        }
+    } else {
+        None
+    };
+
+    Some(RecordedDecision {
+        key: key.trim().to_string(),
+        value: value.trim().to_string(),
+        reason,
+    })
+}
+
+fn build_extraction_prompt(transcript: &str, vague_decisions: &[RecordedDecision]) -> String {
+    let enhancement_section = if vague_decisions.is_empty() {
+        String::new()
+    } else {
+        let mut section = String::from(
+            r#"
+
+---
+
+## 已記錄的決策（增強模糊 reason）
+
+以下是 agent 在本次對話中記錄的決策，但 reason 缺失或模糊。
+請根據 transcript 上下文為每一條提供具體的、有意義的 reason。
+
+輸出時加入 `"kind": "enhancement"` 欄位，以及 `"original_reason"` 保留原始 reason。
+
+"#,
+        );
+        for d in vague_decisions {
+            let reason_display = d.reason.as_deref().unwrap_or("(none)");
+            section.push_str(&format!(
+                "- `{}={}` — current reason: \"{}\"\n",
+                d.key, d.value, reason_display
+            ));
+        }
+        section.push_str(
+            r#"
+Enhancement 項目格式：
+{{
+  "kind": "enhancement",
+  "key": "domain.aspect",
+  "value": "選擇的值",
+  "original_reason": "原始的模糊 reason 或 null",
+  "reason": "根據對話上下文產生的具體 reason",
+  "confidence": 0.0-1.0,
+  "evidence": "transcript 中的原文依據（簡短引用）"
+}}
+"#,
+        );
+        section
+    };
+
     format!(
         r#"你是決策提取器。分析以下開發對話 transcript，識別架構/技術決策。
 
@@ -622,7 +820,7 @@ fn build_extraction_prompt(transcript: &str) -> String {
 - 暫時性的除錯步驟
 
 如果沒有發現任何決策，回覆空陣列 `[]`。
-
+{enhancement_section}
 ---
 
 ## Transcript
@@ -706,6 +904,20 @@ pub fn parse_llm_decisions(text: &str) -> Vec<ExtractedDecision> {
                 .to_string();
             let source_turn = v.get("source_turn").and_then(|t| t.as_u64()).unwrap_or(0) as usize;
 
+            let kind = v
+                .get("kind")
+                .and_then(|k| k.as_str())
+                .map(|k| match k {
+                    "enhancement" => DecisionKind::Enhancement,
+                    _ => DecisionKind::Extraction,
+                })
+                .unwrap_or(DecisionKind::Extraction);
+
+            let original_reason = v
+                .get("original_reason")
+                .and_then(|r| r.as_str())
+                .map(|s| s.to_string());
+
             Some(ExtractedDecision {
                 key,
                 value,
@@ -714,6 +926,8 @@ pub fn parse_llm_decisions(text: &str) -> Vec<ExtractedDecision> {
                 evidence,
                 source_turn,
                 status: DraftStatus::Pending,
+                kind,
+                original_reason,
             })
         })
         .collect()
@@ -911,12 +1125,16 @@ That's it."#;
             evidence: "evidence".to_string(),
             source_turn: 5,
             status: DraftStatus::Pending,
+            kind: DecisionKind::Extraction,
+            original_reason: None,
         };
 
         let json = serde_json::to_string(&draft).unwrap();
         let parsed: ExtractedDecision = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.status, DraftStatus::Pending);
         assert_eq!(parsed.key, "test.key");
+        assert_eq!(parsed.kind, DecisionKind::Extraction);
+        assert!(parsed.original_reason.is_none());
     }
 
     #[test]
@@ -936,10 +1154,12 @@ That's it."#;
 
     #[test]
     fn test_build_extraction_prompt() {
-        let prompt = build_extraction_prompt("test transcript");
+        let prompt = build_extraction_prompt("test transcript", &[]);
         assert!(prompt.contains("決策提取器"));
         assert!(prompt.contains("test transcript"));
         assert!(prompt.contains("JSON"));
+        // No enhancement section when no vague decisions
+        assert!(!prompt.contains("增強模糊"));
     }
 
     #[test]
@@ -959,5 +1179,221 @@ That's it."#;
         assert!(result.contains("part 1"));
         assert!(result.contains("part 2"));
         assert!(!result.contains("grep"));
+    }
+
+    // ── Decision Reason Quality Enhancement Tests (#194) ──
+
+    #[test]
+    fn test_is_vague_reason_none() {
+        assert!(is_vague_reason(None));
+    }
+
+    #[test]
+    fn test_is_vague_reason_short() {
+        assert!(is_vague_reason(Some("ok")));
+        assert!(is_vague_reason(Some("yes")));
+        assert!(is_vague_reason(Some("   short   "))); // trimmed < 15
+    }
+
+    #[test]
+    fn test_is_vague_reason_exact_match() {
+        assert!(is_vague_reason(Some("for now")));
+        assert!(is_vague_reason(Some("just")));
+        assert!(is_vague_reason(Some("simple")));
+        assert!(is_vague_reason(Some("easier")));
+        assert!(is_vague_reason(Some("because")));
+        assert!(is_vague_reason(Some("for now.")));
+        assert!(is_vague_reason(Some("暫時")));
+        assert!(is_vague_reason(Some("先這樣")));
+        assert!(is_vague_reason(Some("好了")));
+        assert!(is_vague_reason(Some("方便")));
+    }
+
+    #[test]
+    fn test_is_vague_reason_good() {
+        assert!(!is_vague_reason(Some("embedded, zero-config for MVP")));
+        assert!(!is_vague_reason(Some("stateless, scales horizontally")));
+    }
+
+    #[test]
+    fn test_is_vague_reason_threshold() {
+        // Exactly 15 chars → not vague
+        assert!(!is_vague_reason(Some("123456789012345")));
+        // 14 chars → vague (too short)
+        assert!(is_vague_reason(Some("12345678901234")));
+    }
+
+    #[test]
+    fn test_is_vague_reason_contains_vague_word_but_longer() {
+        // "just" appears as substring but the whole reason is long and specific
+        assert!(!is_vague_reason(Some(
+            "just because it supports async well and is production-ready"
+        )));
+    }
+
+    #[test]
+    fn test_decision_kind_serde() {
+        // Round-trip for Extraction
+        let json = serde_json::to_string(&DecisionKind::Extraction).unwrap();
+        assert_eq!(json, r#""extraction""#);
+        let parsed: DecisionKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, DecisionKind::Extraction);
+
+        // Round-trip for Enhancement
+        let json = serde_json::to_string(&DecisionKind::Enhancement).unwrap();
+        assert_eq!(json, r#""enhancement""#);
+        let parsed: DecisionKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, DecisionKind::Enhancement);
+    }
+
+    #[test]
+    fn test_backward_compat_no_kind() {
+        // Existing JSON without `kind` or `original_reason` should deserialize
+        let json = r#"{
+            "key": "db.engine",
+            "value": "sqlite",
+            "reason": "embedded",
+            "confidence": 0.9,
+            "evidence": "some quote",
+            "source_turn": 3,
+            "status": "pending"
+        }"#;
+        let parsed: ExtractedDecision = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.kind, DecisionKind::Extraction);
+        assert!(parsed.original_reason.is_none());
+    }
+
+    #[test]
+    fn test_parse_enhancement_output() {
+        let input = r#"[{
+            "kind": "enhancement",
+            "key": "db.engine",
+            "value": "sqlite",
+            "original_reason": "for now",
+            "reason": "SQLite chosen for MVP — embedded, zero external deps",
+            "confidence": 0.85,
+            "evidence": "用戶說先用 SQLite"
+        }]"#;
+
+        let decisions = parse_llm_decisions(input);
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].kind, DecisionKind::Enhancement);
+        assert_eq!(decisions[0].original_reason.as_deref(), Some("for now"));
+        assert!(decisions[0].reason.as_ref().unwrap().contains("SQLite"));
+    }
+
+    #[test]
+    fn test_parse_mixed_output() {
+        let input = r#"[
+            {
+                "kind": "extraction",
+                "key": "api.framework",
+                "value": "axum",
+                "reason": "async Rust",
+                "confidence": 0.9,
+                "evidence": "chose axum"
+            },
+            {
+                "kind": "enhancement",
+                "key": "db.engine",
+                "value": "sqlite",
+                "original_reason": "for now",
+                "reason": "embedded, zero-config for MVP phase",
+                "confidence": 0.85,
+                "evidence": "discussed sqlite"
+            }
+        ]"#;
+
+        let decisions = parse_llm_decisions(input);
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0].kind, DecisionKind::Extraction);
+        assert!(decisions[0].original_reason.is_none());
+        assert_eq!(decisions[1].kind, DecisionKind::Enhancement);
+        assert_eq!(decisions[1].original_reason.as_deref(), Some("for now"));
+    }
+
+    #[test]
+    fn test_prompt_with_vague_decisions() {
+        let vague = vec![
+            RecordedDecision {
+                key: "db.engine".to_string(),
+                value: "sqlite".to_string(),
+                reason: Some("for now".to_string()),
+            },
+            RecordedDecision {
+                key: "auth.method".to_string(),
+                value: "JWT".to_string(),
+                reason: None,
+            },
+        ];
+        let prompt = build_extraction_prompt("test transcript", &vague);
+        assert!(prompt.contains("增強模糊"));
+        assert!(prompt.contains("db.engine"));
+        assert!(prompt.contains("auth.method"));
+        assert!(prompt.contains("(none)"));
+        assert!(prompt.contains("enhancement"));
+    }
+
+    #[test]
+    fn test_prompt_without_vague_decisions() {
+        let prompt = build_extraction_prompt("test transcript", &[]);
+        assert!(!prompt.contains("增強模糊"));
+        assert!(!prompt.contains("enhancement"));
+    }
+
+    #[test]
+    fn test_parse_edda_decide_command_double_quoted() {
+        let cmd = r#"edda decide "db.engine=sqlite" --reason "embedded, zero-config""#;
+        let d = parse_edda_decide_command(cmd).unwrap();
+        assert_eq!(d.key, "db.engine");
+        assert_eq!(d.value, "sqlite");
+        assert_eq!(d.reason.as_deref(), Some("embedded, zero-config"));
+    }
+
+    #[test]
+    fn test_parse_edda_decide_command_single_quoted() {
+        let cmd = "edda decide 'auth.method=JWT' --reason 'stateless'";
+        let d = parse_edda_decide_command(cmd).unwrap();
+        assert_eq!(d.key, "auth.method");
+        assert_eq!(d.value, "JWT");
+        assert_eq!(d.reason.as_deref(), Some("stateless"));
+    }
+
+    #[test]
+    fn test_parse_edda_decide_command_no_reason() {
+        let cmd = r#"edda decide "cache.strategy=redis""#;
+        let d = parse_edda_decide_command(cmd).unwrap();
+        assert_eq!(d.key, "cache.strategy");
+        assert_eq!(d.value, "redis");
+        assert!(d.reason.is_none());
+    }
+
+    #[test]
+    fn test_parse_edda_decide_command_not_found() {
+        let cmd = "cargo build --release";
+        assert!(parse_edda_decide_command(cmd).is_none());
+    }
+
+    #[test]
+    fn test_extract_recorded_decisions_from_transcript() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+
+        // Write a transcript with edda decide commands
+        let lines = vec![
+            r#"{"type":"assistant","message":{"content":"Let me record this."},"tool_input":{"command":"edda decide \"db.engine=sqlite\" --reason \"for now\""}}"#,
+            r#"{"type":"human","message":{"content":"ok"}}"#,
+            r#"{"type":"assistant","message":{"content":"Another decision."},"tool_input":{"command":"edda decide \"auth.method=JWT\""}}"#,
+        ];
+        fs::write(&path, lines.join("\n")).unwrap();
+
+        let decisions = extract_recorded_decisions_from_transcript(&path);
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[0].key, "db.engine");
+        assert_eq!(decisions[0].value, "sqlite");
+        assert_eq!(decisions[0].reason.as_deref(), Some("for now"));
+        assert_eq!(decisions[1].key, "auth.method");
+        assert_eq!(decisions[1].value, "JWT");
+        assert!(decisions[1].reason.is_none());
     }
 }
