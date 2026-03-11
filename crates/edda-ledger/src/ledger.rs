@@ -198,6 +198,16 @@ impl Ledger {
         self.sqlite.executions_for_decision(decision_event_id)
     }
 
+    /// Transitive dependents of `key` via BFS, up to `max_depth` hops.
+    /// Returns `(DepRow, DecisionRow, depth)` — only active decisions, deduplicated.
+    pub fn transitive_dependents_of(
+        &self,
+        key: &str,
+        max_depth: usize,
+    ) -> anyhow::Result<Vec<(crate::sqlite_store::DepRow, DecisionRow, usize)>> {
+        self.sqlite.transitive_dependents_of(key, max_depth)
+    }
+
     // ── Review Bundles ───────────────────────────────────────────────
 
     /// Get a review bundle by bundle_id.
@@ -359,6 +369,136 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         assert!(Ledger::open(&tmp).is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── transitive_dependents_of tests ─────────────────────────────
+
+    fn make_decision_event(branch: &str, key: &str, value: &str) -> edda_core::Event {
+        use edda_core::event::finalize_event;
+        let text = format!("{key}: {value}");
+        let tags = vec!["decision".to_string()];
+        let mut event = new_note_event(branch, None, "system", &text, &tags).unwrap();
+        event.payload["decision"] = serde_json::json!({"key": key, "value": value});
+        finalize_event(&mut event);
+        event
+    }
+
+    #[test]
+    fn transitive_dependents_chain() {
+        let (tmp, ledger) = setup_workspace();
+
+        // A -> B -> C chain
+        ledger
+            .append_event(&make_decision_event("main", "a.root", "v1"))
+            .unwrap();
+        ledger
+            .append_event(&make_decision_event("main", "b.mid", "v2"))
+            .unwrap();
+        ledger
+            .append_event(&make_decision_event("main", "c.leaf", "v3"))
+            .unwrap();
+
+        ledger
+            .insert_dep("b.mid", "a.root", "explicit", None)
+            .unwrap();
+        ledger
+            .insert_dep("c.leaf", "b.mid", "explicit", None)
+            .unwrap();
+
+        let deps = ledger.transitive_dependents_of("a.root", 3).unwrap();
+        assert_eq!(deps.len(), 2);
+
+        let b = deps.iter().find(|(_, d, _)| d.key == "b.mid").unwrap();
+        assert_eq!(b.2, 1);
+
+        let c = deps.iter().find(|(_, d, _)| d.key == "c.leaf").unwrap();
+        assert_eq!(c.2, 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn transitive_dependents_diamond_no_duplicates() {
+        let (tmp, ledger) = setup_workspace();
+
+        // A -> B, A -> C, B -> D, C -> D
+        for (k, v) in [
+            ("a.root", "v1"),
+            ("b.left", "v2"),
+            ("c.right", "v3"),
+            ("d.leaf", "v4"),
+        ] {
+            ledger
+                .append_event(&make_decision_event("main", k, v))
+                .unwrap();
+        }
+        ledger
+            .insert_dep("b.left", "a.root", "explicit", None)
+            .unwrap();
+        ledger
+            .insert_dep("c.right", "a.root", "explicit", None)
+            .unwrap();
+        ledger
+            .insert_dep("d.leaf", "b.left", "explicit", None)
+            .unwrap();
+        ledger
+            .insert_dep("d.leaf", "c.right", "explicit", None)
+            .unwrap();
+
+        let deps = ledger.transitive_dependents_of("a.root", 3).unwrap();
+        // Should have B, C (depth 1) and D (depth 2) — no duplicates
+        assert_eq!(deps.len(), 3);
+
+        let d_hits: Vec<_> = deps.iter().filter(|(_, d, _)| d.key == "d.leaf").collect();
+        assert_eq!(d_hits.len(), 1, "d.leaf should appear only once");
+        assert_eq!(d_hits[0].2, 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn transitive_dependents_depth_limit() {
+        let (tmp, ledger) = setup_workspace();
+
+        // Chain of 5: a -> b -> c -> d -> e
+        for (k, v) in [
+            ("a.n1", "v1"),
+            ("b.n2", "v2"),
+            ("c.n3", "v3"),
+            ("d.n4", "v4"),
+            ("e.n5", "v5"),
+        ] {
+            ledger
+                .append_event(&make_decision_event("main", k, v))
+                .unwrap();
+        }
+        ledger.insert_dep("b.n2", "a.n1", "explicit", None).unwrap();
+        ledger.insert_dep("c.n3", "b.n2", "explicit", None).unwrap();
+        ledger.insert_dep("d.n4", "c.n3", "explicit", None).unwrap();
+        ledger.insert_dep("e.n5", "d.n4", "explicit", None).unwrap();
+
+        // Limit to 2 hops
+        let deps = ledger.transitive_dependents_of("a.n1", 2).unwrap();
+        assert_eq!(deps.len(), 2, "depth limit 2 should return only 2 hops");
+
+        let keys: Vec<&str> = deps.iter().map(|(_, d, _)| d.key.as_str()).collect();
+        assert!(keys.contains(&"b.n2"));
+        assert!(keys.contains(&"c.n3"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn transitive_dependents_empty() {
+        let (tmp, ledger) = setup_workspace();
+        ledger
+            .append_event(&make_decision_event("main", "solo.key", "val"))
+            .unwrap();
+
+        let deps = ledger.transitive_dependents_of("solo.key", 3).unwrap();
+        assert!(deps.is_empty());
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
