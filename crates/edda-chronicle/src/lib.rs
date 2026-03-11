@@ -16,7 +16,7 @@ pub struct RecapOutput {
     pub relations: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecapOptions {
     pub query: Option<String>,
     pub project: Option<String>,
@@ -24,19 +24,6 @@ pub struct RecapOptions {
     pub since: Option<String>,
     pub all: bool,
     pub json: bool,
-}
-
-impl Default for RecapOptions {
-    fn default() -> Self {
-        Self {
-            query: None,
-            project: None,
-            week: false,
-            since: None,
-            all: false,
-            json: false,
-        }
-    }
 }
 
 pub use anchor::{resolve_anchor, Anchor, ResolvedAnchor};

@@ -31,6 +31,7 @@ struct AppState {
     chronicle: Option<ChronicleContext>,
 }
 
+#[allow(dead_code)]
 struct ChronicleContext {
     store_root: PathBuf,
 }
@@ -514,6 +515,7 @@ fn find_prior_decision(
 // ── GET /api/recap ──
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct RecapQuery {
     project: Option<String>,
     query: Option<String>,
