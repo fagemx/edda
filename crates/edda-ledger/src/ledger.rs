@@ -101,6 +101,11 @@ impl Ledger {
         self.sqlite.get_event(event_id)
     }
 
+    /// Get all events of a given type, filtered at the SQL level.
+    pub fn iter_events_by_type(&self, event_type: &str) -> anyhow::Result<Vec<Event>> {
+        self.sqlite.iter_events_by_type(event_type)
+    }
+
     // ── Branches JSON ───────────────────────────────────────────────
 
     /// Read branches.json content.
@@ -520,6 +525,46 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_id, event.event_id);
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn iter_events_by_type_filters_correctly() {
+        use edda_core::event::new_execution_event;
+
+        let (tmp, ledger) = setup_workspace();
+        let note = new_note_event("main", None, "system", "a note", &[]).unwrap();
+        ledger.append_event(&note).unwrap();
+
+        let payload = serde_json::json!({
+            "runtime": "claude", "model": "claude-3-opus",
+            "usage": { "token_in": 100, "token_out": 50, "cost_usd": 0.01, "latency_ms": 500 },
+            "result": { "status": "success" },
+            "event_type": "step_completed",
+        });
+        let exec = new_execution_event(
+            "main", Some(&note.hash), "evt_exec_1", "2026-03-11T00:00:00Z", payload, None,
+        ).unwrap();
+        ledger.append_event(&exec).unwrap();
+
+        assert_eq!(ledger.iter_events().unwrap().len(), 2);
+        let exec_events = ledger.iter_events_by_type("execution_event").unwrap();
+        assert_eq!(exec_events.len(), 1);
+        assert_eq!(exec_events[0].event_id, "evt_exec_1");
+        let note_events = ledger.iter_events_by_type("note").unwrap();
+        assert_eq!(note_events.len(), 1);
+        assert_eq!(note_events[0].event_id, note.event_id);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn iter_events_by_type_empty_for_unknown() {
+        let (tmp, ledger) = setup_workspace();
+        let note = new_note_event("main", None, "system", "a note", &[]).unwrap();
+        ledger.append_event(&note).unwrap();
+        let result = ledger.iter_events_by_type("nonexistent_type").unwrap();
+        assert!(result.is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

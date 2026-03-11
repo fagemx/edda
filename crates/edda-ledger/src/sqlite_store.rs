@@ -573,6 +573,45 @@ impl SqliteStore {
         events.into_iter().map(row_to_event).collect()
     }
 
+    /// Get all events of a given type, filtered at the SQL level using `idx_events_type`.
+    pub fn iter_events_by_type(&self, event_type: &str) -> anyhow::Result<Vec<Event>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, event_type, branch, parent_hash, hash,
+                    payload, refs_blobs, refs_events, refs_provenance,
+                    schema_version, digests, event_family, event_level
+             FROM events WHERE event_type = ?1 ORDER BY rowid",
+        )?;
+
+        let events = stmt
+            .query_map(params![event_type], |row| {
+                let payload_str: String = row.get(6)?;
+                let refs_blobs_str: String = row.get(7)?;
+                let refs_events_str: String = row.get(8)?;
+                let refs_prov_str: String = row.get(9)?;
+                let digests_str: String = row.get(11)?;
+
+                Ok(EventRow {
+                    event_id: row.get(0)?,
+                    ts: row.get(1)?,
+                    event_type: row.get(2)?,
+                    branch: row.get(3)?,
+                    parent_hash: row.get(4)?,
+                    hash: row.get(5)?,
+                    payload_str,
+                    refs_blobs_str,
+                    refs_events_str,
+                    refs_prov_str,
+                    schema_version: row.get(10)?,
+                    digests_str,
+                    event_family: row.get(12)?,
+                    event_level: row.get(13)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        events.into_iter().map(row_to_event).collect()
+    }
+
     /// Get a single event by event_id.
     pub fn get_event(&self, event_id: &str) -> anyhow::Result<Option<Event>> {
         let row = self
