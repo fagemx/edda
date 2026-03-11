@@ -46,33 +46,27 @@ pub struct ContentBlock {
 
 pub async fn synthesize_recap(input: SynthesisInput) -> Result<crate::RecapOutput> {
     let api_key = std::env::var("EDDA_LLM_API_KEY");
-    
+
     match api_key {
-        Ok(key) if !key.is_empty() => {
-            synthesize_with_llm(&key, input).await
-        }
-        _ => {
-            synthesize_with_template(input)
-        }
+        Ok(key) if !key.is_empty() => synthesize_with_llm(&key, input).await,
+        _ => synthesize_with_template(input),
     }
 }
 
 async fn synthesize_with_llm(api_key: &str, input: SynthesisInput) -> Result<crate::RecapOutput> {
     let client = Client::new();
-    
+
     let prompt = build_prompt(&input);
-    
+
     let request = AnthropicRequest {
         model: "claude-3-5-haiku-20241022".to_string(),
         max_tokens: 1024,
-        messages: vec![
-            Message {
-                role: "user".to_string(),
-                content: prompt,
-            },
-        ],
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: prompt,
+        }],
     };
-    
+
     let response = client
         .post("https://api.anthropic.com/v1/messages")
         .header("x-api-key", api_key)
@@ -82,76 +76,74 @@ async fn synthesize_with_llm(api_key: &str, input: SynthesisInput) -> Result<cra
         .send()
         .await
         .with_context(|| "Failed to call Anthropic API")?;
-    
+
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         eprintln!("Warning: LLM API failed ({}): {}", status, body);
         return synthesize_with_template(input);
     }
-    
+
     let api_response: AnthropicResponse = response
         .json()
         .await
         .with_context(|| "Failed to parse Anthropic response")?;
-    
+
     let text = api_response
         .content
         .first()
         .map(|block| block.text.as_str())
         .unwrap_or("");
-    
+
     parse_llm_output(text)
 }
 
 fn synthesize_with_template(input: SynthesisInput) -> Result<crate::RecapOutput> {
     let mut net_result = String::new();
-    let mut needs_you = String::new();
-    let mut decision_context = String::new();
-    let mut relations = String::new();
-    
     // Net result: summarize sessions
     if !input.session_types.is_empty() {
         net_result = format!("Sessions: {}", input.session_types.join(", "));
     }
-    
+
     if !input.commits.is_empty() {
         net_result.push_str(&format!("\nCommits: {}", input.commits.len()));
     }
-    
+
     if !input.decisions.is_empty() {
         net_result.push_str(&format!("\nDecisions: {}", input.decisions.len()));
     }
-    
+
     // Needs you: attention items
-    if !input.attention_items.is_empty() {
-        needs_you = input.attention_items
+    let needs_you = if !input.attention_items.is_empty() {
+        input
+            .attention_items
             .iter()
             .map(|item| format!("• {}", item.description))
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
     } else {
-        needs_you = "No blockers detected".to_string();
-    }
-    
+        "No blockers detected".to_string()
+    };
+
     // Decision context: decisions
-    if !input.decisions.is_empty() {
-        decision_context = input.decisions.join("\n");
+    let decision_context = if !input.decisions.is_empty() {
+        input.decisions.join("\n")
     } else {
-        decision_context = "No decisions recorded".to_string();
-    }
-    
+        "No decisions recorded".to_string()
+    };
+
     // Relations: related content
-    if !input.related_content.is_empty() {
-        relations = input.related_content
+    let relations = if !input.related_content.is_empty() {
+        input
+            .related_content
             .iter()
             .map(|rc| format!("• {} (from {})", rc.snippet, rc.source))
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
     } else {
-        relations = "No related historical content found".to_string();
-    }
-    
+        "No related historical content found".to_string()
+    };
+
     Ok(crate::RecapOutput {
         net_result,
         needs_you,
@@ -203,11 +195,26 @@ Decisions: {}
 [内容]"#,
         input.anchor_description,
         input.session_types.join(", "),
-        input.key_turns.iter().map(|t| format!("Turn {}: {}", t.turn_index, t.content)).collect::<Vec<_>>().join("\n"),
-        input.related_content.iter().map(|rc| format!("• {}", rc.snippet)).collect::<Vec<_>>().join("\n"),
+        input
+            .key_turns
+            .iter()
+            .map(|t| format!("Turn {}: {}", t.turn_index, t.content))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        input
+            .related_content
+            .iter()
+            .map(|rc| format!("• {}", rc.snippet))
+            .collect::<Vec<_>>()
+            .join("\n"),
         input.commits.len(),
         input.decisions.len(),
-        input.attention_items.iter().map(|a| format!("• {}", a.description)).collect::<Vec<_>>().join("\n")
+        input
+            .attention_items
+            .iter()
+            .map(|a| format!("• {}", a.description))
+            .collect::<Vec<_>>()
+            .join("\n")
     )
 }
 
@@ -216,13 +223,13 @@ fn parse_llm_output(text: &str) -> Result<crate::RecapOutput> {
     let mut needs_you = String::new();
     let mut decision_context = String::new();
     let mut relations = String::new();
-    
+
     let lines: Vec<&str> = text.lines().collect();
     let mut current_section = None;
-    
+
     for line in lines {
         let line = line.trim();
-        
+
         if line.starts_with("## 淨結果") || line.starts_with("## 净结果") {
             current_section = Some("net_result");
         } else if line.starts_with("## 需要你") {
@@ -261,7 +268,7 @@ fn parse_llm_output(text: &str) -> Result<crate::RecapOutput> {
             }
         }
     }
-    
+
     Ok(crate::RecapOutput {
         net_result,
         needs_you,

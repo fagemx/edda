@@ -1,7 +1,6 @@
 use crate::classify::SessionType;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyTurn {
@@ -15,7 +14,7 @@ pub struct KeyTurn {
 pub fn extract_key_turns(
     session_id: &str,
     session_type: &SessionType,
-    project_root: &PathBuf,
+    project_root: &std::path::Path,
     max_turns: usize,
 ) -> Result<Vec<KeyTurn>> {
     let index_path = project_root
@@ -32,7 +31,7 @@ pub fn extract_key_turns(
     let records: Vec<serde_json::Value> = content
         .lines()
         .filter(|line| !line.is_empty())
-        .map(|line| serde_json::from_str(line))
+        .map(serde_json::from_str)
         .collect::<Result<Vec<_>, _>>()
         .with_context(|| "Failed to parse index records")?;
 
@@ -68,7 +67,7 @@ fn extract_coding_turns(records: &[serde_json::Value], max_turns: usize) -> Vec<
                     .unwrap_or_default();
 
                 let has_edit = tool_names.iter().any(|t| *t == "Edit" || *t == "Write");
-                let has_bash = tool_names.iter().any(|t| *t == "Bash");
+                let has_bash = tool_names.contains(&"Bash");
 
                 if has_edit || has_bash {
                     let offset = record
@@ -118,7 +117,7 @@ fn extract_research_turns(records: &[serde_json::Value], max_turns: usize) -> Ve
                     .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
                     .unwrap_or_default();
 
-                let has_write = tool_names.iter().any(|t| *t == "Write");
+                let has_write = tool_names.contains(&"Write");
 
                 if has_write {
                     let offset = record

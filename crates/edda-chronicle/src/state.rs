@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecapState {
@@ -14,11 +14,11 @@ pub struct LastRecap {
     pub sessions_covered: Vec<String>,
 }
 
-pub fn state_path(edda_root: &PathBuf) -> PathBuf {
+pub fn state_path(edda_root: &Path) -> PathBuf {
     edda_root.join("chronicle").join("state.json")
 }
 
-pub fn load_state(edda_root: &PathBuf) -> Result<Option<RecapState>> {
+pub fn load_state(edda_root: &Path) -> Result<Option<RecapState>> {
     let path = state_path(edda_root);
     if !path.exists() {
         return Ok(None);
@@ -30,7 +30,7 @@ pub fn load_state(edda_root: &PathBuf) -> Result<Option<RecapState>> {
     Ok(Some(state))
 }
 
-pub fn save_state(edda_root: &PathBuf, state: &RecapState) -> Result<()> {
+pub fn save_state(edda_root: &Path, state: &RecapState) -> Result<()> {
     let path = state_path(edda_root);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)

@@ -511,6 +511,7 @@ pub fn write_request_ack(project_id: &str, session_id: &str, from_label: &str) {
 }
 
 /// Write a sub-agent completion summary event.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_subagent_completed(
     project_id: &str,
     parent_session_id: &str,

@@ -415,7 +415,7 @@ mod tests {
             "agent-1",
             "Explore",
             "Sub-agent completed: 2 files touched",
-            &vec!["a.rs".into(), "b.rs".into()],
+            &["a.rs".into(), "b.rs".into()],
             &Vec::new(),
             &Vec::new(),
         );
