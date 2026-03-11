@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::parse::now_rfc3339;
 
@@ -64,6 +64,15 @@ pub(crate) struct SessionSignals {
     pub failed_commands: Vec<FailedBashCmd>,
     #[serde(default)]
     pub usage: UsageSnapshot,
+}
+
+/// Lightweight summary extracted when a sub-agent completes.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub(crate) struct SubagentSummary {
+    pub summary: String,
+    pub files_touched: Vec<String>,
+    pub commits: Vec<String>,
+    pub decisions: Vec<String>,
 }
 
 /// One-pass transcript scan: extract tasks, files modified, and commits.
@@ -364,6 +373,317 @@ pub(crate) fn parse_commit_result(result: &str, fallback_msg: &str) -> Option<Co
         }
     }
     None
+}
+
+const SUBAGENT_TRANSCRIPT_MAX_BYTES: usize = 512 * 1024;
+const SUBAGENT_MAX_FILES: usize = 8;
+const SUBAGENT_MAX_COMMITS: usize = 5;
+const SUBAGENT_MAX_DECISIONS: usize = 5;
+const SUBAGENT_SUMMARY_MAX_CHARS: usize = 220;
+
+/// Extract a compact sub-agent summary from transcript and fallback text.
+///
+/// Priority:
+/// 1) Parse transcript JSONL at `agent_transcript_path` when available
+/// 2) Fallback to `last_assistant_message`
+pub(crate) fn extract_subagent_summary(
+    agent_transcript_path: &str,
+    last_assistant_message: &str,
+    agent_id: &str,
+) -> SubagentSummary {
+    let transcript = resolve_subagent_transcript_path(agent_transcript_path, agent_id);
+
+    if let Some(path) = transcript.as_deref() {
+        if let Some(mut summary) = extract_subagent_summary_from_transcript(path) {
+            if summary.summary.is_empty() {
+                summary.summary = build_subagent_summary_line(&summary);
+            }
+            if summary.summary.is_empty() {
+                summary.summary = fallback_summary_text(last_assistant_message);
+            }
+            return summary;
+        }
+    }
+
+    extract_subagent_summary_from_message(last_assistant_message)
+}
+
+fn resolve_subagent_transcript_path(path: &str, agent_id: &str) -> Option<PathBuf> {
+    if path.is_empty() {
+        return None;
+    }
+
+    // Most payloads are plain filesystem paths.
+    let direct = PathBuf::from(path);
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    // Defensive fallback for sidechain-like pointers that include separators.
+    // Example shape: "/repo/.claude/transcript.jsonl::sidechain:agent-123"
+    let separators = ["::", "#", "?"];
+    for sep in separators {
+        if let Some((base, _)) = path.split_once(sep) {
+            let candidate = PathBuf::from(base);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // Last attempt: if agent_id appears in path metadata and a sibling jsonl exists,
+    // prefer that file, else give up.
+    if !agent_id.is_empty() {
+        if let Some(parent) = direct.parent() {
+            if parent.is_dir() {
+                let candidate = parent.join(format!("{agent_id}.jsonl"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_subagent_summary_from_transcript(path: &Path) -> Option<SubagentSummary> {
+    use std::io::{BufRead, BufReader};
+
+    let meta = fs::metadata(path).ok()?;
+    if meta.len() == 0 {
+        return None;
+    }
+
+    // Bound scan cost for very large transcripts.
+    if meta.len() > SUBAGENT_TRANSCRIPT_MAX_BYTES as u64 {
+        return None;
+    }
+
+    let file = fs::File::open(path).ok()?;
+    let mut files: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut commits: Vec<String> = Vec::new();
+    let mut decisions: Vec<String> = Vec::new();
+    let mut pending_commit_msgs: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut last_text: String = String::new();
+
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+
+        let rtype = record.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if rtype == "assistant" {
+            let content = record
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array());
+
+            if let Some(arr) = content {
+                for block in arr {
+                    let btype = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    match btype {
+                        "tool_use" => {
+                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let input = block.get("input").unwrap_or(&serde_json::Value::Null);
+                            let tool_use_id =
+                                block.get("id").and_then(|v| v.as_str()).unwrap_or("");
+
+                            if (name == "Edit" || name == "Write")
+                                && input.get("file_path").and_then(|v| v.as_str()).is_some()
+                            {
+                                let fp = input
+                                    .get("file_path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if !fp.is_empty() && !is_noise_file(fp) {
+                                    files.insert(fp.to_string());
+                                }
+                            }
+
+                            if name == "Bash" {
+                                let cmd =
+                                    input.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                                if !tool_use_id.is_empty() && cmd.contains("git commit") {
+                                    pending_commit_msgs.insert(
+                                        tool_use_id.to_string(),
+                                        extract_commit_msg_from_cmd(cmd),
+                                    );
+                                }
+                                extract_decisions_from_text(cmd, &mut decisions);
+                            }
+                        }
+                        "text" => {
+                            if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                                if !text.trim().is_empty() {
+                                    last_text = text.to_string();
+                                    extract_decisions_from_text(text, &mut decisions);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        } else if rtype == "user" {
+            let content = record
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_array());
+            if let Some(arr) = content {
+                for block in arr {
+                    if block.get("type").and_then(|v| v.as_str()) != Some("tool_result") {
+                        continue;
+                    }
+                    let tool_use_id = block
+                        .get("tool_use_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if let Some(fallback_msg) = pending_commit_msgs.remove(tool_use_id) {
+                        let result_text = tool_result_text(block);
+                        if let Some(ci) = parse_commit_result(&result_text, &fallback_msg) {
+                            commits.push(format!("{} {}", ci.hash, ci.message));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut files_touched: Vec<String> = files.into_iter().collect();
+    files_touched.sort();
+    if files_touched.len() > SUBAGENT_MAX_FILES {
+        files_touched.truncate(SUBAGENT_MAX_FILES);
+    }
+    dedup_keep_order(&mut commits);
+    if commits.len() > SUBAGENT_MAX_COMMITS {
+        commits.truncate(SUBAGENT_MAX_COMMITS);
+    }
+    dedup_keep_order(&mut decisions);
+    if decisions.len() > SUBAGENT_MAX_DECISIONS {
+        decisions.truncate(SUBAGENT_MAX_DECISIONS);
+    }
+
+    let mut summary = SubagentSummary {
+        summary: String::new(),
+        files_touched,
+        commits,
+        decisions,
+    };
+
+    // Prefer signal-derived line, but keep last assistant text as fallback seed.
+    summary.summary = build_subagent_summary_line(&summary);
+    if summary.summary.is_empty() {
+        summary.summary = fallback_summary_text(&last_text);
+    }
+
+    if summary.summary.is_empty()
+        && summary.files_touched.is_empty()
+        && summary.commits.is_empty()
+        && summary.decisions.is_empty()
+    {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
+fn extract_subagent_summary_from_message(last_assistant_message: &str) -> SubagentSummary {
+    let mut decisions = Vec::new();
+    extract_decisions_from_text(last_assistant_message, &mut decisions);
+    dedup_keep_order(&mut decisions);
+    if decisions.len() > SUBAGENT_MAX_DECISIONS {
+        decisions.truncate(SUBAGENT_MAX_DECISIONS);
+    }
+
+    let summary = fallback_summary_text(last_assistant_message);
+    SubagentSummary {
+        summary,
+        files_touched: Vec::new(),
+        commits: Vec::new(),
+        decisions,
+    }
+}
+
+fn tool_result_text(block: &serde_json::Value) -> String {
+    block
+        .get("content")
+        .and_then(|c| {
+            if let Some(s) = c.as_str() {
+                Some(s.to_string())
+            } else if let Some(arr) = c.as_array() {
+                arr.iter()
+                    .find_map(|x| x.get("text").and_then(|t| t.as_str()))
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+}
+
+fn extract_decisions_from_text(text: &str, out: &mut Vec<String>) {
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_lowercase();
+        let looks_like_decision = lower.contains("edda decide")
+            || lower.starts_with("decision")
+            || lower.starts_with("decided")
+            || lower.contains("decided:")
+            || lower.contains("\"decision\"");
+        if looks_like_decision {
+            out.push(truncate_chars(line, SUBAGENT_SUMMARY_MAX_CHARS));
+        }
+    }
+}
+
+fn dedup_keep_order(items: &mut Vec<String>) {
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|v| seen.insert(v.clone()));
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max_chars).collect();
+    format!("{truncated}...")
+}
+
+fn fallback_summary_text(text: &str) -> String {
+    let first = text.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        String::new()
+    } else {
+        truncate_chars(first, SUBAGENT_SUMMARY_MAX_CHARS)
+    }
+}
+
+fn build_subagent_summary_line(summary: &SubagentSummary) -> String {
+    let mut parts = Vec::new();
+    if !summary.files_touched.is_empty() {
+        parts.push(format!("{} files touched", summary.files_touched.len()));
+    }
+    if !summary.commits.is_empty() {
+        parts.push(format!("{} commits", summary.commits.len()));
+    }
+    if !summary.decisions.is_empty() {
+        parts.push(format!("{} decisions", summary.decisions.len()));
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("Sub-agent completed: {}", parts.join(", "))
+    }
 }
 
 // ── Session Signals: save / load / render ──
@@ -1628,5 +1948,113 @@ mod tests {
         assert_eq!(loaded.cache_creation_tokens, 50);
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn extract_subagent_summary_from_transcript() {
+        let records = vec![
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "e1",
+                        "name": "Edit",
+                        "input": { "file_path": "/repo/src/lib.rs", "old_string": "a", "new_string": "b" }
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "b1",
+                        "name": "Bash",
+                        "input": { "command": "git commit -m \"feat: sub-agent output\"" }
+                    },
+                    {
+                        "type": "text",
+                        "text": "Decision: keep extraction bounded"
+                    }
+                ]}
+            }),
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "b1",
+                    "content": "[main abc1234] feat: sub-agent output\n 1 file changed"
+                }]}
+            }),
+        ];
+
+        let path = make_transcript(&records);
+        let summary =
+            extract_subagent_summary(path.to_str().unwrap_or_default(), "fallback", "agent-1");
+
+        assert_eq!(summary.files_touched.len(), 1);
+        assert!(summary.files_touched[0].contains("/repo/src/lib.rs"));
+        assert_eq!(summary.commits.len(), 1);
+        assert!(summary.commits[0].contains("abc1234"));
+        assert!(
+            summary
+                .decisions
+                .iter()
+                .any(|d| d.to_lowercase().contains("decision")),
+            "expected a decision signal: {:?}",
+            summary.decisions
+        );
+        assert!(
+            !summary.summary.is_empty(),
+            "summary text should be non-empty"
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn extract_subagent_summary_falls_back_to_last_message() {
+        let summary = extract_subagent_summary(
+            "",
+            "Decision: adopt async queue\nAdditional details",
+            "agent-2",
+        );
+
+        assert!(summary.files_touched.is_empty());
+        assert!(summary.commits.is_empty());
+        assert!(
+            summary
+                .decisions
+                .iter()
+                .any(|d| d.contains("Decision: adopt async queue")),
+            "fallback decisions should include first line: {:?}",
+            summary.decisions
+        );
+        assert!(
+            summary.summary.contains("Decision: adopt async queue"),
+            "fallback summary should use first assistant line: {}",
+            summary.summary
+        );
+    }
+
+    #[test]
+    fn extract_subagent_summary_supports_pointer_like_path() {
+        let records = vec![serde_json::json!({
+            "type": "assistant",
+            "message": { "role": "assistant", "content": [
+                {
+                    "type": "tool_use",
+                    "id": "w1",
+                    "name": "Write",
+                    "input": { "file_path": "/repo/src/new.rs", "content": "fn main() {}" }
+                }
+            ]}
+        })];
+
+        let path = make_transcript(&records);
+        let pointer = format!("{}::sidechain:agent-9", path.to_string_lossy());
+        let summary = extract_subagent_summary(&pointer, "fallback text", "agent-9");
+
+        assert_eq!(summary.files_touched.len(), 1);
+        assert!(summary.files_touched[0].contains("/repo/src/new.rs"));
+        assert!(summary.commits.is_empty());
+
+        let _ = fs::remove_file(&path);
     }
 }
