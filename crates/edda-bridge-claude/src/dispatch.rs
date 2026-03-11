@@ -689,8 +689,8 @@ fn dispatch_session_end(
     }
 
     // 2h. Background capability scan (non-blocking, cooldown-gated)
-    if crate::bg_scan::should_run(&project_id)
-        || crate::bg_scan::has_recent_milestone(&project_id, cwd)
+    if crate::bg_scan::should_run(project_id)
+        || crate::bg_scan::has_recent_milestone(project_id, cwd)
     {
         let pid = project_id.to_string();
         let cwd_owned = cwd.to_string();

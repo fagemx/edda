@@ -25,18 +25,13 @@ const DEFAULT_CONFIDENCE_THRESHOLD: f64 = 0.6;
 
 // ── Data Structures ──
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum GapStatus {
+    #[default]
     Pending,
     Accepted,
     Dismissed,
-}
-
-impl Default for GapStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
