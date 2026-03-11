@@ -12,6 +12,7 @@ use tower_http::cors::CorsLayer;
 use edda_aggregate::aggregate::{aggregate_overview, DateRange};
 use edda_aggregate::quality::{model_quality_from_events, QualityReport};
 use edda_core::event::{finalize_event, new_decision_event, new_execution_event, new_note_event};
+use edda_core::policy;
 use edda_core::types::{rel, DecisionPayload, Provenance};
 use edda_derive::{rebuild_branch, render_context, DeriveOptions};
 use edda_ledger::lock::WorkspaceLock;
@@ -96,6 +97,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/events/karvi", post(post_karvi_event))
         .route("/api/scope/check", post(post_scope_check))
         .route("/api/scope/whitelist", get(get_scope_whitelist))
+        .route("/api/authz/check", post(post_authz_check))
         .route("/api/recap", get(get_recap))
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
@@ -139,6 +141,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/events/karvi", post(post_karvi_event))
         .route("/api/scope/check", post(post_scope_check))
         .route("/api/scope/whitelist", get(get_scope_whitelist))
+        .route("/api/authz/check", post(post_authz_check))
         .route("/api/recap", get(get_recap))
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
@@ -1088,6 +1091,19 @@ async fn get_scope_whitelist(
     Ok(Json(WhitelistResponse { claims }))
 }
 
+// ── POST /api/authz/check ──
+
+async fn post_authz_check(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<policy::AuthzRequest>,
+) -> Result<Json<policy::AuthzResult>, AppError> {
+    let edda_dir = state.repo_root.join(".edda");
+    let pol = policy::load_policy_from_dir(&edda_dir)?;
+    let actors = policy::load_actors_from_dir(&edda_dir)?;
+    let result = policy::evaluate_authz(&body, &pol, &actors);
+    Ok(Json(result))
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -1899,6 +1915,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
+<<<<<<< HEAD
                     .uri("/api/scope/check")
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
@@ -2157,5 +2174,266 @@ mod tests {
         assert_eq!(claims[0]["session_id"], "sess-x");
         assert_eq!(claims[0]["label"], "crate-x");
         assert_eq!(claims[0]["patterns"][0], "crates/x/*");
+    }
+
+    // ── Authz check tests ──
+
+    fn write_policy_and_actors(dir: &Path, policy_yaml: &str, actors_yaml: &str) {
+        let edda_dir = dir.join(".edda");
+        std::fs::write(edda_dir.join("policy.yaml"), policy_yaml).unwrap();
+        std::fs::write(edda_dir.join("actors.yaml"), actors_yaml).unwrap();
+    }
+
+    const TEST_POLICY: &str = "\
+version: 2
+roles:
+  - lead
+  - reviewer
+  - operator
+rules: []
+permissions:
+  default: deny
+  grants:
+    - actions: [deploy, rollback]
+      roles: [lead, operator]
+    - actions: [merge, approve]
+      roles: [lead, reviewer]
+    - actions: [read]
+      roles: [\"*\"]
+";
+
+    const TEST_ACTORS: &str = "\
+version: 1
+actors:
+  alice:
+    roles: [lead]
+  bob:
+    roles: [reviewer]
+  charlie:
+    roles: [operator]
+";
+
+    #[tokio::test]
+    async fn authz_check_allowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        write_policy_and_actors(tmp.path(), TEST_POLICY, TEST_ACTORS);
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/authz/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"actor": "alice", "action": "deploy"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["allowed"], true);
+        assert_eq!(json["actor_roles"], serde_json::json!(["lead"]));
+        assert!(json["matched_grant"].is_object());
+    }
+
+    #[tokio::test]
+    async fn authz_check_denied() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        write_policy_and_actors(tmp.path(), TEST_POLICY, TEST_ACTORS);
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/authz/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"actor": "bob", "action": "deploy"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["allowed"], false);
+        assert!(json["reason"].as_str().unwrap().contains("no grant"));
+    }
+
+    #[tokio::test]
+    async fn authz_check_unknown_actor() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        write_policy_and_actors(tmp.path(), TEST_POLICY, TEST_ACTORS);
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/authz/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"actor": "nobody", "action": "deploy"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["allowed"], false);
+        assert_eq!(json["actor_roles"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn authz_check_wildcard_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        write_policy_and_actors(tmp.path(), TEST_POLICY, TEST_ACTORS);
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/authz/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"actor": "bob", "action": "read"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["allowed"], true);
+    }
+
+    #[tokio::test]
+    async fn authz_check_no_permissions_section() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        // Default policy.yaml from setup_workspace has no permissions section
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/authz/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"actor": "anyone", "action": "deploy"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["allowed"], false);
+        assert_eq!(json["policy_default"], "deny");
+    }
+
+    #[tokio::test]
+    async fn authz_full_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        write_policy_and_actors(tmp.path(), TEST_POLICY, TEST_ACTORS);
+        let app = Router::new().merge(router(tmp.path()));
+
+        // 1. Allowed: alice (lead) can deploy
+        let r1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/authz/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"actor": "alice", "action": "deploy"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r1.status(), StatusCode::OK);
+        let b1 = axum::body::to_bytes(r1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j1: serde_json::Value = serde_json::from_slice(&b1).unwrap();
+        assert_eq!(j1["allowed"], true);
+
+        // 2. Denied: bob (reviewer) cannot deploy
+        let r2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/authz/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"actor": "bob", "action": "deploy"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), StatusCode::OK);
+        let b2 = axum::body::to_bytes(r2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j2: serde_json::Value = serde_json::from_slice(&b2).unwrap();
+        assert_eq!(j2["allowed"], false);
+
+        // 3. Unknown actor denied
+        let r3 = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/authz/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"actor": "unknown", "action": "deploy"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r3.status(), StatusCode::OK);
+        let b3 = axum::body::to_bytes(r3.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let j3: serde_json::Value = serde_json::from_slice(&b3).unwrap();
+        assert_eq!(j3["allowed"], false);
+        assert!(j3["actor_roles"].as_array().unwrap().is_empty());
     }
 }
