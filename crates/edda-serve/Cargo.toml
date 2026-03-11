@@ -16,6 +16,7 @@ edda-derive = { path = "../edda-derive", version = "0.1.1" }
 edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
 edda-aggregate = { path = "../edda-aggregate", version = "0.1.1" }
 edda-store = { path = "../edda-store", version = "0.1.1" }
+edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.1.1" }
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
 tower-http = { version = "0.6", features = ["cors"] }
@@ -23,6 +24,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
+globset = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
