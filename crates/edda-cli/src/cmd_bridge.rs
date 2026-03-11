@@ -888,14 +888,24 @@ pub fn bg_review(
                     edda_bridge_claude::bg_extract::DraftStatus::Accepted => "✅",
                     edda_bridge_claude::bg_extract::DraftStatus::Rejected => "❌",
                 };
+                let kind_label = match d.kind {
+                    edda_bridge_claude::bg_extract::DecisionKind::Extraction => "extraction",
+                    edda_bridge_claude::bg_extract::DecisionKind::Enhancement => "enhancement",
+                };
                 let reason_str = d.reason.as_deref().unwrap_or("-");
                 println!(
-                    "  [{i}] {status_marker} {}={} (confidence: {:.0}%)",
+                    "  [{i}] {status_marker} [{kind_label}] {}={} (confidence: {:.0}%)",
                     d.key,
                     d.value,
                     d.confidence * 100.0
                 );
-                println!("      reason: {reason_str}");
+                if d.kind == edda_bridge_claude::bg_extract::DecisionKind::Enhancement {
+                    let orig = d.original_reason.as_deref().unwrap_or("(none)");
+                    println!("      original reason: {orig}");
+                    println!("      enhanced reason: {reason_str}");
+                } else {
+                    println!("      reason: {reason_str}");
+                }
                 println!("      evidence: {}", d.evidence);
             }
         }
@@ -962,12 +972,31 @@ fn write_accepted_to_ledger(
             value: d.value.clone(),
             reason: d.reason.clone(),
         };
-        let event = edda_core::event::new_decision_event(
-            &branch,
-            parent_hash.as_deref(),
-            "edda-bg/decision-extractor",
-            &payload,
-        )?;
+
+        let actor = match d.kind {
+            edda_bridge_claude::bg_extract::DecisionKind::Enhancement => "edda-bg/reason-enhancer",
+            edda_bridge_claude::bg_extract::DecisionKind::Extraction => {
+                "edda-bg/decision-extractor"
+            }
+        };
+
+        let mut event =
+            edda_core::event::new_decision_event(&branch, parent_hash.as_deref(), actor, &payload)?;
+
+        // For enhancements, supersede the original decision
+        if d.kind == edda_bridge_claude::bg_extract::DecisionKind::Enhancement {
+            if let Ok(Some(prior)) = ledger.find_active_decision(&branch, &d.key) {
+                event.refs.provenance.push(edda_core::types::Provenance {
+                    target: prior.event_id.clone(),
+                    rel: edda_core::types::rel::SUPERSEDES.to_string(),
+                    note: Some(format!(
+                        "reason enhanced from: {}",
+                        d.original_reason.as_deref().unwrap_or("(none)")
+                    )),
+                });
+            }
+        }
+
         ledger.append_event(&event)?;
     }
 
