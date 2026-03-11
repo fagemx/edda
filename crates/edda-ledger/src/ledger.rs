@@ -81,6 +81,11 @@ impl Ledger {
         self.sqlite.append_event(event)
     }
 
+    /// Append an event idempotently. Returns `true` if inserted, `false` if duplicate.
+    pub fn append_event_idempotent(&self, event: &Event) -> anyhow::Result<bool> {
+        self.sqlite.append_event_idempotent(event)
+    }
+
     /// Get the hash of the last event, or `None` if the ledger is empty.
     pub fn last_event_hash(&self) -> anyhow::Result<Option<String>> {
         self.sqlite.last_event_hash()
@@ -336,6 +341,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         assert!(Ledger::open(&tmp).is_err());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn append_event_idempotent_dedup() {
+        let (tmp, ledger) = setup_workspace();
+        let event = new_note_event("main", None, "system", "test idempotent", &[]).unwrap();
+
+        // First insert returns true
+        let inserted = ledger.append_event_idempotent(&event).unwrap();
+        assert!(inserted);
+
+        // Duplicate insert returns false (no error)
+        let inserted2 = ledger.append_event_idempotent(&event).unwrap();
+        assert!(!inserted2);
+
+        // Only one event in ledger
+        let events = ledger.iter_events().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_id, event.event_id);
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

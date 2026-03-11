@@ -614,6 +614,54 @@ pub fn new_pr_event(params: &PrEventParams) -> anyhow::Result<Event> {
     Ok(event)
 }
 
+/// Create a new `execution_event` for Karvi execution events.
+///
+/// Uses the caller-supplied `event_id` and `occurred_at` from the Karvi envelope
+/// rather than generating new ones. The full Karvi envelope is stored as `payload`.
+///
+/// If `decision_ref` is `Some`, a provenance link (`based_on`) is added to `refs`.
+pub fn new_execution_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    event_id_override: &str,
+    occurred_at: &str,
+    payload: serde_json::Value,
+    decision_ref: Option<&str>,
+) -> anyhow::Result<Event> {
+    use crate::types::{rel, Provenance};
+
+    let refs = if let Some(dec_ref) = decision_ref {
+        Refs {
+            provenance: vec![Provenance {
+                target: dec_ref.to_string(),
+                rel: rel::BASED_ON.to_string(),
+                note: Some("karvi decision_ref".to_string()),
+            }],
+            ..Default::default()
+        }
+    } else {
+        Refs::default()
+    };
+
+    let mut event = Event {
+        event_id: event_id_override.to_string(),
+        ts: occurred_at.to_string(),
+        event_type: "execution_event".to_string(),
+        branch: branch.to_string(),
+        parent_hash: parent_hash.map(|s| s.to_string()),
+        hash: String::new(),
+        payload,
+        refs,
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event);
+    Ok(event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

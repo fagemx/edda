@@ -461,6 +461,45 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Append an event idempotently. Returns `true` if inserted, `false` if duplicate.
+    ///
+    /// Uses `INSERT OR IGNORE` so that a duplicate `event_id` is silently skipped
+    /// without returning an error. This is used by the Karvi event consumer to
+    /// handle webhook retries gracefully.
+    pub fn append_event_idempotent(&self, event: &Event) -> anyhow::Result<bool> {
+        let payload = serde_json::to_string(&event.payload)?;
+        let refs_blobs = serde_json::to_string(&event.refs.blobs)?;
+        let refs_events = serde_json::to_string(&event.refs.events)?;
+        let refs_provenance = serde_json::to_string(&event.refs.provenance)?;
+        let digests = serde_json::to_string(&event.digests)?;
+
+        self.conn.execute(
+            "INSERT OR IGNORE INTO events (
+                event_id, ts, event_type, branch, parent_hash, hash,
+                payload, refs_blobs, refs_events, refs_provenance,
+                schema_version, digests, event_family, event_level
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                event.event_id,
+                event.ts,
+                event.event_type,
+                event.branch,
+                event.parent_hash,
+                event.hash,
+                payload,
+                refs_blobs,
+                refs_events,
+                refs_provenance,
+                event.schema_version,
+                digests,
+                event.event_family,
+                event.event_level,
+            ],
+        )?;
+
+        Ok(self.conn.changes() > 0)
+    }
+
     /// Read all events in insertion order.
     pub fn iter_events(&self) -> anyhow::Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(

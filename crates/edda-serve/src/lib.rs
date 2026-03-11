@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
 use edda_aggregate::aggregate::{aggregate_overview, DateRange};
-use edda_core::event::{finalize_event, new_decision_event, new_note_event};
+use edda_core::event::{finalize_event, new_decision_event, new_execution_event, new_note_event};
 use edda_core::types::{rel, DecisionPayload, Provenance};
 use edda_derive::{rebuild_branch, render_context, DeriveOptions};
 use edda_ledger::lock::WorkspaceLock;
@@ -88,6 +88,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/drafts", get(get_drafts))
         .route("/api/note", post(post_note))
         .route("/api/decide", post(post_decide))
+        .route("/api/events/karvi", post(post_karvi_event))
         .route("/api/recap", get(get_recap))
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
@@ -124,6 +125,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/drafts", get(get_drafts))
         .route("/api/note", post(post_note))
         .route("/api/decide", post(post_decide))
+        .route("/api/events/karvi", post(post_karvi_event))
         .route("/api/recap", get(get_recap))
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
@@ -511,6 +513,115 @@ fn find_prior_decision(
                 None
             }
         })
+}
+
+// ── POST /api/events/karvi ──
+
+#[derive(Deserialize)]
+struct KarviEventBody {
+    version: String,
+    event_id: String,
+    event_type: String,
+    occurred_at: String,
+    #[serde(default)]
+    trace_id: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    step_id: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    runtime: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    actor: Option<serde_json::Value>,
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+    #[serde(default)]
+    decision_ref: Option<String>,
+}
+
+#[derive(Serialize)]
+struct KarviEventResponse {
+    event_id: String,
+    status: String,
+}
+
+const VALID_KARVI_EVENT_TYPES: &[&str] = &["step_completed", "step_failed", "step_cancelled"];
+
+async fn post_karvi_event(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<KarviEventBody>,
+) -> Result<Response, AppError> {
+    // Validate version
+    if body.version != "karvi.event.v1" {
+        let err = serde_json::json!({
+            "error": format!("unsupported version: {}", body.version),
+        });
+        return Ok((StatusCode::BAD_REQUEST, Json(err)).into_response());
+    }
+
+    // Validate event_type
+    if !VALID_KARVI_EVENT_TYPES.contains(&body.event_type.as_str()) {
+        let err = serde_json::json!({
+            "error": format!("unsupported event_type: {}", body.event_type),
+        });
+        return Ok((StatusCode::BAD_REQUEST, Json(err)).into_response());
+    }
+
+    // Serialize full body as payload
+    let payload = serde_json::json!({
+        "version": body.version,
+        "event_id": body.event_id,
+        "event_type": body.event_type,
+        "occurred_at": body.occurred_at,
+        "trace_id": body.trace_id,
+        "task_id": body.task_id,
+        "step_id": body.step_id,
+        "project": body.project,
+        "runtime": body.runtime,
+        "model": body.model,
+        "actor": body.actor,
+        "usage": body.usage,
+        "result": body.result,
+        "decision_ref": body.decision_ref,
+    });
+
+    let ledger = state.open_ledger()?;
+    let branch = ledger.head_branch()?;
+    let parent_hash = ledger.last_event_hash()?;
+
+    let event = new_execution_event(
+        &branch,
+        parent_hash.as_deref(),
+        &body.event_id,
+        &body.occurred_at,
+        payload,
+        body.decision_ref.as_deref(),
+    )?;
+
+    let inserted = ledger.append_event_idempotent(&event)?;
+
+    let response = KarviEventResponse {
+        event_id: event.event_id,
+        status: if inserted {
+            "created".to_string()
+        } else {
+            "duplicate".to_string()
+        },
+    };
+
+    let status = if inserted {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+
+    Ok((status, Json(response)).into_response())
 }
 
 // ── GET /api/recap ──
@@ -1105,5 +1216,209 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["anchor"].is_object());
         assert!(json["meta"]["cached"].is_boolean());
+    }
+
+    fn karvi_event_json(event_id: &str, event_type: &str) -> serde_json::Value {
+        serde_json::json!({
+            "version": "karvi.event.v1",
+            "event_id": event_id,
+            "event_type": event_type,
+            "occurred_at": "2026-03-11T00:00:00Z",
+            "trace_id": "trace-1",
+            "task_id": "task-1",
+            "step_id": "step-1",
+            "project": "owner/repo",
+            "runtime": "claude",
+            "model": "claude-3-opus",
+            "actor": { "kind": "agent", "id": "agent-1" },
+            "usage": { "token_in": 100, "token_out": 50, "cost_usd": 0.01, "latency_ms": 500 },
+            "result": { "status": "success", "error_code": null, "retryable": false }
+        })
+    }
+
+    #[tokio::test]
+    async fn karvi_event_creates_execution_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let body = karvi_event_json("evt_karvi_1", "step_completed");
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/events/karvi")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["event_id"], "evt_karvi_1");
+        assert_eq!(json["status"], "created");
+
+        // Verify event is in ledger
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let event = ledger.get_event("evt_karvi_1").unwrap().unwrap();
+        assert_eq!(event.event_type, "execution_event");
+        assert_eq!(event.payload["runtime"], "claude");
+        assert_eq!(event.payload["usage"]["cost_usd"], 0.01);
+    }
+
+    #[tokio::test]
+    async fn karvi_event_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let body = karvi_event_json("evt_karvi_dup", "step_completed").to_string();
+
+        // First request
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/events/karvi")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Second (duplicate) request
+        let app2 = router(tmp.path());
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/events/karvi")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+        assert_eq!(json2["status"], "duplicate");
+
+        // Only one event in ledger
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let events = ledger.iter_events().unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn karvi_event_rejects_bad_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let body = serde_json::json!({
+            "version": "karvi.event.v99",
+            "event_id": "evt_bad",
+            "event_type": "step_completed",
+            "occurred_at": "2026-03-11T00:00:00Z"
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/events/karvi")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported version"));
+    }
+
+    #[tokio::test]
+    async fn karvi_event_rejects_bad_event_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let body = serde_json::json!({
+            "version": "karvi.event.v1",
+            "event_id": "evt_bad_type",
+            "event_type": "step_exploded",
+            "occurred_at": "2026-03-11T00:00:00Z"
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/events/karvi")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported event_type"));
+    }
+
+    #[tokio::test]
+    async fn karvi_event_with_decision_ref() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let mut body = karvi_event_json("evt_karvi_ref", "step_completed");
+        body["decision_ref"] = serde_json::json!("evt_decision_xyz");
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/events/karvi")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Verify provenance link
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let event = ledger.get_event("evt_karvi_ref").unwrap().unwrap();
+        assert_eq!(event.refs.provenance.len(), 1);
+        assert_eq!(event.refs.provenance[0].target, "evt_decision_xyz");
+        assert_eq!(event.refs.provenance[0].rel, "based_on");
     }
 }
