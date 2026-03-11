@@ -97,6 +97,7 @@ pub(crate) enum CoordEventType {
     Binding,
     Request,
     RequestAck,
+    SubagentCompleted,
 }
 
 /// A scope claim by a session.
@@ -136,6 +137,19 @@ pub struct RequestAckEntry {
     pub ts: String,
 }
 
+/// A sub-agent completion summary entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentCompletedEntry {
+    pub parent_session_id: String,
+    pub agent_id: String,
+    pub agent_type: String,
+    pub summary: String,
+    pub files_touched: Vec<String>,
+    pub decisions: Vec<String>,
+    pub commits: Vec<String>,
+    pub ts: String,
+}
+
 /// Computed board state from coordination.jsonl.
 #[derive(Debug, Default)]
 pub struct BoardState {
@@ -143,6 +157,7 @@ pub struct BoardState {
     pub bindings: Vec<BindingEntry>,
     pub requests: Vec<RequestEntry>,
     pub request_acks: Vec<RequestAckEntry>,
+    pub subagent_completions: Vec<SubagentCompletedEntry>,
 }
 
 /// Summary of a peer session for rendering.
@@ -495,6 +510,35 @@ pub fn write_request_ack(project_id: &str, session_id: &str, from_label: &str) {
     append_coord_event(project_id, &event);
 }
 
+/// Write a sub-agent completion summary event.
+pub(crate) fn write_subagent_completed(
+    project_id: &str,
+    parent_session_id: &str,
+    agent_id: &str,
+    agent_type: &str,
+    summary: &str,
+    files_touched: &[String],
+    decisions: &[String],
+    commits: &[String],
+) {
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: parent_session_id.to_string(),
+        event_type: CoordEventType::SubagentCompleted,
+        payload: serde_json::json!({
+            "kind": "subagent_completed",
+            "parent_session_id": parent_session_id,
+            "agent_id": agent_id,
+            "agent_type": agent_type,
+            "summary": summary,
+            "files_touched": files_touched,
+            "decisions": decisions,
+            "commits": commits,
+        }),
+    };
+    append_coord_event(project_id, &event);
+}
+
 /// Check if a binding conflict exists for the given key in coordination.jsonl.
 ///
 /// Returns `Some(BindingConflict)` if a binding with the same key but a
@@ -533,6 +577,7 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
     let mut bindings: Vec<BindingEntry> = Vec::new();
     let mut requests: Vec<RequestEntry> = Vec::new();
     let mut request_acks: Vec<RequestAckEntry> = Vec::new();
+    let mut subagent_completions: Vec<SubagentCompletedEntry> = Vec::new();
 
     for line in content.lines() {
         let event: CoordEvent = match serde_json::from_str(line) {
@@ -604,6 +649,52 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
                     ts: event.ts,
                 });
             }
+            CoordEventType::SubagentCompleted => {
+                let parent_session_id = event.payload["parent_session_id"]
+                    .as_str()
+                    .unwrap_or(event.session_id.as_str())
+                    .to_string();
+                let agent_id = event.payload["agent_id"].as_str().unwrap_or("").to_string();
+                let agent_type = event.payload["agent_type"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let summary = event.payload["summary"].as_str().unwrap_or("").to_string();
+                let files_touched: Vec<String> = event.payload["files_touched"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let decisions: Vec<String> = event.payload["decisions"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let commits: Vec<String> = event.payload["commits"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                subagent_completions.push(SubagentCompletedEntry {
+                    parent_session_id,
+                    agent_id,
+                    agent_type,
+                    summary,
+                    files_touched,
+                    decisions,
+                    commits,
+                    ts: event.ts,
+                });
+            }
         }
     }
 
@@ -616,6 +707,7 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
         bindings,
         requests,
         request_acks,
+        subagent_completions,
     }
 }
 
@@ -679,6 +771,27 @@ pub fn compute_board_state_for_compaction(project_id: &str) -> Vec<String> {
             event_type: CoordEventType::RequestAck,
             payload: serde_json::json!({
                 "from_label": ack.from_label,
+            }),
+        };
+        if let Ok(line) = serde_json::to_string(&event) {
+            lines.push(line);
+        }
+    }
+
+    for sub in &board.subagent_completions {
+        let event = CoordEvent {
+            ts: sub.ts.clone(),
+            session_id: sub.parent_session_id.clone(),
+            event_type: CoordEventType::SubagentCompleted,
+            payload: serde_json::json!({
+                "kind": "subagent_completed",
+                "parent_session_id": sub.parent_session_id,
+                "agent_id": sub.agent_id,
+                "agent_type": sub.agent_type,
+                "summary": sub.summary,
+                "files_touched": sub.files_touched,
+                "decisions": sub.decisions,
+                "commits": sub.commits,
             }),
         };
         if let Ok(line) = serde_json::to_string(&event) {
@@ -3447,6 +3560,93 @@ mod tests {
             pending_after.is_empty(),
             "acked request should still not be pending after compaction"
         );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn serde_subagent_completed_serializes_and_parses() {
+        let event = CoordEvent {
+            ts: "2026-02-18T00:00:00Z".to_string(),
+            session_id: "parent-session".to_string(),
+            event_type: CoordEventType::SubagentCompleted,
+            payload: serde_json::json!({
+                "kind": "subagent_completed",
+                "parent_session_id": "parent-session",
+                "agent_id": "agent-1",
+                "agent_type": "Explore",
+                "summary": "done",
+                "files_touched": ["a.rs"],
+                "decisions": ["Decision: keep parser"],
+                "commits": ["abc1234 feat: x"]
+            }),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"subagent_completed\""));
+
+        let parsed: CoordEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.event_type, CoordEventType::SubagentCompleted);
+    }
+
+    #[test]
+    fn board_state_includes_subagent_completed_entries() {
+        let pid = "test_subagent_board_state";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_subagent_completed(
+            pid,
+            "parent-session",
+            "agent-7",
+            "Plan",
+            "planning done",
+            &["a.rs".into(), "b.rs".into()],
+            &["Decision: use compact mode".into()],
+            &["abc1234 feat: plan".into()],
+        );
+
+        let board = compute_board_state(pid);
+        assert_eq!(board.subagent_completions.len(), 1);
+        let entry = &board.subagent_completions[0];
+        assert_eq!(entry.parent_session_id, "parent-session");
+        assert_eq!(entry.agent_id, "agent-7");
+        assert_eq!(entry.agent_type, "Plan");
+        assert!(entry.summary.contains("planning"));
+        assert_eq!(entry.files_touched.len(), 2);
+        assert_eq!(entry.decisions.len(), 1);
+        assert_eq!(entry.commits.len(), 1);
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn compaction_preserves_subagent_completed() {
+        let pid = "test_subagent_compaction";
+        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(coordination_path(pid));
+
+        write_subagent_completed(
+            pid,
+            "parent-session",
+            "agent-8",
+            "Bash",
+            "completed",
+            &["x.rs".into()],
+            &["Decision: run targeted tests".into()],
+            &["def5678 fix: adjust".into()],
+        );
+
+        let lines = compute_board_state_for_compaction(pid);
+        assert_eq!(lines.len(), 1, "only subagent event should remain");
+
+        let path = coordination_path(pid);
+        let content = lines.join("\n");
+        fs::write(&path, format!("{content}\n")).unwrap();
+
+        let board = compute_board_state(pid);
+        assert_eq!(board.subagent_completions.len(), 1);
+        assert_eq!(board.subagent_completions[0].agent_id, "agent-8");
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }

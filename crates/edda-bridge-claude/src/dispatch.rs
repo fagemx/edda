@@ -234,7 +234,28 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
         }
         "SubagentStop" => {
             let agent_id = get_str(&raw, "agent_id");
+            let agent_type = get_str(&raw, "agent_type");
+            let agent_transcript_path = get_str(&raw, "agent_transcript_path");
+            let last_assistant_message = get_str(&raw, "last_assistant_message");
             if !agent_id.is_empty() {
+                let summary = extract_subagent_summary(
+                    &agent_transcript_path,
+                    &last_assistant_message,
+                    &agent_id,
+                );
+
+                crate::peers::write_subagent_completed(
+                    &project_id,
+                    &session_id,
+                    &agent_id,
+                    &agent_type,
+                    &summary.summary,
+                    &summary.files_touched,
+                    &summary.decisions,
+                    &summary.commits,
+                );
+
+                try_write_subagent_completed_note_event(&cwd, &agent_id, &agent_type, &summary);
                 crate::peers::remove_heartbeat(&project_id, &agent_id);
             }
             Ok(HookResult::empty())
@@ -1464,6 +1485,70 @@ fn try_post_karvi_signal(
         .send(payload.to_string())
     {
         eprintln!("[edda-bridge-claude] karvi write-back failed: {}", e);
+    }
+}
+
+/// Best-effort write of a sub-agent completion `note` event to workspace ledger.
+/// Uses try-lock: silently skips if workspace is locked by another process.
+fn try_write_subagent_completed_note_event(
+    cwd: &str,
+    agent_id: &str,
+    agent_type: &str,
+    summary: &SubagentSummary,
+) {
+    if cwd.is_empty() || agent_id.is_empty() {
+        return;
+    }
+
+    let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(cwd)) else {
+        return;
+    };
+    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
+        return;
+    };
+    let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
+        return;
+    };
+    let Ok(branch) = ledger.head_branch() else {
+        return;
+    };
+    let Ok(parent_hash) = ledger.last_event_hash() else {
+        return;
+    };
+
+    let mut details = Vec::new();
+    if !summary.summary.is_empty() {
+        details.push(summary.summary.clone());
+    }
+    if !summary.files_touched.is_empty() {
+        details.push(format!("{} files", summary.files_touched.len()));
+    }
+    if !summary.commits.is_empty() {
+        details.push(format!("{} commits", summary.commits.len()));
+    }
+    if !summary.decisions.is_empty() {
+        details.push(format!("{} decisions", summary.decisions.len()));
+    }
+
+    let agent_label = if agent_type.is_empty() {
+        agent_id.to_string()
+    } else {
+        format!("{agent_type}:{agent_id}")
+    };
+    let text = if details.is_empty() {
+        format!("Sub-agent completed: {agent_label}")
+    } else {
+        format!(
+            "Sub-agent completed: {agent_label} — {}",
+            details.join(", ")
+        )
+    };
+
+    let tags = vec!["session".to_string(), "subagent".to_string()];
+    if let Ok(event) =
+        edda_core::event::new_note_event(&branch, parent_hash.as_deref(), "agent", &text, &tags)
+    {
+        let _ = ledger.append_event(&event);
     }
 }
 
@@ -3726,6 +3811,157 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn subagent_stop_writes_summary_and_removes_heartbeat() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+        let paths = edda_ledger::EddaPaths::discover(&workspace);
+        edda_ledger::ledger::init_workspace(&paths).unwrap();
+        edda_ledger::ledger::init_head(&paths, "main").unwrap();
+        edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
+
+        let project_id = resolve_project_id(workspace.to_str().unwrap());
+        let _ = edda_store::ensure_dirs(&project_id);
+
+        let transcript = workspace.join("subagent.jsonl");
+        let transcript_content = [
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "role": "assistant", "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "e1",
+                        "name": "Edit",
+                        "input": { "file_path": "/repo/src/lib.rs", "old_string": "a", "new_string": "b" }
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "b1",
+                        "name": "Bash",
+                        "input": { "command": "git commit -m \"feat: sub-agent\"" }
+                    }
+                ]}
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "b1",
+                    "content": "[main abc1234] feat: sub-agent\n 1 file changed"
+                }]}
+            })
+            .to_string(),
+        ]
+        .join("\n");
+        fs::write(&transcript, format!("{transcript_content}\n")).unwrap();
+
+        crate::peers::write_subagent_heartbeat(
+            &project_id,
+            "agent-abc",
+            "parent-sess",
+            "sub:Plan",
+            workspace.to_str().unwrap(),
+        );
+        assert!(crate::peers::read_heartbeat(&project_id, "agent-abc").is_some());
+
+        let stdin = serde_json::json!({
+            "session_id": "parent-sess",
+            "hook_event_name": "SubagentStop",
+            "cwd": workspace.to_str().unwrap(),
+            "agent_id": "agent-abc",
+            "agent_type": "Plan",
+            "agent_transcript_path": transcript.to_string_lossy(),
+            "last_assistant_message": "fallback summary"
+        })
+        .to_string();
+
+        let result = hook_entrypoint_from_stdin(&stdin).unwrap();
+        assert!(result.stdout.is_none());
+
+        // Heartbeat removed as final cleanup
+        assert!(
+            crate::peers::read_heartbeat(&project_id, "agent-abc").is_none(),
+            "heartbeat should be removed after SubagentStop"
+        );
+
+        // Coordination summary event written
+        let board = crate::peers::compute_board_state(&project_id);
+        assert_eq!(board.subagent_completions.len(), 1);
+        let sub = &board.subagent_completions[0];
+        assert_eq!(sub.parent_session_id, "parent-sess");
+        assert_eq!(sub.agent_id, "agent-abc");
+        assert_eq!(sub.agent_type, "Plan");
+        assert_eq!(sub.files_touched.len(), 1);
+        assert_eq!(sub.commits.len(), 1);
+
+        // Workspace note written for watch rendering
+        let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+        let events = ledger.iter_events().unwrap();
+        let note_events: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.event_type == "note"
+                    && e.payload["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("Sub-agent completed")
+            })
+            .collect();
+        assert_eq!(note_events.len(), 1, "should write sub-agent note event");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(&project_id));
+    }
+
+    #[test]
+    fn subagent_stop_fallback_summary_when_transcript_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_path_buf();
+        let paths = edda_ledger::EddaPaths::discover(&workspace);
+        edda_ledger::ledger::init_workspace(&paths).unwrap();
+        edda_ledger::ledger::init_head(&paths, "main").unwrap();
+        edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
+
+        let project_id = resolve_project_id(workspace.to_str().unwrap());
+        let _ = edda_store::ensure_dirs(&project_id);
+
+        crate::peers::write_subagent_heartbeat(
+            &project_id,
+            "agent-fallback",
+            "parent-sess",
+            "sub:Explore",
+            workspace.to_str().unwrap(),
+        );
+
+        let stdin = serde_json::json!({
+            "session_id": "parent-sess",
+            "hook_event_name": "SubagentStop",
+            "cwd": workspace.to_str().unwrap(),
+            "agent_id": "agent-fallback",
+            "agent_type": "Explore",
+            "agent_transcript_path": workspace.join("missing.jsonl").to_string_lossy(),
+            "last_assistant_message": "Decision: use fallback parser"
+        })
+        .to_string();
+
+        let _ = hook_entrypoint_from_stdin(&stdin).unwrap();
+
+        let board = crate::peers::compute_board_state(&project_id);
+        assert_eq!(board.subagent_completions.len(), 1);
+        let sub = &board.subagent_completions[0];
+        assert!(
+            sub.summary.contains("Decision: use fallback parser"),
+            "fallback summary should be sourced from last assistant message"
+        );
+
+        assert!(
+            crate::peers::read_heartbeat(&project_id, "agent-fallback").is_none(),
+            "heartbeat should be removed even on fallback path"
+        );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(&project_id));
     }
 
     #[test]

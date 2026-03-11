@@ -79,8 +79,10 @@ fn render_activity_summary(project_id: &str) -> Option<String> {
     let commits: Vec<CommitInfo> = load_state_vec(project_id, "recent_commits.json", "commits");
     let failed: Vec<FailedBashCmd> =
         load_state_vec(project_id, "failed_commands.json", "failed_commands");
+    let board = crate::peers::compute_board_state(project_id);
+    let recent_subagents: Vec<_> = board.subagent_completions.iter().rev().take(3).collect();
 
-    if files.is_empty() && commits.is_empty() {
+    if files.is_empty() && commits.is_empty() && recent_subagents.is_empty() {
         return None;
     }
 
@@ -119,6 +121,20 @@ fn render_activity_summary(project_id: &str) -> Option<String> {
     if !failed.is_empty() {
         let total_failures: usize = failed.iter().map(|f| f.count).sum();
         lines.push(format!("- {} command failures", total_failures));
+    }
+
+    for sub in recent_subagents {
+        let agent = if sub.agent_type.is_empty() {
+            sub.agent_id.clone()
+        } else {
+            format!("{}:{}", sub.agent_type, sub.agent_id)
+        };
+        let detail = if sub.summary.is_empty() {
+            "completed".to_string()
+        } else {
+            truncate_str(&sub.summary, 80)
+        };
+        lines.push(format!("- sub-agent {agent}: {detail}"));
     }
 
     Some(lines.join("\n"))
@@ -384,6 +400,62 @@ mod tests {
             summary.contains("over 10 turns"),
             "should show velocity: {summary}"
         );
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn activity_summary_renders_subagent_only() {
+        let pid = "test_activity_subagent_only";
+        let _ = edda_store::ensure_dirs(pid);
+
+        crate::peers::write_subagent_completed(
+            pid,
+            "parent-session",
+            "agent-1",
+            "Explore",
+            "Sub-agent completed: 2 files touched",
+            &vec!["a.rs".into(), "b.rs".into()],
+            &Vec::new(),
+            &Vec::new(),
+        );
+
+        let summary = render_activity_summary(pid).unwrap();
+        assert!(summary.contains("Session Activity"));
+        assert!(summary.contains("sub-agent Explore:agent-1"));
+        assert!(summary.contains("2 files touched"));
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn activity_summary_renders_subagent_with_files() {
+        let pid = "test_activity_subagent_with_files";
+        let _ = edda_store::ensure_dirs(pid);
+
+        let signals = SessionSignals {
+            files_modified: vec![FileEditCount {
+                path: "a.rs".into(),
+                count: 1,
+            }],
+            ..Default::default()
+        };
+        save_session_signals(pid, "test-session", &signals);
+
+        crate::peers::write_subagent_completed(
+            pid,
+            "parent-session",
+            "agent-2",
+            "Plan",
+            "Completed planning",
+            &Vec::new(),
+            &Vec::new(),
+            &Vec::new(),
+        );
+
+        let summary = render_activity_summary(pid).unwrap();
+        assert!(summary.contains("1 files modified"));
+        assert!(summary.contains("sub-agent Plan:agent-2"));
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
