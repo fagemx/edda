@@ -157,10 +157,7 @@ fn execute_show(project_id: &str, scan_id: &str, index: usize) -> anyhow::Result
     println!("Title:    {}", gap.title);
     println!("Category: {}", gap.category);
     println!("Severity: {}", gap.severity);
-    println!(
-        "Confidence: {:.0}%",
-        gap.confidence * 100.0
-    );
+    println!("Confidence: {:.0}%", gap.confidence * 100.0);
     println!();
     println!("Description:");
     println!("  {}", gap.description);
@@ -173,10 +170,7 @@ fn execute_show(project_id: &str, scan_id: &str, index: usize) -> anyhow::Result
     }
     if !gap.suggested_labels.is_empty() {
         println!();
-        println!(
-            "Suggested labels: {}",
-            gap.suggested_labels.join(", ")
-        );
+        println!("Suggested labels: {}", gap.suggested_labels.join(", "));
     }
 
     Ok(())

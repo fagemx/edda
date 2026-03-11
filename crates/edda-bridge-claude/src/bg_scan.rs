@@ -114,8 +114,7 @@ pub fn should_run(project_id: &str) -> bool {
 /// Assembles a project snapshot, calls the LLM for gap analysis, saves results
 /// as draft issues, and updates state/cost tracking.
 pub fn run_scan(project_id: &str, cwd: &str) -> Result<ScanResult> {
-    let api_key =
-        std::env::var("EDDA_LLM_API_KEY").with_context(|| "EDDA_LLM_API_KEY not set")?;
+    let api_key = std::env::var("EDDA_LLM_API_KEY").with_context(|| "EDDA_LLM_API_KEY not set")?;
     if api_key.is_empty() {
         anyhow::bail!("EDDA_LLM_API_KEY is empty");
     }
@@ -168,7 +167,10 @@ pub fn run_scan(project_id: &str, cwd: &str) -> Result<ScanResult> {
     let cost_usd = (input_tokens as f64 * HAIKU_INPUT_COST_PER_TOKEN)
         + (output_tokens as f64 * HAIKU_OUTPUT_COST_PER_TOKEN);
 
-    let scan_id = format!("scan_{}", &ulid::Ulid::new().to_string()[..12].to_lowercase());
+    let scan_id = format!(
+        "scan_{}",
+        &ulid::Ulid::new().to_string()[..12].to_lowercase()
+    );
     let result = ScanResult {
         scan_id: scan_id.clone(),
         scanned_at: now_rfc3339(),
@@ -674,7 +676,12 @@ pub fn has_recent_milestone(project_id: &str, cwd: &str) -> bool {
     };
 
     let output = std::process::Command::new("git")
-        .args(["tag", "--sort=-creatordate", "--format=%(creatordate:iso-strict)", "-n1"])
+        .args([
+            "tag",
+            "--sort=-creatordate",
+            "--format=%(creatordate:iso-strict)",
+            "-n1",
+        ])
         .current_dir(cwd)
         .output();
 
@@ -1015,14 +1022,8 @@ End of analysis."#;
         dismiss_gap(pid, "scan_test123", 0).unwrap();
         let scans = list_pending_scans(pid).unwrap();
         assert_eq!(scans.len(), 1); // Still has 1 pending gap
-        assert_eq!(
-            scans[0].gaps[0].status,
-            GapStatus::Dismissed
-        );
-        assert_eq!(
-            scans[0].gaps[1].status,
-            GapStatus::Pending
-        );
+        assert_eq!(scans[0].gaps[0].status, GapStatus::Dismissed);
+        assert_eq!(scans[0].gaps[1].status, GapStatus::Pending);
 
         // Accept the other gap
         let gap = accept_gap(pid, "scan_test123", 1).unwrap();
