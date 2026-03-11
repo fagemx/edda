@@ -981,7 +981,7 @@ pub(crate) fn now_rfc3339() -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
-fn today_date() -> String {
+pub(crate) fn today_date() -> String {
     let now = time::OffsetDateTime::now_utc();
     format!(
         "{:04}-{:02}-{:02}",

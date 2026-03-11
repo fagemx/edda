@@ -1,6 +1,7 @@
 pub mod agent_phase;
 pub mod bg_digest;
 pub mod bg_extract;
+pub mod bg_scan;
 pub mod digest;
 pub mod pattern;
 pub mod peers;
