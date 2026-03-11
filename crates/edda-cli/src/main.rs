@@ -24,6 +24,7 @@ mod cmd_rebuild;
 mod cmd_recap;
 mod cmd_rules;
 mod cmd_run;
+mod cmd_scan;
 mod cmd_search;
 mod cmd_serve;
 mod cmd_status;
@@ -409,6 +410,11 @@ enum Command {
     Rules {
         #[command(subcommand)]
         cmd: cmd_rules::RulesCmd,
+    },
+    /// Capability scanner — identify gaps via LLM analysis
+    Scan {
+        #[command(subcommand)]
+        cmd: cmd_scan::ScanCmd,
     },
 }
 
@@ -1035,5 +1041,6 @@ fn main() -> anyhow::Result<()> {
         }),
         Command::User { cmd } => cmd_user::execute(cmd),
         Command::Rules { cmd } => cmd_rules::execute(cmd, &repo_root),
+        Command::Scan { cmd } => cmd_scan::execute(cmd, &repo_root),
     }
 }

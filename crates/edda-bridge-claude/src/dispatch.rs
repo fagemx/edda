@@ -688,6 +688,19 @@ fn dispatch_session_end(
         });
     }
 
+    // 2h. Background capability scan (non-blocking, cooldown-gated)
+    if crate::bg_scan::should_run(&project_id)
+        || crate::bg_scan::has_recent_milestone(&project_id, cwd)
+    {
+        let pid = project_id.to_string();
+        let cwd_owned = cwd.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = crate::bg_scan::run_scan(&pid, &cwd_owned) {
+                eprintln!("[edda-bg] capability scan failed: {e}");
+            }
+        });
+    }
+
     // 2d. Push notification (best-effort, fire-and-forget)
     notify_session_end(project_id, cwd, session_id);
 
