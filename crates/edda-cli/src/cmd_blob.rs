@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Subcommand;
 use edda_ledger::blob_meta::{self, BlobClass};
 use edda_ledger::blob_store::{blob_list, blob_list_archived};
@@ -371,7 +372,10 @@ fn resolve_hash(paths: &EddaPaths, prefix: &str) -> anyhow::Result<String> {
 
     match matches.len() {
         0 => anyhow::bail!("blob not found: {prefix}"),
-        1 => Ok(matches.into_iter().next().unwrap()),
+        1 => Ok(matches
+            .into_iter()
+            .next()
+            .context("expected exactly one blob match")?),
         _ => {
             let preview: Vec<_> = matches
                 .iter()

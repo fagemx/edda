@@ -1,3 +1,4 @@
+use anyhow::Context;
 use crate::agent::budget::BudgetTracker;
 use crate::agent::launcher::{phase_session_id_attempt, AgentLauncher, PhaseResult};
 use crate::check::engine::{CheckEngine, CheckRunResult};
@@ -146,7 +147,11 @@ pub async fn run_plan(
         let Some(phase_id) = find_next_phase(plan, state, &order) else {
             break; // all done or no runnable phase
         };
-        let phase = plan.phases.iter().find(|p| p.id == phase_id).unwrap();
+        let phase = plan
+            .phases
+            .iter()
+            .find(|p| p.id == phase_id)
+            .context("runnable phase not found in plan")?;
         let phase_state = state.get_phase_mut(&phase_id)?;
         let attempt = phase_state.attempts + 1;
         let phase_cwd = phase
@@ -454,7 +459,9 @@ async fn handle_on_fail(
         OnFail::AutoRetry => {
             let max = phase.max_attempts.unwrap_or(plan.max_attempts);
             let (attempts, should_retry) = {
-                let ps = state.get_phase_mut(phase_id).unwrap();
+                let ps = state
+                    .get_phase_mut(phase_id)
+                    .expect("phase must exist in state");
                 if ps.attempts < max {
                     let error_context = format_check_failures(&check_result.results);
                     ps.retry_context = Some(error_context);
@@ -481,7 +488,9 @@ async fn handle_on_fail(
             }
         }
         OnFail::Skip => {
-            let ps = state.get_phase_mut(phase_id).unwrap();
+            let ps = state
+                .get_phase_mut(phase_id)
+                .expect("phase must exist in state");
             ps.status = PhaseStatus::Skipped;
             ps.skip_reason = Some("auto-skipped by on_fail policy".into());
             event_log.record(Event::PhaseSkipped {
