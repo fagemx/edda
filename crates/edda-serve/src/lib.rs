@@ -38,9 +38,8 @@ struct AppState {
     chronicle: Option<ChronicleContext>,
 }
 
-#[allow(dead_code)]
 struct ChronicleContext {
-    store_root: PathBuf,
+    _store_root: PathBuf,
 }
 
 impl AppState {
@@ -76,7 +75,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
 
     let store_root = edda_store::store_root();
     let chronicle = if store_root.exists() {
-        Some(ChronicleContext { store_root })
+        Some(ChronicleContext { _store_root: store_root })
     } else {
         None
     };
@@ -128,7 +127,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
 pub fn router(repo_root: &Path) -> Router {
     let store_root = edda_store::store_root();
     let chronicle = if store_root.exists() {
-        Some(ChronicleContext { store_root })
+        Some(ChronicleContext { _store_root: store_root })
     } else {
         None
     };
@@ -683,11 +682,10 @@ async fn post_karvi_event(
 // ── GET /api/recap ──
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct RecapQuery {
     project: Option<String>,
     query: Option<String>,
-    since: Option<String>,
+    _since: Option<String>,
     week: Option<bool>,
     scope: Option<String>,
 }

@@ -326,10 +326,6 @@ fn read_workspace_config_bool(cwd: &str, key: &str) -> Option<bool> {
     render::config_bool(cwd, key)
 }
 
-#[allow(dead_code)]
-fn read_workspace_config_usize(cwd: &str, key: &str) -> Option<usize> {
-    render::config_usize(cwd, key)
-}
 pub(crate) fn read_hot_pack(project_id: &str) -> Option<String> {
     let pack_path = edda_store::project_dir(project_id)
         .join("packs")
