@@ -11,7 +11,9 @@ pub fn execute_show(repo_root: &Path, task_id: &str) -> anyhow::Result<()> {
     println!("Task: {} — {}", brief.task_id, brief.title);
     println!(
         "Intent: {} | Status: {} | Branch: {}",
-        brief.intent, brief.status, brief.branch
+        brief.intent.as_str(),
+        brief.status.as_str(),
+        brief.branch,
     );
     println!(
         "Iterations: {} | Last activity: {}",
@@ -66,8 +68,8 @@ pub fn execute_list(
             let obj = serde_json::json!({
                 "task_id": b.task_id,
                 "title": b.title,
-                "intent": b.intent,
-                "status": b.status,
+                "intent": b.intent.as_str(),
+                "status": b.status.as_str(),
                 "branch": b.branch,
                 "iterations": b.iterations,
                 "source_url": b.source_url,
@@ -83,7 +85,10 @@ pub fn execute_list(
     for b in &briefs {
         println!(
             "  {} — {} [{}] ({})",
-            b.task_id, b.title, b.status, b.intent
+            b.task_id,
+            b.title,
+            b.status.as_str(),
+            b.intent.as_str(),
         );
         println!(
             "    Branch: {} | Iterations: {} | Updated: {}",

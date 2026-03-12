@@ -123,6 +123,95 @@ pub struct DecisionPayload {
     pub scope: Option<DecisionScope>,
 }
 
+/// Status of a task brief.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskBriefStatus {
+    Active,
+    Completed,
+    Blocked,
+    Abandoned,
+}
+
+impl TaskBriefStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Completed => "completed",
+            Self::Blocked => "blocked",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
+
+impl std::fmt::Display for TaskBriefStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for TaskBriefStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "active" => Ok(Self::Active),
+            "completed" => Ok(Self::Completed),
+            "blocked" => Ok(Self::Blocked),
+            "abandoned" => Ok(Self::Abandoned),
+            other => Err(format!("unknown task brief status: {other:?}")),
+        }
+    }
+}
+
+/// Intent / purpose of a task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskBriefIntent {
+    Implement,
+    Fix,
+    Maintain,
+    Investigate,
+    Refactor,
+    Document,
+    Test,
+}
+
+impl TaskBriefIntent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Implement => "implement",
+            Self::Fix => "fix",
+            Self::Maintain => "maintain",
+            Self::Investigate => "investigate",
+            Self::Refactor => "refactor",
+            Self::Document => "document",
+            Self::Test => "test",
+        }
+    }
+}
+
+impl std::fmt::Display for TaskBriefIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for TaskBriefIntent {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "implement" => Ok(Self::Implement),
+            "fix" => Ok(Self::Fix),
+            "maintain" => Ok(Self::Maintain),
+            "investigate" => Ok(Self::Investigate),
+            "refactor" => Ok(Self::Refactor),
+            "document" => Ok(Self::Document),
+            "test" => Ok(Self::Test),
+            other => Err(format!("unknown task brief intent: {other:?}")),
+        }
+    }
+}
+
 /// Well-known relation types for provenance links.
 pub mod rel {
     pub const BASED_ON: &str = "based_on";
@@ -498,5 +587,72 @@ mod tests {
         assert_eq!(rel::REVIEWS, "reviews");
         assert_eq!(rel::DEPENDS_ON, "depends_on");
         assert_eq!(rel::IMPORTED_FROM, "imported_from");
+    }
+
+    // ── TaskBriefStatus tests ─────────────────────────────────────
+
+    #[test]
+    fn task_brief_status_round_trip() {
+        for status in [
+            TaskBriefStatus::Active,
+            TaskBriefStatus::Completed,
+            TaskBriefStatus::Blocked,
+            TaskBriefStatus::Abandoned,
+        ] {
+            let s = status.as_str();
+            let parsed: TaskBriefStatus = s.parse().unwrap();
+            assert_eq!(parsed, status);
+            assert_eq!(format!("{status}"), s);
+        }
+    }
+
+    #[test]
+    fn task_brief_status_unknown_is_err() {
+        let result = "foobar".parse::<TaskBriefStatus>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn task_brief_status_serde() {
+        let status = TaskBriefStatus::Completed;
+        let json = serde_json::to_string(&status).unwrap();
+        assert_eq!(json, "\"completed\"");
+        let decoded: TaskBriefStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, TaskBriefStatus::Completed);
+    }
+
+    // ── TaskBriefIntent tests ─────────────────────────────────────
+
+    #[test]
+    fn task_brief_intent_round_trip() {
+        for intent in [
+            TaskBriefIntent::Implement,
+            TaskBriefIntent::Fix,
+            TaskBriefIntent::Maintain,
+            TaskBriefIntent::Investigate,
+            TaskBriefIntent::Refactor,
+            TaskBriefIntent::Document,
+            TaskBriefIntent::Test,
+        ] {
+            let s = intent.as_str();
+            let parsed: TaskBriefIntent = s.parse().unwrap();
+            assert_eq!(parsed, intent);
+            assert_eq!(format!("{intent}"), s);
+        }
+    }
+
+    #[test]
+    fn task_brief_intent_unknown_is_err() {
+        let result = "unknown".parse::<TaskBriefIntent>();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn task_brief_intent_serde() {
+        let intent = TaskBriefIntent::Fix;
+        let json = serde_json::to_string(&intent).unwrap();
+        assert_eq!(json, "\"fix\"");
+        let decoded: TaskBriefIntent = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, TaskBriefIntent::Fix);
     }
 }
