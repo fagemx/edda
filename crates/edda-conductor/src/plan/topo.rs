@@ -1,5 +1,5 @@
 use crate::plan::schema::Plan;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Topological sort of phases by dependency order (Kahn's algorithm).
@@ -41,7 +41,9 @@ pub fn topo_sort(plan: &Plan) -> Result<Vec<String>> {
         if let Some(deps) = dependents.get(id) {
             let mut next = Vec::new();
             for &dep in deps {
-                let deg = in_degree.get_mut(dep).unwrap();
+                let deg = in_degree
+                    .get_mut(dep)
+                    .context("dependent phase not found in in-degree map")?;
                 *deg -= 1;
                 if *deg == 0 {
                     next.push(dep);

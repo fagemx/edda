@@ -36,7 +36,11 @@ pub fn classify_session(
 
     scores
         .into_iter()
-        .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap())
+        .max_by(|a, b| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
         .map(|s| s.session_type)
         .unwrap_or(SessionType::QuickOps)
 }

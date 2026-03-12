@@ -1,3 +1,4 @@
+use anyhow::Context;
 use rusqlite::{params, Connection};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, RegexQuery, TermQuery};
@@ -114,7 +115,10 @@ pub fn search(
     }
 
     let final_query = if must_clauses.len() == 1 {
-        must_clauses.pop().unwrap().1
+        must_clauses
+            .pop()
+            .context("expected at least one search clause")?
+            .1
     } else {
         Box::new(BooleanQuery::from(must_clauses))
     };

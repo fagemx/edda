@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Subcommand;
 use edda_core::event::{
     new_approval_event, new_approval_request_event, new_commit_event, ApprovalEventParams,
@@ -1087,7 +1088,11 @@ pub fn approve(
         ledger.append_event(&event)?;
 
         // Update stage
-        let stage = draft.stages.iter_mut().find(|s| s.stage_id == sid).unwrap();
+        let stage = draft
+            .stages
+            .iter_mut()
+            .find(|s| s.stage_id == sid)
+            .context("stage not found in draft")?;
         if !stage.approved_by.contains(&actor.to_string()) {
             stage.approved_by.push(actor.to_string());
         }
@@ -1115,7 +1120,11 @@ pub fn approve(
         write_draft(&ledger, &draft)?;
         rebuild_all(&ledger)?;
 
-        let stage_ref = draft.stages.iter().find(|s| s.stage_id == sid).unwrap();
+        let stage_ref = draft
+            .stages
+            .iter()
+            .find(|s| s.stage_id == sid)
+            .context("stage not found in draft")?;
         println!(
             "Approved draft {id} stage {sid} by {actor} (stage: {}, {}/{})",
             stage_ref.status,
@@ -1243,7 +1252,11 @@ pub fn reject(
         })?;
         ledger.append_event(&event)?;
 
-        let stage = draft.stages.iter_mut().find(|s| s.stage_id == sid).unwrap();
+        let stage = draft
+            .stages
+            .iter_mut()
+            .find(|s| s.stage_id == sid)
+            .context("stage not found in draft")?;
         stage.status = "rejected".to_string();
 
         draft.approvals.push(ApprovalRecord {

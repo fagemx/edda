@@ -186,7 +186,7 @@ fn save_digest_state(
         summary_len,
     };
     let path = digest_state_path(project_id, session_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("digest state path has no parent")?)?;
     let json = serde_json::to_string_pretty(&state)?;
     fs::write(&path, json)?;
     Ok(())
@@ -195,7 +195,7 @@ fn save_digest_state(
 fn append_audit_log(project_id: &str, entry: &AuditEntry) -> Result<()> {
     use std::io::Write;
     let path = audit_log_path(project_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("audit log path has no parent")?)?;
     let line = serde_json::to_string(entry)?;
     let mut file = fs::OpenOptions::new()
         .create(true)

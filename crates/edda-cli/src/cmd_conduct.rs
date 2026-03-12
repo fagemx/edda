@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use edda_conductor::agent::budget::BudgetTracker;
 use edda_conductor::agent::launcher::{phase_session_id, ClaudeCodeLauncher};
@@ -155,7 +155,11 @@ pub fn run(
         println!("\n  Phase order:");
         let order = edda_conductor::plan::topo::topo_sort(&plan)?;
         for (i, id) in order.iter().enumerate() {
-            let phase = plan.phases.iter().find(|p| p.id == *id).unwrap();
+            let phase = plan
+                .phases
+                .iter()
+                .find(|p| p.id == *id)
+                .context("phase referenced in topo order not found in plan")?;
             let checks = if phase.check.is_empty() {
                 String::new()
             } else {
@@ -385,7 +389,10 @@ fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Result<String>
 
     match names.len() {
         0 => bail!("No plans found."),
-        1 => Ok(names.into_iter().next().unwrap()),
+        1 => Ok(names
+            .into_iter()
+            .next()
+            .context("expected exactly one plan")?),
         _ => bail!(
             "Multiple plans found: {}. Use --plan to specify.",
             names.join(", ")

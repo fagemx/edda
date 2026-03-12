@@ -444,7 +444,7 @@ fn save_extraction_state(project_id: &str, result: &ExtractionResult) -> Result<
     };
 
     let path = extraction_state_path(project_id, &result.session_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("extraction state path has no parent")?)?;
     let json = serde_json::to_string_pretty(&state)?;
     fs::write(&path, json)?;
     Ok(())
@@ -501,7 +501,7 @@ pub(crate) fn update_daily_cost(project_id: &str, cost_usd: f64) -> Result<()> {
     cost_data.total_usd += cost_usd;
     cost_data.calls += 1;
 
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("daily cost path has no parent")?)?;
     let json = serde_json::to_string_pretty(&cost_data)?;
     fs::write(&path, json)?;
     Ok(())
@@ -521,7 +521,7 @@ fn save_draft_decisions(
     };
 
     let path = draft_decision_path(project_id, session_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("draft decision path has no parent")?)?;
     let json = serde_json::to_string_pretty(&draft)?;
     fs::write(&path, json)?;
     Ok(())
@@ -530,7 +530,7 @@ fn save_draft_decisions(
 fn append_audit_log(project_id: &str, entry: &AuditEntry) -> Result<()> {
     use std::io::Write;
     let path = audit_log_path(project_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("audit log path has no parent")?)?;
     let line = serde_json::to_string(entry)?;
     let mut file = fs::OpenOptions::new()
         .create(true)

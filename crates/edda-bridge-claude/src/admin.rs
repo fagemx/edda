@@ -187,7 +187,9 @@ pub fn uninstall(repo_root: &Path) -> anyhow::Result<()> {
         .and_then(|m| m.as_object())
         .is_some_and(|m| m.is_empty())
     {
-        settings.as_object_mut().unwrap().remove("mcpServers");
+        if let Some(obj) = settings.as_object_mut() {
+            obj.remove("mcpServers");
+        }
     }
 
     let output = serde_json::to_string_pretty(&settings)?;

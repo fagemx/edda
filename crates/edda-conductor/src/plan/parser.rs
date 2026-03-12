@@ -75,7 +75,10 @@ fn normalize_one_check(check: &serde_yml::Value) -> Result<Option<serde_yml::Val
         );
     }
 
-    let (key, value) = map.iter().next().unwrap();
+    let (key, value) = map
+        .iter()
+        .next()
+        .context("short-format check map is empty")?;
     let key_str = key
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("check key must be a string"))?;
