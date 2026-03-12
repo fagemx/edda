@@ -107,6 +107,8 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/metrics/quality", get(get_quality_metrics))
         .route("/api/dashboard", get(get_dashboard))
         .route("/dashboard", get(serve_dashboard))
+        .route("/api/actors", get(get_actors))
+        .route("/api/actors/{name}", get(get_actor))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -151,6 +153,8 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
         .route("/api/projects", get(get_projects))
+        .route("/api/actors", get(get_actors))
+        .route("/api/actors/{name}", get(get_actor))
         .route("/api/metrics/quality", get(get_quality_metrics))
         .route("/api/dashboard", get(get_dashboard))
         .route("/dashboard", get(serve_dashboard))
@@ -963,6 +967,68 @@ async fn get_projects(
 
     Ok(Json(ProjectsResponse {
         projects: project_statuses,
+    }))
+}
+
+// ── GET /api/actors ──
+
+#[derive(Serialize)]
+struct ActorResponse {
+    name: String,
+    kind: String,
+    roles: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtime: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ActorsListResponse {
+    actors: Vec<ActorResponse>,
+}
+
+async fn get_actors(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ActorsListResponse>, AppError> {
+    let ledger = state.open_ledger()?;
+    let cfg = policy::load_actors_from_dir(&ledger.paths.edda_dir)?;
+    let actors = cfg
+        .actors
+        .into_iter()
+        .map(|(name, def)| ActorResponse {
+            name,
+            kind: def.kind,
+            roles: def.roles,
+            email: def.email,
+            display_name: def.display_name,
+            runtime: def.runtime,
+        })
+        .collect();
+    Ok(Json(ActorsListResponse { actors }))
+}
+
+// ── GET /api/actors/:name ──
+
+async fn get_actor(
+    State(state): State<Arc<AppState>>,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<ActorResponse>, AppError> {
+    let ledger = state.open_ledger()?;
+    let cfg = policy::load_actors_from_dir(&ledger.paths.edda_dir)?;
+    let def = cfg
+        .actors
+        .get(&name)
+        .ok_or_else(|| anyhow::anyhow!("Actor '{name}' not found"))?;
+    Ok(Json(ActorResponse {
+        name,
+        kind: def.kind.clone(),
+        roles: def.roles.clone(),
+        email: def.email.clone(),
+        display_name: def.display_name.clone(),
+        runtime: def.runtime.clone(),
     }))
 }
 

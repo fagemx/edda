@@ -1,3 +1,4 @@
+mod cmd_actor;
 mod cmd_ask;
 mod cmd_blob;
 mod cmd_branch;
@@ -55,6 +56,11 @@ enum Command {
         /// Overwrite existing coordination skills with latest embedded versions
         #[arg(long)]
         force_skills: bool,
+    },
+    /// Manage project actors (add, remove, list, grant, revoke)
+    Actor {
+        #[command(subcommand)]
+        cmd: cmd_actor::ActorCmd,
     },
     /// Record a note event
     Note {
@@ -859,6 +865,7 @@ fn main() -> anyhow::Result<()> {
             no_hooks,
             force_skills,
         } => cmd_init::execute(&repo_root, no_hooks, force_skills),
+        Command::Actor { cmd } => cmd_actor::run(cmd, &repo_root),
         Command::Note { text, role, tags } => cmd_note::execute(&repo_root, &text, &role, &tags),
         Command::Decide {
             decision,

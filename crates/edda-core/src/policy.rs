@@ -71,6 +71,20 @@ pub struct ActorsConfig {
 pub struct ActorDef {
     #[serde(default)]
     pub roles: Vec<String>,
+    /// Actor kind: "user" or "agent". Defaults to "user" for v1 compat.
+    #[serde(default = "default_user_kind")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// For agent actors: runtime platform (e.g. "claude", "opencode").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+}
+
+fn default_user_kind() -> String {
+    "user".into()
 }
 
 impl Default for ActorsConfig {
@@ -236,6 +250,14 @@ pub fn load_actors_from_dir(edda_dir: &Path) -> anyhow::Result<ActorsConfig> {
     Ok(cfg)
 }
 
+/// Save actors.yaml to the `.edda/` directory.
+pub fn save_actors_to_dir(edda_dir: &Path, cfg: &ActorsConfig) -> anyhow::Result<()> {
+    let path = edda_dir.join("actors.yaml");
+    let yaml = serde_yaml::to_string(cfg)?;
+    std::fs::write(&path, yaml.as_bytes())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +293,10 @@ mod tests {
             name.to_string(),
             ActorDef {
                 roles: roles.iter().map(|s| s.to_string()).collect(),
+                kind: "user".into(),
+                email: None,
+                display_name: None,
+                runtime: None,
             },
         );
         ActorsConfig { version: 1, actors }
@@ -415,6 +441,55 @@ permissions:
         assert_eq!(perms.default, "deny");
         assert_eq!(perms.grants.len(), 2);
         assert_eq!(perms.grants[0].actions, vec!["deploy"]);
+    }
+
+    #[test]
+    fn test_actors_v1_backward_compat() {
+        let yaml = r#"
+version: 1
+actors:
+  alice:
+    roles: [lead, reviewer]
+"#;
+        let cfg: ActorsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.version, 1);
+        let alice = cfg.actors.get("alice").unwrap();
+        assert_eq!(alice.roles, vec!["lead", "reviewer"]);
+        assert_eq!(alice.kind, "user"); // default
+        assert!(alice.email.is_none());
+        assert!(alice.display_name.is_none());
+        assert!(alice.runtime.is_none());
+    }
+
+    #[test]
+    fn test_actors_v2_full_fields() {
+        let yaml = r#"
+version: 2
+actors:
+  alice:
+    kind: user
+    roles: [lead, reviewer]
+    email: alice@example.com
+    display_name: Alice Chen
+  claude-agent-1:
+    kind: agent
+    roles: [operator]
+    runtime: claude
+"#;
+        let cfg: ActorsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.version, 2);
+
+        let alice = cfg.actors.get("alice").unwrap();
+        assert_eq!(alice.kind, "user");
+        assert_eq!(alice.email.as_deref(), Some("alice@example.com"));
+        assert_eq!(alice.display_name.as_deref(), Some("Alice Chen"));
+        assert!(alice.runtime.is_none());
+
+        let agent = cfg.actors.get("claude-agent-1").unwrap();
+        assert_eq!(agent.kind, "agent");
+        assert_eq!(agent.roles, vec!["operator"]);
+        assert_eq!(agent.runtime.as_deref(), Some("claude"));
+        assert!(agent.email.is_none());
     }
 
     #[test]
