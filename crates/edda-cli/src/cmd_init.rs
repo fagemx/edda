@@ -107,6 +107,13 @@ actors: {}
         scaffold_skills(repo_root, force_skills);
     }
 
+    // Scan and register skills in the user-level skill registry
+    match edda_store::skill_registry::scan_and_register(repo_root) {
+        Ok(0) => {} // no skills found, no message
+        Ok(n) => println!("Registered {n} skill(s) in skill registry."),
+        Err(e) => eprintln!("Warning: skill scan failed: {e}"),
+    }
+
     Ok(())
 }
 
