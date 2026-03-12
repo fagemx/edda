@@ -90,43 +90,7 @@ impl EddaPaths {
         }
 
         // Phase 2: Git worktree fallback — resolve to main repo, check .edda/ there
-        resolve_git_repo_root(start).filter(|root| root.join(".edda").is_dir())
-    }
-}
-
-/// Resolve git worktree to main repo root.
-///
-/// Walks up from `start` looking for `.git`:
-/// - **Directory** → parent is the repo root (normal repo)
-/// - **File** with `gitdir: .../worktrees/{name}` → resolve to main repo root
-/// - **File** without `/worktrees/` (e.g. submodule) → use that directory
-/// - **Not found** → `None`
-fn resolve_git_repo_root(start: &Path) -> Option<PathBuf> {
-    let abs = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
-    let mut cur = abs.as_path();
-    loop {
-        let dot_git = cur.join(".git");
-        if dot_git.is_dir() {
-            return Some(cur.to_path_buf());
-        }
-        if dot_git.is_file() {
-            if let Ok(content) = std::fs::read_to_string(&dot_git) {
-                let content = content.trim();
-                if let Some(gitdir) = content.strip_prefix("gitdir:") {
-                    let gitdir = gitdir.trim().replace('\\', "/");
-                    if let Some(pos) = gitdir.find("/worktrees/") {
-                        // Worktree: gitdir points to .git/worktrees/{name}
-                        // Strip /worktrees/{name} to get the common .git dir,
-                        // then take its parent as the repo root.
-                        let common_git = &gitdir[..pos];
-                        return Path::new(common_git).parent().map(|p| p.to_path_buf());
-                    }
-                }
-            }
-            // .git file but not a worktree (e.g. submodule) → use this dir
-            return Some(cur.to_path_buf());
-        }
-        cur = cur.parent()?;
+        edda_core::git::resolve_git_root(start).filter(|root| root.join(".edda").is_dir())
     }
 }
 
@@ -232,69 +196,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[test]
-    fn resolve_git_repo_root_normal_repo() {
-        let tmp = unique_tmp("git_normal");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let repo = tmp.join("my-repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-
-        let result = resolve_git_repo_root(&repo);
-        assert_eq!(result.unwrap(), repo.canonicalize().unwrap());
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn resolve_git_repo_root_worktree() {
-        let tmp = unique_tmp("git_wt");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let repo = tmp.join("repo");
-
-        std::fs::create_dir_all(repo.join(".git").join("worktrees").join("feat-x")).unwrap();
-        let wt = tmp.join("wt");
-        std::fs::create_dir_all(&wt).unwrap();
-
-        let gitdir = repo.join(".git").join("worktrees").join("feat-x");
-        let gitdir_str = gitdir
-            .canonicalize()
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        std::fs::write(wt.join(".git"), format!("gitdir: {gitdir_str}")).unwrap();
-
-        let resolved = resolve_git_repo_root(&wt).unwrap();
-        let repo_canon = repo.canonicalize().unwrap();
-        // Normalize for comparison
-        let norm = |p: &Path| p.to_string_lossy().replace('\\', "/").to_lowercase();
-        assert_eq!(
-            norm(&resolved),
-            norm(&repo_canon),
-            "worktree should resolve to main repo root"
-        );
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn resolve_git_repo_root_submodule() {
-        let tmp = unique_tmp("git_sub");
-        let _ = std::fs::remove_dir_all(&tmp);
-        let sub = tmp.join("parent").join("submodule");
-        std::fs::create_dir_all(&sub).unwrap();
-        // Submodule .git file has /modules/ not /worktrees/
-        std::fs::write(sub.join(".git"), "gitdir: ../../.git/modules/submodule").unwrap();
-
-        let resolved = resolve_git_repo_root(&sub).unwrap();
-        assert_eq!(resolved, sub.canonicalize().unwrap());
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn resolve_git_repo_root_non_git() {
-        let tmp = unique_tmp("git_none");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        assert!(resolve_git_repo_root(&tmp).is_none());
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
 }
