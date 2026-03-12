@@ -34,10 +34,7 @@ pub fn build_search_index_if_needed(project_root: &std::path::Path) -> Result<()
     if !search_dir.exists() {
         // Index doesn't exist - would need to trigger index build
         // For now, just log a warning
-        eprintln!(
-            "Warning: FTS index not found at {:?}. BM25 relations will be skipped.",
-            search_dir
-        );
+        tracing::warn!(path = ?search_dir, "FTS index not found, BM25 relations will be skipped");
     }
 
     Ok(())

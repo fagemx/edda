@@ -278,7 +278,7 @@ pub(super) fn dispatch_session_end(
         let sid = session_id.to_string();
         std::thread::spawn(move || {
             if let Err(e) = crate::bg_extract::run_extraction(&pid, &sid) {
-                eprintln!("[edda-bg] decision extraction failed: {e}");
+                tracing::warn!(error = %e, "decision extraction failed");
             }
         });
     }
@@ -290,7 +290,7 @@ pub(super) fn dispatch_session_end(
         let cwd_str = cwd.to_string();
         std::thread::spawn(move || {
             if let Err(e) = crate::bg_digest::run_digest(&pid, &sid, &cwd_str) {
-                eprintln!("[edda-bg] session digest failed: {e}");
+                tracing::warn!(error = %e, "session digest failed");
             }
         });
     }
@@ -303,7 +303,7 @@ pub(super) fn dispatch_session_end(
         let cwd_owned = cwd.to_string();
         std::thread::spawn(move || {
             if let Err(e) = crate::bg_scan::run_scan(&pid, &cwd_owned) {
-                eprintln!("[edda-bg] capability scan failed: {e}");
+                tracing::warn!(error = %e, "capability scan failed");
             }
         });
     }
@@ -445,11 +445,11 @@ pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
         let _ = lessons_store.sync_to_claude_md(&claude_md_path, 10);
     }
 
-    eprintln!(
-        "[edda L3] post-mortem: {} triggers, {} lessons, {} rule proposals",
-        result.triggers.len(),
-        result.lessons.len(),
-        result.rule_proposals.len(),
+    tracing::info!(
+        triggers = result.triggers.len(),
+        lessons = result.lessons.len(),
+        rule_proposals = result.rule_proposals.len(),
+        "post-mortem complete",
     );
 }
 

@@ -195,10 +195,10 @@ pub fn run_scan(project_id: &str, cwd: &str) -> Result<ScanResult> {
         },
     )?;
 
-    eprintln!(
-        "[edda-bg] capability scan complete: {} gaps found (cost: ${:.4})",
-        result.gaps.len(),
-        cost_usd
+    tracing::info!(
+        gaps = result.gaps.len(),
+        cost_usd = format_args!("{:.4}", cost_usd),
+        "capability scan complete",
     );
 
     Ok(result)

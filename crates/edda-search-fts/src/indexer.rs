@@ -344,7 +344,7 @@ pub fn index_project(
             ) {
                 Ok(n) => total += n,
                 Err(e) => {
-                    eprintln!("warn: indexing session {session_id}: {e}");
+                    tracing::warn!(%session_id, error = %e, "indexing session failed");
                 }
             }
         }

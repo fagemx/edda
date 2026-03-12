@@ -182,7 +182,7 @@ pub fn dispatch(config: &NotifyConfig, event: &NotifyEvent) {
         }
         let name = channel.display_name();
         if let Err(e) = send(&agent, channel, event) {
-            eprintln!("[edda-notify] failed to send to {name}: {e}");
+            tracing::warn!(channel = %name, error = %e, "notification send failed");
         }
     }
 }

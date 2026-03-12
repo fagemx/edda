@@ -30,6 +30,7 @@ dirs.workspace = true
 regex.workspace = true
 blake3.workspace = true
 ureq = "3"
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -150,7 +150,7 @@ pub(super) fn try_post_karvi_signal(
         .header("Content-Type", "application/json")
         .send(payload.to_string())
     {
-        eprintln!("[edda-bridge-claude] karvi write-back failed: {}", e);
+        tracing::warn!(error = %e, "karvi write-back failed");
     }
 }
 

@@ -107,7 +107,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
 
     let addr = format!("{}:{}", config.bind, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    eprintln!("edda HTTP server listening on http://{addr}");
+    tracing::info!(%addr, "HTTP server listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
