@@ -85,12 +85,17 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/status", get(get_status))
         .route("/api/context", get(get_context))
         .route("/api/decisions", get(get_decisions))
-        .route("/api/decisions/{event_id}/outcomes", get(get_decision_outcomes))
+        .route(
+            "/api/decisions/{event_id}/outcomes",
+            get(get_decision_outcomes),
+        )
         .route("/api/log", get(get_log))
         .route("/api/drafts", get(get_drafts))
         .route("/api/note", post(post_note))
         .route("/api/decide", post(post_decide))
         .route("/api/events/karvi", post(post_karvi_event))
+        .route("/api/scope/check", post(post_scope_check))
+        .route("/api/scope/whitelist", get(get_scope_whitelist))
         .route("/api/recap", get(get_recap))
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
@@ -123,12 +128,17 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/context", get(get_context))
         .route("/api/decisions", get(get_decisions))
-        .route("/api/decisions/{event_id}/outcomes", get(get_decision_outcomes))
+        .route(
+            "/api/decisions/{event_id}/outcomes",
+            get(get_decision_outcomes),
+        )
         .route("/api/log", get(get_log))
         .route("/api/drafts", get(get_drafts))
         .route("/api/note", post(post_note))
         .route("/api/decide", post(post_decide))
         .route("/api/events/karvi", post(post_karvi_event))
+        .route("/api/scope/check", post(post_scope_check))
+        .route("/api/scope/whitelist", get(get_scope_whitelist))
         .route("/api/recap", get(get_recap))
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
@@ -939,6 +949,145 @@ async fn get_quality_metrics(
     Ok(Json(report))
 }
 
+// ── POST /api/scope/check ──
+
+#[derive(Deserialize)]
+struct ScopeCheckBody {
+    project_id: String,
+    session_id: String,
+    files: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ScopeCheckResult {
+    path: String,
+    allowed: bool,
+}
+
+#[derive(Serialize)]
+struct ScopeCheckResponse {
+    session_id: String,
+    label: String,
+    scope: Vec<String>,
+    no_claim: bool,
+    all_allowed: bool,
+    results: Vec<ScopeCheckResult>,
+}
+
+async fn post_scope_check(
+    Json(body): Json<ScopeCheckBody>,
+) -> Result<Json<ScopeCheckResponse>, AppError> {
+    let board = edda_bridge_claude::peers::compute_board_state(&body.project_id);
+    let claim = board
+        .claims
+        .iter()
+        .find(|c| c.session_id == body.session_id);
+
+    match claim {
+        None => {
+            // Permissive default: no claim means all files allowed
+            let results = body
+                .files
+                .iter()
+                .map(|f| ScopeCheckResult {
+                    path: f.clone(),
+                    allowed: true,
+                })
+                .collect();
+            Ok(Json(ScopeCheckResponse {
+                session_id: body.session_id,
+                label: String::new(),
+                scope: vec![],
+                no_claim: true,
+                all_allowed: true,
+                results,
+            }))
+        }
+        Some(claim) => {
+            // Build glob set from claim patterns
+            let mut builder = globset::GlobSetBuilder::new();
+            for pattern in &claim.paths {
+                if let Ok(glob) = globset::GlobBuilder::new(pattern)
+                    .literal_separator(false)
+                    .build()
+                {
+                    builder.add(glob);
+                }
+            }
+            let glob_set = builder
+                .build()
+                .map_err(|e| anyhow::anyhow!("invalid glob patterns: {}", e))?;
+
+            let results: Vec<ScopeCheckResult> = body
+                .files
+                .iter()
+                .map(|f| ScopeCheckResult {
+                    path: f.clone(),
+                    allowed: glob_set.is_match(f),
+                })
+                .collect();
+
+            let all_allowed = results.iter().all(|r| r.allowed);
+
+            Ok(Json(ScopeCheckResponse {
+                session_id: body.session_id,
+                label: claim.label.clone(),
+                scope: claim.paths.clone(),
+                no_claim: false,
+                all_allowed,
+                results,
+            }))
+        }
+    }
+}
+
+// ── GET /api/scope/whitelist ──
+
+#[derive(Deserialize)]
+struct WhitelistQuery {
+    project_id: String,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WhitelistClaim {
+    session_id: String,
+    label: String,
+    patterns: Vec<String>,
+    ts: String,
+}
+
+#[derive(Serialize)]
+struct WhitelistResponse {
+    claims: Vec<WhitelistClaim>,
+}
+
+async fn get_scope_whitelist(
+    Query(query): Query<WhitelistQuery>,
+) -> Result<Json<WhitelistResponse>, AppError> {
+    let board = edda_bridge_claude::peers::compute_board_state(&query.project_id);
+
+    let claims: Vec<WhitelistClaim> = board
+        .claims
+        .iter()
+        .filter(|c| {
+            query
+                .session_id
+                .as_ref()
+                .is_none_or(|sid| &c.session_id == sid)
+        })
+        .map(|c| WhitelistClaim {
+            session_id: c.session_id.clone(),
+            label: c.label.clone(),
+            patterns: c.paths.clone(),
+            ts: c.ts.clone(),
+        })
+        .collect();
+
+    Ok(Json(WhitelistResponse { claims }))
+}
+
 // ── Tests ──
 
 #[cfg(test)]
@@ -947,6 +1096,9 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
+
+    /// Serialize tests that set EDDA_STORE_ROOT env var.
+    static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn setup_workspace(dir: &Path) {
         let paths = edda_ledger::EddaPaths::discover(dir);
@@ -1484,7 +1636,8 @@ mod tests {
                     .uri("/api/decide")
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({"decision": "db.engine=postgres", "reason": "test"}).to_string(),
+                        serde_json::json!({"decision": "db.engine=postgres", "reason": "test"})
+                            .to_string(),
                     ))
                     .unwrap(),
             )
@@ -1621,8 +1774,14 @@ mod tests {
             "event_type": "step_completed",
         });
         let e1 = new_execution_event(
-            &branch, None, "evt_q1", "2026-03-11T00:00:00Z", payload1, None,
-        ).unwrap();
+            &branch,
+            None,
+            "evt_q1",
+            "2026-03-11T00:00:00Z",
+            payload1,
+            None,
+        )
+        .unwrap();
         ledger.append_event(&e1).unwrap();
 
         let payload2 = serde_json::json!({
@@ -1632,8 +1791,14 @@ mod tests {
             "event_type": "step_failed",
         });
         let e2 = new_execution_event(
-            &branch, Some(&e1.hash), "evt_q2", "2026-03-11T01:00:00Z", payload2, None,
-        ).unwrap();
+            &branch,
+            Some(&e1.hash),
+            "evt_q2",
+            "2026-03-11T01:00:00Z",
+            payload2,
+            None,
+        )
+        .unwrap();
         ledger.append_event(&e2).unwrap();
         drop(ledger);
 
@@ -1696,5 +1861,301 @@ mod tests {
             .unwrap();
         let report: QualityReport = serde_json::from_slice(&body).unwrap();
         assert_eq!(report.total_steps, 0);
+    }
+
+    // ── Scope check tests ──
+
+    /// Helper: set up EDDA_STORE_ROOT and write a claim, returning the project_id.
+    fn setup_claim(store_dir: &Path, session_id: &str, label: &str, paths: &[String]) -> String {
+        let project_id = "test-project-abc";
+        std::env::set_var("EDDA_STORE_ROOT", store_dir);
+        edda_store::ensure_dirs(project_id).unwrap();
+        edda_bridge_claude::peers::write_claim(project_id, session_id, label, paths);
+        project_id.to_string()
+    }
+
+    #[tokio::test]
+    async fn scope_check_with_matching_claim() {
+        let _lock = STORE_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        setup_workspace(tmp.path());
+
+        let pid = setup_claim(
+            &store_dir,
+            "sess-1",
+            "edda-serve",
+            &["crates/edda-serve/*".to_string()],
+        );
+
+        let app = router(tmp.path());
+        let body = serde_json::json!({
+            "project_id": pid,
+            "session_id": "sess-1",
+            "files": ["crates/edda-serve/src/lib.rs"]
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scope/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["no_claim"], false);
+        assert_eq!(json["all_allowed"], true);
+        assert_eq!(json["results"][0]["allowed"], true);
+        assert_eq!(json["label"], "edda-serve");
+    }
+
+    #[tokio::test]
+    async fn scope_check_with_out_of_scope_files() {
+        let _lock = STORE_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        setup_workspace(tmp.path());
+
+        let pid = setup_claim(
+            &store_dir,
+            "sess-2",
+            "edda-serve",
+            &["crates/edda-serve/*".to_string()],
+        );
+
+        let app = router(tmp.path());
+        let body = serde_json::json!({
+            "project_id": pid,
+            "session_id": "sess-2",
+            "files": [
+                "crates/edda-serve/src/lib.rs",
+                "crates/edda-cli/src/main.rs"
+            ]
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scope/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["no_claim"], false);
+        assert_eq!(json["all_allowed"], false);
+        assert_eq!(json["results"][0]["path"], "crates/edda-serve/src/lib.rs");
+        assert_eq!(json["results"][0]["allowed"], true);
+        assert_eq!(json["results"][1]["path"], "crates/edda-cli/src/main.rs");
+        assert_eq!(json["results"][1]["allowed"], false);
+    }
+
+    #[tokio::test]
+    async fn scope_check_no_claim_permissive() {
+        let _lock = STORE_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        std::env::set_var("EDDA_STORE_ROOT", &store_dir);
+        setup_workspace(tmp.path());
+
+        let app = router(tmp.path());
+        let body = serde_json::json!({
+            "project_id": "no-such-project",
+            "session_id": "sess-no-claim",
+            "files": ["anything.rs"]
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scope/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["no_claim"], true);
+        assert_eq!(json["all_allowed"], true);
+        assert_eq!(json["results"][0]["allowed"], true);
+    }
+
+    #[tokio::test]
+    async fn scope_check_wildcard_claim() {
+        let _lock = STORE_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        setup_workspace(tmp.path());
+
+        let pid = setup_claim(&store_dir, "sess-wild", "everything", &["**/*".to_string()]);
+
+        let app = router(tmp.path());
+        let body = serde_json::json!({
+            "project_id": pid,
+            "session_id": "sess-wild",
+            "files": [
+                "crates/edda-serve/src/lib.rs",
+                "crates/edda-cli/src/main.rs",
+                "README.md"
+            ]
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scope/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["no_claim"], false);
+        assert_eq!(json["all_allowed"], true);
+    }
+
+    #[tokio::test]
+    async fn scope_check_empty_files_list() {
+        let _lock = STORE_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        setup_workspace(tmp.path());
+
+        let pid = setup_claim(&store_dir, "sess-empty", "test", &["src/*".to_string()]);
+
+        let app = router(tmp.path());
+        let body = serde_json::json!({
+            "project_id": pid,
+            "session_id": "sess-empty",
+            "files": []
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scope/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["all_allowed"], true);
+        assert_eq!(json["results"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn scope_whitelist_returns_all_claims() {
+        let _lock = STORE_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        setup_workspace(tmp.path());
+
+        let pid = setup_claim(&store_dir, "sess-a", "crate-a", &["crates/a/*".to_string()]);
+        // Add a second claim for a different session
+        edda_bridge_claude::peers::write_claim(
+            &pid,
+            "sess-b",
+            "crate-b",
+            &["crates/b/*".to_string()],
+        );
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/scope/whitelist?project_id={}", pid))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let claims = json["claims"].as_array().unwrap();
+        assert_eq!(claims.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn scope_whitelist_filters_by_session() {
+        let _lock = STORE_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        setup_workspace(tmp.path());
+
+        let pid = setup_claim(&store_dir, "sess-x", "crate-x", &["crates/x/*".to_string()]);
+        edda_bridge_claude::peers::write_claim(
+            &pid,
+            "sess-y",
+            "crate-y",
+            &["crates/y/*".to_string()],
+        );
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/scope/whitelist?project_id={}&session_id=sess-x",
+                        pid
+                    ))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let claims = json["claims"].as_array().unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0]["session_id"], "sess-x");
+        assert_eq!(claims[0]["label"], "crate-x");
+        assert_eq!(claims[0]["patterns"][0], "crates/x/*");
     }
 }
