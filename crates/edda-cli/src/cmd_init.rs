@@ -50,6 +50,13 @@ rules:
     when:
       default: true
     stages: []
+# permissions:
+#   default: deny
+#   grants:
+#     - actions: [deploy, merge]
+#       roles: [lead]
+#     - actions: [read]
+#       roles: [\"*\"]
 ";
             std::fs::write(&policy_path, default_policy.as_bytes())?;
         }

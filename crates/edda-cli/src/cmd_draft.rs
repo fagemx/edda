@@ -4,6 +4,7 @@ use edda_core::event::{
     new_approval_event, new_approval_request_event, new_commit_event, ApprovalEventParams,
     ApprovalRequestParams, CommitEventParams,
 };
+use edda_core::policy::{ActorsConfig, PolicyRule, PolicyStageDef, PolicyV2Config, PolicyWhen};
 use edda_derive::{build_auto_evidence, last_commit_contribution, rebuild_all};
 use std::path::Path;
 
@@ -157,80 +158,9 @@ use edda_ledger::lock::WorkspaceLock;
 use edda_ledger::Ledger;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
-// ── Policy v2 data model ──
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PolicyV2Config {
-    pub version: u32,
-    #[serde(default)]
-    pub roles: Vec<String>,
-    #[serde(default)]
-    pub rules: Vec<PolicyRule>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PolicyRule {
-    pub id: String,
-    #[serde(default)]
-    pub when: PolicyWhen,
-    #[serde(default)]
-    pub stages: Vec<PolicyStageDef>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct PolicyWhen {
-    #[serde(default)]
-    pub default: Option<bool>,
-    #[serde(default)]
-    pub labels_any: Option<Vec<String>>,
-    #[serde(default)]
-    pub failed_cmd: Option<bool>,
-    #[serde(default)]
-    pub evidence_count_gte: Option<usize>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct PolicyStageDef {
-    pub stage_id: String,
-    pub role: String,
-    #[serde(default = "default_one")]
-    pub min_approvals: usize,
-    #[serde(default = "default_two")]
-    pub max_assignees: usize,
-}
-
-fn default_one() -> usize {
-    1
-}
-fn default_two() -> usize {
-    2
-}
-
-// ── Actors config ──
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ActorsConfig {
-    pub version: u32,
-    #[serde(default)]
-    pub actors: BTreeMap<String, ActorDef>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct ActorDef {
-    #[serde(default)]
-    pub roles: Vec<String>,
-}
-
-impl Default for ActorsConfig {
-    fn default() -> Self {
-        Self {
-            version: 1,
-            actors: BTreeMap::new(),
-        }
-    }
-}
+// Policy v2 types and Actors types are in edda_core::policy (re-imported above).
 
 // ── Policy v1 structs (for v1→v2 conversion) ──
 
@@ -316,6 +246,7 @@ fn convert_v1_to_v2(v1: PolicyV1) -> PolicyV2Config {
         version: 2,
         roles: vec!["approver".to_string()],
         rules: vec![require_rule, default_rule],
+        permissions: None,
     }
 }
 
@@ -340,6 +271,7 @@ fn load_policy_v2(ledger: &Ledger) -> anyhow::Result<PolicyV2Config> {
                 },
                 stages: vec![],
             }],
+            permissions: None,
         });
     }
     let content = std::fs::read(&path)?;

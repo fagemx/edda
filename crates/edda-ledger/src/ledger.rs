@@ -543,8 +543,14 @@ mod tests {
             "event_type": "step_completed",
         });
         let exec = new_execution_event(
-            "main", Some(&note.hash), "evt_exec_1", "2026-03-11T00:00:00Z", payload, None,
-        ).unwrap();
+            "main",
+            Some(&note.hash),
+            "evt_exec_1",
+            "2026-03-11T00:00:00Z",
+            payload,
+            None,
+        )
+        .unwrap();
         ledger.append_event(&exec).unwrap();
 
         assert_eq!(ledger.iter_events().unwrap().len(), 2);
