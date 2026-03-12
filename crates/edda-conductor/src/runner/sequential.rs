@@ -1,4 +1,3 @@
-use anyhow::Context;
 use crate::agent::budget::BudgetTracker;
 use crate::agent::launcher::{phase_session_id_attempt, AgentLauncher, PhaseResult};
 use crate::check::engine::{CheckEngine, CheckRunResult};
@@ -7,6 +6,7 @@ use crate::plan::topo::topo_sort;
 use crate::runner::edda;
 use crate::runner::event_log::{self, Event, EventLogger};
 use crate::runner::notify::Notifier;
+use crate::state::brief::write_brief;
 use crate::state::derive::{
     detect_stale_phases, find_next_phase, is_plan_blocked, is_plan_complete, update_plan_status,
 };
@@ -14,27 +14,37 @@ use crate::state::machine::{
     transition, CheckResult, CheckStatus, ErrorInfo, ErrorType, PhaseStatus, PhaseUpdate,
     PlanState, PlanStatus,
 };
-use crate::state::brief::write_brief;
 use crate::state::persist::save_state;
+use anyhow::Context;
 use anyhow::Result;
 use std::path::Path;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+/// Runtime context for [`run_plan`], grouping execution environment parameters.
+pub struct RunContext<'a> {
+    pub launcher: &'a dyn AgentLauncher,
+    pub check_engine: &'a CheckEngine,
+    pub notifier: &'a dyn Notifier,
+    pub budget: &'a mut BudgetTracker,
+    pub cancel: CancellationToken,
+    pub cwd: &'a Path,
+    pub interactive: bool,
+    pub json_events: bool,
+}
+
 /// Run a plan sequentially. The main conductor loop.
-#[allow(clippy::too_many_arguments)]
-pub async fn run_plan(
-    plan: &Plan,
-    state: &mut PlanState,
-    launcher: &dyn AgentLauncher,
-    check_engine: &CheckEngine,
-    notifier: &dyn Notifier,
-    budget: &mut BudgetTracker,
-    cancel: CancellationToken,
-    cwd: &Path,
-    interactive: bool,
-    json_events: bool,
-) -> Result<()> {
+pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -> Result<()> {
+    let RunContext {
+        launcher,
+        check_engine,
+        notifier,
+        budget,
+        cancel,
+        cwd,
+        interactive,
+        json_events,
+    } = ctx;
     let order = topo_sort(plan)?;
     let total_phases = order.len();
     let mut event_log = EventLogger::new(cwd, &plan.name).with_stdout_json(json_events);
@@ -733,14 +743,16 @@ mod tests {
         run_plan(
             &plan,
             &mut state,
-            launcher,
-            &engine,
-            &notifier,
-            &mut budget,
-            cancel,
-            dir.path(),
-            false, // non-interactive in tests
-            false, // no json events in tests
+            RunContext {
+                launcher,
+                check_engine: &engine,
+                notifier: &notifier,
+                budget: &mut budget,
+                cancel,
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+            },
         )
         .await
         .unwrap();
@@ -973,14 +985,16 @@ phases:
         run_plan(
             &plan,
             &mut state,
-            &launcher,
-            &engine,
-            &notifier,
-            &mut budget,
-            cancel,
-            dir.path(),
-            false,
-            false,
+            RunContext {
+                launcher: &launcher,
+                check_engine: &engine,
+                notifier: &notifier,
+                budget: &mut budget,
+                cancel,
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+            },
         )
         .await
         .unwrap();
@@ -1120,14 +1134,16 @@ phases:
         run_plan(
             &plan,
             &mut state,
-            launcher,
-            &engine,
-            &notifier,
-            &mut budget,
-            cancel,
-            dir.path(),
-            false,
-            false,
+            RunContext {
+                launcher,
+                check_engine: &engine,
+                notifier: &notifier,
+                budget: &mut budget,
+                cancel,
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+            },
         )
         .await
         .unwrap();

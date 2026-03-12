@@ -43,10 +43,10 @@ struct GhAuthor {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct GhReview {
     state: String,
-    author: GhAuthor,
+    #[serde(rename = "author")]
+    _author: GhAuthor,
 }
 
 fn scan_prs(repo_root: &Path, limit: usize, state: &str) -> anyhow::Result<()> {
@@ -227,7 +227,7 @@ mod tests {
 
         let reviews = vec![GhReview {
             state: "APPROVED".to_string(),
-            author: GhAuthor {
+            _author: GhAuthor {
                 login: "reviewer1".to_string(),
             },
         }];
@@ -239,13 +239,13 @@ mod tests {
         let reviews = vec![
             GhReview {
                 state: "CHANGES_REQUESTED".to_string(),
-                author: GhAuthor {
+                _author: GhAuthor {
                     login: "reviewer1".to_string(),
                 },
             },
             GhReview {
                 state: "APPROVED".to_string(),
-                author: GhAuthor {
+                _author: GhAuthor {
                     login: "reviewer2".to_string(),
                 },
             },
@@ -261,19 +261,19 @@ mod tests {
         let reviews = vec![
             GhReview {
                 state: "CHANGES_REQUESTED".to_string(),
-                author: GhAuthor {
+                _author: GhAuthor {
                     login: "reviewer1".to_string(),
                 },
             },
             GhReview {
                 state: "APPROVED".to_string(),
-                author: GhAuthor {
+                _author: GhAuthor {
                     login: "reviewer2".to_string(),
                 },
             },
             GhReview {
                 state: "CHANGES_REQUESTED".to_string(),
-                author: GhAuthor {
+                _author: GhAuthor {
                     login: "reviewer3".to_string(),
                 },
             },

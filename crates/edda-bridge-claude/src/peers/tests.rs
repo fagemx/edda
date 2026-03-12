@@ -1888,12 +1888,14 @@ fn board_state_includes_subagent_completed_entries() {
     write_subagent_completed(
         pid,
         "parent-session",
-        "agent-7",
-        "Plan",
-        "planning done",
-        &["a.rs".into(), "b.rs".into()],
-        &["Decision: use compact mode".into()],
-        &["abc1234 feat: plan".into()],
+        &SubagentReport {
+            agent_id: "agent-7",
+            agent_type: "Plan",
+            summary: "planning done",
+            files_touched: &["a.rs".into(), "b.rs".into()],
+            decisions: &["Decision: use compact mode".into()],
+            commits: &["abc1234 feat: plan".into()],
+        },
     );
 
     let board = compute_board_state(pid);
@@ -1919,12 +1921,14 @@ fn compaction_preserves_subagent_completed() {
     write_subagent_completed(
         pid,
         "parent-session",
-        "agent-8",
-        "Bash",
-        "completed",
-        &["x.rs".into()],
-        &["Decision: run targeted tests".into()],
-        &["def5678 fix: adjust".into()],
+        &SubagentReport {
+            agent_id: "agent-8",
+            agent_type: "Bash",
+            summary: "completed",
+            files_touched: &["x.rs".into()],
+            decisions: &["Decision: run targeted tests".into()],
+            commits: &["def5678 fix: adjust".into()],
+        },
     );
 
     let lines = compute_board_state_for_compaction(pid);

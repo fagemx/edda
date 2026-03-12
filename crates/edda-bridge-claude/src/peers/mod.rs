@@ -234,7 +234,7 @@ pub use board::{compute_board_state, compute_board_state_for_compaction};
 pub use discovery::{discover_active_peers, discover_all_sessions, infer_session_id};
 pub(crate) use heartbeat::{
     cleanup_subagent_heartbeats, ensure_heartbeat_exists, read_heartbeat, update_heartbeat_branch,
-    write_heartbeat, write_subagent_completed, write_subagent_heartbeat,
+    write_heartbeat, write_subagent_completed, write_subagent_heartbeat, SubagentReport,
 };
 pub use heartbeat::{
     find_binding_conflict, remove_heartbeat, touch_heartbeat, write_binding, write_claim,

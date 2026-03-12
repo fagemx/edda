@@ -39,9 +39,8 @@ struct AppState {
     chronicle: Option<ChronicleContext>,
 }
 
-#[allow(dead_code)]
 struct ChronicleContext {
-    store_root: PathBuf,
+    _store_root: PathBuf,
 }
 
 impl AppState {
@@ -118,7 +117,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
 
     let store_root = edda_store::store_root();
     let chronicle = if store_root.exists() {
-        Some(ChronicleContext { store_root })
+        Some(ChronicleContext { _store_root: store_root })
     } else {
         None
     };
@@ -171,7 +170,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
 pub fn router(repo_root: &Path) -> Router {
     let store_root = edda_store::store_root();
     let chronicle = if store_root.exists() {
-        Some(ChronicleContext { store_root })
+        Some(ChronicleContext { _store_root: store_root })
     } else {
         None
     };
@@ -698,11 +697,11 @@ async fn post_karvi_event(
 // ── GET /api/recap ──
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct RecapQuery {
     project: Option<String>,
     query: Option<String>,
-    since: Option<String>,
+    #[serde(rename = "since")]
+    _since: Option<String>,
     week: Option<bool>,
     scope: Option<String>,
 }
@@ -3506,5 +3505,63 @@ actors:
             .as_str()
             .unwrap()
             .contains("key=value format"));
+    }
+
+    #[tokio::test]
+    async fn tool_tier_known_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Write a tool_tiers.yaml with a known mapping
+        let edda_dir = tmp.path().join(".edda");
+        let mut config = edda_core::tool_tier::default_tool_tier_config();
+        config.tools.insert("bash".to_string(), edda_core::tool_tier::ToolTier::T0);
+        edda_core::tool_tier::save_tool_tiers_to_dir(&edda_dir, &config).unwrap();
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tool-tier/bash")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["tool"], "bash");
+        assert_eq!(json["tier"], "T0");
+        assert_eq!(json["approval"], "none");
+    }
+
+    #[tokio::test]
+    async fn tool_tier_unknown_tool_returns_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tool-tier/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["tool"], "nonexistent");
+        assert_eq!(json["tier"], "T1"); // default tier
+        assert_eq!(json["approval"], "none");
     }
 }
