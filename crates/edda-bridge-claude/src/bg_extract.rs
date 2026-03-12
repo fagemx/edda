@@ -444,10 +444,7 @@ fn save_extraction_state(project_id: &str, result: &ExtractionResult) -> Result<
     };
 
     let path = extraction_state_path(project_id, &result.session_id);
-    fs::create_dir_all(
-        path.parent()
-            .context("extraction state path has no parent")?,
-    )?;
+    fs::create_dir_all(path.parent().context("extraction state path has no parent")?)?;
     let json = serde_json::to_string_pretty(&state)?;
     fs::write(&path, json)?;
     Ok(())

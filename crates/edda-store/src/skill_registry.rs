@@ -275,7 +275,10 @@ pub fn get_skill(sid: &str) -> Option<SkillEntry> {
 /// This avoids re-scanning the filesystem when the caller already has the
 /// scanned results (e.g. `execute_scan` in the CLI).
 /// Returns the number of skills registered or updated.
-pub fn register_scanned_skills(repo_root: &Path, skills: &[ScannedSkill]) -> anyhow::Result<usize> {
+pub fn register_scanned_skills(
+    repo_root: &Path,
+    skills: &[ScannedSkill],
+) -> anyhow::Result<usize> {
     let pid = crate::project_id(repo_root);
     let pname = repo_root
         .file_name()
