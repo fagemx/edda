@@ -3,7 +3,7 @@ use std::fs;
 // Imports from dispatch/mod.rs
 use super::{
     apply_context_budget, context_budget, has_active_peers, hook_entrypoint_from_stdin,
-    increment_counter, is_same_as_last_inject, mark_nudge_sent, read_counter, read_peer_count,
+    increment_counter, is_same_as_last_inject, mark_nudge_sent, read_counter,
     render_workspace_section, render_write_back_protocol, set_compact_pending,
     take_compact_pending, wrap_context_boundary, write_inject_hash, write_peer_count, HookResult,
     EDDA_BOUNDARY_END, EDDA_BOUNDARY_START,

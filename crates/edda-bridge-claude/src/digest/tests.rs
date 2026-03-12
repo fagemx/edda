@@ -8,7 +8,6 @@ use super::prev::*;
 use super::render::*;
 use super::*;
 
-use super::*;
 use std::io::Write;
 
 fn write_session_ledger(dir: &Path, lines: &[serde_json::Value]) -> std::path::PathBuf {

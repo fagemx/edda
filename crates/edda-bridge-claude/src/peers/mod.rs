@@ -246,8 +246,5 @@ pub(crate) use render_coord::render_peer_updates_with;
 pub use render_coord::{render_coordination_protocol, render_coordination_protocol_with};
 
 #[cfg(test)]
-pub(crate) use render_coord::render_peer_updates;
-
-#[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
