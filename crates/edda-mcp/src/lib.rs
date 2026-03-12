@@ -68,6 +68,12 @@ struct LogParams {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ToolTierParams {
+    /// Tool name to query (e.g. "bash", "Write", "rm")
+    tool_name: String,
+}
+
 // --- Minimal draft structs for inbox display ---
 
 #[derive(Debug, Deserialize)]
@@ -379,6 +385,20 @@ impl EddaServer {
         Ok(CallToolResult::success(vec![Content::text(
             items.join("\n"),
         )]))
+    }
+
+    /// Query a tool's risk tier (T0-T4) and approval requirement
+    #[tool(description = "Query a tool's risk tier (T0-T4) and approval requirement")]
+    async fn edda_tool_tier(
+        &self,
+        Parameters(params): Parameters<ToolTierParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let edda_dir = self.repo_root.join(".edda");
+        let config =
+            edda_core::tool_tier::load_tool_tiers_from_dir(&edda_dir).map_err(to_mcp_err)?;
+        let result = edda_core::tool_tier::resolve_tool_tier(&config, &params.tool_name);
+        let json = serde_json::to_string_pretty(&result).map_err(|e| to_mcp_err(e.into()))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
 

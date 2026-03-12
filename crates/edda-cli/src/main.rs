@@ -33,6 +33,7 @@ mod cmd_serve;
 mod cmd_skill;
 mod cmd_status;
 mod cmd_switch;
+mod cmd_tool_tier;
 mod cmd_user;
 mod cmd_watch;
 mod pipeline_templates;
@@ -440,6 +441,12 @@ enum Command {
     Skill {
         #[command(subcommand)]
         cmd: cmd_skill::SkillCmd,
+    },
+    /// Tool tier governance -- query and manage tool risk classifications
+    #[command(name = "tool-tier")]
+    ToolTier {
+        #[command(subcommand)]
+        cmd: cmd_tool_tier::ToolTierCmd,
     },
 }
 
@@ -863,8 +870,7 @@ enum McpCommand {
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -1079,5 +1085,6 @@ fn main() -> anyhow::Result<()> {
         Command::Scan { cmd } => cmd_scan::execute(cmd, &repo_root),
         Command::ProposeIssue { cmd } => cmd_propose::execute(cmd, &repo_root),
         Command::Skill { cmd } => cmd_skill::execute(cmd, &repo_root),
+        Command::ToolTier { cmd } => cmd_tool_tier::run(cmd, &repo_root),
     }
 }
