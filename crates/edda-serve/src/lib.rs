@@ -9,8 +9,10 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
-use edda_aggregate::aggregate::{aggregate_overview, DateRange};
+use edda_aggregate::aggregate::{aggregate_decisions, aggregate_overview, DateRange};
+use edda_aggregate::graph::build_dependency_graph;
 use edda_aggregate::quality::{model_quality_from_events, QualityReport};
+use edda_aggregate::risk::{compute_decision_risks, DecisionInput, DecisionRisk};
 use edda_core::event::{finalize_event, new_decision_event, new_execution_event, new_note_event};
 use edda_core::policy;
 use edda_core::types::{rel, DecisionPayload, Provenance};
@@ -102,6 +104,9 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
         .route("/api/projects", get(get_projects))
+        .route("/api/metrics/quality", get(get_quality_metrics))
+        .route("/api/dashboard", get(get_dashboard))
+        .route("/dashboard", get(serve_dashboard))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -147,6 +152,8 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/overview", get(get_overview))
         .route("/api/projects", get(get_projects))
         .route("/api/metrics/quality", get(get_quality_metrics))
+        .route("/api/dashboard", get(get_dashboard))
+        .route("/dashboard", get(serve_dashboard))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -872,23 +879,51 @@ async fn get_overview(
     }
 
     let projects = list_projects();
-    let range = DateRange::default();
-    let _aggregate = aggregate_overview(&projects, &range);
-
-    // TODO: Implement actual attention routing logic
-    // For now, return empty lists
-    let now = time::OffsetDateTime::now_utc();
-    let updated_at = now
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "unknown".to_string());
-
-    let response = OverviewResponse {
-        red: vec![],
-        yellow: vec![],
-        green: vec![],
-        updated_at,
+    let range = DateRange {
+        after: Some({
+            let now = time::OffsetDateTime::now_utc();
+            let from = now - time::Duration::days(7);
+            from.format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default()[..10]
+                .to_string()
+        }),
+        before: None,
     };
 
+    // Compute decisions + risks for attention routing
+    let decisions = aggregate_decisions(&projects);
+    let now_iso = time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let decision_inputs: Vec<DecisionInput> = decisions
+        .iter()
+        .map(|d| DecisionInput {
+            event_id: d.event_id.clone(),
+            key: d.key.clone(),
+            value: d.value.clone(),
+            project: d.project_name.clone(),
+            ts: d.ts.clone(),
+        })
+        .collect();
+
+    let mut all_events = Vec::new();
+    for entry in &projects {
+        let root = std::path::Path::new(&entry.path);
+        if let Ok(ledger) = Ledger::open(root) {
+            if let Ok(events) = ledger.iter_events() {
+                all_events.extend(events);
+            }
+        }
+    }
+
+    let risks = compute_decision_risks(
+        &decision_inputs,
+        &all_events,
+        &now_iso,
+        &std::collections::HashSet::new(),
+    );
+
+    let response = compute_attention(&risks, &projects, &range);
     Ok(Json(response))
 }
 
@@ -1102,6 +1137,272 @@ async fn post_authz_check(
     let actors = policy::load_actors_from_dir(&edda_dir)?;
     let result = policy::evaluate_authz(&body, &pol, &actors);
     Ok(Json(result))
+}
+
+// ── GET /dashboard (HTML) ──
+
+async fn serve_dashboard() -> impl IntoResponse {
+    axum::response::Html(include_str!("../static/dashboard.html"))
+}
+
+// ── GET /api/dashboard ──
+
+#[derive(Deserialize)]
+struct DashboardQuery {
+    #[serde(default = "default_days")]
+    days: usize,
+}
+
+fn default_days() -> usize {
+    7
+}
+
+#[derive(Serialize)]
+struct DashboardResponse {
+    period: DashboardPeriod,
+    summary: DashboardSummary,
+    attention: OverviewResponse,
+    timeline: Vec<TimelineEntry>,
+    graph: edda_aggregate::graph::DependencyGraph,
+    risks: Vec<DecisionRisk>,
+}
+
+#[derive(Serialize)]
+struct DashboardPeriod {
+    from: String,
+    to: String,
+    days: usize,
+}
+
+#[derive(Serialize)]
+struct DashboardSummary {
+    total_projects: usize,
+    total_decisions: usize,
+    total_events: usize,
+    total_commits: usize,
+}
+
+#[derive(Serialize)]
+struct TimelineEntry {
+    ts: String,
+    event_type: String,
+    key: String,
+    value: String,
+    reason: String,
+    project: String,
+    risk_level: String,
+    supersedes: Option<String>,
+}
+
+async fn get_dashboard(
+    State(_state): State<Arc<AppState>>,
+    Query(params): Query<DashboardQuery>,
+) -> Result<Json<DashboardResponse>, AppError> {
+    let projects = list_projects();
+
+    let now = time::OffsetDateTime::now_utc();
+    let from_date = now - time::Duration::days(params.days as i64);
+    let to_str = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let from_str = from_date
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+
+    let range = DateRange {
+        after: Some(from_str[..10].to_string()),
+        before: None,
+    };
+
+    // Summary
+    let agg = aggregate_overview(&projects, &range);
+
+    // Decisions + risk scoring
+    let decisions = aggregate_decisions(&projects);
+    let now_iso = &to_str;
+
+    let decision_inputs: Vec<DecisionInput> = decisions
+        .iter()
+        .map(|d| DecisionInput {
+            event_id: d.event_id.clone(),
+            key: d.key.clone(),
+            value: d.value.clone(),
+            project: d.project_name.clone(),
+            ts: d.ts.clone(),
+        })
+        .collect();
+
+    // Collect all events for risk computation
+    let mut all_events = Vec::new();
+    for entry in &projects {
+        let root = std::path::Path::new(&entry.path);
+        if let Ok(ledger) = Ledger::open(root) {
+            if let Ok(events) = ledger.iter_events() {
+                all_events.extend(events);
+            }
+        }
+    }
+
+    // Cross-project: decision IDs that appear in provenance of events from OTHER projects
+    let mut cross_project_ids = std::collections::HashSet::new();
+    for entry in &projects {
+        let root = std::path::Path::new(&entry.path);
+        if let Ok(ledger) = Ledger::open(root) {
+            if let Ok(events) = ledger.iter_events() {
+                for event in &events {
+                    for prov in &event.refs.provenance {
+                        // If this event references a decision from another project
+                        for d in &decisions {
+                            if d.event_id == prov.target && d.project_name != entry.name {
+                                cross_project_ids.insert(d.event_id.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let risks = compute_decision_risks(&decision_inputs, &all_events, now_iso, &cross_project_ids);
+
+    // Build risk lookup for timeline entries
+    let risk_map: std::collections::HashMap<&str, &str> = risks
+        .iter()
+        .map(|r| (r.event_id.as_str(), r.risk_level.as_str()))
+        .collect();
+
+    // Timeline: decisions sorted by timestamp descending
+    let mut timeline: Vec<TimelineEntry> = decisions
+        .iter()
+        .map(|d| {
+            let risk_level = risk_map
+                .get(d.event_id.as_str())
+                .unwrap_or(&"low")
+                .to_string();
+            TimelineEntry {
+                ts: d.ts.clone().unwrap_or_default(),
+                event_type: "decision".to_string(),
+                key: d.key.clone(),
+                value: d.value.clone(),
+                reason: d.reason.clone(),
+                project: d.project_name.clone(),
+                risk_level,
+                supersedes: None, // Would need provenance walk
+            }
+        })
+        .collect();
+    timeline.sort_by(|a, b| b.ts.cmp(&a.ts));
+
+    // Dependency graph
+    let graph = build_dependency_graph(&projects);
+
+    // Attention routing
+    let attention = compute_attention(&risks, &projects, &range);
+
+    let period = DashboardPeriod {
+        from: from_str[..10].to_string(),
+        to: to_str[..10].to_string(),
+        days: params.days,
+    };
+
+    let summary = DashboardSummary {
+        total_projects: agg.projects.len(),
+        total_decisions: agg.total_decisions,
+        total_events: agg.total_events,
+        total_commits: agg.total_commits,
+    };
+
+    Ok(Json(DashboardResponse {
+        period,
+        summary,
+        attention,
+        timeline,
+        graph,
+        risks,
+    }))
+}
+
+/// Compute attention routing: red / yellow / green classification.
+fn compute_attention(
+    risks: &[DecisionRisk],
+    projects: &[edda_store::registry::ProjectEntry],
+    range: &DateRange,
+) -> OverviewResponse {
+    let mut red = Vec::new();
+    let mut yellow = Vec::new();
+    let mut green = Vec::new();
+
+    let now = time::OffsetDateTime::now_utc();
+    let updated_at = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    // Red: high-risk decisions
+    for r in risks {
+        if r.risk_level == "high" {
+            red.push(OverviewRedItem {
+                project: r.project.clone(),
+                summary: format!("{} = {} (risk {:.0}%)", r.key, r.value, r.risk_score * 100.0),
+                action: "Review before overriding".to_string(),
+                blocked_count: 0,
+            });
+        }
+    }
+
+    // Yellow: medium-risk decisions
+    for r in risks {
+        if r.risk_level == "medium" {
+            yellow.push(OverviewYellowItem {
+                project: r.project.clone(),
+                summary: format!("{} = {} (risk {:.0}%)", r.key, r.value, r.risk_score * 100.0),
+                eta: String::new(),
+            });
+        }
+    }
+
+    // Red: stale projects (no events in range)
+    for entry in projects {
+        let root = std::path::Path::new(&entry.path);
+        let has_events = Ledger::open(root)
+            .and_then(|l| l.iter_events())
+            .map(|events| events.iter().any(|e| range.matches(&e.ts)))
+            .unwrap_or(false);
+        if !has_events {
+            red.push(OverviewRedItem {
+                project: entry.name.clone(),
+                summary: "No activity in period".to_string(),
+                action: "Check project status".to_string(),
+                blocked_count: 0,
+            });
+        }
+    }
+
+    // Green: projects with normal activity
+    for entry in projects {
+        let root = std::path::Path::new(&entry.path);
+        let has_events = Ledger::open(root)
+            .and_then(|l| l.iter_events())
+            .map(|events| events.iter().any(|e| range.matches(&e.ts)))
+            .unwrap_or(false);
+        if has_events {
+            let high_risk = risks
+                .iter()
+                .any(|r| r.project == entry.name && r.risk_level == "high");
+            if !high_risk {
+                green.push(OverviewGreenItem {
+                    project: entry.name.clone(),
+                    summary: "Normal activity".to_string(),
+                });
+            }
+        }
+    }
+
+    OverviewResponse {
+        red,
+        yellow,
+        green,
+        updated_at,
+    }
 }
 
 // ── Tests ──
@@ -1356,7 +1657,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn overview_returns_empty_structure() {
+    async fn overview_returns_structure() {
         let tmp = tempfile::tempdir().unwrap();
         setup_workspace(tmp.path());
         let app = router(tmp.path());
@@ -1376,9 +1677,9 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["red"].as_array().unwrap().is_empty());
-        assert!(json["yellow"].as_array().unwrap().is_empty());
-        assert!(json["green"].as_array().unwrap().is_empty());
+        assert!(json["red"].is_array());
+        assert!(json["yellow"].is_array());
+        assert!(json["green"].is_array());
         assert!(json["updated_at"].is_string());
     }
 
@@ -2434,5 +2735,83 @@ actors:
         let j3: serde_json::Value = serde_json::from_slice(&b3).unwrap();
         assert_eq!(j3["allowed"], false);
         assert!(j3["actor_roles"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dashboard_returns_all_sections() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/dashboard")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["period"].is_object());
+        assert!(json["summary"].is_object());
+        assert!(json["attention"].is_object());
+        assert!(json["timeline"].is_array());
+        assert!(json["graph"].is_object());
+        assert!(json["risks"].is_array());
+    }
+
+    #[tokio::test]
+    async fn dashboard_respects_days_param() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/dashboard?days=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["period"]["days"], 1);
+    }
+
+    #[tokio::test]
+    async fn dashboard_html_returns_html() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/dashboard")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let html = String::from_utf8(body.to_vec()).unwrap();
+        assert!(html.contains("Edda Dashboard"));
+        assert!(html.contains("/api/dashboard"));
     }
 }

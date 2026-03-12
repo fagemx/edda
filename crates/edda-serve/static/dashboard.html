@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Edda Dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f6fa;color:#2d3436}
+header{background:#2d3436;color:#fff;padding:1rem 2rem;display:flex;justify-content:space-between;align-items:center}
+header h1{font-size:1.4rem;font-weight:600}
+header .period{font-size:.85rem;opacity:.7}
+header select{background:#444;color:#fff;border:1px solid #666;border-radius:4px;padding:4px 8px;font-size:.85rem}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;padding:1.5rem 2rem;max-width:1400px;margin:0 auto}
+.card{background:#fff;border-radius:8px;padding:1.25rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card h2{font-size:1rem;font-weight:600;margin-bottom:.75rem;color:#636e72}
+.attention-list{list-style:none}
+.attention-list li{padding:.5rem .75rem;border-radius:4px;margin-bottom:.5rem;font-size:.9rem}
+.att-red{background:#ffeaea;border-left:4px solid #e74c3c}
+.att-yellow{background:#fff8e1;border-left:4px solid #f39c12}
+.att-green{background:#e8f5e9;border-left:4px solid #27ae60}
+.timeline-list{list-style:none;max-height:340px;overflow-y:auto}
+.timeline-list li{padding:.5rem 0;border-bottom:1px solid #eee;font-size:.88rem;display:flex;align-items:center;gap:.5rem}
+.timeline-list li:last-child{border-bottom:none}
+.badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:600;text-transform:uppercase}
+.badge-low{background:#e8f5e9;color:#27ae60}
+.badge-medium{background:#fff8e1;color:#f39c12}
+.badge-high{background:#ffeaea;color:#e74c3c}
+.risk-table{width:100%;border-collapse:collapse;font-size:.88rem}
+.risk-table th{text-align:left;padding:.5rem;border-bottom:2px solid #ddd;color:#636e72;font-size:.8rem;text-transform:uppercase}
+.risk-table td{padding:.5rem;border-bottom:1px solid #eee}
+.risk-table tr:hover{background:#f8f9fa}
+.stats{display:flex;gap:2rem;justify-content:center;padding:1rem 2rem}
+.stat{text-align:center}
+.stat .num{font-size:2rem;font-weight:700;color:#2d3436}
+.stat .label{font-size:.8rem;color:#636e72;text-transform:uppercase}
+.graph-container{min-height:280px;position:relative}
+.graph-placeholder{display:flex;align-items:center;justify-content:center;height:280px;color:#b2bec3;font-size:.9rem}
+.no-data{color:#b2bec3;font-size:.9rem;text-align:center;padding:2rem}
+.refresh-info{text-align:center;padding:.5rem;font-size:.75rem;color:#b2bec3}
+</style>
+</head>
+<body>
+<header>
+  <h1>Edda Dashboard</h1>
+  <div style="display:flex;align-items:center;gap:1rem">
+    <label>
+      <select id="days-select">
+        <option value="1">Last 24h</option>
+        <option value="7" selected>Last 7 days</option>
+        <option value="14">Last 14 days</option>
+        <option value="30">Last 30 days</option>
+      </select>
+    </label>
+    <span class="period" id="period-label"></span>
+  </div>
+</header>
+
+<div class="stats" id="stats-bar">
+  <div class="stat"><span class="num" id="s-projects">-</span><span class="label">Projects</span></div>
+  <div class="stat"><span class="num" id="s-decisions">-</span><span class="label">Decisions</span></div>
+  <div class="stat"><span class="num" id="s-events">-</span><span class="label">Events</span></div>
+  <div class="stat"><span class="num" id="s-commits">-</span><span class="label">Commits</span></div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Attention</h2>
+    <ul class="attention-list" id="attention-list">
+      <li class="no-data">Loading...</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Decision Timeline</h2>
+    <ul class="timeline-list" id="timeline-list">
+      <li class="no-data">Loading...</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Dependency Graph</h2>
+    <div class="graph-container" id="graph-container">
+      <div class="graph-placeholder">Loading graph...</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Override Risk</h2>
+    <table class="risk-table" id="risk-table">
+      <thead><tr><th>Decision</th><th>Value</th><th>Project</th><th>Risk</th></tr></thead>
+      <tbody id="risk-tbody"><tr><td colspan="4" class="no-data">Loading...</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<div class="refresh-info">Auto-refreshes every 60s</div>
+
+<script>
+(function(){
+  const $ = (s) => document.getElementById(s);
+
+  let refreshTimer = null;
+
+  function fetchDashboard() {
+    const days = $('days-select').value;
+    fetch('/api/dashboard?days=' + days)
+      .then(r => r.json())
+      .then(render)
+      .catch(err => {
+        console.error('Dashboard fetch failed:', err);
+        $('attention-list').innerHTML = '<li class="no-data">Failed to load data</li>';
+      });
+  }
+
+  function render(data) {
+    // Period label
+    if (data.period) {
+      $('period-label').textContent = data.period.from + ' to ' + data.period.to;
+    }
+
+    // Summary stats
+    if (data.summary) {
+      $('s-projects').textContent = data.summary.total_projects;
+      $('s-decisions').textContent = data.summary.total_decisions;
+      $('s-events').textContent = data.summary.total_events;
+      $('s-commits').textContent = data.summary.total_commits;
+    }
+
+    // Attention panel
+    renderAttention(data.attention || {red:[], yellow:[], green:[]});
+
+    // Timeline
+    renderTimeline(data.timeline || []);
+
+    // Risk table
+    renderRisks(data.risks || []);
+
+    // Dependency graph
+    renderGraph(data.graph || {nodes:[], edges:[]});
+  }
+
+  function renderAttention(att) {
+    const list = $('attention-list');
+    const items = [];
+    (att.red || []).forEach(r => items.push('<li class="att-red"><strong>' + esc(r.project) + ':</strong> ' + esc(r.summary) + ' <em>(' + esc(r.action) + ')</em></li>'));
+    (att.yellow || []).forEach(y => items.push('<li class="att-yellow"><strong>' + esc(y.project) + ':</strong> ' + esc(y.summary) + '</li>'));
+    (att.green || []).forEach(g => items.push('<li class="att-green"><strong>' + esc(g.project) + ':</strong> ' + esc(g.summary) + '</li>'));
+    list.innerHTML = items.length ? items.join('') : '<li class="att-green">All clear - no items needing attention</li>';
+  }
+
+  function renderTimeline(timeline) {
+    const list = $('timeline-list');
+    if (!timeline.length) {
+      list.innerHTML = '<li class="no-data">No decisions in this period</li>';
+      return;
+    }
+    list.innerHTML = timeline.map(t => {
+      const badge = '<span class="badge badge-' + (t.risk_level || 'low') + '">' + (t.risk_level || 'low') + '</span>';
+      const supersedes = t.supersedes ? ' <span style="color:#b2bec3;font-size:.75rem">(supersedes)</span>' : '';
+      const ts = t.ts ? t.ts.substring(0, 10) : '';
+      return '<li>' + badge + ' <strong>' + esc(t.key) + '</strong>=' + esc(t.value) + supersedes +
+        ' <span style="color:#636e72;margin-left:auto;white-space:nowrap">' + esc(t.project) + ' ' + ts + '</span></li>';
+    }).join('');
+  }
+
+  function renderRisks(risks) {
+    const tbody = $('risk-tbody');
+    if (!risks.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="no-data">No active decisions</td></tr>';
+      return;
+    }
+    const sorted = risks.slice().sort((a, b) => b.risk_score - a.risk_score);
+    tbody.innerHTML = sorted.map(r => {
+      const badge = '<span class="badge badge-' + r.risk_level + '">' + r.risk_level + ' (' + (r.risk_score * 100).toFixed(0) + '%)</span>';
+      return '<tr><td>' + esc(r.key) + '</td><td>' + esc(r.value) + '</td><td>' + esc(r.project) + '</td><td>' + badge + '</td></tr>';
+    }).join('');
+  }
+
+  function renderGraph(graph) {
+    const container = $('graph-container');
+    if (!graph.nodes.length) {
+      container.innerHTML = '<div class="graph-placeholder">No decisions with dependencies</div>';
+      return;
+    }
+    // Simple SVG-based graph rendering
+    const w = container.clientWidth || 600;
+    const h = 280;
+    const nodes = graph.nodes.map((n, i) => ({
+      ...n,
+      x: 60 + (i % 4) * ((w - 120) / Math.min(graph.nodes.length, 4)),
+      y: 40 + Math.floor(i / 4) * 70
+    }));
+    const nodeMap = {};
+    nodes.forEach(n => { nodeMap[n.event_id] = n; });
+
+    let svg = '<svg width="' + w + '" height="' + h + '" style="font-family:sans-serif;font-size:11px">';
+
+    // Edges
+    graph.edges.forEach(e => {
+      const src = nodeMap[e.source];
+      const tgt = nodeMap[e.target];
+      if (src && tgt) {
+        svg += '<line x1="' + src.x + '" y1="' + src.y + '" x2="' + tgt.x + '" y2="' + tgt.y +
+          '" stroke="#b2bec3" stroke-width="1.5" marker-end="url(#arrow)"/>';
+      }
+    });
+
+    svg += '<defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">' +
+      '<path d="M0,0 L8,3 L0,6" fill="#b2bec3"/></marker></defs>';
+
+    // Nodes
+    nodes.forEach(n => {
+      svg += '<g transform="translate(' + n.x + ',' + n.y + ')">' +
+        '<rect x="-50" y="-15" width="100" height="30" rx="4" fill="#dfe6e9" stroke="#b2bec3"/>' +
+        '<text text-anchor="middle" dy="4" fill="#2d3436">' + esc(n.key) + '</text></g>';
+    });
+
+    svg += '</svg>';
+    container.innerHTML = svg;
+  }
+
+  function esc(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  $('days-select').addEventListener('change', function() {
+    fetchDashboard();
+    clearInterval(refreshTimer);
+    refreshTimer = setInterval(fetchDashboard, 60000);
+  });
+
+  fetchDashboard();
+  refreshTimer = setInterval(fetchDashboard, 60000);
+})();
+</script>
+</body>
+</html>
