@@ -308,6 +308,18 @@ pub(super) fn dispatch_session_end(
         });
     }
 
+    // 2i. Background pattern detection (non-blocking, interval-gated)
+    crate::bg_detect::increment_session_count(project_id);
+    if crate::bg_detect::should_run(project_id) {
+        let pid = project_id.to_string();
+        let cwd_owned = cwd.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = crate::bg_detect::run_detect(&pid, &cwd_owned) {
+                eprintln!("[edda-bg] pattern detection failed: {e}");
+            }
+        });
+    }
+
     // 2d. Push notification (best-effort, fire-and-forget)
     notify_session_end(project_id, cwd, session_id);
 

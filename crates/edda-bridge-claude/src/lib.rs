@@ -1,4 +1,5 @@
 pub mod agent_phase;
+pub mod bg_detect;
 pub mod bg_digest;
 pub mod bg_extract;
 pub mod bg_scan;
