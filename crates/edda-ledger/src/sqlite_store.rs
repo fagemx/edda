@@ -1208,6 +1208,45 @@ impl SqliteStore {
 
         Ok(results)
     }
+
+    /// Verify the hash chain integrity of all events in insertion order.
+    ///
+    /// Returns `Ok(())` if the chain is valid: the first event has
+    /// `parent_hash == None`, and each subsequent event's `parent_hash`
+    /// matches the previous event's `hash`.
+    ///
+    /// Returns `Err` describing the first break found.
+    pub fn verify_chain(&self) -> anyhow::Result<()> {
+        let events = self.iter_events()?;
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        // First event must have no parent
+        if events[0].parent_hash.is_some() {
+            anyhow::bail!(
+                "chain break at first event {}: expected parent_hash=None, got {:?}",
+                events[0].event_id,
+                events[0].parent_hash,
+            );
+        }
+
+        for i in 1..events.len() {
+            let expected = Some(events[i - 1].hash.as_str());
+            let actual = events[i].parent_hash.as_deref();
+            if actual != expected {
+                anyhow::bail!(
+                    "chain break at event {} (index {}): expected parent_hash={:?}, got {:?}",
+                    events[i].event_id,
+                    i,
+                    expected,
+                    actual,
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for SqliteStore {
@@ -2536,6 +2575,153 @@ mod tests {
         assert_eq!(d2_execs.len(), 1);
         assert_eq!(d2_execs[0].event_id, "evt_exec_d2");
         assert_eq!(d2_execs[0].status, "failed");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Concurrent writer tests ────────────────────────────────────
+
+    #[test]
+    fn concurrent_writers_no_data_loss() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("edda_sqlite_conc_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+
+        // Create DB with schema first
+        {
+            let _init = SqliteStore::open_or_create(&db_path).unwrap();
+        }
+
+        let num_threads: usize = 10;
+        let events_per_thread: usize = 5;
+        let db_path_shared = db_path.clone();
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let path = db_path_shared.clone();
+                std::thread::spawn(move || {
+                    let store = SqliteStore::open(&path).unwrap();
+                    for i in 0..events_per_thread {
+                        // Each event gets a unique UUID via new_note_event, no parent_hash
+                        // linkage needed — we're testing concurrent *writes*, not chain integrity.
+                        let e = new_note_event(
+                            "main",
+                            None,
+                            "system",
+                            &format!("thread {t} event {i}"),
+                            &[],
+                        )
+                        .unwrap();
+                        store.append_event(&e).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        // Verify: all events persisted, no data loss
+        let store = SqliteStore::open(&db_path).unwrap();
+        let events = store.iter_events().unwrap();
+        assert_eq!(
+            events.len(),
+            num_threads * events_per_thread,
+            "expected {} events, got {}",
+            num_threads * events_per_thread,
+            events.len()
+        );
+
+        // Verify no duplicate event_ids
+        let mut ids: Vec<&str> = events.iter().map(|e| e.event_id.as_str()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), num_threads * events_per_thread);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Hash chain verification tests ──────────────────────────────
+
+    #[test]
+    fn verify_chain_empty_store() {
+        let (dir, store) = tmp_db();
+        assert!(store.verify_chain().is_ok());
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_chain_single_event() {
+        let (dir, store) = tmp_db();
+        let e = new_note_event("main", None, "system", "only event", &[]).unwrap();
+        store.append_event(&e).unwrap();
+        assert!(store.verify_chain().is_ok());
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_chain_valid_sequence() {
+        let (dir, store) = tmp_db();
+        let e1 = new_note_event("main", None, "system", "first", &[]).unwrap();
+        store.append_event(&e1).unwrap();
+        let e2 = new_note_event("main", Some(&e1.hash), "system", "second", &[]).unwrap();
+        store.append_event(&e2).unwrap();
+        let e3 = new_note_event("main", Some(&e2.hash), "system", "third", &[]).unwrap();
+        store.append_event(&e3).unwrap();
+
+        assert!(store.verify_chain().is_ok());
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_chain_detects_broken_parent_hash() {
+        let (dir, store) = tmp_db();
+        let e1 = new_note_event("main", None, "system", "first", &[]).unwrap();
+        store.append_event(&e1).unwrap();
+
+        // Intentionally use wrong parent_hash
+        let e2 =
+            new_note_event("main", Some("sha256:bogus_hash"), "system", "broken", &[]).unwrap();
+        store.append_event(&e2).unwrap();
+
+        let result = store.verify_chain();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("chain break"),
+            "error should mention 'chain break', got: {msg}"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_chain_detects_first_event_with_parent() {
+        let (dir, store) = tmp_db();
+        // First event should have parent_hash=None, but we insert one with a parent
+        let e = new_note_event(
+            "main",
+            Some("sha256:unexpected"),
+            "system",
+            "bad first",
+            &[],
+        )
+        .unwrap();
+        store.append_event(&e).unwrap();
+
+        let result = store.verify_chain();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("first event"));
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
