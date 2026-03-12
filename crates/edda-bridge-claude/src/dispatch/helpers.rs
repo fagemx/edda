@@ -218,6 +218,151 @@ pub(super) fn extract_prior_session_last_message(
     edda_transcript::extract_last_assistant_text(&transcript_path, max_chars)
 }
 
+// ── Project State ──
+
+/// Maximum characters for the karvi board summary.
+const BOARD_SUMMARY_MAX_CHARS: usize = 500;
+/// Maximum number of tasks to display in the board summary.
+const BOARD_MAX_TASKS: usize = 5;
+/// Maximum characters for a task subject.
+const BOARD_TASK_SUBJECT_MAX: usize = 30;
+/// Maximum number of recent signals to display.
+const BOARD_MAX_SIGNALS: usize = 3;
+/// Maximum characters for a signal content snippet.
+const BOARD_SIGNAL_CONTENT_MAX: usize = 40;
+
+/// Read project-level state for context injection.
+///
+/// Currently supports karvi projects (detected by `server/board.json`).
+/// Returns a compact summary suitable for `additionalContext` injection.
+/// Returns `None` for non-karvi projects or on any parse error (graceful degradation).
+pub(super) fn read_project_state(cwd: &str) -> Option<String> {
+    let board_path = Path::new(cwd).join("server/board.json");
+    if board_path.exists() {
+        return read_karvi_board(cwd);
+    }
+    // Future: other project types
+    None
+}
+
+/// Read and format a compact summary of a karvi board.json.
+///
+/// All JSON access is defensive (`Option` chains). Malformed or missing
+/// fields are silently skipped — never returns an error.
+fn read_karvi_board(cwd: &str) -> Option<String> {
+    let board_path = Path::new(cwd).join("server/board.json");
+    let content = fs::read_to_string(&board_path).ok()?;
+    let board: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let mut lines = vec!["[karvi board]".to_string()];
+
+    // Goal and phase
+    if let Some(task_plan) = board.get("taskPlan") {
+        if let Some(goal) = task_plan.get("goal").and_then(|v| v.as_str()) {
+            lines.push(format!("Goal: {goal}"));
+        }
+        if let Some(phase) = task_plan.get("phase").and_then(|v| v.as_str()) {
+            lines.push(format!("Phase: {phase}"));
+        }
+
+        // Tasks
+        if let Some(tasks) = task_plan.get("tasks").and_then(|v| v.as_array()) {
+            if tasks.is_empty() {
+                lines.push("Tasks: (none)".to_string());
+            } else {
+                lines.push("Tasks:".to_string());
+                for task in tasks.iter().take(BOARD_MAX_TASKS) {
+                    let id = task.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                    let subject = task
+                        .get("subject")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(untitled)");
+                    let subject_trunc = if subject.len() > BOARD_TASK_SUBJECT_MAX {
+                        let end = subject.floor_char_boundary(BOARD_TASK_SUBJECT_MAX);
+                        format!("{}...", &subject[..end])
+                    } else {
+                        subject.to_string()
+                    };
+                    let status = task
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+
+                    let mut parts = vec![status.to_string()];
+
+                    if let Some(assigned) = task.get("assigned").and_then(|v| v.as_str()) {
+                        parts.push(format!("assigned: {assigned}"));
+                    }
+
+                    if let Some(review) = task.get("review") {
+                        if let Some(state) = review.get("state").and_then(|v| v.as_str()) {
+                            parts.push(state.to_string());
+                        }
+                    }
+
+                    if let Some(depends) = task.get("depends").and_then(|v| v.as_array()) {
+                        if !depends.is_empty() {
+                            let dep_ids: Vec<&str> =
+                                depends.iter().filter_map(|d| d.as_str()).collect();
+                            if !dep_ids.is_empty() {
+                                parts.push(format!("blocked by {}", dep_ids.join(", ")));
+                            }
+                        }
+                    }
+
+                    lines.push(format!(
+                        "  - {id} \"{subject_trunc}\" ({})",
+                        parts.join(", ")
+                    ));
+                }
+                if tasks.len() > BOARD_MAX_TASKS {
+                    lines.push(format!("  ... and {} more", tasks.len() - BOARD_MAX_TASKS));
+                }
+            }
+        }
+    }
+
+    // Lessons count
+    if let Some(lessons) = board.get("lessons").and_then(|v| v.as_array()) {
+        if !lessons.is_empty() {
+            lines.push(format!("Lessons: {} active", lessons.len()));
+        }
+    }
+
+    // Recent signals (last N)
+    if let Some(signals) = board.get("signals").and_then(|v| v.as_array()) {
+        if !signals.is_empty() {
+            let recent: Vec<String> = signals
+                .iter()
+                .rev()
+                .take(BOARD_MAX_SIGNALS)
+                .filter_map(|s| {
+                    let c = s.get("content").and_then(|v| v.as_str())?;
+                    if c.len() > BOARD_SIGNAL_CONTENT_MAX {
+                        let end = c.floor_char_boundary(BOARD_SIGNAL_CONTENT_MAX);
+                        Some(format!("\"{}...\"", &c[..end]))
+                    } else {
+                        Some(format!("\"{c}\""))
+                    }
+                })
+                .collect();
+            if !recent.is_empty() {
+                lines.push(format!("Signals: {}", recent.join(" | ")));
+            }
+        }
+    }
+
+    let summary = lines.join("\n");
+
+    // Enforce hard cap
+    if summary.len() > BOARD_SUMMARY_MAX_CHARS {
+        let end = summary.floor_char_boundary(BOARD_SUMMARY_MAX_CHARS);
+        Some(format!("{}...(truncated)", &summary[..end]))
+    } else {
+        Some(summary)
+    }
+}
+
 /// Inject karvi task brief if working in a karvi project.
 ///
 /// Detection: Check if server/board.json exists
@@ -249,7 +394,7 @@ pub(super) fn inject_karvi_brief(cwd: &str) -> Option<String> {
 
     let contents = fs::read_to_string(&brief_path).ok()?;
     let truncated = if contents.len() > 2000 {
-        &contents[..2000]
+        &contents[..contents.floor_char_boundary(2000)]
     } else {
         &contents
     };

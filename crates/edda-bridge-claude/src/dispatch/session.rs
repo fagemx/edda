@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::signals::{extract_session_signals, save_session_signals, TaskSnapshot};
 
 use super::helpers::{
-    extract_prior_session_last_message, inject_karvi_brief, render_active_plan,
+    extract_prior_session_last_message, inject_karvi_brief, read_project_state, render_active_plan,
     render_skill_guide_directive, run_auto_digest,
 };
 use super::{
@@ -127,6 +127,14 @@ pub(super) fn dispatch_with_workspace_only(
         .and_then(|v| v.parse().ok())
         .unwrap_or(2500);
     let mut ws = render_workspace_section(cwd, workspace_budget);
+
+    // Inject project-level state (karvi board summary, etc.)
+    if let Some(project_state) = read_project_state(cwd) {
+        ws = Some(match ws {
+            Some(w) => format!("{w}\n\n{project_state}"),
+            None => project_state,
+        });
+    }
 
     // Compute peers + board ONCE for the entire dispatch (#83).
     // Before: discover_active_peers called 2-3×, compute_board_state 3-4× per hook.
@@ -598,6 +606,14 @@ pub(super) fn dispatch_session_start(
         content = Some(match content {
             Some(c) => format!("{c}\n\n{brief}"),
             None => brief,
+        });
+    }
+
+    // Inject project-level state (karvi board summary, etc.)
+    if let Some(project_state) = read_project_state(cwd) {
+        content = Some(match content {
+            Some(c) => format!("{c}\n\n{project_state}"),
+            None => project_state,
         });
     }
 
