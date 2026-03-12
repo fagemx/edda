@@ -193,8 +193,8 @@ pub fn ask(
                     .collect(),
             );
             if opts.include_superseded {
-                // Also scan all events for superseded decisions matching keyword
-                let events = ledger.iter_events()?;
+                // Scan only note events for superseded decisions matching keyword
+                let events = ledger.iter_events_by_type("note")?;
                 let kw_lower = kw.to_lowercase();
                 for event in &events {
                     if let Some(ref b) = opts.branch {
@@ -250,11 +250,12 @@ pub fn ask(
         .collect();
 
     let q = query.trim();
-    // Load events once for both commit and note searches
-    let events = ledger.iter_events()?;
-    let related_commits =
-        find_related_commits(&events, &decision_event_ids, q, opts.limit, &opts.branch);
-    let related_notes = find_related_notes(&events, q, opts.limit, &opts.branch);
+    // SQL push-down: find related commits and notes via targeted queries
+    let commit_events =
+        ledger.find_related_commits(opts.branch.as_deref(), q, &decision_event_ids, opts.limit)?;
+    let related_commits = to_commit_hits(&commit_events, &decision_event_ids, q, opts.limit);
+    let note_events = ledger.find_related_notes(opts.branch.as_deref(), q, opts.limit)?;
+    let related_notes = to_note_hits(&note_events, opts.limit);
 
     let conversations = match transcript_search {
         Some(search_fn) if !q.is_empty() => search_fn(q, opts.limit),
@@ -403,26 +404,19 @@ fn compute_domain_impact(
 
 // ── Related event helpers ────────────────────────────────────────────
 
-fn find_related_commits(
+/// Convert SQL-prefiltered commit events into `CommitHit` with match_type classification.
+/// Events are already filtered by SQL (branch, keyword/evidence); this determines the
+/// specific match_type ("evidence" or "title") for each.
+fn to_commit_hits(
     events: &[Event],
     decision_event_ids: &[&str],
     query: &str,
     limit: usize,
-    branch: &Option<String>,
 ) -> Vec<CommitHit> {
     let mut hits: Vec<CommitHit> = Vec::new();
     let q_lower = query.to_lowercase();
 
-    for event in events.iter().rev() {
-        if event.event_type != "commit" {
-            continue;
-        }
-        if let Some(b) = branch {
-            if event.branch != *b {
-                continue;
-            }
-        }
-
+    for event in events {
         let title = event
             .payload
             .get("title")
@@ -434,17 +428,14 @@ fn find_related_commits(
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        // Check evidence chain: does this commit reference any of our decision events?
+        // Determine match type
         let mut match_type = None;
-
-        // Check refs.events for evidence links
         for ref_id in &event.refs.events {
             if decision_event_ids.contains(&ref_id.as_str()) {
                 match_type = Some("evidence");
                 break;
             }
         }
-        // Also check provenance
         if match_type.is_none() {
             for prov in &event.refs.provenance {
                 if decision_event_ids.contains(&prov.target.as_str()) {
@@ -453,8 +444,6 @@ fn find_related_commits(
                 }
             }
         }
-
-        // Title/purpose keyword match
         if match_type.is_none()
             && !query.is_empty()
             && (title.to_lowercase().contains(&q_lower)
@@ -464,7 +453,6 @@ fn find_related_commits(
         }
 
         if let Some(mt) = match_type {
-            // Deduplicate
             if !hits.iter().any(|h| h.event_id == event.event_id) {
                 hits.push(CommitHit {
                     event_id: event.event_id.clone(),
@@ -484,57 +472,26 @@ fn find_related_commits(
     hits
 }
 
-fn find_related_notes(
-    events: &[Event],
-    query: &str,
-    limit: usize,
-    branch: &Option<String>,
-) -> Vec<NoteHit> {
-    if query.is_empty() {
-        return vec![];
-    }
-
-    let q_lower = query.to_lowercase();
-    let mut hits: Vec<NoteHit> = Vec::new();
-
-    for event in events.iter().rev() {
-        if event.event_type != "note" {
-            continue;
-        }
-        if let Some(b) = branch {
-            if event.branch != *b {
-                continue;
-            }
-        }
-        // Skip decision notes — those are already in decisions section
-        if event.event_type == "note" && edda_core::decision::is_decision(&event.payload) {
-            continue;
-        }
-        // Skip session digest notes — those are session summaries, not research notes
-        if edda_core::decision::is_session_digest(&event.payload) {
-            continue;
-        }
-
-        let text = event
-            .payload
-            .get("text")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        if text.to_lowercase().contains(&q_lower) {
-            hits.push(NoteHit {
+/// Convert SQL-prefiltered note events into `NoteHit`.
+/// Events are already filtered by SQL (branch, keyword, excluding decisions/digests).
+fn to_note_hits(events: &[Event], limit: usize) -> Vec<NoteHit> {
+    events
+        .iter()
+        .take(limit)
+        .map(|event| {
+            let text = event
+                .payload
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            NoteHit {
                 event_id: event.event_id.clone(),
                 text: text.to_string(),
                 ts: event.ts.clone(),
                 branch: event.branch.clone(),
-            });
-            if hits.len() >= limit {
-                break;
             }
-        }
-    }
-
-    hits
+        })
+        .collect()
 }
 
 // ── Human-readable formatting ────────────────────────────────────────

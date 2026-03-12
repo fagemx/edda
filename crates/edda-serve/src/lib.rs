@@ -113,6 +113,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/dashboard", get(serve_dashboard))
         .route("/api/actors", get(get_actors))
         .route("/api/actors/{name}", get(get_actor))
+
         .route("/api/events/stream", get(get_event_stream))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -161,6 +162,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/projects", get(get_projects))
         .route("/api/actors", get(get_actors))
         .route("/api/actors/{name}", get(get_actor))
+
         .route("/api/metrics/quality", get(get_quality_metrics))
         .route("/api/dashboard", get(get_dashboard))
         .route("/dashboard", get(serve_dashboard))
@@ -310,38 +312,19 @@ async fn get_log(
 ) -> Result<Json<LogResponse>, AppError> {
     let ledger = state.open_ledger()?;
     let head = ledger.head_branch()?;
-    let events = ledger.iter_events()?;
     let limit = params.limit.unwrap_or(50);
+
+    let events = ledger.iter_events_filtered(
+        &head,
+        params.r#type.as_deref(),
+        params.keyword.as_deref(),
+        params.after.as_deref(),
+        params.before.as_deref(),
+        limit,
+    )?;
 
     let results: Vec<LogEntry> = events
         .iter()
-        .rev()
-        .filter(|e| e.branch == head)
-        .filter(|e| {
-            if let Some(ref et) = params.r#type {
-                if e.event_type != *et {
-                    return false;
-                }
-            }
-            if let Some(ref kw) = params.keyword {
-                let payload_str = e.payload.to_string().to_lowercase();
-                if !payload_str.contains(&kw.to_lowercase()) {
-                    return false;
-                }
-            }
-            if let Some(ref after) = params.after {
-                if e.ts.as_str() < after.as_str() {
-                    return false;
-                }
-            }
-            if let Some(ref before) = params.before {
-                if e.ts.as_str() > before.as_str() {
-                    return false;
-                }
-            }
-            true
-        })
-        .take(limit)
         .map(|e| {
             let detail = e
                 .payload
@@ -526,14 +509,14 @@ async fn post_decide(
     };
     let mut event = new_decision_event(&branch, parent_hash.as_deref(), "system", &dp)?;
 
-    // Auto-supersede: find prior decision with same key
-    let prior = find_prior_decision(&ledger, &branch, key);
+    // Auto-supersede: find prior decision with same key via SQL index
+    let prior = ledger.find_active_decision(&branch, key)?;
     let mut superseded = None;
-    if let Some((prior_id, prior_value)) = &prior {
-        if prior_value.as_deref() != Some(value) {
-            superseded = Some(prior_id.clone());
+    if let Some(ref row) = prior {
+        if row.value != value {
+            superseded = Some(row.event_id.clone());
             event.refs.provenance.push(Provenance {
-                target: prior_id.clone(),
+                target: row.event_id.clone(),
                 rel: rel::SUPERSEDES.to_string(),
                 note: Some(format!("key '{}' re-decided", key)),
             });
@@ -547,28 +530,6 @@ async fn post_decide(
         event_id: event.event_id,
         superseded,
     }))
-}
-
-/// Find the most recent decision event with the same key on the given branch.
-fn find_prior_decision(
-    ledger: &Ledger,
-    branch: &str,
-    key: &str,
-) -> Option<(String, Option<String>)> {
-    let events = ledger.iter_events().ok()?;
-    events
-        .iter()
-        .rev()
-        .filter(|e| e.branch == branch && e.event_type == "note")
-        .filter(|e| edda_core::decision::is_decision(&e.payload))
-        .find_map(|e| {
-            let dp = edda_core::decision::extract_decision(&e.payload)?;
-            if dp.key == key {
-                Some((e.event_id.clone(), Some(dp.value)))
-            } else {
-                None
-            }
-        })
 }
 
 // ── POST /api/events/karvi ──

@@ -106,6 +106,48 @@ impl Ledger {
         self.sqlite.iter_events_by_type(event_type)
     }
 
+    /// Get all events for a specific branch, filtered at the SQL level.
+    pub fn iter_branch_events(&self, branch: &str) -> anyhow::Result<Vec<Event>> {
+        self.sqlite.iter_branch_events(branch)
+    }
+
+    /// Get events filtered by branch with optional type/keyword/date/limit,
+    /// all pushed down to SQL. Returns newest-first, capped at `limit`.
+    pub fn iter_events_filtered(
+        &self,
+        branch: &str,
+        event_type: Option<&str>,
+        keyword: Option<&str>,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Event>> {
+        self.sqlite
+            .iter_events_filtered(branch, event_type, keyword, after, before, limit)
+    }
+
+    /// Find commit events related to a query by evidence chain or keyword match.
+    pub fn find_related_commits(
+        &self,
+        branch: Option<&str>,
+        keyword: &str,
+        decision_event_ids: &[&str],
+        limit: usize,
+    ) -> anyhow::Result<Vec<Event>> {
+        self.sqlite
+            .find_related_commits(branch, keyword, decision_event_ids, limit)
+    }
+
+    /// Find note events matching a keyword, excluding decisions and session digests.
+    pub fn find_related_notes(
+        &self,
+        branch: Option<&str>,
+        keyword: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Event>> {
+        self.sqlite.find_related_notes(branch, keyword, limit)
+    }
+
     /// Get all events with rowid strictly greater than `after_rowid`.
     ///
     /// Returns `(rowid, Event)` pairs ordered by rowid, useful for cursor-based

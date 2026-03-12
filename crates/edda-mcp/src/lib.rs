@@ -214,18 +214,19 @@ impl EddaServer {
         let mut event = new_decision_event(&branch, parent_hash.as_deref(), "system", &dp)
             .map_err(to_mcp_err)?;
 
-        // Auto-supersede: find prior decision with same key (skip if idempotent)
-        let prior = find_prior_decision(&ledger, &branch, key);
+        // Auto-supersede: find prior decision with same key via SQL index (skip if idempotent)
+        let prior = ledger
+            .find_active_decision(&branch, key)
+            .map_err(to_mcp_err)?;
         let mut supersede_info = String::new();
-        if let Some((prior_id, prior_value)) = &prior {
-            if prior_value.as_deref() != Some(value) {
+        if let Some(ref row) = prior {
+            if row.value != value {
                 supersede_info = format!(
                     " (supersedes {} which was \"{}\")",
-                    prior_id,
-                    prior_value.as_deref().unwrap_or("?")
+                    row.event_id, row.value
                 );
                 event.refs.provenance.push(Provenance {
-                    target: prior_id.clone(),
+                    target: row.event_id.clone(),
                     rel: rel::SUPERSEDES.to_string(),
                     note: Some(format!("key '{}' re-decided", key)),
                 });
@@ -273,39 +274,18 @@ impl EddaServer {
     ) -> Result<CallToolResult, McpError> {
         let ledger = self.open_ledger()?;
         let head = ledger.head_branch().map_err(to_mcp_err)?;
-        let events = ledger.iter_events().map_err(to_mcp_err)?;
         let limit = params.limit.unwrap_or(50);
 
-        let results: Vec<_> = events
-            .iter()
-            .rev()
-            .filter(|e| e.branch == head)
-            .filter(|e| {
-                if let Some(ref et) = params.event_type {
-                    if e.event_type != *et {
-                        return false;
-                    }
-                }
-                if let Some(ref kw) = params.keyword {
-                    let payload_str = e.payload.to_string().to_lowercase();
-                    if !payload_str.contains(&kw.to_lowercase()) {
-                        return false;
-                    }
-                }
-                if let Some(ref after) = params.after {
-                    if e.ts.as_str() < after.as_str() {
-                        return false;
-                    }
-                }
-                if let Some(ref before) = params.before {
-                    if e.ts.as_str() > before.as_str() {
-                        return false;
-                    }
-                }
-                true
-            })
-            .take(limit)
-            .collect();
+        let results = ledger
+            .iter_events_filtered(
+                &head,
+                params.event_type.as_deref(),
+                params.keyword.as_deref(),
+                params.after.as_deref(),
+                params.before.as_deref(),
+                limit,
+            )
+            .map_err(to_mcp_err)?;
 
         if results.is_empty() {
             return Ok(CallToolResult::success(vec![Content::text(
@@ -454,9 +434,11 @@ impl ServerHandler for EddaServer {
                 })
             }
             "edda://log" => {
-                let events = ledger.iter_events().map_err(to_mcp_err)?;
-                let branch_events: Vec<_> = events.iter().filter(|e| e.branch == head).collect();
-                let recent: Vec<_> = branch_events.iter().rev().take(50).rev().collect();
+                // SQL-filtered: get last 50 events on this branch (newest first), then reverse for display
+                let mut recent = ledger
+                    .iter_events_filtered(&head, None, None, None, None, 50)
+                    .map_err(to_mcp_err)?;
+                recent.reverse(); // display in chronological order
                 let lines: Vec<String> = recent
                     .iter()
                     .map(|e| {
@@ -483,28 +465,6 @@ impl ServerHandler for EddaServer {
             )),
         }
     }
-}
-
-/// Find the most recent decision event with the same key on the given branch.
-fn find_prior_decision(
-    ledger: &Ledger,
-    branch: &str,
-    key: &str,
-) -> Option<(String, Option<String>)> {
-    let events = ledger.iter_events().ok()?;
-    events
-        .iter()
-        .rev()
-        .filter(|e| e.branch == branch && e.event_type == "note")
-        .filter(|e| edda_core::decision::is_decision(&e.payload))
-        .find_map(|e| {
-            let dp = edda_core::decision::extract_decision(&e.payload)?;
-            if dp.key == key {
-                Some((e.event_id.clone(), Some(dp.value)))
-            } else {
-                None
-            }
-        })
 }
 
 fn to_mcp_err(e: anyhow::Error) -> McpError {
