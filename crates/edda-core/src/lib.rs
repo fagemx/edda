@@ -4,6 +4,7 @@ pub mod bundle;
 pub mod canon;
 pub mod decision;
 pub mod event;
+pub mod git;
 pub mod hash;
 pub mod policy;
 pub mod types;
