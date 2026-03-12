@@ -2244,3 +2244,80 @@ fn is_karvi_project_detection() {
     // Now it's a karvi project
     assert!(is_karvi_project(path.to_str().unwrap()));
 }
+
+#[test]
+fn task_completed_writes_coordination_event() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().to_path_buf();
+    let paths = edda_ledger::EddaPaths::discover(&workspace);
+    edda_ledger::ledger::init_workspace(&paths).unwrap();
+    edda_ledger::ledger::init_head(&paths, "main").unwrap();
+    edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
+
+    let project_id = resolve_project_id(workspace.to_str().unwrap());
+    let _ = edda_store::ensure_dirs(&project_id);
+
+    let stdin = serde_json::json!({
+        "session_id": "sess-tc1",
+        "hook_event_name": "TaskCompleted",
+        "cwd": workspace.to_str().unwrap(),
+        "task_id": "task-abc",
+        "task_subject": "Implement auth module",
+        "task_description": "Add JWT-based authentication"
+    })
+    .to_string();
+
+    let result = hook_entrypoint_from_stdin(&stdin).unwrap();
+    // TaskCompleted does not support hookSpecificOutput
+    assert!(result.stdout.is_none());
+    assert!(result.stderr.is_none());
+
+    // Verify coordination.jsonl contains the task_completed event
+    let coord_path = edda_store::project_dir(&project_id)
+        .join("state")
+        .join("coordination.jsonl");
+    let content = fs::read_to_string(&coord_path).unwrap();
+    assert!(
+        content.contains("task_completed"),
+        "coordination.jsonl should contain task_completed event type"
+    );
+    assert!(
+        content.contains("task-abc"),
+        "coordination.jsonl should contain task_id"
+    );
+    assert!(
+        content.contains("Implement auth module"),
+        "coordination.jsonl should contain task_subject"
+    );
+}
+
+#[test]
+fn task_completed_skips_when_task_id_empty() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().to_path_buf();
+
+    let project_id = resolve_project_id(workspace.to_str().unwrap());
+    let _ = edda_store::ensure_dirs(&project_id);
+
+    let stdin = serde_json::json!({
+        "session_id": "sess-tc2",
+        "hook_event_name": "TaskCompleted",
+        "cwd": workspace.to_str().unwrap(),
+        "task_id": "",
+        "task_subject": "Should be skipped"
+    })
+    .to_string();
+
+    let result = hook_entrypoint_from_stdin(&stdin).unwrap();
+    assert!(result.stdout.is_none());
+    assert!(result.stderr.is_none());
+
+    // No coordination.jsonl should be created (no events written)
+    let coord_path = edda_store::project_dir(&project_id)
+        .join("state")
+        .join("coordination.jsonl");
+    assert!(
+        !coord_path.exists() || fs::read_to_string(&coord_path).unwrap().is_empty(),
+        "no coordination event should be written when task_id is empty"
+    );
+}

@@ -14,7 +14,7 @@ mod tools;
 pub(crate) use helpers::render_active_plan;
 
 // Sub-module function imports used in hook_entrypoint_from_stdin
-use events::try_write_subagent_completed_note_event;
+use events::{try_write_subagent_completed_note_event, try_write_task_completed_note_event};
 use helpers::run_auto_digest;
 use session::{
     dispatch_session_end, dispatch_session_start, dispatch_subagent_context,
@@ -276,6 +276,25 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
                 try_write_subagent_completed_note_event(&cwd, &agent_id, &agent_type, &summary);
                 crate::peers::remove_heartbeat(&project_id, &agent_id);
             }
+            Ok(HookResult::empty())
+        }
+        "TaskCompleted" => {
+            let task_id = get_str(&raw, "task_id");
+            let task_subject = get_str(&raw, "task_subject");
+            let task_description = get_str(&raw, "task_description");
+
+            if !task_id.is_empty() {
+                crate::peers::write_task_completed(
+                    &project_id,
+                    &session_id,
+                    &task_id,
+                    &task_subject,
+                    &task_description,
+                );
+
+                try_write_task_completed_note_event(&cwd, &task_id, &task_subject);
+            }
+
             Ok(HookResult::empty())
         }
         _ => Ok(HookResult::empty()),

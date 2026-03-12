@@ -332,6 +332,27 @@ pub(crate) fn write_subagent_completed(
     append_coord_event(project_id, &event);
 }
 
+/// Write a task completion event to coordination.jsonl.
+pub(crate) fn write_task_completed(
+    project_id: &str,
+    session_id: &str,
+    task_id: &str,
+    task_subject: &str,
+    task_description: &str,
+) {
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: session_id.to_string(),
+        event_type: CoordEventType::TaskCompleted,
+        payload: serde_json::json!({
+            "task_id": task_id,
+            "task_subject": task_subject,
+            "task_description": task_description,
+        }),
+    };
+    append_coord_event(project_id, &event);
+}
+
 /// Check if a binding conflict exists for the given key in coordination.jsonl.
 ///
 /// Returns `Some(BindingConflict)` if a binding with the same key but a
