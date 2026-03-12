@@ -163,3 +163,5 @@ Per-user store (~/.config/edda/ or %APPDATA%/edda/)
 ```
 
 Heartbeats are written at every prompt. The coordination log is append-only. Both are scanned at hook time by `peers.rs` to build the board state injected into agent context.
+
+For detailed consistency semantics, staleness windows, recovery behavior, and contributor guidance on where to write new state, see [State Consistency Contract](consistency-contract.md).
