@@ -145,6 +145,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/scope/whitelist", get(get_scope_whitelist))
         .route("/api/authz/check", post(post_authz_check))
         .route("/api/approval/check", post(post_approval_check))
+        .route("/api/tool-tier/{tool_name}", get(get_tool_tier))
         .route("/api/recap", get(get_recap))
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
@@ -197,6 +198,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/scope/whitelist", get(get_scope_whitelist))
         .route("/api/authz/check", post(post_authz_check))
         .route("/api/approval/check", post(post_approval_check))
+        .route("/api/tool-tier/{tool_name}", get(get_tool_tier))
         .route("/api/recap", get(get_recap))
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
@@ -1226,6 +1228,18 @@ async fn post_authz_check(
     Ok(Json(result))
 }
 
+// ── GET /api/tool-tier/:tool_name ──
+
+async fn get_tool_tier(
+    State(state): State<Arc<AppState>>,
+    AxumPath(tool_name): AxumPath<String>,
+) -> Result<Json<edda_core::tool_tier::ToolTierResult>, AppError> {
+    let edda_dir = state.repo_root.join(".edda");
+    let config = edda_core::tool_tier::load_tool_tiers_from_dir(&edda_dir)?;
+    let result = edda_core::tool_tier::resolve_tool_tier(&config, &tool_name);
+    Ok(Json(result))
+}
+
 // ── POST /api/approval/check ──
 
 #[derive(Deserialize)]
@@ -1268,7 +1282,9 @@ async fn post_approval_check(
         serde_json::from_value::<edda_core::bundle::ReviewBundle>(event.payload)?
     } else {
         // Build a synthetic bundle from inline fields
-        let risk = body.risk_level.unwrap_or(edda_core::bundle::RiskLevel::Medium);
+        let risk = body
+            .risk_level
+            .unwrap_or(edda_core::bundle::RiskLevel::Medium);
         let file_count = body.files_changed.unwrap_or(0) as usize;
         let failed = body.tests_failed.unwrap_or(0);
         let files: Vec<edda_core::bundle::FileChange> = (0..file_count)
