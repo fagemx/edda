@@ -2289,22 +2289,23 @@ mod tests {
 
     // ── Decision outcome tests ───────────────────────────────────────
 
-    #[allow(clippy::too_many_arguments)]
-    fn make_execution_event_with_decision_ref(
-        branch: &str,
-        event_id: &str,
-        ts: &str,
-        decision_ref: Option<&str>,
-        status: &str,
+    struct ExecutionEventParams<'a> {
+        branch: &'a str,
+        event_id: &'a str,
+        ts: &'a str,
+        decision_ref: Option<&'a str>,
+        status: &'a str,
         cost_usd: f64,
         token_in: u64,
         token_out: u64,
         latency_ms: u64,
-    ) -> Event {
+    }
+
+    fn make_execution_event_with_decision_ref(p: &ExecutionEventParams<'_>) -> Event {
         use edda_core::types::{Provenance, Refs};
         use edda_core::SCHEMA_VERSION;
 
-        let refs = if let Some(dr) = decision_ref {
+        let refs = if let Some(dr) = p.decision_ref {
             Refs {
                 provenance: vec![Provenance {
                     target: dr.to_string(),
@@ -2319,26 +2320,26 @@ mod tests {
 
         let payload = serde_json::json!({
             "version": "karvi.event.v1",
-            "event_id": event_id,
+            "event_id": p.event_id,
             "event_type": "step_completed",
-            "occurred_at": ts,
-            "trace_id": format!("trace_{}", event_id),
-            "task_id": format!("task_{}", event_id),
-            "step_id": format!("step_{}", event_id),
+            "occurred_at": p.ts,
+            "trace_id": format!("trace_{}", p.event_id),
+            "task_id": format!("task_{}", p.event_id),
+            "step_id": format!("step_{}", p.event_id),
             "project": "test/repo",
             "runtime": "opencode",
             "model": "gpt-4",
             "actor": { "kind": "agent", "id": "test-agent" },
-            "usage": { "token_in": token_in, "token_out": token_out, "cost_usd": cost_usd, "latency_ms": latency_ms },
-            "result": { "status": status, "error_code": null, "retryable": false },
-            "decision_ref": decision_ref,
+            "usage": { "token_in": p.token_in, "token_out": p.token_out, "cost_usd": p.cost_usd, "latency_ms": p.latency_ms },
+            "result": { "status": p.status, "error_code": null, "retryable": false },
+            "decision_ref": p.decision_ref,
         });
 
         let mut event = Event {
-            event_id: event_id.to_string(),
-            ts: ts.to_string(),
+            event_id: p.event_id.to_string(),
+            ts: p.ts.to_string(),
             event_type: "execution_event".to_string(),
-            branch: branch.to_string(),
+            branch: p.branch.to_string(),
             parent_hash: None,
             hash: String::new(),
             payload,
@@ -2380,57 +2381,57 @@ mod tests {
         store.append_event(&d1).unwrap();
 
         // Add 3 execution events linked to the decision
-        let e1 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_1",
-            "2026-03-01T10:00:00Z",
-            Some(&d1_id),
-            "success",
-            0.01,
-            100,
-            50,
-            500,
-        );
+        let e1 = make_execution_event_with_decision_ref(&ExecutionEventParams {
+            branch: "main",
+            event_id: "evt_exec_1",
+            ts: "2026-03-01T10:00:00Z",
+            decision_ref: Some(&d1_id),
+            status: "success",
+            cost_usd: 0.01,
+            token_in: 100,
+            token_out: 50,
+            latency_ms: 500,
+        });
         store.append_event(&e1).unwrap();
 
-        let e2 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_2",
-            "2026-03-01T11:00:00Z",
-            Some(&d1_id),
-            "success",
-            0.02,
-            200,
-            100,
-            600,
-        );
+        let e2 = make_execution_event_with_decision_ref(&ExecutionEventParams {
+            branch: "main",
+            event_id: "evt_exec_2",
+            ts: "2026-03-01T11:00:00Z",
+            decision_ref: Some(&d1_id),
+            status: "success",
+            cost_usd: 0.02,
+            token_in: 200,
+            token_out: 100,
+            latency_ms: 600,
+        });
         store.append_event(&e2).unwrap();
 
-        let e3 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_3",
-            "2026-03-01T12:00:00Z",
-            Some(&d1_id),
-            "failed",
-            0.015,
-            150,
-            75,
-            400,
-        );
+        let e3 = make_execution_event_with_decision_ref(&ExecutionEventParams {
+            branch: "main",
+            event_id: "evt_exec_3",
+            ts: "2026-03-01T12:00:00Z",
+            decision_ref: Some(&d1_id),
+            status: "failed",
+            cost_usd: 0.015,
+            token_in: 150,
+            token_out: 75,
+            latency_ms: 400,
+        });
         store.append_event(&e3).unwrap();
 
         // Add an execution NOT linked to this decision (should be ignored)
-        let e4 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_4",
-            "2026-03-01T13:00:00Z",
-            None,
-            "success",
-            0.5,
-            1000,
-            500,
-            1000,
-        );
+        let e4 = make_execution_event_with_decision_ref(&ExecutionEventParams {
+            branch: "main",
+            event_id: "evt_exec_4",
+            ts: "2026-03-01T13:00:00Z",
+            decision_ref: None,
+            status: "success",
+            cost_usd: 0.5,
+            token_in: 1000,
+            token_out: 500,
+            latency_ms: 1000,
+        });
         store.append_event(&e4).unwrap();
 
         let outcomes = store.decision_outcomes(&d1_id).unwrap();
@@ -2483,45 +2484,45 @@ mod tests {
         store.append_event(&d2).unwrap();
 
         // Execution linked to d1
-        let e1 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_d1",
-            "2026-03-01T10:00:00Z",
-            Some(&d1_id),
-            "success",
-            0.01,
-            100,
-            50,
-            500,
-        );
+        let e1 = make_execution_event_with_decision_ref(&ExecutionEventParams {
+            branch: "main",
+            event_id: "evt_exec_d1",
+            ts: "2026-03-01T10:00:00Z",
+            decision_ref: Some(&d1_id),
+            status: "success",
+            cost_usd: 0.01,
+            token_in: 100,
+            token_out: 50,
+            latency_ms: 500,
+        });
         store.append_event(&e1).unwrap();
 
         // Execution linked to d2
-        let e2 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_d2",
-            "2026-03-01T11:00:00Z",
-            Some(&d2_id),
-            "failed",
-            0.02,
-            200,
-            100,
-            600,
-        );
+        let e2 = make_execution_event_with_decision_ref(&ExecutionEventParams {
+            branch: "main",
+            event_id: "evt_exec_d2",
+            ts: "2026-03-01T11:00:00Z",
+            decision_ref: Some(&d2_id),
+            status: "failed",
+            cost_usd: 0.02,
+            token_in: 200,
+            token_out: 100,
+            latency_ms: 600,
+        });
         store.append_event(&e2).unwrap();
 
         // Execution with no decision_ref
-        let e3 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_none",
-            "2026-03-01T12:00:00Z",
-            None,
-            "success",
-            0.03,
-            300,
-            150,
-            700,
-        );
+        let e3 = make_execution_event_with_decision_ref(&ExecutionEventParams {
+            branch: "main",
+            event_id: "evt_exec_none",
+            ts: "2026-03-01T12:00:00Z",
+            decision_ref: None,
+            status: "success",
+            cost_usd: 0.03,
+            token_in: 300,
+            token_out: 150,
+            latency_ms: 700,
+        });
         store.append_event(&e3).unwrap();
 
         let d1_execs = store.executions_for_decision(&d1_id).unwrap();

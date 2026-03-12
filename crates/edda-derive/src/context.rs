@@ -539,6 +539,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Parameters for creating a session_digest note event in tests.
+    struct DigestParams<'a> {
+        branch: &'a str,
+        session_id: &'a str,
+        tool_calls: u64,
+        files: &'a [&'a str],
+        commits: &'a [&'a str],
+        failed: &'a [&'a str],
+        duration_min: u64,
+        tasks: &'a [(&'a str, &'a str)],
+        outcome: &'a str,
+    }
+
     /// Helper: create a session_digest note event with full session_stats.
     fn make_digest_note(
         branch: &str,
@@ -561,7 +574,6 @@ mod tests {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn make_digest_note_with_tasks(
         branch: &str,
         session_id: &str,
@@ -570,9 +582,9 @@ mod tests {
         commits: &[&str],
         failed: &[&str],
         duration_min: u64,
-        tasks: &[(&str, &str)], // (subject, status)
+        tasks: &[(&str, &str)],
     ) -> Event {
-        make_digest_note_full(
+        make_digest_note_from_params(&DigestParams {
             branch,
             session_id,
             tool_calls,
@@ -581,11 +593,10 @@ mod tests {
             failed,
             duration_min,
             tasks,
-            "completed",
-        )
+            outcome: "completed",
+        })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn make_digest_note_full(
         branch: &str,
         session_id: &str,
@@ -597,37 +608,51 @@ mod tests {
         tasks: &[(&str, &str)],
         outcome: &str,
     ) -> Event {
+        make_digest_note_from_params(&DigestParams {
+            branch,
+            session_id,
+            tool_calls,
+            files,
+            commits,
+            failed,
+            duration_min,
+            tasks,
+            outcome,
+        })
+    }
+
+    fn make_digest_note_from_params(p: &DigestParams<'_>) -> Event {
         use edda_core::event::finalize_event;
         use edda_core::types::SCHEMA_VERSION;
 
-        let tasks_json: Vec<serde_json::Value> = tasks
+        let tasks_json: Vec<serde_json::Value> = p.tasks
             .iter()
             .map(|(s, st)| serde_json::json!({"subject": s, "status": st}))
             .collect();
 
         let payload = serde_json::json!({
             "role": "system",
-            "text": format!("Session {session_id}: {tool_calls} tool calls"),
+            "text": format!("Session {}: {} tool calls", p.session_id, p.tool_calls),
             "tags": ["session_digest"],
             "source": "bridge:session_digest",
-            "session_id": session_id,
+            "session_id": p.session_id,
             "session_stats": {
-                "tool_calls": tool_calls,
+                "tool_calls": p.tool_calls,
                 "tool_failures": 0u64,
                 "user_prompts": 1u64,
-                "files_modified": files,
-                "failed_commands": failed,
-                "commits_made": commits,
+                "files_modified": p.files,
+                "failed_commands": p.failed,
+                "commits_made": p.commits,
                 "tasks_snapshot": tasks_json,
-                "outcome": outcome,
-                "duration_minutes": duration_min,
+                "outcome": p.outcome,
+                "duration_minutes": p.duration_min,
             }
         });
         let mut event = Event {
-            event_id: format!("evt_test_{session_id}"),
+            event_id: format!("evt_test_{}", p.session_id),
             ts: "2026-02-14T10:00:00Z".to_string(),
             event_type: "note".to_string(),
-            branch: branch.to_string(),
+            branch: p.branch.to_string(),
             parent_hash: None,
             hash: String::new(),
             payload,
