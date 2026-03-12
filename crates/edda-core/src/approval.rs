@@ -279,10 +279,14 @@ impl ApprovalCondition {
                     if within {
                         return false; // Inside the range, so "time_outside" is false
                     }
+                } else {
+                    // Malformed range string — fail-closed: require approval
+                    return false;
                 }
-                // Malformed range string — treat as non-matching
+            } else {
+                // No current_time provided — fail-closed: uncertain => require approval
+                return false;
             }
-            // No current_time provided — skip this condition
         }
 
         if let Some(threshold) = self.consecutive_failures_gte {
@@ -938,5 +942,39 @@ default_action: auto_approve
         let template = generate_template();
         let parsed: ApprovalPolicy = serde_yaml::from_str(&template).unwrap();
         assert_eq!(parsed.name, "default");
+    }
+
+    // ── Fail-closed time_outside tests ──
+
+    #[test]
+    fn time_outside_with_no_current_time_does_not_match() {
+        let cond = ApprovalCondition {
+            time_outside: Some("09:00-18:00".to_string()),
+            ..Default::default()
+        };
+        let bundle = sample_bundle(RiskLevel::Low, 1, 0);
+        let phase = sample_phase();
+        // current_time is None via make_ctx
+        let ctx = make_ctx(&bundle, &phase, false, 0);
+        assert!(!cond.matches(&ctx));
+    }
+
+    #[test]
+    fn time_outside_with_malformed_range_does_not_match() {
+        let cond = ApprovalCondition {
+            time_outside: Some("invalid".to_string()),
+            ..Default::default()
+        };
+        let bundle = sample_bundle(RiskLevel::Low, 1, 0);
+        let phase = sample_phase();
+        let now = time::OffsetDateTime::now_utc();
+        let ctx = EvalContext {
+            bundle: &bundle,
+            phase: &phase,
+            off_limits_touched: false,
+            consecutive_failures: 0,
+            current_time: Some(now),
+        };
+        assert!(!cond.matches(&ctx));
     }
 }
