@@ -56,11 +56,7 @@ impl TmuxSession {
     /// Each phase pane runs `tail -f <transcript_dir>/<phase_id>*.jsonl` so
     /// the human can see agent activity in real time. The bottom pane runs
     /// `edda watch` for the coordination dashboard.
-    pub fn create(
-        plan_name: &str,
-        phase_ids: &[String],
-        transcript_dir: &Path,
-    ) -> Result<Self> {
+    pub fn create(plan_name: &str, phase_ids: &[String], transcript_dir: &Path) -> Result<Self> {
         if !Self::is_available() {
             bail!("tmux is not installed or not in PATH");
         }
@@ -119,13 +115,7 @@ impl TmuxSession {
         // Create additional phase panes
         for (i, phase_id) in phase_ids.iter().enumerate().skip(1) {
             let cmd = Self::tail_command(transcript_dir, phase_id);
-            run_tmux(&[
-                "split-window",
-                "-t",
-                &session_name,
-                "-h",
-                &cmd,
-            ])?;
+            run_tmux(&["split-window", "-t", &session_name, "-h", &cmd])?;
 
             let pane_id = format!("{session_name}:0.{i}");
             let _ = run_tmux(&[

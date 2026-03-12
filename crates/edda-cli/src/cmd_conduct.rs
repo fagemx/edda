@@ -263,10 +263,7 @@ pub fn run(
             "\nTmux session still active: tmux attach -t {}",
             session.session_name
         );
-        println!(
-            "  Destroy: tmux kill-session -t {}",
-            session.session_name
-        );
+        println!("  Destroy: tmux kill-session -t {}", session.session_name);
     }
 
     result

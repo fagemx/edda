@@ -171,5 +171,4 @@ mod tests {
             "worktree and main tree must have same project_id"
         );
     }
-
 }

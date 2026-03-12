@@ -206,8 +206,7 @@ phases:
 
     #[test]
     fn from_state_empty_plan() {
-        let plan =
-            parse_plan("name: empty\nphases:\n  - id: a\n    prompt: x\n").unwrap();
+        let plan = parse_plan("name: empty\nphases:\n  - id: a\n    prompt: x\n").unwrap();
         let state = PlanState::from_plan(&plan, "plan.yaml");
         let brief = Brief::from_state(&state, None);
 
@@ -340,21 +339,33 @@ phases:
             None,
         )
         .unwrap();
-        let brief = Brief::from_state(&state, Some(BriefMeta {
-            board_type: Some("brief".into()),
-            version: Some(1),
-            task_id: Some("T5".into()),
-            runtime: Some("edda".into()),
-            updated_at: Some("2026-01-01T00:00:00Z".into()),
-        }));
+        let brief = Brief::from_state(
+            &state,
+            Some(BriefMeta {
+                board_type: Some("brief".into()),
+                version: Some(1),
+                task_id: Some("T5".into()),
+                runtime: Some("edda".into()),
+                updated_at: Some("2026-01-01T00:00:00Z".into()),
+            }),
+        );
 
         let json = serde_json::to_string_pretty(&brief).unwrap();
 
         // Verify camelCase keys
         assert!(json.contains("\"boardType\""), "expected boardType in JSON");
-        assert!(json.contains("\"totalPhases\""), "expected totalPhases in JSON");
-        assert!(json.contains("\"completedPhases\""), "expected completedPhases in JSON");
-        assert!(json.contains("\"currentPhase\""), "expected currentPhase in JSON");
+        assert!(
+            json.contains("\"totalPhases\""),
+            "expected totalPhases in JSON"
+        );
+        assert!(
+            json.contains("\"completedPhases\""),
+            "expected completedPhases in JSON"
+        );
+        assert!(
+            json.contains("\"currentPhase\""),
+            "expected currentPhase in JSON"
+        );
         assert!(json.contains("\"taskId\""), "expected taskId in JSON");
         assert!(json.contains("\"updatedAt\""), "expected updatedAt in JSON");
         assert!(json.contains("\"totalUsd\""), "expected totalUsd in JSON");
@@ -384,13 +395,16 @@ phases:
         .unwrap();
         state.total_cost_usd = 0.42;
 
-        let brief = Brief::from_state(&state, Some(BriefMeta {
-            board_type: Some("brief".into()),
-            version: Some(1),
-            task_id: None,
-            runtime: Some("edda".into()),
-            updated_at: None,
-        }));
+        let brief = Brief::from_state(
+            &state,
+            Some(BriefMeta {
+                board_type: Some("brief".into()),
+                version: Some(1),
+                task_id: None,
+                runtime: Some("edda".into()),
+                updated_at: None,
+            }),
+        );
 
         let json = serde_json::to_string_pretty(&brief).unwrap();
         let restored: Brief = serde_json::from_str(&json).unwrap();

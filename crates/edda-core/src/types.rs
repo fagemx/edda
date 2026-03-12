@@ -67,7 +67,48 @@ pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'
             Some(event_level::GOVERNANCE),
         ),
         "pr" => (Some(event_family::MILESTONE), Some(event_level::MILESTONE)),
+        "decision_import" => (
+            Some(event_family::GOVERNANCE),
+            Some(event_level::GOVERNANCE),
+        ),
         _ => (None, None),
+    }
+}
+
+/// Scope of a decision's propagation across projects.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum DecisionScope {
+    /// Default: stays in this project only.
+    #[default]
+    Local,
+    /// Propagates to projects in the same group.
+    Shared,
+    /// Propagates to all registered projects.
+    Global,
+}
+
+impl std::fmt::Display for DecisionScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Local => write!(f, "local"),
+            Self::Shared => write!(f, "shared"),
+            Self::Global => write!(f, "global"),
+        }
+    }
+}
+
+impl std::str::FromStr for DecisionScope {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "local" => Ok(Self::Local),
+            "shared" => Ok(Self::Shared),
+            "global" => Ok(Self::Global),
+            other => Err(format!(
+                "unknown scope: {other} (expected local|shared|global)"
+            )),
+        }
     }
 }
 
@@ -78,6 +119,8 @@ pub struct DecisionPayload {
     pub value: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<DecisionScope>,
 }
 
 /// Well-known relation types for provenance links.
@@ -87,6 +130,7 @@ pub mod rel {
     pub const CONTINUES: &str = "continues";
     pub const REVIEWS: &str = "reviews";
     pub const DEPENDS_ON: &str = "depends_on";
+    pub const IMPORTED_FROM: &str = "imported_from";
 }
 
 /// References to other events and blobs
@@ -140,13 +184,38 @@ mod tests {
             ("rebuild", event_family::ADMIN, event_level::TRACE),
             ("branch_create", event_family::ADMIN, event_level::INFO),
             ("branch_switch", event_family::ADMIN, event_level::INFO),
-            ("approval", event_family::GOVERNANCE, event_level::GOVERNANCE),
-            ("approval_request", event_family::GOVERNANCE, event_level::GOVERNANCE),
+            (
+                "approval",
+                event_family::GOVERNANCE,
+                event_level::GOVERNANCE,
+            ),
+            (
+                "approval_request",
+                event_family::GOVERNANCE,
+                event_level::GOVERNANCE,
+            ),
             ("task_intake", event_family::SIGNAL, event_level::INFO),
-            ("agent_phase_change", event_family::SIGNAL, event_level::INFO),
-            ("review_bundle", event_family::GOVERNANCE, event_level::MILESTONE),
-            ("approval_policy_match", event_family::GOVERNANCE, event_level::GOVERNANCE),
+            (
+                "agent_phase_change",
+                event_family::SIGNAL,
+                event_level::INFO,
+            ),
+            (
+                "review_bundle",
+                event_family::GOVERNANCE,
+                event_level::MILESTONE,
+            ),
+            (
+                "approval_policy_match",
+                event_family::GOVERNANCE,
+                event_level::GOVERNANCE,
+            ),
             ("pr", event_family::MILESTONE, event_level::MILESTONE),
+            (
+                "decision_import",
+                event_family::GOVERNANCE,
+                event_level::GOVERNANCE,
+            ),
         ];
 
         for (event_type, expected_family, expected_level) in &table {
@@ -254,11 +323,20 @@ mod tests {
         };
         let json = serde_json::to_string(&event).expect("serialize");
         // Optional fields with skip_serializing_if should be omitted
-        assert!(!json.contains("event_family"), "event_family should be omitted");
-        assert!(!json.contains("event_level"), "event_level should be omitted");
+        assert!(
+            !json.contains("event_family"),
+            "event_family should be omitted"
+        );
+        assert!(
+            !json.contains("event_level"),
+            "event_level should be omitted"
+        );
         assert!(!json.contains("digests"), "empty digests should be omitted");
         // parent_hash is Option but without skip_serializing_if, so it serializes as null
-        assert!(json.contains("parent_hash"), "parent_hash should be present (as null)");
+        assert!(
+            json.contains("parent_hash"),
+            "parent_hash should be present (as null)"
+        );
         let val: serde_json::Value = serde_json::from_str(&json).expect("parse");
         assert!(val["parent_hash"].is_null());
     }
@@ -283,6 +361,7 @@ mod tests {
             key: "db.engine".to_string(),
             value: "sqlite".to_string(),
             reason: Some("embedded, zero-config".to_string()),
+            scope: None,
         };
         let json = serde_json::to_string(&dp).expect("serialize");
         let decoded: DecisionPayload = serde_json::from_str(&json).expect("deserialize");
@@ -293,11 +372,55 @@ mod tests {
             key: "auth.strategy".to_string(),
             value: "JWT".to_string(),
             reason: None,
+            scope: None,
         };
         let json2 = serde_json::to_string(&dp_no_reason).expect("serialize");
         assert!(!json2.contains("reason"), "None reason should be omitted");
+        assert!(!json2.contains("scope"), "None scope should be omitted");
         let decoded2: DecisionPayload = serde_json::from_str(&json2).expect("deserialize");
         assert_eq!(decoded2, dp_no_reason);
+    }
+
+    #[test]
+    fn decision_payload_with_scope_round_trip() {
+        let dp = DecisionPayload {
+            key: "api.version".to_string(),
+            value: "v3".to_string(),
+            reason: Some("breaking change".to_string()),
+            scope: Some(DecisionScope::Shared),
+        };
+        let json = serde_json::to_string(&dp).expect("serialize");
+        assert!(json.contains("\"scope\":\"shared\""));
+        let decoded: DecisionPayload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.scope, Some(DecisionScope::Shared));
+    }
+
+    #[test]
+    fn decision_scope_ordering() {
+        assert!(DecisionScope::Local < DecisionScope::Shared);
+        assert!(DecisionScope::Shared < DecisionScope::Global);
+    }
+
+    #[test]
+    fn decision_scope_parse_round_trip() {
+        for (s, expected) in [
+            ("local", DecisionScope::Local),
+            ("shared", DecisionScope::Shared),
+            ("global", DecisionScope::Global),
+            ("SHARED", DecisionScope::Shared),
+        ] {
+            let parsed: DecisionScope = s.parse().unwrap();
+            assert_eq!(parsed, expected);
+        }
+        assert!("unknown".parse::<DecisionScope>().is_err());
+    }
+
+    #[test]
+    fn decision_scope_backward_compat() {
+        // Old payload without scope field should deserialize with scope = None
+        let json = r#"{"key":"db","value":"pg","reason":"fast"}"#;
+        let dp: DecisionPayload = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(dp.scope, None);
     }
 
     #[test]
@@ -374,5 +497,6 @@ mod tests {
         assert_eq!(rel::CONTINUES, "continues");
         assert_eq!(rel::REVIEWS, "reviews");
         assert_eq!(rel::DEPENDS_ON, "depends_on");
+        assert_eq!(rel::IMPORTED_FROM, "imported_from");
     }
 }

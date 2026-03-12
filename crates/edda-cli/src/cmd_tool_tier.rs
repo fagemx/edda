@@ -55,7 +55,14 @@ pub fn run(cmd: ToolTierCmd, repo_root: &Path) -> anyhow::Result<()> {
             let reason_str = reason.unwrap_or_else(|| format!("set tool tier: {tool} -> {tier}"));
 
             // Use the same decide path as `edda decide`
-            super::cmd_bridge::decide(repo_root, &decision_str, Some(&reason_str), &[], None)?;
+            super::cmd_bridge::decide(
+                repo_root,
+                &decision_str,
+                Some(&reason_str),
+                &[],
+                None,
+                None,
+            )?;
 
             println!("Set {tool} = {tier}");
         }

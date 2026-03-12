@@ -81,10 +81,14 @@ pub fn compute_decision_risks(
     decisions
         .iter()
         .map(|d| {
-            let downstream_count =
-                downstream_counts.get(d.event_id.as_str()).copied().unwrap_or(0);
-            let execution_refs =
-                execution_counts.get(d.event_id.as_str()).copied().unwrap_or(0);
+            let downstream_count = downstream_counts
+                .get(d.event_id.as_str())
+                .copied()
+                .unwrap_or(0);
+            let execution_refs = execution_counts
+                .get(d.event_id.as_str())
+                .copied()
+                .unwrap_or(0);
             let cross_project = cross_project_ids.contains(&d.event_id);
             let has_approval = approval_set.contains(d.event_id.as_str());
             let age_days = compute_age_days(d.ts.as_deref(), now_iso);
@@ -280,8 +284,7 @@ mod tests {
 
         let mut cross = HashSet::new();
         cross.insert("evt_cp".to_string());
-        let risks_cross =
-            compute_decision_risks(&decisions, &[], "2026-03-12T00:00:00Z", &cross);
+        let risks_cross = compute_decision_risks(&decisions, &[], "2026-03-12T00:00:00Z", &cross);
 
         assert!(risks_cross[0].risk_score > risks_no_cross[0].risk_score);
         assert_eq!(

@@ -208,6 +208,31 @@ impl Ledger {
         self.sqlite.find_active_decision(branch, key)
     }
 
+    // ── Cross-Project Sync ────────────────────────────────────────────
+
+    /// Query active decisions with shared or global scope.
+    pub fn shared_decisions(&self) -> anyhow::Result<Vec<DecisionRow>> {
+        self.sqlite.shared_decisions()
+    }
+
+    /// Check if a decision has already been imported from a source project.
+    pub fn is_already_imported(
+        &self,
+        source_project_id: &str,
+        source_event_id: &str,
+    ) -> anyhow::Result<bool> {
+        self.sqlite
+            .is_already_imported(source_project_id, source_event_id)
+    }
+
+    /// Insert an imported decision from another project.
+    pub fn insert_imported_decision(
+        &self,
+        params: crate::sqlite_store::ImportParams<'_>,
+    ) -> anyhow::Result<()> {
+        self.sqlite.insert_imported_decision(params)
+    }
+
     // ── Decision Dependencies ────────────────────────────────────────
 
     /// Insert a dependency edge between two decision keys.

@@ -95,6 +95,14 @@ CREATE INDEX IF NOT EXISTS idx_bundles_status ON review_bundles(status);
 CREATE INDEX IF NOT EXISTS idx_bundles_bundle_id ON review_bundles(bundle_id);
 ";
 
+const SCHEMA_V5_SQL: &str = "
+ALTER TABLE decisions ADD COLUMN scope TEXT NOT NULL DEFAULT 'local';
+ALTER TABLE decisions ADD COLUMN source_project_id TEXT;
+ALTER TABLE decisions ADD COLUMN source_event_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_decisions_scope ON decisions(scope) WHERE scope != 'local';
+CREATE INDEX IF NOT EXISTS idx_decisions_source ON decisions(source_project_id) WHERE source_project_id IS NOT NULL;
+";
+
 /// A row from the `decisions` table.
 #[derive(Debug, Clone)]
 pub struct DecisionRow {
@@ -107,6 +115,12 @@ pub struct DecisionRow {
     pub supersedes_id: Option<String>,
     pub is_active: bool,
     pub ts: Option<String>,
+    /// Decision propagation scope: "local", "shared", or "global".
+    pub scope: String,
+    /// Source project ID if this decision was imported from another project.
+    pub source_project_id: Option<String>,
+    /// Source event ID if this decision was imported from another project.
+    pub source_event_id: Option<String>,
 }
 
 /// A row from the `review_bundles` table.
@@ -134,6 +148,19 @@ pub struct DepRow {
     pub dep_type: String,
     pub created_event: Option<String>,
     pub created_at: String,
+}
+
+/// Parameters for inserting an imported decision from another project.
+pub struct ImportParams<'a> {
+    pub event: &'a edda_core::types::Event,
+    pub key: &'a str,
+    pub value: &'a str,
+    pub reason: &'a str,
+    pub domain: &'a str,
+    pub scope: &'a str,
+    pub source_project_id: &'a str,
+    pub source_event_id: &'a str,
+    pub is_active: bool,
 }
 
 /// Aggregated outcome metrics for a decision.
@@ -233,6 +260,12 @@ impl SqliteStore {
             self.migrate_v3_to_v4()?;
         }
 
+        // Migrate to v5 if needed (cross-project sync fields)
+        let current = self.schema_version()?;
+        if current < 5 {
+            self.migrate_v4_to_v5()?;
+        }
+
         Ok(())
     }
 
@@ -304,8 +337,8 @@ impl SqliteStore {
 
             self.conn.execute(
                 "INSERT OR IGNORE INTO decisions
-                 (event_id, key, value, reason, domain, branch, supersedes_id, is_active)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, TRUE)",
+                 (event_id, key, value, reason, domain, branch, supersedes_id, is_active, scope)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, TRUE, 'local')",
                 params![event_id, key, value, reason, domain, branch, supersedes_id],
             )?;
         }
@@ -403,6 +436,21 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn migrate_v4_to_v5(&self) -> anyhow::Result<()> {
+        // Add cross-project sync columns to decisions table.
+        // SQLite ALTER TABLE ADD COLUMN must be done one at a time.
+        // Use a check to see if column already exists (idempotent).
+        let has_scope: bool = self
+            .conn
+            .prepare("SELECT scope FROM decisions LIMIT 0")
+            .is_ok();
+        if !has_scope {
+            self.conn.execute_batch(SCHEMA_V5_SQL)?;
+        }
+        self.set_schema_version(5)?;
+        Ok(())
+    }
+
     // ── Events ──────────────────────────────────────────────────────
 
     /// Append an event. Append-only (CONTRACT LEDGER-02).
@@ -463,10 +511,14 @@ impl SqliteStore {
                     params![key, event.branch],
                 )?;
 
+                let scope_str = dp
+                    .scope
+                    .unwrap_or(edda_core::types::DecisionScope::Local)
+                    .to_string();
                 tx.execute(
                     "INSERT INTO decisions
-                     (event_id, key, value, reason, domain, branch, supersedes_id, is_active)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, TRUE)",
+                     (event_id, key, value, reason, domain, branch, supersedes_id, is_active, scope)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, TRUE, ?8)",
                     params![
                         event.event_id,
                         key,
@@ -474,7 +526,8 @@ impl SqliteStore {
                         reason,
                         domain,
                         event.branch,
-                        supersedes_id
+                        supersedes_id,
+                        scope_str
                     ],
                 )?;
             }
@@ -1052,21 +1105,24 @@ impl SqliteStore {
         let sql = match (domain, key_pattern) {
             (Some(_), _) => {
                 "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
-                        d.supersedes_id, d.is_active, e.ts
+                        d.supersedes_id, d.is_active, e.ts,
+                        d.scope, d.source_project_id, d.source_event_id
                  FROM decisions d JOIN events e ON d.event_id = e.event_id
                  WHERE d.is_active = TRUE AND d.domain = ?1
                  ORDER BY d.domain, d.key"
             }
             (_, Some(_)) => {
                 "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
-                        d.supersedes_id, d.is_active, e.ts
+                        d.supersedes_id, d.is_active, e.ts,
+                        d.scope, d.source_project_id, d.source_event_id
                  FROM decisions d JOIN events e ON d.event_id = e.event_id
                  WHERE d.is_active = TRUE AND (d.key LIKE ?1 OR d.value LIKE ?1)
                  ORDER BY d.domain, d.key"
             }
             (None, None) => {
                 "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
-                        d.supersedes_id, d.is_active, e.ts
+                        d.supersedes_id, d.is_active, e.ts,
+                        d.scope, d.source_project_id, d.source_event_id
                  FROM decisions d JOIN events e ON d.event_id = e.event_id
                  WHERE d.is_active = TRUE
                  ORDER BY d.domain, d.key"
@@ -1094,7 +1150,8 @@ impl SqliteStore {
     pub fn decision_timeline(&self, key: &str) -> anyhow::Result<Vec<DecisionRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
-                    d.supersedes_id, d.is_active, e.ts
+                    d.supersedes_id, d.is_active, e.ts,
+                    d.scope, d.source_project_id, d.source_event_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.key = ?1
              ORDER BY e.ts",
@@ -1108,7 +1165,8 @@ impl SqliteStore {
     pub fn domain_timeline(&self, domain: &str) -> anyhow::Result<Vec<DecisionRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
-                    d.supersedes_id, d.is_active, e.ts
+                    d.supersedes_id, d.is_active, e.ts,
+                    d.scope, d.source_project_id, d.source_event_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.domain = ?1
              ORDER BY e.ts",
@@ -1126,6 +1184,108 @@ impl SqliteStore {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("list domains query failed: {e}"))
+    }
+
+    // ── Cross-Project Sync ─────────────────────────────────────────────
+
+    /// Query active decisions with shared or global scope.
+    /// Used by the sync engine to find decisions that should be shared.
+    pub fn shared_decisions(&self) -> anyhow::Result<Vec<DecisionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                    d.supersedes_id, d.is_active, e.ts,
+                    d.scope, d.source_project_id, d.source_event_id
+             FROM decisions d JOIN events e ON d.event_id = e.event_id
+             WHERE d.is_active = TRUE AND d.scope IN ('shared', 'global')
+               AND d.source_project_id IS NULL
+             ORDER BY d.domain, d.key",
+        )?;
+        let rows = stmt.query_map([], map_decision_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("shared decisions query failed: {e}"))
+    }
+
+    /// Check if a decision from a source project/event has already been imported.
+    pub fn is_already_imported(
+        &self,
+        source_project_id: &str,
+        source_event_id: &str,
+    ) -> anyhow::Result<bool> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM decisions
+             WHERE source_project_id = ?1 AND source_event_id = ?2",
+            params![source_project_id, source_event_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Insert an imported decision from another project.
+    /// This writes both the event and the decisions table entry.
+    pub fn insert_imported_decision(&self, p: ImportParams<'_>) -> anyhow::Result<()> {
+        let payload = serde_json::to_string(&p.event.payload)?;
+        let refs_blobs = serde_json::to_string(&p.event.refs.blobs)?;
+        let refs_events = serde_json::to_string(&p.event.refs.events)?;
+        let refs_provenance = serde_json::to_string(&p.event.refs.provenance)?;
+        let digests = serde_json::to_string(&p.event.digests)?;
+
+        let tx = self.conn.unchecked_transaction()?;
+
+        tx.execute(
+            "INSERT INTO events (
+                event_id, ts, event_type, branch, parent_hash, hash,
+                payload, refs_blobs, refs_events, refs_provenance,
+                schema_version, digests, event_family, event_level
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                p.event.event_id,
+                p.event.ts,
+                p.event.event_type,
+                p.event.branch,
+                p.event.parent_hash,
+                p.event.hash,
+                payload,
+                refs_blobs,
+                refs_events,
+                refs_provenance,
+                p.event.schema_version,
+                digests,
+                p.event.event_family,
+                p.event.event_level,
+            ],
+        )?;
+
+        // If active, deactivate prior local decision with same key
+        if p.is_active {
+            tx.execute(
+                "UPDATE decisions SET is_active = FALSE
+                 WHERE key = ?1 AND branch = ?2 AND is_active = TRUE
+                   AND source_project_id IS NULL",
+                params![p.key, p.event.branch],
+            )?;
+        }
+
+        tx.execute(
+            "INSERT INTO decisions
+             (event_id, key, value, reason, domain, branch, supersedes_id, is_active,
+              scope, source_project_id, source_event_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10)",
+            params![
+                p.event.event_id,
+                p.key,
+                p.value,
+                p.reason,
+                p.domain,
+                p.event.branch,
+                p.is_active,
+                p.scope,
+                p.source_project_id,
+                p.source_event_id,
+            ],
+        )?;
+
+        tx.commit()?;
+        Ok(())
     }
 
     // ── Review Bundles ────────────────────────────────────────────────
@@ -1182,7 +1342,8 @@ impl SqliteStore {
     ) -> anyhow::Result<Option<DecisionRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
-                    d.supersedes_id, d.is_active, e.ts
+                    d.supersedes_id, d.is_active, e.ts,
+                    d.scope, d.source_project_id, d.source_event_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.key = ?1 AND d.branch = ?2 AND d.is_active = TRUE
              LIMIT 1",
@@ -1277,7 +1438,8 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(
             "SELECT dd.source_key, dd.target_key, dd.dep_type, dd.created_event, dd.created_at,
                     d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
-                    d.supersedes_id, d.is_active, e.ts
+                    d.supersedes_id, d.is_active, e.ts,
+                    d.scope, d.source_project_id, d.source_event_id
              FROM decision_deps dd
              JOIN decisions d ON d.key = dd.source_key AND d.is_active = TRUE
              JOIN events e ON d.event_id = e.event_id
@@ -1301,6 +1463,9 @@ impl SqliteStore {
                 supersedes_id: row.get(11)?,
                 is_active: row.get(12)?,
                 ts: row.get(13)?,
+                scope: row.get(14)?,
+                source_project_id: row.get(15)?,
+                source_event_id: row.get(16)?,
             };
             Ok((dep, decision))
         })?;
@@ -1613,6 +1778,9 @@ fn map_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRow> {
         supersedes_id: row.get(6)?,
         is_active: row.get(7)?,
         ts: row.get(8)?,
+        scope: row.get(9)?,
+        source_project_id: row.get(10)?,
+        source_event_id: row.get(11)?,
     })
 }
 

@@ -798,10 +798,7 @@ mod tests {
 
         let decision = policy.evaluate("anything", &ctx);
         assert_eq!(decision.action, ApprovalAction::AutoApprove);
-        assert_eq!(
-            decision.matched_rule.as_deref(),
-            Some("catch-all-approve")
-        );
+        assert_eq!(decision.matched_rule.as_deref(), Some("catch-all-approve"));
     }
 
     #[test]
@@ -875,7 +872,11 @@ mod tests {
 
     #[test]
     fn step_policy_json_roundtrip() {
-        for sp in [StepPolicy::Always, StepPolicy::Auto, StepPolicy::Conditional] {
+        for sp in [
+            StepPolicy::Always,
+            StepPolicy::Auto,
+            StepPolicy::Conditional,
+        ] {
             let json = serde_json::to_string(&sp).unwrap();
             let back: StepPolicy = serde_json::from_str(&json).unwrap();
             assert_eq!(back, sp);

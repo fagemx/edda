@@ -100,6 +100,7 @@ mod tests {
             key: key.to_string(),
             value: value.to_string(),
             reason: reason.map(|r| r.to_string()),
+            scope: None,
         }
     }
 
@@ -130,6 +131,7 @@ mod tests {
             name: "test-project".to_string(),
             registered_at: "2026-03-01T00:00:00Z".to_string(),
             last_seen: "2026-03-01T00:00:00Z".to_string(),
+            group: None,
         };
 
         let graph = build_dependency_graph(&[entry]);
@@ -152,8 +154,7 @@ mod tests {
 
         // First decision
         let payload1 = make_decision_payload("db.engine", "sqlite", Some("mvp"));
-        let event1 =
-            edda_core::event::new_decision_event("main", None, "user", &payload1).unwrap();
+        let event1 = edda_core::event::new_decision_event("main", None, "user", &payload1).unwrap();
         ledger.append_event(&event1).unwrap();
         let event1_id = event1.event_id.clone();
 
@@ -175,6 +176,7 @@ mod tests {
             name: "test-project".to_string(),
             registered_at: "2026-03-01T00:00:00Z".to_string(),
             last_seen: "2026-03-01T00:00:00Z".to_string(),
+            group: None,
         };
 
         let graph = build_dependency_graph(&[entry]);

@@ -10,6 +10,7 @@ mod cmd_config;
 mod cmd_context;
 mod cmd_draft;
 mod cmd_gc;
+mod cmd_group;
 mod cmd_init;
 mod cmd_intake;
 mod cmd_log;
@@ -33,6 +34,7 @@ mod cmd_serve;
 mod cmd_skill;
 mod cmd_status;
 mod cmd_switch;
+mod cmd_sync;
 mod cmd_tool_tier;
 mod cmd_user;
 mod cmd_watch;
@@ -89,6 +91,23 @@ enum Command {
         /// Session ID (auto-inferred from active heartbeats if omitted)
         #[arg(long)]
         session: Option<String>,
+        /// Decision scope: local (default), shared, or global
+        #[arg(long, default_value = "local")]
+        scope: String,
+    },
+    /// Manage project groups for cross-project sync
+    Group {
+        #[command(subcommand)]
+        cmd: cmd_group::GroupCmd,
+    },
+    /// Pull shared decisions from group members
+    Sync {
+        /// Pull from a specific project name only
+        #[arg(long)]
+        from: Option<String>,
+        /// Preview without writing
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Claim a scope for coordination (shortcut for `bridge claude claim`)
     Claim {
@@ -891,13 +910,17 @@ fn main() -> anyhow::Result<()> {
             reason,
             refs,
             session,
+            scope,
         } => cmd_bridge::decide(
             &repo_root,
             &decision,
             reason.as_deref(),
             &refs,
             session.as_deref(),
+            Some(&scope),
         ),
+        Command::Group { cmd } => cmd_group::execute(cmd, &repo_root),
+        Command::Sync { from, dry_run } => cmd_sync::execute(&repo_root, from.as_deref(), dry_run),
         Command::Claim {
             label,
             paths,

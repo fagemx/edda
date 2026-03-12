@@ -1,5 +1,7 @@
 use clap::Subcommand;
-use edda_core::policy::{load_actors_from_dir, save_actors_to_dir, ActorDef, ActorKind, ActorsConfig};
+use edda_core::policy::{
+    load_actors_from_dir, save_actors_to_dir, ActorDef, ActorKind, ActorsConfig,
+};
 use std::path::Path;
 
 // ── CLI Schema ──
@@ -77,15 +79,7 @@ pub fn run(cmd: ActorCmd, repo_root: &Path) -> anyhow::Result<()> {
             email,
             display_name,
             runtime,
-        } => add(
-            repo_root,
-            &name,
-            &roles,
-            kind,
-            email,
-            display_name,
-            runtime,
-        ),
+        } => add(repo_root, &name, &roles, kind, email, display_name, runtime),
         ActorCmd::Remove { name } => remove(repo_root, &name),
         ActorCmd::List { json, role } => list(repo_root, json, role.as_deref()),
         ActorCmd::Show { name, json } => show(repo_root, &name, json),

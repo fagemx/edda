@@ -218,6 +218,7 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
                 reason.as_deref(),
                 &refs,
                 session.as_deref(),
+                None,
             ),
             BridgeClaudeCmd::Request {
                 to,
@@ -493,6 +494,7 @@ pub fn decide(
     reason: Option<&str>,
     refs: &[String],
     cli_session: Option<&str>,
+    scope_str: Option<&str>,
 ) -> anyhow::Result<()> {
     let (key, value) = decision.split_once('=').ok_or_else(|| {
         anyhow::anyhow!("decision must be in key=value format (e.g. \"auth.method=JWT RS256\")")
@@ -530,10 +532,16 @@ pub fn decide(
     } else {
         &label
     };
+    let scope = scope_str
+        .filter(|s| *s != "local")
+        .map(|s| s.parse::<edda_core::types::DecisionScope>())
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     let dp = edda_core::types::DecisionPayload {
         key: key.to_string(),
         value: value.to_string(),
         reason: reason.map(|r| r.to_string()),
+        scope,
     };
     let mut event =
         edda_core::event::new_decision_event(&branch, parent_hash.as_deref(), actor, &dp)?;
@@ -594,6 +602,9 @@ pub fn decide(
     println!("Decision recorded: {key} = {value}");
     if let Some(r) = reason {
         println!("  reason: {r}");
+    }
+    if let Some(s) = scope {
+        println!("  scope: {s}");
     }
     Ok(())
 }
@@ -971,6 +982,7 @@ fn write_accepted_to_ledger(
             key: d.key.clone(),
             value: d.value.clone(),
             reason: d.reason.clone(),
+            scope: None,
         };
 
         let actor = match d.kind {
@@ -1116,7 +1128,15 @@ mod tests {
         std::env::set_var("EDDA_SESSION_ID", "test-decide-bind-s1");
         std::env::set_var("EDDA_SESSION_LABEL", "auth");
 
-        decide(&tmp, "db.engine=postgres", Some("need JSONB"), &[], None).unwrap();
+        decide(
+            &tmp,
+            "db.engine=postgres",
+            Some("need JSONB"),
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
 
         // Verify binding was written via L2 conflict check API
         let conflict = edda_bridge_claude::peers::find_binding_conflict(&pid, "db.engine", "OTHER");
@@ -1152,6 +1172,7 @@ mod tests {
             Some("stateless auth"),
             &[],
             None,
+            None,
         )
         .unwrap();
 
@@ -1185,8 +1206,16 @@ mod tests {
         std::env::set_var("EDDA_SESSION_ID", "test-decide-super-s3");
         std::env::set_var("EDDA_SESSION_LABEL", "infra");
 
-        decide(&tmp, "db.engine=SQLite", None, &[], None).unwrap();
-        decide(&tmp, "db.engine=PostgreSQL", Some("need JSONB"), &[], None).unwrap();
+        decide(&tmp, "db.engine=SQLite", None, &[], None, None).unwrap();
+        decide(
+            &tmp,
+            "db.engine=PostgreSQL",
+            Some("need JSONB"),
+            &[],
+            None,
+            None,
+        )
+        .unwrap();
 
         let events = ledger.iter_events().unwrap();
         assert_eq!(events.len(), 2, "should have 2 events");
