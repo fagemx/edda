@@ -152,8 +152,7 @@ mod tests {
 
         // First decision
         let payload1 = make_decision_payload("db.engine", "sqlite", Some("mvp"));
-        let event1 =
-            edda_core::event::new_decision_event("main", None, "user", &payload1).unwrap();
+        let event1 = edda_core::event::new_decision_event("main", None, "user", &payload1).unwrap();
         ledger.append_event(&event1).unwrap();
         let event1_id = event1.event_id.clone();
 

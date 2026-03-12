@@ -2,6 +2,7 @@
 //!
 //! Lazy aggregation: reads each project's ledger on demand, no persistent DB.
 
+use crate::rollup::FileEditStat;
 use edda_core::Event;
 use edda_ledger::Ledger;
 use edda_store::registry::ProjectEntry;
@@ -272,6 +273,102 @@ pub fn commits_by_date(projects: &[ProjectEntry], range: &DateRange) -> BTreeMap
     counts
 }
 
+/// Aggregate per-file edit counts by date across all projects.
+///
+/// Reads `session_stats.file_edit_counts` from session digest events.
+/// Uses `HashSet` to deduplicate agent sessions per (date, file).
+pub fn file_edits_by_date(
+    projects: &[ProjectEntry],
+    range: &DateRange,
+) -> BTreeMap<String, Vec<FileEditStat>> {
+    use std::collections::{HashMap, HashSet};
+
+    // Per-file accumulator: (edit_count, last_ts, unique sessions)
+    type FileAcc = (u64, String, HashSet<String>);
+
+    // Intermediate accumulator: date -> file -> FileAcc
+    let mut acc: HashMap<String, HashMap<String, FileAcc>> = HashMap::new();
+
+    for entry in projects {
+        let root = Path::new(&entry.path);
+        let ledger = match Ledger::open(root) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        let events = match ledger.iter_events() {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for event in events.iter().filter(|e| range.matches(&e.ts)) {
+            let date = event.ts[..10.min(event.ts.len())].to_string();
+
+            let session_id = event
+                .payload
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let stats = match event.payload.get("session_stats") {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let file_edits = match stats.get("file_edit_counts").and_then(|v| v.as_array()) {
+                Some(arr) => arr,
+                None => continue,
+            };
+
+            for edit in file_edits {
+                // file_edit_counts is Vec<(String, u64)>, serialized as [["path", count], ...]
+                let arr = match edit.as_array() {
+                    Some(a) if a.len() == 2 => a,
+                    _ => continue,
+                };
+                let path = match arr[0].as_str() {
+                    Some(p) => p.to_string(),
+                    None => continue,
+                };
+                let count = arr[1].as_u64().unwrap_or(0);
+
+                let day_map = acc.entry(date.clone()).or_default();
+                let file_entry = day_map
+                    .entry(path)
+                    .or_insert_with(|| (0, String::new(), HashSet::new()));
+                file_entry.0 += count;
+                if event.ts > file_entry.1 {
+                    file_entry.1.clone_from(&event.ts);
+                }
+                if !session_id.is_empty() {
+                    file_entry.2.insert(session_id.clone());
+                }
+            }
+        }
+    }
+
+    // Convert accumulator to final structure
+    let mut result: BTreeMap<String, Vec<FileEditStat>> = BTreeMap::new();
+    for (date, files) in acc {
+        let mut edits: Vec<FileEditStat> = files
+            .into_iter()
+            .map(|(path, (edit_count, last_edited, sessions))| FileEditStat {
+                path,
+                edit_count,
+                agent_count: sessions.len(),
+                last_edited,
+                revert_count: 0,
+            })
+            .collect();
+        // Sort by edit_count descending for consistent output
+        edits.sort_by(|a, b| b.edit_count.cmp(&a.edit_count));
+        result.insert(date, edits);
+    }
+
+    result
+}
+
 /// Count unique session IDs from events.
 fn count_unique_sessions(events: &[&Event]) -> usize {
     let mut sessions = std::collections::HashSet::new();
@@ -359,5 +456,105 @@ mod tests {
         assert_eq!(result.total_events, 1);
         assert_eq!(result.projects.len(), 1);
         assert_eq!(result.projects[0].event_count, 1);
+    }
+
+    /// Helper: create a ledger event with session_stats containing file_edit_counts.
+    fn make_session_event(session_id: &str, file_edits: &[(&str, u64)]) -> edda_core::types::Event {
+        let edits_json: Vec<serde_json::Value> = file_edits
+            .iter()
+            .map(|(path, count)| serde_json::json!([path, count]))
+            .collect();
+
+        let mut event =
+            edda_core::event::new_note_event("main", None, "system", "test", &[]).unwrap();
+        event.payload = serde_json::json!({
+            "session_id": session_id,
+            "session_stats": {
+                "file_edit_counts": edits_json,
+            }
+        });
+        event
+    }
+
+    #[test]
+    fn file_edits_by_date_empty_projects() {
+        let result = file_edits_by_date(&[], &DateRange::default());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn file_edits_by_date_parses_tuples() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let paths = edda_ledger::EddaPaths::discover(root);
+        edda_ledger::ledger::init_workspace(&paths).unwrap();
+        edda_ledger::ledger::init_head(&paths, "main").unwrap();
+
+        let ledger = Ledger::open(root).unwrap();
+        let event = make_session_event("sess-1", &[("src/main.rs", 5), ("src/lib.rs", 3)]);
+        ledger.append_event(&event).unwrap();
+
+        let entry = ProjectEntry {
+            project_id: "test".to_string(),
+            path: root.to_string_lossy().to_string(),
+            name: "test".to_string(),
+            registered_at: "2026-01-01".to_string(),
+            last_seen: "2026-01-01".to_string(),
+        };
+
+        let result = file_edits_by_date(&[entry], &DateRange::default());
+        assert_eq!(result.len(), 1);
+
+        let date_key = result.keys().next().unwrap();
+        let edits = &result[date_key];
+        assert_eq!(edits.len(), 2);
+
+        let main_rs = edits.iter().find(|e| e.path == "src/main.rs").unwrap();
+        assert_eq!(main_rs.edit_count, 5);
+        assert_eq!(main_rs.agent_count, 1);
+
+        let lib_rs = edits.iter().find(|e| e.path == "src/lib.rs").unwrap();
+        assert_eq!(lib_rs.edit_count, 3);
+        assert_eq!(lib_rs.agent_count, 1);
+    }
+
+    #[test]
+    fn file_edits_by_date_deduplicates_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let paths = edda_ledger::EddaPaths::discover(root);
+        edda_ledger::ledger::init_workspace(&paths).unwrap();
+        edda_ledger::ledger::init_head(&paths, "main").unwrap();
+
+        let ledger = Ledger::open(root).unwrap();
+
+        // Two different sessions editing the same file
+        let event1 = make_session_event("sess-1", &[("src/main.rs", 5)]);
+        ledger.append_event(&event1).unwrap();
+
+        let event2 = make_session_event("sess-2", &[("src/main.rs", 3)]);
+        ledger.append_event(&event2).unwrap();
+
+        let entry = ProjectEntry {
+            project_id: "test".to_string(),
+            path: root.to_string_lossy().to_string(),
+            name: "test".to_string(),
+            registered_at: "2026-01-01".to_string(),
+            last_seen: "2026-01-01".to_string(),
+        };
+
+        let result = file_edits_by_date(&[entry], &DateRange::default());
+        assert_eq!(result.len(), 1);
+
+        let date_key = result.keys().next().unwrap();
+        let edits = &result[date_key];
+        let main_rs = edits.iter().find(|e| e.path == "src/main.rs").unwrap();
+
+        // Total edits: 5 + 3 = 8
+        assert_eq!(main_rs.edit_count, 8);
+        // Unique sessions: 2 (sess-1 and sess-2)
+        assert_eq!(main_rs.agent_count, 2);
     }
 }

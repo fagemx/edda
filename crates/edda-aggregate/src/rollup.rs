@@ -9,6 +9,23 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// Per-file edit statistics for code heatmap.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FileEditStat {
+    /// File path relative to the repository root.
+    pub path: String,
+    /// Number of Edit/Write tool calls on this file.
+    pub edit_count: u64,
+    /// Number of unique agent sessions that edited this file.
+    pub agent_count: usize,
+    /// ISO 8601 timestamp of the last edit.
+    #[serde(default)]
+    pub last_edited: String,
+    /// Number of reverts affecting this file (0 for now).
+    #[serde(default)]
+    pub revert_count: u64,
+}
+
 /// Daily statistics.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DayStat {
@@ -16,6 +33,9 @@ pub struct DayStat {
     pub events: usize,
     pub commits: usize,
     pub sessions: usize,
+    /// Per-file edit statistics for this day.
+    #[serde(default)]
+    pub file_edits: Vec<FileEditStat>,
 }
 
 /// Weekly statistics.
@@ -24,6 +44,9 @@ pub struct WeekStat {
     pub week_start: String,
     pub events: usize,
     pub commits: usize,
+    /// Per-file edit statistics for this week.
+    #[serde(default)]
+    pub file_edits: Vec<FileEditStat>,
 }
 
 /// Monthly statistics.
@@ -32,6 +55,9 @@ pub struct MonthStat {
     pub month: String,
     pub events: usize,
     pub commits: usize,
+    /// Per-file edit statistics for this month.
+    #[serde(default)]
+    pub file_edits: Vec<FileEditStat>,
 }
 
 /// The full rollup cache.
@@ -79,8 +105,9 @@ pub fn save_rollup(rollup: &Rollup) -> anyhow::Result<()> {
 pub fn compute_rollup(projects: &[ProjectEntry], range: &DateRange, tool: &str) -> Rollup {
     let events_map = aggregate::events_by_date(projects, range);
     let commits_map = aggregate::commits_by_date(projects, range);
+    let file_edits_map = aggregate::file_edits_by_date(projects, range);
 
-    let daily = build_daily_stats(&events_map, &commits_map);
+    let daily = build_daily_stats(&events_map, &commits_map, &file_edits_map);
     let weekly = build_weekly_stats(&daily);
     let monthly = build_monthly_stats(&daily);
 
@@ -159,12 +186,16 @@ pub fn merge_rollups(base: &Rollup, new: &Rollup) -> Rollup {
 fn build_daily_stats(
     events_map: &BTreeMap<String, usize>,
     commits_map: &BTreeMap<String, usize>,
+    file_edits_map: &BTreeMap<String, Vec<FileEditStat>>,
 ) -> Vec<DayStat> {
     let mut all_dates: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for key in events_map.keys() {
         all_dates.insert(key.as_str());
     }
     for key in commits_map.keys() {
+        all_dates.insert(key.as_str());
+    }
+    for key in file_edits_map.keys() {
         all_dates.insert(key.as_str());
     }
 
@@ -174,53 +205,79 @@ fn build_daily_stats(
             date: date.to_string(),
             events: events_map.get(date).copied().unwrap_or(0),
             commits: commits_map.get(date).copied().unwrap_or(0),
-            sessions: 0, // sessions don't have a natural daily granularity
+            sessions: 0,
+            file_edits: file_edits_map.get(date).cloned().unwrap_or_default(),
         })
         .collect()
 }
 
 /// Build weekly stats from daily stats.
 fn build_weekly_stats(daily: &[DayStat]) -> Vec<WeekStat> {
-    let mut weekly_map: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut weekly_map: BTreeMap<String, (usize, usize, Vec<FileEditStat>)> = BTreeMap::new();
 
     for d in daily {
-        // Parse the date to find the Monday of its ISO week
         if let Some(week_start) = iso_week_start(&d.date) {
-            let entry = weekly_map.entry(week_start).or_insert((0, 0));
+            let entry = weekly_map.entry(week_start).or_insert((0, 0, Vec::new()));
             entry.0 += d.events;
             entry.1 += d.commits;
+            merge_file_edits(&mut entry.2, &d.file_edits);
         }
     }
 
     weekly_map
         .into_iter()
-        .map(|(week_start, (events, commits))| WeekStat {
+        .map(|(week_start, (events, commits, file_edits))| WeekStat {
             week_start,
             events,
             commits,
+            file_edits,
         })
         .collect()
 }
 
 /// Build monthly stats from daily stats.
 fn build_monthly_stats(daily: &[DayStat]) -> Vec<MonthStat> {
-    let mut monthly_map: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut monthly_map: BTreeMap<String, (usize, usize, Vec<FileEditStat>)> = BTreeMap::new();
 
     for d in daily {
-        let month = &d.date[..7.min(d.date.len())]; // "YYYY-MM"
-        let entry = monthly_map.entry(month.to_string()).or_insert((0, 0));
+        let month = &d.date[..7.min(d.date.len())];
+        let entry = monthly_map
+            .entry(month.to_string())
+            .or_insert((0, 0, Vec::new()));
         entry.0 += d.events;
         entry.1 += d.commits;
+        merge_file_edits(&mut entry.2, &d.file_edits);
     }
 
     monthly_map
         .into_iter()
-        .map(|(month, (events, commits))| MonthStat {
+        .map(|(month, (events, commits, file_edits))| MonthStat {
             month,
             events,
             commits,
+            file_edits,
         })
         .collect()
+}
+
+/// Merge file edit statistics from `source` into `target`.
+/// Sums `edit_count` and `revert_count`; takes the max of `agent_count` (approximate).
+fn merge_file_edits(target: &mut Vec<FileEditStat>, source: &[FileEditStat]) {
+    for src in source {
+        if let Some(existing) = target.iter_mut().find(|t| t.path == src.path) {
+            existing.edit_count += src.edit_count;
+            existing.revert_count += src.revert_count;
+            // Agent count is approximate when merging across days
+            if src.agent_count > existing.agent_count {
+                existing.agent_count = src.agent_count;
+            }
+            if src.last_edited > existing.last_edited {
+                existing.last_edited.clone_from(&src.last_edited);
+            }
+        } else {
+            target.push(src.clone());
+        }
+    }
 }
 
 /// Given a date string "YYYY-MM-DD", return the ISO Monday of that week as "YYYY-MM-DD".
@@ -266,12 +323,14 @@ mod tests {
                     events: 5,
                     commits: 1,
                     sessions: 0,
+                    file_edits: vec![],
                 },
                 DayStat {
                     date: "2026-03-02".into(),
                     events: 3,
                     commits: 0,
                     sessions: 0,
+                    file_edits: vec![],
                 },
             ],
             weekly: vec![],
@@ -286,12 +345,14 @@ mod tests {
                     events: 10,
                     commits: 2,
                     sessions: 0,
+                    file_edits: vec![],
                 },
                 DayStat {
                     date: "2026-03-03".into(),
                     events: 7,
                     commits: 3,
                     sessions: 0,
+                    file_edits: vec![],
                 },
             ],
             weekly: vec![],
@@ -321,12 +382,48 @@ mod tests {
         commits.insert("2026-03-01".to_string(), 2);
         commits.insert("2026-03-03".to_string(), 1);
 
-        let daily = build_daily_stats(&events, &commits);
+        let file_edits = BTreeMap::new();
+
+        let daily = build_daily_stats(&events, &commits, &file_edits);
         assert_eq!(daily.len(), 3);
         assert_eq!(daily[0].date, "2026-03-01");
         assert_eq!(daily[0].events, 5);
         assert_eq!(daily[0].commits, 2);
         assert_eq!(daily[2].date, "2026-03-03");
         assert_eq!(daily[2].commits, 1);
+    }
+
+    #[test]
+    fn backward_compat_daystat_without_file_edits() {
+        let json = r#"{"date":"2026-03-01","events":5,"commits":1,"sessions":0}"#;
+        let stat: DayStat = serde_json::from_str(json).unwrap();
+        assert_eq!(stat.date, "2026-03-01");
+        assert!(stat.file_edits.is_empty());
+    }
+
+    #[test]
+    fn merge_file_edits_sums_correctly() {
+        let mut target = vec![FileEditStat {
+            path: "src/main.rs".to_string(),
+            edit_count: 5,
+            agent_count: 1,
+            last_edited: "2026-03-01T10:00:00Z".to_string(),
+            revert_count: 0,
+        }];
+
+        let source = vec![FileEditStat {
+            path: "src/main.rs".to_string(),
+            edit_count: 3,
+            agent_count: 2,
+            last_edited: "2026-03-01T14:00:00Z".to_string(),
+            revert_count: 0,
+        }];
+
+        merge_file_edits(&mut target, &source);
+
+        assert_eq!(target.len(), 1);
+        assert_eq!(target[0].edit_count, 8);
+        assert_eq!(target[0].agent_count, 2);
+        assert_eq!(target[0].last_edited, "2026-03-01T14:00:00Z");
     }
 }

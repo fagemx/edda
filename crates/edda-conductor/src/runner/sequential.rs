@@ -1,4 +1,3 @@
-use anyhow::Context;
 use crate::agent::budget::BudgetTracker;
 use crate::agent::launcher::{phase_session_id_attempt, AgentLauncher, PhaseResult};
 use crate::check::engine::{CheckEngine, CheckRunResult};
@@ -15,6 +14,7 @@ use crate::state::machine::{
     PlanState, PlanStatus,
 };
 use crate::state::persist::save_state;
+use anyhow::Context;
 use anyhow::Result;
 use std::path::Path;
 use std::time::Instant;

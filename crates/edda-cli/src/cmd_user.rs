@@ -272,6 +272,19 @@ fn execute_rollup(tool: &str, refresh: bool, json: bool) -> anyhow::Result<()> {
         }
     }
 
+    // Show top 10 edited files from the most recent daily entry
+    if let Some(latest) = rollup_data.daily.last() {
+        if !latest.file_edits.is_empty() {
+            println!("\nTop edited files ({}):", latest.date);
+            for stat in latest.file_edits.iter().take(10) {
+                println!(
+                    "  {} ({} edits, {} agents)",
+                    stat.path, stat.edit_count, stat.agent_count
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
