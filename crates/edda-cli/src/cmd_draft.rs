@@ -4,7 +4,9 @@ use edda_core::event::{
     new_approval_event, new_approval_request_event, new_commit_event, ApprovalEventParams,
     ApprovalRequestParams, CommitEventParams,
 };
-use edda_core::policy::{ActorsConfig, PolicyRule, PolicyStageDef, PolicyV2Config, PolicyWhen};
+use edda_core::policy::{
+    load_actors_from_dir, ActorsConfig, PolicyRule, PolicyStageDef, PolicyV2Config, PolicyWhen,
+};
 use edda_derive::{build_auto_evidence, last_commit_contribution, rebuild_all};
 use std::path::Path;
 
@@ -290,13 +292,7 @@ fn load_policy_v2(ledger: &Ledger) -> anyhow::Result<PolicyV2Config> {
 }
 
 fn load_actors(ledger: &Ledger) -> anyhow::Result<ActorsConfig> {
-    let path = ledger.paths.edda_dir.join("actors.yaml");
-    if !path.exists() {
-        return Ok(ActorsConfig::default());
-    }
-    let content = std::fs::read(&path)?;
-    let cfg: ActorsConfig = serde_yaml::from_slice(&content)?;
-    Ok(cfg)
+    load_actors_from_dir(&ledger.paths.edda_dir)
 }
 
 // ── Route selection ──

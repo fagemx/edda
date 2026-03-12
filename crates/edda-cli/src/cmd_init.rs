@@ -65,8 +65,17 @@ rules:
         let actors_path = paths.edda_dir.join("actors.yaml");
         if !actors_path.exists() {
             let default_actors = "\
-version: 1
+version: 2
 actors: {}
+# Example:
+#   alice:
+#     kind: user
+#     roles: [lead, reviewer]
+#     email: alice@example.com
+#   claude-agent:
+#     kind: agent
+#     roles: [operator]
+#     runtime: claude
 ";
             std::fs::write(&actors_path, default_actors.as_bytes())?;
         }
