@@ -81,4 +81,49 @@ mod tests {
         let loaded = load_state(dir.path(), "test").unwrap().unwrap();
         assert_eq!(loaded.version, 42);
     }
+
+    // ── Corrupted state recovery tests ─────────────────────────────
+
+    /// Helper: create the state.json directory structure and write content.
+    fn write_corrupt_state(dir: &Path, plan_name: &str, content: &[u8]) {
+        let path = state_path(dir, plan_name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, content).unwrap();
+    }
+
+    #[test]
+    fn load_empty_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_corrupt_state(dir.path(), "broken", b"");
+        let result = load_state(dir.path(), "broken");
+        assert!(result.is_err(), "empty file should return Err, not Ok");
+    }
+
+    #[test]
+    fn load_truncated_json_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_corrupt_state(dir.path(), "trunc", br#"{"plan_name": "te"#);
+        let result = load_state(dir.path(), "trunc");
+        assert!(result.is_err(), "truncated JSON should return Err, not Ok");
+    }
+
+    #[test]
+    fn load_wrong_schema_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // Valid JSON but missing required PlanState fields
+        write_corrupt_state(dir.path(), "wrong", br#"{"unexpected": true}"#);
+        let result = load_state(dir.path(), "wrong");
+        assert!(result.is_err(), "wrong schema should return Err, not Ok");
+    }
+
+    #[test]
+    fn load_binary_garbage_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_corrupt_state(dir.path(), "garbage", &[0x00, 0x01, 0xFF, 0xFE, 0x89, 0x50]);
+        let result = load_state(dir.path(), "garbage");
+        assert!(
+            result.is_err(),
+            "binary garbage should return Err, not panic"
+        );
+    }
 }

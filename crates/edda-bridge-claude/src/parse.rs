@@ -110,4 +110,71 @@ mod tests {
         assert_eq!(snake_to_camel("tool_use_id"), "toolUseId");
         assert_eq!(snake_to_camel("permission_mode"), "permissionMode");
     }
+
+    // ── parse_hook_stdin error path tests ──────────────────────────
+
+    #[test]
+    fn parse_empty_string_errors() {
+        assert!(parse_hook_stdin("").is_err());
+    }
+
+    #[test]
+    fn parse_invalid_json_errors() {
+        assert!(parse_hook_stdin("not json at all").is_err());
+    }
+
+    #[test]
+    fn parse_truncated_json_errors() {
+        assert!(parse_hook_stdin("{\"session_id\": \"abc").is_err());
+    }
+
+    #[test]
+    fn parse_valid_empty_object_succeeds() {
+        let val = parse_hook_stdin("{}").unwrap();
+        assert!(val.is_object());
+        assert_eq!(val.as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn parse_valid_json_with_fields() {
+        let input = r#"{"session_id": "s1", "hook_event_name": "init"}"#;
+        let val = parse_hook_stdin(input).unwrap();
+        assert_eq!(val["session_id"], "s1");
+        assert_eq!(val["hook_event_name"], "init");
+    }
+
+    // ── get_str field extraction tests ─────────────────────────────
+
+    #[test]
+    fn get_str_missing_fields_returns_empty() {
+        let val = serde_json::json!({});
+        assert_eq!(get_str(&val, "session_id"), "");
+        assert_eq!(get_str(&val, "hook_event_name"), "");
+        assert_eq!(get_str(&val, "cwd"), "");
+        assert_eq!(get_str(&val, "tool_name"), "");
+    }
+
+    #[test]
+    fn get_str_snake_case_preferred() {
+        // When both snake_case and camelCase exist, snake_case wins
+        let val = serde_json::json!({
+            "session_id": "snake_wins",
+            "sessionId": "camel_loses"
+        });
+        assert_eq!(get_str(&val, "session_id"), "snake_wins");
+    }
+
+    #[test]
+    fn get_str_camel_case_fallback() {
+        // When only camelCase exists, it should be found via fallback
+        let val = serde_json::json!({"sessionId": "from_camel"});
+        assert_eq!(get_str(&val, "session_id"), "from_camel");
+    }
+
+    #[test]
+    fn get_str_non_string_value_returns_empty() {
+        // If the field exists but is not a string, return empty
+        let val = serde_json::json!({"session_id": 42});
+        assert_eq!(get_str(&val, "session_id"), "");
+    }
 }
