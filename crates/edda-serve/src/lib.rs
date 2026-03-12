@@ -157,6 +157,8 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/dashboard", get(serve_dashboard))
         .route("/api/actors", get(get_actors))
         .route("/api/actors/{name}", get(get_actor))
+        .route("/api/briefs", get(get_briefs))
+        .route("/api/briefs/{task_id}", get(get_brief))
         .route("/api/events/stream", get(get_event_stream))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -208,6 +210,8 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/projects", get(get_projects))
         .route("/api/actors", get(get_actors))
         .route("/api/actors/{name}", get(get_actor))
+        .route("/api/briefs", get(get_briefs))
+        .route("/api/briefs/{task_id}", get(get_brief))
         .route("/api/metrics/quality", get(get_quality_metrics))
         .route("/api/dashboard", get(get_dashboard))
         .route("/api/sync", post(post_sync))
@@ -1466,6 +1470,75 @@ async fn post_sync(
 
 async fn serve_dashboard() -> impl IntoResponse {
     axum::response::Html(include_str!("../static/dashboard.html"))
+}
+
+// ── GET /api/briefs ──
+
+#[derive(Deserialize)]
+struct BriefsQuery {
+    status: Option<String>,
+    intent: Option<String>,
+}
+
+async fn get_briefs(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<BriefsQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let ledger = state.open_ledger()?;
+    let briefs = ledger.list_task_briefs(params.status.as_deref(), params.intent.as_deref())?;
+
+    let items: Vec<serde_json::Value> = briefs
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "task_id": b.task_id,
+                "intake_event_id": b.intake_event_id,
+                "title": b.title,
+                "intent": b.intent,
+                "source_url": b.source_url,
+                "status": b.status,
+                "branch": b.branch,
+                "iterations": b.iterations,
+                "artifacts": serde_json::from_str::<serde_json::Value>(&b.artifacts).unwrap_or_default(),
+                "decisions": serde_json::from_str::<serde_json::Value>(&b.decisions).unwrap_or_default(),
+                "last_feedback": b.last_feedback,
+                "created_at": b.created_at,
+                "updated_at": b.updated_at,
+            })
+        })
+        .collect();
+
+    Ok(Json(
+        serde_json::json!({ "briefs": items, "count": items.len() }),
+    ))
+}
+
+// ── GET /api/briefs/:task_id ──
+
+async fn get_brief(
+    State(state): State<Arc<AppState>>,
+    AxumPath(task_id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let ledger = state.open_ledger()?;
+    let brief = ledger
+        .get_task_brief(&task_id)?
+        .ok_or_else(|| AppError::NotFound(format!("task brief not found: {task_id}")))?;
+
+    Ok(Json(serde_json::json!({
+        "task_id": brief.task_id,
+        "intake_event_id": brief.intake_event_id,
+        "title": brief.title,
+        "intent": brief.intent,
+        "source_url": brief.source_url,
+        "status": brief.status,
+        "branch": brief.branch,
+        "iterations": brief.iterations,
+        "artifacts": serde_json::from_str::<serde_json::Value>(&brief.artifacts).unwrap_or_default(),
+        "decisions": serde_json::from_str::<serde_json::Value>(&brief.decisions).unwrap_or_default(),
+        "last_feedback": brief.last_feedback,
+        "created_at": brief.created_at,
+        "updated_at": brief.updated_at,
+    })))
 }
 
 // ── GET /api/dashboard ──
