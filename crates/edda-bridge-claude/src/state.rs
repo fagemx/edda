@@ -152,6 +152,27 @@ pub fn write_peer_count(project_id: &str, session_id: &str, count: usize) {
     let _ = fs::write(&path, count.to_string());
 }
 
+// ── Coordination Offset Tracking ──
+
+/// Read the last-seen byte offset into coordination.jsonl for this session.
+pub fn read_coord_offset(project_id: &str, session_id: &str) -> u64 {
+    let path = edda_store::project_dir(project_id)
+        .join("state")
+        .join(format!("coord_offset.{session_id}"));
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// Write the current byte offset into coordination.jsonl for this session.
+pub fn write_coord_offset(project_id: &str, session_id: &str, offset: u64) {
+    let path = edda_store::project_dir(project_id)
+        .join("state")
+        .join(format!("coord_offset.{session_id}"));
+    let _ = fs::write(&path, offset.to_string());
+}
+
 // ── Utility ──
 
 fn now_rfc3339() -> String {
@@ -229,6 +250,21 @@ mod tests {
         assert_eq!(read_peer_count(pid, sid), 0);
         write_peer_count(pid, sid, 3);
         assert_eq!(read_peer_count(pid, sid), 3);
+
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn coord_offset_round_trip() {
+        let pid = "test_state_coord_off";
+        let sid = "s1";
+        let _ = edda_store::ensure_dirs(pid);
+
+        assert_eq!(read_coord_offset(pid, sid), 0);
+        write_coord_offset(pid, sid, 1234);
+        assert_eq!(read_coord_offset(pid, sid), 1234);
+        write_coord_offset(pid, sid, 0);
+        assert_eq!(read_coord_offset(pid, sid), 0);
 
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }

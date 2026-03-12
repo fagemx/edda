@@ -209,7 +209,7 @@ fn heartbeat_path(project_id: &str, session_id: &str) -> PathBuf {
         .join(format!("session.{session_id}.json"))
 }
 
-fn coordination_path(project_id: &str) -> PathBuf {
+pub(crate) fn coordination_path(project_id: &str) -> PathBuf {
     let dir = edda_store::project_dir(project_id).join("state");
     let new_path = dir.join("coordination.jsonl");
     // One-time migration: rename legacy decisions.jsonl → coordination.jsonl
@@ -244,7 +244,7 @@ pub use heartbeat::{
 };
 pub use helpers::format_age;
 pub(crate) use helpers::{format_peer_suffix, pending_requests_for_session};
-pub(crate) use render_coord::render_peer_updates_with;
+pub(crate) use render_coord::{render_coord_diff, render_peer_updates_with};
 pub use render_coord::{render_coordination_protocol, render_coordination_protocol_with};
 
 #[cfg(test)]
