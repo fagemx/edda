@@ -263,12 +263,14 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
                 crate::peers::write_subagent_completed(
                     &project_id,
                     &session_id,
-                    &agent_id,
-                    &agent_type,
-                    &summary.summary,
-                    &summary.files_touched,
-                    &summary.decisions,
-                    &summary.commits,
+                    &crate::peers::SubagentReport {
+                        agent_id: &agent_id,
+                        agent_type: &agent_type,
+                        summary: &summary.summary,
+                        files_touched: &summary.files_touched,
+                        decisions: &summary.decisions,
+                        commits: &summary.commits,
+                    },
                 );
 
                 try_write_subagent_completed_note_event(&cwd, &agent_id, &agent_type, &summary);
