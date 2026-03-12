@@ -228,7 +228,7 @@ fn write_session_note(cwd: &str, summary: &str) -> Result<()> {
     // Mark source so collect_session_ledger_extras filters it out
     event.payload["source"] = serde_json::json!("bridge:session-digest");
 
-    edda_core::event::finalize_event(&mut event);
+    edda_core::event::finalize_event(&mut event)?;
     ledger.append_event(&event)?;
 
     tracing::info!(event_id = %event.event_id, "session digest written");

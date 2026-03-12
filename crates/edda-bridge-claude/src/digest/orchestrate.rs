@@ -293,7 +293,9 @@ pub(super) fn harvest_inferred_decisions(
             )),
         });
 
-        finalize_event(&mut event);
+        if finalize_event(&mut event).is_err() {
+            break;
+        }
         let event_id = event.event_id.clone();
 
         if ledger.append_event(&event).is_ok() {

@@ -398,7 +398,7 @@ mod tests {
         let tags = vec!["decision".to_string()];
         let mut event = new_note_event(branch, None, "system", &text, &tags).unwrap();
         event.payload["decision"] = serde_json::json!({"key": key, "value": value});
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
         event
     }
 

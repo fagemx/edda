@@ -82,7 +82,7 @@ pub fn build_digest_event(
         event_level: None,
     };
 
-    finalize_event(&mut event);
+    finalize_event(&mut event)?;
     Ok(event)
 }
 
@@ -145,6 +145,6 @@ pub fn build_cmd_milestone_event(
         event_level: None,
     };
 
-    finalize_event(&mut event);
+    finalize_event(&mut event)?;
     Ok(event)
 }

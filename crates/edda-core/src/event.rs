@@ -6,9 +6,9 @@ use crate::types::{
 
 /// Compute the hash for an event: serialize without the `hash` field,
 /// canonical JSON sort, then SHA-256.
-pub fn compute_event_hash(event_without_hash: &serde_json::Value) -> String {
-    let bytes = canonical_json_bytes(event_without_hash);
-    sha256_hex(&bytes)
+pub fn compute_event_hash(event_without_hash: &serde_json::Value) -> anyhow::Result<String> {
+    let bytes = canonical_json_bytes(event_without_hash)?;
+    Ok(sha256_hex(&bytes))
 }
 
 fn new_event_id() -> String {
@@ -28,18 +28,18 @@ fn set_taxonomy(event: &mut Event) {
     event.event_level = level.map(|s| s.to_string());
 }
 
-fn finalize(event: &mut Event) {
+fn finalize(event: &mut Event) -> anyhow::Result<()> {
     // Auto-populate taxonomy fields before hashing
     set_taxonomy(event);
 
     // Serialize the event, remove hash/digests/schema_version, compute canonical hash
-    let mut val = serde_json::to_value(&*event).expect("event serialization should not fail");
+    let mut val = serde_json::to_value(&*event)?;
     if let Some(obj) = val.as_object_mut() {
         obj.remove("hash");
         obj.remove("digests");
         obj.remove("schema_version");
     }
-    let hash_value = compute_event_hash(&val);
+    let hash_value = compute_event_hash(&val)?;
 
     event.hash = hash_value.clone();
     event.digests = vec![Digest {
@@ -47,12 +47,13 @@ fn finalize(event: &mut Event) {
         canon: CANON_EDDA_V1.to_string(),
         value: hash_value,
     }];
+    Ok(())
 }
 
 /// Re-finalize an event after post-construction modification.
 /// Recomputes hash and digests based on current event state.
-pub fn finalize_event(event: &mut Event) {
-    finalize(event);
+pub fn finalize_event(event: &mut Event) -> anyhow::Result<()> {
+    finalize(event)
 }
 
 /// Create a new `note` event.
@@ -84,7 +85,7 @@ pub fn new_note_event(
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -102,8 +103,8 @@ pub fn new_decision_event(
     let tags = vec!["decision".to_string()];
     let mut event = new_note_event(branch, parent_hash, role, &text, &tags)?;
     event.payload["decision"] =
-        serde_json::to_value(decision).expect("DecisionPayload serialization should not fail");
-    finalize(&mut event);
+        serde_json::to_value(decision)?;
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -156,7 +157,7 @@ pub fn new_cmd_event(params: &CmdEventParams<'_>) -> anyhow::Result<Event> {
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -215,7 +216,7 @@ pub fn new_commit_event(params: &mut CommitEventParams<'_>) -> anyhow::Result<Ev
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -248,7 +249,7 @@ pub fn new_rebuild_event(
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -283,7 +284,7 @@ pub fn new_branch_create_event(
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -314,7 +315,7 @@ pub fn new_branch_switch_event(
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -349,7 +350,7 @@ pub fn new_merge_event(
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -393,7 +394,7 @@ pub fn new_approval_event(p: &ApprovalEventParams<'_>) -> anyhow::Result<Event> 
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -437,7 +438,7 @@ pub fn new_approval_request_event(p: &ApprovalRequestParams<'_>) -> anyhow::Resu
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -483,7 +484,7 @@ pub fn new_task_intake_event(params: &TaskIntakeParams) -> anyhow::Result<Event>
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -531,7 +532,7 @@ pub fn new_agent_phase_change_event(p: &AgentPhaseChangeParams<'_>) -> anyhow::R
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -561,7 +562,7 @@ pub fn new_review_bundle_event(params: &ReviewBundleParams) -> anyhow::Result<Ev
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -610,7 +611,7 @@ pub fn new_pr_event(params: &PrEventParams) -> anyhow::Result<Event> {
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -658,7 +659,7 @@ pub fn new_execution_event(
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -712,7 +713,7 @@ pub fn new_approval_policy_match_event(
         event_level: None,
     };
 
-    finalize(&mut event);
+    finalize(&mut event)?;
     Ok(event)
 }
 
@@ -823,7 +824,7 @@ mod tests {
         obj.remove("hash");
         obj.remove("digests");
         obj.remove("schema_version");
-        let recomputed = compute_event_hash(&val);
+        let recomputed = compute_event_hash(&val).unwrap();
         assert_eq!(recomputed, event.hash);
     }
 
@@ -1017,7 +1018,7 @@ mod tests {
         obj.remove("hash");
         obj.remove("digests");
         obj.remove("schema_version");
-        let recomputed = compute_event_hash(&val);
+        let recomputed = compute_event_hash(&val).unwrap();
         assert_eq!(recomputed, e1.hash);
     }
 
@@ -1032,7 +1033,7 @@ mod tests {
         obj.remove("hash");
         obj.remove("digests");
         obj.remove("schema_version");
-        let recomputed = compute_event_hash(&e2_val);
+        let recomputed = compute_event_hash(&e2_val).unwrap();
         assert_eq!(recomputed, e1.hash);
     }
 
@@ -1062,7 +1063,7 @@ mod tests {
         // Force same event_id and ts so we can compare hashes
         e2.event_id = e1.event_id.clone();
         e2.ts = e1.ts.clone();
-        finalize_event(&mut e2);
+        finalize_event(&mut e2).unwrap();
         assert_eq!(e1.hash, e2.hash);
 
         // Add provenance and re-finalize
@@ -1071,7 +1072,7 @@ mod tests {
             rel: rel::BASED_ON.to_string(),
             note: None,
         });
-        finalize_event(&mut e2);
+        finalize_event(&mut e2).unwrap();
         assert_ne!(e1.hash, e2.hash);
     }
 
@@ -1085,7 +1086,7 @@ mod tests {
             rel: rel::REVIEWS.to_string(),
             note: Some("review note".to_string()),
         });
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
 
         let json = serde_json::to_string(&event).unwrap();
         let deserialized: Event = serde_json::from_str(&json).unwrap();
@@ -1388,5 +1389,25 @@ mod tests {
         .unwrap();
         assert_eq!(event.event_family.as_deref(), Some("signal"));
         assert_eq!(event.event_level.as_deref(), Some("info"));
+    }
+
+    #[test]
+    fn finalize_returns_error_on_non_finite_float() {
+        let mut event = Event {
+            event_id: "test".into(),
+            ts: "2026-01-01T00:00:00Z".into(),
+            event_type: "note".into(),
+            branch: "main".into(),
+            parent_hash: None,
+            hash: String::new(),
+            payload: serde_json::json!({"value": f64::NAN}),
+            refs: Refs::default(),
+            schema_version: 1,
+            digests: Vec::new(),
+            event_family: None,
+            event_level: None,
+        };
+        let result = finalize_event(&mut event);
+        assert!(result.is_err(), "finalize should return Err for NaN payload");
     }
 }

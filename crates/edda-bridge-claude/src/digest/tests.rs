@@ -1094,7 +1094,7 @@ fn collect_session_ledger_extras_excludes_digest_notes() {
     )
     .unwrap();
     evt.payload["source"] = serde_json::json!("bridge:session_digest");
-    edda_core::event::finalize_event(&mut evt);
+    edda_core::event::finalize_event(&mut evt).unwrap();
     let ts = evt.ts.clone();
     ledger.append_event(&evt).unwrap();
 

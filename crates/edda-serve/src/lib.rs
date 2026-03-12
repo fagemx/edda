@@ -540,7 +540,7 @@ async fn post_decide(
         }
     }
 
-    finalize_event(&mut event);
+    finalize_event(&mut event)?;
     ledger.append_event(&event)?;
 
     Ok(Json(DecideResponse {

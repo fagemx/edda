@@ -704,7 +704,7 @@ mod tests {
                 note: Some(format!("key '{key}' re-decided")),
             });
         }
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
         event
     }
 
@@ -732,7 +732,7 @@ mod tests {
             event_family: None,
             event_level: None,
         };
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
         event
     }
 
@@ -1090,7 +1090,7 @@ mod tests {
             "tool_calls": 10,
             "tasks_snapshot": [{"subject": "Fix postgres pool", "status": "completed"}],
         });
-        finalize_event(&mut digest);
+        finalize_event(&mut digest).unwrap();
         ledger.append_event(&digest).unwrap();
 
         let result = ask(&ledger, "postgres", &AskOptions::default(), None).unwrap();

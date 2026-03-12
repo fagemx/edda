@@ -166,7 +166,7 @@ mod tests {
             rel: edda_core::types::rel::SUPERSEDES.to_string(),
             note: Some("key 'db.engine' re-decided".to_string()),
         });
-        edda_core::event::finalize_event(&mut event2);
+        edda_core::event::finalize_event(&mut event2).unwrap();
         ledger.append_event(&event2).unwrap();
 
         let entry = ProjectEntry {

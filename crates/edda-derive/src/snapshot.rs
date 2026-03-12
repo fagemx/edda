@@ -457,7 +457,7 @@ mod tests {
             event_family: None,
             event_level: None,
         };
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
         ledger.append_event(&event).unwrap();
 
         let snap = build_branch_snapshot(&ledger, "main").unwrap();

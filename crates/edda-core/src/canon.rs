@@ -2,9 +2,9 @@ use serde_json::Value;
 
 /// Produce canonical JSON bytes: object keys sorted lexicographically (recursive),
 /// arrays preserve order, no extra whitespace.
-pub fn canonical_json_bytes(value: &Value) -> Vec<u8> {
+pub fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, serde_json::Error> {
     let sorted = sort_value(value);
-    serde_json::to_vec(&sorted).expect("canonical JSON serialization should not fail")
+    serde_json::to_vec(&sorted)
 }
 
 fn sort_value(value: &Value) -> Value {
@@ -29,7 +29,7 @@ mod tests {
     #[test]
     fn keys_sorted_lexicographically() {
         let input: Value = serde_json::from_str(r#"{"z":1,"a":2,"m":3}"#).unwrap();
-        let bytes = canonical_json_bytes(&input);
+        let bytes = canonical_json_bytes(&input).unwrap();
         let output = String::from_utf8(bytes).unwrap();
         assert_eq!(output, r#"{"a":2,"m":3,"z":1}"#);
     }
@@ -37,7 +37,7 @@ mod tests {
     #[test]
     fn nested_objects_sorted() {
         let input: Value = serde_json::from_str(r#"{"b":{"z":1,"a":2},"a":1}"#).unwrap();
-        let bytes = canonical_json_bytes(&input);
+        let bytes = canonical_json_bytes(&input).unwrap();
         let output = String::from_utf8(bytes).unwrap();
         assert_eq!(output, r#"{"a":1,"b":{"a":2,"z":1}}"#);
     }
@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn arrays_preserve_order() {
         let input: Value = serde_json::from_str(r#"{"a":[3,1,2]}"#).unwrap();
-        let bytes = canonical_json_bytes(&input);
+        let bytes = canonical_json_bytes(&input).unwrap();
         let output = String::from_utf8(bytes).unwrap();
         assert_eq!(output, r#"{"a":[3,1,2]}"#);
     }
@@ -53,7 +53,7 @@ mod tests {
     #[test]
     fn scalars_unchanged() {
         let input: Value = serde_json::from_str(r#""hello""#).unwrap();
-        let bytes = canonical_json_bytes(&input);
+        let bytes = canonical_json_bytes(&input).unwrap();
         let output = String::from_utf8(bytes).unwrap();
         assert_eq!(output, r#""hello""#);
     }
