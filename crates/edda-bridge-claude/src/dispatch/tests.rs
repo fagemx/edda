@@ -12,7 +12,7 @@ use super::{
 use super::events::{
     extract_task_id, is_karvi_project, try_write_commit_event, try_write_merge_event,
 };
-use super::helpers::{inject_karvi_brief, render_active_plan_from_dir};
+use super::helpers::{inject_karvi_brief, read_project_state, render_active_plan_from_dir};
 use super::session::{
     cleanup_session_state, collect_session_end_warnings, dispatch_session_end,
     dispatch_session_start, dispatch_user_prompt_submit, dispatch_with_workspace_only,
@@ -2517,4 +2517,205 @@ fn offlimits_skips_non_edit_tools() {
     std::env::remove_var("EDDA_ENFORCE_OFFLIMITS");
     std::env::remove_var("EDDA_CLAUDE_AUTO_APPROVE");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+// ── Karvi Board State (read_project_state) Tests ──
+
+#[test]
+fn read_project_state_non_karvi() {
+    let tmp = tempfile::tempdir().unwrap();
+    let result = read_project_state(tmp.path().to_str().unwrap());
+    assert!(result.is_none(), "Should return None for non-karvi project");
+}
+
+#[test]
+fn read_project_state_malformed_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("server")).unwrap();
+    fs::write(tmp.path().join("server/board.json"), "not valid json {{{").unwrap();
+
+    let result = read_project_state(tmp.path().to_str().unwrap());
+    assert!(
+        result.is_none(),
+        "Should return None for malformed board.json"
+    );
+}
+
+#[test]
+fn read_project_state_minimal_board() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("server")).unwrap();
+    let board = serde_json::json!({
+        "taskPlan": {
+            "goal": "implement auth",
+            "phase": "execution"
+        }
+    });
+    fs::write(
+        tmp.path().join("server/board.json"),
+        serde_json::to_string(&board).unwrap(),
+    )
+    .unwrap();
+
+    let result = read_project_state(tmp.path().to_str().unwrap());
+    assert!(result.is_some(), "Should return summary for minimal board");
+    let summary = result.unwrap();
+    assert!(summary.contains("[karvi board]"));
+    assert!(summary.contains("Goal: implement auth"));
+    assert!(summary.contains("Phase: execution"));
+}
+
+#[test]
+fn read_project_state_full_board() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("server")).unwrap();
+    let board = serde_json::json!({
+        "taskPlan": {
+            "goal": "build the app",
+            "phase": "testing",
+            "tasks": [
+                {
+                    "id": "T1",
+                    "subject": "setup project",
+                    "status": "completed",
+                    "review": { "state": "approved" }
+                },
+                {
+                    "id": "T2",
+                    "subject": "implement auth",
+                    "status": "in_progress",
+                    "assigned": "engineer_pro"
+                },
+                {
+                    "id": "T3",
+                    "subject": "deploy",
+                    "status": "blocked",
+                    "depends": ["T2"]
+                }
+            ]
+        },
+        "lessons": [
+            { "rule": "always run tests" },
+            { "rule": "check types" }
+        ],
+        "signals": [
+            { "content": "test coverage at 85%" },
+            { "content": "auth module ready" },
+            { "content": "schema migrated" }
+        ]
+    });
+    fs::write(
+        tmp.path().join("server/board.json"),
+        serde_json::to_string(&board).unwrap(),
+    )
+    .unwrap();
+
+    let result = read_project_state(tmp.path().to_str().unwrap());
+    assert!(result.is_some());
+    let summary = result.unwrap();
+
+    assert!(summary.contains("[karvi board]"));
+    assert!(summary.contains("Goal: build the app"));
+    assert!(summary.contains("Phase: testing"));
+    assert!(summary.contains("T1 \"setup project\" (completed, approved)"));
+    assert!(summary.contains("T2 \"implement auth\" (in_progress, assigned: engineer_pro)"));
+    assert!(summary.contains("T3 \"deploy\" (blocked, blocked by T2)"));
+    assert!(summary.contains("Lessons: 2 active"));
+    assert!(summary.contains("Signals:"));
+    assert!(summary.contains("\"test coverage at 85%\""));
+    assert!(summary.contains("\"auth module ready\""));
+    assert!(summary.contains("\"schema migrated\""));
+}
+
+#[test]
+fn read_project_state_respects_500_char_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("server")).unwrap();
+
+    // Create a board with many tasks to exceed 500 chars
+    let mut tasks = Vec::new();
+    for i in 0..20 {
+        tasks.push(serde_json::json!({
+            "id": format!("T{i}"),
+            "subject": format!("a very long task subject number {i} that takes space"),
+            "status": "in_progress",
+            "assigned": "engineer_pro",
+            "depends": ["T0", "T1"]
+        }));
+    }
+    let board = serde_json::json!({
+        "taskPlan": {
+            "goal": "a goal that is quite long to help push the char count",
+            "phase": "execution",
+            "tasks": tasks
+        },
+        "lessons": [
+            { "rule": "r1" }, { "rule": "r2" }, { "rule": "r3" },
+            { "rule": "r4" }, { "rule": "r5" }
+        ],
+        "signals": [
+            { "content": "signal one" },
+            { "content": "signal two" },
+            { "content": "signal three" }
+        ]
+    });
+    fs::write(
+        tmp.path().join("server/board.json"),
+        serde_json::to_string(&board).unwrap(),
+    )
+    .unwrap();
+
+    let result = read_project_state(tmp.path().to_str().unwrap());
+    assert!(result.is_some());
+    let summary = result.unwrap();
+    // 500 chars + "...(truncated)" suffix
+    assert!(
+        summary.len() <= 500 + 15,
+        "Summary should be at most 515 chars, got {}",
+        summary.len()
+    );
+    assert!(summary.contains("...(truncated)"));
+}
+
+#[test]
+fn read_project_state_missing_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("server")).unwrap();
+
+    // Empty JSON object — no taskPlan at all
+    fs::write(tmp.path().join("server/board.json"), "{}").unwrap();
+
+    let result = read_project_state(tmp.path().to_str().unwrap());
+    assert!(
+        result.is_some(),
+        "Should still return header for valid JSON"
+    );
+    let summary = result.unwrap();
+    assert!(summary.contains("[karvi board]"));
+    // Should NOT contain Goal/Phase/Tasks since taskPlan is missing
+    assert!(!summary.contains("Goal:"));
+    assert!(!summary.contains("Phase:"));
+}
+
+#[test]
+fn read_project_state_empty_tasks() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::create_dir_all(tmp.path().join("server")).unwrap();
+    let board = serde_json::json!({
+        "taskPlan": {
+            "goal": "test",
+            "phase": "idle",
+            "tasks": []
+        }
+    });
+    fs::write(
+        tmp.path().join("server/board.json"),
+        serde_json::to_string(&board).unwrap(),
+    )
+    .unwrap();
+
+    let result = read_project_state(tmp.path().to_str().unwrap());
+    assert!(result.is_some());
+    let summary = result.unwrap();
+    assert!(summary.contains("Tasks: (none)"));
 }
