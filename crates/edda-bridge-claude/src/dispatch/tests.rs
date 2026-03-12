@@ -17,7 +17,9 @@ use super::session::{
     cleanup_session_state, collect_session_end_warnings, dispatch_session_end,
     dispatch_session_start, dispatch_user_prompt_submit, dispatch_with_workspace_only,
 };
-use super::tools::{check_pending_requests, dispatch_post_tool_use, dispatch_pre_tool_use};
+use super::tools::{
+    check_offlimits, check_pending_requests, dispatch_post_tool_use, dispatch_pre_tool_use,
+};
 // Imports from crate
 use crate::parse::resolve_project_id;
 use crate::render;
@@ -2320,4 +2322,199 @@ fn task_completed_skips_when_task_id_empty() {
         !coord_path.exists() || fs::read_to_string(&coord_path).unwrap().is_empty(),
         "no coordination event should be written when task_id is empty"
     );
+}
+
+// ── Off-limits enforcement tests ──
+
+#[test]
+fn offlimits_disabled_by_default() {
+    let pid = "test-offlimits-disabled";
+    let sid = "s-self";
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Even with a peer claim, check_offlimits returns None when peer_count == 0
+    crate::peers::write_claim(pid, "s-peer", "peer-agent", &["src/auth/*".into()]);
+    let result = check_offlimits(pid, sid, "src/auth/login.rs");
+    assert!(result.is_none(), "should not block when peer_count == 0");
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn offlimits_blocks_peer_claimed_file() {
+    let pid = "test-offlimits-blocks";
+    let sid = "s-self-blocks";
+    let peer_sid = "s-peer-blocks";
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Create peer heartbeat so it's discovered as active
+    crate::peers::write_heartbeat_minimal(pid, peer_sid, "store-refactor");
+    // Create peer claim
+    crate::peers::write_claim(
+        pid,
+        peer_sid,
+        "store-refactor",
+        &["crates/edda-store/*".into()],
+    );
+    // Set peer count > 0
+    write_peer_count(pid, sid, 1);
+
+    let result = check_offlimits(pid, sid, "crates/edda-store/src/lib.rs");
+    assert!(result.is_some(), "should block file claimed by active peer");
+    let (label, glob) = result.unwrap();
+    assert_eq!(label, "store-refactor");
+    assert_eq!(glob, "crates/edda-store/*");
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn offlimits_allows_own_claimed_file() {
+    let pid = "test-offlimits-self";
+    let sid = "s-self-own";
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Create own heartbeat and claim
+    crate::peers::write_heartbeat_minimal(pid, sid, "my-agent");
+    crate::peers::write_claim(pid, sid, "my-agent", &["src/auth/*".into()]);
+    write_peer_count(pid, sid, 1);
+
+    let result = check_offlimits(pid, sid, "src/auth/login.rs");
+    assert!(result.is_none(), "should not block own claimed files");
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn offlimits_allows_unclaimed_file() {
+    let pid = "test-offlimits-unclaimed";
+    let sid = "s-self-unclaimed";
+    let peer_sid = "s-peer-unclaimed";
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Create peer with claims on different paths
+    crate::peers::write_heartbeat_minimal(pid, peer_sid, "db-agent");
+    crate::peers::write_claim(pid, peer_sid, "db-agent", &["crates/edda-store/*".into()]);
+    write_peer_count(pid, sid, 1);
+
+    let result = check_offlimits(pid, sid, "crates/edda-bridge-claude/src/lib.rs");
+    assert!(
+        result.is_none(),
+        "should allow files not claimed by any peer"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn offlimits_skips_stale_claims() {
+    let pid = "test-offlimits-stale";
+    let sid = "s-self-stale";
+    let stale_sid = "s-stale-peer";
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Write a claim but NO heartbeat for the peer -> peer won't be discovered as active
+    crate::peers::write_claim(
+        pid,
+        stale_sid,
+        "stale-agent",
+        &["crates/edda-store/*".into()],
+    );
+    write_peer_count(pid, sid, 1);
+
+    let result = check_offlimits(pid, sid, "crates/edda-store/src/lib.rs");
+    assert!(
+        result.is_none(),
+        "should not block on claims from stale/missing peers"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn offlimits_env_var_enables_enforcement() {
+    let pid = "test-offlimits-env";
+    let sid = "s-self-env";
+    let peer_sid = "s-peer-env";
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Set up peer
+    crate::peers::write_heartbeat_minimal(pid, peer_sid, "env-agent");
+    crate::peers::write_claim(pid, peer_sid, "env-agent", &["src/core/*".into()]);
+    write_peer_count(pid, sid, 1);
+
+    // Enable enforcement via env var
+    std::env::set_var("EDDA_ENFORCE_OFFLIMITS", "1");
+
+    let raw = serde_json::json!({
+        "session_id": sid,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": "src/core/engine.rs",
+            "old_string": "fn old()",
+            "new_string": "fn new()"
+        },
+        "cwd": "."
+    });
+    let result = dispatch_pre_tool_use(&raw, ".", pid, sid).unwrap();
+    let output_str = result.stdout.expect("should produce output");
+    let output: serde_json::Value = serde_json::from_str(&output_str).unwrap();
+    assert_eq!(
+        output["hookSpecificOutput"]["permissionDecision"], "block",
+        "should block Edit on peer-claimed file"
+    );
+    let reason = output["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    assert!(
+        reason.contains("Off-limits"),
+        "reason should mention Off-limits"
+    );
+    assert!(
+        reason.contains("env-agent"),
+        "reason should mention peer label"
+    );
+
+    std::env::remove_var("EDDA_ENFORCE_OFFLIMITS");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn offlimits_skips_non_edit_tools() {
+    let pid = "test-offlimits-bash";
+    let sid = "s-self-bash";
+    let peer_sid = "s-peer-bash";
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Set up peer with claim
+    crate::peers::write_heartbeat_minimal(pid, peer_sid, "bash-agent");
+    crate::peers::write_claim(pid, peer_sid, "bash-agent", &["src/*".into()]);
+    write_peer_count(pid, sid, 1);
+
+    // Enable enforcement
+    std::env::set_var("EDDA_ENFORCE_OFFLIMITS", "1");
+    std::env::set_var("EDDA_CLAUDE_AUTO_APPROVE", "1");
+
+    let raw = serde_json::json!({
+        "session_id": sid,
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {
+            "command": "cat src/main.rs"
+        },
+        "cwd": "."
+    });
+    let result = dispatch_pre_tool_use(&raw, ".", pid, sid).unwrap();
+    let output_str = result.stdout.expect("should have output");
+    let output: serde_json::Value = serde_json::from_str(&output_str).unwrap();
+    // Should be "allow" (auto-approve), not "block"
+    assert_eq!(
+        output["hookSpecificOutput"]["permissionDecision"], "allow",
+        "Bash tool should not be blocked by off-limits"
+    );
+
+    std::env::remove_var("EDDA_ENFORCE_OFFLIMITS");
+    std::env::remove_var("EDDA_CLAUDE_AUTO_APPROVE");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
