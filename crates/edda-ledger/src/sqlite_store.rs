@@ -76,6 +76,27 @@ CREATE INDEX IF NOT EXISTS idx_deps_target ON decision_deps(target_key);
 CREATE INDEX IF NOT EXISTS idx_deps_source ON decision_deps(source_key);
 ";
 
+const SCHEMA_V6_SQL: &str = "
+CREATE TABLE IF NOT EXISTS task_briefs (
+    task_id         TEXT PRIMARY KEY,
+    intake_event_id TEXT NOT NULL REFERENCES events(event_id),
+    title           TEXT NOT NULL,
+    intent          TEXT NOT NULL,
+    source_url      TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'active',
+    branch          TEXT NOT NULL,
+    iterations      INTEGER NOT NULL DEFAULT 0,
+    artifacts       TEXT NOT NULL DEFAULT '[]',
+    decisions       TEXT NOT NULL DEFAULT '[]',
+    last_feedback   TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_briefs_status ON task_briefs(status);
+CREATE INDEX IF NOT EXISTS idx_task_briefs_branch ON task_briefs(branch);
+CREATE INDEX IF NOT EXISTS idx_task_briefs_intent ON task_briefs(intent);
+";
+
 const SCHEMA_V3_SQL: &str = "
 CREATE TABLE IF NOT EXISTS review_bundles (
     event_id TEXT PRIMARY KEY REFERENCES events(event_id),
@@ -161,6 +182,24 @@ pub struct ImportParams<'a> {
     pub source_project_id: &'a str,
     pub source_event_id: &'a str,
     pub is_active: bool,
+}
+
+/// A row from the `task_briefs` table.
+#[derive(Debug, Clone)]
+pub struct TaskBriefRow {
+    pub task_id: String,
+    pub intake_event_id: String,
+    pub title: String,
+    pub intent: String,
+    pub source_url: String,
+    pub status: String,
+    pub branch: String,
+    pub iterations: i64,
+    pub artifacts: String,
+    pub decisions: String,
+    pub last_feedback: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Aggregated outcome metrics for a decision.
@@ -264,6 +303,12 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 5 {
             self.migrate_v4_to_v5()?;
+        }
+
+        // Migrate to v6 if needed (task_briefs materialized view)
+        let current = self.schema_version()?;
+        if current < 6 {
+            self.migrate_v5_to_v6()?;
         }
 
         Ok(())
@@ -451,6 +496,159 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn migrate_v5_to_v6(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V6_SQL)?;
+
+        // Backfill: scan existing task_intake events
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, branch, payload FROM events
+             WHERE event_type = 'task_intake' ORDER BY rowid",
+        )?;
+        let rows: Vec<(String, String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (event_id, ts, branch, payload_str) in &rows {
+            let payload: serde_json::Value = match serde_json::from_str(payload_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            materialize_task_brief_sql(&self.conn, event_id, ts, branch, &payload)?;
+        }
+
+        // Backfill updates: scan commits, notes, and merges on brief branches
+        self.backfill_task_brief_updates()?;
+
+        self.set_schema_version(6)?;
+        Ok(())
+    }
+
+    /// Backfill task brief updates from existing commit/note/merge events.
+    fn backfill_task_brief_updates(&self) -> anyhow::Result<()> {
+        let mut brief_stmt = self
+            .conn
+            .prepare("SELECT task_id, branch, created_at FROM task_briefs")?;
+        let briefs: Vec<(String, String, String)> = brief_stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (_task_id, branch, created_at) in &briefs {
+            // Count commits on this branch after the intake
+            let commit_count: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM events
+                 WHERE branch = ?1 AND event_type = 'commit' AND ts >= ?2",
+                params![branch, created_at],
+                |row| row.get(0),
+            )?;
+
+            // Collect artifacts from commit payloads
+            let mut artifacts: Vec<String> = Vec::new();
+            let mut art_stmt = self.conn.prepare(
+                "SELECT payload FROM events
+                 WHERE branch = ?1 AND event_type = 'commit' AND ts >= ?2
+                 ORDER BY rowid",
+            )?;
+            let payloads: Vec<String> = art_stmt
+                .query_map(params![branch, created_at], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for p_str in &payloads {
+                if let Ok(p) = serde_json::from_str::<serde_json::Value>(p_str) {
+                    extract_artifacts_from_payload(&p, &mut artifacts);
+                }
+            }
+
+            // Get last feedback from notes with review/feedback tags
+            let last_feedback: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT payload FROM events
+                     WHERE branch = ?1 AND event_type = 'note' AND ts >= ?2
+                     AND (LOWER(payload) LIKE '%\"review\"%' OR LOWER(payload) LIKE '%\"feedback\"%')
+                     ORDER BY rowid DESC LIMIT 1",
+                    params![branch, created_at],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|p_str| {
+                    serde_json::from_str::<serde_json::Value>(&p_str)
+                        .ok()
+                        .and_then(|p| extract_feedback_from_payload(&p))
+                });
+
+            // Collect decision keys
+            let mut decision_keys: Vec<String> = Vec::new();
+            let mut dec_stmt = self.conn.prepare(
+                "SELECT payload FROM events
+                 WHERE branch = ?1 AND event_type = 'note' AND ts >= ?2
+                 AND LOWER(payload) LIKE '%\"decision\"%'
+                 ORDER BY rowid",
+            )?;
+            let dec_payloads: Vec<String> = dec_stmt
+                .query_map(params![branch, created_at], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for p_str in &dec_payloads {
+                if let Ok(p) = serde_json::from_str::<serde_json::Value>(p_str) {
+                    if let Some(key) = p["decision"]["key"].as_str() {
+                        if !decision_keys.contains(&key.to_string()) {
+                            decision_keys.push(key.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Check for merge (completion)
+            let has_merge: bool = self.conn.query_row(
+                "SELECT COUNT(*) > 0 FROM events
+                 WHERE branch = ?1 AND event_type = 'merge' AND ts >= ?2",
+                params![branch, created_at],
+                |row| row.get(0),
+            )?;
+
+            // Get updated_at from the latest event on this branch
+            let latest_ts: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT ts FROM events
+                     WHERE branch = ?1 AND ts >= ?2
+                     ORDER BY rowid DESC LIMIT 1",
+                    params![branch, created_at],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            let artifacts_json =
+                serde_json::to_string(&artifacts).unwrap_or_else(|_| "[]".to_string());
+            let decisions_json =
+                serde_json::to_string(&decision_keys).unwrap_or_else(|_| "[]".to_string());
+            let status = if has_merge { "completed" } else { "active" };
+
+            self.conn.execute(
+                "UPDATE task_briefs SET
+                    iterations = ?1,
+                    artifacts = ?2,
+                    decisions = ?3,
+                    last_feedback = ?4,
+                    status = ?5,
+                    updated_at = COALESCE(?6, updated_at)
+                 WHERE branch = ?7 AND created_at = ?8",
+                params![
+                    commit_count,
+                    artifacts_json,
+                    decisions_json,
+                    last_feedback,
+                    status,
+                    latest_ts,
+                    branch,
+                    created_at,
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
     // ── Events ──────────────────────────────────────────────────────
 
     /// Append an event. Append-only (CONTRACT LEDGER-02).
@@ -542,6 +740,32 @@ impl SqliteStore {
                 &event.branch,
                 &event.payload,
             )?;
+        }
+
+        // Materialize task brief on intake
+        if event.event_type == "task_intake" {
+            materialize_task_brief_sql(
+                &tx,
+                &event.event_id,
+                &event.ts,
+                &event.branch,
+                &event.payload,
+            )?;
+        }
+
+        // Update task brief on commit (same branch, increment iterations)
+        if event.event_type == "commit" {
+            update_task_brief_on_commit(&tx, event)?;
+        }
+
+        // Update task brief on note with review/feedback tag
+        if event.event_type == "note" {
+            update_task_brief_on_note(&tx, event)?;
+        }
+
+        // Update task brief on merge (mark completed)
+        if event.event_type == "merge" {
+            update_task_brief_on_merge(&tx, event)?;
         }
 
         tx.commit()?;
@@ -1678,6 +1902,66 @@ impl SqliteStore {
 
         Ok(())
     }
+
+    // ── Task Briefs ─────────────────────────────────────────────────
+
+    /// Get a task brief by task_id.
+    pub fn get_task_brief(&self, task_id: &str) -> anyhow::Result<Option<TaskBriefRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_id, intake_event_id, title, intent, source_url,
+                    status, branch, iterations, artifacts, decisions,
+                    last_feedback, created_at, updated_at
+             FROM task_briefs WHERE task_id = ?1",
+        )?;
+        let result = stmt.query_map(params![task_id], map_task_brief_row)?.next();
+        match result {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(anyhow::anyhow!("task brief query failed: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// List task briefs, optionally filtered by status and/or intent.
+    pub fn list_task_briefs(
+        &self,
+        status: Option<&str>,
+        intent: Option<&str>,
+    ) -> anyhow::Result<Vec<TaskBriefRow>> {
+        let base = "SELECT task_id, intake_event_id, title, intent, source_url,
+                           status, branch, iterations, artifacts, decisions,
+                           last_feedback, created_at, updated_at
+                    FROM task_briefs";
+
+        let mut conditions: Vec<&str> = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(s) = status {
+            conditions.push("status = ?");
+            param_values.push(Box::new(s.to_string()));
+        }
+        if let Some(i) = intent {
+            conditions.push("intent = ?");
+            param_values.push(Box::new(i.to_string()));
+        }
+
+        let sql = if conditions.is_empty() {
+            format!("{base} ORDER BY updated_at DESC")
+        } else {
+            format!(
+                "{base} WHERE {} ORDER BY updated_at DESC",
+                conditions.join(" AND ")
+            )
+        };
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), map_task_brief_row)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("task brief list query failed: {e}"))
+    }
 }
 
 impl Drop for SqliteStore {
@@ -1782,6 +2066,171 @@ fn map_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRow> {
         source_project_id: row.get(10)?,
         source_event_id: row.get(11)?,
     })
+}
+
+fn map_task_brief_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskBriefRow> {
+    Ok(TaskBriefRow {
+        task_id: row.get(0)?,
+        intake_event_id: row.get(1)?,
+        title: row.get(2)?,
+        intent: row.get(3)?,
+        source_url: row.get(4)?,
+        status: row.get(5)?,
+        branch: row.get(6)?,
+        iterations: row.get(7)?,
+        artifacts: row.get(8)?,
+        decisions: row.get(9)?,
+        last_feedback: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+/// Materialize a task_intake event into the task_briefs table.
+fn materialize_task_brief_sql(
+    conn: &Connection,
+    event_id: &str,
+    ts: &str,
+    branch: &str,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let source = payload["source"].as_str().unwrap_or("unknown");
+    let source_id = payload["source_id"].as_str().unwrap_or("");
+    let task_id = format!("{source}#{source_id}");
+    let title = payload["title"].as_str().unwrap_or("");
+    let intent = payload["intent"].as_str().unwrap_or("implement");
+    let source_url = payload["source_url"].as_str().unwrap_or("");
+
+    conn.execute(
+        "INSERT OR IGNORE INTO task_briefs
+         (task_id, intake_event_id, title, intent, source_url, status,
+          branch, iterations, artifacts, decisions, last_feedback,
+          created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, 0, '[]', '[]', NULL, ?7, ?7)",
+        params![task_id, event_id, title, intent, source_url, branch, ts],
+    )?;
+    Ok(())
+}
+
+/// Update task brief when a commit event occurs on the same branch.
+fn update_task_brief_on_commit(conn: &Connection, event: &Event) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT task_id, artifacts FROM task_briefs
+         WHERE branch = ?1 AND status = 'active'",
+    )?;
+    let briefs: Vec<(String, String)> = stmt
+        .query_map(params![event.branch], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (task_id, artifacts_str) in &briefs {
+        let mut artifacts: Vec<String> = serde_json::from_str(artifacts_str).unwrap_or_default();
+        extract_artifacts_from_payload(&event.payload, &mut artifacts);
+        let artifacts_json = serde_json::to_string(&artifacts).unwrap_or_else(|_| "[]".to_string());
+
+        conn.execute(
+            "UPDATE task_briefs SET
+                iterations = iterations + 1,
+                artifacts = ?1,
+                updated_at = ?2
+             WHERE task_id = ?3",
+            params![artifacts_json, event.ts, task_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Update task brief when a note with review/feedback tag occurs.
+fn update_task_brief_on_note(conn: &Connection, event: &Event) -> anyhow::Result<()> {
+    let tags = event.payload["tags"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    let has_feedback_tag = tags.contains(&"review") || tags.contains(&"feedback");
+    let has_decision_tag = tags.contains(&"decision");
+
+    if !has_feedback_tag && !has_decision_tag {
+        return Ok(());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT task_id, decisions FROM task_briefs
+         WHERE branch = ?1 AND status = 'active'",
+    )?;
+    let briefs: Vec<(String, String)> = stmt
+        .query_map(params![event.branch], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (task_id, decisions_str) in &briefs {
+        if has_feedback_tag {
+            let feedback = extract_feedback_from_payload(&event.payload);
+            if let Some(fb) = &feedback {
+                conn.execute(
+                    "UPDATE task_briefs SET last_feedback = ?1, updated_at = ?2
+                     WHERE task_id = ?3",
+                    params![fb, event.ts, task_id],
+                )?;
+            }
+        }
+
+        if has_decision_tag {
+            if let Some(key) = event.payload["decision"]["key"].as_str() {
+                let mut decisions: Vec<String> =
+                    serde_json::from_str(decisions_str).unwrap_or_default();
+                if !decisions.contains(&key.to_string()) {
+                    decisions.push(key.to_string());
+                    let decisions_json =
+                        serde_json::to_string(&decisions).unwrap_or_else(|_| "[]".to_string());
+                    conn.execute(
+                        "UPDATE task_briefs SET decisions = ?1, updated_at = ?2
+                         WHERE task_id = ?3",
+                        params![decisions_json, event.ts, task_id],
+                    )?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Update task brief when a merge event occurs (mark completed).
+fn update_task_brief_on_merge(conn: &Connection, event: &Event) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE task_briefs SET status = 'completed', updated_at = ?1
+         WHERE branch = ?2 AND status = 'active'",
+        params![event.ts, event.branch],
+    )?;
+    Ok(())
+}
+
+/// Extract file paths from a commit payload into the artifacts list.
+fn extract_artifacts_from_payload(payload: &serde_json::Value, artifacts: &mut Vec<String>) {
+    if let Some(files) = payload["files"].as_array() {
+        for f in files {
+            if let Some(path) = f.as_str() {
+                if !artifacts.contains(&path.to_string()) {
+                    artifacts.push(path.to_string());
+                }
+            }
+            if let Some(path) = f["path"].as_str() {
+                if !artifacts.contains(&path.to_string()) {
+                    artifacts.push(path.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Extract feedback text from a note payload.
+fn extract_feedback_from_payload(payload: &serde_json::Value) -> Option<String> {
+    if let Some(msg) = payload["message"].as_str() {
+        return Some(msg.to_string());
+    }
+    if let Some(text) = payload["text"].as_str() {
+        return Some(text.to_string());
+    }
+    None
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
@@ -2685,7 +3134,8 @@ mod tests {
             .unwrap();
         assert!(tables.contains(&"review_bundles".to_string()));
         assert!(tables.contains(&"decision_deps".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 4);
+        assert!(tables.contains(&"task_briefs".to_string()));
+        assert_eq!(store.schema_version().unwrap(), 5);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

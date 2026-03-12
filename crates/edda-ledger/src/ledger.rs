@@ -293,6 +293,25 @@ impl Ledger {
         self.sqlite.transitive_dependents_of(key, max_depth)
     }
 
+    // ── Task Briefs ──────────────────────────────────────────────────
+
+    /// Get a task brief by task_id.
+    pub fn get_task_brief(
+        &self,
+        task_id: &str,
+    ) -> anyhow::Result<Option<crate::sqlite_store::TaskBriefRow>> {
+        self.sqlite.get_task_brief(task_id)
+    }
+
+    /// List task briefs, optionally filtered by status and/or intent.
+    pub fn list_task_briefs(
+        &self,
+        status: Option<&str>,
+        intent: Option<&str>,
+    ) -> anyhow::Result<Vec<crate::sqlite_store::TaskBriefRow>> {
+        self.sqlite.list_task_briefs(status, intent)
+    }
+
     // ── Review Bundles ───────────────────────────────────────────────
 
     /// Get a review bundle by bundle_id.
