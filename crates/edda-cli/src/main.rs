@@ -27,6 +27,7 @@ mod cmd_run;
 mod cmd_scan;
 mod cmd_search;
 mod cmd_serve;
+mod cmd_skill;
 mod cmd_status;
 mod cmd_switch;
 mod cmd_user;
@@ -415,6 +416,11 @@ enum Command {
     Scan {
         #[command(subcommand)]
         cmd: cmd_scan::ScanCmd,
+    },
+    /// Manage skill registry (scan, list, show, search)
+    Skill {
+        #[command(subcommand)]
+        cmd: cmd_skill::SkillCmd,
     },
 }
 
@@ -1042,5 +1048,6 @@ fn main() -> anyhow::Result<()> {
         Command::User { cmd } => cmd_user::execute(cmd),
         Command::Rules { cmd } => cmd_rules::execute(cmd, &repo_root),
         Command::Scan { cmd } => cmd_scan::execute(cmd, &repo_root),
+        Command::Skill { cmd } => cmd_skill::execute(cmd, &repo_root),
     }
 }
