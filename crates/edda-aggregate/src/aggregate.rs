@@ -102,7 +102,7 @@ pub fn aggregate_overview(projects: &[ProjectEntry], range: &DateRange) -> Aggre
         let commit_count = filtered.iter().filter(|e| e.event_type == "commit").count();
         let decision_count = filtered
             .iter()
-            .filter(|e| e.event_type == "decision")
+            .filter(|e| e.event_type == "note" && edda_core::decision::is_decision(&e.payload))
             .count();
         let session_count = count_unique_sessions(&filtered);
 
@@ -456,6 +456,40 @@ mod tests {
         assert_eq!(result.total_events, 1);
         assert_eq!(result.projects.len(), 1);
         assert_eq!(result.projects[0].event_count, 1);
+    }
+
+    #[test]
+    fn aggregate_overview_counts_decisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let paths = edda_ledger::EddaPaths::discover(root);
+        edda_ledger::ledger::init_workspace(&paths).unwrap();
+        edda_ledger::ledger::init_head(&paths, "main").unwrap();
+
+        let ledger = Ledger::open(root).unwrap();
+
+        // Create a decision event (note with "decision" tag)
+        let decision = edda_core::types::DecisionPayload {
+            key: "db.engine".to_string(),
+            value: "sqlite".to_string(),
+            reason: Some("embedded".to_string()),
+        };
+        let event =
+            edda_core::event::new_decision_event("main", None, "system", &decision).unwrap();
+        ledger.append_event(&event).unwrap();
+
+        let entry = ProjectEntry {
+            project_id: "test".to_string(),
+            path: root.to_string_lossy().to_string(),
+            name: "test-project".to_string(),
+            registered_at: "2026-03-01T00:00:00Z".to_string(),
+            last_seen: "2026-03-01T00:00:00Z".to_string(),
+        };
+
+        let result = aggregate_overview(&[entry], &DateRange::default());
+        assert_eq!(result.total_decisions, 1);
+        assert_eq!(result.projects[0].decision_count, 1);
     }
 
     /// Helper: create a ledger event with session_stats containing file_edit_counts.
