@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive};
@@ -51,18 +52,59 @@ impl AppState {
 
 // ── Error Handling ──
 
-struct AppError(anyhow::Error);
+#[derive(Debug, thiserror::Error)]
+enum AppError {
+    #[error("{0}")]
+    Validation(String),
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let body = serde_json::json!({ "error": self.0.to_string() });
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(body)).into_response()
+    #[error("{0}")]
+    NotFound(String),
+
+    #[error("{0}")]
+    #[allow(dead_code)]
+    Conflict(String),
+
+    #[error("{0}")]
+    Internal(#[from] anyhow::Error),
+}
+
+impl From<serde_json::Error> for AppError {
+    fn from(err: serde_json::Error) -> Self {
+        Self::Internal(err.into())
     }
 }
 
-impl<E: Into<anyhow::Error>> From<E> for AppError {
-    fn from(err: E) -> Self {
-        Self(err.into())
+impl From<serde_yaml::Error> for AppError {
+    fn from(err: serde_yaml::Error) -> Self {
+        Self::Internal(err.into())
+    }
+}
+
+impl From<globset::Error> for AppError {
+    fn from(err: globset::Error) -> Self {
+        Self::Internal(err.into())
+    }
+}
+
+impl From<std::io::Error> for AppError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Internal(err.into())
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let (status, code) = match &self {
+            AppError::Validation(_) => (StatusCode::BAD_REQUEST, "VALIDATION_ERROR"),
+            AppError::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
+            AppError::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
+            AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
+        };
+        let body = serde_json::json!({
+            "error": self.to_string(),
+            "code": code,
+        });
+        (status, Json(body)).into_response()
     }
 }
 
@@ -272,10 +314,10 @@ async fn get_decision_outcomes(
             let json = serde_json::to_value(metrics)?;
             Ok(Json(json).into_response())
         }
-        None => {
-            let body = serde_json::json!({ "error": format!("decision not found: {}", event_id) });
-            Ok((StatusCode::NOT_FOUND, Json(body)).into_response())
-        }
+        None => Err(AppError::NotFound(format!(
+            "decision not found: {}",
+            event_id
+        ))),
     }
 }
 
@@ -470,8 +512,10 @@ struct EventResponse {
 
 async fn post_note(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<NoteBody>,
-) -> Result<Json<EventResponse>, AppError> {
+    body: Result<Json<NoteBody>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    let Json(body) = body.map_err(|e| AppError::Validation(e.body_text()))?;
+
     let ledger = state.open_ledger()?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
@@ -483,9 +527,12 @@ async fn post_note(
     let event = new_note_event(&branch, parent_hash.as_deref(), role, &body.text, &tags)?;
     ledger.append_event(&event)?;
 
-    Ok(Json(EventResponse {
-        event_id: event.event_id,
-    }))
+    Ok((
+        StatusCode::CREATED,
+        Json(EventResponse {
+            event_id: event.event_id,
+        }),
+    ))
 }
 
 // ── POST /api/decide ──
@@ -505,10 +552,14 @@ struct DecideResponse {
 
 async fn post_decide(
     State(state): State<Arc<AppState>>,
-    Json(body): Json<DecideBody>,
-) -> Result<Json<DecideResponse>, AppError> {
+    body: Result<Json<DecideBody>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    let Json(body) = body.map_err(|e| AppError::Validation(e.body_text()))?;
+
     let (key, value) = body.decision.split_once('=').ok_or_else(|| {
-        anyhow::anyhow!("decision must be in key=value format (e.g. \"db.engine=postgres\")")
+        AppError::Validation(
+            "decision must be in key=value format (e.g. \"db.engine=postgres\")".into(),
+        )
     })?;
     let key = key.trim();
     let value = value.trim();
@@ -543,10 +594,13 @@ async fn post_decide(
     finalize_event(&mut event)?;
     ledger.append_event(&event)?;
 
-    Ok(Json(DecideResponse {
-        event_id: event.event_id,
-        superseded,
-    }))
+    Ok((
+        StatusCode::CREATED,
+        Json(DecideResponse {
+            event_id: event.event_id,
+            superseded,
+        }),
+    ))
 }
 
 /// Find the most recent decision event with the same key on the given branch.
@@ -1022,29 +1076,19 @@ async fn get_actors(
 async fn get_actor(
     State(state): State<Arc<AppState>>,
     AxumPath(name): AxumPath<String>,
-) -> Response {
-    let ledger = match state.open_ledger() {
-        Ok(l) => l,
-        Err(e) => return AppError(e).into_response(),
-    };
-    let cfg = match policy::load_actors_from_dir(&ledger.paths.edda_dir) {
-        Ok(c) => c,
-        Err(e) => return AppError(e).into_response(),
-    };
+) -> Result<Json<ActorResponse>, AppError> {
+    let ledger = state.open_ledger()?;
+    let cfg = policy::load_actors_from_dir(&ledger.paths.edda_dir)?;
     match cfg.actors.get(&name) {
-        Some(def) => Json(ActorResponse {
+        Some(def) => Ok(Json(ActorResponse {
             name,
             kind: def.kind.clone(),
             roles: def.roles.clone(),
             email: def.email.clone(),
             display_name: def.display_name.clone(),
             runtime: def.runtime.clone(),
-        })
-        .into_response(),
-        None => {
-            let body = serde_json::json!({ "error": format!("Actor '{name}' not found") });
-            (StatusCode::NOT_FOUND, Json(body)).into_response()
-        }
+        })),
+        None => Err(AppError::NotFound(format!("Actor '{name}' not found"))),
     }
 }
 
@@ -1250,13 +1294,13 @@ async fn post_approval_check(
     let bundle = if let Some(bundle_id) = &body.bundle_id {
         let ledger = Ledger::open(&state.repo_root)?;
         let Some(row) = ledger.get_bundle(bundle_id)? else {
-            return Err(AppError(anyhow::anyhow!(
+            return Err(AppError::NotFound(format!(
                 "Bundle '{}' not found",
                 bundle_id
             )));
         };
         let Some(event) = ledger.get_event(&row.event_id)? else {
-            return Err(AppError(anyhow::anyhow!(
+            return Err(AppError::NotFound(format!(
                 "Event for bundle '{}' not found",
                 bundle_id
             )));
@@ -1836,7 +1880,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::CREATED);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -1865,7 +1909,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::CREATED);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -2279,7 +2323,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(decide_resp.status(), StatusCode::OK);
+        assert_eq!(decide_resp.status(), StatusCode::CREATED);
 
         let decide_body = axum::body::to_bytes(decide_resp.into_body(), usize::MAX)
             .await
@@ -3416,5 +3460,90 @@ actors:
 
         assert!(text.contains(&e2.event_id), "expected e2: {text}");
         assert!(!text.contains(&e1.event_id), "e1 should be skipped: {text}");
+    }
+
+    #[tokio::test]
+    async fn post_note_rejects_bad_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/note")
+                    .header("content-type", "application/json")
+                    .body(Body::from("not json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "VALIDATION_ERROR");
+        assert!(json["error"].as_str().unwrap().len() > 0);
+    }
+
+    #[tokio::test]
+    async fn post_decide_rejects_bad_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{invalid"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn post_decide_rejects_missing_equals() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "no-equals-sign"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "VALIDATION_ERROR");
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("key=value format"));
     }
 }
