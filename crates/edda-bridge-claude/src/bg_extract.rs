@@ -15,7 +15,7 @@ pub(crate) const DEFAULT_MODEL: &str = "claude-3-5-haiku-20241022";
 pub(crate) const DEFAULT_MAX_TRANSCRIPT_CHARS: usize = 30_000;
 const DEFAULT_DAILY_BUDGET_USD: f64 = 0.50;
 const DEFAULT_CONFIDENCE_THRESHOLD: f64 = 0.7;
-pub(crate) const API_TIMEOUT_SECS: u64 = 30;
+const API_TIMEOUT_SECS: u64 = 30;
 
 // Haiku pricing (per token)
 pub(crate) const HAIKU_INPUT_COST_PER_TOKEN: f64 = 0.000_001; // $1 / 1M input tokens

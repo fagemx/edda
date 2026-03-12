@@ -206,6 +206,16 @@ pub fn run_scan(project_id: &str, cwd: &str) -> Result<ScanResult> {
 
 // ── Review API ──
 
+/// Load a single scan result by ID (regardless of gap status).
+pub fn load_scan(project_id: &str, scan_id: &str) -> Result<ScanResult> {
+    let path = scan_draft_path(project_id, scan_id);
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("Scan not found: {scan_id}"))?;
+    let scan: ScanResult = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse scan: {}", path.display()))?;
+    Ok(scan)
+}
+
 /// List all scan results that have pending gaps.
 pub fn list_pending_scans(project_id: &str) -> Result<Vec<ScanResult>> {
     let dir = scan_drafts_dir(project_id);

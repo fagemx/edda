@@ -139,11 +139,7 @@ fn execute_list(project_id: &str, json: bool) -> anyhow::Result<()> {
 }
 
 fn execute_show(project_id: &str, scan_id: &str, index: usize) -> anyhow::Result<()> {
-    let scans = bg_scan::list_pending_scans(project_id)?;
-    let scan = scans
-        .iter()
-        .find(|s| s.scan_id == scan_id)
-        .ok_or_else(|| anyhow::anyhow!("Scan not found: {scan_id}"))?;
+    let scan = bg_scan::load_scan(project_id, scan_id)?;
 
     if index >= scan.gaps.len() {
         anyhow::bail!(
@@ -183,7 +179,19 @@ fn execute_create(
     dry_run: bool,
     cwd: &str,
 ) -> anyhow::Result<()> {
-    let gap = bg_scan::accept_gap(project_id, scan_id, index)?;
+    let gap = if dry_run {
+        let scan = bg_scan::load_scan(project_id, scan_id)?;
+        if index >= scan.gaps.len() {
+            anyhow::bail!(
+                "Gap index {} out of range (scan has {} gaps)",
+                index,
+                scan.gaps.len()
+            );
+        }
+        scan.gaps[index].clone()
+    } else {
+        bg_scan::accept_gap(project_id, scan_id, index)?
+    };
 
     let title = &gap.title;
     let mut body_parts = vec![gap.description.clone()];
