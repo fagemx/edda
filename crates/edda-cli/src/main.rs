@@ -3,6 +3,7 @@ mod cmd_ask;
 mod cmd_blob;
 mod cmd_branch;
 mod cmd_bridge;
+mod cmd_brief;
 mod cmd_bundle;
 mod cmd_commit;
 mod cmd_conduct;
@@ -386,6 +387,23 @@ enum Command {
     Bundle {
         #[command(subcommand)]
         cmd: BundleCmd,
+    },
+    /// View task engineering briefs (materialized from ledger events)
+    Brief {
+        /// Task ID (e.g., "github_issue#42") — show a specific brief
+        task_id: Option<String>,
+        /// List all briefs
+        #[arg(long)]
+        list: bool,
+        /// Filter by status (active, completed)
+        #[arg(long)]
+        status: Option<String>,
+        /// Filter by intent (implement, fix, maintain, etc.)
+        #[arg(long)]
+        intent: Option<String>,
+        /// Output as JSON lines
+        #[arg(long)]
+        json: bool,
     },
     /// Approval policy management (show, check, init)
     Policy {
@@ -1079,6 +1097,22 @@ fn main() -> anyhow::Result<()> {
             BundleCmd::Show { bundle_id } => cmd_bundle::execute_show(&repo_root, &bundle_id),
             BundleCmd::List { status } => cmd_bundle::execute_list(&repo_root, status.as_deref()),
         },
+        Command::Brief {
+            task_id,
+            list,
+            status,
+            intent,
+            json,
+        } => {
+            if let Some(id) = task_id {
+                cmd_brief::execute_show(&repo_root, &id)
+            } else if list {
+                cmd_brief::execute_list(&repo_root, status.as_deref(), intent.as_deref(), json)
+            } else {
+                // Default: list all briefs
+                cmd_brief::execute_list(&repo_root, status.as_deref(), intent.as_deref(), json)
+            }
+        }
         Command::Policy { cmd } => cmd_policy::run(cmd, &repo_root),
         Command::Watch => cmd_watch::execute(&repo_root),
         Command::Notify { cmd } => cmd_notify::run(cmd, &repo_root),
