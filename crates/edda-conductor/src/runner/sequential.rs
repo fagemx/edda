@@ -51,7 +51,7 @@ pub async fn run_plan(
         state.plan_status = PlanStatus::Running;
         save_state(cwd, state)?;
         event_log::write_runner_status(cwd, state, None);
-        let _ = write_brief(cwd, state, None);
+        write_brief(cwd, state, None);
         event_log.record(Event::PlanStart {
             plan_name: plan.name.clone(),
             phase_count: total_phases,
@@ -191,7 +191,7 @@ pub async fn run_plan(
             attempt,
         });
         event_log::write_runner_status(cwd, state, Some(&phase_id));
-        let _ = write_brief(cwd, state, None);
+        write_brief(cwd, state, None);
 
         // 4. Build prompt + launch agent
         let prompt = build_phase_prompt(phase, retry_ctx.as_deref());
@@ -444,7 +444,7 @@ pub async fn run_plan(
     }
 
     event_log::write_runner_status(cwd, state, None);
-    let _ = write_brief(cwd, state, None);
+    write_brief(cwd, state, None);
     Ok(())
 }
 

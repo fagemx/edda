@@ -1,5 +1,14 @@
+// Deferred fields from issue #125's full task-brief schema:
+//
+//   - `project`       — project-level metadata (repo, board URL, etc.)
+//   - `iterations`    — per-iteration history with diffs and feedback
+//   - `decisions`     — architectural decisions made during the task
+//   - `lastFeedback`  — most recent human feedback snapshot
+//
+// These are intentionally omitted for now and will be added in a follow-up
+// when the karvi adapter needs them.
+
 use crate::state::machine::{PhaseStatus, PlanState};
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -155,16 +164,17 @@ pub fn brief_path(cwd: &Path, plan_name: &str) -> PathBuf {
 
 /// Derive a Brief from PlanState and write it atomically to disk.
 ///
-/// Uses best-effort semantics (logs error but doesn't fail the run)
-/// to match the `write_runner_status` pattern.
-pub fn write_brief(cwd: &Path, state: &PlanState, meta: Option<BriefMeta>) -> Result<()> {
+/// Uses best-effort semantics (swallows errors internally) to match the
+/// `write_runner_status` pattern — a brief-write failure must never abort
+/// the run.
+pub fn write_brief(cwd: &Path, state: &PlanState, meta: Option<BriefMeta>) {
     let brief = Brief::from_state(state, meta);
     let path = brief_path(cwd, &state.plan_name);
-    let data = serde_json::to_string_pretty(&brief)
-        .context("serializing brief")?;
-    edda_store::write_atomic(&path, data.as_bytes())
-        .with_context(|| format!("writing brief: {}", path.display()))?;
-    Ok(())
+    if let Ok(data) = serde_json::to_string_pretty(&brief) {
+        if let Err(e) = edda_store::write_atomic(&path, data.as_bytes()) {
+            eprintln!("[brief] failed to write {}: {e}", path.display());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -402,7 +412,7 @@ phases:
         let dir = tempfile::tempdir().unwrap();
         let state = test_plan_state();
 
-        write_brief(dir.path(), &state, None).unwrap();
+        write_brief(dir.path(), &state, None);
 
         let path = brief_path(dir.path(), "test");
         assert!(path.exists(), "brief.json should exist");
