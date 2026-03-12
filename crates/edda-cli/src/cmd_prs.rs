@@ -45,6 +45,7 @@ struct GhAuthor {
 #[derive(Debug, Deserialize)]
 struct GhReview {
     state: String,
+    #[serde(rename = "author")]
     _author: GhAuthor,
 }
 

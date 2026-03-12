@@ -700,6 +700,7 @@ async fn post_karvi_event(
 struct RecapQuery {
     project: Option<String>,
     query: Option<String>,
+    #[serde(rename = "since")]
     _since: Option<String>,
     week: Option<bool>,
     scope: Option<String>,
