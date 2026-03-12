@@ -49,6 +49,7 @@ pub fn build_digest_event(
             "cache_creation_tokens": stats.cache_creation_tokens,
             "estimated_cost_usd": stats.estimated_cost_usd,
             "activity": stats.activity.to_string(),
+            "file_edit_counts": stats.file_edit_counts,
             "notes": notes,
         }
     });
