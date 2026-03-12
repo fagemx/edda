@@ -119,6 +119,8 @@ fn score_from_factors(f: &RiskFactors) -> f64 {
     let age = (f.age_days as f64 / 30.0).min(1.0) * 0.15;
     let exec = (f.execution_refs as f64 / 10.0).min(1.0) * 0.25;
     let cross = if f.cross_project { 0.2 } else { 0.0 };
+    // Approved decisions carry higher override risk because they have
+    // organizational backing — overriding them has greater organizational impact.
     let approval = if f.has_approval { 0.1 } else { 0.0 };
     downstream + age + exec + cross + approval
 }

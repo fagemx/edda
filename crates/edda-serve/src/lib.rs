@@ -906,6 +906,7 @@ async fn get_overview(
         })
         .collect();
 
+    // TODO: This event-loading block is duplicated in get_dashboard; extract into a shared helper in a follow-up.
     let mut all_events = Vec::new();
     for entry in &projects {
         let root = std::path::Path::new(&entry.path);
@@ -1233,6 +1234,7 @@ async fn get_dashboard(
         .collect();
 
     // Collect all events for risk computation
+    // TODO: This event-loading block is duplicated in get_overview; extract into a shared helper in a follow-up.
     let mut all_events = Vec::new();
     for entry in &projects {
         let root = std::path::Path::new(&entry.path);
@@ -1677,9 +1679,9 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["red"].is_array());
-        assert!(json["yellow"].is_array());
-        assert!(json["green"].is_array());
+        assert!(json["red"].as_array().unwrap().is_empty());
+        assert!(json["yellow"].as_array().unwrap().is_empty());
+        assert!(json["green"].as_array().unwrap().is_empty());
         assert!(json["updated_at"].is_string());
     }
 
