@@ -76,6 +76,27 @@ CREATE INDEX IF NOT EXISTS idx_deps_target ON decision_deps(target_key);
 CREATE INDEX IF NOT EXISTS idx_deps_source ON decision_deps(source_key);
 ";
 
+const SCHEMA_V6_SQL: &str = "
+CREATE TABLE IF NOT EXISTS task_briefs (
+    task_id         TEXT PRIMARY KEY,
+    intake_event_id TEXT NOT NULL REFERENCES events(event_id),
+    title           TEXT NOT NULL,
+    intent          TEXT NOT NULL,
+    source_url      TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'active',
+    branch          TEXT NOT NULL,
+    iterations      INTEGER NOT NULL DEFAULT 0,
+    artifacts       TEXT NOT NULL DEFAULT '[]',
+    decisions       TEXT NOT NULL DEFAULT '[]',
+    last_feedback   TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_briefs_status ON task_briefs(status);
+CREATE INDEX IF NOT EXISTS idx_task_briefs_branch ON task_briefs(branch);
+CREATE INDEX IF NOT EXISTS idx_task_briefs_intent ON task_briefs(intent);
+";
+
 const SCHEMA_V3_SQL: &str = "
 CREATE TABLE IF NOT EXISTS review_bundles (
     event_id TEXT PRIMARY KEY REFERENCES events(event_id),
@@ -161,6 +182,24 @@ pub struct ImportParams<'a> {
     pub source_project_id: &'a str,
     pub source_event_id: &'a str,
     pub is_active: bool,
+}
+
+/// A row from the `task_briefs` table.
+#[derive(Debug, Clone)]
+pub struct TaskBriefRow {
+    pub task_id: String,
+    pub intake_event_id: String,
+    pub title: String,
+    pub intent: edda_core::types::TaskBriefIntent,
+    pub source_url: String,
+    pub status: edda_core::types::TaskBriefStatus,
+    pub branch: String,
+    pub iterations: i64,
+    pub artifacts: String,
+    pub decisions: String,
+    pub last_feedback: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 /// Aggregated outcome metrics for a decision.
@@ -264,6 +303,12 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 5 {
             self.migrate_v4_to_v5()?;
+        }
+
+        // Migrate to v6 if needed (task_briefs materialized view)
+        let current = self.schema_version()?;
+        if current < 6 {
+            self.migrate_v5_to_v6()?;
         }
 
         Ok(())
@@ -451,6 +496,158 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn migrate_v5_to_v6(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V6_SQL)?;
+
+        // Backfill: scan existing task_intake events
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, branch, payload FROM events
+             WHERE event_type = 'task_intake' ORDER BY rowid",
+        )?;
+        let rows: Vec<(String, String, String, String)> = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (event_id, ts, branch, payload_str) in &rows {
+            let payload: serde_json::Value = match serde_json::from_str(payload_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            materialize_task_brief_sql(&self.conn, event_id, ts, branch, &payload)?;
+        }
+
+        // Backfill updates: scan commits, notes, and merges on brief branches
+        self.backfill_task_brief_updates()?;
+
+        self.set_schema_version(6)?;
+        Ok(())
+    }
+
+    /// Backfill task brief updates from existing commit/note/merge events.
+    fn backfill_task_brief_updates(&self) -> anyhow::Result<()> {
+        let mut brief_stmt = self
+            .conn
+            .prepare("SELECT task_id, branch, created_at FROM task_briefs")?;
+        let briefs: Vec<(String, String, String)> = brief_stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (_task_id, branch, created_at) in &briefs {
+            // Count commits on this branch after the intake
+            let commit_count: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM events
+                 WHERE branch = ?1 AND event_type = 'commit' AND ts >= ?2",
+                params![branch, created_at],
+                |row| row.get(0),
+            )?;
+
+            // Collect artifacts from commit payloads
+            let mut artifacts: Vec<String> = Vec::new();
+            let mut art_stmt = self.conn.prepare(
+                "SELECT payload FROM events
+                 WHERE branch = ?1 AND event_type = 'commit' AND ts >= ?2
+                 ORDER BY rowid",
+            )?;
+            let payloads: Vec<String> = art_stmt
+                .query_map(params![branch, created_at], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for p_str in &payloads {
+                if let Ok(p) = serde_json::from_str::<serde_json::Value>(p_str) {
+                    extract_artifacts_from_payload(&p, &mut artifacts);
+                }
+            }
+
+            // Scan all notes on this branch to find feedback and decision tags.
+            // We parse JSON in Rust instead of using SQL LIKE to avoid false matches.
+            let mut note_stmt = self.conn.prepare(
+                "SELECT payload FROM events
+                 WHERE branch = ?1 AND event_type = 'note' AND ts >= ?2
+                 ORDER BY rowid",
+            )?;
+            let note_payloads: Vec<String> = note_stmt
+                .query_map(params![branch, created_at], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut last_feedback: Option<String> = None;
+            let mut decision_keys: Vec<String> = Vec::new();
+
+            for p_str in &note_payloads {
+                let p: serde_json::Value = match serde_json::from_str(p_str) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let tags = payload_tags(&p);
+                if tags.iter().any(|t| t == "review" || t == "feedback") {
+                    if let Some(fb) = extract_feedback_from_payload(&p) {
+                        last_feedback = Some(fb);
+                    }
+                }
+                if tags.iter().any(|t| t == "decision") {
+                    if let Some(key) = p["decision"]["key"].as_str() {
+                        if !decision_keys.contains(&key.to_string()) {
+                            decision_keys.push(key.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Check for merge (completion)
+            let has_merge: bool = self.conn.query_row(
+                "SELECT COUNT(*) > 0 FROM events
+                 WHERE branch = ?1 AND event_type = 'merge' AND ts >= ?2",
+                params![branch, created_at],
+                |row| row.get(0),
+            )?;
+
+            // Get updated_at from the latest event on this branch
+            let latest_ts: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT ts FROM events
+                     WHERE branch = ?1 AND ts >= ?2
+                     ORDER BY rowid DESC LIMIT 1",
+                    params![branch, created_at],
+                    |row| row.get(0),
+                )
+                .optional()?;
+
+            let artifacts_json =
+                serde_json::to_string(&artifacts).unwrap_or_else(|_| "[]".to_string());
+            let decisions_json =
+                serde_json::to_string(&decision_keys).unwrap_or_else(|_| "[]".to_string());
+            let status = if has_merge {
+                edda_core::types::TaskBriefStatus::Completed
+            } else {
+                edda_core::types::TaskBriefStatus::Active
+            };
+
+            self.conn.execute(
+                "UPDATE task_briefs SET
+                    iterations = ?1,
+                    artifacts = ?2,
+                    decisions = ?3,
+                    last_feedback = ?4,
+                    status = ?5,
+                    updated_at = COALESCE(?6, updated_at)
+                 WHERE branch = ?7 AND created_at = ?8",
+                params![
+                    commit_count,
+                    artifacts_json,
+                    decisions_json,
+                    last_feedback,
+                    status.as_str(),
+                    latest_ts,
+                    branch,
+                    created_at,
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
     // ── Events ──────────────────────────────────────────────────────
 
     /// Append an event. Append-only (CONTRACT LEDGER-02).
@@ -542,6 +739,32 @@ impl SqliteStore {
                 &event.branch,
                 &event.payload,
             )?;
+        }
+
+        // Materialize task brief on intake
+        if event.event_type == "task_intake" {
+            materialize_task_brief_sql(
+                &tx,
+                &event.event_id,
+                &event.ts,
+                &event.branch,
+                &event.payload,
+            )?;
+        }
+
+        // Update task brief on commit (same branch, increment iterations)
+        if event.event_type == "commit" {
+            update_task_brief_on_commit(&tx, event)?;
+        }
+
+        // Update task brief on note with review/feedback tag
+        if event.event_type == "note" {
+            update_task_brief_on_note(&tx, event)?;
+        }
+
+        // Update task brief on merge (mark completed)
+        if event.event_type == "merge" {
+            update_task_brief_on_merge(&tx, event)?;
         }
 
         tx.commit()?;
@@ -1678,6 +1901,66 @@ impl SqliteStore {
 
         Ok(())
     }
+
+    // ── Task Briefs ─────────────────────────────────────────────────
+
+    /// Get a task brief by task_id.
+    pub fn get_task_brief(&self, task_id: &str) -> anyhow::Result<Option<TaskBriefRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT task_id, intake_event_id, title, intent, source_url,
+                    status, branch, iterations, artifacts, decisions,
+                    last_feedback, created_at, updated_at
+             FROM task_briefs WHERE task_id = ?1",
+        )?;
+        let result = stmt.query_map(params![task_id], map_task_brief_row)?.next();
+        match result {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(anyhow::anyhow!("task brief query failed: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// List task briefs, optionally filtered by status and/or intent.
+    pub fn list_task_briefs(
+        &self,
+        status: Option<&str>,
+        intent: Option<&str>,
+    ) -> anyhow::Result<Vec<TaskBriefRow>> {
+        let base = "SELECT task_id, intake_event_id, title, intent, source_url,
+                           status, branch, iterations, artifacts, decisions,
+                           last_feedback, created_at, updated_at
+                    FROM task_briefs";
+
+        let mut conditions: Vec<&str> = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(s) = status {
+            conditions.push("status = ?");
+            param_values.push(Box::new(s.to_string()));
+        }
+        if let Some(i) = intent {
+            conditions.push("intent = ?");
+            param_values.push(Box::new(i.to_string()));
+        }
+
+        let sql = if conditions.is_empty() {
+            format!("{base} ORDER BY updated_at DESC")
+        } else {
+            format!(
+                "{base} WHERE {} ORDER BY updated_at DESC",
+                conditions.join(" AND ")
+            )
+        };
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), map_task_brief_row)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("task brief list query failed: {e}"))
+    }
 }
 
 impl Drop for SqliteStore {
@@ -1782,6 +2065,220 @@ fn map_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRow> {
         source_project_id: row.get(10)?,
         source_event_id: row.get(11)?,
     })
+}
+
+fn map_task_brief_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskBriefRow> {
+    let intent_str: String = row.get(3)?;
+    let status_str: String = row.get(5)?;
+    let intent = intent_str
+        .parse::<edda_core::types::TaskBriefIntent>()
+        .unwrap_or(edda_core::types::TaskBriefIntent::Implement);
+    let status = status_str
+        .parse::<edda_core::types::TaskBriefStatus>()
+        .unwrap_or(edda_core::types::TaskBriefStatus::Active);
+    Ok(TaskBriefRow {
+        task_id: row.get(0)?,
+        intake_event_id: row.get(1)?,
+        title: row.get(2)?,
+        intent,
+        source_url: row.get(4)?,
+        status,
+        branch: row.get(6)?,
+        iterations: row.get(7)?,
+        artifacts: row.get(8)?,
+        decisions: row.get(9)?,
+        last_feedback: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+/// Materialize a task_intake event into the task_briefs table.
+fn materialize_task_brief_sql(
+    conn: &Connection,
+    event_id: &str,
+    ts: &str,
+    branch: &str,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let source = payload["source"].as_str().unwrap_or("unknown");
+    let source_id = payload["source_id"].as_str().unwrap_or("");
+    let task_id = format!("{source}#{source_id}");
+    let title = payload["title"].as_str().unwrap_or("");
+    let intent_str = payload["intent"].as_str().unwrap_or("implement");
+    // Validate intent; fall back to "implement" if unrecognised
+    let intent = intent_str
+        .parse::<edda_core::types::TaskBriefIntent>()
+        .unwrap_or(edda_core::types::TaskBriefIntent::Implement);
+    let source_url = payload["source_url"].as_str().unwrap_or("");
+
+    conn.execute(
+        "INSERT OR IGNORE INTO task_briefs
+         (task_id, intake_event_id, title, intent, source_url, status,
+          branch, iterations, artifacts, decisions, last_feedback,
+          created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6, 0, '[]', '[]', NULL, ?7, ?7)",
+        params![
+            task_id,
+            event_id,
+            title,
+            intent.as_str(),
+            source_url,
+            branch,
+            ts
+        ],
+    )?;
+    Ok(())
+}
+
+/// Update task brief when a commit event occurs on the same branch.
+fn update_task_brief_on_commit(conn: &Connection, event: &Event) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare(
+        "SELECT task_id, artifacts FROM task_briefs
+         WHERE branch = ?1 AND status = ?2",
+    )?;
+    let briefs: Vec<(String, String)> = stmt
+        .query_map(
+            params![
+                event.branch,
+                edda_core::types::TaskBriefStatus::Active.as_str()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (task_id, artifacts_str) in &briefs {
+        let mut artifacts: Vec<String> = serde_json::from_str(artifacts_str).unwrap_or_default();
+        extract_artifacts_from_payload(&event.payload, &mut artifacts);
+        let artifacts_json = serde_json::to_string(&artifacts).unwrap_or_else(|_| "[]".to_string());
+
+        conn.execute(
+            "UPDATE task_briefs SET
+                iterations = iterations + 1,
+                artifacts = ?1,
+                updated_at = ?2
+             WHERE task_id = ?3",
+            params![artifacts_json, event.ts, task_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Update task brief when a note with review/feedback tag occurs.
+fn update_task_brief_on_note(conn: &Connection, event: &Event) -> anyhow::Result<()> {
+    let tags = event.payload["tags"]
+        .as_array()
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    let has_feedback_tag = tags.contains(&"review") || tags.contains(&"feedback");
+    let has_decision_tag = tags.contains(&"decision");
+
+    if !has_feedback_tag && !has_decision_tag {
+        return Ok(());
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT task_id, decisions FROM task_briefs
+         WHERE branch = ?1 AND status = ?2",
+    )?;
+    let briefs: Vec<(String, String)> = stmt
+        .query_map(
+            params![
+                event.branch,
+                edda_core::types::TaskBriefStatus::Active.as_str()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    for (task_id, decisions_str) in &briefs {
+        if has_feedback_tag {
+            let feedback = extract_feedback_from_payload(&event.payload);
+            if let Some(fb) = &feedback {
+                conn.execute(
+                    "UPDATE task_briefs SET last_feedback = ?1, updated_at = ?2
+                     WHERE task_id = ?3",
+                    params![fb, event.ts, task_id],
+                )?;
+            }
+        }
+
+        if has_decision_tag {
+            if let Some(key) = event.payload["decision"]["key"].as_str() {
+                let mut decisions: Vec<String> =
+                    serde_json::from_str(decisions_str).unwrap_or_default();
+                if !decisions.contains(&key.to_string()) {
+                    decisions.push(key.to_string());
+                    let decisions_json =
+                        serde_json::to_string(&decisions).unwrap_or_else(|_| "[]".to_string());
+                    conn.execute(
+                        "UPDATE task_briefs SET decisions = ?1, updated_at = ?2
+                         WHERE task_id = ?3",
+                        params![decisions_json, event.ts, task_id],
+                    )?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Update task brief when a merge event occurs (mark completed).
+fn update_task_brief_on_merge(conn: &Connection, event: &Event) -> anyhow::Result<()> {
+    conn.execute(
+        "UPDATE task_briefs SET status = ?1, updated_at = ?2
+         WHERE branch = ?3 AND status = ?4",
+        params![
+            edda_core::types::TaskBriefStatus::Completed.as_str(),
+            event.ts,
+            event.branch,
+            edda_core::types::TaskBriefStatus::Active.as_str(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Extract file paths from a commit payload into the artifacts list.
+fn extract_artifacts_from_payload(payload: &serde_json::Value, artifacts: &mut Vec<String>) {
+    if let Some(files) = payload["files"].as_array() {
+        for f in files {
+            if let Some(path) = f.as_str() {
+                if !artifacts.contains(&path.to_string()) {
+                    artifacts.push(path.to_string());
+                }
+            }
+            if let Some(path) = f["path"].as_str() {
+                if !artifacts.contains(&path.to_string()) {
+                    artifacts.push(path.to_string());
+                }
+            }
+        }
+    }
+}
+
+/// Extract the `tags` array from a JSON payload, returning an empty vec on any error.
+fn payload_tags(payload: &serde_json::Value) -> Vec<String> {
+    payload["tags"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Extract feedback text from a note payload.
+fn extract_feedback_from_payload(payload: &serde_json::Value) -> Option<String> {
+    if let Some(msg) = payload["message"].as_str() {
+        return Some(msg.to_string());
+    }
+    if let Some(text) = payload["text"].as_str() {
+        return Some(text.to_string());
+    }
+    None
 }
 
 // ── Internal helpers ────────────────────────────────────────────────
@@ -2685,7 +3182,8 @@ mod tests {
             .unwrap();
         assert!(tables.contains(&"review_bundles".to_string()));
         assert!(tables.contains(&"decision_deps".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 4);
+        assert!(tables.contains(&"task_briefs".to_string()));
+        assert_eq!(store.schema_version().unwrap(), 5);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3181,6 +3679,504 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("first event"));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Task brief tests ─────────────────────────────────────────────
+
+    fn make_task_intake_event(branch: &str, source_id: &str, title: &str, intent: &str) -> Event {
+        use edda_core::event::{new_task_intake_event, TaskIntakeParams};
+        new_task_intake_event(&TaskIntakeParams {
+            branch: branch.to_string(),
+            parent_hash: None,
+            source: "github_issue".to_string(),
+            source_id: source_id.to_string(),
+            source_url: format!("https://github.com/test/repo/issues/{source_id}"),
+            title: title.to_string(),
+            intent: intent.to_string(),
+            labels: vec!["enhancement".to_string()],
+            priority: "medium".to_string(),
+            constraints: vec![],
+        })
+        .unwrap()
+    }
+
+    fn make_commit_event(branch: &str, files: &[&str]) -> Event {
+        use edda_core::event::finalize_event;
+        let file_vals: Vec<serde_json::Value> = files
+            .iter()
+            .map(|f| serde_json::json!({"path": f}))
+            .collect();
+        let payload = serde_json::json!({
+            "sha": "abc123",
+            "message": "test commit",
+            "files": file_vals,
+        });
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mut event = Event {
+            event_id: format!("evt_commit_{n}"),
+            ts: time_now_rfc3339(),
+            event_type: "commit".to_string(),
+            branch: branch.to_string(),
+            parent_hash: None,
+            hash: String::new(),
+            payload,
+            refs: Refs::default(),
+            schema_version: 1,
+            digests: Vec::new(),
+            event_family: Some("milestone".to_string()),
+            event_level: Some("milestone".to_string()),
+        };
+        finalize_event(&mut event).unwrap();
+        event
+    }
+
+    fn make_merge_event(branch: &str) -> Event {
+        use edda_core::event::finalize_event;
+        let payload = serde_json::json!({
+            "target_branch": "main",
+            "merge_sha": "def456",
+        });
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let mut event = Event {
+            event_id: format!("evt_merge_{n}"),
+            ts: time_now_rfc3339(),
+            event_type: "merge".to_string(),
+            branch: branch.to_string(),
+            parent_hash: None,
+            hash: String::new(),
+            payload,
+            refs: Refs::default(),
+            schema_version: 1,
+            digests: Vec::new(),
+            event_family: Some("milestone".to_string()),
+            event_level: Some("milestone".to_string()),
+        };
+        finalize_event(&mut event).unwrap();
+        event
+    }
+
+    #[test]
+    fn task_brief_materialized_on_intake() {
+        let (dir, store) = tmp_db();
+        let e = make_task_intake_event("feat/x", "42", "Add auth", "implement");
+        store.append_event(&e).unwrap();
+
+        let brief = store.get_task_brief("github_issue#42").unwrap();
+        assert!(brief.is_some());
+        let b = brief.unwrap();
+        assert_eq!(b.task_id, "github_issue#42");
+        assert_eq!(b.title, "Add auth");
+        assert_eq!(b.intent, edda_core::types::TaskBriefIntent::Implement);
+        assert_eq!(b.status, edda_core::types::TaskBriefStatus::Active);
+        assert_eq!(b.branch, "feat/x");
+        assert_eq!(b.iterations, 0);
+        assert_eq!(b.intake_event_id, e.event_id);
+        assert!(b.source_url.contains("42"));
+        assert!(b.last_feedback.is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_not_found_returns_none() {
+        let (dir, store) = tmp_db();
+        let result = store.get_task_brief("nonexistent#99").unwrap();
+        assert!(result.is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_commit_increments_iterations() {
+        let (dir, store) = tmp_db();
+        let intake = make_task_intake_event("feat/x", "10", "Fix bug", "fix");
+        store.append_event(&intake).unwrap();
+
+        // First commit
+        let c1 = make_commit_event("feat/x", &["src/main.rs"]);
+        store.append_event(&c1).unwrap();
+
+        let b = store.get_task_brief("github_issue#10").unwrap().unwrap();
+        assert_eq!(b.iterations, 1);
+        assert_eq!(b.intent, edda_core::types::TaskBriefIntent::Fix);
+
+        // Second commit adds new artifact
+        let c2 = make_commit_event("feat/x", &["src/lib.rs"]);
+        store.append_event(&c2).unwrap();
+
+        let b = store.get_task_brief("github_issue#10").unwrap().unwrap();
+        assert_eq!(b.iterations, 2);
+
+        let artifacts: Vec<String> = serde_json::from_str(&b.artifacts).unwrap();
+        assert!(artifacts.contains(&"src/main.rs".to_string()));
+        assert!(artifacts.contains(&"src/lib.rs".to_string()));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_commit_on_different_branch_ignored() {
+        let (dir, store) = tmp_db();
+        let intake = make_task_intake_event("feat/a", "20", "Task A", "implement");
+        store.append_event(&intake).unwrap();
+
+        // Commit on a different branch should not affect this brief
+        let c = make_commit_event("feat/b", &["other.rs"]);
+        store.append_event(&c).unwrap();
+
+        let b = store.get_task_brief("github_issue#20").unwrap().unwrap();
+        assert_eq!(b.iterations, 0);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_merge_marks_completed() {
+        let (dir, store) = tmp_db();
+        let intake = make_task_intake_event("feat/x", "30", "Impl feature", "implement");
+        store.append_event(&intake).unwrap();
+
+        let m = make_merge_event("feat/x");
+        store.append_event(&m).unwrap();
+
+        let b = store.get_task_brief("github_issue#30").unwrap().unwrap();
+        assert_eq!(b.status, edda_core::types::TaskBriefStatus::Completed);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_merge_does_not_affect_other_branch() {
+        let (dir, store) = tmp_db();
+        let intake = make_task_intake_event("feat/a", "31", "Task A", "implement");
+        store.append_event(&intake).unwrap();
+
+        // Merge on a different branch
+        let m = make_merge_event("feat/b");
+        store.append_event(&m).unwrap();
+
+        let b = store.get_task_brief("github_issue#31").unwrap().unwrap();
+        assert_eq!(b.status, edda_core::types::TaskBriefStatus::Active);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_note_with_feedback_tag() {
+        let (dir, store) = tmp_db();
+        let intake = make_task_intake_event("feat/x", "40", "Review task", "implement");
+        store.append_event(&intake).unwrap();
+
+        // Note with review tag
+        let note = new_note_event(
+            "feat/x",
+            None,
+            "reviewer",
+            "Looks good but needs tests",
+            &["review".to_string()],
+        )
+        .unwrap();
+        store.append_event(&note).unwrap();
+
+        let b = store.get_task_brief("github_issue#40").unwrap().unwrap();
+        assert_eq!(
+            b.last_feedback.as_deref(),
+            Some("Looks good but needs tests")
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_note_with_decision_tag() {
+        let (dir, store) = tmp_db();
+        let intake = make_task_intake_event("feat/x", "50", "Decide arch", "implement");
+        store.append_event(&intake).unwrap();
+
+        // Note with decision tag
+        let mut note = new_note_event(
+            "feat/x",
+            None,
+            "system",
+            "db.engine: sqlite",
+            &["decision".to_string()],
+        )
+        .unwrap();
+        note.payload["decision"] = serde_json::json!({"key": "db.engine", "value": "sqlite"});
+        store.append_event(&note).unwrap();
+
+        let b = store.get_task_brief("github_issue#50").unwrap().unwrap();
+        let decisions: Vec<String> = serde_json::from_str(&b.decisions).unwrap();
+        assert!(decisions.contains(&"db.engine".to_string()));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_note_without_relevant_tag_ignored() {
+        let (dir, store) = tmp_db();
+        let intake = make_task_intake_event("feat/x", "51", "Some task", "implement");
+        store.append_event(&intake).unwrap();
+
+        // Note with unrelated tag
+        let note = new_note_event(
+            "feat/x",
+            None,
+            "user",
+            "random note",
+            &["session".to_string()],
+        )
+        .unwrap();
+        store.append_event(&note).unwrap();
+
+        let b = store.get_task_brief("github_issue#51").unwrap().unwrap();
+        assert!(b.last_feedback.is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_list_all() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_task_intake_event(
+                "feat/a",
+                "60",
+                "Task A",
+                "implement",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_task_intake_event("feat/b", "61", "Task B", "fix"))
+            .unwrap();
+
+        let all = store.list_task_briefs(None, None).unwrap();
+        assert_eq!(all.len(), 2);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_list_filter_by_status() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_task_intake_event(
+                "feat/a",
+                "70",
+                "Active task",
+                "implement",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_task_intake_event("feat/b", "71", "Done task", "fix"))
+            .unwrap();
+
+        // Complete the second one
+        store.append_event(&make_merge_event("feat/b")).unwrap();
+
+        let active = store.list_task_briefs(Some("active"), None).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].task_id, "github_issue#70");
+
+        let completed = store.list_task_briefs(Some("completed"), None).unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].task_id, "github_issue#71");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_list_filter_by_intent() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_task_intake_event(
+                "feat/a",
+                "80",
+                "Impl task",
+                "implement",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_task_intake_event("feat/b", "81", "Fix task", "fix"))
+            .unwrap();
+
+        let impls = store.list_task_briefs(None, Some("implement")).unwrap();
+        assert_eq!(impls.len(), 1);
+        assert_eq!(impls[0].task_id, "github_issue#80");
+
+        let fixes = store.list_task_briefs(None, Some("fix")).unwrap();
+        assert_eq!(fixes.len(), 1);
+        assert_eq!(fixes[0].task_id, "github_issue#81");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_list_filter_combined() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_task_intake_event("feat/a", "90", "A", "implement"))
+            .unwrap();
+        store
+            .append_event(&make_task_intake_event("feat/b", "91", "B", "implement"))
+            .unwrap();
+        store
+            .append_event(&make_task_intake_event("feat/c", "92", "C", "fix"))
+            .unwrap();
+
+        // Complete B
+        store.append_event(&make_merge_event("feat/b")).unwrap();
+
+        let result = store
+            .list_task_briefs(Some("active"), Some("implement"))
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].task_id, "github_issue#90");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_duplicate_intake_ignored() {
+        let (dir, store) = tmp_db();
+        let e1 = make_task_intake_event("feat/x", "100", "Task", "implement");
+        store.append_event(&e1).unwrap();
+
+        // Another intake with same source/source_id but different event
+        let e2 = make_task_intake_event("feat/x", "100", "Task v2", "fix");
+        store.append_event(&e2).unwrap();
+
+        // Should still have only one brief (INSERT OR IGNORE)
+        let briefs = store.list_task_briefs(None, None).unwrap();
+        assert_eq!(briefs.len(), 1);
+        assert_eq!(briefs[0].title, "Task"); // original title kept
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_unknown_intent_falls_back() {
+        let (dir, store) = tmp_db();
+        // Manually create an event with an unknown intent
+        let e = make_task_intake_event("feat/x", "110", "Unknown intent task", "foobar");
+        store.append_event(&e).unwrap();
+
+        let b = store.get_task_brief("github_issue#110").unwrap().unwrap();
+        // Should fall back to Implement
+        assert_eq!(b.intent, edda_core::types::TaskBriefIntent::Implement);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_completed_ignores_further_commits() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_task_intake_event(
+                "feat/x",
+                "120",
+                "Done task",
+                "implement",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_commit_event("feat/x", &["a.rs"]))
+            .unwrap();
+        store.append_event(&make_merge_event("feat/x")).unwrap();
+
+        let b = store.get_task_brief("github_issue#120").unwrap().unwrap();
+        assert_eq!(b.status, edda_core::types::TaskBriefStatus::Completed);
+        assert_eq!(b.iterations, 1);
+
+        // Commit after merge should not increment (status is completed, not active)
+        store
+            .append_event(&make_commit_event("feat/x", &["b.rs"]))
+            .unwrap();
+
+        let b = store.get_task_brief("github_issue#120").unwrap().unwrap();
+        assert_eq!(b.iterations, 1); // unchanged
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_backfill_parses_json_not_like() {
+        let (dir, store) = tmp_db();
+
+        // Create a task_intake directly in events table (simulating pre-v5 data)
+        let intake = make_task_intake_event("feat/x", "130", "Backfill test", "implement");
+        store.append_event(&intake).unwrap();
+
+        // Create a note that mentions "review" in the message text but NOT in tags.
+        // This should NOT be picked up as feedback (unlike the old LIKE approach).
+        let note = new_note_event(
+            "feat/x",
+            None,
+            "user",
+            "I did a code review and found issues",
+            &["session".to_string()],
+        )
+        .unwrap();
+        store.append_event(&note).unwrap();
+
+        let b = store.get_task_brief("github_issue#130").unwrap().unwrap();
+        // No feedback should be set because the tag is "session", not "review"
+        assert!(b.last_feedback.is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_brief_all_intent_variants() {
+        let (dir, store) = tmp_db();
+        let intents = [
+            "implement",
+            "fix",
+            "maintain",
+            "investigate",
+            "refactor",
+            "document",
+            "test",
+        ];
+        for (i, intent) in intents.iter().enumerate() {
+            let id = format!("{}", 200 + i);
+            store
+                .append_event(&make_task_intake_event("feat/x", &id, "task", intent))
+                .unwrap();
+        }
+
+        let all = store.list_task_briefs(None, None).unwrap();
+        assert_eq!(all.len(), intents.len());
+
+        // Verify each intent can be filtered
+        for intent in &intents {
+            let found = store.list_task_briefs(None, Some(intent)).unwrap();
+            assert_eq!(
+                found.len(),
+                1,
+                "should find exactly one task with intent {intent}"
+            );
+        }
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
