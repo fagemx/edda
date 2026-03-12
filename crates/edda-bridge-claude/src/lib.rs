@@ -3,6 +3,7 @@ pub mod bg_detect;
 pub mod bg_digest;
 pub mod bg_extract;
 pub mod bg_scan;
+pub mod issue_proposal;
 pub mod digest;
 pub mod pattern;
 pub mod peers;

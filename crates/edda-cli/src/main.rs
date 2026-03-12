@@ -20,6 +20,7 @@ mod cmd_pattern;
 mod cmd_phase;
 mod cmd_pipeline;
 mod cmd_plan;
+mod cmd_propose;
 mod cmd_prs;
 mod cmd_rebuild;
 mod cmd_recap;
@@ -422,6 +423,12 @@ enum Command {
     Scan {
         #[command(subcommand)]
         cmd: cmd_scan::ScanCmd,
+    },
+    /// Issue proposal workflow — draft, review, and create GitHub issues
+    #[command(name = "propose-issue")]
+    ProposeIssue {
+        #[command(subcommand)]
+        cmd: cmd_propose::ProposeCmd,
     },
     /// Manage skill registry (scan, list, show, search)
     Skill {
@@ -1063,6 +1070,7 @@ fn main() -> anyhow::Result<()> {
         Command::User { cmd } => cmd_user::execute(cmd),
         Command::Rules { cmd } => cmd_rules::execute(cmd, &repo_root),
         Command::Scan { cmd } => cmd_scan::execute(cmd, &repo_root),
+        Command::ProposeIssue { cmd } => cmd_propose::execute(cmd, &repo_root),
         Command::Skill { cmd } => cmd_skill::execute(cmd, &repo_root),
     }
 }
