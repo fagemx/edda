@@ -278,7 +278,8 @@ fn read_karvi_board(cwd: &str) -> Option<String> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("(untitled)");
                     let subject_trunc = if subject.len() > BOARD_TASK_SUBJECT_MAX {
-                        format!("{}...", &subject[..BOARD_TASK_SUBJECT_MAX])
+                        let end = subject.floor_char_boundary(BOARD_TASK_SUBJECT_MAX);
+                        format!("{}...", &subject[..end])
                     } else {
                         subject.to_string()
                     };
@@ -338,7 +339,8 @@ fn read_karvi_board(cwd: &str) -> Option<String> {
                 .filter_map(|s| {
                     let c = s.get("content").and_then(|v| v.as_str())?;
                     if c.len() > BOARD_SIGNAL_CONTENT_MAX {
-                        Some(format!("\"{}...\"", &c[..BOARD_SIGNAL_CONTENT_MAX]))
+                        let end = c.floor_char_boundary(BOARD_SIGNAL_CONTENT_MAX);
+                        Some(format!("\"{}...\"", &c[..end]))
                     } else {
                         Some(format!("\"{c}\""))
                     }
@@ -354,10 +356,8 @@ fn read_karvi_board(cwd: &str) -> Option<String> {
 
     // Enforce hard cap
     if summary.len() > BOARD_SUMMARY_MAX_CHARS {
-        Some(format!(
-            "{}...(truncated)",
-            &summary[..BOARD_SUMMARY_MAX_CHARS]
-        ))
+        let end = summary.floor_char_boundary(BOARD_SUMMARY_MAX_CHARS);
+        Some(format!("{}...(truncated)", &summary[..end]))
     } else {
         Some(summary)
     }
@@ -394,7 +394,7 @@ pub(super) fn inject_karvi_brief(cwd: &str) -> Option<String> {
 
     let contents = fs::read_to_string(&brief_path).ok()?;
     let truncated = if contents.len() > 2000 {
-        &contents[..2000]
+        &contents[..contents.floor_char_boundary(2000)]
     } else {
         &contents
     };
