@@ -836,6 +836,14 @@ enum McpCommand {
 }
 
 fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "warn".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
     let repo_root = edda_ledger::EddaPaths::find_root(&cwd).unwrap_or(cwd);

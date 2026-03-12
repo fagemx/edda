@@ -47,6 +47,7 @@ hex.workspace = true
 ulid.workspace = true
 time.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
+tracing-subscriber = { workspace = true }
 
 [features]
 default = ["tui"]

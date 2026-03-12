@@ -80,7 +80,7 @@ async fn synthesize_with_llm(api_key: &str, input: SynthesisInput) -> Result<cra
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        eprintln!("Warning: LLM API failed ({}): {}", status, body);
+        tracing::warn!(%status, %body, "LLM API failed");
         return synthesize_with_template(input);
     }
 

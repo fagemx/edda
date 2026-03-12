@@ -163,7 +163,7 @@ pub(super) fn run_auto_digest(
         digest_failed_cmds,
     ) {
         crate::digest::DigestResult::Written { event_id } => {
-            eprintln!("[edda] digested previous session → {event_id}");
+            tracing::info!(%event_id, "digested previous session");
             None
         }
         crate::digest::DigestResult::PermanentFailure(warning) => Some(warning),

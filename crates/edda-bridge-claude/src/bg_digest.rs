@@ -231,7 +231,7 @@ fn write_session_note(cwd: &str, summary: &str) -> Result<()> {
     edda_core::event::finalize_event(&mut event);
     ledger.append_event(&event)?;
 
-    eprintln!("[edda-bg] session digest written → {}", event.event_id);
+    tracing::info!(event_id = %event.event_id, "session digest written");
     Ok(())
 }
 

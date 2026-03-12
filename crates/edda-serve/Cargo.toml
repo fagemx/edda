@@ -18,6 +18,7 @@ edda-aggregate = { path = "../edda-aggregate", version = "0.1.1" }
 edda-store = { path = "../edda-store", version = "0.1.1" }
 edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.1.1" }
 axum = "0.8"
+tracing = { workspace = true }
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
 tower-http = { version = "0.6", features = ["cors"] }
 anyhow.workspace = true
