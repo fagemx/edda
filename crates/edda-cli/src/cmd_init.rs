@@ -80,6 +80,13 @@ actors: {}
             std::fs::write(&actors_path, default_actors.as_bytes())?;
         }
 
+        // Generate default tool_tiers.yaml
+        let tier_path = paths.edda_dir.join("tool_tiers.yaml");
+        if !tier_path.exists() {
+            let default_tiers = edda_core::tool_tier::default_tool_tier_config();
+            edda_core::tool_tier::save_tool_tiers_to_dir(&paths.edda_dir, &default_tiers)?;
+        }
+
         // Open ledger and write the init event
         let ledger = Ledger::open(repo_root)?;
         let _lock = WorkspaceLock::acquire(&ledger.paths)?;

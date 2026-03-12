@@ -113,6 +113,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/dashboard", get(serve_dashboard))
         .route("/api/actors", get(get_actors))
         .route("/api/actors/{name}", get(get_actor))
+        .route("/api/tool-tier/{tool_name}", get(get_tool_tier))
         .route("/api/events/stream", get(get_event_stream))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -161,6 +162,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/projects", get(get_projects))
         .route("/api/actors", get(get_actors))
         .route("/api/actors/{name}", get(get_actor))
+        .route("/api/tool-tier/{tool_name}", get(get_tool_tier))
         .route("/api/metrics/quality", get(get_quality_metrics))
         .route("/api/dashboard", get(get_dashboard))
         .route("/dashboard", get(serve_dashboard))
@@ -1046,6 +1048,18 @@ async fn get_actor(
             (StatusCode::NOT_FOUND, Json(body)).into_response()
         }
     }
+}
+
+// ── GET /api/tool-tier/:tool_name ──
+
+async fn get_tool_tier(
+    State(state): State<Arc<AppState>>,
+    AxumPath(tool_name): AxumPath<String>,
+) -> Result<Json<edda_core::tool_tier::ToolTierResult>, AppError> {
+    let edda_dir = state.repo_root.join(".edda");
+    let config = edda_core::tool_tier::load_tool_tiers_from_dir(&edda_dir)?;
+    let result = edda_core::tool_tier::resolve_tool_tier(&config, &tool_name);
+    Ok(Json(result))
 }
 
 // ── GET /api/metrics/quality ──
@@ -3416,5 +3430,64 @@ actors:
 
         assert!(text.contains(&e2.event_id), "expected e2: {text}");
         assert!(!text.contains(&e1.event_id), "e1 should be skipped: {text}");
+    }
+
+    #[tokio::test]
+    async fn tool_tier_known_tool() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let edda_dir = tmp.path().join(".edda");
+        let mut config = edda_core::tool_tier::default_tool_tier_config();
+        config
+            .tools
+            .insert("bash".to_string(), edda_core::tool_tier::ToolTier::T0);
+        edda_core::tool_tier::save_tool_tiers_to_dir(&edda_dir, &config).unwrap();
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tool-tier/bash")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["tool"], "bash");
+        assert_eq!(json["tier"], "T0");
+        assert_eq!(json["approval"], "none");
+    }
+
+    #[tokio::test]
+    async fn tool_tier_unknown_tool_returns_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/tool-tier/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["tool"], "nonexistent");
+        assert_eq!(json["tier"], "T1"); // default tier
+        assert_eq!(json["approval"], "none");
     }
 }
