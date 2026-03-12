@@ -1915,7 +1915,6 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-<<<<<<< HEAD
                     .uri("/api/scope/check")
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
