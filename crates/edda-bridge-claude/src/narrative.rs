@@ -412,12 +412,14 @@ mod tests {
         crate::peers::write_subagent_completed(
             pid,
             "parent-session",
-            "agent-1",
-            "Explore",
-            "Sub-agent completed: 2 files touched",
-            &["a.rs".into(), "b.rs".into()],
-            &Vec::new(),
-            &Vec::new(),
+            &crate::peers::SubagentReport {
+                agent_id: "agent-1",
+                agent_type: "Explore",
+                summary: "Sub-agent completed: 2 files touched",
+                files_touched: &["a.rs".into(), "b.rs".into()],
+                decisions: &Vec::new(),
+                commits: &Vec::new(),
+            },
         );
 
         let summary = render_activity_summary(pid).unwrap();
@@ -445,12 +447,14 @@ mod tests {
         crate::peers::write_subagent_completed(
             pid,
             "parent-session",
-            "agent-2",
-            "Plan",
-            "Completed planning",
-            &Vec::new(),
-            &Vec::new(),
-            &Vec::new(),
+            &crate::peers::SubagentReport {
+                agent_id: "agent-2",
+                agent_type: "Plan",
+                summary: "Completed planning",
+                files_touched: &Vec::new(),
+                decisions: &Vec::new(),
+                commits: &Vec::new(),
+            },
         );
 
         let summary = render_activity_summary(pid).unwrap();

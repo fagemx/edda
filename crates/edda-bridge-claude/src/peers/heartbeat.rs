@@ -298,17 +298,21 @@ pub fn write_request_ack(project_id: &str, session_id: &str, from_label: &str) {
     append_coord_event(project_id, &event);
 }
 
+/// Data describing a completed sub-agent's work output.
+pub(crate) struct SubagentReport<'a> {
+    pub agent_id: &'a str,
+    pub agent_type: &'a str,
+    pub summary: &'a str,
+    pub files_touched: &'a [String],
+    pub decisions: &'a [String],
+    pub commits: &'a [String],
+}
+
 /// Write a sub-agent completion summary event.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_subagent_completed(
     project_id: &str,
     parent_session_id: &str,
-    agent_id: &str,
-    agent_type: &str,
-    summary: &str,
-    files_touched: &[String],
-    decisions: &[String],
-    commits: &[String],
+    report: &SubagentReport<'_>,
 ) {
     let event = CoordEvent {
         ts: now_rfc3339(),
@@ -317,12 +321,12 @@ pub(crate) fn write_subagent_completed(
         payload: serde_json::json!({
             "kind": "subagent_completed",
             "parent_session_id": parent_session_id,
-            "agent_id": agent_id,
-            "agent_type": agent_type,
-            "summary": summary,
-            "files_touched": files_touched,
-            "decisions": decisions,
-            "commits": commits,
+            "agent_id": report.agent_id,
+            "agent_type": report.agent_type,
+            "summary": report.summary,
+            "files_touched": report.files_touched,
+            "decisions": report.decisions,
+            "commits": report.commits,
         }),
     };
     append_coord_event(project_id, &event);

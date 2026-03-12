@@ -2594,7 +2594,18 @@ mod tests {
 
     // ── Decision outcome tests ───────────────────────────────────────
 
-    #[allow(clippy::too_many_arguments)]
+    struct ExecEventParams<'a> {
+        branch: &'a str,
+        event_id: &'a str,
+        ts: &'a str,
+        decision_ref: Option<&'a str>,
+        status: &'a str,
+        cost_usd: f64,
+        token_in: u64,
+        token_out: u64,
+        latency_ms: u64,
+    }
+
     fn make_execution_event_with_decision_ref(
         branch: &str,
         event_id: &str,
@@ -2606,10 +2617,24 @@ mod tests {
         token_out: u64,
         latency_ms: u64,
     ) -> Event {
+        make_exec_event_from_params(&ExecEventParams {
+            branch,
+            event_id,
+            ts,
+            decision_ref,
+            status,
+            cost_usd,
+            token_in,
+            token_out,
+            latency_ms,
+        })
+    }
+
+    fn make_exec_event_from_params(p: &ExecEventParams<'_>) -> Event {
         use edda_core::types::{Provenance, Refs};
         use edda_core::SCHEMA_VERSION;
 
-        let refs = if let Some(dr) = decision_ref {
+        let refs = if let Some(dr) = p.decision_ref {
             Refs {
                 provenance: vec![Provenance {
                     target: dr.to_string(),
@@ -2624,26 +2649,26 @@ mod tests {
 
         let payload = serde_json::json!({
             "version": "karvi.event.v1",
-            "event_id": event_id,
+            "event_id": p.event_id,
             "event_type": "step_completed",
-            "occurred_at": ts,
-            "trace_id": format!("trace_{}", event_id),
-            "task_id": format!("task_{}", event_id),
-            "step_id": format!("step_{}", event_id),
+            "occurred_at": p.ts,
+            "trace_id": format!("trace_{}", p.event_id),
+            "task_id": format!("task_{}", p.event_id),
+            "step_id": format!("step_{}", p.event_id),
             "project": "test/repo",
             "runtime": "opencode",
             "model": "gpt-4",
             "actor": { "kind": "agent", "id": "test-agent" },
-            "usage": { "token_in": token_in, "token_out": token_out, "cost_usd": cost_usd, "latency_ms": latency_ms },
-            "result": { "status": status, "error_code": null, "retryable": false },
-            "decision_ref": decision_ref,
+            "usage": { "token_in": p.token_in, "token_out": p.token_out, "cost_usd": p.cost_usd, "latency_ms": p.latency_ms },
+            "result": { "status": p.status, "error_code": null, "retryable": false },
+            "decision_ref": p.decision_ref,
         });
 
         let mut event = Event {
-            event_id: event_id.to_string(),
-            ts: ts.to_string(),
+            event_id: p.event_id.to_string(),
+            ts: p.ts.to_string(),
             event_type: "execution_event".to_string(),
-            branch: branch.to_string(),
+            branch: p.branch.to_string(),
             parent_hash: None,
             hash: String::new(),
             payload,

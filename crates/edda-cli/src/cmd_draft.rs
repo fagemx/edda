@@ -840,6 +840,17 @@ pub fn list(repo_root: &Path, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+struct DraftItem {
+    draft_id: String,
+    title: String,
+    branch: String,
+    stage_id: String,
+    role: String,
+    min_approvals: usize,
+    current_approvals: usize,
+    assignees: Vec<String>,
+}
+
 pub fn inbox(
     repo_root: &Path,
     by: Option<&str>,
@@ -857,17 +868,7 @@ pub fn inbox(
         return Ok(());
     }
 
-    #[allow(clippy::type_complexity)]
-    let mut items: Vec<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        usize,
-        usize,
-        Vec<String>,
-    )> = Vec::new();
+    let mut items: Vec<DraftItem> = Vec::new();
 
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -897,16 +898,16 @@ pub fn inbox(
                     continue;
                 }
             }
-            items.push((
-                draft.draft_id.clone(),
-                draft.title.clone(),
-                draft.branch.clone(),
-                stage.stage_id.clone(),
-                stage.role.clone(),
-                stage.min_approvals,
-                stage.approved_by.len(),
-                stage.assignees.clone(),
-            ));
+            items.push(DraftItem {
+                draft_id: draft.draft_id.clone(),
+                title: draft.title.clone(),
+                branch: draft.branch.clone(),
+                stage_id: stage.stage_id.clone(),
+                role: stage.role.clone(),
+                min_approvals: stage.min_approvals,
+                current_approvals: stage.approved_by.len(),
+                assignees: stage.assignees.clone(),
+            });
         }
     }
 
@@ -918,24 +919,27 @@ pub fn inbox(
     }
 
     if json {
-        for (did, title, branch, sid, role, min_approvals, current, assignees) in &items {
+        for item in &items {
             let obj = serde_json::json!({
-                "draft_id": did,
-                "title": title,
-                "branch": branch,
-                "stage_id": sid,
-                "role": role,
-                "min_approvals": min_approvals,
-                "current_approvals": current,
-                "approvals_needed": min_approvals.saturating_sub(*current),
-                "assignees": assignees,
+                "draft_id": item.draft_id,
+                "title": item.title,
+                "branch": item.branch,
+                "stage_id": item.stage_id,
+                "role": item.role,
+                "min_approvals": item.min_approvals,
+                "current_approvals": item.current_approvals,
+                "approvals_needed": item.min_approvals.saturating_sub(item.current_approvals),
+                "assignees": item.assignees,
             });
             println!("{}", serde_json::to_string(&obj)?);
         }
     } else {
-        for (did, title, _branch, sid, role, min, current, _assignees) in &items {
-            let needed = min.saturating_sub(*current);
-            println!("{did} | {title} | {sid} | {role} | approvals needed: {needed}");
+        for item in &items {
+            let needed = item.min_approvals.saturating_sub(item.current_approvals);
+            println!(
+                "{} | {} | {} | {} | approvals needed: {needed}",
+                item.draft_id, item.title, item.stage_id, item.role
+            );
         }
     }
     Ok(())

@@ -226,7 +226,7 @@ mod tests {
 
         let reviews = vec![GhReview {
             state: "APPROVED".to_string(),
-            author: GhAuthor {
+            _author: GhAuthor {
                 login: "reviewer1".to_string(),
             },
         }];
@@ -238,13 +238,13 @@ mod tests {
         let reviews = vec![
             GhReview {
                 state: "CHANGES_REQUESTED".to_string(),
-                author: GhAuthor {
+                _author: GhAuthor {
                     login: "reviewer1".to_string(),
                 },
             },
             GhReview {
                 state: "APPROVED".to_string(),
-                author: GhAuthor {
+                _author: GhAuthor {
                     login: "reviewer2".to_string(),
                 },
             },
@@ -260,19 +260,19 @@ mod tests {
         let reviews = vec![
             GhReview {
                 state: "CHANGES_REQUESTED".to_string(),
-                author: GhAuthor {
+                _author: GhAuthor {
                     login: "reviewer1".to_string(),
                 },
             },
             GhReview {
                 state: "APPROVED".to_string(),
-                author: GhAuthor {
+                _author: GhAuthor {
                     login: "reviewer2".to_string(),
                 },
             },
             GhReview {
                 state: "CHANGES_REQUESTED".to_string(),
-                author: GhAuthor {
+                _author: GhAuthor {
                     login: "reviewer3".to_string(),
                 },
             },
