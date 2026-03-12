@@ -8,6 +8,7 @@ use edda_conductor::runner::notify::StdoutNotifier;
 use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
 use edda_conductor::state::persist::{load_state, save_state};
+use edda_conductor::tmux::TmuxSession;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
@@ -31,6 +32,9 @@ pub enum ConductCmd {
         /// Output events as JSONL to stdout (for machine consumption)
         #[arg(long)]
         json: bool,
+        /// Create a tmux session with per-phase transcript panes + dashboard
+        #[arg(long)]
+        tmux: bool,
     },
     /// Show status of running/completed plans
     Status {
@@ -76,12 +80,14 @@ pub fn run_cmd(cmd: ConductCmd, repo_root: &Path) -> Result<()> {
             dry_run,
             quiet,
             json,
+            tmux,
         } => run(
             Path::new(&plan_file),
             cwd.as_deref().map(Path::new),
             dry_run,
             !quiet,
             json,
+            tmux,
         ),
         ConductCmd::Status { plan_name, json } => status(repo_root, plan_name.as_deref(), json),
         ConductCmd::Retry { phase_id, plan } => retry(repo_root, &phase_id, plan.as_deref()),
@@ -103,6 +109,7 @@ pub fn run(
     dry_run: bool,
     verbose: bool,
     json_events: bool,
+    tmux: bool,
 ) -> Result<()> {
     let plan = load_plan(plan_file)?;
     let cwd = cwd_override
@@ -121,6 +128,21 @@ pub fn run(
 
     // When --json, suppress human-readable output (verbose/TUI)
     let verbose = if json_events { false } else { verbose };
+
+    // Resolve tmux availability
+    let use_tmux = if tmux {
+        if TmuxSession::is_available() {
+            true
+        } else {
+            eprintln!(
+                "Warning: --tmux requested but tmux is not installed. \
+                 Falling back to normal mode."
+            );
+            false
+        }
+    } else {
+        false
+    };
 
     // Load or create state
     let mut state = match load_state(&cwd, &plan.name)? {
@@ -142,6 +164,8 @@ pub fn run(
         }
     };
 
+    let order = edda_conductor::plan::topo::topo_sort(&plan)?;
+
     if dry_run {
         println!("\n[dry-run] Plan: {}", plan.name);
         println!("  Phases: {}", plan.phases.len());
@@ -153,7 +177,6 @@ pub fn run(
         println!("  Max attempts: {}", plan.max_attempts);
         println!("  On fail: {:?}", plan.on_fail);
         println!("\n  Phase order:");
-        let order = edda_conductor::plan::topo::topo_sort(&plan)?;
         for (i, id) in order.iter().enumerate() {
             let phase = plan
                 .phases
@@ -169,18 +192,22 @@ pub fn run(
         }
         println!("\n  Session IDs:");
         for id in &order {
-            println!("    {} → {}", id, phase_session_id(&plan.name, id));
+            println!("    {} \u{2192} {}", id, phase_session_id(&plan.name, id));
+        }
+        if use_tmux {
+            TmuxSession::print_layout_preview(&plan.name, &order);
         }
         return Ok(());
     }
 
+    let transcript_dir = cwd
+        .join(".edda")
+        .join("conductor")
+        .join(&plan.name)
+        .join("transcripts");
+
     let mut launcher = ClaudeCodeLauncher::new().with_verbose(verbose);
-    launcher.transcript_dir = Some(
-        cwd.join(".edda")
-            .join("conductor")
-            .join(&plan.name)
-            .join("transcripts"),
-    );
+    launcher.transcript_dir = Some(transcript_dir.clone());
     launcher.verify_available()?;
     let engine = CheckEngine::new(cwd.clone());
     let notifier = StdoutNotifier;
@@ -193,8 +220,28 @@ pub fn run(
 
     let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
 
+    // Create tmux session if requested
+    let tmux_session = if use_tmux {
+        match TmuxSession::create(&plan.name, &order, &transcript_dir) {
+            Ok(session) => {
+                println!("Tmux session created: {}", session.session_name);
+                println!("  Attach: tmux attach -t {}", session.session_name);
+                Some(session)
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to create tmux session: {e}. \
+                     Continuing without tmux."
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(run_plan(
+    let result = rt.block_on(run_plan(
         &plan,
         &mut state,
         RunContext {
@@ -206,10 +253,23 @@ pub fn run(
             cwd: &cwd,
             interactive,
             json_events,
+            tmux_session: tmux_session.as_ref(),
         },
-    ))?;
+    ));
 
-    Ok(())
+    // Print tmux session info after run completes
+    if let Some(ref session) = tmux_session {
+        println!(
+            "\nTmux session still active: tmux attach -t {}",
+            session.session_name
+        );
+        println!(
+            "  Destroy: tmux kill-session -t {}",
+            session.session_name
+        );
+    }
+
+    result
 }
 
 /// Execute `edda conduct status [plan-name]`
