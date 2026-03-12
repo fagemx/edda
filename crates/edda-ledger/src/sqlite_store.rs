@@ -655,6 +655,69 @@ impl SqliteStore {
         }
     }
 
+    /// Get all events with rowid strictly greater than `after_rowid`.
+    ///
+    /// Returns `(rowid, Event)` pairs ordered by rowid, useful for cursor-based
+    /// polling (e.g. SSE streaming).
+    pub fn events_after_rowid(&self, after_rowid: i64) -> anyhow::Result<Vec<(i64, Event)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT rowid, event_id, ts, event_type, branch, parent_hash, hash,
+                    payload, refs_blobs, refs_events, refs_provenance,
+                    schema_version, digests, event_family, event_level
+             FROM events WHERE rowid > ?1 ORDER BY rowid",
+        )?;
+
+        let rows = stmt
+            .query_map(params![after_rowid], |row| {
+                let rowid: i64 = row.get(0)?;
+                let payload_str: String = row.get(7)?;
+                let refs_blobs_str: String = row.get(8)?;
+                let refs_events_str: String = row.get(9)?;
+                let refs_prov_str: String = row.get(10)?;
+                let digests_str: String = row.get(12)?;
+
+                Ok((
+                    rowid,
+                    EventRow {
+                        event_id: row.get(1)?,
+                        ts: row.get(2)?,
+                        event_type: row.get(3)?,
+                        branch: row.get(4)?,
+                        parent_hash: row.get(5)?,
+                        hash: row.get(6)?,
+                        payload_str,
+                        refs_blobs_str,
+                        refs_events_str,
+                        refs_prov_str,
+                        schema_version: row.get(11)?,
+                        digests_str,
+                        event_family: row.get(13)?,
+                        event_level: row.get(14)?,
+                    },
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        rows.into_iter()
+            .map(|(rid, er)| Ok((rid, row_to_event(er)?)))
+            .collect()
+    }
+
+    /// Look up the rowid for a given `event_id`.
+    ///
+    /// Returns `None` if the event does not exist.
+    pub fn rowid_for_event_id(&self, event_id: &str) -> anyhow::Result<Option<i64>> {
+        let result: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT rowid FROM events WHERE event_id = ?1",
+                params![event_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(result)
+    }
+
     /// Get the hash of the last event.
     pub fn last_event_hash(&self) -> anyhow::Result<Option<String>> {
         let result: Option<String> = self

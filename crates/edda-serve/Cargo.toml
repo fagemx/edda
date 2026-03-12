@@ -19,7 +19,9 @@ edda-store = { path = "../edda-store", version = "0.1.1" }
 edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.1.1" }
 axum = "0.8"
 tracing = { workspace = true }
-tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
+tokio-stream = "0.1"
+async-stream = "0.3"
 tower-http = { version = "0.6", features = ["cors"] }
 anyhow.workspace = true
 serde.workspace = true
@@ -32,3 +34,4 @@ globset = { workspace = true }
 tempfile.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
