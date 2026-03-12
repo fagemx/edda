@@ -41,6 +41,10 @@ pub fn execute(cmd: SkillCmd, repo_root: &Path) -> anyhow::Result<()> {
     }
 }
 
+// TODO(follow-up): Usage tracking (invocation counts, last-used timestamps)
+// is deferred to a separate issue. The registry currently tracks versions
+// and last-seen-at-scan, but not per-invocation usage data.
+
 fn execute_scan(repo_root: &Path) -> anyhow::Result<()> {
     let skills = skill_registry::scan_project_skills(repo_root);
 
@@ -51,7 +55,8 @@ fn execute_scan(repo_root: &Path) -> anyhow::Result<()> {
 
     println!("Found {} skill(s), registering...", skills.len());
 
-    let count = skill_registry::scan_and_register(repo_root)?;
+    // Use register_scanned_skills to avoid scanning the filesystem a second time.
+    let count = skill_registry::register_scanned_skills(repo_root, &skills)?;
     println!("Registered {count} skill(s) in skill registry.");
 
     for skill in &skills {

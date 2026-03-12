@@ -249,22 +249,6 @@ pub fn register_skill(
     save_skill_registry(&reg)
 }
 
-/// Unregister a skill by skill_id.
-pub fn unregister_skill(skill_id: &str) -> anyhow::Result<()> {
-    let _lock = lock_file(&skill_registry_lock_path())?;
-    let mut reg = load_skill_registry();
-    reg.skills.remove(skill_id);
-    save_skill_registry(&reg)
-}
-
-/// Unregister all skills for a given project_id.
-pub fn unregister_project_skills(pid: &str) -> anyhow::Result<()> {
-    let _lock = lock_file(&skill_registry_lock_path())?;
-    let mut reg = load_skill_registry();
-    reg.skills.retain(|_, entry| entry.project_id != pid);
-    save_skill_registry(&reg)
-}
-
 /// List all registered skills.
 pub fn list_skills() -> Vec<SkillEntry> {
     let reg = load_skill_registry();
@@ -286,30 +270,21 @@ pub fn get_skill(sid: &str) -> Option<SkillEntry> {
     reg.skills.get(sid).cloned()
 }
 
-/// Update last_seen timestamp for a skill.
-pub fn touch_skill(sid: &str) -> anyhow::Result<()> {
-    let _lock = lock_file(&skill_registry_lock_path())?;
-    let mut reg = load_skill_registry();
-
-    if let Some(entry) = reg.skills.get_mut(sid) {
-        entry.last_seen = now_rfc3339();
-        save_skill_registry(&reg)?;
-    }
-
-    Ok(())
-}
-
-/// Scan a project and register/update all discovered skills.
+/// Register a pre-scanned list of skills for a project.
 ///
+/// This avoids re-scanning the filesystem when the caller already has the
+/// scanned results (e.g. `execute_scan` in the CLI).
 /// Returns the number of skills registered or updated.
-pub fn scan_and_register(repo_root: &Path) -> anyhow::Result<usize> {
+pub fn register_scanned_skills(
+    repo_root: &Path,
+    skills: &[ScannedSkill],
+) -> anyhow::Result<usize> {
     let pid = crate::project_id(repo_root);
     let pname = repo_root
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    let skills = scan_project_skills(repo_root);
     let count = skills.len();
 
     for skill in skills {
@@ -324,6 +299,18 @@ pub fn scan_and_register(repo_root: &Path) -> anyhow::Result<usize> {
     }
 
     Ok(count)
+}
+
+/// Scan a project and register/update all discovered skills.
+///
+/// Convenience wrapper that calls `scan_project_skills` then
+/// `register_scanned_skills`. Prefer `register_scanned_skills` when the
+/// caller already holds the scan results to avoid a redundant filesystem walk.
+///
+/// Returns the number of skills registered or updated.
+pub fn scan_and_register(repo_root: &Path) -> anyhow::Result<usize> {
+    let skills = scan_project_skills(repo_root);
+    register_scanned_skills(repo_root, &skills)
 }
 
 // ---------------------------------------------------------------------------
@@ -418,33 +405,6 @@ mod tests {
             assert_eq!(entry.content_hash, "hash_v2");
             assert_eq!(entry.version_history.len(), 1);
             assert_eq!(entry.version_history[0].content_hash, "hash_v1");
-        });
-    }
-
-    #[test]
-    fn unregister_removes_entry() {
-        with_isolated_store(|| {
-            register_skill("proj1", "my-project", "issue-plan", "desc", "path", "hash1").unwrap();
-            let sid = skill_id("issue-plan", "my-project");
-            assert!(get_skill(&sid).is_some());
-
-            unregister_skill(&sid).unwrap();
-            assert!(get_skill(&sid).is_none());
-        });
-    }
-
-    #[test]
-    fn unregister_project_skills_removes_all() {
-        with_isolated_store(|| {
-            register_skill("proj1", "project-a", "skill-1", "desc", "path1", "h1").unwrap();
-            register_skill("proj1", "project-a", "skill-2", "desc", "path2", "h2").unwrap();
-            register_skill("proj2", "project-b", "skill-3", "desc", "path3", "h3").unwrap();
-
-            unregister_project_skills("proj1").unwrap();
-
-            let skills = list_skills();
-            assert_eq!(skills.len(), 1);
-            assert_eq!(skills[0].project_id, "proj2");
         });
     }
 
