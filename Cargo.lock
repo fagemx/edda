@@ -846,11 +846,13 @@ name = "edda-core"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "globset",
  "hex",
  "serde",
  "serde_json",
  "serde_yaml",
  "sha2",
+ "tempfile",
  "thiserror",
  "time",
  "ulid",

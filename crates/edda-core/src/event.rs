@@ -662,6 +662,60 @@ pub fn new_execution_event(
     Ok(event)
 }
 
+/// Parameters for creating an `approval_policy_match` event.
+#[derive(Debug, Clone)]
+pub struct ApprovalPolicyMatchParams {
+    pub branch: String,
+    pub parent_hash: Option<String>,
+    pub task_id: String,
+    pub step: String,
+    pub matched_rule: Option<String>,
+    pub action: String,
+    pub reason: String,
+    pub risk_level: Option<String>,
+    pub files_changed: Option<u32>,
+}
+
+/// Create a new `approval_policy_match` event.
+pub fn new_approval_policy_match_event(
+    params: &ApprovalPolicyMatchParams,
+) -> anyhow::Result<Event> {
+    let mut payload = serde_json::json!({
+        "task_id": params.task_id,
+        "step": params.step,
+        "action": params.action,
+        "reason": params.reason,
+    });
+
+    if let Some(rule) = &params.matched_rule {
+        payload["matched_rule"] = serde_json::json!(rule);
+    }
+    if let Some(risk) = &params.risk_level {
+        payload["risk_level"] = serde_json::json!(risk);
+    }
+    if let Some(fc) = params.files_changed {
+        payload["files_changed"] = serde_json::json!(fc);
+    }
+
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: "approval_policy_match".to_string(),
+        branch: params.branch.clone(),
+        parent_hash: params.parent_hash.clone(),
+        hash: String::new(),
+        payload,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event);
+    Ok(event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

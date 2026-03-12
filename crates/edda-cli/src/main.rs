@@ -20,6 +20,7 @@ mod cmd_pattern;
 mod cmd_phase;
 mod cmd_pipeline;
 mod cmd_plan;
+mod cmd_policy;
 mod cmd_propose;
 mod cmd_prs;
 mod cmd_rebuild;
@@ -365,6 +366,11 @@ enum Command {
     Bundle {
         #[command(subcommand)]
         cmd: BundleCmd,
+    },
+    /// Approval policy management (show, check, init)
+    Policy {
+        #[command(subcommand)]
+        cmd: cmd_policy::PolicyCmd,
     },
     /// Launch the real-time peer status and event TUI
     Watch,
@@ -1044,6 +1050,7 @@ fn main() -> anyhow::Result<()> {
             BundleCmd::Show { bundle_id } => cmd_bundle::execute_show(&repo_root, &bundle_id),
             BundleCmd::List { status } => cmd_bundle::execute_list(&repo_root, status.as_deref()),
         },
+        Command::Policy { cmd } => cmd_policy::run(cmd, &repo_root),
         Command::Watch => cmd_watch::execute(&repo_root),
         Command::Notify { cmd } => cmd_notify::run(cmd, &repo_root),
         Command::Serve { bind, port } => cmd_serve::execute(&repo_root, &bind, port),

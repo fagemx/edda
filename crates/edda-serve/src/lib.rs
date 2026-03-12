@@ -103,6 +103,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/scope/check", post(post_scope_check))
         .route("/api/scope/whitelist", get(get_scope_whitelist))
         .route("/api/authz/check", post(post_authz_check))
+        .route("/api/approval/check", post(post_approval_check))
         .route("/api/recap", get(get_recap))
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
@@ -153,6 +154,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/scope/check", post(post_scope_check))
         .route("/api/scope/whitelist", get(get_scope_whitelist))
         .route("/api/authz/check", post(post_authz_check))
+        .route("/api/approval/check", post(post_approval_check))
         .route("/api/recap", get(get_recap))
         .route("/api/recap/cached", get(get_recap_cached))
         .route("/api/overview", get(get_overview))
@@ -1218,6 +1220,107 @@ async fn post_authz_check(
     let actors = policy::load_actors_from_dir(&edda_dir)?;
     let result = policy::evaluate_authz(&body, &pol, &actors);
     Ok(Json(result))
+}
+
+// ── POST /api/approval/check ──
+
+#[derive(Deserialize)]
+struct ApprovalCheckRequest {
+    step: String,
+    #[serde(default)]
+    bundle_id: Option<String>,
+    #[serde(default)]
+    risk_level: Option<edda_core::bundle::RiskLevel>,
+    #[serde(default)]
+    files_changed: Option<u32>,
+    #[serde(default)]
+    tests_failed: Option<u32>,
+    #[serde(default)]
+    off_limits_touched: Option<bool>,
+}
+
+async fn post_approval_check(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ApprovalCheckRequest>,
+) -> Result<Json<edda_core::approval::ApprovalDecision>, AppError> {
+    let edda_dir = state.repo_root.join(".edda");
+    let policy = edda_core::approval::load_approval_policy(&edda_dir)?;
+
+    // Build ReviewBundle from request or from ledger
+    let bundle = if let Some(bundle_id) = &body.bundle_id {
+        let ledger = Ledger::open(&state.repo_root)?;
+        let Some(row) = ledger.get_bundle(bundle_id)? else {
+            return Err(AppError(anyhow::anyhow!(
+                "Bundle '{}' not found",
+                bundle_id
+            )));
+        };
+        let Some(event) = ledger.get_event(&row.event_id)? else {
+            return Err(AppError(anyhow::anyhow!(
+                "Event for bundle '{}' not found",
+                bundle_id
+            )));
+        };
+        serde_json::from_value::<edda_core::bundle::ReviewBundle>(event.payload)?
+    } else {
+        // Build a synthetic bundle from inline fields
+        let risk = body.risk_level.unwrap_or(edda_core::bundle::RiskLevel::Medium);
+        let file_count = body.files_changed.unwrap_or(0) as usize;
+        let failed = body.tests_failed.unwrap_or(0);
+        let files: Vec<edda_core::bundle::FileChange> = (0..file_count)
+            .map(|i| edda_core::bundle::FileChange {
+                path: format!("file_{i}"),
+                added: 1,
+                deleted: 0,
+            })
+            .collect();
+        edda_core::bundle::ReviewBundle {
+            bundle_id: "inline".to_string(),
+            change_summary: edda_core::bundle::ChangeSummary {
+                files,
+                total_added: file_count as u32,
+                total_deleted: 0,
+                diff_ref: "inline".to_string(),
+            },
+            test_results: edda_core::bundle::TestResults {
+                passed: 0,
+                failed,
+                ignored: 0,
+                total: failed,
+                failures: vec![],
+                command: "inline".to_string(),
+            },
+            risk_assessment: edda_core::bundle::RiskAssessment {
+                level: risk,
+                factors: vec![],
+            },
+            suggested_action: edda_core::bundle::SuggestedAction::Review,
+            suggested_reason: "inline check".to_string(),
+        }
+    };
+
+    let phase_state = edda_core::agent_phase::AgentPhaseState {
+        phase: edda_core::agent_phase::AgentPhase::Implement,
+        session_id: "api-check".to_string(),
+        label: None,
+        issue: None,
+        pr: None,
+        branch: None,
+        confidence: 1.0,
+        detected_at: String::new(),
+        signals: vec![],
+    };
+
+    let ctx = edda_core::approval::EvalContext {
+        bundle: &bundle,
+        phase: &phase_state,
+        off_limits_touched: body.off_limits_touched.unwrap_or(false),
+        consecutive_failures: 0,
+        current_time: Some(time::OffsetDateTime::now_utc()),
+    };
+
+    let decision = policy.evaluate(&body.step, &ctx);
+    Ok(Json(decision))
 }
 
 // ── GET /dashboard (HTML) ──
