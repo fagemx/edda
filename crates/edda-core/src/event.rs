@@ -102,8 +102,7 @@ pub fn new_decision_event(
     };
     let tags = vec!["decision".to_string()];
     let mut event = new_note_event(branch, parent_hash, role, &text, &tags)?;
-    event.payload["decision"] =
-        serde_json::to_value(decision)?;
+    event.payload["decision"] = serde_json::to_value(decision)?;
     finalize(&mut event)?;
     Ok(event)
 }
@@ -742,6 +741,7 @@ mod tests {
             key: "db.engine".to_string(),
             value: "sqlite".to_string(),
             reason: Some("embedded, zero-config".to_string()),
+            scope: None,
         };
         let event = new_decision_event("main", None, "system", &dp).unwrap();
         assert_eq!(event.event_type, "note");
@@ -764,6 +764,7 @@ mod tests {
             key: "auth.method".to_string(),
             value: "JWT".to_string(),
             reason: None,
+            scope: None,
         };
         let event = new_decision_event("main", None, "system", &dp).unwrap();
         assert_eq!(event.payload["decision"]["key"], "auth.method");
@@ -778,6 +779,7 @@ mod tests {
             key: "api.style".to_string(),
             value: "REST".to_string(),
             reason: Some("compatibility".to_string()),
+            scope: None,
         };
         let event = new_decision_event("main", None, "system", &dp).unwrap();
         let extracted = crate::decision::extract_decision(&event.payload).unwrap();
@@ -1408,6 +1410,9 @@ mod tests {
             event_level: None,
         };
         let result = finalize_event(&mut event);
-        assert!(result.is_err(), "finalize should return Err for NaN payload");
+        assert!(
+            result.is_err(),
+            "finalize should return Err for NaN payload"
+        );
     }
 }

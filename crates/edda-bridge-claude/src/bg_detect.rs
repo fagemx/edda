@@ -295,10 +295,7 @@ fn detect_failure_patterns(project_id: &str) -> Vec<RawSignal> {
         // Only look at last 20 sessions
         total_count += 1;
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-            let status = val
-                .get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("");
+            let status = val.get("status").and_then(|s| s.as_str()).unwrap_or("");
             if status == "failed" {
                 error_count += 1;
                 if let Some(sid) = val.get("session_id").and_then(|s| s.as_str()) {
@@ -320,9 +317,7 @@ fn detect_failure_patterns(project_id: &str) -> Vec<RawSignal> {
         signals.push(RawSignal {
             kind: SignalKind::FailurePattern,
             severity: severity.to_string(),
-            summary: format!(
-                "{error_count} of last {total_count} sessions had error outcomes"
-            ),
+            summary: format!("{error_count} of last {total_count} sessions had error outcomes"),
             evidence: recent_errors,
             metric_value: error_count as f64,
             baseline_value: threshold as f64,
@@ -350,7 +345,8 @@ fn detect_cost_anomalies(project_id: &str) -> Vec<RawSignal> {
         "bg_detect_audit.jsonl",
     ];
 
-    let mut daily_costs: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+    let mut daily_costs: std::collections::BTreeMap<String, f64> =
+        std::collections::BTreeMap::new();
 
     for filename in &audit_files {
         let path = state_dir.join(filename);
@@ -361,14 +357,8 @@ fn detect_cost_anomalies(project_id: &str) -> Vec<RawSignal> {
 
         for line in content.lines() {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                let cost = val
-                    .get("cost_usd")
-                    .and_then(|c| c.as_f64())
-                    .unwrap_or(0.0);
-                let ts = val
-                    .get("ts")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
+                let cost = val.get("cost_usd").and_then(|c| c.as_f64()).unwrap_or(0.0);
+                let ts = val.get("ts").and_then(|t| t.as_str()).unwrap_or("");
                 // Extract date portion (first 10 chars of ISO timestamp)
                 let date = if ts.len() >= 10 { &ts[..10] } else { ts };
                 if !date.is_empty() {
@@ -404,7 +394,10 @@ fn detect_cost_anomalies(project_id: &str) -> Vec<RawSignal> {
             severity: severity.to_string(),
             summary: format!(
                 "Daily cost ${:.4} on {} exceeds {:.1}x rolling average (${:.4})",
-                today_cost, last_date, today_cost / avg, avg
+                today_cost,
+                last_date,
+                today_cost / avg,
+                avg
             ),
             evidence: vec![format!("date={last_date}"), format!("avg=${avg:.4}")],
             metric_value: today_cost,
@@ -419,10 +412,7 @@ fn detect_cost_anomalies(project_id: &str) -> Vec<RawSignal> {
 /// Detect quality degradation by looking at success/error ratios in recent
 /// session outcomes from digest audit logs.
 fn detect_quality_degradation(project_id: &str) -> Vec<RawSignal> {
-    let drop_threshold = env_f64(
-        "EDDA_DETECT_QUALITY_DROP",
-        DEFAULT_QUALITY_DROP_THRESHOLD,
-    );
+    let drop_threshold = env_f64("EDDA_DETECT_QUALITY_DROP", DEFAULT_QUALITY_DROP_THRESHOLD);
 
     let audit_path = edda_store::project_dir(project_id)
         .join("state")
@@ -449,10 +439,7 @@ fn detect_quality_degradation(project_id: &str) -> Vec<RawSignal> {
         for line in entries {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
                 total += 1;
-                let status = val
-                    .get("status")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("");
+                let status = val.get("status").and_then(|s| s.as_str()).unwrap_or("");
                 if status == "completed" || status == "ok" || status == "success" {
                     ok += 1;
                 }
@@ -525,8 +512,7 @@ fn build_detect_context(cwd: &str, signals: &[RawSignal]) -> Result<String> {
     let mut sections = Vec::new();
 
     // Signals summary
-    let signals_json =
-        serde_json::to_string_pretty(signals).unwrap_or_else(|_| "[]".to_string());
+    let signals_json = serde_json::to_string_pretty(signals).unwrap_or_else(|_| "[]".to_string());
     sections.push(format!("## Detected Anomaly Signals\n\n{signals_json}"));
 
     // Recent session notes (from ledger)
@@ -546,10 +532,7 @@ fn build_detect_context(cwd: &str, signals: &[RawSignal]) -> Result<String> {
                     .collect();
 
                 if !notes.is_empty() {
-                    sections.push(format!(
-                        "## Recent Session Notes\n\n{}",
-                        notes.join("\n")
-                    ));
+                    sections.push(format!("## Recent Session Notes\n\n{}", notes.join("\n")));
                 }
             }
         }
@@ -692,13 +675,8 @@ fn write_detect_note(_project_id: &str, cwd: &str, result: &DetectResult) -> Res
 
     let text = parts.join("\n");
     let tags = vec!["pattern-detect".to_string()];
-    let mut event = edda_core::event::new_note_event(
-        &branch,
-        parent_hash.as_deref(),
-        "bridge",
-        &text,
-        &tags,
-    )?;
+    let mut event =
+        edda_core::event::new_note_event(&branch, parent_hash.as_deref(), "bridge", &text, &tags)?;
 
     event.payload["source"] = serde_json::json!("bridge:pattern-detect");
 

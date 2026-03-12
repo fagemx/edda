@@ -34,7 +34,16 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
             .and_then(|v| v.as_str())
             .filter(|r| !r.is_empty())
             .map(|r| r.to_string());
-        return Some(DecisionPayload { key, value, reason });
+        let scope = d
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok());
+        return Some(DecisionPayload {
+            key,
+            value,
+            reason,
+            scope,
+        });
     }
     // Text fallback: "key: value — reason"
     let text = payload.get("text").and_then(|v| v.as_str())?;
@@ -47,6 +56,7 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
         key: key.to_string(),
         value,
         reason,
+        scope: None,
     })
 }
 

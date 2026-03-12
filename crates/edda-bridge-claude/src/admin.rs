@@ -337,7 +337,10 @@ fn ensure_claude_md_edda_section(repo_root: &Path) -> anyhow::Result<()> {
     } else {
         // Create new file with full onboarding template
         fs::write(&claude_md, EDDA_CLAUDE_MD_CREATE.trim_start())?;
-        println!("Created {} with edda decision tracking", claude_md.display());
+        println!(
+            "Created {} with edda decision tracking",
+            claude_md.display()
+        );
     }
     Ok(())
 }

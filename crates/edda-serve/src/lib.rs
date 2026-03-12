@@ -210,6 +210,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/actors/{name}", get(get_actor))
         .route("/api/metrics/quality", get(get_quality_metrics))
         .route("/api/dashboard", get(get_dashboard))
+        .route("/api/sync", post(post_sync))
         .route("/dashboard", get(serve_dashboard))
         .route("/api/events/stream", get(get_event_stream))
         .layer(CorsLayer::permissive())
@@ -574,6 +575,7 @@ async fn post_decide(
         key: key.to_string(),
         value: value.to_string(),
         reason: body.reason,
+        scope: None,
     };
     let mut event = new_decision_event(&branch, parent_hash.as_deref(), "system", &dp)?;
 
@@ -1357,6 +1359,82 @@ async fn post_approval_check(
 
     let decision = policy.evaluate(&body.step, &ctx);
     Ok(Json(decision))
+}
+
+// ── POST /api/sync ──
+
+#[derive(Deserialize)]
+struct SyncRequest {
+    /// Optional: sync from a specific project name
+    from: Option<String>,
+    /// Dry run mode
+    #[serde(default)]
+    dry_run: bool,
+}
+
+#[derive(Serialize)]
+struct SyncResponse {
+    imported: Vec<SyncImportedEntry>,
+    skipped: usize,
+    conflicts: Vec<SyncConflictEntry>,
+}
+
+#[derive(Serialize)]
+struct SyncImportedEntry {
+    key: String,
+    value: String,
+    source_project: String,
+}
+
+#[derive(Serialize)]
+struct SyncConflictEntry {
+    key: String,
+    local_value: String,
+    remote_value: String,
+    source_project: String,
+}
+
+async fn post_sync(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<SyncRequest>, JsonRejection>,
+) -> Result<Json<SyncResponse>, AppError> {
+    let body = body.map(|Json(b)| b).unwrap_or(SyncRequest {
+        from: None,
+        dry_run: false,
+    });
+
+    let ledger = state.open_ledger()?;
+
+    let sources = if let Some(name) = &body.from {
+        edda_ledger::sync::sources_from_name(name)
+    } else {
+        edda_ledger::sync::sources_from_group(&state.repo_root)
+    };
+
+    let result = edda_ledger::sync::sync_from_sources(&ledger, &sources, body.dry_run)?;
+
+    Ok(Json(SyncResponse {
+        imported: result
+            .imported
+            .into_iter()
+            .map(|d| SyncImportedEntry {
+                key: d.key,
+                value: d.value,
+                source_project: d.source_project,
+            })
+            .collect(),
+        skipped: result.skipped,
+        conflicts: result
+            .conflicts
+            .into_iter()
+            .map(|c| SyncConflictEntry {
+                key: c.key,
+                local_value: c.local_value,
+                remote_value: c.remote_value,
+                source_project: c.source_project,
+            })
+            .collect(),
+    }))
 }
 
 // ── GET /dashboard (HTML) ──
@@ -3318,6 +3396,7 @@ actors:
             key: "test.key".into(),
             value: "test_val".into(),
             reason: Some("testing".into()),
+            scope: None,
         };
         let decision = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         ledger.append_event(&decision).unwrap();

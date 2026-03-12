@@ -133,11 +133,7 @@ pub fn list_proposals(
 }
 
 /// Approve a proposal: mark as approved and return it.
-pub fn approve_proposal(
-    project_id: &str,
-    proposal_id: &str,
-    by: &str,
-) -> Result<IssueProposal> {
+pub fn approve_proposal(project_id: &str, proposal_id: &str, by: &str) -> Result<IssueProposal> {
     let mut proposal = load_proposal(project_id, proposal_id)?;
     if proposal.status != ProposalStatus::Pending {
         anyhow::bail!(
@@ -192,11 +188,7 @@ pub fn record_issue_created(
 }
 
 /// Dismiss a proposal with optional reason.
-pub fn dismiss_proposal(
-    project_id: &str,
-    proposal_id: &str,
-    reason: Option<&str>,
-) -> Result<()> {
+pub fn dismiss_proposal(project_id: &str, proposal_id: &str, reason: Option<&str>) -> Result<()> {
     let mut proposal = load_proposal(project_id, proposal_id)?;
     if proposal.status != ProposalStatus::Pending {
         anyhow::bail!(

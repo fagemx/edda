@@ -1,7 +1,5 @@
 use clap::Subcommand;
-use edda_bridge_claude::issue_proposal::{
-    self, IssueProposal, ProposalSource, ProposalStatus,
-};
+use edda_bridge_claude::issue_proposal::{self, IssueProposal, ProposalSource, ProposalStatus};
 use std::path::Path;
 
 #[derive(Subcommand)]
@@ -84,9 +82,7 @@ pub fn execute(cmd: ProposeCmd, repo_root: &Path) -> anyhow::Result<()> {
             &source,
             source_ref.as_deref(),
         ),
-        ProposeCmd::FromScan { scan_id, index } => {
-            execute_from_scan(&project_id, &scan_id, index)
-        }
+        ProposeCmd::FromScan { scan_id, index } => execute_from_scan(&project_id, &scan_id, index),
         ProposeCmd::List { status, json } => execute_list(&project_id, status.as_deref(), json),
         ProposeCmd::Show { prop_id } => execute_show(&project_id, &prop_id),
         ProposeCmd::Approve {
@@ -159,18 +155,14 @@ fn execute_from_scan(project_id: &str, scan_id: &str, index: usize) -> anyhow::R
     Ok(())
 }
 
-fn execute_list(
-    project_id: &str,
-    status: Option<&str>,
-    json: bool,
-) -> anyhow::Result<()> {
+fn execute_list(project_id: &str, status: Option<&str>, json: bool) -> anyhow::Result<()> {
     let status_filter = match status {
         Some("pending") => Some(ProposalStatus::Pending),
         Some("approved") => Some(ProposalStatus::Approved),
         Some("dismissed") => Some(ProposalStatus::Dismissed),
-        Some(s) => anyhow::bail!(
-            "Unknown status filter: {s} (expected: pending, approved, dismissed)"
-        ),
+        Some(s) => {
+            anyhow::bail!("Unknown status filter: {s} (expected: pending, approved, dismissed)")
+        }
         None => None,
     };
 
@@ -301,11 +293,7 @@ fn execute_approve(
     Ok(())
 }
 
-fn execute_dismiss(
-    project_id: &str,
-    prop_id: &str,
-    reason: Option<&str>,
-) -> anyhow::Result<()> {
+fn execute_dismiss(project_id: &str, prop_id: &str, reason: Option<&str>) -> anyhow::Result<()> {
     issue_proposal::dismiss_proposal(project_id, prop_id, reason)?;
     println!("Proposal {prop_id} dismissed.");
     if let Some(r) = reason {
@@ -371,9 +359,7 @@ fn check_rbac_if_configured(repo_root: &Path, actor: &str, action: &str) -> anyh
     let result = edda_core::policy::evaluate_authz(&req, &policy, &actors);
     if !result.allowed {
         let reason = result.reason.unwrap_or_default();
-        anyhow::bail!(
-            "RBAC denied: actor '{actor}' lacks '{action}' permission. {reason}"
-        );
+        anyhow::bail!("RBAC denied: actor '{actor}' lacks '{action}' permission. {reason}");
     }
     Ok(())
 }

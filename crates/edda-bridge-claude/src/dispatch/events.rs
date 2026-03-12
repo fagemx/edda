@@ -156,11 +156,7 @@ pub(super) fn try_post_karvi_signal(
 
 /// Best-effort write of a task-completed `note` event to workspace ledger.
 /// Uses try-lock: silently skips if workspace is locked by another process.
-pub(super) fn try_write_task_completed_note_event(
-    cwd: &str,
-    task_id: &str,
-    task_subject: &str,
-) {
+pub(super) fn try_write_task_completed_note_event(cwd: &str, task_id: &str, task_subject: &str) {
     if cwd.is_empty() || task_id.is_empty() {
         return;
     }

@@ -195,5 +195,4 @@ mod tests {
         assert!(EddaPaths::find_root(&tmp).is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
-
 }

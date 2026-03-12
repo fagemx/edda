@@ -212,8 +212,7 @@ pub(super) fn check_offlimits(
                     return Some((claim.label.clone(), glob_pattern.clone()));
                 }
                 // Also try matching against just the file name.
-                if let Some(file_name) =
-                    Path::new(&normalized).file_name().and_then(|n| n.to_str())
+                if let Some(file_name) = Path::new(&normalized).file_name().and_then(|n| n.to_str())
                 {
                     if matcher.is_match(file_name) {
                         return Some((claim.label.clone(), glob_pattern.clone()));

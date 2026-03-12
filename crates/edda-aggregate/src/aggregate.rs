@@ -450,6 +450,7 @@ mod tests {
             name: "test-project".to_string(),
             registered_at: "2026-03-01T00:00:00Z".to_string(),
             last_seen: "2026-03-01T00:00:00Z".to_string(),
+            group: None,
         };
 
         let result = aggregate_overview(&[entry], &DateRange::default());
@@ -474,6 +475,7 @@ mod tests {
             key: "db.engine".to_string(),
             value: "sqlite".to_string(),
             reason: Some("embedded".to_string()),
+            scope: None,
         };
         let event =
             edda_core::event::new_decision_event("main", None, "system", &decision).unwrap();
@@ -485,6 +487,7 @@ mod tests {
             name: "test-project".to_string(),
             registered_at: "2026-03-01T00:00:00Z".to_string(),
             last_seen: "2026-03-01T00:00:00Z".to_string(),
+            group: None,
         };
 
         let result = aggregate_overview(&[entry], &DateRange::default());
@@ -535,6 +538,7 @@ mod tests {
             name: "test".to_string(),
             registered_at: "2026-01-01".to_string(),
             last_seen: "2026-01-01".to_string(),
+            group: None,
         };
 
         let result = file_edits_by_date(&[entry], &DateRange::default());
@@ -577,6 +581,7 @@ mod tests {
             name: "test".to_string(),
             registered_at: "2026-01-01".to_string(),
             last_seen: "2026-01-01".to_string(),
+            group: None,
         };
 
         let result = file_edits_by_date(&[entry], &DateRange::default());

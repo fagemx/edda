@@ -216,6 +216,7 @@ impl EddaServer {
             key: key.to_string(),
             value: value.to_string(),
             reason: params.reason.clone(),
+            scope: None,
         };
         let mut event = new_decision_event(&branch, parent_hash.as_deref(), "system", &dp)
             .map_err(to_mcp_err)?;
@@ -227,10 +228,8 @@ impl EddaServer {
         let mut supersede_info = String::new();
         if let Some(ref row) = prior {
             if row.value != value {
-                supersede_info = format!(
-                    " (supersedes {} which was \"{}\")",
-                    row.event_id, row.value
-                );
+                supersede_info =
+                    format!(" (supersedes {} which was \"{}\")", row.event_id, row.value);
                 event.refs.provenance.push(Provenance {
                     target: row.event_id.clone(),
                     rel: rel::SUPERSEDES.to_string(),

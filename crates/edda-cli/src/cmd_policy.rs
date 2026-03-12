@@ -92,10 +92,7 @@ fn execute_check(repo_root: &Path, bundle_id: &str, step: &str) -> Result<()> {
     println!("  reason:       {}", decision.reason);
     println!("  overridable:  {}", decision.overridable);
     println!();
-    println!(
-        "  risk_level:   {:?}",
-        review_bundle.risk_assessment.level
-    );
+    println!("  risk_level:   {:?}", review_bundle.risk_assessment.level);
     println!(
         "  files_changed: {}",
         review_bundle.change_summary.files.len()
