@@ -65,11 +65,7 @@ pub(crate) fn fmt_evidence_item(item: &Value) -> Option<String> {
 // ── Snapshot builder ──
 
 pub(crate) fn collect_branch_events(ledger: &Ledger, branch: &str) -> Result<Vec<Event>> {
-    Ok(ledger
-        .iter_events()?
-        .into_iter()
-        .filter(|ev| ev.branch == branch)
-        .collect())
+    ledger.iter_branch_events(branch)
 }
 
 /// Look for a `branch_create` event whose payload.name matches the branch,

@@ -612,6 +612,272 @@ impl SqliteStore {
         events.into_iter().map(row_to_event).collect()
     }
 
+    /// Get all events for a specific branch, filtered at the SQL level using `idx_events_branch`.
+    pub fn iter_branch_events(&self, branch: &str) -> anyhow::Result<Vec<Event>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, event_type, branch, parent_hash, hash,
+                    payload, refs_blobs, refs_events, refs_provenance,
+                    schema_version, digests, event_family, event_level
+             FROM events WHERE branch = ?1 ORDER BY rowid",
+        )?;
+
+        let events = stmt
+            .query_map(params![branch], |row| {
+                let payload_str: String = row.get(6)?;
+                let refs_blobs_str: String = row.get(7)?;
+                let refs_events_str: String = row.get(8)?;
+                let refs_prov_str: String = row.get(9)?;
+                let digests_str: String = row.get(11)?;
+
+                Ok(EventRow {
+                    event_id: row.get(0)?,
+                    ts: row.get(1)?,
+                    event_type: row.get(2)?,
+                    branch: row.get(3)?,
+                    parent_hash: row.get(4)?,
+                    hash: row.get(5)?,
+                    payload_str,
+                    refs_blobs_str,
+                    refs_events_str,
+                    refs_prov_str,
+                    schema_version: row.get(10)?,
+                    digests_str,
+                    event_family: row.get(12)?,
+                    event_level: row.get(13)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        events.into_iter().map(row_to_event).collect()
+    }
+
+    /// Get events filtered by branch and optional type/keyword/date range/limit,
+    /// all pushed down to SQL for index-backed retrieval.
+    ///
+    /// Results are returned in reverse insertion order (newest first), capped at `limit`.
+    pub fn iter_events_filtered(
+        &self,
+        branch: &str,
+        event_type: Option<&str>,
+        keyword: Option<&str>,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Event>> {
+        let mut sql = String::from(
+            "SELECT event_id, ts, event_type, branch, parent_hash, hash,
+                    payload, refs_blobs, refs_events, refs_provenance,
+                    schema_version, digests, event_family, event_level
+             FROM events WHERE branch = ?",
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        param_values.push(Box::new(branch.to_string()));
+
+        if let Some(et) = event_type {
+            sql.push_str(" AND event_type = ?");
+            param_values.push(Box::new(et.to_string()));
+        }
+        if let Some(kw) = keyword {
+            sql.push_str(" AND LOWER(payload) LIKE ?");
+            let pattern = format!("%{}%", kw.to_lowercase());
+            param_values.push(Box::new(pattern));
+        }
+        if let Some(a) = after {
+            sql.push_str(" AND ts >= ?");
+            param_values.push(Box::new(a.to_string()));
+        }
+        if let Some(b) = before {
+            sql.push_str(" AND ts <= ?");
+            param_values.push(Box::new(b.to_string()));
+        }
+        sql.push_str(" ORDER BY rowid DESC LIMIT ?");
+        param_values.push(Box::new(limit as i64));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let events = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                let payload_str: String = row.get(6)?;
+                let refs_blobs_str: String = row.get(7)?;
+                let refs_events_str: String = row.get(8)?;
+                let refs_prov_str: String = row.get(9)?;
+                let digests_str: String = row.get(11)?;
+
+                Ok(EventRow {
+                    event_id: row.get(0)?,
+                    ts: row.get(1)?,
+                    event_type: row.get(2)?,
+                    branch: row.get(3)?,
+                    parent_hash: row.get(4)?,
+                    hash: row.get(5)?,
+                    payload_str,
+                    refs_blobs_str,
+                    refs_events_str,
+                    refs_prov_str,
+                    schema_version: row.get(10)?,
+                    digests_str,
+                    event_family: row.get(12)?,
+                    event_level: row.get(13)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        events.into_iter().map(row_to_event).collect()
+    }
+
+    /// Find commit events related to a query by evidence chain or keyword match.
+    ///
+    /// Uses `idx_events_type` for `event_type = 'commit'` filtering.
+    pub fn find_related_commits(
+        &self,
+        branch: Option<&str>,
+        keyword: &str,
+        decision_event_ids: &[&str],
+        limit: usize,
+    ) -> anyhow::Result<Vec<Event>> {
+        let mut sql = String::from(
+            "SELECT event_id, ts, event_type, branch, parent_hash, hash,
+                    payload, refs_blobs, refs_events, refs_provenance,
+                    schema_version, digests, event_family, event_level
+             FROM events WHERE event_type = 'commit'",
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(b) = branch {
+            sql.push_str(" AND branch = ?");
+            param_values.push(Box::new(b.to_string()));
+        }
+
+        // Filter: keyword in payload OR evidence chain match
+        if !keyword.is_empty() || !decision_event_ids.is_empty() {
+            let mut conditions = Vec::new();
+            if !keyword.is_empty() {
+                conditions.push("LOWER(payload) LIKE ?".to_string());
+                param_values.push(Box::new(format!("%{}%", keyword.to_lowercase())));
+            }
+            for eid in decision_event_ids {
+                conditions.push("(refs_events LIKE ? OR refs_provenance LIKE ?)".to_string());
+                let pattern = format!("%{}%", eid);
+                param_values.push(Box::new(pattern.clone()));
+                param_values.push(Box::new(pattern));
+            }
+            if !conditions.is_empty() {
+                sql.push_str(" AND (");
+                sql.push_str(&conditions.join(" OR "));
+                sql.push(')');
+            }
+        }
+
+        sql.push_str(" ORDER BY rowid DESC LIMIT ?");
+        param_values.push(Box::new(limit as i64));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let events = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                let payload_str: String = row.get(6)?;
+                let refs_blobs_str: String = row.get(7)?;
+                let refs_events_str: String = row.get(8)?;
+                let refs_prov_str: String = row.get(9)?;
+                let digests_str: String = row.get(11)?;
+
+                Ok(EventRow {
+                    event_id: row.get(0)?,
+                    ts: row.get(1)?,
+                    event_type: row.get(2)?,
+                    branch: row.get(3)?,
+                    parent_hash: row.get(4)?,
+                    hash: row.get(5)?,
+                    payload_str,
+                    refs_blobs_str,
+                    refs_events_str,
+                    refs_prov_str,
+                    schema_version: row.get(10)?,
+                    digests_str,
+                    event_family: row.get(12)?,
+                    event_level: row.get(13)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        events.into_iter().map(row_to_event).collect()
+    }
+
+    /// Find note events matching a keyword, excluding decision notes and session digests.
+    ///
+    /// Uses `idx_events_type` for `event_type = 'note'` filtering.
+    pub fn find_related_notes(
+        &self,
+        branch: Option<&str>,
+        keyword: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<Event>> {
+        if keyword.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut sql = String::from(
+            "SELECT event_id, ts, event_type, branch, parent_hash, hash,
+                    payload, refs_blobs, refs_events, refs_provenance,
+                    schema_version, digests, event_family, event_level
+             FROM events WHERE event_type = 'note'",
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(b) = branch {
+            sql.push_str(" AND branch = ?");
+            param_values.push(Box::new(b.to_string()));
+        }
+
+        // Keyword match on payload text
+        sql.push_str(" AND LOWER(payload) LIKE ?");
+        param_values.push(Box::new(format!("%{}%", keyword.to_lowercase())));
+
+        // Exclude decision notes and session digests at SQL level
+        sql.push_str(" AND payload NOT LIKE '%\"decision\"%'");
+        sql.push_str(" AND payload NOT LIKE '%\"session_digest\"%'");
+
+        sql.push_str(" ORDER BY rowid DESC LIMIT ?");
+        param_values.push(Box::new(limit as i64));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let events = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                let payload_str: String = row.get(6)?;
+                let refs_blobs_str: String = row.get(7)?;
+                let refs_events_str: String = row.get(8)?;
+                let refs_prov_str: String = row.get(9)?;
+                let digests_str: String = row.get(11)?;
+
+                Ok(EventRow {
+                    event_id: row.get(0)?,
+                    ts: row.get(1)?,
+                    event_type: row.get(2)?,
+                    branch: row.get(3)?,
+                    parent_hash: row.get(4)?,
+                    hash: row.get(5)?,
+                    payload_str,
+                    refs_blobs_str,
+                    refs_events_str,
+                    refs_prov_str,
+                    schema_version: row.get(10)?,
+                    digests_str,
+                    event_family: row.get(12)?,
+                    event_level: row.get(13)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        events.into_iter().map(row_to_event).collect()
+    }
+
     /// Get a single event by event_id.
     pub fn get_event(&self, event_id: &str) -> anyhow::Result<Option<Event>> {
         let row = self
