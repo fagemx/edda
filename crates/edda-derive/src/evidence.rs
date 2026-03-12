@@ -13,7 +13,7 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        format!("{}...", &s[..s.floor_char_boundary(max)])
     }
 }
 
@@ -166,6 +166,18 @@ mod tests {
     use edda_core::event::{
         new_cmd_event, new_commit_event, new_note_event, CmdEventParams, CommitEventParams,
     };
+
+    #[test]
+    fn truncate_handles_multibyte_chars() {
+        // "café" is 5 chars but 6 bytes (é = 2 bytes)
+        let s = "café hello world";
+        let result = truncate(s, 4);
+        // Should not panic; boundary lands inside 'é', floor_char_boundary rounds down
+        assert!(result.ends_with("..."));
+        // With max=5 we should get the full "café " prefix
+        let result2 = truncate(s, 5);
+        assert!(result2.starts_with("café"));
+    }
 
     #[test]
     fn build_auto_evidence_collects_todos_and_fails() {

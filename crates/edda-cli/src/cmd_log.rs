@@ -182,7 +182,7 @@ fn format_event_detail(event: &Event) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
             let truncated = if text.len() > 60 {
-                format!("{}...", &text[..57])
+                format!("{}...", &text[..text.floor_char_boundary(57)])
             } else {
                 text.to_string()
             };
@@ -206,7 +206,7 @@ fn format_event_detail(event: &Event) -> String {
                 })
                 .unwrap_or_default();
             let argv_short = if argv.len() > 40 {
-                format!("{}...", &argv[..37])
+                format!("{}...", &argv[..argv.floor_char_boundary(37)])
             } else {
                 argv
             };
