@@ -99,6 +99,16 @@ struct AuditEntry {
 
 /// Increment the session counter.  Call this on every SessionEnd *before*
 /// checking `should_run`.
+///
+/// **Known limitation – race condition**: `increment_session_count` and
+/// `should_run` are not atomic.  Two concurrent sessions ending at the same
+/// instant could both read the pre-increment count, causing `should_run` to
+/// return `true` twice (duplicate detection run) or to miss a threshold
+/// crossing.  In practice this is benign: detection is idempotent and the
+/// cooldown window prevents redundant work.  A future improvement could
+/// combine the increment + threshold check into a single file-locked
+/// read-modify-write, but the current design is acceptable for the
+/// single-user CLI use case.
 pub fn increment_session_count(project_id: &str) {
     let state = load_detect_state(project_id).unwrap_or(DetectState {
         last_detect_at: String::new(),
@@ -276,7 +286,7 @@ fn detect_failure_patterns(project_id: &str) -> Vec<RawSignal> {
         Err(_) => return Vec::new(),
     };
 
-    // Count sessions with error outcomes from digest audit
+    // Count sessions with failed outcomes from digest audit
     let mut error_count: usize = 0;
     let mut total_count: usize = 0;
     let mut recent_errors: Vec<String> = Vec::new();
@@ -289,7 +299,7 @@ fn detect_failure_patterns(project_id: &str) -> Vec<RawSignal> {
                 .get("status")
                 .and_then(|s| s.as_str())
                 .unwrap_or("");
-            if status == "error" || status == "failed" {
+            if status == "failed" {
                 error_count += 1;
                 if let Some(sid) = val.get("session_id").and_then(|s| s.as_str()) {
                     recent_errors.push(sid.to_string());
