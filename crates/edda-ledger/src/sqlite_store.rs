@@ -150,6 +150,19 @@ pub struct DepRow {
     pub created_at: String,
 }
 
+/// Parameters for inserting an imported decision from another project.
+pub struct ImportParams<'a> {
+    pub event: &'a edda_core::types::Event,
+    pub key: &'a str,
+    pub value: &'a str,
+    pub reason: &'a str,
+    pub domain: &'a str,
+    pub scope: &'a str,
+    pub source_project_id: &'a str,
+    pub source_event_id: &'a str,
+    pub is_active: bool,
+}
+
 /// Aggregated outcome metrics for a decision.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OutcomeMetrics {
@@ -1175,9 +1188,9 @@ impl SqliteStore {
 
     // ── Cross-Project Sync ─────────────────────────────────────────────
 
-    /// Query active decisions with scope >= the given minimum scope.
+    /// Query active decisions with shared or global scope.
     /// Used by the sync engine to find decisions that should be shared.
-    pub fn shared_decisions(&self, min_scope: &str) -> anyhow::Result<Vec<DecisionRow>> {
+    pub fn shared_decisions(&self) -> anyhow::Result<Vec<DecisionRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
@@ -1187,8 +1200,6 @@ impl SqliteStore {
                AND d.source_project_id IS NULL
              ORDER BY d.domain, d.key",
         )?;
-        // We ignore min_scope as a parameter and just return shared+global
-        let _ = min_scope;
         let rows = stmt.query_map([], map_decision_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("shared decisions query failed: {e}"))
@@ -1211,24 +1222,12 @@ impl SqliteStore {
 
     /// Insert an imported decision from another project.
     /// This writes both the event and the decisions table entry.
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_imported_decision(
-        &self,
-        event: &edda_core::types::Event,
-        key: &str,
-        value: &str,
-        reason: &str,
-        domain: &str,
-        scope: &str,
-        source_project_id: &str,
-        source_event_id: &str,
-        is_active: bool,
-    ) -> anyhow::Result<()> {
-        let payload = serde_json::to_string(&event.payload)?;
-        let refs_blobs = serde_json::to_string(&event.refs.blobs)?;
-        let refs_events = serde_json::to_string(&event.refs.events)?;
-        let refs_provenance = serde_json::to_string(&event.refs.provenance)?;
-        let digests = serde_json::to_string(&event.digests)?;
+    pub fn insert_imported_decision(&self, p: ImportParams<'_>) -> anyhow::Result<()> {
+        let payload = serde_json::to_string(&p.event.payload)?;
+        let refs_blobs = serde_json::to_string(&p.event.refs.blobs)?;
+        let refs_events = serde_json::to_string(&p.event.refs.events)?;
+        let refs_provenance = serde_json::to_string(&p.event.refs.provenance)?;
+        let digests = serde_json::to_string(&p.event.digests)?;
 
         let tx = self.conn.unchecked_transaction()?;
 
@@ -1239,30 +1238,30 @@ impl SqliteStore {
                 schema_version, digests, event_family, event_level
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
-                event.event_id,
-                event.ts,
-                event.event_type,
-                event.branch,
-                event.parent_hash,
-                event.hash,
+                p.event.event_id,
+                p.event.ts,
+                p.event.event_type,
+                p.event.branch,
+                p.event.parent_hash,
+                p.event.hash,
                 payload,
                 refs_blobs,
                 refs_events,
                 refs_provenance,
-                event.schema_version,
+                p.event.schema_version,
                 digests,
-                event.event_family,
-                event.event_level,
+                p.event.event_family,
+                p.event.event_level,
             ],
         )?;
 
         // If active, deactivate prior local decision with same key
-        if is_active {
+        if p.is_active {
             tx.execute(
                 "UPDATE decisions SET is_active = FALSE
                  WHERE key = ?1 AND branch = ?2 AND is_active = TRUE
                    AND source_project_id IS NULL",
-                params![key, event.branch],
+                params![p.key, p.event.branch],
             )?;
         }
 
@@ -1272,16 +1271,16 @@ impl SqliteStore {
               scope, source_project_id, source_event_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10)",
             params![
-                event.event_id,
-                key,
-                value,
-                reason,
-                domain,
-                event.branch,
-                is_active,
-                scope,
-                source_project_id,
-                source_event_id,
+                p.event.event_id,
+                p.key,
+                p.value,
+                p.reason,
+                p.domain,
+                p.event.branch,
+                p.is_active,
+                p.scope,
+                p.source_project_id,
+                p.source_event_id,
             ],
         )?;
 

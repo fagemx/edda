@@ -210,9 +210,9 @@ impl Ledger {
 
     // ── Cross-Project Sync ────────────────────────────────────────────
 
-    /// Query active decisions with scope >= the given minimum scope.
-    pub fn shared_decisions(&self, min_scope: &str) -> anyhow::Result<Vec<DecisionRow>> {
-        self.sqlite.shared_decisions(min_scope)
+    /// Query active decisions with shared or global scope.
+    pub fn shared_decisions(&self) -> anyhow::Result<Vec<DecisionRow>> {
+        self.sqlite.shared_decisions()
     }
 
     /// Check if a decision has already been imported from a source project.
@@ -226,30 +226,11 @@ impl Ledger {
     }
 
     /// Insert an imported decision from another project.
-    #[allow(clippy::too_many_arguments)]
     pub fn insert_imported_decision(
         &self,
-        event: &edda_core::Event,
-        key: &str,
-        value: &str,
-        reason: &str,
-        domain: &str,
-        scope: &str,
-        source_project_id: &str,
-        source_event_id: &str,
-        is_active: bool,
+        params: crate::sqlite_store::ImportParams<'_>,
     ) -> anyhow::Result<()> {
-        self.sqlite.insert_imported_decision(
-            event,
-            key,
-            value,
-            reason,
-            domain,
-            scope,
-            source_project_id,
-            source_event_id,
-            is_active,
-        )
+        self.sqlite.insert_imported_decision(params)
     }
 
     // ── Decision Dependencies ────────────────────────────────────────

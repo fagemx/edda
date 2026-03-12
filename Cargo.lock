@@ -889,7 +889,6 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "edda-core",
- "edda-store",
  "fs2",
  "rusqlite",
  "serde",

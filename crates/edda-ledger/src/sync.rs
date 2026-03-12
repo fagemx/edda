@@ -2,12 +2,15 @@
 //!
 //! Pull-based: the target project pulls shared decisions from source projects'
 //! ledgers and creates `decision_import` events with provenance links.
+//!
+//! This module only accepts pre-resolved data — callers (L4: cli, serve)
+//! are responsible for resolving project IDs and source paths via `edda-store`.
 
+use crate::sqlite_store::ImportParams;
 use crate::Ledger;
 use edda_core::decision::extract_domain;
 use edda_core::event::finalize_event;
 use edda_core::types::{Event, Provenance, Refs, SCHEMA_VERSION};
-use std::path::Path;
 
 /// A source project to sync from.
 pub struct SyncSource {
@@ -34,30 +37,43 @@ pub struct ConflictInfo {
     pub source_project: String,
 }
 
+/// An error that occurred while syncing from a specific source.
+#[derive(Debug, Clone)]
+pub struct SourceError {
+    pub project_name: String,
+    pub error: String,
+}
+
 /// Result of a sync operation.
 #[derive(Debug, Clone, Default)]
 pub struct SyncResult {
     pub imported: Vec<ImportedDecision>,
     pub skipped: usize,
     pub conflicts: Vec<ConflictInfo>,
+    pub errors: Vec<SourceError>,
 }
 
 /// Sync shared decisions from source projects into the target ledger.
+///
+/// `target_project_id` is the pre-resolved project ID for the target ledger
+/// (callers compute this via `edda_store::project_id`).
 ///
 /// For each source project:
 /// 1. Open the source ledger and query shared/global decisions
 /// 2. Skip decisions already imported (by source_project_id + source_event_id)
 /// 3. For new decisions: create `decision_import` event with provenance
 /// 4. For conflicts (same key, different value): import as inactive
+///
+/// Source-level failures (cannot open ledger or query decisions) are collected
+/// in `SyncResult::errors` rather than silently swallowed.
 pub fn sync_from_sources(
     target: &Ledger,
     sources: &[SyncSource],
+    target_project_id: &str,
     dry_run: bool,
 ) -> anyhow::Result<SyncResult> {
     let branch = target.head_branch()?;
     let mut result = SyncResult::default();
-
-    let target_project_id = edda_store::project_id(&target.paths.root);
 
     for source in sources {
         // Don't sync from self
@@ -67,12 +83,24 @@ pub fn sync_from_sources(
 
         let source_ledger = match Ledger::open(&source.ledger_path) {
             Ok(l) => l,
-            Err(_) => continue,
+            Err(e) => {
+                result.errors.push(SourceError {
+                    project_name: source.project_name.clone(),
+                    error: format!("failed to open ledger: {e}"),
+                });
+                continue;
+            }
         };
 
-        let shared = match source_ledger.shared_decisions("shared") {
+        let shared = match source_ledger.shared_decisions() {
             Ok(d) => d,
-            Err(_) => continue,
+            Err(e) => {
+                result.errors.push(SourceError {
+                    project_name: source.project_name.clone(),
+                    error: format!("failed to query shared decisions: {e}"),
+                });
+                continue;
+            }
         };
 
         for decision in &shared {
@@ -122,17 +150,17 @@ pub fn sync_from_sources(
             finalize_event(&mut event)?;
 
             let domain = extract_domain(&decision.key);
-            target.insert_imported_decision(
-                &event,
-                &decision.key,
-                &decision.value,
-                &decision.reason,
-                &domain,
-                &decision.scope,
-                &source.project_id,
-                &decision.event_id,
-                import_active,
-            )?;
+            target.insert_imported_decision(ImportParams {
+                event: &event,
+                key: &decision.key,
+                value: &decision.value,
+                reason: &decision.reason,
+                domain: &domain,
+                scope: &decision.scope,
+                source_project_id: &source.project_id,
+                source_event_id: &decision.event_id,
+                is_active: import_active,
+            })?;
 
             result.imported.push(ImportedDecision {
                 key: decision.key.clone(),
@@ -144,33 +172,6 @@ pub fn sync_from_sources(
     }
 
     Ok(result)
-}
-
-/// Build sync sources from registry group members.
-pub fn sources_from_group(repo_root: &Path) -> Vec<SyncSource> {
-    let members = edda_store::registry::list_group_members(repo_root);
-    members
-        .into_iter()
-        .map(|entry| SyncSource {
-            project_id: entry.project_id,
-            project_name: entry.name,
-            ledger_path: std::path::PathBuf::from(&entry.path),
-        })
-        .collect()
-}
-
-/// Build sync sources from a specific project name in the registry.
-pub fn sources_from_name(name: &str) -> Vec<SyncSource> {
-    let projects = edda_store::registry::list_projects();
-    projects
-        .into_iter()
-        .filter(|p| p.name == name)
-        .map(|entry| SyncSource {
-            project_id: entry.project_id,
-            project_name: entry.name,
-            ledger_path: std::path::PathBuf::from(&entry.path),
-        })
-        .collect()
 }
 
 fn make_import_event(
@@ -281,7 +282,7 @@ mod tests {
     #[test]
     fn sync_empty_sources() {
         let (tmp, ledger) = setup_workspace();
-        let result = sync_from_sources(&ledger, &[], false).unwrap();
+        let result = sync_from_sources(&ledger, &[], "target_proj", false).unwrap();
         assert!(result.imported.is_empty());
         assert_eq!(result.skipped, 0);
         assert!(result.conflicts.is_empty());
@@ -301,7 +302,7 @@ mod tests {
             ledger_path: tmp_src.clone(),
         }];
 
-        let result = sync_from_sources(&tgt_ledger, &sources, false).unwrap();
+        let result = sync_from_sources(&tgt_ledger, &sources, "target_proj", false).unwrap();
         assert_eq!(result.imported.len(), 1);
         assert_eq!(result.imported[0].key, "api.version");
         assert_eq!(result.imported[0].value, "v3");
@@ -330,11 +331,11 @@ mod tests {
         }];
 
         // First sync
-        let r1 = sync_from_sources(&tgt_ledger, &sources, false).unwrap();
+        let r1 = sync_from_sources(&tgt_ledger, &sources, "target_proj", false).unwrap();
         assert_eq!(r1.imported.len(), 1);
 
         // Second sync should skip
-        let r2 = sync_from_sources(&tgt_ledger, &sources, false).unwrap();
+        let r2 = sync_from_sources(&tgt_ledger, &sources, "target_proj", false).unwrap();
         assert_eq!(r2.imported.len(), 0);
         assert_eq!(r2.skipped, 1);
 
@@ -359,7 +360,7 @@ mod tests {
             ledger_path: tmp_src.clone(),
         }];
 
-        let result = sync_from_sources(&tgt_ledger, &sources, false).unwrap();
+        let result = sync_from_sources(&tgt_ledger, &sources, "target_proj", false).unwrap();
         assert_eq!(result.conflicts.len(), 1);
         assert_eq!(result.conflicts[0].local_value, "v2");
         assert_eq!(result.conflicts[0].remote_value, "v3");
@@ -383,7 +384,7 @@ mod tests {
             ledger_path: tmp_src.clone(),
         }];
 
-        let result = sync_from_sources(&tgt_ledger, &sources, true).unwrap();
+        let result = sync_from_sources(&tgt_ledger, &sources, "target_proj", true).unwrap();
         assert_eq!(result.imported.len(), 1);
 
         // Should not have written anything
@@ -408,7 +409,7 @@ mod tests {
             ledger_path: tmp_src.clone(),
         }];
 
-        let result = sync_from_sources(&tgt_ledger, &sources, false).unwrap();
+        let result = sync_from_sources(&tgt_ledger, &sources, "target_proj", false).unwrap();
         assert!(result.imported.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp_src);

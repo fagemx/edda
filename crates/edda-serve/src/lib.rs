@@ -1363,6 +1363,29 @@ async fn post_approval_check(
 
 // ── POST /api/sync ──
 
+fn sources_from_group(repo_root: &Path) -> Vec<edda_ledger::sync::SyncSource> {
+    edda_store::registry::list_group_members(repo_root)
+        .into_iter()
+        .map(|entry| edda_ledger::sync::SyncSource {
+            project_id: entry.project_id,
+            project_name: entry.name,
+            ledger_path: PathBuf::from(&entry.path),
+        })
+        .collect()
+}
+
+fn sources_from_name(name: &str) -> Vec<edda_ledger::sync::SyncSource> {
+    edda_store::registry::list_projects()
+        .into_iter()
+        .filter(|p| p.name == name)
+        .map(|entry| edda_ledger::sync::SyncSource {
+            project_id: entry.project_id,
+            project_name: entry.name,
+            ledger_path: PathBuf::from(&entry.path),
+        })
+        .collect()
+}
+
 #[derive(Deserialize)]
 struct SyncRequest {
     /// Optional: sync from a specific project name
@@ -1406,12 +1429,14 @@ async fn post_sync(
     let ledger = state.open_ledger()?;
 
     let sources = if let Some(name) = &body.from {
-        edda_ledger::sync::sources_from_name(name)
+        sources_from_name(name)
     } else {
-        edda_ledger::sync::sources_from_group(&state.repo_root)
+        sources_from_group(&state.repo_root)
     };
 
-    let result = edda_ledger::sync::sync_from_sources(&ledger, &sources, body.dry_run)?;
+    let target_project_id = edda_store::project_id(&state.repo_root);
+    let result =
+        edda_ledger::sync::sync_from_sources(&ledger, &sources, &target_project_id, body.dry_run)?;
 
     Ok(Json(SyncResponse {
         imported: result
