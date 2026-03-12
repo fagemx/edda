@@ -15,6 +15,7 @@ use crate::state::machine::{
     PlanState, PlanStatus,
 };
 use crate::state::persist::save_state;
+use crate::tmux::TmuxSession;
 use anyhow::Context;
 use anyhow::Result;
 use std::path::Path;
@@ -31,6 +32,8 @@ pub struct RunContext<'a> {
     pub cwd: &'a Path,
     pub interactive: bool,
     pub json_events: bool,
+    /// Optional tmux session for updating pane status during execution.
+    pub tmux_session: Option<&'a TmuxSession>,
 }
 
 /// Run a plan sequentially. The main conductor loop.
@@ -44,6 +47,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
         cwd,
         interactive,
         json_events,
+        tmux_session,
     } = ctx;
     let order = topo_sort(plan)?;
     let total_phases = order.len();
@@ -195,6 +199,9 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
         save_state(cwd, state)?;
 
         println!("\n▶ [{phase_num}/{total_phases}] Phase \"{phase_id}\" (attempt {attempt})");
+        if let Some(tmux) = tmux_session {
+            let _ = tmux.update_phase_status(&phase_id, "Running");
+        }
         let phase_start = Instant::now();
         event_log.record(Event::PhaseStart {
             phase_id: phase_id.clone(),
@@ -268,6 +275,9 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         "  ✓ Phase \"{phase_id}\" passed ({})",
                         format_elapsed(phase_start.elapsed())
                     );
+                    if let Some(tmux) = tmux_session {
+                        let _ = tmux.update_phase_status(&phase_id, "Passed");
+                    }
 
                     // Record to edda ledger
                     edda::record_phase_done(cwd, &phase_id, result_text.as_deref(), cost_usd);
@@ -299,6 +309,9 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         "  ✗ Phase \"{phase_id}\" failed ({}): {err_msg}",
                         format_elapsed(phase_start.elapsed()),
                     );
+                    if let Some(tmux) = tmux_session {
+                        let _ = tmux.update_phase_status(&phase_id, "Failed");
+                    }
                     edda::record_phase_failed(cwd, &phase_id, err_msg);
                     event_log.record(Event::PhaseFailed {
                         phase_id: phase_id.clone(),
@@ -340,6 +353,9 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                     "  ⏰ Phase \"{phase_id}\" timed out ({})",
                     format_elapsed(phase_start.elapsed())
                 );
+                if let Some(tmux) = tmux_session {
+                    let _ = tmux.update_phase_status(&phase_id, "Stale");
+                }
                 edda::record_phase_failed(cwd, &phase_id, "timed out");
                 event_log.record(Event::PhaseFailed {
                     phase_id: phase_id.clone(),
@@ -370,6 +386,9 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                     "  ✗ Phase \"{phase_id}\" crashed ({}): {error}",
                     format_elapsed(phase_start.elapsed())
                 );
+                if let Some(tmux) = tmux_session {
+                    let _ = tmux.update_phase_status(&phase_id, "Failed");
+                }
                 edda::record_phase_failed(cwd, &phase_id, &error);
                 event_log.record(Event::PhaseFailed {
                     phase_id: phase_id.clone(),
@@ -752,6 +771,7 @@ mod tests {
                 cwd: dir.path(),
                 interactive: false,
                 json_events: false,
+                tmux_session: None,
             },
         )
         .await
@@ -994,6 +1014,7 @@ phases:
                 cwd: dir.path(),
                 interactive: false,
                 json_events: false,
+                tmux_session: None,
             },
         )
         .await
@@ -1143,6 +1164,7 @@ phases:
                 cwd: dir.path(),
                 interactive: false,
                 json_events: false,
+                tmux_session: None,
             },
         )
         .await
