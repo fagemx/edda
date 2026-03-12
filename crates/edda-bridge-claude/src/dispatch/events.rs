@@ -154,6 +154,47 @@ pub(super) fn try_post_karvi_signal(
     }
 }
 
+/// Best-effort write of a task-completed `note` event to workspace ledger.
+/// Uses try-lock: silently skips if workspace is locked by another process.
+pub(super) fn try_write_task_completed_note_event(
+    cwd: &str,
+    task_id: &str,
+    task_subject: &str,
+) {
+    if cwd.is_empty() || task_id.is_empty() {
+        return;
+    }
+
+    let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(cwd)) else {
+        return;
+    };
+    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
+        return;
+    };
+    let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
+        return;
+    };
+    let Ok(branch) = ledger.head_branch() else {
+        return;
+    };
+    let Ok(parent_hash) = ledger.last_event_hash() else {
+        return;
+    };
+
+    let text = if task_subject.is_empty() {
+        format!("Task completed: {task_id}")
+    } else {
+        format!("Task completed: {task_subject} ({task_id})")
+    };
+
+    let tags = vec!["session".to_string(), "task".to_string()];
+    if let Ok(event) =
+        edda_core::event::new_note_event(&branch, parent_hash.as_deref(), "agent", &text, &tags)
+    {
+        let _ = ledger.append_event(&event);
+    }
+}
+
 /// Best-effort write of a sub-agent completion `note` event to workspace ledger.
 /// Uses try-lock: silently skips if workspace is locked by another process.
 pub(super) fn try_write_subagent_completed_note_event(
