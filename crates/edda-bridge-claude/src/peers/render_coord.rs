@@ -23,7 +23,43 @@ pub fn render_coordination_protocol(
 ) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);
     let board = compute_board_state(project_id);
-    render_coordination_protocol_with(&peers, &board, project_id, session_id)
+
+    // Resolve my label to identify which requests are "to me"
+    let my_label: String = board
+        .claims
+        .iter()
+        .find(|c| c.session_id == session_id)
+        .map(|c| c.label.clone())
+        .or_else(|| read_heartbeat(project_id, session_id).map(|hb| hb.label))
+        .unwrap_or_default();
+
+    // Collect unacked requests addressed to me (before rendering)
+    let unacked_from_labels: Vec<String> = if !my_label.is_empty() {
+        board
+            .requests
+            .iter()
+            .filter(|r| r.to_label == my_label)
+            .filter(|r| {
+                !board
+                    .request_acks
+                    .iter()
+                    .any(|a| a.from_label == r.from_label && a.acker_session == session_id)
+            })
+            .map(|r| r.from_label.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let result = render_coordination_protocol_with(&peers, &board, project_id, session_id);
+
+    // Auto-ack: the agent has now "seen" these requests at SessionStart.
+    // Write ack events so they won't appear in subsequent renders.
+    for from_label in &unacked_from_labels {
+        super::heartbeat::write_request_ack(project_id, session_id, from_label);
+    }
+
+    result
 }
 
 /// Generate a suggested `edda claim` command based on available session context.
@@ -212,10 +248,17 @@ pub fn render_coordination_protocol_with(
     }
 
     // Requests to me (using resolved my_label from claim or heartbeat fallback)
+    // Filter out already-acked requests so stale entries don't accumulate.
     let my_requests: Vec<&RequestEntry> = board
         .requests
         .iter()
         .filter(|r| r.to_label == my_label && !my_label.is_empty())
+        .filter(|r| {
+            !board
+                .request_acks
+                .iter()
+                .any(|a| a.from_label == r.from_label && a.acker_session == session_id)
+        })
         .collect();
     if !my_requests.is_empty() {
         lines.push("### Requests to you".to_string());
@@ -320,10 +363,17 @@ pub(crate) fn render_peer_updates_with(
     } else {
         ""
     };
+    // Filter out acked requests so stale entries don't appear in peer updates.
     let my_requests: Vec<&RequestEntry> = board
         .requests
         .iter()
         .filter(|r| r.to_label == my_label && !my_label.is_empty())
+        .filter(|r| {
+            !board
+                .request_acks
+                .iter()
+                .any(|a| a.from_label == r.from_label && a.acker_session == session_id)
+        })
         .collect();
     if !my_requests.is_empty() {
         for r in my_requests.iter().take(2) {

@@ -270,9 +270,23 @@ fn render_requests(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .requests
         .iter()
         .map(|r| {
+            let is_acked = app
+                .board
+                .request_acks
+                .iter()
+                .any(|a| a.from_label == r.from_label);
             let msg = truncate_str(&r.message, 40);
-            let line = format!(" {} → {}: {msg}", r.from_label, r.to_label);
-            ListItem::new(Line::from(line))
+            let line = if is_acked {
+                format!(" [ack] {} → {}: {msg}", r.from_label, r.to_label)
+            } else {
+                format!(" {} → {}: {msg}", r.from_label, r.to_label)
+            };
+            let style = if is_acked {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(line)).style(style)
         })
         .collect();
     let block = Block::default().title(" Requests ").borders(Borders::TOP);
