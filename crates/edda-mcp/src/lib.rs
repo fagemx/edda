@@ -233,7 +233,7 @@ impl EddaServer {
         }
 
         // Re-finalize after payload/refs mutation
-        finalize_event(&mut event);
+        finalize_event(&mut event).map_err(to_mcp_err)?;
         ledger.append_event(&event).map_err(to_mcp_err)?;
 
         Ok(CallToolResult::success(vec![Content::text(format!(

@@ -293,7 +293,10 @@ pub(super) fn harvest_inferred_decisions(
             )),
         });
 
-        finalize_event(&mut event);
+        if let Err(e) = finalize_event(&mut event) {
+            tracing::warn!(event_id = %event.event_id, error = %e, "finalize failed for inferred decision, stopping harvest");
+            break;
+        }
         let event_id = event.event_id.clone();
 
         if ledger.append_event(&event).is_ok() {

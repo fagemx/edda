@@ -1643,7 +1643,7 @@ mod tests {
             });
         }
 
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
         event
     }
 
@@ -1752,7 +1752,7 @@ mod tests {
         // Do NOT add payload.decision — simulate legacy format
         // Remove it if new_note_event somehow adds it (it doesn't)
         event.payload.as_object_mut().unwrap().remove("decision");
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
         store.append_event(&event).unwrap();
 
         let active = store.active_decisions(None, None).unwrap();
@@ -2348,7 +2348,7 @@ mod tests {
             event_family: None,
             event_level: None,
         };
-        edda_core::event::finalize_event(&mut event);
+        edda_core::event::finalize_event(&mut event).unwrap();
         event
     }
 

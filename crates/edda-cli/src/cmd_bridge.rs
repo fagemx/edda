@@ -569,7 +569,7 @@ pub fn decide(
     }
 
     // Re-finalize after payload/refs mutation
-    edda_core::event::finalize_event(&mut event);
+    edda_core::event::finalize_event(&mut event)?;
     ledger.append_event(&event)?;
 
     // Insert dependency edges
@@ -1077,7 +1077,7 @@ mod tests {
         )
         .unwrap();
         event.payload["decision"] = serde_json::json!({"key": "db.engine", "value": "postgres"});
-        edda_core::event::finalize_event(&mut event);
+        edda_core::event::finalize_event(&mut event).unwrap();
         ledger.append_event(&event).unwrap();
 
         let result = ledger.find_active_decision(&branch, "db.engine").unwrap();

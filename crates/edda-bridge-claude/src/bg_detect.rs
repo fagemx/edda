@@ -702,7 +702,7 @@ fn write_detect_note(_project_id: &str, cwd: &str, result: &DetectResult) -> Res
 
     event.payload["source"] = serde_json::json!("bridge:pattern-detect");
 
-    edda_core::event::finalize_event(&mut event);
+    edda_core::event::finalize_event(&mut event)?;
     ledger.append_event(&event)?;
 
     eprintln!("[edda-bg] pattern detect note written → {}", event.event_id);

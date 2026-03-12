@@ -637,7 +637,7 @@ mod tests {
             event_family: None,
             event_level: None,
         };
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
         event
     }
 
@@ -686,7 +686,7 @@ mod tests {
             event_family: None,
             event_level: None,
         };
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
         event
     }
 
@@ -1118,7 +1118,7 @@ mod tests {
             event_family: None,
             event_level: None,
         };
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
         ledger.append_event(&event).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
@@ -1196,7 +1196,7 @@ mod tests {
             event_family: None,
             event_level: None,
         };
-        finalize_event(&mut d2);
+        finalize_event(&mut d2).unwrap();
         ledger.append_event(&d2).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
@@ -1235,7 +1235,7 @@ mod tests {
             rel: "supersedes".to_string(),
             note: None,
         });
-        finalize_event(&mut b);
+        finalize_event(&mut b).unwrap();
         ledger.append_event(&b).unwrap();
 
         // C: db = postgres, supersedes B
@@ -1245,7 +1245,7 @@ mod tests {
             rel: "supersedes".to_string(),
             note: None,
         });
-        finalize_event(&mut c);
+        finalize_event(&mut c).unwrap();
         ledger.append_event(&c).unwrap();
 
         let ctx = render_context(&ledger, "main", DeriveOptions::default()).unwrap();
@@ -1439,7 +1439,7 @@ mod tests {
             event_family: None,
             event_level: None,
         };
-        finalize_event(&mut event);
+        finalize_event(&mut event).unwrap();
         event
     }
 
