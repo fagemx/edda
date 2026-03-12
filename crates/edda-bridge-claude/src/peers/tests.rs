@@ -258,14 +258,22 @@ fn full_lifecycle_multi_session() {
     assert!(proto.contains("4")); // 3 peers + self = 4 agents
     assert!(proto.contains("JWT RS256"));
 
-    // Verify s2 sees the request
-    let proto_s2 = render_coordination_protocol(pid, "s2", ".").unwrap();
-    assert!(proto_s2.contains("Export BillingPlan type"));
-
-    // s2 sees peer updates (lightweight)
+    // s2 sees peer updates (lightweight) — check BEFORE render_coordination_protocol
+    // because render_coordination_protocol auto-acks displayed requests.
     let updates = render_peer_updates(pid, "s2").unwrap();
     assert!(updates.contains("Peers"));
     assert!(updates.contains("Export BillingPlan"));
+
+    // Verify s2 sees the request at SessionStart (auto-acks it)
+    let proto_s2 = render_coordination_protocol(pid, "s2", ".").unwrap();
+    assert!(proto_s2.contains("Export BillingPlan type"));
+
+    // After auto-ack, peer updates should no longer show the request
+    let updates_after = render_peer_updates(pid, "s2").unwrap();
+    assert!(
+        !updates_after.contains("Export BillingPlan"),
+        "acked request should be filtered from subsequent peer updates"
+    );
 
     // Solo session should still see bindings (but not peer sections)
     remove_heartbeat(pid, "s1");
@@ -2225,4 +2233,88 @@ mod derive_scope_tests {
             Some(("server".to_string(), vec!["server/*".to_string()]))
         );
     }
+}
+
+// ── Request ack render filtering tests ──
+
+#[test]
+fn render_coordination_filters_acked_requests() {
+    let pid = "test_render_coord_ack_filter";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    // Set up two peers: s1 (auth) and s2 (billing)
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+
+    // billing sends a request to auth
+    write_request(pid, "s2", "billing", "auth", "Need AuthToken export");
+
+    // Before ack: request should appear in render for s1 (auth)
+    let peers = discover_active_peers(pid, "s1");
+    let board = compute_board_state(pid);
+    let result = render_coordination_protocol_with(&peers, &board, pid, "s1");
+    assert!(result.is_some());
+    let text = result.unwrap();
+    assert!(
+        text.contains("Need AuthToken export"),
+        "unacked request should appear: {text}"
+    );
+
+    // s1 acks the request from billing
+    write_request_ack(pid, "s1", "billing");
+
+    // After ack: request should NOT appear for s1
+    let board = compute_board_state(pid);
+    let result = render_coordination_protocol_with(&peers, &board, pid, "s1");
+    assert!(result.is_some());
+    let text = result.unwrap();
+    assert!(
+        !text.contains("Need AuthToken export"),
+        "acked request should be filtered out: {text}"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn peer_updates_filters_acked_requests() {
+    let pid = "test_peer_updates_ack_filter";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+
+    // billing sends a request to auth
+    write_request(pid, "s2", "billing", "auth", "Export BillingPlan");
+
+    // Before ack: request should appear in peer updates for s1
+    let result = render_peer_updates(pid, "s1");
+    assert!(result.is_some());
+    let text = result.unwrap();
+    assert!(
+        text.contains("Export BillingPlan"),
+        "unacked request should appear in peer updates: {text}"
+    );
+
+    // s1 acks the request
+    write_request_ack(pid, "s1", "billing");
+
+    // After ack: request should NOT appear for s1
+    let result = render_peer_updates(pid, "s1");
+    assert!(result.is_some());
+    let text = result.unwrap();
+    assert!(
+        !text.contains("Export BillingPlan"),
+        "acked request should be filtered from peer updates: {text}"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
