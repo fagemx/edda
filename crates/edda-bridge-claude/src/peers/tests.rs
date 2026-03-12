@@ -2318,3 +2318,106 @@ fn peer_updates_filters_acked_requests() {
     remove_heartbeat(pid, "s2");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
+
+// ── Coordination Diff Tests (#146) ──
+
+#[test]
+fn coord_diff_renders_new_events() {
+    let pid = "test_coord_diff_new";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    // Seed offset at 0 (simulate SessionStart with empty file)
+    crate::state::write_coord_offset(pid, "my-sess", 0);
+
+    // Write events from a different session
+    write_claim(pid, "other-sess", "auth", &["src/auth/*".into()]);
+    write_binding(pid, "other-sess", "auth", "db.engine", "sqlite");
+
+    let diff = render_coord_diff(pid, "my-sess");
+    assert!(diff.is_some(), "should render new events");
+    let text = diff.unwrap();
+    assert!(text.contains("[coordination update]"));
+    assert!(text.contains("auth"));
+    assert!(text.contains("claimed"));
+    assert!(text.contains("db.engine=sqlite"));
+
+    // Second call — no new events, should return None
+    let diff2 = render_coord_diff(pid, "my-sess");
+    assert!(diff2.is_none(), "should return None when no new events");
+
+    let _ = fs::remove_file(coordination_path(pid));
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn coord_diff_filters_own_events() {
+    let pid = "test_coord_diff_own";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    // Seed offset
+    crate::state::write_coord_offset(pid, "my-sess", 0);
+
+    // Write event from own session
+    write_claim(pid, "my-sess", "auth", &["src/auth/*".into()]);
+
+    let diff = render_coord_diff(pid, "my-sess");
+    assert!(diff.is_none(), "own events should be filtered out");
+
+    let _ = fs::remove_file(coordination_path(pid));
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn coord_diff_compaction_guard() {
+    let pid = "test_coord_diff_compact";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    // Write some events and set offset past them
+    write_claim(pid, "peer-sess", "api", &["src/api/*".into()]);
+    crate::state::write_coord_offset(pid, "my-sess", 99999);
+
+    // File is smaller than offset → compaction guard triggers, reset to 0
+    let diff = render_coord_diff(pid, "my-sess");
+    assert!(
+        diff.is_some(),
+        "should render events after compaction reset"
+    );
+    let text = diff.unwrap();
+    assert!(text.contains("api"));
+
+    let _ = fs::remove_file(coordination_path(pid));
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn coord_diff_skips_when_no_offset_file() {
+    let pid = "test_coord_diff_no_offset";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    // Write events but do NOT seed offset (simulates no SessionStart)
+    write_claim(pid, "peer-sess", "api", &["src/api/*".into()]);
+
+    // First call: no offset file exists → seeds offset and returns None
+    let diff = render_coord_diff(pid, "my-sess");
+    assert!(diff.is_none(), "should skip when offset file not seeded");
+
+    // Write more events
+    write_binding(pid, "peer-sess", "api", "api.style", "REST");
+
+    // Second call: offset file now exists, new events since last seed
+    let diff2 = render_coord_diff(pid, "my-sess");
+    assert!(diff2.is_some(), "should render new events after seeding");
+    let text = diff2.unwrap();
+    assert!(text.contains("REST"));
+
+    let _ = fs::remove_file(coordination_path(pid));
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}

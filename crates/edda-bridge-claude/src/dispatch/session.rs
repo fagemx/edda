@@ -163,6 +163,14 @@ pub(super) fn dispatch_with_workspace_only(
         }
     }
 
+    // Coordination diff: inject new events since last check (#146)
+    if let Some(diff) = crate::peers::render_coord_diff(project_id, session_id) {
+        ws = Some(match ws {
+            Some(w) => format!("{w}\n{diff}"),
+            None => diff,
+        });
+    }
+
     if let Some(ws) = ws {
         let wrapped = wrap_context_boundary(&ws);
         // Dedup: skip if identical to last injection
@@ -483,6 +491,8 @@ pub(super) fn cleanup_session_state(project_id: &str, session_id: &str, peers_ac
     let _ = fs::remove_file(state_dir.join(format!("signal_count.{session_id}")));
     // Late peer detection counter (#11)
     let _ = fs::remove_file(state_dir.join(format!("peer_count.{session_id}")));
+    // Coordination diff offset (#146)
+    let _ = fs::remove_file(state_dir.join(format!("coord_offset.{session_id}")));
     // Auto-claim state file (#24)
     crate::peers::remove_autoclaim_state(project_id, session_id);
     // Agent phase state file (#55)
@@ -618,6 +628,12 @@ pub(super) fn dispatch_session_start(
     // re-inject the full protocol on the first prompt after SessionStart (#11).
     let peers = crate::peers::discover_active_peers(project_id, session_id);
     write_peer_count(project_id, session_id, peers.len());
+
+    // Seed coordination offset so first UserPromptSubmit only diffs new events (#146).
+    let coord_path = crate::peers::coordination_path(project_id);
+    if let Ok(meta) = std::fs::metadata(&coord_path) {
+        crate::state::write_coord_offset(project_id, session_id, meta.len());
+    }
 
     // Remaining body sections (truncatable — nice-to-have context).
 

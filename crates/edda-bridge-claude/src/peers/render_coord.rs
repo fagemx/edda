@@ -4,7 +4,7 @@ use super::autoclaim::derive_scope_from_files;
 use super::board::compute_board_state;
 use super::discovery::discover_active_peers;
 use super::heartbeat::read_heartbeat;
-use super::helpers::{format_age, format_peer_suffix, truncate_to_budget};
+use super::helpers::{self, format_age, format_peer_suffix, truncate_to_budget};
 use super::{
     protocol_budget, BoardState, PeerSummary, RequestEntry, SessionHeartbeat, PEER_UPDATES_BUDGET,
 };
@@ -390,4 +390,132 @@ pub(crate) fn render_peer_updates_with(
     } else {
         Some(result)
     }
+}
+
+// ── Coordination Diff (Real-time Delta Injection) ──
+
+/// Maximum chars for the coordination diff section.
+const COORD_DIFF_BUDGET: usize = 200;
+
+/// Maximum number of events to include in a single diff injection.
+const COORD_DIFF_MAX_EVENTS: usize = 5;
+
+/// Render new coordination events since the last injection for this session.
+///
+/// Reads `coordination.jsonl` from the stored byte offset, parses new lines,
+/// filters out own events and low-priority types, and returns a compact diff.
+/// Updates the offset after reading.
+///
+/// Returns `None` if no new relevant events exist.
+pub(crate) fn render_coord_diff(project_id: &str, session_id: &str) -> Option<String> {
+    use super::{coordination_path, CoordEvent, CoordEventType};
+    use crate::state::{read_coord_offset, write_coord_offset};
+    use std::io::Read;
+
+    let coord_path = coordination_path(project_id);
+    let file_len = std::fs::metadata(&coord_path).ok()?.len();
+
+    // Check if offset was ever seeded (by SessionStart). If not, seed it now
+    // and skip this cycle to avoid injecting all historical events.
+    let offset_path = edda_store::project_dir(project_id)
+        .join("state")
+        .join(format!("coord_offset.{session_id}"));
+    if !offset_path.exists() {
+        write_coord_offset(project_id, session_id, file_len);
+        return None;
+    }
+
+    let offset = read_coord_offset(project_id, session_id);
+
+    // Compaction guard: if file shrank, reset offset
+    let effective_offset = if file_len < offset { 0 } else { offset };
+
+    // No new data
+    if file_len == effective_offset {
+        return None;
+    }
+
+    // Read bytes from offset to EOF
+    let mut file = std::fs::File::open(&coord_path).ok()?;
+    std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(effective_offset)).ok()?;
+    let mut tail = String::new();
+    file.read_to_string(&mut tail).ok()?;
+
+    // Update offset to current file end
+    write_coord_offset(project_id, session_id, file_len);
+
+    let now_epoch = {
+        let now = time::OffsetDateTime::now_utc();
+        now.unix_timestamp() as u64
+    };
+
+    let mut diff_lines: Vec<String> = Vec::new();
+
+    for line in tail.lines() {
+        if diff_lines.len() >= COORD_DIFF_MAX_EVENTS {
+            break;
+        }
+        let event: CoordEvent = match serde_json::from_str(line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        // Skip own events
+        if event.session_id == session_id {
+            continue;
+        }
+
+        // Skip low-priority event types
+        match event.event_type {
+            CoordEventType::Unclaim
+            | CoordEventType::TaskCompleted
+            | CoordEventType::SubagentCompleted
+            | CoordEventType::RequestAck => continue,
+            _ => {}
+        }
+
+        let age = helpers::parse_rfc3339_to_epoch(&event.ts)
+            .map(|ts| helpers::format_age(now_epoch.saturating_sub(ts)))
+            .unwrap_or_else(|| "just now".to_string());
+
+        let label = event.payload["label"]
+            .as_str()
+            .or_else(|| event.payload["from_label"].as_str())
+            .or_else(|| event.payload["by_label"].as_str())
+            .unwrap_or("peer");
+
+        let rendered = match event.event_type {
+            CoordEventType::Claim => {
+                let paths: Vec<&str> = event.payload["paths"]
+                    .as_array()
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+                format!("- {label} claimed {} ({age})", paths.join(", "))
+            }
+            CoordEventType::Binding => {
+                let key = event.payload["key"].as_str().unwrap_or("?");
+                let value = event.payload["value"].as_str().unwrap_or("?");
+                format!("- {label} decided \"{key}={value}\" ({age})")
+            }
+            CoordEventType::Request => {
+                let msg = event.payload["message"].as_str().unwrap_or("");
+                let to = event.payload["to_label"].as_str().unwrap_or("?");
+                format!("- {label} -> {to}: \"{msg}\" ({age})")
+            }
+            // Already filtered above
+            _ => continue,
+        };
+
+        diff_lines.push(rendered);
+    }
+
+    if diff_lines.is_empty() {
+        return None;
+    }
+
+    let mut result = format!("[coordination update]\n{}", diff_lines.join("\n"));
+    if result.len() > COORD_DIFF_BUDGET {
+        result = helpers::truncate_to_budget(&result, COORD_DIFF_BUDGET);
+    }
+    Some(result)
 }
