@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::Path;
 
+use globset::Glob;
+
 use crate::parse::*;
 
 use super::events::{
@@ -49,6 +51,41 @@ pub(super) fn dispatch_pre_tool_use(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // ── Off-limits enforcement: block Edit/Write on peer-claimed files ──
+    let enforce_offlimits = match std::env::var("EDDA_ENFORCE_OFFLIMITS") {
+        Ok(val) => val == "1",
+        Err(_) => read_workspace_config_bool(cwd, "bridge.enforce_offlimits").unwrap_or(false),
+    };
+    if enforce_offlimits {
+        let tool_name_ol = get_str(raw, "tool_name");
+        if tool_name_ol == "Edit" || tool_name_ol == "Write" {
+            let file_path = raw
+                .pointer("/tool_input/file_path")
+                .or_else(|| raw.pointer("/input/file_path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !file_path.is_empty() {
+                if let Some((peer_label, matched_glob)) =
+                    check_offlimits(project_id, session_id, file_path)
+                {
+                    let reason = format!(
+                        "Off-limits: file '{}' is claimed by agent '{}' (paths: {}). \
+                         Use `edda request \"{}\" \"need to edit {}\"` to coordinate.",
+                        file_path, peer_label, matched_glob, peer_label, file_path
+                    );
+                    let output = serde_json::json!({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "block",
+                            "permissionDecisionReason": reason
+                        }
+                    });
+                    return Ok(HookResult::output(serde_json::to_string(&output)?));
                 }
             }
         }
@@ -126,6 +163,67 @@ pub(super) fn check_pending_requests(project_id: &str, session_id: &str) -> Opti
         lines.push(format!("  - From **{}**: {}", r.from_label, r.message));
     }
     Some(lines.join("\n"))
+}
+
+/// Check if a file path is claimed by an active peer (off-limits enforcement).
+///
+/// Returns `Some((peer_label, matched_glob))` if the file is claimed by another
+/// active session, `None` otherwise. Self-claims and stale peer claims are excluded.
+pub(super) fn check_offlimits(
+    project_id: &str,
+    session_id: &str,
+    file_path: &str,
+) -> Option<(String, String)> {
+    // Solo gate: skip when no peers are active.
+    if read_peer_count(project_id, session_id) == 0 {
+        return None;
+    }
+
+    // Get active peers (excludes self and stale sessions).
+    let active_peers = crate::peers::discover_active_peers(project_id, session_id);
+    if active_peers.is_empty() {
+        return None;
+    }
+
+    // Collect active peer session IDs for cross-referencing.
+    let active_sids: std::collections::HashSet<&str> =
+        active_peers.iter().map(|p| p.session_id.as_str()).collect();
+
+    // Get board state (cached per #83).
+    let board = crate::peers::compute_board_state(project_id);
+
+    // Normalize path separators for cross-platform matching.
+    let normalized = file_path.replace('\\', "/");
+
+    for claim in &board.claims {
+        // Skip self-claims.
+        if claim.session_id == session_id {
+            continue;
+        }
+        // Skip claims from stale/inactive peers.
+        if !active_sids.contains(claim.session_id.as_str()) {
+            continue;
+        }
+
+        for glob_pattern in &claim.paths {
+            if let Ok(glob) = Glob::new(glob_pattern) {
+                let matcher = glob.compile_matcher();
+                if matcher.is_match(&normalized) {
+                    return Some((claim.label.clone(), glob_pattern.clone()));
+                }
+                // Also try matching against just the file name.
+                if let Some(file_name) =
+                    Path::new(&normalized).file_name().and_then(|n| n.to_str())
+                {
+                    if matcher.is_match(file_name) {
+                        return Some((claim.label.clone(), glob_pattern.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// L3: evaluate learned rules against the current PreToolUse hook context.
