@@ -338,9 +338,11 @@ struct LogQuery {
 #[derive(Serialize)]
 struct LogEntry {
     ts: String,
+    #[serde(rename = "type")]
     event_type: String,
     event_id: String,
     branch: String,
+    #[serde(rename = "summary")]
     detail: String,
 }
 
@@ -1925,7 +1927,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let events = json["events"].as_array().unwrap();
         assert!(!events.is_empty());
-        assert_eq!(events[0]["event_type"], "note");
+        assert_eq!(events[0]["type"], "note");
     }
 
     #[tokio::test]
