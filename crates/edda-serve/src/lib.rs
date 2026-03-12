@@ -1,9 +1,12 @@
+use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{Event as SseEvent, KeepAlive};
+use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -109,6 +112,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/dashboard", get(serve_dashboard))
         .route("/api/actors", get(get_actors))
         .route("/api/actors/{name}", get(get_actor))
+        .route("/api/events/stream", get(get_event_stream))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -158,6 +162,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/metrics/quality", get(get_quality_metrics))
         .route("/api/dashboard", get(get_dashboard))
         .route("/dashboard", get(serve_dashboard))
+        .route("/api/events/stream", get(get_event_stream))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -1419,7 +1424,12 @@ fn compute_attention(
         if r.risk_level == "high" {
             red.push(OverviewRedItem {
                 project: r.project.clone(),
-                summary: format!("{} = {} (risk {:.0}%)", r.key, r.value, r.risk_score * 100.0),
+                summary: format!(
+                    "{} = {} (risk {:.0}%)",
+                    r.key,
+                    r.value,
+                    r.risk_score * 100.0
+                ),
                 action: "Review before overriding".to_string(),
                 blocked_count: 0,
             });
@@ -1431,7 +1441,12 @@ fn compute_attention(
         if r.risk_level == "medium" {
             yellow.push(OverviewYellowItem {
                 project: r.project.clone(),
-                summary: format!("{} = {} (risk {:.0}%)", r.key, r.value, r.risk_score * 100.0),
+                summary: format!(
+                    "{} = {} (risk {:.0}%)",
+                    r.key,
+                    r.value,
+                    r.risk_score * 100.0
+                ),
                 eta: String::new(),
             });
         }
@@ -1480,6 +1495,130 @@ fn compute_attention(
         green,
         updated_at,
     }
+}
+
+// ── SSE Event Stream ──
+
+/// Query parameters for the SSE event stream endpoint.
+#[derive(Deserialize)]
+struct StreamParams {
+    /// Comma-separated event types to subscribe to (e.g. "decision,phase_change").
+    /// If omitted, all event types are streamed.
+    types: Option<String>,
+    /// Resume from this event_id (alternative to `Last-Event-ID` header).
+    since: Option<String>,
+}
+
+/// Map a ledger event to the SSE event name sent to clients.
+///
+/// Decisions are stored as `note` events with a `decision` key in the payload,
+/// so we check the payload in addition to the `event_type` field.
+fn sse_event_name(event: &edda_core::Event) -> &'static str {
+    match event.event_type.as_str() {
+        "agent_phase_change" => "phase_change",
+        "approval_request" => "approval_pending",
+        "note" if event.payload.get("decision").is_some() => "decision",
+        _ => "new_event",
+    }
+}
+
+/// `GET /api/events/stream` — Server-Sent Events endpoint.
+///
+/// Streams new ledger events in real time using a poll-based approach
+/// (queries SQLite rowid cursor every 2 seconds).
+///
+/// Supports:
+/// - `?types=decision,phase_change` — filter by SSE event type
+/// - `?since=evt_xxx` or `Last-Event-ID` header — resume after disconnect
+/// - 30-second keep-alive heartbeat
+async fn get_event_stream(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<StreamParams>,
+    headers: HeaderMap,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<SseEvent, Infallible>>>, AppError> {
+    // Determine the resume cursor: query param takes precedence over header.
+    let since = params.since.or_else(|| {
+        headers
+            .get("Last-Event-ID")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+    });
+
+    // Parse type filter into a set for O(1) lookups.
+    let type_filter: Option<Vec<String>> = params.types.map(|t| {
+        t.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+
+    // Resolve the initial cursor (rowid) from `since` event_id.
+    let mut cursor: i64 = if let Some(ref event_id) = since {
+        let ledger = state.open_ledger()?;
+        ledger.rowid_for_event_id(event_id)?.unwrap_or(0)
+    } else {
+        0
+    };
+
+    let repo_root = state.repo_root.clone();
+
+    let stream = async_stream::stream! {
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+
+            let ledger = match edda_ledger::Ledger::open(&repo_root) {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+
+            let new_events = match ledger.events_after_rowid(cursor) {
+                Ok(evts) => evts,
+                Err(_) => continue,
+            };
+
+            if new_events.is_empty() {
+                continue;
+            }
+
+            // Update cursor to the latest rowid.
+            if let Some((last_rowid, _)) = new_events.last() {
+                cursor = *last_rowid;
+            }
+
+            for (_rowid, event) in new_events {
+                let sse_name = sse_event_name(&event);
+
+                // Apply type filter if specified.
+                if let Some(ref filters) = type_filter {
+                    if !filters.iter().any(|f| f == sse_name) {
+                        continue;
+                    }
+                }
+
+                let event_id = event.event_id.clone();
+                let data = serde_json::json!({
+                    "event_type": sse_name,
+                    "data": serde_json::to_value(&event).unwrap_or_default(),
+                    "ts": &event.ts,
+                });
+
+                let sse_event = SseEvent::default()
+                    .event(sse_name)
+                    .id(event_id)
+                    .json_data(data)
+                    .unwrap_or_else(|_| SseEvent::default().comment("serialization error"));
+
+                yield Ok::<_, Infallible>(sse_event);
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(30))
+            .text("ping"),
+    ))
 }
 
 // ── Tests ──
@@ -2941,5 +3080,238 @@ actors:
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["error"].as_str().unwrap().contains("not found"));
+    }
+
+    // ── SSE tests ──
+
+    #[tokio::test]
+    async fn test_sse_stream_content_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            ct.contains("text/event-stream"),
+            "expected text/event-stream, got: {ct}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sse_stream_new_events() {
+        use http_body_util::BodyExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Append an event BEFORE connecting (so it's immediately available).
+        let ledger = edda_ledger::Ledger::open(tmp.path()).unwrap();
+        let note =
+            edda_core::event::new_note_event("main", None, "system", "sse test note", &[]).unwrap();
+        ledger.append_event(&note).unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Read the first frame from the SSE stream (with timeout).
+        let mut body = resp.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .expect("timed out waiting for SSE frame")
+            .expect("stream ended unexpectedly")
+            .expect("frame error");
+
+        let data = frame.into_data().expect("expected data frame");
+        let text = String::from_utf8(data.to_vec()).unwrap();
+
+        // SSE format: "event: new_event\ndata: ...\nid: evt_...\n\n"
+        assert!(text.contains("event: new_event"), "got: {text}");
+        assert!(text.contains(&note.event_id), "got: {text}");
+    }
+
+    #[tokio::test]
+    async fn test_sse_stream_type_filter() {
+        use http_body_util::BodyExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Append a decision event.
+        let ledger = edda_ledger::Ledger::open(tmp.path()).unwrap();
+        let dp = edda_core::types::DecisionPayload {
+            key: "test.key".into(),
+            value: "test_val".into(),
+            reason: Some("testing".into()),
+        };
+        let decision = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
+        ledger.append_event(&decision).unwrap();
+
+        // Append a note event (should be filtered out).
+        let note = edda_core::event::new_note_event(
+            "main",
+            Some(&decision.hash),
+            "system",
+            "filtered out",
+            &[],
+        )
+        .unwrap();
+        ledger.append_event(&note).unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+
+        // Subscribe only to "decision" type.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events/stream?types=decision")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .expect("timed out waiting for SSE frame")
+            .expect("stream ended unexpectedly")
+            .expect("frame error");
+
+        let data = frame.into_data().expect("expected data frame");
+        let text = String::from_utf8(data.to_vec()).unwrap();
+
+        // Should contain the decision but NOT the note.
+        assert!(text.contains("event: decision"), "got: {text}");
+        assert!(text.contains(&decision.event_id), "got: {text}");
+        assert!(
+            !text.contains(&note.event_id),
+            "note should be filtered out: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sse_stream_since_replay() {
+        use http_body_util::BodyExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Append two events.
+        let ledger = edda_ledger::Ledger::open(tmp.path()).unwrap();
+        let e1 =
+            edda_core::event::new_note_event("main", None, "system", "first event", &[]).unwrap();
+        ledger.append_event(&e1).unwrap();
+
+        let e2 =
+            edda_core::event::new_note_event("main", Some(&e1.hash), "system", "second event", &[])
+                .unwrap();
+        ledger.append_event(&e2).unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+
+        // Connect with ?since=<e1.event_id>, should only get e2.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/events/stream?since={}", e1.event_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .expect("timed out waiting for SSE frame")
+            .expect("stream ended unexpectedly")
+            .expect("frame error");
+
+        let data = frame.into_data().expect("expected data frame");
+        let text = String::from_utf8(data.to_vec()).unwrap();
+
+        // Should contain e2 but NOT e1.
+        assert!(text.contains(&e2.event_id), "expected e2: {text}");
+        assert!(!text.contains(&e1.event_id), "e1 should be skipped: {text}");
+    }
+
+    #[tokio::test]
+    async fn test_sse_stream_last_event_id_header() {
+        use http_body_util::BodyExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let ledger = edda_ledger::Ledger::open(tmp.path()).unwrap();
+        let e1 = edda_core::event::new_note_event("main", None, "system", "first", &[]).unwrap();
+        ledger.append_event(&e1).unwrap();
+
+        let e2 = edda_core::event::new_note_event("main", Some(&e1.hash), "system", "second", &[])
+            .unwrap();
+        ledger.append_event(&e2).unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+
+        // Use Last-Event-ID header instead of query param.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/events/stream")
+                    .header("Last-Event-ID", &e1.event_id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let mut body = resp.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .expect("timed out waiting for SSE frame")
+            .expect("stream ended unexpectedly")
+            .expect("frame error");
+
+        let data = frame.into_data().expect("expected data frame");
+        let text = String::from_utf8(data.to_vec()).unwrap();
+
+        assert!(text.contains(&e2.event_id), "expected e2: {text}");
+        assert!(!text.contains(&e1.event_id), "e1 should be skipped: {text}");
     }
 }

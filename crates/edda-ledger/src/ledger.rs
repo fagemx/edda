@@ -106,6 +106,19 @@ impl Ledger {
         self.sqlite.iter_events_by_type(event_type)
     }
 
+    /// Get all events with rowid strictly greater than `after_rowid`.
+    ///
+    /// Returns `(rowid, Event)` pairs ordered by rowid, useful for cursor-based
+    /// polling (e.g. SSE streaming).
+    pub fn events_after_rowid(&self, after_rowid: i64) -> anyhow::Result<Vec<(i64, Event)>> {
+        self.sqlite.events_after_rowid(after_rowid)
+    }
+
+    /// Look up the rowid for a given `event_id`.
+    pub fn rowid_for_event_id(&self, event_id: &str) -> anyhow::Result<Option<i64>> {
+        self.sqlite.rowid_for_event_id(event_id)
+    }
+
     // ── Branches JSON ───────────────────────────────────────────────
 
     /// Read branches.json content.
