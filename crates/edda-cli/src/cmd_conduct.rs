@@ -5,7 +5,7 @@ use edda_conductor::agent::launcher::{phase_session_id, ClaudeCodeLauncher};
 use edda_conductor::check::engine::CheckEngine;
 use edda_conductor::plan::parser::load_plan;
 use edda_conductor::runner::notify::StdoutNotifier;
-use edda_conductor::runner::sequential::run_plan;
+use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
 use edda_conductor::state::persist::{load_state, save_state};
 use std::path::Path;
@@ -194,18 +194,17 @@ pub fn run(
     let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin());
 
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(run_plan(
-        &plan,
-        &mut state,
-        &launcher,
-        &engine,
-        &notifier,
-        &mut budget,
+    let mut ctx = RunContext {
+        launcher: &launcher,
+        check_engine: &engine,
+        notifier: &notifier,
+        budget: &mut budget,
         cancel,
-        &cwd,
+        cwd: &cwd,
         interactive,
         json_events,
-    ))?;
+    };
+    rt.block_on(run_plan(&plan, &mut state, &mut ctx))?;
 
     Ok(())
 }

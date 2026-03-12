@@ -21,20 +21,32 @@ use std::path::Path;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+/// Execution context for running a plan — groups environment parameters.
+pub struct RunContext<'a> {
+    pub launcher: &'a dyn AgentLauncher,
+    pub check_engine: &'a CheckEngine,
+    pub notifier: &'a dyn Notifier,
+    pub budget: &'a mut BudgetTracker,
+    pub cancel: CancellationToken,
+    pub cwd: &'a Path,
+    pub interactive: bool,
+    pub json_events: bool,
+}
+
 /// Run a plan sequentially. The main conductor loop.
-#[allow(clippy::too_many_arguments)]
 pub async fn run_plan(
     plan: &Plan,
     state: &mut PlanState,
-    launcher: &dyn AgentLauncher,
-    check_engine: &CheckEngine,
-    notifier: &dyn Notifier,
-    budget: &mut BudgetTracker,
-    cancel: CancellationToken,
-    cwd: &Path,
-    interactive: bool,
-    json_events: bool,
+    ctx: &mut RunContext<'_>,
 ) -> Result<()> {
+    let launcher = ctx.launcher;
+    let check_engine = ctx.check_engine;
+    let notifier = ctx.notifier;
+    let budget = &mut ctx.budget;
+    let cancel = ctx.cancel.clone();
+    let cwd: &Path = ctx.cwd;
+    let interactive = ctx.interactive;
+    let json_events = ctx.json_events;
     let order = topo_sort(plan)?;
     let total_phases = order.len();
     let mut event_log = EventLogger::new(cwd, &plan.name).with_stdout_json(json_events);
@@ -730,20 +742,17 @@ mod tests {
         let mut budget = BudgetTracker::new(plan.budget_usd);
         let cancel = CancellationToken::new();
 
-        run_plan(
-            &plan,
-            &mut state,
+        let mut ctx = RunContext {
             launcher,
-            &engine,
-            &notifier,
-            &mut budget,
+            check_engine: &engine,
+            notifier: &notifier,
+            budget: &mut budget,
             cancel,
-            dir.path(),
-            false, // non-interactive in tests
-            false, // no json events in tests
-        )
-        .await
-        .unwrap();
+            cwd: dir.path(),
+            interactive: false,
+            json_events: false,
+        };
+        run_plan(&plan, &mut state, &mut ctx).await.unwrap();
 
         let msgs = notifier.messages();
         (state, msgs)
@@ -970,20 +979,17 @@ phases:
 
         let launcher = MockLauncher::new();
 
-        run_plan(
-            &plan,
-            &mut state,
-            &launcher,
-            &engine,
-            &notifier,
-            &mut budget,
+        let mut ctx = RunContext {
+            launcher: &launcher,
+            check_engine: &engine,
+            notifier: &notifier,
+            budget: &mut budget,
             cancel,
-            dir.path(),
-            false,
-            false,
-        )
-        .await
-        .unwrap();
+            cwd: dir.path(),
+            interactive: false,
+            json_events: false,
+        };
+        run_plan(&plan, &mut state, &mut ctx).await.unwrap();
 
         // Should stop without running any phases
         assert!(state
@@ -1117,20 +1123,17 @@ phases:
         let mut budget = BudgetTracker::new(plan.budget_usd);
         let cancel = CancellationToken::new();
 
-        run_plan(
-            &plan,
-            &mut state,
+        let mut ctx = RunContext {
             launcher,
-            &engine,
-            &notifier,
-            &mut budget,
+            check_engine: &engine,
+            notifier: &notifier,
+            budget: &mut budget,
             cancel,
-            dir.path(),
-            false,
-            false,
-        )
-        .await
-        .unwrap();
+            cwd: dir.path(),
+            interactive: false,
+            json_events: false,
+        };
+        run_plan(&plan, &mut state, &mut ctx).await.unwrap();
 
         (state, dir)
     }
