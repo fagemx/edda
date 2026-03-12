@@ -19,3 +19,7 @@ hex.workspace = true
 ulid.workspace = true
 time.workspace = true
 serde_yaml.workspace = true
+globset.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
