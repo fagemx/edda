@@ -81,4 +81,37 @@ mod tests {
         let loaded = load_state(dir.path(), "test").unwrap().unwrap();
         assert_eq!(loaded.version, 42);
     }
+
+    // -- Corrupted state recovery tests (Issue #242) --
+
+    #[test]
+    fn load_empty_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(dir.path(), "broken");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+        let result = load_state(dir.path(), "broken");
+        assert!(result.is_err(), "empty file should return Err");
+    }
+
+    #[test]
+    fn load_truncated_json_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(dir.path(), "truncated");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, r#"{"plan_name": "te"#).unwrap();
+        let result = load_state(dir.path(), "truncated");
+        assert!(result.is_err(), "truncated JSON should return Err");
+    }
+
+    #[test]
+    fn load_binary_garbage_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = state_path(dir.path(), "garbage");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"\x00\x01\xff\xfe\x80\x90").unwrap();
+        let result = load_state(dir.path(), "garbage");
+        assert!(result.is_err(), "binary garbage should return Err");
+    }
+
 }

@@ -573,6 +573,35 @@ impl SqliteStore {
         events.into_iter().map(row_to_event).collect()
     }
 
+
+    /// Verify the hash chain integrity of all events in insertion order.
+    /// Returns `Ok(())` if the chain is valid, or `Err` describing the first break found.
+    pub fn verify_chain(&self) -> anyhow::Result<()> {
+        let events = self.iter_events()?;
+        if events.is_empty() {
+            return Ok(());
+        }
+        // First event should have no parent
+        if events[0].parent_hash.is_some() {
+            anyhow::bail!(
+                "chain break at first event {}: expected parent_hash=None, got {:?}",
+                events[0].event_id,
+                events[0].parent_hash
+            );
+        }
+        for i in 1..events.len() {
+            if events[i].parent_hash.as_deref() != Some(&events[i - 1].hash) {
+                anyhow::bail!(
+                    "chain break at event {}: expected parent_hash={}, got {:?}",
+                    events[i].event_id,
+                    events[i - 1].hash,
+                    events[i].parent_hash
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Get all events of a given type, filtered at the SQL level using `idx_events_type`.
     pub fn iter_events_by_type(&self, event_type: &str) -> anyhow::Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(
@@ -2540,4 +2569,216 @@ mod tests {
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // -- Concurrent writer tests (Issue #242) --
+
+    #[test]
+    fn concurrent_writers_no_data_loss() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("edda_sqlite_concurrent_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+
+        // Create the DB + schema first
+        let init_store = SqliteStore::open_or_create(&db_path).unwrap();
+        drop(init_store);
+
+        let num_threads = 10;
+        let events_per_thread = 5;
+        let db_path_shared = db_path.clone();
+
+        let handles: Vec<_> = (0..num_threads)
+            .map(|t| {
+                let p = db_path_shared.clone();
+                std::thread::spawn(move || {
+                    let store = SqliteStore::open(&p).unwrap();
+                    for i in 0..events_per_thread {
+                        let e = new_note_event(
+                            "main",
+                            None,
+                            "system",
+                            &format!("thread {t} event {i}"),
+                            &[],
+                        )
+                        .unwrap();
+                        store.append_event(&e).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        let store = SqliteStore::open(&db_path).unwrap();
+        let events = store.iter_events().unwrap();
+        assert_eq!(events.len(), num_threads * events_per_thread);
+
+        // Verify no duplicate event_ids
+        let mut ids: Vec<&str> = events.iter().map(|e| e.event_id.as_str()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), num_threads * events_per_thread);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_writers_all_events_readable() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("edda_sqlite_conc_read_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+
+        let init_store = SqliteStore::open_or_create(&db_path).unwrap();
+        drop(init_store);
+
+        let db_path_shared = db_path.clone();
+        let handles: Vec<_> = (0..5)
+            .map(|t| {
+                let p = db_path_shared.clone();
+                std::thread::spawn(move || {
+                    let store = SqliteStore::open(&p).unwrap();
+                    for i in 0..3 {
+                        let e = new_note_event(
+                            "main",
+                            None,
+                            "system",
+                            &format!("t{t}e{i}"),
+                            &["concurrent".to_string()],
+                        )
+                        .unwrap();
+                        store.append_event(&e).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        // Verify every event payload is intact
+        let store = SqliteStore::open(&db_path).unwrap();
+        let events = store.iter_events().unwrap();
+        assert_eq!(events.len(), 15);
+        for event in &events {
+            assert_eq!(event.event_type, "note");
+            assert!(event.payload["text"].as_str().is_some());
+        }
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_writers_with_contention() {
+        // Higher contention: more threads, fewer events -- stress the busy_timeout
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir()
+            .join(format!("edda_sqlite_conc_stress_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+
+        let init_store = SqliteStore::open_or_create(&db_path).unwrap();
+        drop(init_store);
+
+        let db_path_shared = db_path.clone();
+        let handles: Vec<_> = (0..20)
+            .map(|t| {
+                let p = db_path_shared.clone();
+                std::thread::spawn(move || {
+                    let store = SqliteStore::open(&p).unwrap();
+                    let e =
+                        new_note_event("main", None, "system", &format!("stress {t}"), &[])
+                            .unwrap();
+                    store.append_event(&e).unwrap();
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        let store = SqliteStore::open(&db_path).unwrap();
+        let events = store.iter_events().unwrap();
+        assert_eq!(events.len(), 20);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- Hash chain verification tests (Issue #242) --
+
+    #[test]
+    fn verify_chain_valid_sequence() {
+        let (dir, store) = tmp_db();
+        let mut prev_hash: Option<String> = None;
+        for i in 0..5 {
+            let e = new_note_event(
+                "main",
+                prev_hash.as_deref(),
+                "system",
+                &format!("chain event {i}"),
+                &[],
+            )
+            .unwrap();
+            prev_hash = Some(e.hash.clone());
+            store.append_event(&e).unwrap();
+        }
+
+        assert!(store.verify_chain().is_ok());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_chain_single_event() {
+        let (dir, store) = tmp_db();
+        let e = new_note_event("main", None, "system", "only event", &[]).unwrap();
+        store.append_event(&e).unwrap();
+
+        assert!(store.verify_chain().is_ok());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_chain_detects_broken_parent_hash() {
+        let (dir, store) = tmp_db();
+
+        // Insert first event normally
+        let e1 = new_note_event("main", None, "system", "first", &[]).unwrap();
+        store.append_event(&e1).unwrap();
+
+        // Insert second event with correct parent_hash
+        let e2 = new_note_event("main", Some(&e1.hash), "system", "second", &[]).unwrap();
+        store.append_event(&e2).unwrap();
+
+        // Insert third event with WRONG parent_hash (pointing to e1 instead of e2)
+        let e3 = new_note_event("main", Some(&e1.hash), "system", "broken", &[]).unwrap();
+        store.append_event(&e3).unwrap();
+
+        let result = store.verify_chain();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("chain break"),
+            "error should mention chain break, got: {err_msg}"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 }

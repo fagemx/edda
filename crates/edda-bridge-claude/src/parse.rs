@@ -110,4 +110,54 @@ mod tests {
         assert_eq!(snake_to_camel("tool_use_id"), "toolUseId");
         assert_eq!(snake_to_camel("permission_mode"), "permissionMode");
     }
+
+    // -- parse_hook_stdin error path tests (Issue #242) --
+
+    #[test]
+    fn parse_empty_string_errors() {
+        assert!(parse_hook_stdin("").is_err());
+    }
+
+    #[test]
+    fn parse_invalid_json_errors() {
+        assert!(parse_hook_stdin("not json at all").is_err());
+    }
+
+    #[test]
+    fn parse_truncated_json_errors() {
+        assert!(parse_hook_stdin(r#"{"key": "val"#).is_err());
+    }
+
+    #[test]
+    fn parse_valid_empty_object() {
+        let val = parse_hook_stdin("{}").unwrap();
+        assert!(val.is_object());
+        assert_eq!(val.as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn get_str_missing_fields_returns_empty() {
+        let val = serde_json::json!({});
+        assert_eq!(get_str(&val, "session_id"), "");
+        assert_eq!(get_str(&val, "hook_event_name"), "");
+        assert_eq!(get_str(&val, "transcript_path"), "");
+        assert_eq!(get_str(&val, "cwd"), "");
+        assert_eq!(get_str(&val, "tool_name"), "");
+    }
+
+    #[test]
+    fn get_str_prefers_snake_case() {
+        let val = serde_json::json!({
+            "session_id": "snake_value",
+            "sessionId": "camel_value"
+        });
+        assert_eq!(get_str(&val, "session_id"), "snake_value");
+    }
+
+    #[test]
+    fn get_str_falls_back_to_camel_case() {
+        let val = serde_json::json!({"sessionId": "abc123"});
+        assert_eq!(get_str(&val, "session_id"), "abc123");
+    }
+
 }
