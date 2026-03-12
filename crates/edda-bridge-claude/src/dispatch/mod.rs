@@ -263,12 +263,14 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
                 crate::peers::write_subagent_completed(
                     &project_id,
                     &session_id,
-                    &agent_id,
-                    &agent_type,
-                    &summary.summary,
-                    &summary.files_touched,
-                    &summary.decisions,
-                    &summary.commits,
+                    &crate::peers::SubagentReport {
+                        agent_id: &agent_id,
+                        agent_type: &agent_type,
+                        summary: &summary.summary,
+                        files_touched: &summary.files_touched,
+                        decisions: &summary.decisions,
+                        commits: &summary.commits,
+                    },
                 );
 
                 try_write_subagent_completed_note_event(&cwd, &agent_id, &agent_type, &summary);
@@ -326,10 +328,6 @@ fn read_workspace_config_bool(cwd: &str, key: &str) -> Option<bool> {
     render::config_bool(cwd, key)
 }
 
-#[allow(dead_code)]
-fn read_workspace_config_usize(cwd: &str, key: &str) -> Option<usize> {
-    render::config_usize(cwd, key)
-}
 pub(crate) fn read_hot_pack(project_id: &str) -> Option<String> {
     let pack_path = edda_store::project_dir(project_id)
         .join("packs")

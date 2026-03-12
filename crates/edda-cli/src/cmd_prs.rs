@@ -43,10 +43,9 @@ struct GhAuthor {
 }
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct GhReview {
     state: String,
-    author: GhAuthor,
+    _author: GhAuthor,
 }
 
 fn scan_prs(repo_root: &Path, limit: usize, state: &str) -> anyhow::Result<()> {
