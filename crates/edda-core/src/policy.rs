@@ -67,13 +67,42 @@ pub struct ActorsConfig {
     pub actors: BTreeMap<String, ActorDef>,
 }
 
+/// Actor kind: distinguishes human users from automated agents.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ActorKind {
+    #[default]
+    User,
+    Agent,
+}
+
+impl std::fmt::Display for ActorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ActorKind::User => write!(f, "user"),
+            ActorKind::Agent => write!(f, "agent"),
+        }
+    }
+}
+
+impl std::str::FromStr for ActorKind {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "user" => Ok(ActorKind::User),
+            "agent" => Ok(ActorKind::Agent),
+            other => anyhow::bail!("Actor kind must be 'user' or 'agent', got: {other}"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ActorDef {
     #[serde(default)]
     pub roles: Vec<String>,
-    /// Actor kind: "user" or "agent". Defaults to "user" for v1 compat.
-    #[serde(default = "default_user_kind")]
-    pub kind: String,
+    /// Actor kind: "user" or "agent". Defaults to User for v1 compat.
+    #[serde(default)]
+    pub kind: ActorKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -81,10 +110,6 @@ pub struct ActorDef {
     /// For agent actors: runtime platform (e.g. "claude", "opencode").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
-}
-
-fn default_user_kind() -> String {
-    "user".into()
 }
 
 impl Default for ActorsConfig {
@@ -293,7 +318,7 @@ mod tests {
             name.to_string(),
             ActorDef {
                 roles: roles.iter().map(|s| s.to_string()).collect(),
-                kind: "user".into(),
+                kind: ActorKind::User,
                 email: None,
                 display_name: None,
                 runtime: None,
@@ -455,7 +480,7 @@ actors:
         assert_eq!(cfg.version, 1);
         let alice = cfg.actors.get("alice").unwrap();
         assert_eq!(alice.roles, vec!["lead", "reviewer"]);
-        assert_eq!(alice.kind, "user"); // default
+        assert_eq!(alice.kind, ActorKind::User); // default
         assert!(alice.email.is_none());
         assert!(alice.display_name.is_none());
         assert!(alice.runtime.is_none());
@@ -480,13 +505,13 @@ actors:
         assert_eq!(cfg.version, 2);
 
         let alice = cfg.actors.get("alice").unwrap();
-        assert_eq!(alice.kind, "user");
+        assert_eq!(alice.kind, ActorKind::User);
         assert_eq!(alice.email.as_deref(), Some("alice@example.com"));
         assert_eq!(alice.display_name.as_deref(), Some("Alice Chen"));
         assert!(alice.runtime.is_none());
 
         let agent = cfg.actors.get("claude-agent-1").unwrap();
-        assert_eq!(agent.kind, "agent");
+        assert_eq!(agent.kind, ActorKind::Agent);
         assert_eq!(agent.roles, vec!["operator"]);
         assert_eq!(agent.runtime.as_deref(), Some("claude"));
         assert!(agent.email.is_none());

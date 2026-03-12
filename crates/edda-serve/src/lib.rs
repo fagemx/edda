@@ -14,7 +14,7 @@ use edda_aggregate::graph::build_dependency_graph;
 use edda_aggregate::quality::{model_quality_from_events, QualityReport};
 use edda_aggregate::risk::{compute_decision_risks, DecisionInput, DecisionRisk};
 use edda_core::event::{finalize_event, new_decision_event, new_execution_event, new_note_event};
-use edda_core::policy;
+use edda_core::policy::{self, ActorKind};
 use edda_core::types::{rel, DecisionPayload, Provenance};
 use edda_derive::{rebuild_branch, render_context, DeriveOptions};
 use edda_ledger::lock::WorkspaceLock;
@@ -975,7 +975,7 @@ async fn get_projects(
 #[derive(Serialize)]
 struct ActorResponse {
     name: String,
-    kind: String,
+    kind: ActorKind,
     roles: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     email: Option<String>,
@@ -1015,21 +1015,30 @@ async fn get_actors(
 async fn get_actor(
     State(state): State<Arc<AppState>>,
     AxumPath(name): AxumPath<String>,
-) -> Result<Json<ActorResponse>, AppError> {
-    let ledger = state.open_ledger()?;
-    let cfg = policy::load_actors_from_dir(&ledger.paths.edda_dir)?;
-    let def = cfg
-        .actors
-        .get(&name)
-        .ok_or_else(|| anyhow::anyhow!("Actor '{name}' not found"))?;
-    Ok(Json(ActorResponse {
-        name,
-        kind: def.kind.clone(),
-        roles: def.roles.clone(),
-        email: def.email.clone(),
-        display_name: def.display_name.clone(),
-        runtime: def.runtime.clone(),
-    }))
+) -> Response {
+    let ledger = match state.open_ledger() {
+        Ok(l) => l,
+        Err(e) => return AppError(e).into_response(),
+    };
+    let cfg = match policy::load_actors_from_dir(&ledger.paths.edda_dir) {
+        Ok(c) => c,
+        Err(e) => return AppError(e).into_response(),
+    };
+    match cfg.actors.get(&name) {
+        Some(def) => Json(ActorResponse {
+            name,
+            kind: def.kind.clone(),
+            roles: def.roles.clone(),
+            email: def.email.clone(),
+            display_name: def.display_name.clone(),
+            runtime: def.runtime.clone(),
+        })
+        .into_response(),
+        None => {
+            let body = serde_json::json!({ "error": format!("Actor '{name}' not found") });
+            (StatusCode::NOT_FOUND, Json(body)).into_response()
+        }
+    }
 }
 
 // ── GET /api/metrics/quality ──
@@ -2881,5 +2890,56 @@ actors:
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("Edda Dashboard"));
         assert!(html.contains("/api/dashboard"));
+    }
+
+    // ── Actor endpoint tests ──
+
+    #[tokio::test]
+    async fn test_get_actors_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/actors")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let actors = json["actors"].as_array().unwrap();
+        assert!(actors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_actor_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/actors/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("not found"));
     }
 }

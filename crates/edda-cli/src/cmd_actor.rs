@@ -1,5 +1,5 @@
 use clap::Subcommand;
-use edda_core::policy::{load_actors_from_dir, save_actors_to_dir, ActorDef, ActorsConfig};
+use edda_core::policy::{load_actors_from_dir, save_actors_to_dir, ActorDef, ActorKind, ActorsConfig};
 use std::path::Path;
 
 // ── CLI Schema ──
@@ -15,7 +15,7 @@ pub enum ActorCmd {
         roles: Vec<String>,
         /// Actor kind: user or agent
         #[arg(long, default_value = "user")]
-        kind: String,
+        kind: ActorKind,
         /// Email address (optional)
         #[arg(long)]
         email: Option<String>,
@@ -81,7 +81,7 @@ pub fn run(cmd: ActorCmd, repo_root: &Path) -> anyhow::Result<()> {
             repo_root,
             &name,
             &roles,
-            &kind,
+            kind,
             email,
             display_name,
             runtime,
@@ -111,13 +111,6 @@ fn validate_actor_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn validate_kind(kind: &str) -> anyhow::Result<()> {
-    if kind != "user" && kind != "agent" {
-        anyhow::bail!("Actor kind must be 'user' or 'agent', got: {kind}");
-    }
-    Ok(())
-}
-
 fn load_and_check(
     repo_root: &Path,
 ) -> anyhow::Result<(edda_ledger::paths::EddaPaths, ActorsConfig)> {
@@ -135,13 +128,12 @@ fn add(
     repo_root: &Path,
     name: &str,
     roles: &[String],
-    kind: &str,
+    kind: ActorKind,
     email: Option<String>,
     display_name: Option<String>,
     runtime: Option<String>,
 ) -> anyhow::Result<()> {
     validate_actor_name(name)?;
-    validate_kind(kind)?;
 
     let (paths, mut cfg) = load_and_check(repo_root)?;
 
@@ -151,9 +143,15 @@ fn add(
         );
     }
 
+    println!("Added actor: {name}");
+    println!("  kind: {kind}");
+    if !roles.is_empty() {
+        println!("  roles: {}", roles.join(", "));
+    }
+
     let actor = ActorDef {
         roles: roles.to_vec(),
-        kind: kind.to_string(),
+        kind,
         email,
         display_name,
         runtime,
@@ -163,11 +161,6 @@ fn add(
     cfg.version = 2;
     save_actors_to_dir(&paths.edda_dir, &cfg)?;
 
-    println!("Added actor: {name}");
-    println!("  kind: {kind}");
-    if !roles.is_empty() {
-        println!("  roles: {}", roles.join(", "));
-    }
     Ok(())
 }
 
@@ -339,7 +332,7 @@ mod tests {
             &tmp,
             "alice",
             &["lead".into(), "reviewer".into()],
-            "user",
+            ActorKind::User,
             Some("a@b.com".into()),
             None,
             None,
@@ -350,7 +343,7 @@ mod tests {
         assert!(cfg.actors.contains_key("alice"));
         let alice = cfg.actors.get("alice").unwrap();
         assert_eq!(alice.roles, vec!["lead", "reviewer"]);
-        assert_eq!(alice.kind, "user");
+        assert_eq!(alice.kind, ActorKind::User);
         assert_eq!(alice.email.as_deref(), Some("a@b.com"));
 
         let _ = std::fs::remove_dir_all(&tmp);
@@ -363,7 +356,7 @@ mod tests {
             &tmp,
             "bob",
             &["operator".into()],
-            "agent",
+            ActorKind::Agent,
             None,
             None,
             Some("claude".into()),
@@ -387,7 +380,7 @@ mod tests {
             &tmp,
             "carol",
             &["reviewer".into()],
-            "user",
+            ActorKind::User,
             None,
             None,
             None,
@@ -412,8 +405,8 @@ mod tests {
     #[test]
     fn test_actor_add_duplicate_errors() {
         let tmp = setup_workspace();
-        add(&tmp, "dave", &[], "user", None, None, None).unwrap();
-        let result = add(&tmp, "dave", &[], "user", None, None, None);
+        add(&tmp, "dave", &[], ActorKind::User, None, None, None).unwrap();
+        let result = add(&tmp, "dave", &[], ActorKind::User, None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
 
@@ -434,10 +427,10 @@ mod tests {
     fn test_actor_kind_default() {
         let tmp = setup_workspace();
         // When kind defaults to "user"
-        add(&tmp, "eve", &[], "user", None, None, None).unwrap();
+        add(&tmp, "eve", &[], ActorKind::User, None, None, None).unwrap();
         let (_, cfg) = load_and_check(&tmp).unwrap();
         let eve = cfg.actors.get("eve").unwrap();
-        assert_eq!(eve.kind, "user");
+        assert_eq!(eve.kind, ActorKind::User);
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -454,14 +447,12 @@ mod tests {
 
     #[test]
     fn test_actor_invalid_kind_errors() {
-        let tmp = setup_workspace();
-        let result = add(&tmp, "frank", &[], "robot", None, None, None);
+        // ActorKind::from_str rejects invalid values at parse time
+        let result: Result<ActorKind, _> = "robot".parse();
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("must be 'user' or 'agent'"));
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
