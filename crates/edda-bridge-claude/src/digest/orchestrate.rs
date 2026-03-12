@@ -293,7 +293,8 @@ pub(super) fn harvest_inferred_decisions(
             )),
         });
 
-        if finalize_event(&mut event).is_err() {
+        if let Err(e) = finalize_event(&mut event) {
+            tracing::warn!(event_id = %event.event_id, error = %e, "finalize failed for inferred decision, stopping harvest");
             break;
         }
         let event_id = event.event_id.clone();
