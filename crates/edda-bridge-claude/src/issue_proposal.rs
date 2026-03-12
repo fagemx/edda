@@ -167,6 +167,12 @@ pub fn record_issue_created(
     issue_number: u64,
 ) -> Result<()> {
     let mut proposal = load_proposal(project_id, proposal_id)?;
+    if proposal.status != ProposalStatus::Approved {
+        anyhow::bail!(
+            "Proposal {proposal_id} is not approved (status: {:?})",
+            proposal.status
+        );
+    }
     proposal.issue_url = Some(issue_url.to_string());
     proposal.issue_number = Some(issue_number);
 
@@ -510,6 +516,46 @@ mod tests {
             Some("https://github.com/test/repo/issues/42")
         );
         assert_eq!(loaded.issue_number, Some(42));
+
+        // Cleanup
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn record_issue_created_rejects_non_approved() {
+        let pid = "test_proposal_reject_non_approved";
+        let _ = edda_store::ensure_dirs(pid);
+
+        let proposal = IssueProposal {
+            proposal_id: "prop_reject1".to_string(),
+            created_at: "2026-03-12T10:00:00Z".to_string(),
+            source: ProposalSource::Manual,
+            source_ref: None,
+            title: "Not approved".to_string(),
+            body: "body".to_string(),
+            labels: vec![],
+            status: ProposalStatus::Pending,
+            approved_by: None,
+            approved_at: None,
+            issue_url: None,
+            issue_number: None,
+            dismiss_reason: None,
+        };
+        save_proposal(pid, &proposal).unwrap();
+
+        // Should fail because proposal is Pending, not Approved
+        let result = record_issue_created(
+            pid,
+            "prop_reject1",
+            "https://github.com/test/repo/issues/99",
+            99,
+        );
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not approved"),
+            "Expected 'not approved' in error, got: {err_msg}"
+        );
 
         // Cleanup
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
