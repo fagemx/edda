@@ -126,8 +126,8 @@ pub fn install(repo_root: &Path, no_claude_md: bool) -> anyhow::Result<()> {
     let output = serde_json::to_string_pretty(&settings)?;
     fs::write(&path, output.as_bytes())?;
 
-    tracing::info!(path = %path.display(), "installed edda hooks");
-    tracing::info!("configured MCP server (edda mcp serve)");
+    println!("Installed edda hooks into {}", path.display());
+    println!("Configured MCP server (edda mcp serve)");
 
     // Onboard CLAUDE.md with edda decision-tracking instructions.
     // B1.5 testing showed CLAUDE.md is the decisive factor for agent compliance:
@@ -145,7 +145,7 @@ pub fn uninstall(repo_root: &Path) -> anyhow::Result<()> {
     let path = settings_path(repo_root);
 
     if !path.exists() {
-        tracing::info!(path = %path.display(), "no settings file found");
+        println!("No settings file found at {}", path.display());
         return Ok(());
     }
 
@@ -195,7 +195,7 @@ pub fn uninstall(repo_root: &Path) -> anyhow::Result<()> {
     let output = serde_json::to_string_pretty(&settings)?;
     fs::write(&path, output.as_bytes())?;
 
-    tracing::info!(path = %path.display(), "uninstalled edda hooks");
+    println!("Uninstalled edda hooks from {}", path.display());
     Ok(())
 }
 
@@ -332,11 +332,11 @@ fn ensure_claude_md_edda_section(repo_root: &Path) -> anyhow::Result<()> {
         }
         appended.push_str(EDDA_CLAUDE_MD_APPEND);
         fs::write(&claude_md, appended)?;
-        tracing::info!(path = %claude_md.display(), "appended edda section");
+        println!("Appended edda section to {}", claude_md.display());
     } else {
         // Create new file with full onboarding template
         fs::write(&claude_md, EDDA_CLAUDE_MD_CREATE.trim_start())?;
-        tracing::info!(path = %claude_md.display(), "created CLAUDE.md with edda decision tracking");
+        println!("Created {} with edda decision tracking", claude_md.display());
     }
     Ok(())
 }
@@ -360,7 +360,7 @@ fn ensure_claude_md_coordination_section(repo_root: &Path) -> anyhow::Result<()>
     }
     appended.push_str(EDDA_COORDINATION_SECTION);
     fs::write(&claude_md, appended)?;
-    tracing::info!(path = %claude_md.display(), "appended coordination rules");
+    println!("Appended coordination rules to {}", claude_md.display());
     Ok(())
 }
 
