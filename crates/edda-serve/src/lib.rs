@@ -117,7 +117,9 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
 
     let store_root = edda_store::store_root();
     let chronicle = if store_root.exists() {
-        Some(ChronicleContext { _store_root: store_root })
+        Some(ChronicleContext {
+            _store_root: store_root,
+        })
     } else {
         None
     };
@@ -155,7 +157,6 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/dashboard", get(serve_dashboard))
         .route("/api/actors", get(get_actors))
         .route("/api/actors/{name}", get(get_actor))
-
         .route("/api/events/stream", get(get_event_stream))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -171,7 +172,9 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
 pub fn router(repo_root: &Path) -> Router {
     let store_root = edda_store::store_root();
     let chronicle = if store_root.exists() {
-        Some(ChronicleContext { _store_root: store_root })
+        Some(ChronicleContext {
+            _store_root: store_root,
+        })
     } else {
         None
     };
@@ -205,7 +208,6 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/projects", get(get_projects))
         .route("/api/actors", get(get_actors))
         .route("/api/actors/{name}", get(get_actor))
-
         .route("/api/metrics/quality", get(get_quality_metrics))
         .route("/api/dashboard", get(get_dashboard))
         .route("/dashboard", get(serve_dashboard))
@@ -344,6 +346,7 @@ struct LogEntry {
     branch: String,
     #[serde(rename = "summary")]
     detail: String,
+    tags: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -378,12 +381,23 @@ async fn get_log(
                 .or_else(|| e.payload.get("title").and_then(|v| v.as_str()))
                 .unwrap_or("")
                 .to_string();
+            let tags: Vec<String> = e
+                .payload
+                .get("tags")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
             LogEntry {
                 ts: e.ts.clone(),
                 event_type: e.event_type.clone(),
                 event_id: e.event_id.clone(),
                 branch: e.branch.clone(),
                 detail,
+                tags,
             }
         })
         .collect();
@@ -1904,8 +1918,14 @@ mod tests {
         // Seed an event
         let ledger = Ledger::open(tmp.path()).unwrap();
         let parent_hash = ledger.last_event_hash().unwrap();
-        let event =
-            new_note_event("main", parent_hash.as_deref(), "user", "test note", &[]).unwrap();
+        let event = new_note_event(
+            "main",
+            parent_hash.as_deref(),
+            "user",
+            "test note",
+            &["session".into()],
+        )
+        .unwrap();
         ledger.append_event(&event).unwrap();
         drop(ledger);
 
@@ -1928,6 +1948,9 @@ mod tests {
         let events = json["events"].as_array().unwrap();
         assert!(!events.is_empty());
         assert_eq!(events[0]["type"], "note");
+        let tags = events[0]["tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0], "session");
     }
 
     #[tokio::test]
@@ -3519,10 +3542,7 @@ actors:
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["code"], "VALIDATION_ERROR");
-        assert!(json["error"]
-            .as_str()
-            .unwrap()
-            .contains("key=value format"));
+        assert!(json["error"].as_str().unwrap().contains("key=value format"));
     }
 
     #[tokio::test]
@@ -3533,7 +3553,9 @@ actors:
         // Write a tool_tiers.yaml with a known mapping
         let edda_dir = tmp.path().join(".edda");
         let mut config = edda_core::tool_tier::default_tool_tier_config();
-        config.tools.insert("bash".to_string(), edda_core::tool_tier::ToolTier::T0);
+        config
+            .tools
+            .insert("bash".to_string(), edda_core::tool_tier::ToolTier::T0);
         edda_core::tool_tier::save_tool_tiers_to_dir(&edda_dir, &config).unwrap();
 
         let app = router(tmp.path());
