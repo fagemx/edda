@@ -323,6 +323,44 @@ impl Ledger {
     pub fn list_bundles(&self, status: Option<&str>) -> anyhow::Result<Vec<BundleRow>> {
         self.sqlite.list_bundles(status)
     }
+
+    // ── Device Tokens ───────────────────────────────────────────────
+
+    /// Insert a new device token row.
+    pub fn insert_device_token(
+        &self,
+        row: &crate::sqlite_store::DeviceTokenRow,
+    ) -> anyhow::Result<()> {
+        self.sqlite.insert_device_token(row)
+    }
+
+    /// Validate a device token by its SHA-256 hash. Returns the row if active.
+    pub fn validate_device_token(
+        &self,
+        token_hash: &str,
+    ) -> anyhow::Result<Option<crate::sqlite_store::DeviceTokenRow>> {
+        self.sqlite.validate_device_token(token_hash)
+    }
+
+    /// List all device tokens (active and revoked).
+    pub fn list_device_tokens(&self) -> anyhow::Result<Vec<crate::sqlite_store::DeviceTokenRow>> {
+        self.sqlite.list_device_tokens()
+    }
+
+    /// Revoke a device token by device name. Returns true if revoked.
+    pub fn revoke_device_token(
+        &self,
+        device_name: &str,
+        revoke_event_id: &str,
+    ) -> anyhow::Result<bool> {
+        self.sqlite
+            .revoke_device_token(device_name, revoke_event_id)
+    }
+
+    /// Revoke all active device tokens. Returns count of revoked tokens.
+    pub fn revoke_all_device_tokens(&self, revoke_event_id: &str) -> anyhow::Result<u64> {
+        self.sqlite.revoke_all_device_tokens(revoke_event_id)
+    }
 }
 
 // ── Init functions ──────────────────────────────────────────────────

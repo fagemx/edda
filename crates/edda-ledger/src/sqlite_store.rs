@@ -97,6 +97,20 @@ CREATE INDEX IF NOT EXISTS idx_task_briefs_branch ON task_briefs(branch);
 CREATE INDEX IF NOT EXISTS idx_task_briefs_intent ON task_briefs(intent);
 ";
 
+const SCHEMA_V7_SQL: &str = "
+CREATE TABLE IF NOT EXISTS device_tokens (
+    token_hash      TEXT PRIMARY KEY,
+    device_name     TEXT NOT NULL,
+    paired_at       TEXT NOT NULL,
+    paired_from_ip  TEXT NOT NULL DEFAULT '',
+    revoked_at      TEXT,
+    pair_event_id   TEXT NOT NULL REFERENCES events(event_id),
+    revoke_event_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_device_tokens_name ON device_tokens(device_name);
+CREATE INDEX IF NOT EXISTS idx_device_tokens_active ON device_tokens(revoked_at) WHERE revoked_at IS NULL;
+";
+
 const SCHEMA_V3_SQL: &str = "
 CREATE TABLE IF NOT EXISTS review_bundles (
     event_id TEXT PRIMARY KEY REFERENCES events(event_id),
@@ -200,6 +214,18 @@ pub struct TaskBriefRow {
     pub last_feedback: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// A row from the `device_tokens` table.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DeviceTokenRow {
+    pub token_hash: String,
+    pub device_name: String,
+    pub paired_at: String,
+    pub paired_from_ip: String,
+    pub revoked_at: Option<String>,
+    pub pair_event_id: String,
+    pub revoke_event_id: Option<String>,
 }
 
 /// Aggregated outcome metrics for a decision.
@@ -309,6 +335,12 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 6 {
             self.migrate_v5_to_v6()?;
+        }
+
+        // Migrate to v7 if needed (device_tokens table)
+        let current = self.schema_version()?;
+        if current < 7 {
+            self.migrate_v6_to_v7()?;
         }
 
         Ok(())
@@ -525,6 +557,13 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn migrate_v6_to_v7(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V7_SQL)?;
+        // No backfill needed — device_tokens is a new feature with no existing data.
+        self.set_schema_version(7)?;
+        Ok(())
+    }
+
     /// Backfill task brief updates from existing commit/note/merge events.
     fn backfill_task_brief_updates(&self) -> anyhow::Result<()> {
         let mut brief_stmt = self
@@ -646,6 +685,108 @@ impl SqliteStore {
         }
 
         Ok(())
+    }
+
+    // ── Device Tokens ──────────────────────────────────────────────
+
+    /// Insert a new device token row.
+    pub fn insert_device_token(&self, row: &DeviceTokenRow) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO device_tokens
+             (token_hash, device_name, paired_at, paired_from_ip, revoked_at, pair_event_id, revoke_event_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                row.token_hash,
+                row.device_name,
+                row.paired_at,
+                row.paired_from_ip,
+                row.revoked_at,
+                row.pair_event_id,
+                row.revoke_event_id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Validate a device token by its SHA-256 hash. Returns the row if active (not revoked).
+    pub fn validate_device_token(
+        &self,
+        token_hash: &str,
+    ) -> anyhow::Result<Option<DeviceTokenRow>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT token_hash, device_name, paired_at, paired_from_ip,
+                        revoked_at, pair_event_id, revoke_event_id
+                 FROM device_tokens
+                 WHERE token_hash = ?1 AND revoked_at IS NULL",
+                params![token_hash],
+                |row| {
+                    Ok(DeviceTokenRow {
+                        token_hash: row.get(0)?,
+                        device_name: row.get(1)?,
+                        paired_at: row.get(2)?,
+                        paired_from_ip: row.get(3)?,
+                        revoked_at: row.get(4)?,
+                        pair_event_id: row.get(5)?,
+                        revoke_event_id: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// List all device tokens (active and revoked).
+    pub fn list_device_tokens(&self) -> anyhow::Result<Vec<DeviceTokenRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT token_hash, device_name, paired_at, paired_from_ip,
+                    revoked_at, pair_event_id, revoke_event_id
+             FROM device_tokens
+             ORDER BY paired_at DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(DeviceTokenRow {
+                    token_hash: row.get(0)?,
+                    device_name: row.get(1)?,
+                    paired_at: row.get(2)?,
+                    paired_from_ip: row.get(3)?,
+                    revoked_at: row.get(4)?,
+                    pair_event_id: row.get(5)?,
+                    revoke_event_id: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Revoke a device token by name. Returns true if a token was revoked.
+    pub fn revoke_device_token(
+        &self,
+        device_name: &str,
+        revoke_event_id: &str,
+    ) -> anyhow::Result<bool> {
+        let now = time_now_rfc3339();
+        let count = self.conn.execute(
+            "UPDATE device_tokens
+             SET revoked_at = ?1, revoke_event_id = ?2
+             WHERE device_name = ?3 AND revoked_at IS NULL",
+            params![now, revoke_event_id, device_name],
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Revoke all active device tokens. Returns the count of revoked tokens.
+    pub fn revoke_all_device_tokens(&self, revoke_event_id: &str) -> anyhow::Result<u64> {
+        let now = time_now_rfc3339();
+        let count = self.conn.execute(
+            "UPDATE device_tokens
+             SET revoked_at = ?1, revoke_event_id = ?2
+             WHERE revoked_at IS NULL",
+            params![now, revoke_event_id],
+        )?;
+        Ok(count as u64)
     }
 
     // ── Events ──────────────────────────────────────────────────────
@@ -3183,7 +3324,8 @@ mod tests {
         assert!(tables.contains(&"review_bundles".to_string()));
         assert!(tables.contains(&"decision_deps".to_string()));
         assert!(tables.contains(&"task_briefs".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 5);
+        assert!(tables.contains(&"device_tokens".to_string()));
+        assert_eq!(store.schema_version().unwrap(), 7);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
