@@ -176,6 +176,14 @@ pub struct DecisionRow {
     pub source_event_id: Option<String>,
 }
 
+/// An entry in a causal chain traversal result.
+#[derive(Debug, Clone)]
+pub struct ChainEntry {
+    pub decision: DecisionRow,
+    pub relation: String,
+    pub depth: usize,
+}
+
 /// A row from the `review_bundles` table.
 #[derive(Debug, Clone)]
 pub struct BundleRow {
@@ -1995,6 +2003,193 @@ impl SqliteStore {
         })?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("active_dependents_of query failed: {e}"))
+    }
+
+    // ── Causal Chain ─────────────────────────────────────────────────
+
+    /// Look up a single decision by its event_id.
+    pub fn get_decision_by_event_id(&self, event_id: &str) -> anyhow::Result<Option<DecisionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                    d.supersedes_id, d.is_active, e.ts,
+                    d.scope, d.source_project_id, d.source_event_id
+             FROM decisions d
+             JOIN events e ON d.event_id = e.event_id
+             WHERE d.event_id = ?1
+             LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![event_id], |row| {
+            Ok(DecisionRow {
+                event_id: row.get(0)?,
+                key: row.get(1)?,
+                value: row.get(2)?,
+                reason: row.get(3)?,
+                domain: row.get(4)?,
+                branch: row.get(5)?,
+                supersedes_id: row.get(6)?,
+                is_active: row.get(7)?,
+                ts: row.get(8)?,
+                scope: row.get(9)?,
+                source_project_id: row.get(10)?,
+                source_event_id: row.get(11)?,
+            })
+        })?;
+        match rows.next() {
+            Some(Ok(row)) => Ok(Some(row)),
+            Some(Err(e)) => Err(anyhow::anyhow!("get_decision_by_event_id failed: {e}")),
+            None => Ok(None),
+        }
+    }
+
+    /// Traverse the causal chain from a root decision via unified BFS.
+    pub fn causal_chain(
+        &self,
+        event_id: &str,
+        max_depth: usize,
+    ) -> anyhow::Result<Option<(DecisionRow, Vec<ChainEntry>)>> {
+        use std::collections::{HashSet, VecDeque};
+
+        let root = match self.get_decision_by_event_id(event_id)? {
+            Some(d) => d,
+            None => return Ok(None),
+        };
+
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(root.event_id.clone());
+
+        let mut queue: VecDeque<(String, String, Option<String>, usize)> = VecDeque::new();
+        queue.push_back((
+            root.key.clone(),
+            root.event_id.clone(),
+            root.supersedes_id.clone(),
+            0,
+        ));
+
+        let mut results: Vec<ChainEntry> = Vec::new();
+
+        while let Some((current_key, current_event_id, current_supersedes_id, depth)) =
+            queue.pop_front()
+        {
+            if depth >= max_depth {
+                continue;
+            }
+            let next_depth = depth + 1;
+
+            // 1) Dependency edges: who depends on current_key
+            let dep_stmt_sql = "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                        d.supersedes_id, d.is_active, e.ts,
+                        d.scope, d.source_project_id, d.source_event_id,
+                        dd.dep_type
+                 FROM decision_deps dd
+                 JOIN decisions d ON d.key = dd.source_key
+                 JOIN events e ON d.event_id = e.event_id
+                 WHERE dd.target_key = ?1";
+            let mut dep_stmt = self.conn.prepare(dep_stmt_sql)?;
+            let dep_rows = dep_stmt.query_map(params![current_key], |row| {
+                let decision = DecisionRow {
+                    event_id: row.get(0)?,
+                    key: row.get(1)?,
+                    value: row.get(2)?,
+                    reason: row.get(3)?,
+                    domain: row.get(4)?,
+                    branch: row.get(5)?,
+                    supersedes_id: row.get(6)?,
+                    is_active: row.get(7)?,
+                    ts: row.get(8)?,
+                    scope: row.get(9)?,
+                    source_project_id: row.get(10)?,
+                    source_event_id: row.get(11)?,
+                };
+                let dep_type: String = row.get(12)?;
+                Ok((decision, dep_type))
+            })?;
+            for row in dep_rows {
+                let (decision, dep_type) =
+                    row.map_err(|e| anyhow::anyhow!("causal_chain dep query failed: {e}"))?;
+                if visited.insert(decision.event_id.clone()) {
+                    let relation = match dep_type.as_str() {
+                        "explicit" => "depends_on".to_string(),
+                        "auto_domain" => "domain_related".to_string(),
+                        other => other.to_string(),
+                    };
+                    queue.push_back((
+                        decision.key.clone(),
+                        decision.event_id.clone(),
+                        decision.supersedes_id.clone(),
+                        next_depth,
+                    ));
+                    results.push(ChainEntry {
+                        decision,
+                        relation,
+                        depth: next_depth,
+                    });
+                }
+            }
+
+            // 2) Superseded-by: decisions whose supersedes_id = current_event_id
+            let mut sup_by_stmt = self.conn.prepare(
+                "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                        d.supersedes_id, d.is_active, e.ts,
+                        d.scope, d.source_project_id, d.source_event_id
+                 FROM decisions d
+                 JOIN events e ON d.event_id = e.event_id
+                 WHERE d.supersedes_id = ?1",
+            )?;
+            let sup_by_rows = sup_by_stmt.query_map(params![current_event_id], |row| {
+                Ok(DecisionRow {
+                    event_id: row.get(0)?,
+                    key: row.get(1)?,
+                    value: row.get(2)?,
+                    reason: row.get(3)?,
+                    domain: row.get(4)?,
+                    branch: row.get(5)?,
+                    supersedes_id: row.get(6)?,
+                    is_active: row.get(7)?,
+                    ts: row.get(8)?,
+                    scope: row.get(9)?,
+                    source_project_id: row.get(10)?,
+                    source_event_id: row.get(11)?,
+                })
+            })?;
+            for row in sup_by_rows {
+                let decision = row
+                    .map_err(|e| anyhow::anyhow!("causal_chain superseded_by query failed: {e}"))?;
+                if visited.insert(decision.event_id.clone()) {
+                    queue.push_back((
+                        decision.key.clone(),
+                        decision.event_id.clone(),
+                        decision.supersedes_id.clone(),
+                        next_depth,
+                    ));
+                    results.push(ChainEntry {
+                        decision,
+                        relation: "superseded_by".to_string(),
+                        depth: next_depth,
+                    });
+                }
+            }
+
+            // 3) Supersedes (reverse): if current has supersedes_id, look up that decision
+            if let Some(ref sup_id) = current_supersedes_id {
+                if let Some(decision) = self.get_decision_by_event_id(sup_id)? {
+                    if visited.insert(decision.event_id.clone()) {
+                        queue.push_back((
+                            decision.key.clone(),
+                            decision.event_id.clone(),
+                            decision.supersedes_id.clone(),
+                            next_depth,
+                        ));
+                        results.push(ChainEntry {
+                            decision,
+                            relation: "supersedes".to_string(),
+                            depth: next_depth,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(Some((root, results)))
     }
 
     // ── Decision Outcomes ─────────────────────────────────────────────
@@ -4927,6 +5122,190 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "db.engine");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Causal chain tests ──────────────────────────────────────────
+
+    #[test]
+    fn get_decision_by_event_id_returns_decision() {
+        let (dir, store) = tmp_db();
+        let e = make_decision_event("main", "db.engine", "postgres", Some("JSONB support"), None);
+        let eid = e.event_id.clone();
+        store.append_event(&e).unwrap();
+
+        let found = store.get_decision_by_event_id(&eid).unwrap();
+        assert!(found.is_some());
+        let d = found.unwrap();
+        assert_eq!(d.key, "db.engine");
+        assert_eq!(d.value, "postgres");
+        assert_eq!(d.reason, "JSONB support");
+
+        // Non-existent returns None
+        let missing = store.get_decision_by_event_id("evt_nonexistent").unwrap();
+        assert!(missing.is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn causal_chain_returns_none_for_nonexistent() {
+        let (dir, store) = tmp_db();
+        let result = store.causal_chain("evt_nonexistent", 3).unwrap();
+        assert!(result.is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn causal_chain_empty_when_no_deps() {
+        let (dir, store) = tmp_db();
+        let e = make_decision_event("main", "db.engine", "postgres", Some("test"), None);
+        let eid = e.event_id.clone();
+        store.append_event(&e).unwrap();
+
+        let (root, chain) = store.causal_chain(&eid, 3).unwrap().unwrap();
+        assert_eq!(root.key, "db.engine");
+        assert!(chain.is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn causal_chain_follows_dependency_edges() {
+        let (dir, store) = tmp_db();
+
+        let e_a = make_decision_event("main", "db.engine", "postgres", Some("root"), None);
+        let eid_a = e_a.event_id.clone();
+        store.append_event(&e_a).unwrap();
+
+        let e_b = make_decision_event("main", "db.pool", "10", Some("pool config"), None);
+        store.append_event(&e_b).unwrap();
+
+        let e_c = make_decision_event("main", "db.timeout", "30", Some("timeout"), None);
+        store.append_event(&e_c).unwrap();
+
+        // db.pool depends on db.engine, db.timeout depends on db.pool
+        store
+            .insert_dep("db.pool", "db.engine", "explicit", None)
+            .unwrap();
+        store
+            .insert_dep("db.timeout", "db.pool", "explicit", None)
+            .unwrap();
+
+        let (root, chain) = store.causal_chain(&eid_a, 5).unwrap().unwrap();
+        assert_eq!(root.key, "db.engine");
+        assert_eq!(chain.len(), 2);
+
+        // depth 1: db.pool depends on db.engine
+        let pool_entry = chain.iter().find(|e| e.decision.key == "db.pool").unwrap();
+        assert_eq!(pool_entry.relation, "depends_on");
+        assert_eq!(pool_entry.depth, 1);
+
+        // depth 2: db.timeout depends on db.pool
+        let timeout_entry = chain
+            .iter()
+            .find(|e| e.decision.key == "db.timeout")
+            .unwrap();
+        assert_eq!(timeout_entry.relation, "depends_on");
+        assert_eq!(timeout_entry.depth, 2);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn causal_chain_follows_supersession() {
+        let (dir, store) = tmp_db();
+
+        let e_a = make_decision_event("main", "db.engine", "postgres", Some("original"), None);
+        let eid_a = e_a.event_id.clone();
+        store.append_event(&e_a).unwrap();
+
+        let e_b = make_decision_event(
+            "main",
+            "db.engine",
+            "mysql",
+            Some("changed mind"),
+            Some(&eid_a),
+        );
+        store.append_event(&e_b).unwrap();
+
+        let (root, chain) = store.causal_chain(&eid_a, 3).unwrap().unwrap();
+        assert_eq!(root.key, "db.engine");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].relation, "superseded_by");
+        assert_eq!(chain[0].decision.value, "mysql");
+        assert_eq!(chain[0].depth, 1);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn causal_chain_mixed_dep_and_supersession() {
+        let (dir, store) = tmp_db();
+
+        let e_a = make_decision_event("main", "db.engine", "postgres", Some("original"), None);
+        let eid_a = e_a.event_id.clone();
+        store.append_event(&e_a).unwrap();
+
+        // B supersedes A
+        let e_b = make_decision_event("main", "db.engine", "mysql", Some("changed"), Some(&eid_a));
+        store.append_event(&e_b).unwrap();
+
+        // C depends on A's key
+        let e_c = make_decision_event("main", "db.pool", "10", Some("pool"), None);
+        store.append_event(&e_c).unwrap();
+        store
+            .insert_dep("db.pool", "db.engine", "explicit", None)
+            .unwrap();
+
+        let (root, chain) = store.causal_chain(&eid_a, 3).unwrap().unwrap();
+        assert_eq!(root.key, "db.engine");
+        assert_eq!(chain.len(), 2);
+
+        let has_superseded_by = chain.iter().any(|e| e.relation == "superseded_by");
+        let has_depends_on = chain.iter().any(|e| e.relation == "depends_on");
+        assert!(has_superseded_by);
+        assert!(has_depends_on);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn causal_chain_respects_depth_limit() {
+        let (dir, store) = tmp_db();
+
+        let e_a = make_decision_event("main", "db.engine", "postgres", Some("root"), None);
+        let eid_a = e_a.event_id.clone();
+        store.append_event(&e_a).unwrap();
+
+        let e_b = make_decision_event("main", "db.pool", "10", Some("pool"), None);
+        store.append_event(&e_b).unwrap();
+
+        let e_c = make_decision_event("main", "db.timeout", "30", Some("timeout"), None);
+        store.append_event(&e_c).unwrap();
+
+        store
+            .insert_dep("db.pool", "db.engine", "explicit", None)
+            .unwrap();
+        store
+            .insert_dep("db.timeout", "db.pool", "explicit", None)
+            .unwrap();
+
+        // depth=1 should only reach db.pool, not db.timeout
+        let (root, chain) = store.causal_chain(&eid_a, 1).unwrap().unwrap();
+        assert_eq!(root.key, "db.engine");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain[0].decision.key, "db.pool");
+        assert_eq!(chain[0].depth, 1);
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
