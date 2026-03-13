@@ -739,7 +739,7 @@ fn load_detect_state(project_id: &str) -> Option<DetectState> {
 
 fn save_detect_state_raw(project_id: &str, state: &DetectState) -> Result<()> {
     let path = detect_state_path(project_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("detect state path has no parent")?)?;
     let json = serde_json::to_string_pretty(state)?;
     fs::write(&path, json)?;
     Ok(())
@@ -766,7 +766,7 @@ fn save_detect_result(project_id: &str, result: &DetectResult) -> Result<()> {
 fn append_audit_log(project_id: &str, entry: &AuditEntry) -> Result<()> {
     use std::io::Write;
     let path = audit_log_path(project_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("detect audit log path has no parent")?)?;
     let line = serde_json::to_string(entry)?;
     let mut file = fs::OpenOptions::new()
         .create(true)
