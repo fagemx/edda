@@ -92,9 +92,9 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
                     ts: event.ts,
                 });
             }
-            CoordEventType::TaskCompleted => {
-                // TaskCompleted events are informational milestones;
-                // no board-level state aggregation needed yet.
+            CoordEventType::TaskCompleted | CoordEventType::TeammateIdle => {
+                // TaskCompleted and TeammateIdle events are informational;
+                // no board-level state aggregation needed.
             }
             CoordEventType::SubagentCompleted => {
                 let parent_session_id = event.payload["parent_session_id"]

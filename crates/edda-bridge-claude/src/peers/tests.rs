@@ -2421,3 +2421,83 @@ fn coord_diff_skips_when_no_offset_file() {
     let _ = fs::remove_file(coordination_path(pid));
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
+
+#[test]
+fn resolve_teammate_by_label() {
+    let pid = "test_resolve_teammate";
+    let sid = "teammate-session-123";
+    let _ = edda_store::ensure_dirs(pid);
+
+    let signals = SessionSignals::default();
+    write_heartbeat(pid, sid, &signals, Some("worker-auth"));
+
+    // Should resolve by label
+    let resolved = resolve_teammate_session(pid, "worker-auth");
+    assert_eq!(resolved, Some(sid.to_string()));
+
+    // Should resolve by session_id
+    let resolved2 = resolve_teammate_session(pid, sid);
+    assert_eq!(resolved2, Some(sid.to_string()));
+
+    // Should return None for nonexistent
+    let resolved3 = resolve_teammate_session(pid, "nonexistent");
+    assert!(resolved3.is_none());
+
+    // Cleanup
+    remove_heartbeat(pid, sid);
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn teammate_idle_writes_coord_event_and_updates_phase() {
+    let pid = "test_teammate_idle";
+    let notifier_sid = "notifier-session";
+    let teammate_sid = "teammate-session";
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Clean up any existing coordination file
+    let _ = fs::remove_file(coordination_path(pid));
+
+    // Setup: create a heartbeat for the teammate
+    let signals = SessionSignals::default();
+    write_heartbeat(pid, teammate_sid, &signals, Some("worker-auth"));
+
+    // Verify teammate starts without "idle" phase
+    let hb_before = read_heartbeat(pid, teammate_sid).expect("heartbeat should exist");
+    assert_ne!(hb_before.current_phase.as_deref(), Some("idle"));
+
+    // Update teammate phase to "idle"
+    update_teammate_phase(pid, teammate_sid, "idle");
+
+    // Verify heartbeat phase is now "idle"
+    let hb_after = read_heartbeat(pid, teammate_sid).expect("heartbeat should exist");
+    assert_eq!(hb_after.current_phase.as_deref(), Some("idle"));
+
+    // Write teammate idle event
+    write_teammate_idle(pid, notifier_sid, "worker-auth", "team-alpha");
+
+    // Verify coordination.jsonl contains the event
+    let coord_content =
+        fs::read_to_string(coordination_path(pid)).expect("coord file should exist");
+    assert!(
+        coord_content.contains("teammate_idle"),
+        "should contain teammate_idle event type"
+    );
+    assert!(
+        coord_content.contains("worker-auth"),
+        "should contain teammate_name"
+    );
+    assert!(
+        coord_content.contains("team-alpha"),
+        "should contain team_name"
+    );
+
+    // Board state should not crash on the new event type
+    let board = compute_board_state(pid);
+    assert!(board.claims.is_empty());
+
+    // Cleanup
+    remove_heartbeat(pid, teammate_sid);
+    let _ = fs::remove_file(coordination_path(pid));
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}

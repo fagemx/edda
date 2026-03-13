@@ -375,3 +375,56 @@ pub fn find_binding_conflict(
         ts: existing.ts.clone(),
     })
 }
+
+/// Resolve a teammate name to a session_id by scanning active heartbeats.
+/// Returns `None` if no match found (teammate_name doesn't match any label or session_id).
+pub(crate) fn resolve_teammate_session(project_id: &str, teammate_name: &str) -> Option<String> {
+    let state_dir = edda_store::project_dir(project_id).join("state");
+    let entries = fs::read_dir(&state_dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("session.") || !name.ends_with(".json") {
+            continue;
+        }
+        if let Ok(content) = fs::read_to_string(entry.path()) {
+            if let Ok(hb) = serde_json::from_str::<SessionHeartbeat>(&content) {
+                if hb.label == teammate_name || hb.session_id == teammate_name {
+                    return Some(hb.session_id);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Update a teammate's heartbeat phase to the given value.
+/// Used to set phase to "idle" when a TeammateIdle event is received.
+pub(crate) fn update_teammate_phase(project_id: &str, session_id: &str, phase: &str) {
+    let path = heartbeat_path(project_id, session_id);
+    if let Some(mut hb) = read_heartbeat(project_id, session_id) {
+        hb.current_phase = Some(phase.to_string());
+        hb.last_heartbeat = now_rfc3339();
+        if let Ok(data) = serde_json::to_string_pretty(&hb) {
+            let _ = edda_store::write_atomic(&path, data.as_bytes());
+        }
+    }
+}
+
+/// Write a teammate idle event to coordination.jsonl.
+pub(crate) fn write_teammate_idle(
+    project_id: &str,
+    notified_session_id: &str,
+    teammate_name: &str,
+    team_name: &str,
+) {
+    let event = CoordEvent {
+        ts: now_rfc3339(),
+        session_id: notified_session_id.to_string(),
+        event_type: CoordEventType::TeammateIdle,
+        payload: serde_json::json!({
+            "teammate_name": teammate_name,
+            "team_name": team_name,
+        }),
+    };
+    append_coord_event(project_id, &event);
+}

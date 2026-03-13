@@ -97,6 +97,7 @@ pub(crate) enum CoordEventType {
     RequestAck,
     SubagentCompleted,
     TaskCompleted,
+    TeammateIdle,
 }
 
 /// A scope claim by a session.
@@ -234,9 +235,9 @@ pub(crate) use autoclaim::{maybe_auto_claim, maybe_auto_claim_file, remove_autoc
 pub use board::{compute_board_state, compute_board_state_for_compaction};
 pub use discovery::{discover_active_peers, discover_all_sessions, infer_session_id};
 pub(crate) use heartbeat::{
-    cleanup_subagent_heartbeats, ensure_heartbeat_exists, read_heartbeat, update_heartbeat_branch,
-    write_heartbeat, write_subagent_completed, write_subagent_heartbeat, write_task_completed,
-    SubagentReport,
+    cleanup_subagent_heartbeats, ensure_heartbeat_exists, read_heartbeat, resolve_teammate_session,
+    update_heartbeat_branch, update_teammate_phase, write_heartbeat, write_subagent_completed,
+    write_subagent_heartbeat, write_task_completed, write_teammate_idle, SubagentReport,
 };
 pub use heartbeat::{
     find_binding_conflict, remove_heartbeat, touch_heartbeat, write_binding, write_claim,
