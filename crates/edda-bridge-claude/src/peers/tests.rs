@@ -40,7 +40,7 @@ fn heartbeat_write_read_roundtrip() {
         ..Default::default()
     };
 
-    write_heartbeat(pid, sid, &signals, Some("auth"));
+    write_heartbeat(pid, sid, &signals, Some("auth"), ".");
     let hb = read_heartbeat(pid, sid).expect("should read heartbeat");
 
     assert_eq!(hb.session_id, sid);
@@ -94,8 +94,8 @@ fn discover_peers_excludes_self() {
     let _ = edda_store::ensure_dirs(pid);
 
     let signals = SessionSignals::default();
-    write_heartbeat(pid, "self-session", &signals, Some("self"));
-    write_heartbeat(pid, "peer-session", &signals, Some("peer"));
+    write_heartbeat(pid, "self-session", &signals, Some("self"), ".");
+    write_heartbeat(pid, "peer-session", &signals, Some("peer"), ".");
 
     let peers = discover_active_peers(pid, "self-session");
     assert_eq!(peers.len(), 1);
@@ -125,8 +125,8 @@ fn render_protocol_multi_session() {
     let _ = fs::remove_file(coordination_path(pid));
 
     let signals = SessionSignals::default();
-    write_heartbeat(pid, "s1", &signals, Some("auth"));
-    write_heartbeat(pid, "s2", &signals, Some("billing"));
+    write_heartbeat(pid, "s1", &signals, Some("auth"), ".");
+    write_heartbeat(pid, "s2", &signals, Some("billing"), ".");
     write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
     write_claim(pid, "s2", "billing", &["src/billing/*".into()]);
     write_binding(pid, "s1", "auth", "auth.method", "JWT RS256");
@@ -235,10 +235,10 @@ fn full_lifecycle_multi_session() {
 
     // Simulate 4 sessions starting
     let signals = SessionSignals::default();
-    write_heartbeat(pid, "s1", &signals, Some("auth"));
-    write_heartbeat(pid, "s2", &signals, Some("billing"));
-    write_heartbeat(pid, "s3", &signals, Some("api"));
-    write_heartbeat(pid, "s4", &signals, Some("frontend"));
+    write_heartbeat(pid, "s1", &signals, Some("auth"), ".");
+    write_heartbeat(pid, "s2", &signals, Some("billing"), ".");
+    write_heartbeat(pid, "s3", &signals, Some("api"), ".");
+    write_heartbeat(pid, "s4", &signals, Some("frontend"), ".");
 
     // Claims
     write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
@@ -413,8 +413,8 @@ fn render_protocol_shows_peer_tasks() {
         }],
         ..Default::default()
     };
-    write_heartbeat(pid, "s1", &signals_with_task, Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &signals_with_task, Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
 
     let result = render_coordination_protocol(pid, "s2", ".").unwrap();
     assert!(
@@ -445,8 +445,8 @@ fn render_protocol_shows_focus_files_when_no_tasks() {
         }],
         ..Default::default()
     };
-    write_heartbeat(pid, "s1", &signals, Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &signals, Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
 
     let result = render_coordination_protocol(pid, "s2", ".").unwrap();
     assert!(
@@ -481,8 +481,8 @@ fn render_peer_updates_shows_tasks() {
         }],
         ..Default::default()
     };
-    write_heartbeat(pid, "s1", &signals, Some("billing"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s1", &signals, Some("billing"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"), ".");
 
     let result = render_peer_updates(pid, "s2").unwrap();
     assert!(
@@ -509,8 +509,8 @@ fn render_peer_updates_shows_focus_files() {
         }],
         ..Default::default()
     };
-    write_heartbeat(pid, "s1", &signals, Some("billing"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s1", &signals, Some("billing"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"), ".");
 
     let result = render_peer_updates(pid, "s2").unwrap();
     assert!(
@@ -534,8 +534,8 @@ fn render_peer_updates_shows_bare_label() {
     let _ = fs::remove_file(coordination_path(pid));
 
     // Peer with no tasks and no focus files
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("billing"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("billing"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"), ".");
 
     let result = render_peer_updates(pid, "s2").unwrap();
     assert!(
@@ -560,8 +560,8 @@ fn render_peer_updates_includes_l2_instructions() {
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
 
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("billing"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("billing"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"), ".");
 
     let result = render_peer_updates(pid, "s2").unwrap();
     assert!(
@@ -720,7 +720,13 @@ fn infer_session_one_active() {
     let pid = "test_infer_one";
     let _ = edda_store::ensure_dirs(pid);
 
-    write_heartbeat(pid, "sess-abc", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(
+        pid,
+        "sess-abc",
+        &SessionSignals::default(),
+        Some("auth"),
+        ".",
+    );
 
     let result = infer_session_id(pid);
     assert_eq!(result, Some(("sess-abc".into(), "auth".into())));
@@ -734,8 +740,8 @@ fn infer_session_two_active_is_ambiguous() {
     let pid = "test_infer_two";
     let _ = edda_store::ensure_dirs(pid);
 
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
 
     let result = infer_session_id(pid);
     assert!(result.is_none(), "two active → ambiguous → None");
@@ -751,7 +757,13 @@ fn infer_session_one_active_one_stale() {
     let _ = edda_store::ensure_dirs(pid);
 
     // Write one fresh heartbeat
-    write_heartbeat(pid, "fresh", &SessionSignals::default(), Some("frontend"));
+    write_heartbeat(
+        pid,
+        "fresh",
+        &SessionSignals::default(),
+        Some("frontend"),
+        ".",
+    );
 
     // Write a stale heartbeat by manually setting old timestamp
     let stale_path = heartbeat_path(pid, "stale");
@@ -833,8 +845,8 @@ fn cross_session_binding_conflict_last_write_wins() {
     assert_eq!(board.bindings[0].by_session, "s2");
 
     // Both sessions see the latest value via render_peer_updates
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
 
     let updates_s1 = render_peer_updates(pid, "s1").unwrap();
     assert!(
@@ -872,8 +884,8 @@ fn cross_session_different_keys_both_visible() {
     );
 
     // Both sessions see both bindings
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
 
     let updates_s1 = render_peer_updates(pid, "s1").unwrap();
     assert!(
@@ -909,8 +921,8 @@ fn request_delivered_via_heartbeat_label_no_claim() {
     let _ = fs::remove_file(coordination_path(pid));
 
     // Two sessions: s1 (peer) and s2 (me) — both have heartbeats, no claims
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
 
     // s1 sends request to "billing" (s2's heartbeat label)
     write_request(pid, "s1", "auth", "billing", "please expose /api/users");
@@ -937,8 +949,8 @@ fn explicit_claim_wins_over_heartbeat_for_requests() {
     let _ = fs::remove_file(coordination_path(pid));
 
     // s2 has heartbeat "auth" but claim "backend"
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"), ".");
     write_claim(pid, "s2", "backend", &[]);
 
     // Request to "backend" (claim label) should arrive
@@ -968,7 +980,7 @@ fn no_heartbeat_no_claim_no_requests() {
     let _ = fs::remove_file(coordination_path(pid));
 
     // s1 is peer, s2 has no heartbeat and no claim
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
     write_request(pid, "s1", "auth", "ghost", "hello ghost");
 
     // s2 renders — should not see the request (no identity)
@@ -988,8 +1000,8 @@ fn heartbeat_scope_display_without_claim() {
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
 
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"), ".");
 
     let result = render_coordination_protocol(pid, "s2", ".").unwrap();
     // Without a claim, should show actionable nudge with label-based suggestion
@@ -1013,8 +1025,8 @@ fn claim_scope_display_with_paths() {
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
 
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"), ".");
     write_claim(pid, "s2", "backend", &["src/api/*".into()]);
 
     let result = render_coordination_protocol(pid, "s2", ".").unwrap();
@@ -1034,8 +1046,8 @@ fn multi_session_shows_l2_instructions() {
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
 
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
 
     let result = render_coordination_protocol(pid, "s2", ".").unwrap();
     assert!(
@@ -1079,8 +1091,8 @@ fn peer_updates_request_via_heartbeat_fallback() {
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
 
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
     write_request(pid, "s1", "auth", "billing", "need billing API");
 
     let result = render_peer_updates(pid, "s2").unwrap();
@@ -1149,7 +1161,7 @@ fn auto_claim_writes_claim_from_signals() {
         ..Default::default()
     };
 
-    maybe_auto_claim(pid, "s1", &signals);
+    maybe_auto_claim(pid, "s1", &signals, ".");
 
     let board = compute_board_state(pid);
     assert_eq!(board.claims.len(), 1, "should have 1 claim");
@@ -1177,7 +1189,7 @@ fn auto_claim_skips_when_manual_claim_exists() {
         ..Default::default()
     };
 
-    maybe_auto_claim(pid, "s1", &signals);
+    maybe_auto_claim(pid, "s1", &signals, ".");
 
     let board = compute_board_state(pid);
     let claim = board.claims.iter().find(|c| c.session_id == "s1").unwrap();
@@ -1204,8 +1216,8 @@ fn auto_claim_dedup_no_repeated_writes() {
         ..Default::default()
     };
 
-    maybe_auto_claim(pid, "s1", &signals);
-    maybe_auto_claim(pid, "s1", &signals);
+    maybe_auto_claim(pid, "s1", &signals, ".");
+    maybe_auto_claim(pid, "s1", &signals, ".");
 
     let content = fs::read_to_string(coordination_path(pid)).unwrap_or_default();
     let claim_count = content.lines().filter(|l| l.contains("\"claim\"")).count();
@@ -1228,7 +1240,7 @@ fn auto_claim_updates_on_scope_change() {
         }],
         ..Default::default()
     };
-    maybe_auto_claim(pid, "s1", &signals1);
+    maybe_auto_claim(pid, "s1", &signals1, ".");
 
     let signals2 = SessionSignals {
         files_modified: vec![FileEditCount {
@@ -1237,7 +1249,7 @@ fn auto_claim_updates_on_scope_change() {
         }],
         ..Default::default()
     };
-    maybe_auto_claim(pid, "s1", &signals2);
+    maybe_auto_claim(pid, "s1", &signals2, ".");
 
     let board = compute_board_state(pid);
     let claim = board.claims.iter().find(|c| c.session_id == "s1").unwrap();
@@ -1263,7 +1275,7 @@ fn auto_claim_cleanup_removes_state_file() {
         }],
         ..Default::default()
     };
-    maybe_auto_claim(pid, "s1", &signals);
+    maybe_auto_claim(pid, "s1", &signals, ".");
 
     let state_path = autoclaim_state_path(pid, "s1");
     assert!(
@@ -1305,7 +1317,7 @@ fn render_shows_branch_when_present() {
     let _ = fs::create_dir_all(path.parent().unwrap());
     fs::write(&path, serde_json::to_string_pretty(&hb_json).unwrap()).unwrap();
 
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
 
     let result = render_coordination_protocol(pid, "s2", ".").unwrap();
     assert!(
@@ -1348,7 +1360,7 @@ fn render_omits_branch_when_absent() {
     let _ = fs::create_dir_all(path.parent().unwrap());
     fs::write(&path, serde_json::to_string_pretty(&hb_json).unwrap()).unwrap();
 
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
 
     let result = render_coordination_protocol(pid, "s2", ".").unwrap();
     assert!(
@@ -1377,8 +1389,8 @@ fn render_peer_updates_with_matches_original() {
         }],
         ..Default::default()
     };
-    write_heartbeat(pid, "s1", &signals, Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &signals, Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
     write_binding(pid, "s1", "auth", "db.engine", "postgres");
 
     // Call original wrapper
@@ -1413,8 +1425,8 @@ fn render_coordination_protocol_with_matches_original() {
         }],
         ..Default::default()
     };
-    write_heartbeat(pid, "s1", &signals, Some("billing"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"));
+    write_heartbeat(pid, "s1", &signals, Some("billing"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"), ".");
     write_binding(pid, "s1", "billing", "payment.provider", "stripe");
 
     // Call original wrapper
@@ -1514,8 +1526,8 @@ fn protocol_no_claim_shows_nudge() {
         }],
         ..Default::default()
     };
-    write_heartbeat(pid, "s1", &signals, Some("peer-agent"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("my-agent"));
+    write_heartbeat(pid, "s1", &signals, Some("peer-agent"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("my-agent"), ".");
 
     let peers = discover_active_peers(pid, "s2");
     let board = compute_board_state(pid);
@@ -1543,8 +1555,14 @@ fn protocol_with_claim_shows_scope() {
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
 
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer-agent"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("my-agent"));
+    write_heartbeat(
+        pid,
+        "s1",
+        &SessionSignals::default(),
+        Some("peer-agent"),
+        ".",
+    );
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("my-agent"), ".");
     write_claim(pid, "s2", "my-agent", &["crates/edda-cli/*".to_string()]);
 
     let peers = discover_active_peers(pid, "s2");
@@ -1593,7 +1611,13 @@ fn protocol_nudge_uses_branch_context() {
     let _ = fs::write(&hb_path, serde_json::to_string_pretty(&hb).unwrap());
 
     // Create peer
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("peer-agent"));
+    write_heartbeat(
+        pid,
+        "s1",
+        &SessionSignals::default(),
+        Some("peer-agent"),
+        ".",
+    );
 
     let peers = discover_active_peers(pid, "s2");
     let board = compute_board_state(pid);
@@ -1995,7 +2019,7 @@ fn cleanup_subagent_heartbeats_selective() {
     let _ = edda_store::ensure_dirs(pid);
 
     // Create parent heartbeat
-    write_heartbeat_minimal(pid, "parent-1", "main-session");
+    write_heartbeat_minimal(pid, "parent-1", "main-session", ".");
     // Create two sub-agent heartbeats for parent-1
     write_subagent_heartbeat(pid, "sub-a", "parent-1", "sub:Explore", ".");
     write_subagent_heartbeat(pid, "sub-b", "parent-1", "sub:Plan", ".");
@@ -2244,8 +2268,8 @@ fn render_coordination_filters_acked_requests() {
     let _ = fs::remove_file(coordination_path(pid));
 
     // Set up two peers: s1 (auth) and s2 (billing)
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
     write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
 
     // billing sends a request to auth
@@ -2286,8 +2310,8 @@ fn peer_updates_filters_acked_requests() {
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
 
-    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"));
-    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"));
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
     write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
 
     // billing sends a request to auth
@@ -2429,7 +2453,7 @@ fn resolve_teammate_by_label() {
     let _ = edda_store::ensure_dirs(pid);
 
     let signals = SessionSignals::default();
-    write_heartbeat(pid, sid, &signals, Some("worker-auth"));
+    write_heartbeat(pid, sid, &signals, Some("worker-auth"), ".");
 
     // Should resolve by label
     let resolved = resolve_teammate_session(pid, "worker-auth");
@@ -2460,7 +2484,7 @@ fn teammate_idle_writes_coord_event_and_updates_phase() {
 
     // Setup: create a heartbeat for the teammate
     let signals = SessionSignals::default();
-    write_heartbeat(pid, teammate_sid, &signals, Some("worker-auth"));
+    write_heartbeat(pid, teammate_sid, &signals, Some("worker-auth"), ".");
 
     // Verify teammate starts without "idle" phase
     let hb_before = read_heartbeat(pid, teammate_sid).expect("heartbeat should exist");

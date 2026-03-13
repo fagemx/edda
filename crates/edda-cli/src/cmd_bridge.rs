@@ -849,7 +849,12 @@ pub fn heartbeat_write(
     let project_id = edda_store::project_id(repo_root);
     let (session_id, _) = resolve_session_id(cli_session, &project_id, label);
     let _ = edda_store::ensure_dirs(&project_id);
-    edda_bridge_claude::peers::write_heartbeat_minimal(&project_id, &session_id, label);
+    edda_bridge_claude::peers::write_heartbeat_minimal(
+        &project_id,
+        &session_id,
+        label,
+        repo_root.to_str().unwrap_or("."),
+    );
     println!("Heartbeat written: {label} ({session_id})");
     Ok(())
 }
@@ -1383,7 +1388,7 @@ mod tests {
         let _ = edda_store::ensure_dirs(pid);
 
         // Write
-        edda_bridge_claude::peers::write_heartbeat_minimal(pid, sid, "worker");
+        edda_bridge_claude::peers::write_heartbeat_minimal(pid, sid, "worker", ".");
         let state_dir = edda_store::project_dir(pid).join("state");
         let hb_path = state_dir.join(format!("session.{sid}.json"));
         assert!(hb_path.exists(), "heartbeat file should exist after write");

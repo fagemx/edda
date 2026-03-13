@@ -108,10 +108,10 @@ pub(super) fn ingest_and_build_pack(
     save_session_signals(project_id, session_id, &signals);
 
     // Write full peer heartbeat with signals snapshot (unconditional — peer discovery depends on it)
-    crate::peers::write_heartbeat(project_id, session_id, &signals, None);
+    crate::peers::write_heartbeat(project_id, session_id, &signals, None, cwd);
 
     // Auto-claim scope from edited files (L1 auto-detection, #24)
-    crate::peers::maybe_auto_claim(project_id, session_id, &signals);
+    crate::peers::maybe_auto_claim(project_id, session_id, &signals, cwd);
 }
 /// Lightweight injection: workspace context only (~2K chars), no turns.
 /// Supports session-scoped dedup: if workspace context is identical to the

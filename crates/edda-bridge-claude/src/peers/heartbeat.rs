@@ -7,8 +7,8 @@ use crate::signals::SessionSignals;
 use super::board::compute_board_state;
 use super::helpers::auto_label;
 use super::{
-    coordination_path, detect_git_branch, detect_git_branch_in, env_label, heartbeat_path,
-    BindingConflict, CoordEvent, CoordEventType, SessionHeartbeat,
+    coordination_path, detect_git_branch_in, env_label, heartbeat_path, BindingConflict,
+    CoordEvent, CoordEventType, SessionHeartbeat,
 };
 
 // ── Heartbeat Write/Read ──
@@ -19,6 +19,7 @@ pub(crate) fn write_heartbeat(
     session_id: &str,
     signals: &SessionSignals,
     label: Option<&str>,
+    cwd: &str,
 ) {
     let now = now_rfc3339();
     let path = heartbeat_path(project_id, session_id);
@@ -54,7 +55,7 @@ pub(crate) fn write_heartbeat(
             .take(3)
             .map(|c| format!("{} {}", &c.hash[..7.min(c.hash.len())], c.message))
             .collect(),
-        branch: detect_git_branch(),
+        branch: detect_git_branch_in(cwd),
         current_phase: crate::agent_phase::read_phase_state(project_id, session_id)
             .map(|ps| ps.phase.to_string()),
         parent_session_id: None,
@@ -99,11 +100,17 @@ pub(crate) fn update_heartbeat_branch(project_id: &str, session_id: &str, branch
 /// This is needed because `ingest_and_build_pack` skips when the transcript file
 /// doesn't exist yet — which is the normal case for brand-new SessionStart events
 /// (Claude Code creates the transcript *after* the hook fires).
-pub(crate) fn ensure_heartbeat_exists(project_id: &str, session_id: &str) {
+pub(crate) fn ensure_heartbeat_exists(project_id: &str, session_id: &str, cwd: &str) {
     if read_heartbeat(project_id, session_id).is_some() {
         return;
     }
-    write_heartbeat(project_id, session_id, &SessionSignals::default(), None);
+    write_heartbeat(
+        project_id,
+        session_id,
+        &SessionSignals::default(),
+        None,
+        cwd,
+    );
 }
 
 /// Remove heartbeat on SessionEnd.
@@ -115,7 +122,7 @@ pub fn remove_heartbeat(project_id: &str, session_id: &str) {
 ///
 /// Creates a heartbeat with the given label and empty signals, sufficient
 /// for peer discovery. Use `write_heartbeat` for full signal-enriched heartbeats.
-pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str) {
+pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str, cwd: &str) {
     let now = now_rfc3339();
     let path = heartbeat_path(project_id, session_id);
 
@@ -133,7 +140,7 @@ pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str) 
         files_modified_count: 0,
         total_edits: 0,
         recent_commits: Vec::new(),
-        branch: detect_git_branch(),
+        branch: detect_git_branch_in(cwd),
         current_phase: None,
         parent_session_id: None,
     };

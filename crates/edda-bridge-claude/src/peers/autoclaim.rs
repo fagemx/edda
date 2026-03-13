@@ -5,7 +5,7 @@ use crate::signals::{FileEditCount, SessionSignals};
 
 use super::board::compute_board_state;
 use super::heartbeat::write_claim;
-use super::{autoclaim_state_path, detect_git_branch, AutoClaimState};
+use super::{autoclaim_state_path, detect_git_branch_in, AutoClaimState};
 
 // ── Auto-Claim ──
 
@@ -107,7 +107,12 @@ pub(super) fn derive_scope_from_files(files: &[FileEditCount]) -> Option<(String
 /// - Skips if session already has an explicit claim in `coordination.jsonl`
 /// - Skips if derived scope is identical to last auto-claim (dedup)
 /// - Writes claim event + saves state file for dedup
-pub(crate) fn maybe_auto_claim(project_id: &str, session_id: &str, signals: &SessionSignals) {
+pub(crate) fn maybe_auto_claim(
+    project_id: &str,
+    session_id: &str,
+    signals: &SessionSignals,
+    cwd: &str,
+) {
     // 1. Check existing state
     let board = compute_board_state(project_id);
     let existing_claim = board.claims.iter().find(|c| c.session_id == session_id);
@@ -127,7 +132,7 @@ pub(crate) fn maybe_auto_claim(project_id: &str, session_id: &str, signals: &Ses
         None => {
             // No file edits yet (fresh session) — use git branch as fallback label
             // so the peer is visible in `edda watch` immediately (#128)
-            match detect_git_branch() {
+            match detect_git_branch_in(cwd) {
                 Some(branch) => (branch, vec!["**/*".to_string()]),
                 None => return,
             }
