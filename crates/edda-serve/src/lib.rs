@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
 use edda_aggregate::aggregate::{aggregate_decisions, aggregate_overview, DateRange};
+use edda_aggregate::controls::evaluate_controls_rules;
 use edda_aggregate::graph::build_dependency_graph;
 use edda_aggregate::quality::{model_quality_from_events, QualityReport};
 use edda_aggregate::risk::{compute_decision_risks, DecisionInput, DecisionRisk};
@@ -160,6 +161,12 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/briefs", get(get_briefs))
         .route("/api/briefs/{task_id}", get(get_brief))
         .route("/api/events/stream", get(get_event_stream))
+        .route("/api/controls/suggestions", get(get_controls_suggestions))
+        .route("/api/controls/patches", get(get_controls_patches))
+        .route(
+            "/api/controls/patches/{patch_id}/approve",
+            post(post_approve_controls_patch),
+        )
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -217,6 +224,12 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/sync", post(post_sync))
         .route("/dashboard", get(serve_dashboard))
         .route("/api/events/stream", get(get_event_stream))
+        .route("/api/controls/suggestions", get(get_controls_suggestions))
+        .route("/api/controls/patches", get(get_controls_patches))
+        .route(
+            "/api/controls/patches/{patch_id}/approve",
+            post(post_approve_controls_patch),
+        )
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -1096,6 +1109,100 @@ async fn get_quality_metrics(
     let events = ledger.iter_events_by_type("execution_event")?;
     let report = model_quality_from_events(&events, &range);
     Ok(Json(report))
+}
+
+// ── GET /api/controls/suggestions ──
+
+#[derive(Deserialize)]
+struct ControlsSuggestionsQuery {
+    after: Option<String>,
+    before: Option<String>,
+    min_samples: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct ControlsSuggestionsResponse {
+    suggestions: Vec<edda_aggregate::controls::ControlsSuggestion>,
+    quality: QualityReport,
+}
+
+async fn get_controls_suggestions(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ControlsSuggestionsQuery>,
+) -> Result<Json<ControlsSuggestionsResponse>, AppError> {
+    let range = DateRange {
+        after: params.after,
+        before: params.before,
+    };
+    let ledger = state.open_ledger()?;
+    let events = ledger.iter_events_by_type("execution_event")?;
+    let report = model_quality_from_events(&events, &range);
+
+    let rules = edda_bridge_claude::controls_suggest::load_rules();
+    let suggestions = evaluate_controls_rules(&rules, &report, params.min_samples);
+
+    Ok(Json(ControlsSuggestionsResponse {
+        suggestions,
+        quality: report,
+    }))
+}
+
+// ── GET /api/controls/patches ──
+
+#[derive(Deserialize)]
+struct ControlsPatchesQuery {
+    status: Option<String>,
+}
+
+async fn get_controls_patches(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ControlsPatchesQuery>,
+) -> Result<Json<Vec<edda_bridge_claude::controls_suggest::ControlsPatch>>, AppError> {
+    let project_id = edda_store::project_id(&state.repo_root);
+
+    let status_filter = match params.status.as_deref() {
+        Some("pending") => Some(edda_bridge_claude::controls_suggest::PatchStatus::Pending),
+        Some("approved") => Some(edda_bridge_claude::controls_suggest::PatchStatus::Approved),
+        Some("dismissed") => Some(edda_bridge_claude::controls_suggest::PatchStatus::Dismissed),
+        Some("applied") => Some(edda_bridge_claude::controls_suggest::PatchStatus::Applied),
+        Some(s) => {
+            return Err(AppError::Validation(format!(
+                "Unknown status: {s} (expected: pending, approved, dismissed, applied)"
+            )));
+        }
+        None => None,
+    };
+
+    let patches =
+        edda_bridge_claude::controls_suggest::list_patches(&project_id, status_filter.as_ref())?;
+    Ok(Json(patches))
+}
+
+// ── POST /api/controls/patches/{patch_id}/approve ──
+
+#[derive(Deserialize)]
+struct ApprovePatchBody {
+    #[serde(default = "default_approve_actor")]
+    by: String,
+}
+
+fn default_approve_actor() -> String {
+    "api".to_string()
+}
+
+async fn post_approve_controls_patch(
+    State(state): State<Arc<AppState>>,
+    AxumPath(patch_id): AxumPath<String>,
+    body: Result<Json<ApprovePatchBody>, JsonRejection>,
+) -> Result<Json<edda_bridge_claude::controls_suggest::ControlsPatch>, AppError> {
+    let project_id = edda_store::project_id(&state.repo_root);
+    let by = match body {
+        Ok(Json(b)) => b.by,
+        Err(_) => "api".to_string(),
+    };
+
+    let patch = edda_bridge_claude::controls_suggest::approve_patch(&project_id, &patch_id, &by)?;
+    Ok(Json(patch))
 }
 
 // ── POST /api/scope/check ──

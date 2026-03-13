@@ -9,6 +9,7 @@ mod cmd_commit;
 mod cmd_conduct;
 mod cmd_config;
 mod cmd_context;
+mod cmd_controls;
 mod cmd_draft;
 mod cmd_gc;
 mod cmd_group;
@@ -473,6 +474,12 @@ enum Command {
     ProposeIssue {
         #[command(subcommand)]
         cmd: cmd_propose::ProposeCmd,
+    },
+    /// Controls patch workflow — evaluate quality rules and propose Karvi controls adjustments
+    #[command(name = "propose-patch")]
+    ProposePatch {
+        #[command(subcommand)]
+        cmd: cmd_controls::ControlsCmd,
     },
     /// Manage skill registry (scan, list, show, search)
     Skill {
@@ -1141,6 +1148,7 @@ fn main() -> anyhow::Result<()> {
         Command::Rules { cmd } => cmd_rules::execute(cmd, &repo_root),
         Command::Scan { cmd } => cmd_scan::execute(cmd, &repo_root),
         Command::ProposeIssue { cmd } => cmd_propose::execute(cmd, &repo_root),
+        Command::ProposePatch { cmd } => cmd_controls::execute(cmd, &repo_root),
         Command::Skill { cmd } => cmd_skill::execute(cmd, &repo_root),
         Command::ToolTier { cmd } => cmd_tool_tier::run(cmd, &repo_root),
     }
