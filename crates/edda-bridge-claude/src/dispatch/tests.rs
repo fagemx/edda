@@ -2719,3 +2719,33 @@ fn read_project_state_empty_tasks() {
     let summary = result.unwrap();
     assert!(summary.contains("Tasks: (none)"));
 }
+
+// ── Issue #287: SessionEnd background thread join ──
+
+#[test]
+fn session_end_bg_threads_joined_zero_threads() {
+    // Regression test: when no background threads are spawned (no API key),
+    // the channel-based join must complete immediately without hanging.
+    let pid = "test_se_bg_join_zero";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    let _ = edda_store::ensure_dirs(pid);
+    let cwd = tempfile::tempdir().unwrap();
+
+    // Disable features that would require external state
+    std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
+    std::env::set_var("EDDA_POSTMORTEM", "0");
+    // No EDDA_LLM_API_KEY → all should_run() return false → bg_count=0
+    std::env::remove_var("EDDA_LLM_API_KEY");
+    // Use a short join timeout to catch hangs quickly
+    std::env::set_var("EDDA_BG_JOIN_TIMEOUT_SECS", "1");
+
+    let result = dispatch_session_end(pid, "s1", "", cwd.path().to_str().unwrap(), false);
+    assert!(result.is_ok(), "dispatch_session_end should succeed with zero bg threads");
+
+    std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
+    std::env::remove_var("EDDA_PLANS_DIR");
+    std::env::remove_var("EDDA_POSTMORTEM");
+    std::env::remove_var("EDDA_BG_JOIN_TIMEOUT_SECS");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}

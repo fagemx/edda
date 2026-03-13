@@ -288,19 +288,32 @@ pub(super) fn dispatch_session_end(
     // 2e. L3 post-mortem analysis (best-effort, fire-and-forget)
     run_postmortem(project_id, session_id, cwd);
 
-    // 2f. Background decision extraction (non-blocking, best-effort)
+    // 2f–2i. Background tasks with channel-based completion tracking.
+    // Previously these were fire-and-forget spawns whose JoinHandles were
+    // dropped.  Because SessionEnd is the last hook event the process could
+    // exit before the threads finished, truncating LLM API calls and state
+    // writes.  We now collect completions via an mpsc channel and join with
+    // a configurable timeout (EDDA_BG_JOIN_TIMEOUT_SECS, default 45).
+    let (bg_tx, bg_rx) = std::sync::mpsc::channel::<&'static str>();
+    let mut bg_count: usize = 0;
+
+    // 2f. Background decision extraction
     if crate::bg_extract::should_run(project_id, session_id) {
+        let tx = bg_tx.clone();
         let pid = project_id.to_string();
         let sid = session_id.to_string();
         std::thread::spawn(move || {
             if let Err(e) = crate::bg_extract::run_extraction(&pid, &sid) {
                 tracing::warn!(error = %e, "decision extraction failed");
             }
+            let _ = tx.send("bg_extract");
         });
+        bg_count += 1;
     }
 
-    // 2g. Background session digest (non-blocking, best-effort)
+    // 2g. Background session digest
     if crate::bg_digest::should_run(project_id, session_id) {
+        let tx = bg_tx.clone();
         let pid = project_id.to_string();
         let sid = session_id.to_string();
         let cwd_str = cwd.to_string();
@@ -308,32 +321,78 @@ pub(super) fn dispatch_session_end(
             if let Err(e) = crate::bg_digest::run_digest(&pid, &sid, &cwd_str) {
                 tracing::warn!(error = %e, "session digest failed");
             }
+            let _ = tx.send("bg_digest");
         });
+        bg_count += 1;
     }
 
-    // 2h. Background capability scan (non-blocking, cooldown-gated)
+    // 2h. Background capability scan (cooldown-gated)
     if crate::bg_scan::should_run(project_id)
         || crate::bg_scan::has_recent_milestone(project_id, cwd)
     {
+        let tx = bg_tx.clone();
         let pid = project_id.to_string();
         let cwd_owned = cwd.to_string();
         std::thread::spawn(move || {
             if let Err(e) = crate::bg_scan::run_scan(&pid, &cwd_owned) {
                 tracing::warn!(error = %e, "capability scan failed");
             }
+            let _ = tx.send("bg_scan");
         });
+        bg_count += 1;
     }
 
-    // 2i. Background pattern detection (non-blocking, interval-gated)
+    // 2i. Background pattern detection (interval-gated)
     crate::bg_detect::increment_session_count(project_id);
     if crate::bg_detect::should_run(project_id) {
+        let tx = bg_tx.clone();
         let pid = project_id.to_string();
         let cwd_owned = cwd.to_string();
         std::thread::spawn(move || {
             if let Err(e) = crate::bg_detect::run_detect(&pid, &cwd_owned) {
                 eprintln!("[edda-bg] pattern detection failed: {e}");
             }
+            let _ = tx.send("bg_detect");
         });
+        bg_count += 1;
+    }
+
+    // Drop the original sender so the channel closes when all threads finish.
+    drop(bg_tx);
+
+    // Join background threads with a configurable timeout.
+    let bg_timeout = std::time::Duration::from_secs(
+        std::env::var("EDDA_BG_JOIN_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(45),
+    );
+    let deadline = std::time::Instant::now() + bg_timeout;
+    let mut completed = 0;
+    while completed < bg_count {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(
+                completed,
+                total = bg_count,
+                "background thread join timeout — abandoning remaining"
+            );
+            break;
+        }
+        match bg_rx.recv_timeout(remaining) {
+            Ok(name) => {
+                completed += 1;
+                tracing::debug!(name, completed, total = bg_count, "bg thread done");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    completed,
+                    total = bg_count,
+                    "background thread join timeout"
+                );
+                break;
+            }
+        }
     }
 
     // 2d. Push notification (best-effort, fire-and-forget)
