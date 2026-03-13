@@ -1628,7 +1628,6 @@ async fn post_approve_controls_patch(
     Ok(Json(patch))
 }
 
-
 // ── GET /api/metrics/overview ──
 
 fn default_overview_days() -> usize {
@@ -1845,7 +1844,6 @@ async fn get_metrics_trends(
         granularity: params.granularity,
         data,
     }))
->>>>>>> 2677ce3 (feat(metrics): cross-project metrics dashboard (#199))
 }
 
 // ── POST /api/scope/check ──
@@ -2549,9 +2547,9 @@ fn compute_attention(
     if days > 0 {
         for pm in project_metrics {
             let daily_avg = pm.cost.daily_avg_usd;
-            if daily_avg > 0.0 && pm.cost.total_usd > 0.0 {
-                // Estimate today's cost as total / days (rough approximation)
-                let last_day_cost = pm.cost.total_usd / days as f64;
+            if daily_avg > 0.0 && pm.cost.last_day_usd > 0.0 {
+                // Use the actual most-recent-day cost from rollup data
+                let last_day_cost = pm.cost.last_day_usd;
                 if last_day_cost > daily_avg * 5.0 {
                     red.push(OverviewRedItem {
                         project: pm.name.clone(),
@@ -4957,5 +4955,116 @@ actors:
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload["device_id"], "iphone-14-xyz");
+    }
+
+    #[test]
+    fn cost_anomaly_detection_yellow_and_red() {
+        use edda_aggregate::aggregate::{
+            ActivityMetrics, CostMetrics, ProjectMetrics, QualityMetrics,
+        };
+
+        let range = DateRange {
+            after: Some("2026-03-01".to_string()),
+            before: Some("2026-03-08".to_string()),
+        };
+
+        // Project with 6x spike on last day → should be red
+        let red_project = ProjectMetrics {
+            project_id: "proj-red".to_string(),
+            name: "red-spike".to_string(),
+            group: None,
+            activity: ActivityMetrics {
+                events: 10,
+                commits: 2,
+                decisions: 0,
+                sessions: 1,
+            },
+            cost: CostMetrics {
+                total_usd: 0.70,
+                daily_avg_usd: 0.10,
+                last_day_usd: 0.60, // 6x the daily avg
+                by_model: vec![],
+            },
+            quality: QualityMetrics {
+                success_rate: 1.0,
+                avg_latency_ms: 0.0,
+                total_steps: 10,
+            },
+        };
+
+        // Project with 3x spike on last day → should be yellow
+        let yellow_project = ProjectMetrics {
+            project_id: "proj-yellow".to_string(),
+            name: "yellow-spike".to_string(),
+            group: None,
+            activity: ActivityMetrics {
+                events: 10,
+                commits: 2,
+                decisions: 0,
+                sessions: 1,
+            },
+            cost: CostMetrics {
+                total_usd: 0.40,
+                daily_avg_usd: 0.10,
+                last_day_usd: 0.30, // 3x the daily avg
+                by_model: vec![],
+            },
+            quality: QualityMetrics {
+                success_rate: 1.0,
+                avg_latency_ms: 0.0,
+                total_steps: 10,
+            },
+        };
+
+        // Project with normal cost → should not trigger
+        let normal_project = ProjectMetrics {
+            project_id: "proj-normal".to_string(),
+            name: "normal".to_string(),
+            group: None,
+            activity: ActivityMetrics {
+                events: 10,
+                commits: 2,
+                decisions: 0,
+                sessions: 1,
+            },
+            cost: CostMetrics {
+                total_usd: 0.70,
+                daily_avg_usd: 0.10,
+                last_day_usd: 0.10, // exactly average
+                by_model: vec![],
+            },
+            quality: QualityMetrics {
+                success_rate: 1.0,
+                avg_latency_ms: 0.0,
+                total_steps: 10,
+            },
+        };
+
+        let metrics = vec![red_project, yellow_project, normal_project];
+        let result = compute_attention(&[], &[], &range, &metrics, 7);
+
+        // Red should contain the 6x spike project
+        let red_names: Vec<&str> = result.red.iter().map(|r| r.project.as_str()).collect();
+        assert!(
+            red_names.contains(&"red-spike"),
+            "Expected red-spike in red items, got: {red_names:?}"
+        );
+
+        // Yellow should contain the 3x spike project
+        let yellow_names: Vec<&str> = result.yellow.iter().map(|y| y.project.as_str()).collect();
+        assert!(
+            yellow_names.contains(&"yellow-spike"),
+            "Expected yellow-spike in yellow items, got: {yellow_names:?}"
+        );
+
+        // Normal project should not appear in red or yellow
+        assert!(
+            !red_names.contains(&"normal"),
+            "Normal project should not be in red"
+        );
+        assert!(
+            !yellow_names.contains(&"normal"),
+            "Normal project should not be in yellow"
+        );
     }
 }

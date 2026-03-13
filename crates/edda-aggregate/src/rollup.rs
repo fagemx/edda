@@ -260,8 +260,16 @@ fn build_daily_stats(
         .collect()
 }
 
-/// Accumulator for aggregating stats: (events, commits, file_edits, cost_usd, exec_count, success_count).
-type StatAccum = (usize, usize, Vec<FileEditStat>, f64, u64, u64);
+/// Accumulator for aggregating stats across days into weekly/monthly buckets.
+#[derive(Default)]
+struct StatAccum {
+    events: usize,
+    commits: usize,
+    file_edits: Vec<FileEditStat>,
+    cost_usd: f64,
+    execution_count: u64,
+    success_count: u64,
+}
 
 /// Build weekly stats from daily stats.
 fn build_weekly_stats(daily: &[DayStat]) -> Vec<WeekStat> {
@@ -269,36 +277,27 @@ fn build_weekly_stats(daily: &[DayStat]) -> Vec<WeekStat> {
 
     for d in daily {
         if let Some(week_start) = iso_week_start(&d.date) {
-            let entry = weekly_map
-                .entry(week_start)
-                .or_insert((0, 0, Vec::new(), 0.0, 0, 0));
-            entry.0 += d.events;
-            entry.1 += d.commits;
-            merge_file_edits(&mut entry.2, &d.file_edits);
-            entry.3 += d.cost_usd;
-            entry.4 += d.execution_count;
-            entry.5 += d.success_count;
+            let entry = weekly_map.entry(week_start).or_default();
+            entry.events += d.events;
+            entry.commits += d.commits;
+            merge_file_edits(&mut entry.file_edits, &d.file_edits);
+            entry.cost_usd += d.cost_usd;
+            entry.execution_count += d.execution_count;
+            entry.success_count += d.success_count;
         }
     }
 
     weekly_map
         .into_iter()
-        .map(
-            |(
-                week_start,
-                (events, commits, file_edits, cost_usd, execution_count, success_count),
-            )| {
-                WeekStat {
-                    week_start,
-                    events,
-                    commits,
-                    file_edits,
-                    cost_usd,
-                    execution_count,
-                    success_count,
-                }
-            },
-        )
+        .map(|(week_start, acc)| WeekStat {
+            week_start,
+            events: acc.events,
+            commits: acc.commits,
+            file_edits: acc.file_edits,
+            cost_usd: acc.cost_usd,
+            execution_count: acc.execution_count,
+            success_count: acc.success_count,
+        })
         .collect()
 }
 
@@ -308,32 +307,26 @@ fn build_monthly_stats(daily: &[DayStat]) -> Vec<MonthStat> {
 
     for d in daily {
         let month = &d.date[..7.min(d.date.len())];
-        let entry = monthly_map
-            .entry(month.to_string())
-            .or_insert((0, 0, Vec::new(), 0.0, 0, 0));
-        entry.0 += d.events;
-        entry.1 += d.commits;
-        merge_file_edits(&mut entry.2, &d.file_edits);
-        entry.3 += d.cost_usd;
-        entry.4 += d.execution_count;
-        entry.5 += d.success_count;
+        let entry = monthly_map.entry(month.to_string()).or_default();
+        entry.events += d.events;
+        entry.commits += d.commits;
+        merge_file_edits(&mut entry.file_edits, &d.file_edits);
+        entry.cost_usd += d.cost_usd;
+        entry.execution_count += d.execution_count;
+        entry.success_count += d.success_count;
     }
 
     monthly_map
         .into_iter()
-        .map(
-            |(month, (events, commits, file_edits, cost_usd, execution_count, success_count))| {
-                MonthStat {
-                    month,
-                    events,
-                    commits,
-                    file_edits,
-                    cost_usd,
-                    execution_count,
-                    success_count,
-                }
-            },
-        )
+        .map(|(month, acc)| MonthStat {
+            month,
+            events: acc.events,
+            commits: acc.commits,
+            file_edits: acc.file_edits,
+            cost_usd: acc.cost_usd,
+            execution_count: acc.execution_count,
+            success_count: acc.success_count,
+        })
         .collect()
 }
 

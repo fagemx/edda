@@ -488,6 +488,9 @@ pub struct ModelCost {
 pub struct CostMetrics {
     pub total_usd: f64,
     pub daily_avg_usd: f64,
+    /// Cost of the most recent day in the period (for anomaly detection).
+    #[serde(default)]
+    pub last_day_usd: f64,
     pub by_model: Vec<ModelCost>,
 }
 
@@ -553,6 +556,25 @@ pub fn per_project_metrics(
             0.0
         };
 
+        // Compute per-day costs to find the most recent day's cost
+        let last_day_usd = {
+            let mut day_costs: BTreeMap<&str, f64> = BTreeMap::new();
+            for event in &exec_events {
+                let cost = event
+                    .payload
+                    .get("usage")
+                    .and_then(|u| u.get("cost_usd"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                if cost > 0.0 {
+                    let date = &event.ts[..10.min(event.ts.len())];
+                    *day_costs.entry(date).or_insert(0.0) += cost;
+                }
+            }
+            // Last entry in BTreeMap is the most recent date
+            day_costs.values().last().copied().unwrap_or(0.0)
+        };
+
         results.push(ProjectMetrics {
             project_id: entry.project_id.clone(),
             name: entry.name.clone(),
@@ -566,6 +588,7 @@ pub fn per_project_metrics(
             cost: CostMetrics {
                 total_usd: quality_report.total_cost_usd,
                 daily_avg_usd: daily_avg,
+                last_day_usd,
                 by_model,
             },
             quality: QualityMetrics {
