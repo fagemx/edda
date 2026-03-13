@@ -1773,6 +1773,7 @@ async fn post_karvi_event(
     });
 
     let ledger = state.open_ledger()?;
+    let _lock = WorkspaceLock::acquire(&ledger.paths)?;
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;
 
