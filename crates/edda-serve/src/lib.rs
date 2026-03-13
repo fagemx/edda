@@ -15,7 +15,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use edda_ledger::device_token::{generate_device_token, hash_token};
 use serde::{Deserialize, Serialize};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use edda_aggregate::aggregate::{
     aggregate_decisions, aggregate_overview, per_project_metrics, DateRange, ProjectMetrics,
@@ -212,10 +212,28 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
             auth_middleware,
         ));
 
+    // SECURITY: restrict CORS to localhost origins only. edda is a local
+    // development tool; if remote access is needed, consider adding an
+    // explicit --cors-origin CLI flag.
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list([
+            format!("http://127.0.0.1:{}", config.port)
+                .parse()
+                .expect("valid localhost origin"),
+            format!("http://localhost:{}", config.port)
+                .parse()
+                .expect("valid localhost origin"),
+            format!("http://[::1]:{}", config.port)
+                .parse()
+                .expect("valid localhost origin"),
+        ]))
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
+
     let app = Router::new()
         .merge(public_routes)
         .merge(protected_routes)
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state);
 
     let addr = format!("{}:{}", config.bind, config.port);
@@ -231,7 +249,8 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
 
 /// Build the router (for testing without binding to a port).
 /// Note: no auth middleware is applied here — tests run as localhost.
-pub fn router(repo_root: &Path) -> Router {
+#[cfg(test)]
+fn router(repo_root: &Path) -> Router {
     let store_root = edda_store::store_root();
     let chronicle = if store_root.exists() {
         Some(ChronicleContext {
@@ -298,7 +317,6 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/pair/list", get(list_paired_devices))
         .route("/api/pair/revoke", post(revoke_device))
         .route("/api/pair/revoke-all", post(revoke_all_devices))
-        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
@@ -2744,6 +2762,9 @@ struct ScopeCheckResponse {
     results: Vec<ScopeCheckResult>,
 }
 
+// SECURITY: `project_id` is caller-supplied and not validated against any
+// ACL. Acceptable because edda is a single-user local tool; revisit if
+// multi-tenant isolation is ever required.
 async fn post_scope_check(
     Json(body): Json<ScopeCheckBody>,
 ) -> Result<Json<ScopeCheckResponse>, AppError> {
@@ -2833,6 +2854,9 @@ struct WhitelistResponse {
     claims: Vec<WhitelistClaim>,
 }
 
+// SECURITY: `project_id` is caller-supplied and not validated against any
+// ACL. Acceptable because edda is a single-user local tool; revisit if
+// multi-tenant isolation is ever required.
 async fn get_scope_whitelist(
     Query(query): Query<WhitelistQuery>,
 ) -> Result<Json<WhitelistResponse>, AppError> {
