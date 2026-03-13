@@ -6616,4 +6616,256 @@ actors:
         assert_eq!(chain_arr[0]["key"], "db.pool");
         assert_eq!(chain_json["meta"]["max_depth"], 1);
     }
+
+    // ── Auth Middleware Tests ──────────────────────────────────────
+
+    /// Build a production-like app with auth middleware for testing.
+    fn app_with_auth(repo_root: &Path) -> Router {
+        let store_root = edda_store::store_root();
+        let chronicle = if store_root.exists() {
+            Some(ChronicleContext {
+                _store_root: store_root,
+            })
+        } else {
+            None
+        };
+
+        let state = Arc::new(AppState {
+            repo_root: repo_root.to_path_buf(),
+            chronicle,
+            pending_pairings: Mutex::new(HashMap::new()),
+        });
+
+        let public_routes = Router::new().route("/api/health", get(health));
+
+        let protected_routes = Router::new()
+            .route("/api/status", get(get_status))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ));
+
+        Router::new()
+            .merge(public_routes)
+            .merge(protected_routes)
+            .layer(CorsLayer::permissive())
+            .with_state(state)
+    }
+
+    /// Insert a dummy event into the ledger and return its event_id.
+    /// Needed because device_tokens.pair_event_id has a FK to events.
+    fn seed_dummy_event(ledger: &Ledger) -> String {
+        use edda_core::event::new_note_event;
+        let event = new_note_event("main", None, "system", "seed event", &[]).unwrap();
+        let event_id = event.event_id.clone();
+        ledger.append_event(&event).unwrap();
+        event_id
+    }
+
+    /// Build a request from a remote (non-localhost) IP.
+    fn remote_request(uri: &str) -> Request<Body> {
+        let mut req = Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 1], 12345))));
+        req
+    }
+
+    /// Build a request from a remote IP with an Authorization header.
+    fn remote_request_with_auth(uri: &str, token: &str) -> Request<Body> {
+        let mut req = Request::builder()
+            .uri(uri)
+            .header("authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 1], 12345))));
+        req
+    }
+
+    /// Build a request from a localhost IP.
+    fn localhost_request(uri: &str) -> Request<Body> {
+        let mut req = Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        req
+    }
+
+    #[tokio::test]
+    async fn auth_localhost_bypasses_middleware() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = app_with_auth(tmp.path());
+
+        let resp = app.oneshot(localhost_request("/api/status")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_missing_header_returns_401() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = app_with_auth(tmp.path());
+
+        let resp = app.oneshot(remote_request("/api/status")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "UNAUTHORIZED");
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing or invalid"));
+    }
+
+    #[tokio::test]
+    async fn auth_malformed_header_returns_401() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = app_with_auth(tmp.path());
+
+        // "Token" instead of "Bearer"
+        let mut req = Request::builder()
+            .uri("/api/status")
+            .header("authorization", "Token some_value")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 1], 12345))));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing or invalid"));
+    }
+
+    #[tokio::test]
+    async fn auth_invalid_token_returns_401() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = app_with_auth(tmp.path());
+
+        let resp = app
+            .oneshot(remote_request_with_auth("/api/status", "bad_token_value"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid or revoked"));
+    }
+
+    #[tokio::test]
+    async fn auth_revoked_token_returns_401() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed a device token that is already revoked
+        let raw_token = generate_device_token();
+        let token_hash = hash_token(&raw_token);
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let pair_evt = seed_dummy_event(&ledger);
+        let revoke_evt = seed_dummy_event(&ledger);
+        ledger
+            .insert_device_token(&edda_ledger::sqlite_store::DeviceTokenRow {
+                token_hash: token_hash.clone(),
+                device_name: "test-device".to_string(),
+                paired_at: "2026-01-01T00:00:00Z".to_string(),
+                paired_from_ip: "203.0.113.1".to_string(),
+                revoked_at: Some("2026-01-02T00:00:00Z".to_string()),
+                pair_event_id: pair_evt,
+                revoke_event_id: Some(revoke_evt),
+            })
+            .unwrap();
+        drop(ledger);
+
+        let app = app_with_auth(tmp.path());
+        let resp = app
+            .oneshot(remote_request_with_auth("/api/status", &raw_token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_valid_token_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed a valid (non-revoked) device token
+        let raw_token = generate_device_token();
+        let token_hash = hash_token(&raw_token);
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let pair_evt = seed_dummy_event(&ledger);
+        ledger
+            .insert_device_token(&edda_ledger::sqlite_store::DeviceTokenRow {
+                token_hash,
+                device_name: "test-device".to_string(),
+                paired_at: "2026-01-01T00:00:00Z".to_string(),
+                paired_from_ip: "203.0.113.1".to_string(),
+                revoked_at: None,
+                pair_event_id: pair_evt,
+                revoke_event_id: None,
+            })
+            .unwrap();
+        drop(ledger);
+
+        let app = app_with_auth(tmp.path());
+        let resp = app
+            .oneshot(remote_request_with_auth("/api/status", &raw_token))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_public_route_no_auth_needed() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = app_with_auth(tmp.path());
+
+        // /api/health is a public route — should work without auth from remote IP
+        let resp = app.oneshot(remote_request("/api/health")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn auth_ipv6_localhost_bypasses() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = app_with_auth(tmp.path());
+
+        let mut req = Request::builder()
+            .uri("/api/status")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::from((
+            [0, 0, 0, 0, 0, 0, 0, 1],
+            12345,
+        ))));
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }
