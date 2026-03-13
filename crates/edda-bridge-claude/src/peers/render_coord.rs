@@ -480,6 +480,7 @@ pub(crate) fn render_coord_diff(project_id: &str, session_id: &str) -> Option<St
 
         let label = event.payload["label"]
             .as_str()
+            .or_else(|| event.payload["teammate_name"].as_str())
             .or_else(|| event.payload["from_label"].as_str())
             .or_else(|| event.payload["by_label"].as_str())
             .unwrap_or("peer");
@@ -501,6 +502,10 @@ pub(crate) fn render_coord_diff(project_id: &str, session_id: &str) -> Option<St
                 let msg = event.payload["message"].as_str().unwrap_or("");
                 let to = event.payload["to_label"].as_str().unwrap_or("?");
                 format!("- {label} -> {to}: \"{msg}\" ({age})")
+            }
+            CoordEventType::TeammateIdle => {
+                let teammate = event.payload["teammate_name"].as_str().unwrap_or("?");
+                format!("- {teammate} is now idle (available for handoff) ({age})")
             }
             // Already filtered above
             _ => continue,

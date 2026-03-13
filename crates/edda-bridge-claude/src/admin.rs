@@ -19,6 +19,7 @@ const HOOK_EVENTS: &[&str] = &[
     "SubagentStart",
     "SubagentStop",
     "TaskCompleted",
+    "TeammateIdle",
 ];
 
 /// Check if a matcher group (Claude Code hook format) contains a edda hook.

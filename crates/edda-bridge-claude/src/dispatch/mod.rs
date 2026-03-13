@@ -297,6 +297,22 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
 
             Ok(HookResult::empty())
         }
+        "TeammateIdle" => {
+            let teammate_name = get_str(&raw, "teammate_name");
+            let team_name = get_str(&raw, "team_name");
+
+            // Best-effort: update teammate's heartbeat phase to "idle"
+            if let Some(teammate_sid) =
+                crate::peers::resolve_teammate_session(&project_id, &teammate_name)
+            {
+                crate::peers::update_teammate_phase(&project_id, &teammate_sid, "idle");
+            }
+
+            // Write idle event to coordination.jsonl (always, even if name resolution fails)
+            crate::peers::write_teammate_idle(&project_id, &session_id, &teammate_name, &team_name);
+
+            Ok(HookResult::empty())
+        }
         _ => Ok(HookResult::empty()),
     }
 }
