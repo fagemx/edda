@@ -379,12 +379,15 @@ where
     }
 }
 
-/// Hook timeout in milliseconds. Configurable via `EDDA_HOOK_TIMEOUT_MS` (default: 10s).
+/// Hook timeout in milliseconds. Configurable via `EDDA_HOOK_TIMEOUT_MS` (default: 60s).
+///
+/// Raised from 10s to 60s to accommodate SessionEnd background threads that
+/// make LLM API calls (bg_extract, bg_digest, bg_scan, bg_detect).  See #287.
 fn hook_timeout_ms() -> u64 {
     std::env::var("EDDA_HOOK_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(10_000)
+        .unwrap_or(60_000)
 }
 
 fn debug_log(msg: &str) {
@@ -1457,9 +1460,9 @@ mod tests {
     }
 
     #[test]
-    fn hook_timeout_ms_defaults_to_10s() {
+    fn hook_timeout_ms_defaults_to_60s() {
         std::env::remove_var("EDDA_HOOK_TIMEOUT_MS");
-        assert_eq!(hook_timeout_ms(), 10_000);
+        assert_eq!(hook_timeout_ms(), 60_000);
     }
 
     #[test]
