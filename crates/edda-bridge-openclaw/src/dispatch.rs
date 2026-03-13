@@ -91,7 +91,7 @@ fn dispatch_session_start(
     // Write minimal heartbeat for peer discovery
     if !session_id.is_empty() {
         let label = std::env::var("EDDA_SESSION_LABEL").unwrap_or_default();
-        edda_bridge_claude::peers::write_heartbeat_minimal(project_id, session_id, &label);
+        edda_bridge_claude::peers::write_heartbeat_minimal(project_id, session_id, &label, cwd);
     }
 
     // Auto-digest previous sessions

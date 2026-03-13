@@ -198,7 +198,7 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
             // writes heartbeat as a side-effect, but skips when the transcript
             // file doesn't exist yet — the normal case for brand-new sessions
             // where Claude Code creates the file AFTER SessionStart fires.
-            crate::peers::ensure_heartbeat_exists(&project_id, &session_id);
+            crate::peers::ensure_heartbeat_exists(&project_id, &session_id, &cwd);
             dispatch_session_start(&project_id, &session_id, &cwd, digest_warning.as_deref())
         }
         "UserPromptSubmit" => {

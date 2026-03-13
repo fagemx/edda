@@ -1212,8 +1212,8 @@ fn cross_session_binding_visible_via_user_prompt_submit() {
 
     // Multi-session: write heartbeats for s1 and s2
     let signals = crate::signals::SessionSignals::default();
-    crate::peers::write_heartbeat(pid, "s1", &signals, Some("auth"));
-    crate::peers::write_heartbeat(pid, "s2", &signals, Some("billing"));
+    crate::peers::write_heartbeat(pid, "s1", &signals, Some("auth"), ".");
+    crate::peers::write_heartbeat(pid, "s2", &signals, Some("billing"), ".");
 
     // Session A (s1) writes a binding
     crate::peers::write_binding(pid, "s1", "auth", "db.engine", "postgres");
@@ -1478,7 +1478,7 @@ fn late_peer_detection_injects_full_protocol() {
     // No peer_count file yet (virgin session) → prev_count = 0
     // Create a peer heartbeat to simulate a second agent joining
     let signals = crate::signals::SessionSignals::default();
-    crate::peers::write_heartbeat(pid, "peer-a", &signals, Some("billing"));
+    crate::peers::write_heartbeat(pid, "peer-a", &signals, Some("billing"), ".");
 
     let result =
         dispatch_with_workspace_only(pid, sid, cwd.to_str().unwrap(), "UserPromptSubmit").unwrap();
@@ -1532,7 +1532,7 @@ fn subsequent_prompts_use_lightweight_updates() {
 
     // Peer heartbeat still active
     let signals = crate::signals::SessionSignals::default();
-    crate::peers::write_heartbeat(pid, "peer-b", &signals, Some("auth"));
+    crate::peers::write_heartbeat(pid, "peer-b", &signals, Some("auth"), ".");
 
     let result =
         dispatch_with_workspace_only(pid, sid, cwd.to_str().unwrap(), "UserPromptSubmit").unwrap();
@@ -2400,7 +2400,7 @@ fn offlimits_blocks_peer_claimed_file() {
     let _ = edda_store::ensure_dirs(pid);
 
     // Create peer heartbeat so it's discovered as active
-    crate::peers::write_heartbeat_minimal(pid, peer_sid, "store-refactor");
+    crate::peers::write_heartbeat_minimal(pid, peer_sid, "store-refactor", ".");
     // Create peer claim
     crate::peers::write_claim(
         pid,
@@ -2427,7 +2427,7 @@ fn offlimits_allows_own_claimed_file() {
     let _ = edda_store::ensure_dirs(pid);
 
     // Create own heartbeat and claim
-    crate::peers::write_heartbeat_minimal(pid, sid, "my-agent");
+    crate::peers::write_heartbeat_minimal(pid, sid, "my-agent", ".");
     crate::peers::write_claim(pid, sid, "my-agent", &["src/auth/*".into()]);
     write_peer_count(pid, sid, 1);
 
@@ -2445,7 +2445,7 @@ fn offlimits_allows_unclaimed_file() {
     let _ = edda_store::ensure_dirs(pid);
 
     // Create peer with claims on different paths
-    crate::peers::write_heartbeat_minimal(pid, peer_sid, "db-agent");
+    crate::peers::write_heartbeat_minimal(pid, peer_sid, "db-agent", ".");
     crate::peers::write_claim(pid, peer_sid, "db-agent", &["crates/edda-store/*".into()]);
     write_peer_count(pid, sid, 1);
 
@@ -2491,7 +2491,7 @@ fn offlimits_env_var_enables_enforcement() {
     let _ = edda_store::ensure_dirs(pid);
 
     // Set up peer
-    crate::peers::write_heartbeat_minimal(pid, peer_sid, "env-agent");
+    crate::peers::write_heartbeat_minimal(pid, peer_sid, "env-agent", ".");
     crate::peers::write_claim(pid, peer_sid, "env-agent", &["src/core/*".into()]);
     write_peer_count(pid, sid, 1);
 
@@ -2542,7 +2542,7 @@ fn offlimits_skips_non_edit_tools() {
     let _ = edda_store::ensure_dirs(pid);
 
     // Set up peer with claim
-    crate::peers::write_heartbeat_minimal(pid, peer_sid, "bash-agent");
+    crate::peers::write_heartbeat_minimal(pid, peer_sid, "bash-agent", ".");
     crate::peers::write_claim(pid, peer_sid, "bash-agent", &["src/*".into()]);
     write_peer_count(pid, sid, 1);
 
@@ -2797,7 +2797,10 @@ fn session_end_bg_threads_joined_zero_threads() {
     std::env::set_var("EDDA_BG_JOIN_TIMEOUT_SECS", "1");
 
     let result = dispatch_session_end(pid, "s1", "", cwd.path().to_str().unwrap(), false);
-    assert!(result.is_ok(), "dispatch_session_end should succeed with zero bg threads");
+    assert!(
+        result.is_ok(),
+        "dispatch_session_end should succeed with zero bg threads"
+    );
 
     std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     std::env::remove_var("EDDA_PLANS_DIR");
