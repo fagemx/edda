@@ -441,7 +441,7 @@ fn collect_active_decisions(cwd: &str) -> Option<String> {
     let cwd_path = Path::new(cwd);
     let root = edda_ledger::EddaPaths::find_root(cwd_path)?;
     let ledger = edda_ledger::Ledger::open(&root).ok()?;
-    let decisions = ledger.active_decisions(None, None).ok()?;
+    let decisions = ledger.active_decisions(None, None, None, None).ok()?;
 
     if decisions.is_empty() {
         return None;

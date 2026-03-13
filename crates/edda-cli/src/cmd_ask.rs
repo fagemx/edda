@@ -20,6 +20,7 @@ pub fn execute(
         include_superseded: all,
         branch: branch.map(|s| s.to_string()),
         impact,
+        ..Default::default()
     };
 
     // Build transcript search callback

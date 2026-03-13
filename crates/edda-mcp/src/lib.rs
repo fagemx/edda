@@ -263,6 +263,8 @@ impl EddaServer {
             include_superseded: params.include_superseded.unwrap_or(false),
             branch: params.branch,
             impact: false,
+            after: None,
+            before: None,
         };
 
         let result = edda_ask::ask(&ledger, q, &opts, None).map_err(to_mcp_err)?;

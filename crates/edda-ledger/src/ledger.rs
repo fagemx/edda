@@ -176,22 +176,38 @@ impl Ledger {
     // ── Decisions ───────────────────────────────────────────────────
 
     /// Query active decisions, optionally filtered by domain or key pattern.
+    /// `after`/`before` are optional ISO 8601 bounds for temporal filtering.
     pub fn active_decisions(
         &self,
         domain: Option<&str>,
         key_pattern: Option<&str>,
+        after: Option<&str>,
+        before: Option<&str>,
     ) -> anyhow::Result<Vec<DecisionRow>> {
-        self.sqlite.active_decisions(domain, key_pattern)
+        self.sqlite
+            .active_decisions(domain, key_pattern, after, before)
     }
 
     /// All decisions for a key (active + superseded), ordered by time.
-    pub fn decision_timeline(&self, key: &str) -> anyhow::Result<Vec<DecisionRow>> {
-        self.sqlite.decision_timeline(key)
+    /// `after`/`before` are optional ISO 8601 bounds for temporal filtering.
+    pub fn decision_timeline(
+        &self,
+        key: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+    ) -> anyhow::Result<Vec<DecisionRow>> {
+        self.sqlite.decision_timeline(key, after, before)
     }
 
     /// All decisions for a domain (active + superseded), ordered by time.
-    pub fn domain_timeline(&self, domain: &str) -> anyhow::Result<Vec<DecisionRow>> {
-        self.sqlite.domain_timeline(domain)
+    /// `after`/`before` are optional ISO 8601 bounds for temporal filtering.
+    pub fn domain_timeline(
+        &self,
+        domain: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+    ) -> anyhow::Result<Vec<DecisionRow>> {
+        self.sqlite.domain_timeline(domain, after, before)
     }
 
     /// Distinct domain values from active decisions.

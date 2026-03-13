@@ -1461,81 +1461,154 @@ impl SqliteStore {
     // ── Decisions ───────────────────────────────────────────────────
 
     /// Query active decisions, optionally filtered by domain or key prefix.
+    /// `after`/`before` are optional ISO 8601 bounds for temporal filtering.
     pub fn active_decisions(
         &self,
         domain: Option<&str>,
         key_pattern: Option<&str>,
+        after: Option<&str>,
+        before: Option<&str>,
     ) -> anyhow::Result<Vec<DecisionRow>> {
-        let sql = match (domain, key_pattern) {
-            (Some(_), _) => {
-                "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
-                        d.supersedes_id, d.is_active, e.ts,
-                        d.scope, d.source_project_id, d.source_event_id
-                 FROM decisions d JOIN events e ON d.event_id = e.event_id
-                 WHERE d.is_active = TRUE AND d.domain = ?1
-                 ORDER BY d.domain, d.key"
-            }
-            (_, Some(_)) => {
-                "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
-                        d.supersedes_id, d.is_active, e.ts,
-                        d.scope, d.source_project_id, d.source_event_id
-                 FROM decisions d JOIN events e ON d.event_id = e.event_id
-                 WHERE d.is_active = TRUE AND (d.key LIKE ?1 OR d.value LIKE ?1)
-                 ORDER BY d.domain, d.key"
-            }
-            (None, None) => {
-                "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
-                        d.supersedes_id, d.is_active, e.ts,
-                        d.scope, d.source_project_id, d.source_event_id
-                 FROM decisions d JOIN events e ON d.event_id = e.event_id
-                 WHERE d.is_active = TRUE
-                 ORDER BY d.domain, d.key"
-            }
-        };
+        let has_temporal = after.is_some() || before.is_some();
 
-        let param: String = match (domain, key_pattern) {
-            (Some(d), _) => d.to_string(),
-            (_, Some(k)) => format!("%{k}%"),
-            _ => String::new(),
-        };
+        let mut sql = String::from(
+            "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                    d.supersedes_id, d.is_active, e.ts,
+                    d.scope, d.source_project_id, d.source_event_id
+             FROM decisions d JOIN events e ON d.event_id = e.event_id
+             WHERE d.is_active = TRUE",
+        );
 
-        let mut stmt = self.conn.prepare(sql)?;
-        let rows = if domain.is_some() || key_pattern.is_some() {
-            stmt.query_map(params![param], map_decision_row)?
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+
+        if let Some(d) = domain {
+            sql.push_str(&format!(" AND d.domain = ?{idx}"));
+            param_values.push(Box::new(d.to_string()));
+            idx += 1;
+        } else if let Some(k) = key_pattern {
+            let like = format!("%{k}%");
+            sql.push_str(&format!(" AND (d.key LIKE ?{idx} OR d.value LIKE ?{idx})"));
+            param_values.push(Box::new(like));
+            idx += 1;
+        }
+
+        if let Some(a) = after {
+            sql.push_str(&format!(" AND e.ts >= ?{idx}"));
+            param_values.push(Box::new(a.to_string()));
+            idx += 1;
+        }
+        if let Some(b) = before {
+            sql.push_str(&format!(" AND e.ts <= ?{idx}"));
+            param_values.push(Box::new(b.to_string()));
+            let _ = idx + 1;
+        }
+
+        if has_temporal {
+            sql.push_str(" ORDER BY e.ts DESC");
         } else {
-            stmt.query_map([], map_decision_row)?
-        };
+            sql.push_str(" ORDER BY d.domain, d.key");
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_ref.as_slice(), map_decision_row)?;
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("decision query failed: {e}"))
     }
 
     /// All decisions for a key (active + superseded), ordered by time.
-    pub fn decision_timeline(&self, key: &str) -> anyhow::Result<Vec<DecisionRow>> {
-        let mut stmt = self.conn.prepare(
+    /// `after`/`before` are optional ISO 8601 bounds for temporal filtering.
+    pub fn decision_timeline(
+        &self,
+        key: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+    ) -> anyhow::Result<Vec<DecisionRow>> {
+        let has_temporal = after.is_some() || before.is_some();
+
+        let mut sql = String::from(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
                     d.scope, d.source_project_id, d.source_event_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
-             WHERE d.key = ?1
-             ORDER BY e.ts",
-        )?;
-        let rows = stmt.query_map(params![key], map_decision_row)?;
+             WHERE d.key = ?1",
+        );
+
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        param_values.push(Box::new(key.to_string()));
+        let mut idx = 2;
+
+        if let Some(a) = after {
+            sql.push_str(&format!(" AND e.ts >= ?{idx}"));
+            param_values.push(Box::new(a.to_string()));
+            idx += 1;
+        }
+        if let Some(b) = before {
+            sql.push_str(&format!(" AND e.ts <= ?{idx}"));
+            param_values.push(Box::new(b.to_string()));
+            let _ = idx + 1;
+        }
+
+        if has_temporal {
+            sql.push_str(" ORDER BY e.ts DESC");
+        } else {
+            sql.push_str(" ORDER BY e.ts");
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_ref.as_slice(), map_decision_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("decision timeline query failed: {e}"))
     }
 
     /// All decisions for a domain (active + superseded), ordered by time.
-    pub fn domain_timeline(&self, domain: &str) -> anyhow::Result<Vec<DecisionRow>> {
-        let mut stmt = self.conn.prepare(
+    /// `after`/`before` are optional ISO 8601 bounds for temporal filtering.
+    pub fn domain_timeline(
+        &self,
+        domain: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+    ) -> anyhow::Result<Vec<DecisionRow>> {
+        let has_temporal = after.is_some() || before.is_some();
+
+        let mut sql = String::from(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
                     d.scope, d.source_project_id, d.source_event_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
-             WHERE d.domain = ?1
-             ORDER BY e.ts",
-        )?;
-        let rows = stmt.query_map(params![domain], map_decision_row)?;
+             WHERE d.domain = ?1",
+        );
+
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        param_values.push(Box::new(domain.to_string()));
+        let mut idx = 2;
+
+        if let Some(a) = after {
+            sql.push_str(&format!(" AND e.ts >= ?{idx}"));
+            param_values.push(Box::new(a.to_string()));
+            idx += 1;
+        }
+        if let Some(b) = before {
+            sql.push_str(&format!(" AND e.ts <= ?{idx}"));
+            param_values.push(Box::new(b.to_string()));
+            let _ = idx + 1;
+        }
+
+        if has_temporal {
+            sql.push_str(" ORDER BY e.ts DESC");
+        } else {
+            sql.push_str(" ORDER BY e.ts");
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let rows = stmt.query_map(params_ref.as_slice(), map_decision_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("domain timeline query failed: {e}"))
     }
@@ -2764,7 +2837,7 @@ mod tests {
         let e = make_decision_event("main", "db.engine", "postgres", Some("JSONB support"), None);
         store.append_event(&e).unwrap();
 
-        let active = store.active_decisions(None, None).unwrap();
+        let active = store.active_decisions(None, None, None, None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].key, "db.engine");
         assert_eq!(active[0].value, "postgres");
@@ -2788,13 +2861,13 @@ mod tests {
         let d2 = make_decision_event("main", "db.engine", "postgres", Some("JSONB"), Some(&d1_id));
         store.append_event(&d2).unwrap();
 
-        let active = store.active_decisions(None, None).unwrap();
+        let active = store.active_decisions(None, None, None, None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].value, "postgres");
         assert_eq!(active[0].supersedes_id.as_deref(), Some(d1_id.as_str()));
 
         // Timeline should show both
-        let timeline = store.decision_timeline("db.engine").unwrap();
+        let timeline = store.decision_timeline("db.engine", None, None).unwrap();
         assert_eq!(timeline.len(), 2);
         assert!(!timeline[0].is_active); // mysql deactivated
         assert!(timeline[1].is_active); // postgres active
@@ -2834,10 +2907,14 @@ mod tests {
             ))
             .unwrap();
 
-        let db_decisions = store.active_decisions(Some("db"), None).unwrap();
+        let db_decisions = store
+            .active_decisions(Some("db"), None, None, None)
+            .unwrap();
         assert_eq!(db_decisions.len(), 2);
 
-        let auth_decisions = store.active_decisions(Some("auth"), None).unwrap();
+        let auth_decisions = store
+            .active_decisions(Some("auth"), None, None, None)
+            .unwrap();
         assert_eq!(auth_decisions.len(), 1);
         assert_eq!(auth_decisions[0].key, "auth.method");
 
@@ -2866,7 +2943,7 @@ mod tests {
         finalize_event(&mut event).unwrap();
         store.append_event(&event).unwrap();
 
-        let active = store.active_decisions(None, None).unwrap();
+        let active = store.active_decisions(None, None, None, None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].key, "orm");
         assert_eq!(active[0].value, "sqlx");
@@ -2908,11 +2985,15 @@ mod tests {
             .unwrap();
 
         // Search by key/value pattern
-        let results = store.active_decisions(None, Some("postgres")).unwrap();
+        let results = store
+            .active_decisions(None, Some("postgres"), None, None)
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "db.engine");
 
-        let results = store.active_decisions(None, Some("auth")).unwrap();
+        let results = store
+            .active_decisions(None, Some("auth"), None, None)
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "auth.method");
 
@@ -2970,7 +3051,7 @@ mod tests {
             ))
             .unwrap();
 
-        let all = store.active_decisions(None, None).unwrap();
+        let all = store.active_decisions(None, None, None, None).unwrap();
         assert_eq!(all.len(), 2);
 
         let main = store
@@ -3026,7 +3107,7 @@ mod tests {
         assert!(store.schema_version().unwrap() >= 2);
 
         // Verify decisions table was populated by backfill
-        let active = store.active_decisions(None, None).unwrap();
+        let active = store.active_decisions(None, None, None, None).unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].key, "db.engine");
         assert_eq!(active[0].value, "postgres");
@@ -3043,7 +3124,7 @@ mod tests {
         let e = new_note_event("main", None, "system", "just a note", &["todo".into()]).unwrap();
         store.append_event(&e).unwrap();
 
-        let active = store.active_decisions(None, None).unwrap();
+        let active = store.active_decisions(None, None, None, None).unwrap();
         assert!(active.is_empty());
 
         drop(store);
@@ -3071,7 +3152,7 @@ mod tests {
             ))
             .unwrap();
 
-        let timeline = store.domain_timeline("db").unwrap();
+        let timeline = store.domain_timeline("db", None, None).unwrap();
         assert_eq!(timeline.len(), 2);
         assert_eq!(timeline[0].value, "sqlite");
         assert!(!timeline[0].is_active);
@@ -3095,7 +3176,7 @@ mod tests {
             ))
             .unwrap();
 
-        let timeline = store.domain_timeline("nonexistent").unwrap();
+        let timeline = store.domain_timeline("nonexistent", None, None).unwrap();
         assert!(timeline.is_empty());
 
         drop(store);
@@ -4319,6 +4400,346 @@ mod tests {
                 "should find exactly one task with intent {intent}"
             );
         }
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Temporal filter tests ────────────────────────────────────────
+
+    /// Helper: create a decision event with a specific timestamp.
+    fn make_decision_event_at(branch: &str, key: &str, value: &str, ts: &str) -> Event {
+        use edda_core::event::finalize_event;
+        let text = format!("{key}: {value}");
+        let tags = vec!["decision".to_string()];
+        let mut event = new_note_event(branch, None, "system", &text, &tags).unwrap();
+        event.ts = ts.to_string();
+        event.payload["decision"] = serde_json::json!({"key": key, "value": value});
+        finalize_event(&mut event).unwrap();
+        event
+    }
+
+    #[test]
+    fn temporal_filter_after_only() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.engine",
+                "postgres",
+                "2026-03-10T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.pool",
+                "10",
+                "2026-03-12T00:00:00Z",
+            ))
+            .unwrap();
+
+        let results = store
+            .active_decisions(None, None, Some("2026-03-11T00:00:00Z"), None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "db.pool");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporal_filter_before_only() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.engine",
+                "postgres",
+                "2026-03-10T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.pool",
+                "10",
+                "2026-03-12T00:00:00Z",
+            ))
+            .unwrap();
+
+        let results = store
+            .active_decisions(None, None, None, Some("2026-03-11T00:00:00Z"))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "db.engine");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporal_filter_range() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "a.early",
+                "v1",
+                "2026-03-08T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "b.mid",
+                "v2",
+                "2026-03-10T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "c.late",
+                "v3",
+                "2026-03-14T00:00:00Z",
+            ))
+            .unwrap();
+
+        let results = store
+            .active_decisions(
+                None,
+                None,
+                Some("2026-03-09T00:00:00Z"),
+                Some("2026-03-12T00:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "b.mid");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporal_filter_with_domain() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.engine",
+                "postgres",
+                "2026-03-10T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.pool",
+                "10",
+                "2026-03-12T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "auth.method",
+                "JWT",
+                "2026-03-12T00:00:00Z",
+            ))
+            .unwrap();
+
+        let results = store
+            .active_decisions(Some("db"), None, Some("2026-03-11T00:00:00Z"), None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "db.pool");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporal_filter_with_keyword() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.engine",
+                "postgres",
+                "2026-03-10T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "cache.engine",
+                "redis",
+                "2026-03-12T00:00:00Z",
+            ))
+            .unwrap();
+
+        let results = store
+            .active_decisions(None, Some("engine"), Some("2026-03-11T00:00:00Z"), None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "cache.engine");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporal_filter_empty_range() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.engine",
+                "postgres",
+                "2026-03-10T00:00:00Z",
+            ))
+            .unwrap();
+
+        let results = store
+            .active_decisions(
+                None,
+                None,
+                Some("2026-03-15T00:00:00Z"),
+                Some("2026-03-05T00:00:00Z"),
+            )
+            .unwrap();
+        assert!(results.is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporal_filter_no_params_unchanged() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.engine",
+                "postgres",
+                "2026-03-10T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "auth.method",
+                "JWT",
+                "2026-03-12T00:00:00Z",
+            ))
+            .unwrap();
+
+        let results = store.active_decisions(None, None, None, None).unwrap();
+        assert_eq!(results.len(), 2);
+        // Original sort order: domain, key (auth before db)
+        assert_eq!(results[0].key, "auth.method");
+        assert_eq!(results[1].key, "db.engine");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporal_filter_sort_order_desc() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "a.first",
+                "v1",
+                "2026-03-08T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "b.second",
+                "v2",
+                "2026-03-10T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "c.third",
+                "v3",
+                "2026-03-12T00:00:00Z",
+            ))
+            .unwrap();
+
+        let results = store
+            .active_decisions(None, None, Some("2026-03-07T00:00:00Z"), None)
+            .unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].key, "c.third");
+        assert_eq!(results[1].key, "b.second");
+        assert_eq!(results[2].key, "a.first");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporal_filter_decision_timeline() {
+        let (dir, store) = tmp_db();
+
+        let e1 = make_decision_event_at("main", "db.engine", "mysql", "2026-03-08T00:00:00Z");
+        store.append_event(&e1).unwrap();
+        let mut e2 =
+            make_decision_event_at("main", "db.engine", "postgres", "2026-03-12T00:00:00Z");
+        e2.refs.provenance.push(Provenance {
+            target: e1.event_id.clone(),
+            rel: "supersedes".to_string(),
+            note: Some("upgrade".to_string()),
+        });
+        edda_core::event::finalize_event(&mut e2).unwrap();
+        store.append_event(&e2).unwrap();
+
+        let results = store
+            .decision_timeline("db.engine", Some("2026-03-10T00:00:00Z"), None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].value, "postgres");
+
+        let results = store.decision_timeline("db.engine", None, None).unwrap();
+        assert_eq!(results.len(), 2);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temporal_filter_domain_timeline() {
+        let (dir, store) = tmp_db();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.engine",
+                "postgres",
+                "2026-03-08T00:00:00Z",
+            ))
+            .unwrap();
+        store
+            .append_event(&make_decision_event_at(
+                "main",
+                "db.pool",
+                "10",
+                "2026-03-12T00:00:00Z",
+            ))
+            .unwrap();
+
+        let results = store
+            .domain_timeline("db", None, Some("2026-03-10T00:00:00Z"))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "db.engine");
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
