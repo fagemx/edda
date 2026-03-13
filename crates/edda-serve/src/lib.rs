@@ -1632,16 +1632,14 @@ async fn post_snapshot(
         edda_ledger::BlobClass::DecisionEvidence,
         threshold,
     )
-    .ok()
-    .flatten();
+    .map_err(|e| anyhow::anyhow!("writing context blob: {e}"))?;
     let result_blob = edda_ledger::blob_put_if_large(
         &ledger.paths,
         &result_bytes,
         edda_ledger::BlobClass::DecisionEvidence,
         threshold,
     )
-    .ok()
-    .flatten();
+    .map_err(|e| anyhow::anyhow!("writing result blob: {e}"))?;
 
     let has_blobs = context_blob.is_some() || result_blob.is_some();
 
@@ -5722,5 +5720,224 @@ actors:
             !yellow_names.contains(&"normal"),
             "Normal project should not be in yellow"
         );
+    }
+
+    // ── DecideSnapshot endpoint tests ──
+
+    fn snapshot_json() -> serde_json::Value {
+        serde_json::json!({
+            "engine_version": "claude-3.5",
+            "context_hash": "abc123def456",
+            "context": {"files": ["main.rs"], "prompt": "test"},
+            "result": {"decisions": [{"key": "db.engine", "value": "sqlite"}]},
+        })
+    }
+
+    #[tokio::test]
+    async fn post_snapshot_returns_201() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/snapshot")
+                    .header("content-type", "application/json")
+                    .body(Body::from(snapshot_json().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["event_id"].as_str().unwrap().starts_with("evt_"));
+        assert_eq!(json["context_hash"], "abc123def456");
+    }
+
+    #[tokio::test]
+    async fn post_snapshot_rejects_empty_engine_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let body = serde_json::json!({
+            "engine_version": "",
+            "context_hash": "abc123",
+            "context": {},
+            "result": {},
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/snapshot")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_snapshot_rejects_empty_context_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let body = serde_json::json!({
+            "engine_version": "claude-3.5",
+            "context_hash": "",
+            "context": {},
+            "result": {},
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/snapshot")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn post_snapshot_rejects_missing_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let body = serde_json::json!({"engine_version": "claude-3.5"});
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/snapshot")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_snapshots_returns_posted() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // POST a snapshot
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/snapshot")
+                    .header("content-type", "application/json")
+                    .body(Body::from(snapshot_json().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // GET /api/snapshots
+        let app2 = router(tmp.path());
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/api/snapshots")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["context_hash"], "abc123def456");
+        assert_eq!(json[0]["engine_version"], "claude-3.5");
+    }
+
+    #[tokio::test]
+    async fn get_snapshots_by_context_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // POST a snapshot
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/snapshot")
+                    .header("content-type", "application/json")
+                    .body(Body::from(snapshot_json().to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // GET /api/snapshots/:context_hash
+        let app2 = router(tmp.path());
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .uri("/api/snapshots/abc123def456")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["context_hash"], "abc123def456");
+    }
+
+    #[tokio::test]
+    async fn get_snapshots_by_hash_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/snapshots/nonexistent_hash")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
