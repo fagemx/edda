@@ -13,11 +13,14 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
-use edda_aggregate::aggregate::{aggregate_decisions, aggregate_overview, DateRange};
+use edda_aggregate::aggregate::{
+    aggregate_decisions, aggregate_overview, per_project_metrics, DateRange, ProjectMetrics,
+};
 use edda_aggregate::controls::evaluate_controls_rules;
 use edda_aggregate::graph::build_dependency_graph;
 use edda_aggregate::quality::{model_quality_from_events, QualityReport};
 use edda_aggregate::risk::{compute_decision_risks, DecisionInput, DecisionRisk};
+use edda_aggregate::rollup;
 use edda_core::agent_phase::{mobile_context_summary, AgentPhaseState};
 use edda_core::event::{
     finalize_event, new_approval_event, new_decision_event, new_execution_event, new_note_event,
@@ -160,6 +163,8 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/overview", get(get_overview))
         .route("/api/projects", get(get_projects))
         .route("/api/metrics/quality", get(get_quality_metrics))
+        .route("/api/metrics/overview", get(get_metrics_overview))
+        .route("/api/metrics/trends", get(get_metrics_trends))
         .route("/api/dashboard", get(get_dashboard))
         .route("/dashboard", get(serve_dashboard))
         .route("/api/actors", get(get_actors))
@@ -228,6 +233,8 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/briefs", get(get_briefs))
         .route("/api/briefs/{task_id}", get(get_brief))
         .route("/api/metrics/quality", get(get_quality_metrics))
+        .route("/api/metrics/overview", get(get_metrics_overview))
+        .route("/api/metrics/trends", get(get_metrics_trends))
         .route("/api/dashboard", get(get_dashboard))
         .route("/api/sync", post(post_sync))
         .route("/dashboard", get(serve_dashboard))
@@ -1402,7 +1409,7 @@ async fn get_overview(
         &std::collections::HashSet::new(),
     );
 
-    let response = compute_attention(&risks, &projects, &range);
+    let response = compute_attention(&risks, &projects, &range, &[], 7);
     Ok(Json(response))
 }
 
@@ -1619,6 +1626,224 @@ async fn post_approve_controls_patch(
 
     let patch = edda_bridge_claude::controls_suggest::approve_patch(&project_id, &patch_id, &by)?;
     Ok(Json(patch))
+}
+
+// ── GET /api/metrics/overview ──
+
+fn default_overview_days() -> usize {
+    30
+}
+
+#[derive(Deserialize)]
+struct MetricsOverviewQuery {
+    #[serde(default = "default_overview_days")]
+    days: usize,
+    group: Option<String>,
+}
+
+#[derive(Serialize)]
+struct MetricsOverviewResponse {
+    period: DashboardPeriod,
+    projects: Vec<ProjectMetrics>,
+    totals: MetricsTotals,
+}
+
+#[derive(Serialize)]
+struct MetricsTotals {
+    total_cost_usd: f64,
+    total_events: usize,
+    total_commits: usize,
+    total_steps: u64,
+    overall_success_rate: f64,
+}
+
+async fn get_metrics_overview(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<MetricsOverviewQuery>,
+) -> Result<Json<MetricsOverviewResponse>, AppError> {
+    if state.chronicle.is_none() {
+        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+    }
+
+    let all_projects = list_projects();
+    let projects: Vec<_> = if let Some(ref group) = params.group {
+        all_projects
+            .into_iter()
+            .filter(|p| p.group.as_deref() == Some(group.as_str()))
+            .collect()
+    } else {
+        all_projects
+    };
+
+    let now = time::OffsetDateTime::now_utc();
+    let from_date = now - time::Duration::days(params.days as i64);
+    let to_str = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+    let from_str = from_date
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+
+    let range = DateRange {
+        after: Some(from_str[..10].to_string()),
+        before: None,
+    };
+
+    let metrics = per_project_metrics(&projects, &range, params.days);
+
+    let total_cost: f64 = metrics.iter().map(|m| m.cost.total_usd).sum();
+    let total_events: usize = metrics.iter().map(|m| m.activity.events).sum();
+    let total_commits: usize = metrics.iter().map(|m| m.activity.commits).sum();
+    let total_steps: u64 = metrics.iter().map(|m| m.quality.total_steps).sum();
+    let total_success: u64 = metrics
+        .iter()
+        .map(|m| (m.quality.success_rate * m.quality.total_steps as f64) as u64)
+        .sum();
+
+    let period = DashboardPeriod {
+        from: from_str[..10].to_string(),
+        to: to_str[..10].to_string(),
+        days: params.days,
+    };
+
+    Ok(Json(MetricsOverviewResponse {
+        period,
+        projects: metrics,
+        totals: MetricsTotals {
+            total_cost_usd: total_cost,
+            total_events,
+            total_commits,
+            total_steps,
+            overall_success_rate: if total_steps > 0 {
+                total_success as f64 / total_steps as f64
+            } else {
+                0.0
+            },
+        },
+    }))
+}
+
+// ── GET /api/metrics/trends ──
+
+fn default_trend_granularity() -> String {
+    "daily".to_string()
+}
+
+#[derive(Deserialize)]
+struct TrendsQuery {
+    #[serde(default = "default_overview_days")]
+    days: usize,
+    #[serde(default = "default_trend_granularity")]
+    granularity: String,
+    group: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TrendsResponse {
+    granularity: String,
+    data: Vec<TrendPoint>,
+}
+
+#[derive(Serialize)]
+struct TrendPoint {
+    date: String,
+    events: usize,
+    commits: usize,
+    cost_usd: f64,
+    execution_count: u64,
+    success_count: u64,
+    success_rate: f64,
+}
+
+async fn get_metrics_trends(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<TrendsQuery>,
+) -> Result<Json<TrendsResponse>, AppError> {
+    if state.chronicle.is_none() {
+        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+    }
+
+    let all_projects = list_projects();
+    let projects: Vec<_> = if let Some(ref group) = params.group {
+        all_projects
+            .into_iter()
+            .filter(|p| p.group.as_deref() == Some(group.as_str()))
+            .collect()
+    } else {
+        all_projects
+    };
+
+    let now = time::OffsetDateTime::now_utc();
+    let from_date = now - time::Duration::days(params.days as i64);
+    let from_str = from_date
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+
+    let range = DateRange {
+        after: Some(from_str[..10].to_string()),
+        before: None,
+    };
+
+    let r = rollup::compute_rollup(&projects, &range, "edda");
+
+    let data: Vec<TrendPoint> = match params.granularity.as_str() {
+        "weekly" => r
+            .weekly
+            .iter()
+            .map(|w| TrendPoint {
+                date: w.week_start.clone(),
+                events: w.events,
+                commits: w.commits,
+                cost_usd: w.cost_usd,
+                execution_count: w.execution_count,
+                success_count: w.success_count,
+                success_rate: if w.execution_count > 0 {
+                    w.success_count as f64 / w.execution_count as f64
+                } else {
+                    0.0
+                },
+            })
+            .collect(),
+        "monthly" => r
+            .monthly
+            .iter()
+            .map(|m| TrendPoint {
+                date: m.month.clone(),
+                events: m.events,
+                commits: m.commits,
+                cost_usd: m.cost_usd,
+                execution_count: m.execution_count,
+                success_count: m.success_count,
+                success_rate: if m.execution_count > 0 {
+                    m.success_count as f64 / m.execution_count as f64
+                } else {
+                    0.0
+                },
+            })
+            .collect(),
+        _ => r
+            .daily
+            .iter()
+            .map(|d| TrendPoint {
+                date: d.date.clone(),
+                events: d.events,
+                commits: d.commits,
+                cost_usd: d.cost_usd,
+                execution_count: d.execution_count,
+                success_count: d.success_count,
+                success_rate: if d.execution_count > 0 {
+                    d.success_count as f64 / d.execution_count as f64
+                } else {
+                    0.0
+                },
+            })
+            .collect(),
+    };
+
+    Ok(Json(TrendsResponse {
+        granularity: params.granularity,
+        data,
+    }))
 }
 
 // ── POST /api/scope/check ──
@@ -2084,6 +2309,7 @@ struct DashboardResponse {
     timeline: Vec<TimelineEntry>,
     graph: edda_aggregate::graph::DependencyGraph,
     risks: Vec<DecisionRisk>,
+    project_metrics: Vec<ProjectMetrics>,
 }
 
 #[derive(Serialize)]
@@ -2099,6 +2325,8 @@ struct DashboardSummary {
     total_decisions: usize,
     total_events: usize,
     total_commits: usize,
+    total_cost_usd: f64,
+    overall_success_rate: f64,
 }
 
 #[derive(Serialize)]
@@ -2216,8 +2444,24 @@ async fn get_dashboard(
     // Dependency graph
     let graph = build_dependency_graph(&projects);
 
-    // Attention routing
-    let attention = compute_attention(&risks, &projects, &range);
+    // Per-project metrics
+    let project_metrics = per_project_metrics(&projects, &range, params.days);
+
+    // Compute cost totals for summary
+    let total_cost: f64 = project_metrics.iter().map(|m| m.cost.total_usd).sum();
+    let total_steps: u64 = project_metrics.iter().map(|m| m.quality.total_steps).sum();
+    let total_success: u64 = project_metrics
+        .iter()
+        .map(|m| (m.quality.success_rate * m.quality.total_steps as f64) as u64)
+        .sum();
+    let overall_success_rate = if total_steps > 0 {
+        total_success as f64 / total_steps as f64
+    } else {
+        0.0
+    };
+
+    // Attention routing (with cost anomaly detection)
+    let attention = compute_attention(&risks, &projects, &range, &project_metrics, params.days);
 
     let period = DashboardPeriod {
         from: from_str[..10].to_string(),
@@ -2230,6 +2474,8 @@ async fn get_dashboard(
         total_decisions: agg.total_decisions,
         total_events: agg.total_events,
         total_commits: agg.total_commits,
+        total_cost_usd: total_cost,
+        overall_success_rate,
     };
 
     Ok(Json(DashboardResponse {
@@ -2239,14 +2485,21 @@ async fn get_dashboard(
         timeline,
         graph,
         risks,
+        project_metrics,
     }))
 }
 
 /// Compute attention routing: red / yellow / green classification.
+///
+/// Includes cost anomaly detection when `project_metrics` is non-empty:
+/// - Yellow: project daily cost > 2x period average
+/// - Red: project daily cost > 5x period average
 fn compute_attention(
     risks: &[DecisionRisk],
     projects: &[edda_store::registry::ProjectEntry],
     range: &DateRange,
+    project_metrics: &[ProjectMetrics],
+    days: usize,
 ) -> OverviewResponse {
     let mut red = Vec::new();
     let mut yellow = Vec::new();
@@ -2287,6 +2540,37 @@ fn compute_attention(
                 ),
                 eta: String::new(),
             });
+        }
+    }
+
+    // Cost anomaly detection
+    if days > 0 {
+        for pm in project_metrics {
+            let daily_avg = pm.cost.daily_avg_usd;
+            if daily_avg > 0.0 && pm.cost.last_day_usd > 0.0 {
+                // Use the actual most-recent-day cost from rollup data
+                let last_day_cost = pm.cost.last_day_usd;
+                if last_day_cost > daily_avg * 5.0 {
+                    red.push(OverviewRedItem {
+                        project: pm.name.clone(),
+                        summary: format!(
+                            "Cost spike: ${:.2}/day (5x above ${:.2} avg)",
+                            last_day_cost, daily_avg
+                        ),
+                        action: "Investigate cost increase".to_string(),
+                        blocked_count: 0,
+                    });
+                } else if last_day_cost > daily_avg * 2.0 {
+                    yellow.push(OverviewYellowItem {
+                        project: pm.name.clone(),
+                        summary: format!(
+                            "Elevated cost: ${:.2}/day (2x above ${:.2} avg)",
+                            last_day_cost, daily_avg
+                        ),
+                        eta: String::new(),
+                    });
+                }
+            }
         }
     }
 
@@ -3827,6 +4111,91 @@ actors:
         assert!(json["timeline"].is_array());
         assert!(json["graph"].is_object());
         assert!(json["risks"].is_array());
+        assert!(json["project_metrics"].is_array());
+        // New summary fields
+        assert!(
+            json["summary"]["total_cost_usd"].is_f64()
+                || json["summary"]["total_cost_usd"].is_u64()
+        );
+        assert!(
+            json["summary"]["overall_success_rate"].is_f64()
+                || json["summary"]["overall_success_rate"].is_u64()
+        );
+    }
+
+    #[tokio::test]
+    async fn metrics_overview_returns_200() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/metrics/overview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["period"].is_object());
+        assert!(json["projects"].is_array());
+        assert!(json["totals"].is_object());
+    }
+
+    #[tokio::test]
+    async fn metrics_trends_returns_200() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/metrics/trends?granularity=daily")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["granularity"], "daily");
+        assert!(json["data"].is_array());
+    }
+
+    #[tokio::test]
+    async fn metrics_trends_weekly_granularity() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/metrics/trends?granularity=weekly")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["granularity"], "weekly");
     }
 
     #[tokio::test]
@@ -4586,5 +4955,116 @@ actors:
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload["device_id"], "iphone-14-xyz");
+    }
+
+    #[test]
+    fn cost_anomaly_detection_yellow_and_red() {
+        use edda_aggregate::aggregate::{
+            ActivityMetrics, CostMetrics, ProjectMetrics, QualityMetrics,
+        };
+
+        let range = DateRange {
+            after: Some("2026-03-01".to_string()),
+            before: Some("2026-03-08".to_string()),
+        };
+
+        // Project with 6x spike on last day → should be red
+        let red_project = ProjectMetrics {
+            project_id: "proj-red".to_string(),
+            name: "red-spike".to_string(),
+            group: None,
+            activity: ActivityMetrics {
+                events: 10,
+                commits: 2,
+                decisions: 0,
+                sessions: 1,
+            },
+            cost: CostMetrics {
+                total_usd: 0.70,
+                daily_avg_usd: 0.10,
+                last_day_usd: 0.60, // 6x the daily avg
+                by_model: vec![],
+            },
+            quality: QualityMetrics {
+                success_rate: 1.0,
+                avg_latency_ms: 0.0,
+                total_steps: 10,
+            },
+        };
+
+        // Project with 3x spike on last day → should be yellow
+        let yellow_project = ProjectMetrics {
+            project_id: "proj-yellow".to_string(),
+            name: "yellow-spike".to_string(),
+            group: None,
+            activity: ActivityMetrics {
+                events: 10,
+                commits: 2,
+                decisions: 0,
+                sessions: 1,
+            },
+            cost: CostMetrics {
+                total_usd: 0.40,
+                daily_avg_usd: 0.10,
+                last_day_usd: 0.30, // 3x the daily avg
+                by_model: vec![],
+            },
+            quality: QualityMetrics {
+                success_rate: 1.0,
+                avg_latency_ms: 0.0,
+                total_steps: 10,
+            },
+        };
+
+        // Project with normal cost → should not trigger
+        let normal_project = ProjectMetrics {
+            project_id: "proj-normal".to_string(),
+            name: "normal".to_string(),
+            group: None,
+            activity: ActivityMetrics {
+                events: 10,
+                commits: 2,
+                decisions: 0,
+                sessions: 1,
+            },
+            cost: CostMetrics {
+                total_usd: 0.70,
+                daily_avg_usd: 0.10,
+                last_day_usd: 0.10, // exactly average
+                by_model: vec![],
+            },
+            quality: QualityMetrics {
+                success_rate: 1.0,
+                avg_latency_ms: 0.0,
+                total_steps: 10,
+            },
+        };
+
+        let metrics = vec![red_project, yellow_project, normal_project];
+        let result = compute_attention(&[], &[], &range, &metrics, 7);
+
+        // Red should contain the 6x spike project
+        let red_names: Vec<&str> = result.red.iter().map(|r| r.project.as_str()).collect();
+        assert!(
+            red_names.contains(&"red-spike"),
+            "Expected red-spike in red items, got: {red_names:?}"
+        );
+
+        // Yellow should contain the 3x spike project
+        let yellow_names: Vec<&str> = result.yellow.iter().map(|y| y.project.as_str()).collect();
+        assert!(
+            yellow_names.contains(&"yellow-spike"),
+            "Expected yellow-spike in yellow items, got: {yellow_names:?}"
+        );
+
+        // Normal project should not appear in red or yellow
+        assert!(
+            !red_names.contains(&"normal"),
+            "Normal project should not be in red"
+        );
+        assert!(
+            !yellow_names.contains(&"normal"),
+            "Normal project should not be in yellow"
+        );
     }
 }
