@@ -19,3 +19,6 @@ fs2.workspace = true
 time.workspace = true
 ulid.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
+rand.workspace = true
+sha2.workspace = true
+hex.workspace = true

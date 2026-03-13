@@ -1,5 +1,6 @@
 pub mod blob_meta;
 pub mod blob_store;
+pub mod device_token;
 pub mod ledger;
 pub mod lock;
 pub mod paths;

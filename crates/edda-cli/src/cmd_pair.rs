@@ -1,5 +1,5 @@
 use clap::Subcommand;
-use sha2::{Digest, Sha256};
+use edda_ledger::device_token::{generate_device_token, hash_token};
 use std::path::Path;
 
 #[derive(Subcommand)]
@@ -28,26 +28,6 @@ pub fn execute(cmd: PairCmd, repo_root: &Path) -> anyhow::Result<()> {
         PairCmd::Revoke { name } => execute_revoke(repo_root, &name),
         PairCmd::RevokeAll => execute_revoke_all(repo_root),
     }
-}
-
-/// Generate a device token: `edda_dev_<64-hex-chars>`.
-fn generate_device_token() -> String {
-    // Use ULID bytes + timestamp for randomness without requiring `rand`
-    let id1 = ulid::Ulid::new();
-    let id2 = ulid::Ulid::new();
-    let mut bytes = [0u8; 32];
-    let b1 = id1.to_bytes();
-    let b2 = id2.to_bytes();
-    bytes[..16].copy_from_slice(&b1);
-    bytes[16..].copy_from_slice(&b2);
-    format!("edda_dev_{}", hex::encode(bytes))
-}
-
-/// Hash a raw token string with SHA-256 and return hex.
-fn hash_token(raw_token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(raw_token.as_bytes());
-    hex::encode(hasher.finalize())
 }
 
 fn execute_new(repo_root: &Path, name: &str) -> anyhow::Result<()> {
@@ -164,6 +144,15 @@ fn execute_list(repo_root: &Path) -> anyhow::Result<()> {
 fn execute_revoke(repo_root: &Path, name: &str) -> anyhow::Result<()> {
     let ledger = edda_ledger::Ledger::open(repo_root)?;
 
+    // Check the token exists before writing the ledger event
+    let existing = ledger.list_device_tokens()?;
+    let has_active = existing
+        .iter()
+        .any(|t| t.device_name == name && t.revoked_at.is_none());
+    if !has_active {
+        anyhow::bail!("no active device token found for '{name}'");
+    }
+
     let event_id = format!("evt_{}", ulid::Ulid::new());
     let branch = ledger.head_branch()?;
     let now = time::OffsetDateTime::now_utc();
@@ -191,14 +180,9 @@ fn execute_revoke(repo_root: &Path, name: &str) -> anyhow::Result<()> {
 
     edda_core::event::finalize_event(&mut event)?;
     ledger.append_event(&event)?;
+    ledger.revoke_device_token(name, &event_id)?;
 
-    let revoked = ledger.revoke_device_token(name, &event_id)?;
-    if revoked {
-        eprintln!("Revoked device: {name}");
-    } else {
-        eprintln!("No active device token found for '{name}'");
-    }
-
+    eprintln!("Revoked device: {name}");
     Ok(())
 }
 

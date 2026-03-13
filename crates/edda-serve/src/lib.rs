@@ -13,8 +13,8 @@ use axum::response::sse::{Event as SseEvent, KeepAlive};
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use edda_ledger::device_token::{generate_device_token, hash_token};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest as Sha2Digest, Sha256};
 use tower_http::cors::CorsLayer;
 
 use edda_aggregate::aggregate::{
@@ -311,22 +311,6 @@ fn is_localhost(addr: &SocketAddr) -> bool {
         }
 }
 
-/// Hash a raw token string with SHA-256 and return hex.
-fn hash_token(raw_token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(raw_token.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-/// Generate a new device token: `edda_dev_<64-hex-chars>`.
-fn generate_device_token() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes);
-    format!("edda_dev_{}", hex::encode(bytes))
-}
-
 /// Generate a pairing token (random hex, shorter).
 fn generate_pairing_token() -> String {
     use rand::Rng;
@@ -577,8 +561,21 @@ async fn revoke_device(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let Json(req) = body.map_err(|e| AppError::Validation(e.to_string()))?;
 
-    let event_id = format!("evt_{}", ulid::Ulid::new());
     let ledger = state.open_ledger()?;
+
+    // Check the token exists *before* writing the ledger event
+    let existing = ledger.list_device_tokens()?;
+    let has_active = existing
+        .iter()
+        .any(|t| t.device_name == req.device_name && t.revoked_at.is_none());
+    if !has_active {
+        return Err(AppError::NotFound(format!(
+            "no active device token found for '{}'",
+            req.device_name
+        )));
+    }
+
+    let event_id = format!("evt_{}", ulid::Ulid::new());
     let branch = ledger.head_branch()?;
 
     let now = time::OffsetDateTime::now_utc();
@@ -608,21 +605,13 @@ async fn revoke_device(
 
     edda_core::event::finalize_event(&mut event)?;
     ledger.append_event(&event)?;
+    ledger.revoke_device_token(&req.device_name, &event_id)?;
 
-    let revoked = ledger.revoke_device_token(&req.device_name, &event_id)?;
-
-    if revoked {
-        Ok(Json(serde_json::json!({
-            "ok": true,
-            "device_name": req.device_name,
-            "event_id": event_id,
-        })))
-    } else {
-        Err(AppError::NotFound(format!(
-            "no active device token found for '{}'",
-            req.device_name
-        )))
-    }
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "device_name": req.device_name,
+        "event_id": event_id,
+    })))
 }
 
 /// POST /api/pair/revoke-all — Revoke all active device tokens.
