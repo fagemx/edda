@@ -117,6 +117,10 @@ pub struct AskOptions {
     pub include_superseded: bool,
     pub branch: Option<String>,
     pub impact: bool,
+    /// ISO 8601 lower bound (inclusive) for temporal filtering.
+    pub after: Option<String>,
+    /// ISO 8601 upper bound (inclusive) for temporal filtering.
+    pub before: Option<String>,
 }
 
 impl Default for AskOptions {
@@ -126,6 +130,8 @@ impl Default for AskOptions {
             include_superseded: false,
             branch: None,
             impact: false,
+            after: None,
+            before: None,
         }
     }
 }
@@ -152,10 +158,13 @@ pub fn ask(
         }
     };
 
+    let after_ref = opts.after.as_deref();
+    let before_ref = opts.before.as_deref();
+
     let (decisions, timeline) = match &input_type {
         InputType::ExactKey(key) => {
             let all = ledger
-                .decision_timeline(key)?
+                .decision_timeline(key, after_ref, before_ref)?
                 .into_iter()
                 .map(|r| to_decision_hit(&r))
                 .collect::<Vec<_>>();
@@ -170,14 +179,14 @@ pub fn ask(
         InputType::Domain(domain) => {
             let active = branch_filter(
                 ledger
-                    .active_decisions(Some(domain), None)?
+                    .active_decisions(Some(domain), None, after_ref, before_ref)?
                     .into_iter()
                     .map(|r| to_decision_hit(&r))
                     .collect(),
             );
             let tl = branch_filter(
                 ledger
-                    .domain_timeline(domain)?
+                    .domain_timeline(domain, after_ref, before_ref)?
                     .into_iter()
                     .map(|r| to_decision_hit(&r))
                     .collect(),
@@ -187,7 +196,7 @@ pub fn ask(
         InputType::Keyword(kw) => {
             let mut hits = branch_filter(
                 ledger
-                    .active_decisions(None, Some(kw))?
+                    .active_decisions(None, Some(kw), after_ref, before_ref)?
                     .into_iter()
                     .map(|r| to_decision_hit(&r))
                     .collect(),
@@ -233,7 +242,7 @@ pub fn ask(
         InputType::Overview => {
             let active = branch_filter(
                 ledger
-                    .active_decisions(None, None)?
+                    .active_decisions(None, None, after_ref, before_ref)?
                     .into_iter()
                     .map(|r| to_decision_hit(&r))
                     .collect(),
@@ -372,7 +381,7 @@ fn compute_domain_impact(
     ledger: &Ledger,
     domain: &str,
 ) -> anyhow::Result<(Vec<DependentHit>, Option<OverrideRisk>)> {
-    let keys_in_domain = ledger.active_decisions(Some(domain), None)?;
+    let keys_in_domain = ledger.active_decisions(Some(domain), None, None, None)?;
     if keys_in_domain.is_empty() {
         return Ok((vec![], None));
     }

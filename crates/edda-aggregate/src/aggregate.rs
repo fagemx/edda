@@ -191,7 +191,7 @@ pub fn aggregate_decisions(projects: &[ProjectEntry]) -> Vec<DecisionRecord> {
             Err(_) => continue,
         };
 
-        let decisions = match ledger.active_decisions(None, None) {
+        let decisions = match ledger.active_decisions(None, None, None, None) {
             Ok(d) => d,
             Err(_) => continue,
         };

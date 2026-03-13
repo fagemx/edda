@@ -728,12 +728,30 @@ struct DecisionsQuery {
     limit: Option<usize>,
     all: Option<bool>,
     branch: Option<String>,
+    /// ISO 8601 lower bound (inclusive) for temporal filtering.
+    after: Option<String>,
+    /// ISO 8601 upper bound (inclusive) for temporal filtering.
+    before: Option<String>,
+}
+
+/// Validate that a string looks like a valid ISO 8601 / RFC 3339 timestamp.
+fn validate_iso8601(s: &str) -> Result<(), String> {
+    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+        .map(|_| ())
+        .map_err(|_| format!("invalid ISO 8601 timestamp: {s}"))
 }
 
 async fn get_decisions(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DecisionsQuery>,
 ) -> Result<Json<edda_ask::AskResult>, AppError> {
+    if let Some(ref after) = params.after {
+        validate_iso8601(after).map_err(AppError::Validation)?;
+    }
+    if let Some(ref before) = params.before {
+        validate_iso8601(before).map_err(AppError::Validation)?;
+    }
+
     let ledger = state.open_ledger()?;
     let q = params.q.as_deref().unwrap_or("");
     let opts = edda_ask::AskOptions {
@@ -741,6 +759,8 @@ async fn get_decisions(
         include_superseded: params.all.unwrap_or(false),
         branch: params.branch,
         impact: false,
+        after: params.after,
+        before: params.before,
     };
     let result = edda_ask::ask(&ledger, q, &opts, None)?;
     Ok(Json(result))

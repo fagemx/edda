@@ -592,7 +592,7 @@ pub fn decide(
     }
 
     // Auto-link: star-shaped within same domain
-    let same_domain = ledger.active_decisions(Some(&domain), None)?;
+    let same_domain = ledger.active_decisions(Some(&domain), None, None, None)?;
     for d in &same_domain {
         if d.key != key {
             ledger.insert_dep(key, &d.key, "auto_domain", Some(&event.event_id))?;

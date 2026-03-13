@@ -308,7 +308,7 @@ mod tests {
         assert_eq!(result.imported[0].value, "v3");
 
         // Verify it was written to the ledger
-        let decisions = tgt_ledger.active_decisions(None, None).unwrap();
+        let decisions = tgt_ledger.active_decisions(None, None, None, None).unwrap();
         assert!(decisions.iter().any(|d| d.key == "api.version"
             && d.value == "v3"
             && d.source_project_id.as_deref() == Some("source_proj")));
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(result.imported.len(), 1);
 
         // Should not have written anything
-        let decisions = tgt_ledger.active_decisions(None, None).unwrap();
+        let decisions = tgt_ledger.active_decisions(None, None, None, None).unwrap();
         assert!(decisions.is_empty());
 
         let _ = std::fs::remove_dir_all(&tmp_src);
