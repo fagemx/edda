@@ -1016,6 +1016,7 @@ pub fn approve(
             note,
             stage_id: sid,
             role: &stage_role,
+            device_id: None,
         })?;
         ledger.append_event(&event)?;
 
@@ -1079,6 +1080,7 @@ pub fn approve(
             note,
             stage_id: "",
             role: "",
+            device_id: None,
         })?;
         ledger.append_event(&event)?;
 
@@ -1181,6 +1183,7 @@ pub fn reject(
             note,
             stage_id: sid,
             role: &stage_role,
+            device_id: None,
         })?;
         ledger.append_event(&event)?;
 
@@ -1222,6 +1225,7 @@ pub fn reject(
             note,
             stage_id: "",
             role: "",
+            device_id: None,
         })?;
         ledger.append_event(&event)?;
 
