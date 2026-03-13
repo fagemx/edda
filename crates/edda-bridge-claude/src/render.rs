@@ -239,17 +239,18 @@ mod tests {
 
     #[test]
     fn context_budget_uses_env_var() {
-        std::env::set_var("EDDA_MAX_CONTEXT_CHARS", "1234");
-        let budget = context_budget("");
-        assert_eq!(budget, 1234);
-        std::env::remove_var("EDDA_MAX_CONTEXT_CHARS");
+        crate::with_env_guard(&[("EDDA_MAX_CONTEXT_CHARS", Some("1234"))], || {
+            let budget = context_budget("");
+            assert_eq!(budget, 1234);
+        });
     }
 
     #[test]
     fn context_budget_default_without_config() {
-        std::env::remove_var("EDDA_MAX_CONTEXT_CHARS");
-        let budget = context_budget("/nonexistent/dir");
-        assert_eq!(budget, DEFAULT_MAX_CONTEXT_CHARS);
+        crate::with_env_guard(&[("EDDA_MAX_CONTEXT_CHARS", None)], || {
+            let budget = context_budget("/nonexistent/dir");
+            assert_eq!(budget, DEFAULT_MAX_CONTEXT_CHARS);
+        });
     }
 
     #[test]

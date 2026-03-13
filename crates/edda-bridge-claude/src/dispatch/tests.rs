@@ -29,49 +29,55 @@ use crate::signals::{
 
 #[test]
 fn hook_entrypoint_session_start() {
-    // Disable auto-digest to avoid interacting with real project state
-    std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
-    // Disable plan injection to avoid picking up real plan files
-    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent/plans/dir");
-    let stdin = r#"{"session_id":"s1","hook_event_name":"SessionStart","cwd":".","transcript_path":"","permission_mode":"default"}"#;
-    let result = hook_entrypoint_from_stdin(stdin).unwrap();
-    // Write-back protocol always fires, so there should be output
-    assert!(
-        result.stdout.is_some(),
-        "write-back protocol should always inject"
+    crate::with_env_guard(
+        &[
+            ("EDDA_BRIDGE_AUTO_DIGEST", Some("0")),
+            ("EDDA_PLANS_DIR", Some("/nonexistent/plans/dir")),
+        ],
+        || {
+            let stdin = r#"{"session_id":"s1","hook_event_name":"SessionStart","cwd":".","transcript_path":"","permission_mode":"default"}"#;
+            let result = hook_entrypoint_from_stdin(stdin).unwrap();
+            assert!(
+                result.stdout.is_some(),
+                "write-back protocol should always inject"
+            );
+            let output: serde_json::Value =
+                serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+            let ctx = output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
+            assert!(
+                ctx.contains("Write-Back Protocol"),
+                "should contain write-back protocol"
+            );
+            assert!(result.stderr.is_none());
+        },
     );
-    let output: serde_json::Value = serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
-    let ctx = output["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(
-        ctx.contains("Write-Back Protocol"),
-        "should contain write-back protocol"
-    );
-    assert!(result.stderr.is_none());
-    std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
-    std::env::remove_var("EDDA_PLANS_DIR");
 }
 
 #[test]
 fn hook_entrypoint_camel_case_input() {
-    // Claude Code sends camelCase JSON
-    std::env::set_var("EDDA_CLAUDE_AUTO_APPROVE", "1");
-    let stdin = r#"{"sessionId":"s-camel","hookEventName":"PreToolUse","cwd":".","toolName":"Bash","toolUseId":"tu1"}"#;
-    let result = hook_entrypoint_from_stdin(stdin).unwrap();
-    assert!(result.stdout.is_some());
-    let output: serde_json::Value = serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
-    assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
+    crate::with_env_guard(&[("EDDA_CLAUDE_AUTO_APPROVE", Some("1"))], || {
+        // Claude Code sends camelCase JSON
+        let stdin = r#"{"sessionId":"s-camel","hookEventName":"PreToolUse","cwd":".","toolName":"Bash","toolUseId":"tu1"}"#;
+        let result = hook_entrypoint_from_stdin(stdin).unwrap();
+        assert!(result.stdout.is_some());
+        let output: serde_json::Value =
+            serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
+    });
 }
 
 #[test]
 fn hook_entrypoint_pre_tool_use_auto_approve() {
-    std::env::set_var("EDDA_CLAUDE_AUTO_APPROVE", "1");
-    let stdin = r#"{"session_id":"s1","hook_event_name":"PreToolUse","cwd":".","tool_name":"Bash","tool_use_id":"tu1"}"#;
-    let result = hook_entrypoint_from_stdin(stdin).unwrap();
-    assert!(result.stdout.is_some());
-    let output: serde_json::Value = serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
-    assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
+    crate::with_env_guard(&[("EDDA_CLAUDE_AUTO_APPROVE", Some("1"))], || {
+        let stdin = r#"{"session_id":"s1","hook_event_name":"PreToolUse","cwd":".","tool_name":"Bash","tool_use_id":"tu1"}"#;
+        let result = hook_entrypoint_from_stdin(stdin).unwrap();
+        assert!(result.stdout.is_some());
+        let output: serde_json::Value =
+            serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
+    });
 }
 
 #[test]
@@ -114,34 +120,38 @@ fn pre_tool_use_with_patterns() {
     .unwrap();
 
     // Enable patterns
-    std::env::set_var("EDDA_PATTERNS_ENABLED", "1");
-    std::env::set_var("EDDA_CLAUDE_AUTO_APPROVE", "1");
+    crate::with_env_guard(
+        &[
+            ("EDDA_PATTERNS_ENABLED", Some("1")),
+            ("EDDA_CLAUDE_AUTO_APPROVE", Some("1")),
+        ],
+        || {
+            let stdin = serde_json::json!({
+                "session_id": "s1",
+                "hook_event_name": "PreToolUse",
+                "cwd": tmp.path().to_str().unwrap(),
+                "tool_name": "Edit",
+                "tool_use_id": "tu1",
+                "tool_input": {
+                    "file_path": "src/foo.test.ts",
+                    "old_string": "old",
+                    "new_string": "new"
+                }
+            });
 
-    let stdin = serde_json::json!({
-        "session_id": "s1",
-        "hook_event_name": "PreToolUse",
-        "cwd": tmp.path().to_str().unwrap(),
-        "tool_name": "Edit",
-        "tool_use_id": "tu1",
-        "tool_input": {
-            "file_path": "src/foo.test.ts",
-            "old_string": "old",
-            "new_string": "new"
-        }
-    });
-
-    let result = hook_entrypoint_from_stdin(&serde_json::to_string(&stdin).unwrap()).unwrap();
-    assert!(result.stdout.is_some());
-    let output: serde_json::Value = serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
-    assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
-    let ctx = output["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
-    assert!(ctx.contains("test-no-db"));
-    assert!(ctx.contains("API"));
-
-    // Cleanup
-    std::env::remove_var("EDDA_PATTERNS_ENABLED");
+            let result =
+                hook_entrypoint_from_stdin(&serde_json::to_string(&stdin).unwrap()).unwrap();
+            assert!(result.stdout.is_some());
+            let output: serde_json::Value =
+                serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+            assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "allow");
+            let ctx = output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
+            assert!(ctx.contains("test-no-db"));
+            assert!(ctx.contains("API"));
+        },
+    );
 }
 
 #[test]
@@ -418,7 +428,6 @@ fn active_plan_truncates_to_budget() {
 fn session_start_includes_signals() {
     let pid = "test_session_start_signals";
     let _ = edda_store::ensure_dirs(pid);
-    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent/plans/dir");
 
     // Save session signals (tasks, files, commits)
     let signals = SessionSignals {
@@ -445,37 +454,41 @@ fn session_start_includes_signals() {
     let _ = fs::create_dir_all(&pack_dir);
     let _ = fs::write(pack_dir.join("hot.md"), "# edda memory pack (hot)\n");
 
-    let result = dispatch_session_start(pid, "test-session", "", None).unwrap();
-    assert!(result.stdout.is_some(), "should return output");
+    crate::with_env_guard(
+        &[("EDDA_PLANS_DIR", Some("/nonexistent/plans/dir"))],
+        || {
+            let result = dispatch_session_start(pid, "test-session", "", None).unwrap();
+            assert!(result.stdout.is_some(), "should return output");
 
-    let output: serde_json::Value = serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
-    let ctx = output["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
+            let output: serde_json::Value =
+                serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+            let ctx = output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
 
-    // L1 narrative sections
-    assert!(
-        ctx.contains("## Tasks"),
-        "should contain Tasks section:\n{ctx}"
-    );
-    assert!(
-        ctx.contains("Fix bug"),
-        "should contain task subject:\n{ctx}"
-    );
-    assert!(
-        ctx.contains("Session Activity"),
-        "should contain Session Activity section:\n{ctx}"
-    );
-    assert!(
-        ctx.contains("1 files modified"),
-        "should contain file count:\n{ctx}"
-    );
-    assert!(
-        ctx.contains("abc1234"),
-        "should contain commit hash:\n{ctx}"
+            assert!(
+                ctx.contains("## Tasks"),
+                "should contain Tasks section:\n{ctx}"
+            );
+            assert!(
+                ctx.contains("Fix bug"),
+                "should contain task subject:\n{ctx}"
+            );
+            assert!(
+                ctx.contains("Session Activity"),
+                "should contain Session Activity section:\n{ctx}"
+            );
+            assert!(
+                ctx.contains("1 files modified"),
+                "should contain file count:\n{ctx}"
+            );
+            assert!(
+                ctx.contains("abc1234"),
+                "should contain commit hash:\n{ctx}"
+            );
+        },
     );
 
-    std::env::remove_var("EDDA_PLANS_DIR");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
@@ -483,36 +496,39 @@ fn session_start_includes_signals() {
 fn session_start_no_signals_no_extra_sections() {
     let pid = "test_session_start_no_signals";
     let _ = edda_store::ensure_dirs(pid);
-    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent/plans/dir");
 
     // Write a minimal hot pack, no signals
     let pack_dir = edda_store::project_dir(pid).join("packs");
     let _ = fs::create_dir_all(&pack_dir);
     let _ = fs::write(pack_dir.join("hot.md"), "# edda memory pack (hot)\n");
 
-    let result = dispatch_session_start(pid, "test-session", "", None).unwrap();
-    assert!(result.stdout.is_some());
+    crate::with_env_guard(
+        &[("EDDA_PLANS_DIR", Some("/nonexistent/plans/dir"))],
+        || {
+            let result = dispatch_session_start(pid, "test-session", "", None).unwrap();
+            assert!(result.stdout.is_some());
 
-    let output: serde_json::Value = serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
-    let ctx = output["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
+            let output: serde_json::Value =
+                serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+            let ctx = output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
 
-    // No narrative sections should appear when empty
-    assert!(
-        !ctx.contains("## Tasks"),
-        "should not contain Tasks when empty"
-    );
-    assert!(
-        !ctx.contains("Session Activity"),
-        "should not contain Session Activity when empty"
-    );
-    assert!(
-        !ctx.contains("Current Focus"),
-        "should not contain Focus when empty"
+            assert!(
+                !ctx.contains("## Tasks"),
+                "should not contain Tasks when empty"
+            );
+            assert!(
+                !ctx.contains("Session Activity"),
+                "should not contain Session Activity when empty"
+            );
+            assert!(
+                !ctx.contains("Current Focus"),
+                "should not contain Focus when empty"
+            );
+        },
     );
 
-    std::env::remove_var("EDDA_PLANS_DIR");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
@@ -713,28 +729,32 @@ fn wrap_context_boundary_adds_markers() {
 fn session_start_output_has_boundary_markers() {
     let pid = "test_boundary_session_start";
     let _ = edda_store::ensure_dirs(pid);
-    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent/plans/dir");
 
     let pack_dir = edda_store::project_dir(pid).join("packs");
     let _ = fs::create_dir_all(&pack_dir);
     let _ = fs::write(pack_dir.join("hot.md"), "# edda memory pack (hot)\n");
 
-    let result = dispatch_session_start(pid, "test-session", "", None).unwrap();
-    let output: serde_json::Value = serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
-    let ctx = output["hookSpecificOutput"]["additionalContext"]
-        .as_str()
-        .unwrap();
+    crate::with_env_guard(
+        &[("EDDA_PLANS_DIR", Some("/nonexistent/plans/dir"))],
+        || {
+            let result = dispatch_session_start(pid, "test-session", "", None).unwrap();
+            let output: serde_json::Value =
+                serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
+            let ctx = output["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap();
 
-    assert!(
-        ctx.contains(EDDA_BOUNDARY_START),
-        "SessionStart should have edda:start marker"
-    );
-    assert!(
-        ctx.contains(EDDA_BOUNDARY_END),
-        "SessionStart should have edda:end marker"
+            assert!(
+                ctx.contains(EDDA_BOUNDARY_START),
+                "SessionStart should have edda:start marker"
+            );
+            assert!(
+                ctx.contains(EDDA_BOUNDARY_END),
+                "SessionStart should have edda:end marker"
+            );
+        },
     );
 
-    std::env::remove_var("EDDA_PLANS_DIR");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
@@ -758,17 +778,18 @@ fn apply_context_budget_truncates_long_content() {
 
 #[test]
 fn context_budget_uses_env_var() {
-    std::env::set_var("EDDA_MAX_CONTEXT_CHARS", "1234");
-    let budget = context_budget("");
-    assert_eq!(budget, 1234);
-    std::env::remove_var("EDDA_MAX_CONTEXT_CHARS");
+    crate::with_env_guard(&[("EDDA_MAX_CONTEXT_CHARS", Some("1234"))], || {
+        let budget = context_budget("");
+        assert_eq!(budget, 1234);
+    });
 }
 
 #[test]
 fn context_budget_default_without_config() {
-    std::env::remove_var("EDDA_MAX_CONTEXT_CHARS");
-    let budget = context_budget("/nonexistent/dir");
-    assert_eq!(budget, render::DEFAULT_MAX_CONTEXT_CHARS);
+    crate::with_env_guard(&[("EDDA_MAX_CONTEXT_CHARS", None)], || {
+        let budget = context_budget("/nonexistent/dir");
+        assert_eq!(budget, render::DEFAULT_MAX_CONTEXT_CHARS);
+    });
 }
 
 // ── Body/Tail Budget Split tests ──
@@ -1185,9 +1206,6 @@ fn cross_session_binding_visible_via_user_prompt_submit() {
     let pid = "test_xsess_bind_vis";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
-    std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
-    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
-
     // Create temp cwd (no .edda/ — workspace section will be None)
     let cwd = std::env::temp_dir().join("edda_xsess_vis_cwd");
     let _ = fs::create_dir_all(&cwd);
@@ -1200,6 +1218,9 @@ fn cross_session_binding_visible_via_user_prompt_submit() {
     // Session A (s1) writes a binding
     crate::peers::write_binding(pid, "s1", "auth", "db.engine", "postgres");
 
+    let _eg = crate::ENV_LOCK.lock().unwrap();
+    std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
     // Session B (s2) dispatches UserPromptSubmit — should see the binding
     let result = dispatch_user_prompt_submit(pid, "s2", "", cwd.to_str().unwrap()).unwrap();
     assert!(
@@ -1220,6 +1241,9 @@ fn cross_session_binding_visible_via_user_prompt_submit() {
         "should contain binding value, got:\n{ctx}"
     );
 
+    std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
+    std::env::remove_var("EDDA_PLANS_DIR");
+    drop(_eg);
     crate::peers::remove_heartbeat(pid, "s1");
     crate::peers::remove_heartbeat(pid, "s2");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1231,8 +1255,6 @@ fn user_prompt_submit_dedup_skips_identical_state() {
     let pid = "test_ups_dedup";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
-    std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
-    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
     let cwd = std::env::temp_dir().join("edda_dedup_cwd");
     let _ = fs::create_dir_all(&cwd);
@@ -1240,6 +1262,9 @@ fn user_prompt_submit_dedup_skips_identical_state() {
     // Write a binding so there's something to inject
     crate::peers::write_binding(pid, "s1", "auth", "cache.backend", "redis");
 
+    let _eg = crate::ENV_LOCK.lock().unwrap();
+    std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
     // First call — should produce output
     let r1 = dispatch_user_prompt_submit(pid, "dedup-sess", "", cwd.to_str().unwrap()).unwrap();
     assert!(r1.stdout.is_some(), "first call should return output");
@@ -1251,6 +1276,9 @@ fn user_prompt_submit_dedup_skips_identical_state() {
         "second call should be dedup-skipped (empty)"
     );
 
+    std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
+    std::env::remove_var("EDDA_PLANS_DIR");
+    drop(_eg);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -1262,8 +1290,6 @@ fn solo_session_still_sees_bindings_via_prompt_submit() {
     let pid = "test_solo_bind_vis";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
-    std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
-    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
     let cwd = std::env::temp_dir().join("edda_solo_vis_cwd");
     let _ = fs::create_dir_all(&cwd);
@@ -1271,6 +1297,9 @@ fn solo_session_still_sees_bindings_via_prompt_submit() {
     // Write binding — no heartbeats (solo mode)
     crate::peers::write_binding(pid, "solo-s", "solo", "api.style", "GraphQL");
 
+    let _eg = crate::ENV_LOCK.lock().unwrap();
+    std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
+    std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
     let result = dispatch_user_prompt_submit(pid, "solo-s", "", cwd.to_str().unwrap()).unwrap();
     assert!(result.stdout.is_some(), "solo session should see bindings");
     let output: serde_json::Value = serde_json::from_str(result.stdout.as_ref().unwrap()).unwrap();
@@ -1282,6 +1311,9 @@ fn solo_session_still_sees_bindings_via_prompt_submit() {
         "solo session should see binding value, got:\n{ctx}"
     );
 
+    std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
+    std::env::remove_var("EDDA_PLANS_DIR");
+    drop(_eg);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -1316,12 +1348,12 @@ fn solo_to_multi_session_transition() {
     // Phase 3: Peer goes stale → back to solo
     // Sleep to ensure file mtime is in the past, then set threshold to 0
     std::thread::sleep(std::time::Duration::from_millis(1100));
-    std::env::set_var("EDDA_PEER_STALE_SECS", "0");
-    assert!(
-        !has_active_peers(pid, "s1"),
-        "peer should be stale after threshold=0 with old mtime"
-    );
-    std::env::remove_var("EDDA_PEER_STALE_SECS");
+    crate::with_env_guard(&[("EDDA_PEER_STALE_SECS", Some("0"))], || {
+        assert!(
+            !has_active_peers(pid, "s1"),
+            "peer should be stale after threshold=0 with old mtime"
+        );
+    });
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
@@ -1333,6 +1365,7 @@ fn session_end_unclaim_only_with_active_peers() {
     let pid = "test_se_unclaim_gate";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
+    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
@@ -1368,6 +1401,9 @@ fn session_end_unclaim_only_with_active_peers() {
         .count();
     assert!(unclaim_s3 > 0, "should have unclaim when peers_active=true");
 
+    std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
+    std::env::remove_var("EDDA_PLANS_DIR");
+    drop(_eg);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -1378,6 +1414,7 @@ fn session_end_reads_counters_before_cleanup() {
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
     let sid = "counter-sess";
+    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
@@ -1416,6 +1453,9 @@ fn session_end_reads_counters_before_cleanup() {
         "signal_count should be cleaned"
     );
 
+    std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
+    std::env::remove_var("EDDA_PLANS_DIR");
+    drop(_eg);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -1427,6 +1467,7 @@ fn late_peer_detection_injects_full_protocol() {
     let pid = "test_late_peer_full";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
+    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
@@ -1463,6 +1504,9 @@ fn late_peer_detection_injects_full_protocol() {
         .unwrap();
     assert_eq!(count, 1, "peer_count should be 1");
 
+    std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
+    std::env::remove_var("EDDA_PLANS_DIR");
+    drop(_eg);
     crate::peers::remove_heartbeat(pid, "peer-a");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
@@ -1473,6 +1517,7 @@ fn subsequent_prompts_use_lightweight_updates() {
     let pid = "test_late_peer_subsequent";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
+    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
@@ -1503,6 +1548,9 @@ fn subsequent_prompts_use_lightweight_updates() {
         "should contain lightweight peer header, got:\n{ctx}"
     );
 
+    std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
+    std::env::remove_var("EDDA_PLANS_DIR");
+    drop(_eg);
     crate::peers::remove_heartbeat(pid, "peer-b");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
@@ -1513,6 +1561,7 @@ fn solo_session_writes_zero_peer_count() {
     let pid = "test_late_peer_solo";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
+    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
@@ -1536,6 +1585,9 @@ fn solo_session_writes_zero_peer_count() {
         .unwrap();
     assert_eq!(count, 0, "peer_count should be 0 for solo session");
 
+    std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
+    std::env::remove_var("EDDA_PLANS_DIR");
+    drop(_eg);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -2444,6 +2496,7 @@ fn offlimits_env_var_enables_enforcement() {
     write_peer_count(pid, sid, 1);
 
     // Enable enforcement via env var
+    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_ENFORCE_OFFLIMITS", "1");
 
     let raw = serde_json::json!({
@@ -2477,6 +2530,7 @@ fn offlimits_env_var_enables_enforcement() {
     );
 
     std::env::remove_var("EDDA_ENFORCE_OFFLIMITS");
+    drop(_eg);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
@@ -2493,6 +2547,7 @@ fn offlimits_skips_non_edit_tools() {
     write_peer_count(pid, sid, 1);
 
     // Enable enforcement
+    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_ENFORCE_OFFLIMITS", "1");
     std::env::set_var("EDDA_CLAUDE_AUTO_APPROVE", "1");
 
@@ -2516,6 +2571,7 @@ fn offlimits_skips_non_edit_tools() {
 
     std::env::remove_var("EDDA_ENFORCE_OFFLIMITS");
     std::env::remove_var("EDDA_CLAUDE_AUTO_APPROVE");
+    drop(_eg);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 

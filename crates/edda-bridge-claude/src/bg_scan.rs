@@ -904,18 +904,25 @@ End of analysis."#;
 
     #[test]
     fn should_run_returns_false_when_disabled() {
-        std::env::set_var("EDDA_BG_ENABLED", "0");
-        std::env::set_var("EDDA_LLM_API_KEY", "test-key");
-        assert!(!should_run("test_scan_disabled"));
-        std::env::remove_var("EDDA_BG_ENABLED");
-        std::env::remove_var("EDDA_LLM_API_KEY");
+        crate::with_env_guard(
+            &[
+                ("EDDA_BG_ENABLED", Some("0")),
+                ("EDDA_LLM_API_KEY", Some("test-key")),
+            ],
+            || {
+                assert!(!should_run("test_scan_disabled"));
+            },
+        );
     }
 
     #[test]
     fn should_run_returns_false_without_api_key() {
-        std::env::set_var("EDDA_BG_ENABLED", "1");
-        std::env::remove_var("EDDA_LLM_API_KEY");
-        assert!(!should_run("test_scan_no_key"));
+        crate::with_env_guard(
+            &[("EDDA_BG_ENABLED", Some("1")), ("EDDA_LLM_API_KEY", None)],
+            || {
+                assert!(!should_run("test_scan_no_key"));
+            },
+        );
     }
 
     #[test]
@@ -934,17 +941,19 @@ End of analysis."#;
         let _ = fs::create_dir_all(path.parent().unwrap());
         let _ = fs::write(&path, serde_json::to_string_pretty(&state).unwrap());
 
-        std::env::set_var("EDDA_BG_ENABLED", "1");
-        std::env::set_var("EDDA_LLM_API_KEY", "test-key");
-        std::env::set_var("EDDA_SCAN_COOLDOWN_DAYS", "7");
-
-        assert!(!should_run(pid));
+        crate::with_env_guard(
+            &[
+                ("EDDA_BG_ENABLED", Some("1")),
+                ("EDDA_LLM_API_KEY", Some("test-key")),
+                ("EDDA_SCAN_COOLDOWN_DAYS", Some("7")),
+            ],
+            || {
+                assert!(!should_run(pid));
+            },
+        );
 
         // Cleanup
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
-        std::env::remove_var("EDDA_BG_ENABLED");
-        std::env::remove_var("EDDA_LLM_API_KEY");
-        std::env::remove_var("EDDA_SCAN_COOLDOWN_DAYS");
     }
 
     #[test]
@@ -967,17 +976,18 @@ End of analysis."#;
         let _ = fs::create_dir_all(path.parent().unwrap());
         let _ = fs::write(&path, serde_json::to_string_pretty(&state).unwrap());
 
-        // With 7-day cooldown, should NOT have elapsed
-        std::env::set_var("EDDA_SCAN_COOLDOWN_DAYS", "7");
-        assert!(!cooldown_elapsed(pid));
+        crate::with_env_guard(&[("EDDA_SCAN_COOLDOWN_DAYS", Some("7"))], || {
+            // With 7-day cooldown, should NOT have elapsed
+            assert!(!cooldown_elapsed(pid));
+        });
 
-        // With 1-day cooldown, SHOULD have elapsed
-        std::env::set_var("EDDA_SCAN_COOLDOWN_DAYS", "1");
-        assert!(cooldown_elapsed(pid));
+        crate::with_env_guard(&[("EDDA_SCAN_COOLDOWN_DAYS", Some("1"))], || {
+            // With 1-day cooldown, SHOULD have elapsed
+            assert!(cooldown_elapsed(pid));
+        });
 
         // Cleanup
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
-        std::env::remove_var("EDDA_SCAN_COOLDOWN_DAYS");
     }
 
     #[test]
