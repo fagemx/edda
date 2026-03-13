@@ -162,6 +162,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/status", get(get_status))
         .route("/api/context", get(get_context))
         .route("/api/decisions", get(get_decisions))
+        .route("/api/decisions/batch", post(post_decisions_batch))
         .route(
             "/api/decisions/{event_id}/outcomes",
             get(get_decision_outcomes),
@@ -249,6 +250,7 @@ pub fn router(repo_root: &Path) -> Router {
         .route("/api/status", get(get_status))
         .route("/api/context", get(get_context))
         .route("/api/decisions", get(get_decisions))
+        .route("/api/decisions/batch", post(post_decisions_batch))
         .route(
             "/api/decisions/{event_id}/outcomes",
             get(get_decision_outcomes),
@@ -770,6 +772,119 @@ async fn get_decisions(
     };
     let result = edda_ask::ask(&ledger, q, &opts, None)?;
     Ok(Json(result))
+}
+
+// ── POST /api/decisions/batch ──
+
+#[derive(Deserialize)]
+struct BatchQuery {
+    queries: Vec<BatchSubQuery>,
+    #[serde(default)]
+    slim: bool,
+}
+
+#[derive(Deserialize)]
+struct BatchSubQuery {
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    domain: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    all: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct BatchResponse {
+    results: Vec<BatchSubResult>,
+}
+
+#[derive(Serialize)]
+struct BatchSubResult {
+    query_index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decisions: Option<Vec<edda_ask::DecisionHit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeline: Option<Vec<edda_ask::DecisionHit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    related_commits: Option<Vec<edda_ask::CommitHit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    related_notes: Option<Vec<edda_ask::NoteHit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conversations: Option<Vec<edda_ask::ConversationHit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+async fn post_decisions_batch(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<BatchQuery>, JsonRejection>,
+) -> Result<Json<BatchResponse>, AppError> {
+    let Json(body) = body.map_err(|e| AppError::Validation(e.body_text()))?;
+
+    if body.queries.is_empty() || body.queries.len() > 10 {
+        return Err(AppError::Validation(
+            "queries must contain 1\u{2013}10 items".into(),
+        ));
+    }
+
+    let ledger = state.open_ledger()?;
+    let mut results = Vec::with_capacity(body.queries.len());
+
+    for (i, sub) in body.queries.iter().enumerate() {
+        let q = sub.q.as_deref().or(sub.domain.as_deref()).unwrap_or("");
+
+        let opts = edda_ask::AskOptions {
+            limit: sub.limit.unwrap_or(20).min(100),
+            include_superseded: sub.all.unwrap_or(false),
+            branch: sub.branch.clone(),
+            impact: false,
+            after: None,
+            before: None,
+        };
+
+        match edda_ask::ask(&ledger, q, &opts, None) {
+            Ok(result) => {
+                if body.slim {
+                    results.push(BatchSubResult {
+                        query_index: i,
+                        decisions: Some(result.decisions),
+                        timeline: None,
+                        related_commits: None,
+                        related_notes: None,
+                        conversations: None,
+                        error: None,
+                    });
+                } else {
+                    results.push(BatchSubResult {
+                        query_index: i,
+                        decisions: Some(result.decisions),
+                        timeline: Some(result.timeline),
+                        related_commits: Some(result.related_commits),
+                        related_notes: Some(result.related_notes),
+                        conversations: Some(result.conversations),
+                        error: None,
+                    });
+                }
+            }
+            Err(e) => {
+                results.push(BatchSubResult {
+                    query_index: i,
+                    decisions: None,
+                    timeline: None,
+                    related_commits: None,
+                    related_notes: None,
+                    conversations: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(Json(BatchResponse { results }))
 }
 
 // ── GET /api/decisions/:event_id/outcomes ──
@@ -5959,5 +6074,196 @@ actors:
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── POST /api/decisions/batch tests ──
+
+    #[tokio::test]
+    async fn batch_returns_multiple_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed a decision so queries can find something
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let parent_hash = ledger.last_event_hash().unwrap();
+        let dp = DecisionPayload {
+            key: "db.engine".into(),
+            value: "sqlite".into(),
+            reason: Some("embedded".into()),
+            scope: None,
+        };
+        let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
+        ledger.append_event(&event).unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decisions/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "queries": [
+                                { "q": "db.engine" },
+                                { "q": "nonexistent_keyword_xyz", "limit": 5 }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let results = json["results"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["query_index"], 0);
+        assert_eq!(results[1]["query_index"], 1);
+        // First query should have decisions
+        assert!(results[0]["decisions"].is_array());
+        // Second query should also succeed (just empty)
+        assert!(results[1]["decisions"].is_array());
+    }
+
+    #[tokio::test]
+    async fn batch_slim_omits_extra_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decisions/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "queries": [{ "q": "anything" }],
+                            "slim": true
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let result = &json["results"][0];
+        assert!(result["decisions"].is_array());
+        // slim mode should omit timeline, related_commits, related_notes, conversations
+        assert!(result.get("timeline").is_none());
+        assert!(result.get("related_commits").is_none());
+        assert!(result.get("related_notes").is_none());
+        assert!(result.get("conversations").is_none());
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_over_10_queries() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let queries: Vec<serde_json::Value> = (0..11)
+            .map(|i| serde_json::json!({ "q": format!("q{i}") }))
+            .collect();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decisions/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "queries": queries }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn batch_rejects_empty_queries() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decisions/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::json!({ "queries": [] }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn batch_domain_as_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed a decision with a domain
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let parent_hash = ledger.last_event_hash().unwrap();
+        let dp = DecisionPayload {
+            key: "blog-village.cache".into(),
+            value: "redis".into(),
+            reason: Some("fast".into()),
+            scope: None,
+        };
+        let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
+        ledger.append_event(&event).unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decisions/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "queries": [
+                                { "domain": "blog-village" }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let results = json["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["query_index"], 0);
+        assert!(results[0]["decisions"].is_array());
     }
 }
