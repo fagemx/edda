@@ -72,6 +72,7 @@ pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'
             Some(event_level::GOVERNANCE),
         ),
         "device_pair" | "device_revoke" => (Some(event_family::ADMIN), Some(event_level::INFO)),
+        "decide_snapshot" => (Some(event_family::GOVERNANCE), Some(event_level::MILESTONE)),
         _ => (None, None),
     }
 }
@@ -308,6 +309,11 @@ mod tests {
             ),
             ("device_pair", event_family::ADMIN, event_level::INFO),
             ("device_revoke", event_family::ADMIN, event_level::INFO),
+            (
+                "decide_snapshot",
+                event_family::GOVERNANCE,
+                event_level::MILESTONE,
+            ),
         ];
 
         for (event_type, expected_family, expected_level) in &table {

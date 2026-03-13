@@ -139,6 +139,26 @@ pub fn blob_put_classified(
     Ok(blob_ref)
 }
 
+/// Threshold in bytes for offloading snapshot payloads to blob store.
+pub const SNAPSHOT_BLOB_THRESHOLD: usize = 8192;
+
+/// Conditionally write bytes to blob store if they exceed `threshold`.
+///
+/// Returns `Some(blob_ref)` if offloaded, `None` if the data is small
+/// enough to stay inline in the event payload.
+pub fn blob_put_if_large(
+    paths: &EddaPaths,
+    data: &[u8],
+    class: BlobClass,
+    threshold: usize,
+) -> anyhow::Result<Option<String>> {
+    if data.len() > threshold {
+        Ok(Some(blob_put_classified(paths, data, class)?))
+    } else {
+        Ok(None)
+    }
+}
+
 /// List archived blobs with their sizes.
 pub fn blob_list_archived(paths: &EddaPaths) -> anyhow::Result<Vec<BlobInfo>> {
     if !paths.archive_blobs_dir.exists() {

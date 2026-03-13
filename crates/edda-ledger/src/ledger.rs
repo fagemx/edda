@@ -377,6 +377,35 @@ impl Ledger {
     pub fn revoke_all_device_tokens(&self, revoke_event_id: &str) -> anyhow::Result<u64> {
         self.sqlite.revoke_all_device_tokens(revoke_event_id)
     }
+
+    // ── Decide Snapshots ────────────────────────────────────────────
+
+    /// Insert a row into the `decide_snapshots` materialized view.
+    pub fn insert_snapshot(
+        &self,
+        row: &crate::sqlite_store::DecideSnapshotRow,
+    ) -> anyhow::Result<()> {
+        self.sqlite.insert_snapshot(row)
+    }
+
+    /// Query snapshots with optional filtering by village_id and engine_version.
+    pub fn query_snapshots(
+        &self,
+        village_id: Option<&str>,
+        engine_version: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<crate::sqlite_store::DecideSnapshotRow>> {
+        self.sqlite
+            .query_snapshots(village_id, engine_version, limit)
+    }
+
+    /// Find all snapshots for a given context_hash.
+    pub fn snapshots_by_context_hash(
+        &self,
+        context_hash: &str,
+    ) -> anyhow::Result<Vec<crate::sqlite_store::DecideSnapshotRow>> {
+        self.sqlite.snapshots_by_context_hash(context_hash)
+    }
 }
 
 // ── Init functions ──────────────────────────────────────────────────
