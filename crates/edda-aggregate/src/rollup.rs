@@ -36,6 +36,15 @@ pub struct DayStat {
     /// Per-file edit statistics for this day.
     #[serde(default)]
     pub file_edits: Vec<FileEditStat>,
+    /// Total cost in USD from execution events.
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// Number of execution events.
+    #[serde(default)]
+    pub execution_count: u64,
+    /// Number of successful execution events.
+    #[serde(default)]
+    pub success_count: u64,
 }
 
 /// Weekly statistics.
@@ -47,6 +56,15 @@ pub struct WeekStat {
     /// Per-file edit statistics for this week.
     #[serde(default)]
     pub file_edits: Vec<FileEditStat>,
+    /// Total cost in USD from execution events.
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// Number of execution events.
+    #[serde(default)]
+    pub execution_count: u64,
+    /// Number of successful execution events.
+    #[serde(default)]
+    pub success_count: u64,
 }
 
 /// Monthly statistics.
@@ -58,6 +76,15 @@ pub struct MonthStat {
     /// Per-file edit statistics for this month.
     #[serde(default)]
     pub file_edits: Vec<FileEditStat>,
+    /// Total cost in USD from execution events.
+    #[serde(default)]
+    pub cost_usd: f64,
+    /// Number of execution events.
+    #[serde(default)]
+    pub execution_count: u64,
+    /// Number of successful execution events.
+    #[serde(default)]
+    pub success_count: u64,
 }
 
 /// The full rollup cache.
@@ -106,8 +133,16 @@ pub fn compute_rollup(projects: &[ProjectEntry], range: &DateRange, tool: &str) 
     let events_map = aggregate::events_by_date(projects, range);
     let commits_map = aggregate::commits_by_date(projects, range);
     let file_edits_map = aggregate::file_edits_by_date(projects, range);
+    let cost_map = aggregate::cost_by_date(projects, range);
+    let quality_map = aggregate::quality_by_date(projects, range);
 
-    let daily = build_daily_stats(&events_map, &commits_map, &file_edits_map);
+    let daily = build_daily_stats(
+        &events_map,
+        &commits_map,
+        &file_edits_map,
+        &cost_map,
+        &quality_map,
+    );
     let weekly = build_weekly_stats(&daily);
     let monthly = build_monthly_stats(&daily);
 
@@ -187,6 +222,8 @@ fn build_daily_stats(
     events_map: &BTreeMap<String, usize>,
     commits_map: &BTreeMap<String, usize>,
     file_edits_map: &BTreeMap<String, Vec<FileEditStat>>,
+    cost_map: &BTreeMap<String, f64>,
+    quality_map: &BTreeMap<String, (u64, u64)>,
 ) -> Vec<DayStat> {
     let mut all_dates: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for key in events_map.keys() {
@@ -198,65 +235,105 @@ fn build_daily_stats(
     for key in file_edits_map.keys() {
         all_dates.insert(key.as_str());
     }
+    for key in cost_map.keys() {
+        all_dates.insert(key.as_str());
+    }
+    for key in quality_map.keys() {
+        all_dates.insert(key.as_str());
+    }
 
     all_dates
         .into_iter()
-        .map(|date| DayStat {
-            date: date.to_string(),
-            events: events_map.get(date).copied().unwrap_or(0),
-            commits: commits_map.get(date).copied().unwrap_or(0),
-            sessions: 0,
-            file_edits: file_edits_map.get(date).cloned().unwrap_or_default(),
+        .map(|date| {
+            let (success_count, execution_count) = quality_map.get(date).copied().unwrap_or((0, 0));
+            DayStat {
+                date: date.to_string(),
+                events: events_map.get(date).copied().unwrap_or(0),
+                commits: commits_map.get(date).copied().unwrap_or(0),
+                sessions: 0,
+                file_edits: file_edits_map.get(date).cloned().unwrap_or_default(),
+                cost_usd: cost_map.get(date).copied().unwrap_or(0.0),
+                execution_count,
+                success_count,
+            }
         })
         .collect()
 }
 
+/// Accumulator for aggregating stats: (events, commits, file_edits, cost_usd, exec_count, success_count).
+type StatAccum = (usize, usize, Vec<FileEditStat>, f64, u64, u64);
+
 /// Build weekly stats from daily stats.
 fn build_weekly_stats(daily: &[DayStat]) -> Vec<WeekStat> {
-    let mut weekly_map: BTreeMap<String, (usize, usize, Vec<FileEditStat>)> = BTreeMap::new();
+    let mut weekly_map: BTreeMap<String, StatAccum> = BTreeMap::new();
 
     for d in daily {
         if let Some(week_start) = iso_week_start(&d.date) {
-            let entry = weekly_map.entry(week_start).or_insert((0, 0, Vec::new()));
+            let entry = weekly_map
+                .entry(week_start)
+                .or_insert((0, 0, Vec::new(), 0.0, 0, 0));
             entry.0 += d.events;
             entry.1 += d.commits;
             merge_file_edits(&mut entry.2, &d.file_edits);
+            entry.3 += d.cost_usd;
+            entry.4 += d.execution_count;
+            entry.5 += d.success_count;
         }
     }
 
     weekly_map
         .into_iter()
-        .map(|(week_start, (events, commits, file_edits))| WeekStat {
-            week_start,
-            events,
-            commits,
-            file_edits,
-        })
+        .map(
+            |(
+                week_start,
+                (events, commits, file_edits, cost_usd, execution_count, success_count),
+            )| {
+                WeekStat {
+                    week_start,
+                    events,
+                    commits,
+                    file_edits,
+                    cost_usd,
+                    execution_count,
+                    success_count,
+                }
+            },
+        )
         .collect()
 }
 
 /// Build monthly stats from daily stats.
 fn build_monthly_stats(daily: &[DayStat]) -> Vec<MonthStat> {
-    let mut monthly_map: BTreeMap<String, (usize, usize, Vec<FileEditStat>)> = BTreeMap::new();
+    let mut monthly_map: BTreeMap<String, StatAccum> = BTreeMap::new();
 
     for d in daily {
         let month = &d.date[..7.min(d.date.len())];
         let entry = monthly_map
             .entry(month.to_string())
-            .or_insert((0, 0, Vec::new()));
+            .or_insert((0, 0, Vec::new(), 0.0, 0, 0));
         entry.0 += d.events;
         entry.1 += d.commits;
         merge_file_edits(&mut entry.2, &d.file_edits);
+        entry.3 += d.cost_usd;
+        entry.4 += d.execution_count;
+        entry.5 += d.success_count;
     }
 
     monthly_map
         .into_iter()
-        .map(|(month, (events, commits, file_edits))| MonthStat {
-            month,
-            events,
-            commits,
-            file_edits,
-        })
+        .map(
+            |(month, (events, commits, file_edits, cost_usd, execution_count, success_count))| {
+                MonthStat {
+                    month,
+                    events,
+                    commits,
+                    file_edits,
+                    cost_usd,
+                    execution_count,
+                    success_count,
+                }
+            },
+        )
         .collect()
 }
 
@@ -322,15 +399,13 @@ mod tests {
                     date: "2026-03-01".into(),
                     events: 5,
                     commits: 1,
-                    sessions: 0,
-                    file_edits: vec![],
+                    ..Default::default()
                 },
                 DayStat {
                     date: "2026-03-02".into(),
                     events: 3,
                     commits: 0,
-                    sessions: 0,
-                    file_edits: vec![],
+                    ..Default::default()
                 },
             ],
             weekly: vec![],
@@ -344,15 +419,13 @@ mod tests {
                     date: "2026-03-02".into(),
                     events: 10,
                     commits: 2,
-                    sessions: 0,
-                    file_edits: vec![],
+                    ..Default::default()
                 },
                 DayStat {
                     date: "2026-03-03".into(),
                     events: 7,
                     commits: 3,
-                    sessions: 0,
-                    file_edits: vec![],
+                    ..Default::default()
                 },
             ],
             weekly: vec![],
@@ -383,8 +456,10 @@ mod tests {
         commits.insert("2026-03-03".to_string(), 1);
 
         let file_edits = BTreeMap::new();
+        let cost_map = BTreeMap::new();
+        let quality_map = BTreeMap::new();
 
-        let daily = build_daily_stats(&events, &commits, &file_edits);
+        let daily = build_daily_stats(&events, &commits, &file_edits, &cost_map, &quality_map);
         assert_eq!(daily.len(), 3);
         assert_eq!(daily[0].date, "2026-03-01");
         assert_eq!(daily[0].events, 5);
@@ -399,6 +474,71 @@ mod tests {
         let stat: DayStat = serde_json::from_str(json).unwrap();
         assert_eq!(stat.date, "2026-03-01");
         assert!(stat.file_edits.is_empty());
+        // New fields default to zero
+        assert_eq!(stat.cost_usd, 0.0);
+        assert_eq!(stat.execution_count, 0);
+        assert_eq!(stat.success_count, 0);
+    }
+
+    #[test]
+    fn backward_compat_weekstat_without_cost_fields() {
+        let json = r#"{"week_start":"2026-03-02","events":10,"commits":3}"#;
+        let stat: WeekStat = serde_json::from_str(json).unwrap();
+        assert_eq!(stat.week_start, "2026-03-02");
+        assert_eq!(stat.cost_usd, 0.0);
+        assert_eq!(stat.execution_count, 0);
+        assert_eq!(stat.success_count, 0);
+    }
+
+    #[test]
+    fn build_daily_stats_includes_cost_quality() {
+        let mut events = BTreeMap::new();
+        events.insert("2026-03-01".to_string(), 5);
+
+        let commits = BTreeMap::new();
+        let file_edits = BTreeMap::new();
+
+        let mut cost_map = BTreeMap::new();
+        cost_map.insert("2026-03-01".to_string(), 0.05);
+
+        let mut quality_map = BTreeMap::new();
+        quality_map.insert("2026-03-01".to_string(), (8u64, 10u64));
+
+        let daily = build_daily_stats(&events, &commits, &file_edits, &cost_map, &quality_map);
+        assert_eq!(daily.len(), 1);
+        assert!((daily[0].cost_usd - 0.05).abs() < 1e-9);
+        assert_eq!(daily[0].execution_count, 10);
+        assert_eq!(daily[0].success_count, 8);
+    }
+
+    #[test]
+    fn weekly_stats_sum_cost_quality() {
+        let daily = vec![
+            DayStat {
+                date: "2026-03-02".into(),
+                events: 5,
+                commits: 1,
+                cost_usd: 0.10,
+                execution_count: 5,
+                success_count: 4,
+                ..Default::default()
+            },
+            DayStat {
+                date: "2026-03-03".into(),
+                events: 3,
+                commits: 0,
+                cost_usd: 0.05,
+                execution_count: 3,
+                success_count: 3,
+                ..Default::default()
+            },
+        ];
+
+        let weekly = build_weekly_stats(&daily);
+        assert_eq!(weekly.len(), 1);
+        assert!((weekly[0].cost_usd - 0.15).abs() < 1e-9);
+        assert_eq!(weekly[0].execution_count, 8);
+        assert_eq!(weekly[0].success_count, 7);
     }
 
     #[test]

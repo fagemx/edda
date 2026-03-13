@@ -369,6 +369,225 @@ pub fn file_edits_by_date(
     result
 }
 
+/// Aggregate execution event cost by date (YYYY-MM-DD) across all projects.
+pub fn cost_by_date(projects: &[ProjectEntry], range: &DateRange) -> BTreeMap<String, f64> {
+    let mut costs: BTreeMap<String, f64> = BTreeMap::new();
+
+    for entry in projects {
+        let root = Path::new(&entry.path);
+        let ledger = match Ledger::open(root) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        let events = match ledger.iter_events() {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for event in &events {
+            if event.event_type != "execution_event" {
+                continue;
+            }
+            if !range.matches(&event.ts) {
+                continue;
+            }
+            let cost = event
+                .payload
+                .get("usage")
+                .and_then(|u| u.get("cost_usd"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            if cost > 0.0 {
+                let date = &event.ts[..10.min(event.ts.len())];
+                *costs.entry(date.to_string()).or_insert(0.0) += cost;
+            }
+        }
+    }
+
+    costs
+}
+
+/// Aggregate execution event quality by date (YYYY-MM-DD) across all projects.
+///
+/// Returns `BTreeMap<date, (success_count, total_count)>`.
+pub fn quality_by_date(
+    projects: &[ProjectEntry],
+    range: &DateRange,
+) -> BTreeMap<String, (u64, u64)> {
+    let mut quality: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+
+    for entry in projects {
+        let root = Path::new(&entry.path);
+        let ledger = match Ledger::open(root) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        let events = match ledger.iter_events() {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        for event in &events {
+            if event.event_type != "execution_event" {
+                continue;
+            }
+            if !range.matches(&event.ts) {
+                continue;
+            }
+            let status = event
+                .payload
+                .get("result")
+                .and_then(|r| r.get("status"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+
+            let date = &event.ts[..10.min(event.ts.len())];
+            let entry = quality.entry(date.to_string()).or_insert((0, 0));
+            if status == "success" {
+                entry.0 += 1;
+            }
+            entry.1 += 1;
+        }
+    }
+
+    quality
+}
+
+/// Per-project metrics with cost, quality, and activity breakdown.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectMetrics {
+    pub project_id: String,
+    pub name: String,
+    pub group: Option<String>,
+    pub activity: ActivityMetrics,
+    pub cost: CostMetrics,
+    pub quality: QualityMetrics,
+}
+
+/// Activity counts for a project within a time range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityMetrics {
+    pub events: usize,
+    pub commits: usize,
+    pub decisions: usize,
+    pub sessions: usize,
+}
+
+/// Per-model cost breakdown entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCost {
+    pub model: String,
+    pub cost_usd: f64,
+    pub steps: u64,
+}
+
+/// Cost metrics for a project within a time range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostMetrics {
+    pub total_usd: f64,
+    pub daily_avg_usd: f64,
+    pub by_model: Vec<ModelCost>,
+}
+
+/// Quality metrics for a project within a time range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QualityMetrics {
+    pub success_rate: f64,
+    pub avg_latency_ms: f64,
+    pub total_steps: u64,
+}
+
+/// Compute per-project metrics for all given projects within the specified date range.
+pub fn per_project_metrics(
+    projects: &[ProjectEntry],
+    range: &DateRange,
+    days: usize,
+) -> Vec<ProjectMetrics> {
+    use crate::quality::model_quality_from_events;
+
+    let mut results = Vec::new();
+
+    for entry in projects {
+        let root = Path::new(&entry.path);
+        let ledger = match Ledger::open(root) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        let events = match ledger.iter_events() {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let filtered: Vec<&Event> = events.iter().filter(|e| range.matches(&e.ts)).collect();
+        let commit_count = filtered.iter().filter(|e| e.event_type == "commit").count();
+        let decision_count = filtered
+            .iter()
+            .filter(|e| e.event_type == "note" && edda_core::decision::is_decision(&e.payload))
+            .count();
+        let session_count = count_unique_sessions(&filtered);
+
+        // Quality: filter execution events and compute
+        let exec_events: Vec<Event> = events
+            .iter()
+            .filter(|e| e.event_type == "execution_event" && range.matches(&e.ts))
+            .cloned()
+            .collect();
+        let quality_report = model_quality_from_events(&exec_events, range);
+
+        let by_model: Vec<ModelCost> = quality_report
+            .models
+            .iter()
+            .map(|m| ModelCost {
+                model: m.model.clone(),
+                cost_usd: m.total_cost_usd,
+                steps: m.total_steps,
+            })
+            .collect();
+
+        let daily_avg = if days > 0 {
+            quality_report.total_cost_usd / days as f64
+        } else {
+            0.0
+        };
+
+        results.push(ProjectMetrics {
+            project_id: entry.project_id.clone(),
+            name: entry.name.clone(),
+            group: entry.group.clone(),
+            activity: ActivityMetrics {
+                events: filtered.len(),
+                commits: commit_count,
+                decisions: decision_count,
+                sessions: session_count,
+            },
+            cost: CostMetrics {
+                total_usd: quality_report.total_cost_usd,
+                daily_avg_usd: daily_avg,
+                by_model,
+            },
+            quality: QualityMetrics {
+                success_rate: quality_report.overall_success_rate,
+                avg_latency_ms: if quality_report.total_steps > 0 {
+                    quality_report
+                        .models
+                        .iter()
+                        .map(|m| m.avg_latency_ms * m.total_steps as f64)
+                        .sum::<f64>()
+                        / quality_report.total_steps as f64
+                } else {
+                    0.0
+                },
+                total_steps: quality_report.total_steps,
+            },
+        });
+    }
+
+    results
+}
+
 /// Count unique session IDs from events.
 fn count_unique_sessions(events: &[&Event]) -> usize {
     let mut sessions = std::collections::HashSet::new();
