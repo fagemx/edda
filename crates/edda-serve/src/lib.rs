@@ -167,6 +167,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
             "/api/decisions/{event_id}/outcomes",
             get(get_decision_outcomes),
         )
+        .route("/api/decisions/{event_id}/chain", get(get_decision_chain))
         .route("/api/log", get(get_log))
         .route("/api/drafts", get(get_drafts))
         .route("/api/drafts/{id}/approve", post(post_draft_approve))
@@ -255,6 +256,7 @@ pub fn router(repo_root: &Path) -> Router {
             "/api/decisions/{event_id}/outcomes",
             get(get_decision_outcomes),
         )
+        .route("/api/decisions/{event_id}/chain", get(get_decision_chain))
         .route("/api/log", get(get_log))
         .route("/api/drafts", get(get_drafts))
         .route("/api/drafts/{id}/approve", post(post_draft_approve))
@@ -906,6 +908,88 @@ async fn get_decision_outcomes(
             event_id
         ))),
     }
+}
+
+// ── GET /api/decisions/:event_id/chain ──
+
+#[derive(Deserialize)]
+struct ChainQuery {
+    depth: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct ChainResponse {
+    root: ChainNodeResponse,
+    chain: Vec<ChainNodeResponse>,
+    meta: ChainMeta,
+}
+
+#[derive(Serialize)]
+struct ChainNodeResponse {
+    event_id: String,
+    key: String,
+    value: String,
+    reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    depth: Option<usize>,
+    ts: String,
+    is_active: bool,
+}
+
+#[derive(Serialize)]
+struct ChainMeta {
+    max_depth: usize,
+    total_nodes: usize,
+}
+
+async fn get_decision_chain(
+    State(state): State<Arc<AppState>>,
+    AxumPath(event_id): AxumPath<String>,
+    Query(params): Query<ChainQuery>,
+) -> Result<Json<ChainResponse>, AppError> {
+    let depth = params.depth.unwrap_or(3).min(10);
+    let ledger = state.open_ledger()?;
+
+    let (root, chain) = ledger
+        .causal_chain(&event_id, depth)?
+        .ok_or_else(|| AppError::NotFound(format!("decision not found: {}", event_id)))?;
+
+    let root_node = ChainNodeResponse {
+        event_id: root.event_id,
+        key: root.key,
+        value: root.value,
+        reason: root.reason,
+        relation: None,
+        depth: None,
+        ts: root.ts.unwrap_or_default(),
+        is_active: root.is_active,
+    };
+
+    let chain_nodes: Vec<ChainNodeResponse> = chain
+        .into_iter()
+        .map(|entry| ChainNodeResponse {
+            event_id: entry.decision.event_id,
+            key: entry.decision.key,
+            value: entry.decision.value,
+            reason: entry.decision.reason,
+            relation: Some(entry.relation),
+            depth: Some(entry.depth),
+            ts: entry.decision.ts.unwrap_or_default(),
+            is_active: entry.decision.is_active,
+        })
+        .collect();
+
+    let total_nodes = 1 + chain_nodes.len();
+    Ok(Json(ChainResponse {
+        root: root_node,
+        chain: chain_nodes,
+        meta: ChainMeta {
+            max_depth: depth,
+            total_nodes,
+        },
+    }))
 }
 
 // ── GET /api/log ──
@@ -6265,5 +6349,247 @@ actors:
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["query_index"], 0);
         assert!(results[0]["decisions"].is_array());
+    }
+
+    // ── Causal chain endpoint tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn chain_endpoint_empty_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = Router::new().merge(router(tmp.path()));
+
+        let decide_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "db.engine=postgres", "reason": "test"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decide_resp.status(), StatusCode::CREATED);
+
+        let body = axum::body::to_bytes(decide_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let event_id = json["event_id"].as_str().unwrap();
+
+        let chain_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/decisions/{}/chain", event_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(chain_resp.status(), StatusCode::OK);
+
+        let chain_body = axum::body::to_bytes(chain_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let chain_json: serde_json::Value = serde_json::from_slice(&chain_body).unwrap();
+
+        assert_eq!(chain_json["root"]["key"], "db.engine");
+        assert_eq!(chain_json["root"]["value"], "postgres");
+        assert!(chain_json["chain"].as_array().unwrap().is_empty());
+        assert_eq!(chain_json["meta"]["total_nodes"], 1);
+    }
+
+    #[tokio::test]
+    async fn chain_endpoint_404_for_nonexistent() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = Router::new().merge(router(tmp.path()));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/decisions/evt_nonexistent/chain")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn chain_endpoint_returns_chain_with_deps() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = Router::new().merge(router(tmp.path()));
+
+        let resp_a = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "db.engine=postgres", "reason": "root"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body_a = axum::body::to_bytes(resp_a.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json_a: serde_json::Value = serde_json::from_slice(&body_a).unwrap();
+        let event_id_a = json_a["event_id"].as_str().unwrap().to_string();
+
+        let _resp_b = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "db.pool=10", "reason": "pool config"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        {
+            let ledger = Ledger::open(tmp.path()).unwrap();
+            ledger
+                .insert_dep("db.pool", "db.engine", "explicit", None)
+                .unwrap();
+        }
+
+        let chain_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/decisions/{}/chain?depth=3", event_id_a))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(chain_resp.status(), StatusCode::OK);
+
+        let chain_body = axum::body::to_bytes(chain_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let chain_json: serde_json::Value = serde_json::from_slice(&chain_body).unwrap();
+
+        assert_eq!(chain_json["root"]["key"], "db.engine");
+        let chain_arr = chain_json["chain"].as_array().unwrap();
+        assert_eq!(chain_arr.len(), 1);
+        assert_eq!(chain_arr[0]["key"], "db.pool");
+        assert_eq!(chain_arr[0]["relation"], "depends_on");
+        assert_eq!(chain_arr[0]["depth"], 1);
+        assert_eq!(chain_json["meta"]["total_nodes"], 2);
+        assert_eq!(chain_json["meta"]["max_depth"], 3);
+    }
+
+    #[tokio::test]
+    async fn chain_endpoint_depth_param() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = Router::new().merge(router(tmp.path()));
+
+        let resp_a = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "db.engine=postgres", "reason": "root"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body_a = axum::body::to_bytes(resp_a.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json_a: serde_json::Value = serde_json::from_slice(&body_a).unwrap();
+        let event_id_a = json_a["event_id"].as_str().unwrap().to_string();
+
+        let _resp_b = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "db.pool=10", "reason": "pool"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let _resp_c = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"decision": "db.timeout=30", "reason": "timeout"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        {
+            let ledger = Ledger::open(tmp.path()).unwrap();
+            ledger
+                .insert_dep("db.pool", "db.engine", "explicit", None)
+                .unwrap();
+            ledger
+                .insert_dep("db.timeout", "db.pool", "explicit", None)
+                .unwrap();
+        }
+
+        let chain_resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/api/decisions/{}/chain?depth=1", event_id_a))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(chain_resp.status(), StatusCode::OK);
+
+        let chain_body = axum::body::to_bytes(chain_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let chain_json: serde_json::Value = serde_json::from_slice(&chain_body).unwrap();
+
+        let chain_arr = chain_json["chain"].as_array().unwrap();
+        assert_eq!(chain_arr.len(), 1);
+        assert_eq!(chain_arr[0]["key"], "db.pool");
+        assert_eq!(chain_json["meta"]["max_depth"], 1);
     }
 }

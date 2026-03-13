@@ -309,6 +309,22 @@ impl Ledger {
         self.sqlite.transitive_dependents_of(key, max_depth)
     }
 
+    // ── Causal Chain ─────────────────────────────────────────────────
+
+    /// Look up a single decision by event_id.
+    pub fn get_decision_by_event_id(&self, event_id: &str) -> anyhow::Result<Option<DecisionRow>> {
+        self.sqlite.get_decision_by_event_id(event_id)
+    }
+
+    /// Traverse the causal chain from a root decision via unified BFS.
+    pub fn causal_chain(
+        &self,
+        event_id: &str,
+        max_depth: usize,
+    ) -> anyhow::Result<Option<(DecisionRow, Vec<crate::sqlite_store::ChainEntry>)>> {
+        self.sqlite.causal_chain(event_id, max_depth)
+    }
+
     // ── Task Briefs ──────────────────────────────────────────────────
 
     /// Get a task brief by task_id.
