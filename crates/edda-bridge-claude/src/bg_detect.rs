@@ -848,9 +848,9 @@ mod tests {
 
     #[test]
     fn should_run_returns_false_when_disabled() {
-        std::env::set_var("EDDA_BG_ENABLED", "0");
-        assert!(!should_run("test_detect_disabled"));
-        std::env::remove_var("EDDA_BG_ENABLED");
+        crate::with_env_guard(&[("EDDA_BG_ENABLED", Some("0"))], || {
+            assert!(!should_run("test_detect_disabled"));
+        });
     }
 
     #[test]
@@ -859,9 +859,9 @@ mod tests {
         // Ensure no state file exists
         let _ = fs::remove_file(detect_state_path(pid));
 
-        std::env::set_var("EDDA_BG_ENABLED", "1");
-        assert!(should_run(pid));
-        std::env::remove_var("EDDA_BG_ENABLED");
+        crate::with_env_guard(&[("EDDA_BG_ENABLED", Some("1"))], || {
+            assert!(should_run(pid));
+        });
     }
 
     #[test]
@@ -876,14 +876,18 @@ mod tests {
         };
         save_detect_state_raw(pid, &state).unwrap();
 
-        std::env::set_var("EDDA_BG_ENABLED", "1");
-        std::env::set_var("EDDA_DETECT_INTERVAL", "10");
-        assert!(!should_run(pid));
+        crate::with_env_guard(
+            &[
+                ("EDDA_BG_ENABLED", Some("1")),
+                ("EDDA_DETECT_INTERVAL", Some("10")),
+            ],
+            || {
+                assert!(!should_run(pid));
+            },
+        );
 
         // Cleanup
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
-        std::env::remove_var("EDDA_BG_ENABLED");
-        std::env::remove_var("EDDA_DETECT_INTERVAL");
     }
 
     #[test]
@@ -898,16 +902,19 @@ mod tests {
         };
         save_detect_state_raw(pid, &state).unwrap();
 
-        std::env::set_var("EDDA_BG_ENABLED", "1");
-        std::env::set_var("EDDA_DETECT_INTERVAL", "1");
-        std::env::set_var("EDDA_DETECT_COOLDOWN_HOURS", "24");
-        assert!(!should_run(pid));
+        crate::with_env_guard(
+            &[
+                ("EDDA_BG_ENABLED", Some("1")),
+                ("EDDA_DETECT_INTERVAL", Some("1")),
+                ("EDDA_DETECT_COOLDOWN_HOURS", Some("24")),
+            ],
+            || {
+                assert!(!should_run(pid));
+            },
+        );
 
         // Cleanup
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
-        std::env::remove_var("EDDA_BG_ENABLED");
-        std::env::remove_var("EDDA_DETECT_INTERVAL");
-        std::env::remove_var("EDDA_DETECT_COOLDOWN_HOURS");
     }
 
     #[test]
@@ -1232,9 +1239,9 @@ End."#;
             sessions_since_last: 100,
             status: "completed".to_string(),
         };
-        std::env::set_var("EDDA_DETECT_COOLDOWN_HOURS", "24");
-        assert!(!cooldown_elapsed(&state));
-        std::env::remove_var("EDDA_DETECT_COOLDOWN_HOURS");
+        crate::with_env_guard(&[("EDDA_DETECT_COOLDOWN_HOURS", Some("24"))], || {
+            assert!(!cooldown_elapsed(&state));
+        });
     }
 
     #[test]

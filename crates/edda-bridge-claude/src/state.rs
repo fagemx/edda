@@ -230,15 +230,20 @@ mod tests {
 
     #[test]
     fn nudge_cooldown_env_var_override() {
-        assert_eq!(nudge_cooldown_secs(), 180);
+        crate::with_env_guard(&[("EDDA_NUDGE_COOLDOWN_SECS", None)], || {
+            assert_eq!(nudge_cooldown_secs(), 180);
+        });
 
-        std::env::set_var("EDDA_NUDGE_COOLDOWN_SECS", "60");
-        assert_eq!(nudge_cooldown_secs(), 60);
+        crate::with_env_guard(&[("EDDA_NUDGE_COOLDOWN_SECS", Some("60"))], || {
+            assert_eq!(nudge_cooldown_secs(), 60);
+        });
 
-        std::env::set_var("EDDA_NUDGE_COOLDOWN_SECS", "not_a_number");
-        assert_eq!(nudge_cooldown_secs(), 180);
-
-        std::env::remove_var("EDDA_NUDGE_COOLDOWN_SECS");
+        crate::with_env_guard(
+            &[("EDDA_NUDGE_COOLDOWN_SECS", Some("not_a_number"))],
+            || {
+                assert_eq!(nudge_cooldown_secs(), 180);
+            },
+        );
     }
 
     #[test]

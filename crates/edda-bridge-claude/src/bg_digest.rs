@@ -314,27 +314,39 @@ mod tests {
 
     #[test]
     fn should_run_returns_false_when_disabled() {
-        std::env::set_var("EDDA_BG_ENABLED", "0");
-        std::env::set_var("EDDA_LLM_API_KEY", "test-key");
-        assert!(!should_run("test_proj", "test_sess"));
-        std::env::remove_var("EDDA_BG_ENABLED");
-        std::env::remove_var("EDDA_LLM_API_KEY");
+        crate::with_env_guard(
+            &[
+                ("EDDA_BG_ENABLED", Some("0")),
+                ("EDDA_LLM_API_KEY", Some("test-key")),
+            ],
+            || {
+                assert!(!should_run("test_proj", "test_sess"));
+            },
+        );
     }
 
     #[test]
     fn should_run_returns_false_without_api_key() {
-        std::env::set_var("EDDA_BG_ENABLED", "1");
-        std::env::remove_var("EDDA_LLM_API_KEY");
-        assert!(!should_run("test_proj", "test_sess"));
+        crate::with_env_guard(
+            &[("EDDA_BG_ENABLED", Some("1")), ("EDDA_LLM_API_KEY", None)],
+            || {
+                assert!(!should_run("test_proj", "test_sess"));
+            },
+        );
     }
 
     #[test]
     fn should_run_returns_false_without_transcript() {
-        std::env::set_var("EDDA_BG_ENABLED", "1");
-        std::env::set_var("EDDA_LLM_API_KEY", "test-key");
-        // No transcript file exists for a random project/session
-        assert!(!should_run("nonexistent_proj_digest", "nonexistent_sess"));
-        std::env::remove_var("EDDA_LLM_API_KEY");
+        crate::with_env_guard(
+            &[
+                ("EDDA_BG_ENABLED", Some("1")),
+                ("EDDA_LLM_API_KEY", Some("test-key")),
+            ],
+            || {
+                // No transcript file exists for a random project/session
+                assert!(!should_run("nonexistent_proj_digest", "nonexistent_sess"));
+            },
+        );
     }
 
     #[test]
@@ -359,14 +371,18 @@ mod tests {
         let _ = fs::create_dir_all(state_path.parent().unwrap());
         let _ = fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap());
 
-        std::env::set_var("EDDA_BG_ENABLED", "1");
-        std::env::set_var("EDDA_LLM_API_KEY", "test-key");
-
-        assert!(!should_run(pid, sid));
+        crate::with_env_guard(
+            &[
+                ("EDDA_BG_ENABLED", Some("1")),
+                ("EDDA_LLM_API_KEY", Some("test-key")),
+            ],
+            || {
+                assert!(!should_run(pid, sid));
+            },
+        );
 
         // Cleanup
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
-        std::env::remove_var("EDDA_LLM_API_KEY");
     }
 
     #[test]
