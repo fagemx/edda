@@ -762,6 +762,7 @@ dependencies = [
  "anyhow",
  "blake3",
  "dirs",
+ "edda-aggregate",
  "edda-core",
  "edda-derive",
  "edda-index",
