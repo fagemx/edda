@@ -364,11 +364,13 @@ pub struct ApprovalEventParams<'a> {
     pub note: &'a str,
     pub stage_id: &'a str,
     pub role: &'a str,
+    /// Optional device identifier for remote approval audit trail.
+    pub device_id: Option<&'a str>,
 }
 
 /// Create a new `approval` event.
 pub fn new_approval_event(p: &ApprovalEventParams<'_>) -> anyhow::Result<Event> {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "draft_id": p.draft_id,
         "draft_sha256": p.draft_sha256,
         "decision": p.decision,
@@ -377,6 +379,9 @@ pub fn new_approval_event(p: &ApprovalEventParams<'_>) -> anyhow::Result<Event> 
         "stage_id": p.stage_id,
         "role": p.role,
     });
+    if let Some(device_id) = p.device_id {
+        payload["device_id"] = serde_json::Value::String(device_id.to_string());
+    }
 
     let mut event = Event {
         event_id: new_event_id(),
@@ -941,6 +946,7 @@ mod tests {
             note: "LGTM",
             stage_id: "lead",
             role: "lead",
+            device_id: None,
         })
         .unwrap();
         assert_eq!(event.event_type, "approval");
@@ -951,6 +957,27 @@ mod tests {
         assert_eq!(event.payload["role"], "lead");
         assert_eq!(event.schema_version, SCHEMA_VERSION);
         assert_eq!(event.digests[0].value, event.hash);
+        // device_id should not be present when None
+        assert!(event.payload.get("device_id").is_none());
+    }
+
+    #[test]
+    fn approval_event_with_device_id() {
+        let event = new_approval_event(&ApprovalEventParams {
+            branch: "main",
+            parent_hash: None,
+            draft_id: "drf_dev",
+            draft_sha256: "abc123",
+            decision: "approve",
+            actor: "alice",
+            note: "approved from phone",
+            stage_id: "lead",
+            role: "lead",
+            device_id: Some("iphone-14-abc"),
+        })
+        .unwrap();
+        assert_eq!(event.payload["device_id"], "iphone-14-abc");
+        assert_eq!(event.payload["actor"], "alice");
     }
 
     #[test]
@@ -1170,6 +1197,7 @@ mod tests {
             note: "",
             stage_id: "lead",
             role: "lead",
+            device_id: None,
         })
         .unwrap();
         assert_eq!(event.event_family.as_deref(), Some("governance"));
