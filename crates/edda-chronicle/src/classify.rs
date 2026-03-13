@@ -159,3 +159,80 @@ fn calculate_scores(
 
     scores
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(val: &str) -> String {
+        val.to_string()
+    }
+
+    #[test]
+    fn test_coding_session() {
+        let tools = vec![s("Edit"), s("Read"), s("Bash")];
+        let bash = vec![s("git commit -m 'fix'")];
+        let result = classify_session(&tools, &bash, 5, 3, 10, 600);
+        assert_eq!(result, SessionType::Coding);
+    }
+
+    #[test]
+    fn test_research_session() {
+        let tools = vec![s("Read"), s("Grep"), s("Write")];
+        let bash: Vec<String> = vec![];
+        let result = classify_session(&tools, &bash, 1, 10, 8, 600);
+        assert_eq!(result, SessionType::Research);
+    }
+
+    #[test]
+    fn test_discussion_session() {
+        let tools = vec![s("Read")];
+        let bash: Vec<String> = vec![];
+        let result = classify_session(&tools, &bash, 0, 0, 15, 3600);
+        assert_eq!(result, SessionType::Discussion);
+    }
+
+    #[test]
+    fn test_analysis_session() {
+        // Read + Grep + Write + Edit → Analysis (score 3.5)
+        // Avoid test commands to keep Debugging at 0
+        let tools = vec![s("Read"), s("Grep"), s("Write"), s("Edit")];
+        let bash: Vec<String> = vec![];
+        let result = classify_session(&tools, &bash, 2, 5, 8, 600);
+        assert_eq!(result, SessionType::Analysis);
+    }
+
+    #[test]
+    fn test_automated_session() {
+        let tools = vec![s("SubagentStart"), s("Read"), s("Bash")];
+        let bash = vec![s("some-command")];
+        let result = classify_session(&tools, &bash, 0, 1, 5, 300);
+        assert_eq!(result, SessionType::Automated);
+    }
+
+    #[test]
+    fn test_debugging_session() {
+        // cargo test + Edit → Debugging (score 3.5)
+        // Avoid git commit to keep Coding lower
+        let tools = vec![s("Edit"), s("Read"), s("Bash")];
+        let bash = vec![s("cargo test")];
+        let result = classify_session(&tools, &bash, 1, 2, 8, 600);
+        assert_eq!(result, SessionType::Debugging);
+    }
+
+    #[test]
+    fn test_quick_ops_session() {
+        let tools = vec![s("Read")];
+        let bash: Vec<String> = vec![];
+        let result = classify_session(&tools, &bash, 0, 0, 2, 60);
+        assert_eq!(result, SessionType::QuickOps);
+    }
+
+    #[test]
+    fn test_empty_input_defaults_to_quick_ops() {
+        let tools: Vec<String> = vec![];
+        let bash: Vec<String> = vec![];
+        let result = classify_session(&tools, &bash, 0, 0, 0, 0);
+        assert_eq!(result, SessionType::QuickOps);
+    }
+}

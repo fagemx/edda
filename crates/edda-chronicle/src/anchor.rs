@@ -163,3 +163,125 @@ impl Anchor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RecapOptions;
+
+    fn default_opts() -> RecapOptions {
+        RecapOptions::default()
+    }
+
+    #[test]
+    fn test_from_options_query() {
+        let opts = RecapOptions {
+            query: Some("auth flow".into()),
+            ..default_opts()
+        };
+        let anchor = Anchor::from_options(&opts);
+        assert!(matches!(anchor, Anchor::Topic(q) if q == "auth flow"));
+    }
+
+    #[test]
+    fn test_from_options_project() {
+        let opts = RecapOptions {
+            project: Some("edda".into()),
+            ..default_opts()
+        };
+        let anchor = Anchor::from_options(&opts);
+        assert!(matches!(anchor, Anchor::Project(p) if p == "edda"));
+    }
+
+    #[test]
+    fn test_from_options_week() {
+        let opts = RecapOptions {
+            week: true,
+            ..default_opts()
+        };
+        let anchor = Anchor::from_options(&opts);
+        assert!(matches!(anchor, Anchor::Week));
+    }
+
+    #[test]
+    fn test_from_options_since() {
+        let opts = RecapOptions {
+            since: Some("2026-01-01T00:00:00Z".into()),
+            ..default_opts()
+        };
+        let anchor = Anchor::from_options(&opts);
+        assert!(matches!(anchor, Anchor::Since(s) if s == "2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn test_from_options_all() {
+        let opts = RecapOptions {
+            all: true,
+            ..default_opts()
+        };
+        let anchor = Anchor::from_options(&opts);
+        assert!(matches!(anchor, Anchor::All));
+    }
+
+    #[test]
+    fn test_from_options_default() {
+        let anchor = Anchor::from_options(&default_opts());
+        assert!(matches!(anchor, Anchor::Default));
+    }
+
+    #[test]
+    fn test_resolve_default_no_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = default_opts();
+        let resolved = resolve_anchor(&Anchor::Default, &tmp.path().to_path_buf(), &opts).unwrap();
+
+        assert_eq!(resolved.anchor_type, "default");
+        assert!(resolved.project_filter.is_none());
+        assert!(resolved.topic_query.is_none());
+        assert!(resolved.session_ids.is_empty());
+
+        let (start, end) = resolved.time_filter.expect("should have time filter");
+        assert!(start < end);
+        let duration = end - start;
+        let expected = chrono::Duration::hours(24);
+        assert!(
+            (duration - expected).num_seconds().abs() < 5,
+            "duration should be ~24h, got {}s",
+            duration.num_seconds()
+        );
+    }
+
+    #[test]
+    fn test_resolve_project_anchor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = default_opts();
+        let resolved = resolve_anchor(
+            &Anchor::Project("myproject".into()),
+            &tmp.path().to_path_buf(),
+            &opts,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.anchor_type, "project");
+        assert_eq!(resolved.project_filter, Some("myproject".into()));
+        assert!(resolved.time_filter.is_none());
+    }
+
+    #[test]
+    fn test_resolve_week_anchor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let opts = default_opts();
+        let resolved =
+            resolve_anchor(&Anchor::Week, &tmp.path().to_path_buf(), &opts).unwrap();
+
+        assert_eq!(resolved.anchor_type, "week");
+        let (start, end) = resolved.time_filter.expect("should have time filter");
+        assert!(start < end);
+        let duration = end - start;
+        let expected = chrono::Duration::weeks(1);
+        assert!(
+            (duration - expected).num_seconds().abs() < 5,
+            "duration should be ~1 week"
+        );
+    }
+}

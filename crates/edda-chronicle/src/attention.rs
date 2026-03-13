@@ -70,3 +70,62 @@ fn truncate_text(text: &str, max_len: usize) -> String {
         format!("{}...", &text[..end])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use edda_core::event::new_note_event;
+
+    fn setup_ledger() -> (tempfile::TempDir, Ledger) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open_or_init(tmp.path()).unwrap();
+        (tmp, ledger)
+    }
+
+    #[test]
+    fn test_empty_ledger() {
+        let (_tmp, ledger) = setup_ledger();
+        let items = get_attention_items(&ledger, None).unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_blocker_detected() {
+        let (_tmp, ledger) = setup_ledger();
+        let event =
+            new_note_event("main", None, "system", "This is a blocker for release", &[]).unwrap();
+        ledger.append_event(&event).unwrap();
+
+        let items = get_attention_items(&ledger, None).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item_type, "blocker");
+        assert_eq!(items[0].priority, "high");
+        assert!(items[0].description.contains("blocker"));
+    }
+
+    #[test]
+    fn test_non_blocker_ignored() {
+        let (_tmp, ledger) = setup_ledger();
+        let event =
+            new_note_event("main", None, "system", "Normal progress update", &[]).unwrap();
+        ledger.append_event(&event).unwrap();
+
+        let items = get_attention_items(&ledger, None).unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_truncate_text_long_input() {
+        let long = "a".repeat(200);
+        let result = truncate_text(&long, 100);
+        assert!(result.len() <= 100);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_truncate_text_short_input() {
+        let short = "hello world";
+        let result = truncate_text(short, 100);
+        assert_eq!(result, "hello world");
+    }
+}

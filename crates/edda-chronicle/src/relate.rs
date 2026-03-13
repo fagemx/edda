@@ -39,3 +39,22 @@ pub fn build_search_index_if_needed(project_root: &std::path::Path) -> Result<()
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_no_index_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = find_related_content("some query", tmp.path(), 10).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_build_search_index_if_needed_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = build_search_index_if_needed(tmp.path());
+        assert!(result.is_ok());
+    }
+}
