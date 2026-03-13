@@ -1056,30 +1056,7 @@ impl SqliteStore {
         )?;
 
         let events = stmt
-            .query_map([], |row| {
-                let payload_str: String = row.get(6)?;
-                let refs_blobs_str: String = row.get(7)?;
-                let refs_events_str: String = row.get(8)?;
-                let refs_prov_str: String = row.get(9)?;
-                let digests_str: String = row.get(11)?;
-
-                Ok(EventRow {
-                    event_id: row.get(0)?,
-                    ts: row.get(1)?,
-                    event_type: row.get(2)?,
-                    branch: row.get(3)?,
-                    parent_hash: row.get(4)?,
-                    hash: row.get(5)?,
-                    payload_str,
-                    refs_blobs_str,
-                    refs_events_str,
-                    refs_prov_str,
-                    schema_version: row.get(10)?,
-                    digests_str,
-                    event_family: row.get(12)?,
-                    event_level: row.get(13)?,
-                })
-            })?
+            .query_map([], map_event_row)?
             .collect::<Result<Vec<_>, _>>()?;
 
         events.into_iter().map(row_to_event).collect()
@@ -1095,30 +1072,7 @@ impl SqliteStore {
         )?;
 
         let events = stmt
-            .query_map(params![event_type], |row| {
-                let payload_str: String = row.get(6)?;
-                let refs_blobs_str: String = row.get(7)?;
-                let refs_events_str: String = row.get(8)?;
-                let refs_prov_str: String = row.get(9)?;
-                let digests_str: String = row.get(11)?;
-
-                Ok(EventRow {
-                    event_id: row.get(0)?,
-                    ts: row.get(1)?,
-                    event_type: row.get(2)?,
-                    branch: row.get(3)?,
-                    parent_hash: row.get(4)?,
-                    hash: row.get(5)?,
-                    payload_str,
-                    refs_blobs_str,
-                    refs_events_str,
-                    refs_prov_str,
-                    schema_version: row.get(10)?,
-                    digests_str,
-                    event_family: row.get(12)?,
-                    event_level: row.get(13)?,
-                })
-            })?
+            .query_map(params![event_type], map_event_row)?
             .collect::<Result<Vec<_>, _>>()?;
 
         events.into_iter().map(row_to_event).collect()
@@ -1134,30 +1088,7 @@ impl SqliteStore {
         )?;
 
         let events = stmt
-            .query_map(params![branch], |row| {
-                let payload_str: String = row.get(6)?;
-                let refs_blobs_str: String = row.get(7)?;
-                let refs_events_str: String = row.get(8)?;
-                let refs_prov_str: String = row.get(9)?;
-                let digests_str: String = row.get(11)?;
-
-                Ok(EventRow {
-                    event_id: row.get(0)?,
-                    ts: row.get(1)?,
-                    event_type: row.get(2)?,
-                    branch: row.get(3)?,
-                    parent_hash: row.get(4)?,
-                    hash: row.get(5)?,
-                    payload_str,
-                    refs_blobs_str,
-                    refs_events_str,
-                    refs_prov_str,
-                    schema_version: row.get(10)?,
-                    digests_str,
-                    event_family: row.get(12)?,
-                    event_level: row.get(13)?,
-                })
-            })?
+            .query_map(params![branch], map_event_row)?
             .collect::<Result<Vec<_>, _>>()?;
 
         events.into_iter().map(row_to_event).collect()
@@ -1210,30 +1141,7 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(&sql)?;
 
         let events = stmt
-            .query_map(param_refs.as_slice(), |row| {
-                let payload_str: String = row.get(6)?;
-                let refs_blobs_str: String = row.get(7)?;
-                let refs_events_str: String = row.get(8)?;
-                let refs_prov_str: String = row.get(9)?;
-                let digests_str: String = row.get(11)?;
-
-                Ok(EventRow {
-                    event_id: row.get(0)?,
-                    ts: row.get(1)?,
-                    event_type: row.get(2)?,
-                    branch: row.get(3)?,
-                    parent_hash: row.get(4)?,
-                    hash: row.get(5)?,
-                    payload_str,
-                    refs_blobs_str,
-                    refs_events_str,
-                    refs_prov_str,
-                    schema_version: row.get(10)?,
-                    digests_str,
-                    event_family: row.get(12)?,
-                    event_level: row.get(13)?,
-                })
-            })?
+            .query_map(param_refs.as_slice(), map_event_row)?
             .collect::<Result<Vec<_>, _>>()?;
 
         events.into_iter().map(row_to_event).collect()
@@ -1290,30 +1198,7 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(&sql)?;
 
         let events = stmt
-            .query_map(param_refs.as_slice(), |row| {
-                let payload_str: String = row.get(6)?;
-                let refs_blobs_str: String = row.get(7)?;
-                let refs_events_str: String = row.get(8)?;
-                let refs_prov_str: String = row.get(9)?;
-                let digests_str: String = row.get(11)?;
-
-                Ok(EventRow {
-                    event_id: row.get(0)?,
-                    ts: row.get(1)?,
-                    event_type: row.get(2)?,
-                    branch: row.get(3)?,
-                    parent_hash: row.get(4)?,
-                    hash: row.get(5)?,
-                    payload_str,
-                    refs_blobs_str,
-                    refs_events_str,
-                    refs_prov_str,
-                    schema_version: row.get(10)?,
-                    digests_str,
-                    event_family: row.get(12)?,
-                    event_level: row.get(13)?,
-                })
-            })?
+            .query_map(param_refs.as_slice(), map_event_row)?
             .collect::<Result<Vec<_>, _>>()?;
 
         events.into_iter().map(row_to_event).collect()
@@ -1361,30 +1246,7 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(&sql)?;
 
         let events = stmt
-            .query_map(param_refs.as_slice(), |row| {
-                let payload_str: String = row.get(6)?;
-                let refs_blobs_str: String = row.get(7)?;
-                let refs_events_str: String = row.get(8)?;
-                let refs_prov_str: String = row.get(9)?;
-                let digests_str: String = row.get(11)?;
-
-                Ok(EventRow {
-                    event_id: row.get(0)?,
-                    ts: row.get(1)?,
-                    event_type: row.get(2)?,
-                    branch: row.get(3)?,
-                    parent_hash: row.get(4)?,
-                    hash: row.get(5)?,
-                    payload_str,
-                    refs_blobs_str,
-                    refs_events_str,
-                    refs_prov_str,
-                    schema_version: row.get(10)?,
-                    digests_str,
-                    event_family: row.get(12)?,
-                    event_level: row.get(13)?,
-                })
-            })?
+            .query_map(param_refs.as_slice(), map_event_row)?
             .collect::<Result<Vec<_>, _>>()?;
 
         events.into_iter().map(row_to_event).collect()
@@ -1400,30 +1262,7 @@ impl SqliteStore {
                         schema_version, digests, event_family, event_level
                  FROM events WHERE event_id = ?1",
                 params![event_id],
-                |row| {
-                    let payload_str: String = row.get(6)?;
-                    let refs_blobs_str: String = row.get(7)?;
-                    let refs_events_str: String = row.get(8)?;
-                    let refs_prov_str: String = row.get(9)?;
-                    let digests_str: String = row.get(11)?;
-
-                    Ok(EventRow {
-                        event_id: row.get(0)?,
-                        ts: row.get(1)?,
-                        event_type: row.get(2)?,
-                        branch: row.get(3)?,
-                        parent_hash: row.get(4)?,
-                        hash: row.get(5)?,
-                        payload_str,
-                        refs_blobs_str,
-                        refs_events_str,
-                        refs_prov_str,
-                        schema_version: row.get(10)?,
-                        digests_str,
-                        event_family: row.get(12)?,
-                        event_level: row.get(13)?,
-                    })
-                },
+                map_event_row,
             )
             .optional()?;
 
@@ -2542,6 +2381,31 @@ impl SqliteStore {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("snapshot context_hash query failed: {e}"))
     }
+}
+
+fn map_event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventRow> {
+    let payload_str: String = row.get(6)?;
+    let refs_blobs_str: String = row.get(7)?;
+    let refs_events_str: String = row.get(8)?;
+    let refs_prov_str: String = row.get(9)?;
+    let digests_str: String = row.get(11)?;
+
+    Ok(EventRow {
+        event_id: row.get(0)?,
+        ts: row.get(1)?,
+        event_type: row.get(2)?,
+        branch: row.get(3)?,
+        parent_hash: row.get(4)?,
+        hash: row.get(5)?,
+        payload_str,
+        refs_blobs_str,
+        refs_events_str,
+        refs_prov_str,
+        schema_version: row.get(10)?,
+        digests_str,
+        event_family: row.get(12)?,
+        event_level: row.get(13)?,
+    })
 }
 
 fn map_snapshot_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecideSnapshotRow> {
