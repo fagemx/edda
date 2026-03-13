@@ -129,19 +129,18 @@ pub fn save_rollup(rollup: &Rollup) -> anyhow::Result<()> {
 }
 
 /// Compute a full rollup from scratch.
+///
+/// Uses a single-pass aggregation to collect all metrics in one traversal
+/// per project ledger, instead of 5 separate scans.
 pub fn compute_rollup(projects: &[ProjectEntry], range: &DateRange, tool: &str) -> Rollup {
-    let events_map = aggregate::events_by_date(projects, range);
-    let commits_map = aggregate::commits_by_date(projects, range);
-    let file_edits_map = aggregate::file_edits_by_date(projects, range);
-    let cost_map = aggregate::cost_by_date(projects, range);
-    let quality_map = aggregate::quality_by_date(projects, range);
+    let metrics = aggregate::rollup_metrics_by_date(projects, range);
 
     let daily = build_daily_stats(
-        &events_map,
-        &commits_map,
-        &file_edits_map,
-        &cost_map,
-        &quality_map,
+        &metrics.events,
+        &metrics.commits,
+        &metrics.file_edits,
+        &metrics.cost,
+        &metrics.quality,
     );
     let weekly = build_weekly_stats(&daily);
     let monthly = build_monthly_stats(&daily);
