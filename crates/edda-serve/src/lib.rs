@@ -217,11 +217,13 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .allow_origin(AllowOrigin::list([
             format!("http://127.0.0.1:{}", config.port)
                 .parse()
-                .unwrap(),
+                .expect("valid localhost origin"),
             format!("http://localhost:{}", config.port)
                 .parse()
-                .unwrap(),
-            format!("http://[::1]:{}", config.port).parse().unwrap(),
+                .expect("valid localhost origin"),
+            format!("http://[::1]:{}", config.port)
+                .parse()
+                .expect("valid localhost origin"),
         ]))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any);
@@ -245,8 +247,8 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
 
 /// Build the router (for testing without binding to a port).
 /// Note: no auth middleware is applied here — tests run as localhost.
-#[allow(dead_code)]
-pub(crate) fn router(repo_root: &Path) -> Router {
+#[cfg(test)]
+fn router(repo_root: &Path) -> Router {
     let store_root = edda_store::store_root();
     let chronicle = if store_root.exists() {
         Some(ChronicleContext {
