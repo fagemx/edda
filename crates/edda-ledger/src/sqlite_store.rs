@@ -111,6 +111,24 @@ CREATE INDEX IF NOT EXISTS idx_device_tokens_name ON device_tokens(device_name);
 CREATE INDEX IF NOT EXISTS idx_device_tokens_active ON device_tokens(revoked_at) WHERE revoked_at IS NULL;
 ";
 
+const SCHEMA_V8_SQL: &str = "
+CREATE TABLE IF NOT EXISTS decide_snapshots (
+    event_id        TEXT PRIMARY KEY REFERENCES events(event_id),
+    context_hash    TEXT NOT NULL,
+    engine_version  TEXT NOT NULL,
+    schema_version  TEXT NOT NULL DEFAULT 'snapshot.v1',
+    redaction_level TEXT NOT NULL DEFAULT 'full',
+    village_id      TEXT,
+    cycle_id        TEXT,
+    has_blobs       BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_context_hash ON decide_snapshots(context_hash);
+CREATE INDEX IF NOT EXISTS idx_snapshots_village ON decide_snapshots(village_id) WHERE village_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_snapshots_engine ON decide_snapshots(engine_version);
+CREATE INDEX IF NOT EXISTS idx_snapshots_village_engine ON decide_snapshots(village_id, engine_version);
+";
+
 const SCHEMA_V3_SQL: &str = "
 CREATE TABLE IF NOT EXISTS review_bundles (
     event_id TEXT PRIMARY KEY REFERENCES events(event_id),
@@ -228,6 +246,20 @@ pub struct DeviceTokenRow {
     pub revoke_event_id: Option<String>,
 }
 
+/// A row from the `decide_snapshots` table.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DecideSnapshotRow {
+    pub event_id: String,
+    pub context_hash: String,
+    pub engine_version: String,
+    pub schema_version: String,
+    pub redaction_level: String,
+    pub village_id: Option<String>,
+    pub cycle_id: Option<String>,
+    pub has_blobs: bool,
+    pub created_at: String,
+}
+
 /// Aggregated outcome metrics for a decision.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OutcomeMetrics {
@@ -341,6 +373,12 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 7 {
             self.migrate_v6_to_v7()?;
+        }
+
+        // Migrate to v8 if needed (decide_snapshots table)
+        let current = self.schema_version()?;
+        if current < 8 {
+            self.migrate_v7_to_v8()?;
         }
 
         Ok(())
@@ -561,6 +599,55 @@ impl SqliteStore {
         self.conn.execute_batch(SCHEMA_V7_SQL)?;
         // No backfill needed — device_tokens is a new feature with no existing data.
         self.set_schema_version(7)?;
+        Ok(())
+    }
+
+    fn migrate_v7_to_v8(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V8_SQL)?;
+
+        // Backfill: scan existing decide_snapshot events
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, payload FROM events
+             WHERE event_type = 'decide_snapshot' ORDER BY rowid",
+        )?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        for (event_id, ts, payload_str) in &rows {
+            let payload: serde_json::Value = match serde_json::from_str(payload_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let context_hash = payload["context_hash"].as_str().unwrap_or("");
+            let engine_version = payload["engine_version"].as_str().unwrap_or("");
+            let schema_version = payload["schema_version"].as_str().unwrap_or("snapshot.v1");
+            let redaction_level = payload["redaction_level"].as_str().unwrap_or("full");
+            let village_id = payload["village_id"].as_str();
+            let cycle_id = payload["cycle_id"].as_str();
+            let has_blobs =
+                payload.get("context_blob").is_some() || payload.get("result_blob").is_some();
+
+            self.conn.execute(
+                "INSERT OR IGNORE INTO decide_snapshots
+                 (event_id, context_hash, engine_version, schema_version,
+                  redaction_level, village_id, cycle_id, has_blobs, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    event_id,
+                    context_hash,
+                    engine_version,
+                    schema_version,
+                    redaction_level,
+                    village_id,
+                    cycle_id,
+                    has_blobs,
+                    ts
+                ],
+            )?;
+        }
+
+        self.set_schema_version(8)?;
         Ok(())
     }
 
@@ -2102,6 +2189,105 @@ impl SqliteStore {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("task brief list query failed: {e}"))
     }
+
+    // ── Decide Snapshots ─────────────────────────────────────────────
+
+    /// Insert a row into the `decide_snapshots` materialized view.
+    pub fn insert_snapshot(&self, row: &DecideSnapshotRow) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO decide_snapshots
+             (event_id, context_hash, engine_version, schema_version,
+              redaction_level, village_id, cycle_id, has_blobs, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                row.event_id,
+                row.context_hash,
+                row.engine_version,
+                row.schema_version,
+                row.redaction_level,
+                row.village_id,
+                row.cycle_id,
+                row.has_blobs,
+                row.created_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Query snapshots with optional filtering by village_id and engine_version.
+    pub fn query_snapshots(
+        &self,
+        village_id: Option<&str>,
+        engine_version: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<DecideSnapshotRow>> {
+        let base = "SELECT event_id, context_hash, engine_version, schema_version,
+                           redaction_level, village_id, cycle_id, has_blobs, created_at
+                    FROM decide_snapshots";
+
+        let mut conditions: Vec<&str> = Vec::new();
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+        if let Some(v) = village_id {
+            conditions.push("village_id = ?");
+            param_values.push(Box::new(v.to_string()));
+        }
+        if let Some(e) = engine_version {
+            conditions.push("engine_version = ?");
+            param_values.push(Box::new(e.to_string()));
+        }
+
+        let sql = if conditions.is_empty() {
+            format!("{base} ORDER BY created_at DESC LIMIT ?")
+        } else {
+            format!(
+                "{base} WHERE {} ORDER BY created_at DESC LIMIT ?",
+                conditions.join(" AND ")
+            )
+        };
+        param_values.push(Box::new(limit as i64));
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(param_refs.as_slice(), map_snapshot_row)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))
+    }
+
+    /// Find all snapshots with a given context_hash (for version comparison).
+    pub fn snapshots_by_context_hash(
+        &self,
+        context_hash: &str,
+    ) -> anyhow::Result<Vec<DecideSnapshotRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, context_hash, engine_version, schema_version,
+                    redaction_level, village_id, cycle_id, has_blobs, created_at
+             FROM decide_snapshots
+             WHERE context_hash = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![context_hash], map_snapshot_row)?;
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("snapshot context_hash query failed: {e}"))
+    }
+}
+
+fn map_snapshot_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecideSnapshotRow> {
+    Ok(DecideSnapshotRow {
+        event_id: row.get(0)?,
+        context_hash: row.get(1)?,
+        engine_version: row.get(2)?,
+        schema_version: row.get(3)?,
+        redaction_level: row.get(4)?,
+        village_id: row.get(5)?,
+        cycle_id: row.get(6)?,
+        has_blobs: row.get(7)?,
+        created_at: row.get(8)?,
+    })
 }
 
 impl Drop for SqliteStore {
@@ -3325,7 +3511,8 @@ mod tests {
         assert!(tables.contains(&"decision_deps".to_string()));
         assert!(tables.contains(&"task_briefs".to_string()));
         assert!(tables.contains(&"device_tokens".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 7);
+        assert!(tables.contains(&"decide_snapshots".to_string()));
+        assert_eq!(store.schema_version().unwrap(), 8);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

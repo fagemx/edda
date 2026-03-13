@@ -667,6 +667,38 @@ pub fn new_execution_event(
     Ok(event)
 }
 
+/// Create a new `decide_snapshot` event.
+///
+/// The payload contains compact metadata; large context/result data should
+/// be offloaded to blob store by the caller and referenced via `blob_refs`.
+pub fn new_snapshot_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    payload: serde_json::Value,
+    blob_refs: Vec<String>,
+) -> anyhow::Result<Event> {
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: "decide_snapshot".to_string(),
+        branch: branch.to_string(),
+        parent_hash: parent_hash.map(|s| s.to_string()),
+        hash: String::new(),
+        payload,
+        refs: Refs {
+            blobs: blob_refs,
+            ..Default::default()
+        },
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event)?;
+    Ok(event)
+}
+
 /// Parameters for creating an `approval_policy_match` event.
 #[derive(Debug, Clone)]
 pub struct ApprovalPolicyMatchParams {
