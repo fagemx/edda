@@ -1,15 +1,19 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
+use axum::http::{HeaderMap, Request, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive};
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use edda_ledger::device_token::{generate_device_token, hash_token};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::CorsLayer;
 
@@ -45,6 +49,12 @@ pub struct ServeConfig {
 struct AppState {
     repo_root: PathBuf,
     chronicle: Option<ChronicleContext>,
+    pending_pairings: Mutex<HashMap<String, PairingRequest>>,
+}
+
+struct PairingRequest {
+    device_name: String,
+    expires_at: std::time::Instant,
 }
 
 struct ChronicleContext {
@@ -70,6 +80,9 @@ enum AppError {
     #[error("{0}")]
     #[allow(dead_code)]
     Conflict(String),
+
+    #[error("{0}")]
+    Unauthorized(String),
 
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
@@ -105,6 +118,7 @@ impl IntoResponse for AppError {
             AppError::Validation(_) => (StatusCode::BAD_REQUEST, "VALIDATION_ERROR"),
             AppError::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
+            AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         };
         let body = serde_json::json!({
@@ -135,10 +149,16 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
     let state = Arc::new(AppState {
         repo_root: repo_root.to_path_buf(),
         chronicle,
+        pending_pairings: Mutex::new(HashMap::new()),
     });
 
-    let app = Router::new()
+    // Public routes (no auth required)
+    let public_routes = Router::new()
         .route("/api/health", get(health))
+        .route("/pair", get(complete_pairing));
+
+    // Protected routes (auth middleware applied)
+    let protected_routes = Router::new()
         .route("/api/status", get(get_status))
         .route("/api/context", get(get_context))
         .route("/api/decisions", get(get_decisions))
@@ -178,17 +198,34 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
             "/api/controls/patches/{patch_id}/approve",
             post(post_approve_controls_patch),
         )
+        .route("/api/pair/new", post(create_pairing))
+        .route("/api/pair/list", get(list_paired_devices))
+        .route("/api/pair/revoke", post(revoke_device))
+        .route("/api/pair/revoke-all", post(revoke_all_devices))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(protected_routes)
         .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr = format!("{}:{}", config.bind, config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     eprintln!("edda HTTP server listening on http://{addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
 /// Build the router (for testing without binding to a port).
+/// Note: no auth middleware is applied here — tests run as localhost.
 pub fn router(repo_root: &Path) -> Router {
     let store_root = edda_store::store_root();
     let chronicle = if store_root.exists() {
@@ -202,6 +239,7 @@ pub fn router(repo_root: &Path) -> Router {
     let state = Arc::new(AppState {
         repo_root: repo_root.to_path_buf(),
         chronicle,
+        pending_pairings: Mutex::new(HashMap::new()),
     });
     Router::new()
         .route("/api/health", get(health))
@@ -245,8 +283,378 @@ pub fn router(repo_root: &Path) -> Router {
             "/api/controls/patches/{patch_id}/approve",
             post(post_approve_controls_patch),
         )
+        .route("/pair", get(complete_pairing))
+        .route("/api/pair/new", post(create_pairing))
+        .route("/api/pair/list", get(list_paired_devices))
+        .route("/api/pair/revoke", post(revoke_device))
+        .route("/api/pair/revoke-all", post(revoke_all_devices))
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+// ── Auth Middleware ──
+
+/// Check if a socket address is localhost.
+fn is_localhost(addr: &SocketAddr) -> bool {
+    let ip = addr.ip();
+    ip.is_loopback()
+        || match ip {
+            std::net::IpAddr::V6(v6) => {
+                // IPv4-mapped IPv6: ::ffff:127.0.0.1
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    v4.is_loopback()
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+}
+
+/// Generate a pairing token (random hex, shorter).
+fn generate_pairing_token() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let mut bytes = [0u8; 16];
+    rng.fill(&mut bytes);
+    hex::encode(bytes)
+}
+
+/// Auth middleware: localhost passes through, remote needs Bearer token.
+async fn auth_middleware(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    State(state): State<Arc<AppState>>,
+    req: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, AppError> {
+    // Localhost: always allowed (backward compat)
+    if is_localhost(&addr) {
+        return Ok(next.run(req).await);
+    }
+
+    // Remote: check Authorization header
+    let auth_header = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    let raw_token = match auth_header {
+        Some(h) if h.starts_with("Bearer ") => &h[7..],
+        _ => {
+            return Err(AppError::Unauthorized(
+                "missing or invalid Authorization header".to_string(),
+            ));
+        }
+    };
+
+    let token_hash = hash_token(raw_token);
+    let ledger = state.open_ledger()?;
+    let device = ledger.validate_device_token(&token_hash)?;
+
+    match device {
+        Some(_) => Ok(next.run(req).await),
+        None => Err(AppError::Unauthorized(
+            "invalid or revoked device token".to_string(),
+        )),
+    }
+}
+
+// ── Pairing Endpoints ──
+
+#[derive(Deserialize)]
+struct CreatePairingRequest {
+    device_name: String,
+}
+
+#[derive(Serialize)]
+struct CreatePairingResponse {
+    pairing_url: String,
+    pairing_token: String,
+    expires_in_seconds: u64,
+}
+
+/// POST /api/pair/new — Create a pairing request (generates one-time pairing token).
+async fn create_pairing(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Result<Json<CreatePairingRequest>, JsonRejection>,
+) -> Result<Json<CreatePairingResponse>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::Validation(e.to_string()))?;
+
+    if req.device_name.is_empty() {
+        return Err(AppError::Validation("device_name is required".to_string()));
+    }
+
+    let pairing_token = generate_pairing_token();
+    let ttl = Duration::from_secs(600); // 10 minutes
+
+    {
+        let mut pairings = state
+            .pending_pairings
+            .lock()
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("lock poisoned: {e}")))?;
+
+        // Clean up expired pairings
+        let now = std::time::Instant::now();
+        pairings.retain(|_, v| v.expires_at > now);
+
+        pairings.insert(
+            pairing_token.clone(),
+            PairingRequest {
+                device_name: req.device_name,
+                expires_at: now + ttl,
+            },
+        );
+    }
+
+    // Determine host from request headers for URL construction
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost:7433");
+
+    let pairing_url = format!("http://{host}/pair?token={pairing_token}");
+
+    Ok(Json(CreatePairingResponse {
+        pairing_url,
+        pairing_token,
+        expires_in_seconds: 600,
+    }))
+}
+
+#[derive(Deserialize)]
+struct CompletePairingQuery {
+    token: String,
+}
+
+#[derive(Serialize)]
+struct CompletePairingResponse {
+    device_token: String,
+    device_name: String,
+}
+
+/// GET /pair?token=<pairing_token> — Complete pairing (the URL the device visits).
+async fn complete_pairing(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<CompletePairingQuery>,
+) -> Result<Json<CompletePairingResponse>, AppError> {
+    // Extract and validate the pairing token
+    let pairing_req = {
+        let mut pairings = state
+            .pending_pairings
+            .lock()
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("lock poisoned: {e}")))?;
+
+        let now = std::time::Instant::now();
+        pairings.retain(|_, v| v.expires_at > now);
+
+        pairings.remove(&query.token)
+    };
+
+    let pairing_req = pairing_req
+        .ok_or_else(|| AppError::Validation("invalid or expired pairing token".to_string()))?;
+
+    // Generate the long-lived device token
+    let device_token = generate_device_token();
+    let token_hash = hash_token(&device_token);
+
+    let now = time::OffsetDateTime::now_utc();
+    let paired_at = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("time format error: {e}")))?;
+
+    let from_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    let event_id = format!("evt_{}", ulid::Ulid::new());
+
+    // Write device_pair event to ledger
+    let ledger = state.open_ledger()?;
+    let branch = ledger.head_branch()?;
+
+    let payload = serde_json::json!({
+        "device_name": pairing_req.device_name,
+        "paired_from_ip": from_ip,
+        "token_hash_prefix": &token_hash[..8],
+    });
+
+    let parent_hash = ledger.last_event_hash()?;
+    let mut event = edda_core::types::Event {
+        event_id: event_id.clone(),
+        ts: paired_at.clone(),
+        event_type: "device_pair".to_string(),
+        branch: branch.clone(),
+        parent_hash,
+        hash: String::new(),
+        payload,
+        refs: Default::default(),
+        schema_version: edda_core::types::SCHEMA_VERSION,
+        digests: vec![],
+        event_family: Some(edda_core::types::event_family::ADMIN.to_string()),
+        event_level: Some(edda_core::types::event_level::INFO.to_string()),
+    };
+
+    edda_core::event::finalize_event(&mut event)?;
+    ledger.append_event(&event)?;
+
+    // Insert into device_tokens table
+    ledger.insert_device_token(&edda_ledger::DeviceTokenRow {
+        token_hash,
+        device_name: pairing_req.device_name.clone(),
+        paired_at,
+        paired_from_ip: from_ip,
+        revoked_at: None,
+        pair_event_id: event_id,
+        revoke_event_id: None,
+    })?;
+
+    Ok(Json(CompletePairingResponse {
+        device_token,
+        device_name: pairing_req.device_name,
+    }))
+}
+
+#[derive(Serialize)]
+struct DeviceInfo {
+    device_name: String,
+    paired_at: String,
+    status: String,
+    revoked_at: Option<String>,
+}
+
+/// GET /api/pair/list — List all paired devices.
+async fn list_paired_devices(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<DeviceInfo>>, AppError> {
+    let ledger = state.open_ledger()?;
+    let tokens = ledger.list_device_tokens()?;
+
+    let devices: Vec<DeviceInfo> = tokens
+        .into_iter()
+        .map(|t| DeviceInfo {
+            device_name: t.device_name,
+            paired_at: t.paired_at,
+            status: if t.revoked_at.is_some() {
+                "revoked".to_string()
+            } else {
+                "active".to_string()
+            },
+            revoked_at: t.revoked_at,
+        })
+        .collect();
+
+    Ok(Json(devices))
+}
+
+#[derive(Deserialize)]
+struct RevokeDeviceRequest {
+    device_name: String,
+}
+
+/// POST /api/pair/revoke — Revoke a specific device.
+async fn revoke_device(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<RevokeDeviceRequest>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let Json(req) = body.map_err(|e| AppError::Validation(e.to_string()))?;
+
+    let ledger = state.open_ledger()?;
+
+    // Check the token exists *before* writing the ledger event
+    let existing = ledger.list_device_tokens()?;
+    let has_active = existing
+        .iter()
+        .any(|t| t.device_name == req.device_name && t.revoked_at.is_none());
+    if !has_active {
+        return Err(AppError::NotFound(format!(
+            "no active device token found for '{}'",
+            req.device_name
+        )));
+    }
+
+    let event_id = format!("evt_{}", ulid::Ulid::new());
+    let branch = ledger.head_branch()?;
+
+    let now = time::OffsetDateTime::now_utc();
+    let ts = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("time format error: {e}")))?;
+
+    let payload = serde_json::json!({
+        "device_name": req.device_name,
+    });
+
+    let parent_hash = ledger.last_event_hash()?;
+    let mut event = edda_core::types::Event {
+        event_id: event_id.clone(),
+        ts,
+        event_type: "device_revoke".to_string(),
+        branch: branch.clone(),
+        parent_hash,
+        hash: String::new(),
+        payload,
+        refs: Default::default(),
+        schema_version: edda_core::types::SCHEMA_VERSION,
+        digests: vec![],
+        event_family: Some(edda_core::types::event_family::ADMIN.to_string()),
+        event_level: Some(edda_core::types::event_level::INFO.to_string()),
+    };
+
+    edda_core::event::finalize_event(&mut event)?;
+    ledger.append_event(&event)?;
+    ledger.revoke_device_token(&req.device_name, &event_id)?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "device_name": req.device_name,
+        "event_id": event_id,
+    })))
+}
+
+/// POST /api/pair/revoke-all — Revoke all active device tokens.
+async fn revoke_all_devices(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let event_id = format!("evt_{}", ulid::Ulid::new());
+    let ledger = state.open_ledger()?;
+    let branch = ledger.head_branch()?;
+
+    let now = time::OffsetDateTime::now_utc();
+    let ts = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("time format error: {e}")))?;
+
+    let payload = serde_json::json!({ "revoke_all": true });
+
+    let parent_hash = ledger.last_event_hash()?;
+    let mut event = edda_core::types::Event {
+        event_id: event_id.clone(),
+        ts,
+        event_type: "device_revoke".to_string(),
+        branch: branch.clone(),
+        parent_hash,
+        hash: String::new(),
+        payload,
+        refs: Default::default(),
+        schema_version: edda_core::types::SCHEMA_VERSION,
+        digests: vec![],
+        event_family: Some(edda_core::types::event_family::ADMIN.to_string()),
+        event_level: Some(edda_core::types::event_level::INFO.to_string()),
+    };
+
+    edda_core::event::finalize_event(&mut event)?;
+    ledger.append_event(&event)?;
+
+    let count = ledger.revoke_all_device_tokens(&event_id)?;
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "revoked_count": count,
+        "event_id": event_id,
+    })))
 }
 
 // ── Health ──

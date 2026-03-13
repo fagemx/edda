@@ -30,8 +30,10 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 time.workspace = true
 globset = { workspace = true }
+rand.workspace = true
 sha2 = { workspace = true }
 hex = { workspace = true }
+ulid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

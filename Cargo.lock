@@ -891,9 +891,12 @@ dependencies = [
  "anyhow",
  "edda-core",
  "fs2",
+ "hex",
+ "rand 0.8.5",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "time",
  "ulid",
@@ -991,10 +994,10 @@ dependencies = [
  "globset",
  "hex",
  "http-body-util",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2",
  "tempfile",
  "thiserror",
  "time",
@@ -1003,6 +1006,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "ulid",
 ]
 
 [[package]]

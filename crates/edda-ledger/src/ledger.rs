@@ -323,6 +323,44 @@ impl Ledger {
     pub fn list_bundles(&self, status: Option<&str>) -> anyhow::Result<Vec<BundleRow>> {
         self.sqlite.list_bundles(status)
     }
+
+    // ── Device Tokens ───────────────────────────────────────────────
+
+    /// Insert a new device token row.
+    pub fn insert_device_token(
+        &self,
+        row: &crate::sqlite_store::DeviceTokenRow,
+    ) -> anyhow::Result<()> {
+        self.sqlite.insert_device_token(row)
+    }
+
+    /// Validate a device token by its SHA-256 hash. Returns the row if active.
+    pub fn validate_device_token(
+        &self,
+        token_hash: &str,
+    ) -> anyhow::Result<Option<crate::sqlite_store::DeviceTokenRow>> {
+        self.sqlite.validate_device_token(token_hash)
+    }
+
+    /// List all device tokens (active and revoked).
+    pub fn list_device_tokens(&self) -> anyhow::Result<Vec<crate::sqlite_store::DeviceTokenRow>> {
+        self.sqlite.list_device_tokens()
+    }
+
+    /// Revoke a device token by device name. Returns true if revoked.
+    pub fn revoke_device_token(
+        &self,
+        device_name: &str,
+        revoke_event_id: &str,
+    ) -> anyhow::Result<bool> {
+        self.sqlite
+            .revoke_device_token(device_name, revoke_event_id)
+    }
+
+    /// Revoke all active device tokens. Returns count of revoked tokens.
+    pub fn revoke_all_device_tokens(&self, revoke_event_id: &str) -> anyhow::Result<u64> {
+        self.sqlite.revoke_all_device_tokens(revoke_event_id)
+    }
 }
 
 // ── Init functions ──────────────────────────────────────────────────
@@ -670,6 +708,187 @@ mod tests {
         ledger.append_event(&note).unwrap();
         let result = ledger.iter_events_by_type("nonexistent_type").unwrap();
         assert!(result.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Device Token tests ──────────────────────────────────────────
+
+    /// Helper: append a note event and return its event_id (satisfies FK on device_tokens).
+    fn insert_pair_event(ledger: &Ledger) -> String {
+        let evt = new_note_event("main", None, "system", "device_pair placeholder", &[]).unwrap();
+        let eid = evt.event_id.clone();
+        ledger.append_event(&evt).unwrap();
+        eid
+    }
+
+    #[test]
+    fn device_token_insert_and_validate() {
+        use crate::device_token::{generate_device_token, hash_token};
+
+        let (tmp, ledger) = setup_workspace();
+        let pair_eid = insert_pair_event(&ledger);
+
+        let raw = generate_device_token();
+        let hashed = hash_token(&raw);
+
+        ledger
+            .insert_device_token(&crate::sqlite_store::DeviceTokenRow {
+                token_hash: hashed.clone(),
+                device_name: "test-phone".to_string(),
+                paired_at: "2026-01-01T00:00:00Z".to_string(),
+                paired_from_ip: "127.0.0.1".to_string(),
+                revoked_at: None,
+                pair_event_id: pair_eid,
+                revoke_event_id: None,
+            })
+            .unwrap();
+
+        // Validate with correct hash succeeds
+        let found = ledger.validate_device_token(&hashed).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().device_name, "test-phone");
+
+        // Validate with wrong hash returns None
+        let wrong = ledger.validate_device_token("badhash").unwrap();
+        assert!(wrong.is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn device_token_revoke_flow() {
+        use crate::device_token::{generate_device_token, hash_token};
+
+        let (tmp, ledger) = setup_workspace();
+        let pair_eid = insert_pair_event(&ledger);
+
+        let raw = generate_device_token();
+        let hashed = hash_token(&raw);
+
+        ledger
+            .insert_device_token(&crate::sqlite_store::DeviceTokenRow {
+                token_hash: hashed.clone(),
+                device_name: "my-tablet".to_string(),
+                paired_at: "2026-01-01T00:00:00Z".to_string(),
+                paired_from_ip: "127.0.0.1".to_string(),
+                revoked_at: None,
+                pair_event_id: pair_eid,
+                revoke_event_id: None,
+            })
+            .unwrap();
+
+        // Token is valid before revocation
+        assert!(ledger.validate_device_token(&hashed).unwrap().is_some());
+
+        // Revoke it
+        let revoked = ledger.revoke_device_token("my-tablet", "evt_rev1").unwrap();
+        assert!(revoked);
+
+        // Token is no longer valid after revocation
+        assert!(ledger.validate_device_token(&hashed).unwrap().is_none());
+
+        // Revoking again returns false (already revoked)
+        let revoked2 = ledger.revoke_device_token("my-tablet", "evt_rev2").unwrap();
+        assert!(!revoked2);
+
+        // Revoking nonexistent device returns false
+        let revoked3 = ledger
+            .revoke_device_token("no-such-device", "evt_rev3")
+            .unwrap();
+        assert!(!revoked3);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn device_token_revoke_all() {
+        use crate::device_token::{generate_device_token, hash_token};
+
+        let (tmp, ledger) = setup_workspace();
+
+        // Insert two devices, each with a real event for the FK
+        for name in ["dev-a", "dev-b"] {
+            let pair_eid = insert_pair_event(&ledger);
+            let raw = generate_device_token();
+            let hashed = hash_token(&raw);
+            ledger
+                .insert_device_token(&crate::sqlite_store::DeviceTokenRow {
+                    token_hash: hashed,
+                    device_name: name.to_string(),
+                    paired_at: "2026-01-01T00:00:00Z".to_string(),
+                    paired_from_ip: "127.0.0.1".to_string(),
+                    revoked_at: None,
+                    pair_event_id: pair_eid,
+                    revoke_event_id: None,
+                })
+                .unwrap();
+        }
+
+        let tokens = ledger.list_device_tokens().unwrap();
+        assert_eq!(tokens.len(), 2);
+        let active = tokens.iter().filter(|t| t.revoked_at.is_none()).count();
+        assert_eq!(active, 2);
+
+        // Revoke all
+        let count = ledger.revoke_all_device_tokens("evt_revall").unwrap();
+        assert_eq!(count, 2);
+
+        // All revoked
+        let tokens2 = ledger.list_device_tokens().unwrap();
+        let active2 = tokens2.iter().filter(|t| t.revoked_at.is_none()).count();
+        assert_eq!(active2, 0);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn device_token_list_shows_all() {
+        use crate::device_token::{generate_device_token, hash_token};
+
+        let (tmp, ledger) = setup_workspace();
+
+        let pair_eid1 = insert_pair_event(&ledger);
+        let pair_eid2 = insert_pair_event(&ledger);
+
+        let raw1 = generate_device_token();
+        let raw2 = generate_device_token();
+
+        ledger
+            .insert_device_token(&crate::sqlite_store::DeviceTokenRow {
+                token_hash: hash_token(&raw1),
+                device_name: "active-dev".to_string(),
+                paired_at: "2026-01-01T00:00:00Z".to_string(),
+                paired_from_ip: "127.0.0.1".to_string(),
+                revoked_at: None,
+                pair_event_id: pair_eid1,
+                revoke_event_id: None,
+            })
+            .unwrap();
+
+        ledger
+            .insert_device_token(&crate::sqlite_store::DeviceTokenRow {
+                token_hash: hash_token(&raw2),
+                device_name: "revoked-dev".to_string(),
+                paired_at: "2026-01-01T00:00:00Z".to_string(),
+                paired_from_ip: "192.168.1.1".to_string(),
+                revoked_at: None,
+                pair_event_id: pair_eid2,
+                revoke_event_id: None,
+            })
+            .unwrap();
+
+        // Revoke the second one
+        ledger
+            .revoke_device_token("revoked-dev", "evt_rev")
+            .unwrap();
+
+        let all = ledger.list_device_tokens().unwrap();
+        assert_eq!(all.len(), 2, "list should include both active and revoked");
+
+        let active: Vec<_> = all.iter().filter(|t| t.revoked_at.is_none()).collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].device_name, "active-dev");
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

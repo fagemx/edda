@@ -19,6 +19,7 @@ mod cmd_log;
 mod cmd_merge;
 mod cmd_note;
 mod cmd_notify;
+mod cmd_pair;
 mod cmd_pattern;
 mod cmd_phase;
 mod cmd_pipeline;
@@ -417,6 +418,11 @@ enum Command {
     Notify {
         #[command(subcommand)]
         cmd: cmd_notify::NotifyCmd,
+    },
+    /// Device pairing and token management
+    Pair {
+        #[command(subcommand)]
+        cmd: cmd_pair::PairCmd,
     },
     /// Start HTTP API server
     Serve {
@@ -1123,6 +1129,7 @@ fn main() -> anyhow::Result<()> {
         Command::Policy { cmd } => cmd_policy::run(cmd, &repo_root),
         Command::Watch => cmd_watch::execute(&repo_root),
         Command::Notify { cmd } => cmd_notify::run(cmd, &repo_root),
+        Command::Pair { cmd } => cmd_pair::execute(cmd, &repo_root),
         Command::Serve { bind, port } => cmd_serve::execute(&repo_root, &bind, port),
         Command::Gc {
             dry_run,
