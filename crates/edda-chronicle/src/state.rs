@@ -45,3 +45,62 @@ pub fn save_state(edda_root: &Path, state: &RecapState) -> Result<()> {
         .with_context(|| format!("Failed to rename state file: {:?} -> {:?}", tmp_path, path))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_state(ts: &str, sessions: Vec<String>) -> RecapState {
+        RecapState {
+            last_recap: LastRecap {
+                timestamp: ts.to_string(),
+                anchor: "default".to_string(),
+                sessions_covered: sessions,
+            },
+        }
+    }
+
+    #[test]
+    fn test_load_missing_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = load_state(tmp.path()).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_save_and_load_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = make_state("2026-01-01T00:00:00Z", vec!["s1".into(), "s2".into()]);
+        save_state(tmp.path(), &state).unwrap();
+
+        let loaded = load_state(tmp.path()).unwrap().expect("state should exist");
+        assert_eq!(loaded.last_recap.timestamp, "2026-01-01T00:00:00Z");
+        assert_eq!(loaded.last_recap.sessions_covered, vec!["s1", "s2"]);
+        assert_eq!(loaded.last_recap.anchor, "default");
+    }
+
+    #[test]
+    fn test_corrupted_state_returns_err() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("chronicle");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("state.json"), "not valid json{{{").unwrap();
+
+        let result = load_state(tmp.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_save_creates_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let chronicle_dir = tmp.path().join("chronicle");
+        assert!(!chronicle_dir.exists());
+
+        let state = make_state("2026-01-01T00:00:00Z", vec![]);
+        save_state(tmp.path(), &state).unwrap();
+
+        assert!(chronicle_dir.exists());
+        assert!(chronicle_dir.join("state.json").exists());
+        assert!(!chronicle_dir.join("state.tmp").exists());
+    }
+}

@@ -276,3 +276,105 @@ fn parse_llm_output(text: &str) -> Result<crate::RecapOutput> {
         relations,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::attention::AttentionItem;
+
+    fn empty_input() -> SynthesisInput {
+        SynthesisInput {
+            anchor_description: String::new(),
+            session_types: vec![],
+            key_turns: vec![],
+            related_content: vec![],
+            attention_items: vec![],
+            commits: vec![],
+            decisions: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn test_template_fallback_happy_path() {
+        std::env::remove_var("EDDA_LLM_API_KEY");
+
+        let input = SynthesisInput {
+            anchor_description: "Last 24 hours".into(),
+            session_types: vec!["Coding".into(), "Research".into()],
+            key_turns: vec![],
+            related_content: vec![],
+            attention_items: vec![AttentionItem {
+                item_type: "blocker".into(),
+                description: "CI is red".into(),
+                priority: "high".into(),
+                source: "ledger".into(),
+                event_id: None,
+            }],
+            commits: vec!["abc123".into(), "def456".into()],
+            decisions: vec!["db.engine=sqlite".into()],
+        };
+
+        let output = synthesize_recap(input).await.unwrap();
+        assert!(output.net_result.contains("Coding"));
+        assert!(output.net_result.contains("Research"));
+        assert!(output.net_result.contains("Commits: 2"));
+        assert!(output.net_result.contains("Decisions: 1"));
+        assert!(output.needs_you.contains("CI is red"));
+        assert_eq!(output.decision_context, "db.engine=sqlite");
+    }
+
+    #[tokio::test]
+    async fn test_template_empty_input() {
+        std::env::remove_var("EDDA_LLM_API_KEY");
+
+        let output = synthesize_recap(empty_input()).await.unwrap();
+        assert_eq!(output.needs_you, "No blockers detected");
+        assert_eq!(output.decision_context, "No decisions recorded");
+        assert_eq!(output.relations, "No related historical content found");
+    }
+
+    #[test]
+    fn test_parse_llm_output_traditional() {
+        let text = "## 淨結果\n新增了認證模組，通過所有測試。\n\n## 需要你\nCI pipeline 需要設定新的 secret。\n\n## 決策脈絡\n選擇 JWT 而非 session cookie，因為需要跨服務驗證。\n\n## 關聯\n與上週的 API gateway 重構相關。";
+
+        let output = parse_llm_output(text).unwrap();
+        assert!(output.net_result.contains("認證模組"));
+        assert!(output.needs_you.contains("CI pipeline"));
+        assert!(output.decision_context.contains("JWT"));
+        assert!(output.relations.contains("API gateway"));
+    }
+
+    #[test]
+    fn test_parse_llm_output_simplified() {
+        let text = "## 净结果\n完成了数据库迁移。\n\n## 需要你\n需要审核 PR #42。\n\n## 决策脉络\n使用 SQLite 作为嵌入式存储。\n\n## 关联\n参考了 edda-store 的实现。";
+
+        let output = parse_llm_output(text).unwrap();
+        assert!(output.net_result.contains("数据库迁移"));
+        assert!(output.needs_you.contains("PR #42"));
+        assert!(output.decision_context.contains("SQLite"));
+        assert!(output.relations.contains("edda-store"));
+    }
+
+    #[test]
+    fn test_build_prompt_contains_sections() {
+        let input = SynthesisInput {
+            anchor_description: "Last 24 hours".into(),
+            session_types: vec!["Coding".into()],
+            key_turns: vec![TurnContent {
+                turn_index: 0,
+                content: "edited auth.rs".into(),
+            }],
+            related_content: vec![],
+            attention_items: vec![],
+            commits: vec!["abc".into()],
+            decisions: vec!["auth=jwt".into()],
+        };
+
+        let prompt = build_prompt(&input);
+        assert!(prompt.contains("Last 24 hours"));
+        assert!(prompt.contains("Coding"));
+        assert!(prompt.contains("edited auth.rs"));
+        assert!(prompt.contains("Commits: 1"));
+        assert!(prompt.contains("Decisions: 1"));
+    }
+}
