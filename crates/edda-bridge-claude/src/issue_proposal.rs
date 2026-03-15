@@ -74,7 +74,7 @@ pub fn new_proposal_id() -> String {
 /// Save an issue proposal to disk.
 pub fn save_proposal(project_id: &str, proposal: &IssueProposal) -> Result<()> {
     let path = proposal_path(project_id, &proposal.proposal_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("proposal path has no parent")?)?;
     let json = serde_json::to_string_pretty(proposal)?;
     fs::write(&path, json)?;
 
@@ -288,7 +288,7 @@ fn append_audit(
 ) -> Result<()> {
     use std::io::Write;
     let path = audit_log_path(project_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("audit log path has no parent")?)?;
     let entry = AuditEntry {
         ts: now_rfc3339(),
         proposal_id: proposal_id.to_string(),

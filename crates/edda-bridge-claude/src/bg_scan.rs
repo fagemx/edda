@@ -743,7 +743,7 @@ fn save_scan_state(project_id: &str, result: &ScanResult) -> Result<()> {
         status: "completed".to_string(),
     };
     let path = scan_state_path(project_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("scan state path has no parent")?)?;
     let json = serde_json::to_string_pretty(&state)?;
     fs::write(&path, json)?;
     Ok(())
@@ -751,7 +751,7 @@ fn save_scan_state(project_id: &str, result: &ScanResult) -> Result<()> {
 
 fn save_scan_drafts(project_id: &str, result: &ScanResult) -> Result<()> {
     let path = scan_draft_path(project_id, &result.scan_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("scan draft path has no parent")?)?;
     let json = serde_json::to_string_pretty(result)?;
     fs::write(&path, json)?;
     Ok(())
@@ -760,7 +760,7 @@ fn save_scan_drafts(project_id: &str, result: &ScanResult) -> Result<()> {
 fn append_audit_log(project_id: &str, entry: &AuditEntry) -> Result<()> {
     use std::io::Write;
     let path = audit_log_path(project_id);
-    fs::create_dir_all(path.parent().unwrap())?;
+    fs::create_dir_all(path.parent().context("audit log path has no parent")?)?;
     let line = serde_json::to_string(entry)?;
     let mut file = fs::OpenOptions::new()
         .create(true)

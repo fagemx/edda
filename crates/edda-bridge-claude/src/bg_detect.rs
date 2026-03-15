@@ -766,7 +766,10 @@ fn save_detect_result(project_id: &str, result: &DetectResult) -> Result<()> {
 fn append_audit_log(project_id: &str, entry: &AuditEntry) -> Result<()> {
     use std::io::Write;
     let path = audit_log_path(project_id);
-    fs::create_dir_all(path.parent().context("detect audit log path has no parent")?)?;
+    fs::create_dir_all(
+        path.parent()
+            .context("detect audit log path has no parent")?,
+    )?;
     let line = serde_json::to_string(entry)?;
     let mut file = fs::OpenOptions::new()
         .create(true)
