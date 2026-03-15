@@ -3910,7 +3910,11 @@ mod tests {
 
     #[tokio::test]
     async fn overview_returns_structure() {
+        let _lock = STORE_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::env::set_var("EDDA_STORE_ROOT", &store_dir);
         setup_workspace(tmp.path());
         let app = router(tmp.path());
 
@@ -3933,6 +3937,7 @@ mod tests {
         assert!(json["yellow"].as_array().unwrap().is_empty());
         assert!(json["green"].as_array().unwrap().is_empty());
         assert!(json["updated_at"].is_string());
+        std::env::remove_var("EDDA_STORE_ROOT");
     }
 
     #[tokio::test]
