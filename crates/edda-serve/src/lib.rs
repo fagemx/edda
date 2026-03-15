@@ -78,7 +78,6 @@ enum AppError {
     NotFound(String),
 
     #[error("{0}")]
-    #[allow(dead_code)]
     Conflict(String),
 
     #[error("{0}")]
@@ -3012,7 +3011,9 @@ async fn post_approval_check(
 }
 
 // ── POST /api/sync ──
+// NOTE: sync endpoint is wired only in the test router for now.
 
+#[cfg(test)]
 fn sources_from_group(repo_root: &Path) -> Vec<edda_ledger::sync::SyncSource> {
     edda_store::registry::list_group_members(repo_root)
         .into_iter()
@@ -3024,6 +3025,7 @@ fn sources_from_group(repo_root: &Path) -> Vec<edda_ledger::sync::SyncSource> {
         .collect()
 }
 
+#[cfg(test)]
 fn sources_from_name(name: &str) -> Vec<edda_ledger::sync::SyncSource> {
     edda_store::registry::list_projects()
         .into_iter()
@@ -3036,6 +3038,7 @@ fn sources_from_name(name: &str) -> Vec<edda_ledger::sync::SyncSource> {
         .collect()
 }
 
+#[cfg(test)]
 #[derive(Deserialize)]
 struct SyncRequest {
     /// Optional: sync from a specific project name
@@ -3045,6 +3048,7 @@ struct SyncRequest {
     dry_run: bool,
 }
 
+#[cfg(test)]
 #[derive(Serialize)]
 struct SyncResponse {
     imported: Vec<SyncImportedEntry>,
@@ -3052,6 +3056,7 @@ struct SyncResponse {
     conflicts: Vec<SyncConflictEntry>,
 }
 
+#[cfg(test)]
 #[derive(Serialize)]
 struct SyncImportedEntry {
     key: String,
@@ -3059,6 +3064,7 @@ struct SyncImportedEntry {
     source_project: String,
 }
 
+#[cfg(test)]
 #[derive(Serialize)]
 struct SyncConflictEntry {
     key: String,
@@ -3067,6 +3073,7 @@ struct SyncConflictEntry {
     source_project: String,
 }
 
+#[cfg(test)]
 async fn post_sync(
     State(state): State<Arc<AppState>>,
     body: Result<Json<SyncRequest>, JsonRejection>,
@@ -6639,12 +6646,9 @@ actors:
 
         let public_routes = Router::new().route("/api/health", get(health));
 
-        let protected_routes = Router::new()
-            .route("/api/status", get(get_status))
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                auth_middleware,
-            ));
+        let protected_routes = Router::new().route("/api/status", get(get_status)).layer(
+            middleware::from_fn_with_state(state.clone(), auth_middleware),
+        );
 
         Router::new()
             .merge(public_routes)
@@ -6665,10 +6669,7 @@ actors:
 
     /// Build a request from a remote (non-localhost) IP.
     fn remote_request(uri: &str) -> Request<Body> {
-        let mut req = Request::builder()
-            .uri(uri)
-            .body(Body::empty())
-            .unwrap();
+        let mut req = Request::builder().uri(uri).body(Body::empty()).unwrap();
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([203, 0, 113, 1], 12345))));
         req
@@ -6688,10 +6689,7 @@ actors:
 
     /// Build a request from a localhost IP.
     fn localhost_request(uri: &str) -> Request<Body> {
-        let mut req = Request::builder()
-            .uri(uri)
-            .body(Body::empty())
-            .unwrap();
+        let mut req = Request::builder().uri(uri).body(Body::empty()).unwrap();
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
         req
