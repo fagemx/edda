@@ -3660,6 +3660,14 @@ mod tests {
     /// Serialize tests that set EDDA_STORE_ROOT env var.
     static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// RAII guard that removes EDDA_STORE_ROOT on drop (panic-safe cleanup).
+    struct StoreRootGuard;
+    impl Drop for StoreRootGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("EDDA_STORE_ROOT");
+        }
+    }
+
     fn setup_workspace(dir: &Path) {
         let paths = edda_ledger::EddaPaths::discover(dir);
         paths.ensure_layout().unwrap();
@@ -3910,7 +3918,12 @@ mod tests {
 
     #[tokio::test]
     async fn overview_returns_structure() {
+        let _lock = STORE_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::env::set_var("EDDA_STORE_ROOT", &store_dir);
+        let _guard = StoreRootGuard;
         setup_workspace(tmp.path());
         let app = router(tmp.path());
 
