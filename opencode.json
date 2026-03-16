@@ -6,10 +6,10 @@
       "npm": "@ai-sdk/openai-compatible",
       "env": ["T8STAR_API_KEY"],
       "models": {
-        "gpt-5.3-codex-high": {
-          "name": "GPT 5.3 Codex High",
+        "gpt-5.3-codex-medium": {
+          "name": "GPT 5.3 Codex Medium",
           "tool_call": true,
-          "limit": { "context": 200000, "output": 16384 }
+          "limit": { "context": 200000, "output": 163840 }
         }
       },
       "options": {

@@ -106,8 +106,7 @@ mod tests {
     #[test]
     fn test_non_blocker_ignored() {
         let (_tmp, ledger) = setup_ledger();
-        let event =
-            new_note_event("main", None, "system", "Normal progress update", &[]).unwrap();
+        let event = new_note_event("main", None, "system", "Normal progress update", &[]).unwrap();
         ledger.append_event(&event).unwrap();
 
         let items = get_attention_items(&ledger, None).unwrap();

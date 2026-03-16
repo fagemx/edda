@@ -899,6 +899,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "time",
+ "tracing",
  "ulid",
 ]
 

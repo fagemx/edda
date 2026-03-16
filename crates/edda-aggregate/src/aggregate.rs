@@ -1039,8 +1039,7 @@ mod tests {
             .unwrap();
 
         // Add a session event with file edits
-        let session_event =
-            make_session_event("sess-1", &[("src/main.rs", 3), ("src/lib.rs", 1)]);
+        let session_event = make_session_event("sess-1", &[("src/main.rs", 3), ("src/lib.rs", 1)]);
         ledger.append_event(&session_event).unwrap();
 
         let entry = ProjectEntry {
@@ -1068,10 +1067,10 @@ mod tests {
         assert!((total_cost - 0.07).abs() < 1e-9);
 
         // Quality: 1 success out of 2 execution events
-        let (total_success, total_exec): (u64, u64) =
-            metrics.quality.values().fold((0, 0), |acc, &(s, t)| {
-                (acc.0 + s, acc.1 + t)
-            });
+        let (total_success, total_exec): (u64, u64) = metrics
+            .quality
+            .values()
+            .fold((0, 0), |acc, &(s, t)| (acc.0 + s, acc.1 + t));
         assert_eq!(total_success, 1);
         assert_eq!(total_exec, 2);
 
