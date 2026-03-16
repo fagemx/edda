@@ -271,8 +271,7 @@ mod tests {
     fn test_resolve_week_anchor() {
         let tmp = tempfile::tempdir().unwrap();
         let opts = default_opts();
-        let resolved =
-            resolve_anchor(&Anchor::Week, &tmp.path().to_path_buf(), &opts).unwrap();
+        let resolved = resolve_anchor(&Anchor::Week, &tmp.path().to_path_buf(), &opts).unwrap();
 
         assert_eq!(resolved.anchor_type, "week");
         let (start, end) = resolved.time_filter.expect("should have time filter");
