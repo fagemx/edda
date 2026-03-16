@@ -179,7 +179,13 @@ pub fn ask(
         InputType::Domain(domain) => {
             let active = branch_filter(
                 ledger
-                    .active_decisions(Some(domain), None, after_ref, before_ref)?
+                    .active_decisions_limited(
+                        Some(domain),
+                        None,
+                        after_ref,
+                        before_ref,
+                        opts.limit,
+                    )?
                     .into_iter()
                     .map(|r| to_decision_hit(&r))
                     .collect(),
@@ -196,7 +202,7 @@ pub fn ask(
         InputType::Keyword(kw) => {
             let mut hits = branch_filter(
                 ledger
-                    .active_decisions(None, Some(kw), after_ref, before_ref)?
+                    .active_decisions_limited(None, Some(kw), after_ref, before_ref, opts.limit)?
                     .into_iter()
                     .map(|r| to_decision_hit(&r))
                     .collect(),
@@ -242,7 +248,7 @@ pub fn ask(
         InputType::Overview => {
             let active = branch_filter(
                 ledger
-                    .active_decisions(None, None, after_ref, before_ref)?
+                    .active_decisions_limited(None, None, after_ref, before_ref, opts.limit)?
                     .into_iter()
                     .map(|r| to_decision_hit(&r))
                     .collect(),
