@@ -3,6 +3,14 @@ use edda_ledger::sqlite_store::DecisionRow;
 use edda_ledger::Ledger;
 use serde::Serialize;
 
+const SEMANTIC_CANDIDATE_LIMIT: usize = 500;
+
+#[derive(Debug)]
+struct ScoredDecision {
+    row: DecisionRow,
+    score: f64,
+}
+
 // ── Input type detection ─────────────────────────────────────────────
 
 /// Detected input type for a query string.
@@ -200,13 +208,31 @@ pub fn ask(
             (active, tl)
         }
         InputType::Keyword(kw) => {
-            let mut hits = branch_filter(
-                ledger
-                    .active_decisions_limited(None, Some(kw), after_ref, before_ref, opts.limit)?
-                    .into_iter()
-                    .map(|r| to_decision_hit(&r))
-                    .collect(),
-            );
+            let mut semantic_hits = semantic_decision_search(
+                ledger,
+                kw,
+                opts.branch.as_deref(),
+                after_ref,
+                before_ref,
+                opts.limit,
+            )?;
+
+            let lexical_fallback = ledger
+                .active_decisions_limited(None, Some(kw), after_ref, before_ref, opts.limit)?
+                .into_iter()
+                .map(|r| to_decision_hit(&r));
+
+            for hit in lexical_fallback {
+                if !semantic_hits.iter().any(|h| h.event_id == hit.event_id) {
+                    semantic_hits.push(hit);
+                }
+            }
+
+            let mut hits = branch_filter(semantic_hits);
+            if hits.len() > opts.limit {
+                hits.truncate(opts.limit);
+            }
+
             if opts.include_superseded {
                 // Scan only note events for superseded decisions matching keyword
                 let events = ledger.iter_events_by_type("note")?;
@@ -507,6 +533,136 @@ fn to_note_hits(events: &[Event], limit: usize) -> Vec<NoteHit> {
             }
         })
         .collect()
+}
+
+fn semantic_decision_search(
+    ledger: &Ledger,
+    query: &str,
+    branch: Option<&str>,
+    after: Option<&str>,
+    before: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<Vec<DecisionHit>> {
+    if limit == 0 {
+        return Ok(vec![]);
+    }
+
+    let candidates =
+        ledger.active_decisions_limited(None, None, after, before, SEMANTIC_CANDIDATE_LIMIT)?;
+
+    let scored = rank_decisions_by_similarity(query, candidates, branch);
+    Ok(scored
+        .into_iter()
+        .take(limit)
+        .map(|s| to_decision_hit(&s.row))
+        .collect())
+}
+
+fn rank_decisions_by_similarity(
+    query: &str,
+    candidates: Vec<DecisionRow>,
+    branch: Option<&str>,
+) -> Vec<ScoredDecision> {
+    let query_tokens = tokenize_for_similarity(query);
+    if query_tokens.is_empty() {
+        return vec![];
+    }
+
+    let mut tokenized_docs: Vec<(DecisionRow, Vec<String>)> = Vec::new();
+    for row in candidates {
+        if branch.is_some_and(|b| row.branch != b) {
+            continue;
+        }
+        let text = format!("{} {} {} {}", row.domain, row.key, row.value, row.reason);
+        let tokens = tokenize_for_similarity(&text);
+        if !tokens.is_empty() {
+            tokenized_docs.push((row, tokens));
+        }
+    }
+
+    if tokenized_docs.is_empty() {
+        return vec![];
+    }
+
+    let mut doc_freq: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (_, tokens) in &tokenized_docs {
+        let unique: std::collections::HashSet<&str> = tokens.iter().map(|t| t.as_str()).collect();
+        for token in unique {
+            *doc_freq.entry(token.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let n_docs = tokenized_docs.len() as f64;
+    let query_tf = term_freq(&query_tokens);
+    let query_norm = vector_norm(&query_tf, &doc_freq, n_docs);
+
+    let mut scored: Vec<ScoredDecision> = Vec::new();
+    for (row, tokens) in tokenized_docs {
+        let tf = term_freq(&tokens);
+        let doc_norm = vector_norm(&tf, &doc_freq, n_docs);
+        if doc_norm <= f64::EPSILON || query_norm <= f64::EPSILON {
+            continue;
+        }
+
+        let mut dot = 0.0;
+        for (token, q_tf) in &query_tf {
+            if let Some(d_tf) = tf.get(token) {
+                let idf = inv_doc_freq(doc_freq.get(token).copied().unwrap_or(0), n_docs);
+                dot += (*q_tf as f64 * idf) * (*d_tf as f64 * idf);
+            }
+        }
+
+        let score = dot / (query_norm * doc_norm);
+        if score > 0.0 {
+            scored.push(ScoredDecision { row, score });
+        }
+    }
+
+    scored.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored
+}
+
+fn tokenize_for_similarity(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter_map(|t| {
+            let normalized = t.trim().to_lowercase();
+            if normalized.len() >= 2 {
+                Some(normalized)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn term_freq(tokens: &[String]) -> std::collections::HashMap<String, usize> {
+    let mut tf = std::collections::HashMap::new();
+    for token in tokens {
+        *tf.entry(token.clone()).or_insert(0) += 1;
+    }
+    tf
+}
+
+fn inv_doc_freq(df: usize, n_docs: f64) -> f64 {
+    ((n_docs + 1.0) / (df as f64 + 1.0)).ln() + 1.0
+}
+
+fn vector_norm(
+    tf: &std::collections::HashMap<String, usize>,
+    doc_freq: &std::collections::HashMap<String, usize>,
+    n_docs: f64,
+) -> f64 {
+    let mut sum_sq = 0.0;
+    for (token, count) in tf {
+        let idf = inv_doc_freq(doc_freq.get(token).copied().unwrap_or(0), n_docs);
+        let weight = *count as f64 * idf;
+        sum_sq += weight * weight;
+    }
+    sum_sq.sqrt()
 }
 
 // ── Human-readable formatting ────────────────────────────────────────
@@ -1360,6 +1516,43 @@ mod tests {
         // Impact should be empty for keyword queries
         assert!(result.dependents.is_empty());
         assert!(result.override_risk.is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ask_keyword_semantic_similarity() {
+        let (tmp, ledger) = setup();
+        ledger
+            .append_event(&make_decision(
+                "main",
+                "pricing.discount_policy",
+                "daytime_revenue_shield",
+                Some("avoid aggressive daytime markdowns"),
+                None,
+            ))
+            .unwrap();
+        ledger
+            .append_event(&make_decision(
+                "main",
+                "inventory.reorder_buffer",
+                "40_percent",
+                Some("protect stock for midnight spikes"),
+                None,
+            ))
+            .unwrap();
+
+        let query = "similar daytime discount outcome for chiefs";
+        let result = ask(&ledger, query, &AskOptions::default(), None).unwrap();
+
+        assert_eq!(result.input_type, "keyword");
+        assert!(
+            result
+                .decisions
+                .iter()
+                .any(|d| d.key == "pricing.discount_policy"),
+            "semantic search should retrieve discount precedent"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
