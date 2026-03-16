@@ -16,7 +16,7 @@ use axum::{Json, Router};
 use edda_ledger::device_token::{generate_device_token, hash_token};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use edda_aggregate::aggregate::{
     aggregate_decisions, aggregate_overview, per_project_metrics, DateRange, ProjectMetrics,
@@ -51,7 +51,7 @@ struct AppState {
     repo_root: PathBuf,
     chronicle: Option<ChronicleContext>,
     pending_pairings: Mutex<HashMap<String, PairingRequest>>,
-    snapshot_cache: Mutex<HashMap<String, SnapshotCacheEntry>>,
+    snapshot_cache: Mutex<HashMap<String, VillageSnapshotCacheEntry>>,
 }
 
 struct PairingRequest {
@@ -59,7 +59,7 @@ struct PairingRequest {
     expires_at: std::time::Instant,
 }
 
-struct SnapshotCacheEntry {
+struct VillageSnapshotCacheEntry {
     expires_at: std::time::Instant,
     snapshots: Vec<serde_json::Value>,
 }
@@ -1970,16 +1970,9 @@ fn default_snapshot_limit() -> usize {
     20
 }
 
-fn snapshots_cache_key(query: &SnapshotsQuery) -> String {
-    format!(
-        "v={:?}|e={:?}|d={:?}|l={}|o={}",
-        query.village_id, query.engine_version, query.decision_type, query.limit, query.offset
-    )
-}
-
 fn snapshots_cache_lookup(
     state: &Arc<AppState>,
-    key: &str,
+    village_id: &str,
 ) -> Result<Option<Vec<serde_json::Value>>, AppError> {
     let mut cache = state
         .snapshot_cache
@@ -1987,21 +1980,23 @@ fn snapshots_cache_lookup(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("lock poisoned: {e}")))?;
     let now = std::time::Instant::now();
     cache.retain(|_, v| v.expires_at > now);
-    Ok(cache.get(key).map(|entry| entry.snapshots.clone()))
+    Ok(cache.get(village_id).map(|entry| entry.snapshots.clone()))
 }
 
 fn snapshots_cache_store(
     state: &Arc<AppState>,
-    key: String,
+    village_id: String,
     snapshots: Vec<serde_json::Value>,
 ) -> Result<(), AppError> {
     let mut cache = state
         .snapshot_cache
         .lock()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("lock poisoned: {e}")))?;
+    let mut snapshots = snapshots;
+    snapshots.truncate(100);
     cache.insert(
-        key,
-        SnapshotCacheEntry {
+        village_id,
+        VillageSnapshotCacheEntry {
             expires_at: std::time::Instant::now() + Duration::from_secs(300),
             snapshots,
         },
@@ -2009,29 +2004,119 @@ fn snapshots_cache_store(
     Ok(())
 }
 
+fn snapshots_page_from_cached(
+    mut snapshots: Vec<serde_json::Value>,
+    query: &SnapshotsQuery,
+) -> Vec<serde_json::Value> {
+    if let Some(ref engine) = query.engine_version {
+        snapshots.retain(|s| {
+            s.get("engine_version")
+                .and_then(|v| v.as_str())
+                .map(|v| v == engine)
+                .unwrap_or(false)
+        });
+    }
+    if let Some(ref decision_type) = query.decision_type {
+        snapshots.retain(|s| {
+            s.get("decision_type")
+                .and_then(|v| v.as_str())
+                .map(|v| v == decision_type)
+                .unwrap_or(false)
+        });
+    }
+    snapshots
+        .into_iter()
+        .skip(query.offset)
+        .take(query.limit)
+        .collect()
+}
+
 async fn get_snapshots(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SnapshotsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
     let start = std::time::Instant::now();
-    let should_cache = query.village_id.is_some() && query.limit <= 100 && query.offset < 100;
-    let cache_key = snapshots_cache_key(&query);
+    let is_hot_path = query.village_id.is_some() && query.limit <= 100 && query.offset < 100;
 
-    if should_cache {
-        if let Some(cached) = snapshots_cache_lookup(&state, &cache_key)? {
+    if is_hot_path {
+        if let Some(village_id) = query.village_id.as_deref() {
+            if let Some(cached_all) = snapshots_cache_lookup(&state, village_id)? {
+                let cached = snapshots_page_from_cached(cached_all, &query);
+                let elapsed = start.elapsed();
+                let elapsed_ms = elapsed.as_millis() as u64;
+                if elapsed_ms > 100 {
+                    warn!(
+                        village_id = query.village_id.as_deref(),
+                        engine_version = query.engine_version.as_deref(),
+                        decision_type = query.decision_type.as_deref(),
+                        limit = query.limit,
+                        offset = query.offset,
+                        result_count = cached.len(),
+                        elapsed_ms = elapsed_ms,
+                        cache_hit = true,
+                        hot_path = is_hot_path,
+                        "get_snapshots request exceeded hot-path latency budget"
+                    );
+                }
+                debug!(
+                    village_id = query.village_id.as_deref(),
+                    engine_version = query.engine_version.as_deref(),
+                    decision_type = query.decision_type.as_deref(),
+                    limit = query.limit,
+                    offset = query.offset,
+                    result_count = cached.len(),
+                    elapsed_ms = elapsed_ms,
+                    cache_hit = true,
+                    hot_path = is_hot_path,
+                    "get_snapshots request completed"
+                );
+                return Ok(Json(cached));
+            }
+        }
+    }
+
+    if is_hot_path {
+        if let Some(village_id) = query.village_id.as_deref() {
+            let ledger = state.open_ledger()?;
+            let rows = ledger.query_snapshots(Some(village_id), None, None, 100, 0)?;
+
+            let mut full_snapshots = Vec::new();
+            for row in &rows {
+                let snapshot = reconstruct_snapshot(&ledger, row)?;
+                full_snapshots.push(snapshot);
+            }
+            snapshots_cache_store(&state, village_id.to_string(), full_snapshots.clone())?;
+
+            let snapshots = snapshots_page_from_cached(full_snapshots, &query);
             let elapsed = start.elapsed();
+            let elapsed_ms = elapsed.as_millis() as u64;
+            if elapsed_ms > 100 {
+                warn!(
+                    village_id = query.village_id.as_deref(),
+                    engine_version = query.engine_version.as_deref(),
+                    decision_type = query.decision_type.as_deref(),
+                    limit = query.limit,
+                    offset = query.offset,
+                    result_count = snapshots.len(),
+                    elapsed_ms = elapsed_ms,
+                    cache_hit = false,
+                    hot_path = is_hot_path,
+                    "get_snapshots request exceeded hot-path latency budget"
+                );
+            }
             debug!(
                 village_id = query.village_id.as_deref(),
                 engine_version = query.engine_version.as_deref(),
                 decision_type = query.decision_type.as_deref(),
                 limit = query.limit,
                 offset = query.offset,
-                result_count = cached.len(),
-                elapsed_ms = elapsed.as_millis() as u64,
-                cached = true,
+                result_count = snapshots.len(),
+                elapsed_ms = elapsed_ms,
+                cache_hit = false,
+                hot_path = is_hot_path,
                 "get_snapshots request completed"
             );
-            return Ok(Json(cached));
+            return Ok(Json(snapshots));
         }
     }
 
@@ -2050,11 +2135,22 @@ async fn get_snapshots(
         snapshots.push(snapshot);
     }
 
-    if should_cache {
-        snapshots_cache_store(&state, cache_key, snapshots.clone())?;
-    }
-
     let elapsed = start.elapsed();
+    let elapsed_ms = elapsed.as_millis() as u64;
+    if elapsed_ms > 100 {
+        warn!(
+            village_id = query.village_id.as_deref(),
+            engine_version = query.engine_version.as_deref(),
+            decision_type = query.decision_type.as_deref(),
+            limit = query.limit,
+            offset = query.offset,
+            result_count = snapshots.len(),
+            elapsed_ms = elapsed_ms,
+            cache_hit = false,
+            hot_path = is_hot_path,
+            "get_snapshots request exceeded hot-path latency budget"
+        );
+    }
     debug!(
         village_id = query.village_id.as_deref(),
         engine_version = query.engine_version.as_deref(),
@@ -2062,8 +2158,9 @@ async fn get_snapshots(
         limit = query.limit,
         offset = query.offset,
         result_count = snapshots.len(),
-        elapsed_ms = elapsed.as_millis() as u64,
-        cached = false,
+        elapsed_ms = elapsed_ms,
+        cache_hit = false,
+        hot_path = is_hot_path,
         "get_snapshots request completed"
     );
 
@@ -6361,6 +6458,69 @@ actors:
         let json: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json.len(), 1);
         assert_eq!(json[0]["decision_type"], "chief");
+    }
+
+    #[tokio::test]
+    async fn get_snapshots_hot_path_uses_village_cache_window() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let app = router(tmp.path());
+        for i in 0..120 {
+            let decision_type = if i % 2 == 0 { "chief" } else { "general" };
+            let body = serde_json::json!({
+                "engine_version": "claude-3.5",
+                "decision_type": decision_type,
+                "village_id": "blog-village",
+                "context_hash": format!("ctx-{i}"),
+                "context": {"files": ["a.rs"]},
+                "result": {"ok": true}
+            });
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/snapshot")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+
+        // First query populates village cache with top-100 snapshot window.
+        let first = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/snapshots?village_id=blog-village&decision_type=chief&limit=20&offset=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // Second query should be served from the cached window and respect pagination.
+        let second = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/snapshots?village_id=blog-village&decision_type=chief&limit=20&offset=40")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(second.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json.len(), 10);
+        assert!(json.iter().all(|v| v["decision_type"] == "chief"));
     }
 
     // ── POST /api/decisions/batch tests ──

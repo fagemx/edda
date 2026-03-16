@@ -7,7 +7,7 @@ use edda_core::types::{Digest, Event, Provenance, Refs};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::time::Instant;
-use tracing::debug;
+use tracing::{debug, warn};
 
 const SCHEMA_SQL: &str = "
 PRAGMA journal_mode = WAL;
@@ -169,6 +169,12 @@ const SCHEMA_V10_SQL: &str = "
 ALTER TABLE decide_snapshots ADD COLUMN decision_type TEXT NOT NULL DEFAULT 'general';
 CREATE INDEX IF NOT EXISTS idx_snapshots_village_created_type
     ON decide_snapshots(village_id, created_at DESC, decision_type)
+    WHERE village_id IS NOT NULL;
+";
+
+const SCHEMA_V11_SQL: &str = "
+CREATE INDEX IF NOT EXISTS idx_snapshots_village_type_created
+    ON decide_snapshots(village_id, decision_type, created_at DESC)
     WHERE village_id IS NOT NULL;
 ";
 
@@ -416,6 +422,12 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 10 {
             self.migrate_v9_to_v10()?;
+        }
+
+        // Migrate to v11 if needed (village+type+created_at index order)
+        let current = self.schema_version()?;
+        if current < 11 {
+            self.migrate_v10_to_v11()?;
         }
 
         Ok(())
@@ -715,6 +727,12 @@ impl SqliteStore {
         }
 
         self.set_schema_version(10)?;
+        Ok(())
+    }
+
+    fn migrate_v10_to_v11(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V11_SQL)?;
+        self.set_schema_version(11)?;
         Ok(())
     }
 
@@ -2411,48 +2429,149 @@ impl SqliteStore {
         offset: usize,
     ) -> anyhow::Result<Vec<DecideSnapshotRow>> {
         let start = Instant::now();
-        let base = "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
-                           redaction_level, village_id, cycle_id, has_blobs, created_at
-                    FROM decide_snapshots";
-
-        let mut conditions: Vec<&str> = Vec::new();
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-        if let Some(v) = village_id {
-            conditions.push("village_id = ?");
-            param_values.push(Box::new(v.to_string()));
-        }
-        if let Some(e) = engine_version {
-            conditions.push("engine_version = ?");
-            param_values.push(Box::new(e.to_string()));
-        }
-        if let Some(dt) = decision_type {
-            conditions.push("decision_type = ?");
-            param_values.push(Box::new(dt.to_string()));
-        }
-
-        let sql = if conditions.is_empty() {
-            format!("{base} ORDER BY created_at DESC LIMIT ? OFFSET ?")
-        } else {
-            format!(
-                "{base} WHERE {} ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                conditions.join(" AND ")
-            )
+        let limit_i64 = limit as i64;
+        let offset_i64 = offset as i64;
+        let (result, hot_path) = match (village_id, engine_version, decision_type) {
+            (Some(v), None, Some(dt)) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
+                            redaction_level, village_id, cycle_id, has_blobs, created_at
+                     FROM decide_snapshots
+                     WHERE village_id = ?1 AND decision_type = ?2
+                     ORDER BY created_at DESC
+                     LIMIT ?3 OFFSET ?4",
+                )?;
+                let rows =
+                    stmt.query_map(params![v, dt, limit_i64, offset_i64], map_snapshot_row)?;
+                let result = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))?;
+                (result, true)
+            }
+            (Some(v), Some(e), Some(dt)) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
+                            redaction_level, village_id, cycle_id, has_blobs, created_at
+                     FROM decide_snapshots
+                     WHERE village_id = ?1 AND engine_version = ?2 AND decision_type = ?3
+                     ORDER BY created_at DESC
+                     LIMIT ?4 OFFSET ?5",
+                )?;
+                let rows =
+                    stmt.query_map(params![v, e, dt, limit_i64, offset_i64], map_snapshot_row)?;
+                let result = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))?;
+                (result, false)
+            }
+            (Some(v), Some(e), None) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
+                            redaction_level, village_id, cycle_id, has_blobs, created_at
+                     FROM decide_snapshots
+                     WHERE village_id = ?1 AND engine_version = ?2
+                     ORDER BY created_at DESC
+                     LIMIT ?3 OFFSET ?4",
+                )?;
+                let rows =
+                    stmt.query_map(params![v, e, limit_i64, offset_i64], map_snapshot_row)?;
+                let result = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))?;
+                (result, false)
+            }
+            (Some(v), None, None) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
+                            redaction_level, village_id, cycle_id, has_blobs, created_at
+                     FROM decide_snapshots
+                     WHERE village_id = ?1
+                     ORDER BY created_at DESC
+                     LIMIT ?2 OFFSET ?3",
+                )?;
+                let rows = stmt.query_map(params![v, limit_i64, offset_i64], map_snapshot_row)?;
+                let result = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))?;
+                (result, true)
+            }
+            (None, Some(e), Some(dt)) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
+                            redaction_level, village_id, cycle_id, has_blobs, created_at
+                     FROM decide_snapshots
+                     WHERE engine_version = ?1 AND decision_type = ?2
+                     ORDER BY created_at DESC
+                     LIMIT ?3 OFFSET ?4",
+                )?;
+                let rows =
+                    stmt.query_map(params![e, dt, limit_i64, offset_i64], map_snapshot_row)?;
+                let result = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))?;
+                (result, false)
+            }
+            (None, Some(e), None) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
+                            redaction_level, village_id, cycle_id, has_blobs, created_at
+                     FROM decide_snapshots
+                     WHERE engine_version = ?1
+                     ORDER BY created_at DESC
+                     LIMIT ?2 OFFSET ?3",
+                )?;
+                let rows = stmt.query_map(params![e, limit_i64, offset_i64], map_snapshot_row)?;
+                let result = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))?;
+                (result, false)
+            }
+            (None, None, Some(dt)) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
+                            redaction_level, village_id, cycle_id, has_blobs, created_at
+                     FROM decide_snapshots
+                     WHERE decision_type = ?1
+                     ORDER BY created_at DESC
+                     LIMIT ?2 OFFSET ?3",
+                )?;
+                let rows = stmt.query_map(params![dt, limit_i64, offset_i64], map_snapshot_row)?;
+                let result = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))?;
+                (result, false)
+            }
+            (None, None, None) => {
+                let mut stmt = self.conn.prepare(
+                    "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
+                            redaction_level, village_id, cycle_id, has_blobs, created_at
+                     FROM decide_snapshots
+                     ORDER BY created_at DESC
+                     LIMIT ?1 OFFSET ?2",
+                )?;
+                let rows = stmt.query_map(params![limit_i64, offset_i64], map_snapshot_row)?;
+                let result = rows
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))?;
+                (result, false)
+            }
         };
-        param_values.push(Box::new(limit as i64));
-        param_values.push(Box::new(offset as i64));
-
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(param_refs.as_slice(), map_snapshot_row)?;
-
-        let result = rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))?;
 
         let elapsed = start.elapsed();
+        let elapsed_ms = elapsed.as_millis() as u64;
+        if elapsed_ms > 100 {
+            warn!(
+                village_id = village_id,
+                engine_version = engine_version,
+                decision_type = decision_type,
+                limit = limit,
+                offset = offset,
+                result_count = result.len(),
+                elapsed_ms = elapsed_ms,
+                hot_path = hot_path,
+                "snapshot query exceeded hot-path latency budget"
+            );
+        }
         debug!(
             village_id = village_id,
             engine_version = engine_version,
@@ -2460,7 +2579,8 @@ impl SqliteStore {
             limit = limit,
             offset = offset,
             result_count = result.len(),
-            elapsed_ms = elapsed.as_millis() as u64,
+            elapsed_ms = elapsed_ms,
+            hot_path = hot_path,
             "snapshot query completed"
         );
 
@@ -3768,7 +3888,29 @@ mod tests {
         assert!(tables.contains(&"task_briefs".to_string()));
         assert!(tables.contains(&"device_tokens".to_string()));
         assert!(tables.contains(&"decide_snapshots".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 10);
+        assert_eq!(store.schema_version().unwrap(), 11);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_migration_v10_to_v11_adds_hot_path_index() {
+        let (dir, store) = tmp_db();
+
+        let index_exists: bool = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) > 0
+                 FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_snapshots_village_type_created'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(index_exists);
+        assert_eq!(store.schema_version().unwrap(), 11);
+
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3882,8 +4024,15 @@ mod tests {
                 .unwrap();
             assert_eq!(rows.len(), 20);
         }
+
+        for _ in 0..100 {
+            let rows = store
+                .query_snapshots(Some("blog-village"), None, Some("chief"), 20, 10)
+                .unwrap();
+            assert_eq!(rows.len(), 20);
+        }
         let elapsed = start.elapsed();
-        let avg_ms = elapsed.as_millis() as f64 / 100.0;
+        let avg_ms = elapsed.as_millis() as f64 / 200.0;
 
         assert!(
             avg_ms < 100.0,
