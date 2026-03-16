@@ -123,6 +123,8 @@ pub struct DecisionPayload {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<DecisionScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub village_id: Option<String>,
 }
 
 /// Status of a task brief.
@@ -460,6 +462,7 @@ mod tests {
             value: "sqlite".to_string(),
             reason: Some("embedded, zero-config".to_string()),
             scope: None,
+            village_id: None,
         };
         let json = serde_json::to_string(&dp).expect("serialize");
         let decoded: DecisionPayload = serde_json::from_str(&json).expect("deserialize");
@@ -471,6 +474,7 @@ mod tests {
             value: "JWT".to_string(),
             reason: None,
             scope: None,
+            village_id: None,
         };
         let json2 = serde_json::to_string(&dp_no_reason).expect("serialize");
         assert!(!json2.contains("reason"), "None reason should be omitted");
@@ -486,11 +490,27 @@ mod tests {
             value: "v3".to_string(),
             reason: Some("breaking change".to_string()),
             scope: Some(DecisionScope::Shared),
+            village_id: None,
         };
         let json = serde_json::to_string(&dp).expect("serialize");
         assert!(json.contains("\"scope\":\"shared\""));
         let decoded: DecisionPayload = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(decoded.scope, Some(DecisionScope::Shared));
+    }
+
+    #[test]
+    fn decision_payload_with_village_id_round_trip() {
+        let dp = DecisionPayload {
+            key: "db.engine".to_string(),
+            value: "postgres".to_string(),
+            reason: None,
+            scope: None,
+            village_id: Some("village-42".to_string()),
+        };
+        let json = serde_json::to_string(&dp).expect("serialize");
+        assert!(json.contains("\"village_id\":\"village-42\""));
+        let decoded: DecisionPayload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(decoded.village_id, Some("village-42".to_string()));
     }
 
     #[test]
@@ -519,6 +539,7 @@ mod tests {
         let json = r#"{"key":"db","value":"pg","reason":"fast"}"#;
         let dp: DecisionPayload = serde_json::from_str(json).expect("deserialize");
         assert_eq!(dp.scope, None);
+        assert_eq!(dp.village_id, None);
     }
 
     #[test]

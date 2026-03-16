@@ -25,7 +25,7 @@ pub fn is_session_digest(payload: &Value) -> bool {
 /// Prefers structured `payload.decision` object, falls back to text parse
 /// for backward compatibility with legacy events.
 pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
-    // Structured path: payload.decision.{key, value, reason}
+    // Structured path: payload.decision.{key, value, reason, village_id}
     if let Some(d) = payload.get("decision") {
         let key = d.get("key").and_then(|v| v.as_str())?.to_string();
         let value = d.get("value").and_then(|v| v.as_str())?.to_string();
@@ -38,11 +38,17 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
             .get("scope")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse().ok());
+        let village_id = d
+            .get("village_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
         return Some(DecisionPayload {
             key,
             value,
             reason,
             scope,
+            village_id,
         });
     }
     // Text fallback: "key: value — reason"
@@ -57,6 +63,7 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
         value,
         reason,
         scope: None,
+        village_id: None,
     })
 }
 
@@ -197,5 +204,37 @@ mod tests {
     #[test]
     fn domain_multi_dot() {
         assert_eq!(extract_domain("api.v2.style"), "api");
+    }
+
+    #[test]
+    fn extract_structured_with_village_id() {
+        let payload = serde_json::json!({
+            "tags": ["decision"],
+            "decision": {"key": "db.engine", "value": "postgres", "village_id": "village-42"}
+        });
+        let dp = extract_decision(&payload).unwrap();
+        assert_eq!(dp.key, "db.engine");
+        assert_eq!(dp.value, "postgres");
+        assert_eq!(dp.village_id.as_deref(), Some("village-42"));
+    }
+
+    #[test]
+    fn extract_structured_empty_village_id_becomes_none() {
+        let payload = serde_json::json!({
+            "tags": ["decision"],
+            "decision": {"key": "k", "value": "v", "village_id": ""}
+        });
+        let dp = extract_decision(&payload).unwrap();
+        assert!(dp.village_id.is_none());
+    }
+
+    #[test]
+    fn extract_text_fallback_village_id_is_none() {
+        let payload = serde_json::json!({
+            "tags": ["decision"],
+            "text": "db.engine: postgres"
+        });
+        let dp = extract_decision(&payload).unwrap();
+        assert!(dp.village_id.is_none());
     }
 }
