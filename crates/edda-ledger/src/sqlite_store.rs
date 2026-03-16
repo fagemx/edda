@@ -165,6 +165,13 @@ CREATE INDEX IF NOT EXISTS idx_decisions_active_domain
     ON decisions(is_active, domain) WHERE is_active = TRUE;
 ";
 
+const SCHEMA_V10_SQL: &str = "
+ALTER TABLE decide_snapshots ADD COLUMN decision_type TEXT NOT NULL DEFAULT 'general';
+CREATE INDEX IF NOT EXISTS idx_snapshots_village_created_type
+    ON decide_snapshots(village_id, created_at DESC, decision_type)
+    WHERE village_id IS NOT NULL;
+";
+
 /// A row from the `decisions` table.
 #[derive(Debug, Clone)]
 pub struct DecisionRow {
@@ -269,6 +276,7 @@ pub struct DecideSnapshotRow {
     pub event_id: String,
     pub context_hash: String,
     pub engine_version: String,
+    pub decision_type: String,
     pub schema_version: String,
     pub redaction_level: String,
     pub village_id: Option<String>,
@@ -402,6 +410,12 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 9 {
             self.migrate_v8_to_v9()?;
+        }
+
+        // Migrate to v10 if needed (snapshot hot path indexes + decision_type)
+        let current = self.schema_version()?;
+        if current < 10 {
+            self.migrate_v9_to_v10()?;
         }
 
         Ok(())
@@ -677,6 +691,30 @@ impl SqliteStore {
     fn migrate_v8_to_v9(&self) -> anyhow::Result<()> {
         self.conn.execute_batch(SCHEMA_V9_SQL)?;
         self.set_schema_version(9)?;
+        Ok(())
+    }
+
+    fn migrate_v9_to_v10(&self) -> anyhow::Result<()> {
+        let has_decision_type = self
+            .conn
+            .prepare("PRAGMA table_info(decide_snapshots)")?
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .any(|name| name == "decision_type");
+
+        if has_decision_type {
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_snapshots_village_created_type
+                 ON decide_snapshots(village_id, created_at DESC, decision_type)
+                 WHERE village_id IS NOT NULL",
+                [],
+            )?;
+        } else {
+            self.conn.execute_batch(SCHEMA_V10_SQL)?;
+        }
+
+        self.set_schema_version(10)?;
         Ok(())
     }
 
@@ -2344,13 +2382,14 @@ impl SqliteStore {
     pub fn insert_snapshot(&self, row: &DecideSnapshotRow) -> anyhow::Result<()> {
         self.conn.execute(
             "INSERT INTO decide_snapshots
-             (event_id, context_hash, engine_version, schema_version,
+             (event_id, context_hash, engine_version, decision_type, schema_version,
               redaction_level, village_id, cycle_id, has_blobs, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 row.event_id,
                 row.context_hash,
                 row.engine_version,
+                row.decision_type,
                 row.schema_version,
                 row.redaction_level,
                 row.village_id,
@@ -2367,9 +2406,12 @@ impl SqliteStore {
         &self,
         village_id: Option<&str>,
         engine_version: Option<&str>,
+        decision_type: Option<&str>,
         limit: usize,
+        offset: usize,
     ) -> anyhow::Result<Vec<DecideSnapshotRow>> {
-        let base = "SELECT event_id, context_hash, engine_version, schema_version,
+        let start = Instant::now();
+        let base = "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
                            redaction_level, village_id, cycle_id, has_blobs, created_at
                     FROM decide_snapshots";
 
@@ -2384,16 +2426,21 @@ impl SqliteStore {
             conditions.push("engine_version = ?");
             param_values.push(Box::new(e.to_string()));
         }
+        if let Some(dt) = decision_type {
+            conditions.push("decision_type = ?");
+            param_values.push(Box::new(dt.to_string()));
+        }
 
         let sql = if conditions.is_empty() {
-            format!("{base} ORDER BY created_at DESC LIMIT ?")
+            format!("{base} ORDER BY created_at DESC LIMIT ? OFFSET ?")
         } else {
             format!(
-                "{base} WHERE {} ORDER BY created_at DESC LIMIT ?",
+                "{base} WHERE {} ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 conditions.join(" AND ")
             )
         };
         param_values.push(Box::new(limit as i64));
+        param_values.push(Box::new(offset as i64));
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
@@ -2401,8 +2448,23 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(param_refs.as_slice(), map_snapshot_row)?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))
+        let result = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("snapshot query failed: {e}"))?;
+
+        let elapsed = start.elapsed();
+        debug!(
+            village_id = village_id,
+            engine_version = engine_version,
+            decision_type = decision_type,
+            limit = limit,
+            offset = offset,
+            result_count = result.len(),
+            elapsed_ms = elapsed.as_millis() as u64,
+            "snapshot query completed"
+        );
+
+        Ok(result)
     }
 
     /// Find all snapshots with a given context_hash (for version comparison).
@@ -2411,7 +2473,7 @@ impl SqliteStore {
         context_hash: &str,
     ) -> anyhow::Result<Vec<DecideSnapshotRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT event_id, context_hash, engine_version, schema_version,
+            "SELECT event_id, context_hash, engine_version, decision_type, schema_version,
                     redaction_level, village_id, cycle_id, has_blobs, created_at
              FROM decide_snapshots
              WHERE context_hash = ?1
@@ -2454,12 +2516,13 @@ fn map_snapshot_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecideSnapshotR
         event_id: row.get(0)?,
         context_hash: row.get(1)?,
         engine_version: row.get(2)?,
-        schema_version: row.get(3)?,
-        redaction_level: row.get(4)?,
-        village_id: row.get(5)?,
-        cycle_id: row.get(6)?,
-        has_blobs: row.get(7)?,
-        created_at: row.get(8)?,
+        decision_type: row.get(3)?,
+        schema_version: row.get(4)?,
+        redaction_level: row.get(5)?,
+        village_id: row.get(6)?,
+        cycle_id: row.get(7)?,
+        has_blobs: row.get(8)?,
+        created_at: row.get(9)?,
     })
 }
 
@@ -3705,7 +3768,129 @@ mod tests {
         assert!(tables.contains(&"task_briefs".to_string()));
         assert!(tables.contains(&"device_tokens".to_string()));
         assert!(tables.contains(&"decide_snapshots".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 9);
+        assert_eq!(store.schema_version().unwrap(), 10);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn query_snapshots_supports_decision_type_and_offset() {
+        let (dir, store) = tmp_db();
+
+        let e1 = make_decision_event("main", "snap.key1", "v1", None, None);
+        store.append_event(&e1).unwrap();
+        store
+            .insert_snapshot(&DecideSnapshotRow {
+                event_id: e1.event_id.clone(),
+                context_hash: "ctx1".to_string(),
+                engine_version: "engine-a".to_string(),
+                decision_type: "chief".to_string(),
+                schema_version: "snapshot.v1".to_string(),
+                redaction_level: "full".to_string(),
+                village_id: Some("blog-village".to_string()),
+                cycle_id: None,
+                has_blobs: false,
+                created_at: "2026-03-17T10:00:00Z".to_string(),
+            })
+            .unwrap();
+
+        let e2 = make_decision_event("main", "snap.key2", "v2", None, None);
+        store.append_event(&e2).unwrap();
+        store
+            .insert_snapshot(&DecideSnapshotRow {
+                event_id: e2.event_id.clone(),
+                context_hash: "ctx2".to_string(),
+                engine_version: "engine-a".to_string(),
+                decision_type: "chief".to_string(),
+                schema_version: "snapshot.v1".to_string(),
+                redaction_level: "full".to_string(),
+                village_id: Some("blog-village".to_string()),
+                cycle_id: None,
+                has_blobs: false,
+                created_at: "2026-03-17T10:01:00Z".to_string(),
+            })
+            .unwrap();
+
+        let e3 = make_decision_event("main", "snap.key3", "v3", None, None);
+        store.append_event(&e3).unwrap();
+        store
+            .insert_snapshot(&DecideSnapshotRow {
+                event_id: e3.event_id.clone(),
+                context_hash: "ctx3".to_string(),
+                engine_version: "engine-a".to_string(),
+                decision_type: "general".to_string(),
+                schema_version: "snapshot.v1".to_string(),
+                redaction_level: "full".to_string(),
+                village_id: Some("blog-village".to_string()),
+                cycle_id: None,
+                has_blobs: false,
+                created_at: "2026-03-17T10:02:00Z".to_string(),
+            })
+            .unwrap();
+
+        let chief = store
+            .query_snapshots(Some("blog-village"), None, Some("chief"), 20, 0)
+            .unwrap();
+        assert_eq!(chief.len(), 2);
+        assert_eq!(chief[0].context_hash, "ctx2");
+        assert_eq!(chief[1].context_hash, "ctx1");
+
+        let chief_offset = store
+            .query_snapshots(Some("blog-village"), None, Some("chief"), 1, 1)
+            .unwrap();
+        assert_eq!(chief_offset.len(), 1);
+        assert_eq!(chief_offset[0].context_hash, "ctx1");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshots_hot_path_query_performance() {
+        use std::time::Instant;
+
+        let (dir, store) = tmp_db();
+
+        for i in 0..300 {
+            let e = make_decision_event("main", &format!("snap.key{i}"), "value", None, None);
+            store.append_event(&e).unwrap();
+            let decision_type = if i % 2 == 0 { "chief" } else { "general" };
+            store
+                .insert_snapshot(&DecideSnapshotRow {
+                    event_id: e.event_id.clone(),
+                    context_hash: format!("ctx{i}"),
+                    engine_version: "engine-a".to_string(),
+                    decision_type: decision_type.to_string(),
+                    schema_version: "snapshot.v1".to_string(),
+                    redaction_level: "full".to_string(),
+                    village_id: Some("blog-village".to_string()),
+                    cycle_id: None,
+                    has_blobs: false,
+                    created_at: format!("2026-03-17T10:{:02}:00Z", i % 60),
+                })
+                .unwrap();
+        }
+
+        let _ = store
+            .query_snapshots(Some("blog-village"), None, Some("chief"), 20, 0)
+            .unwrap();
+
+        let start = Instant::now();
+        for _ in 0..100 {
+            let rows = store
+                .query_snapshots(Some("blog-village"), None, Some("chief"), 20, 0)
+                .unwrap();
+            assert_eq!(rows.len(), 20);
+        }
+        let elapsed = start.elapsed();
+        let avg_ms = elapsed.as_millis() as f64 / 100.0;
+
+        assert!(
+            avg_ms < 100.0,
+            "snapshot hot path query avg {}ms exceeds 100ms threshold",
+            avg_ms
+        );
+
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

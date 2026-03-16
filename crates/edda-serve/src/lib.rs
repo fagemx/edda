@@ -16,6 +16,7 @@ use axum::{Json, Router};
 use edda_ledger::device_token::{generate_device_token, hash_token};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tracing::debug;
 
 use edda_aggregate::aggregate::{
     aggregate_decisions, aggregate_overview, per_project_metrics, DateRange, ProjectMetrics,
@@ -50,11 +51,17 @@ struct AppState {
     repo_root: PathBuf,
     chronicle: Option<ChronicleContext>,
     pending_pairings: Mutex<HashMap<String, PairingRequest>>,
+    snapshot_cache: Mutex<HashMap<String, SnapshotCacheEntry>>,
 }
 
 struct PairingRequest {
     device_name: String,
     expires_at: std::time::Instant,
+}
+
+struct SnapshotCacheEntry {
+    expires_at: std::time::Instant,
+    snapshots: Vec<serde_json::Value>,
 }
 
 struct ChronicleContext {
@@ -149,6 +156,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         repo_root: repo_root.to_path_buf(),
         chronicle,
         pending_pairings: Mutex::new(HashMap::new()),
+        snapshot_cache: Mutex::new(HashMap::new()),
     });
 
     // Public routes (no auth required)
@@ -263,6 +271,7 @@ fn router(repo_root: &Path) -> Router {
         repo_root: repo_root.to_path_buf(),
         chronicle,
         pending_pairings: Mutex::new(HashMap::new()),
+        snapshot_cache: Mutex::new(HashMap::new()),
     });
     Router::new()
         .route("/api/health", get(health))
@@ -1812,6 +1821,8 @@ struct SnapshotBody {
     context: serde_json::Value,
     result: serde_json::Value,
     engine_version: String,
+    #[serde(default = "default_snapshot_decision_type")]
+    decision_type: String,
     #[serde(default = "default_snapshot_schema")]
     schema_version: String,
     context_hash: String,
@@ -1823,6 +1834,10 @@ struct SnapshotBody {
 
 fn default_snapshot_schema() -> String {
     "snapshot.v1".to_string()
+}
+
+fn default_snapshot_decision_type() -> String {
+    "general".to_string()
 }
 
 fn default_redaction_level() -> String {
@@ -1883,6 +1898,7 @@ async fn post_snapshot(
     // Build event payload: metadata + inline or blob refs
     let mut payload = serde_json::json!({
         "engine_version": body.engine_version,
+        "decision_type": body.decision_type,
         "schema_version": body.schema_version,
         "context_hash": body.context_hash,
         "redaction_level": body.redaction_level,
@@ -1919,6 +1935,7 @@ async fn post_snapshot(
         event_id: event_id.clone(),
         context_hash: body.context_hash.clone(),
         engine_version: body.engine_version,
+        decision_type: body.decision_type,
         schema_version: body.schema_version,
         redaction_level: body.redaction_level,
         village_id: body.village_id,
@@ -1942,23 +1959,89 @@ async fn post_snapshot(
 struct SnapshotsQuery {
     village_id: Option<String>,
     engine_version: Option<String>,
+    decision_type: Option<String>,
     #[serde(default = "default_snapshot_limit")]
     limit: usize,
+    #[serde(default)]
+    offset: usize,
 }
 
 fn default_snapshot_limit() -> usize {
     20
 }
 
+fn snapshots_cache_key(query: &SnapshotsQuery) -> String {
+    format!(
+        "v={:?}|e={:?}|d={:?}|l={}|o={}",
+        query.village_id, query.engine_version, query.decision_type, query.limit, query.offset
+    )
+}
+
+fn snapshots_cache_lookup(
+    state: &Arc<AppState>,
+    key: &str,
+) -> Result<Option<Vec<serde_json::Value>>, AppError> {
+    let mut cache = state
+        .snapshot_cache
+        .lock()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("lock poisoned: {e}")))?;
+    let now = std::time::Instant::now();
+    cache.retain(|_, v| v.expires_at > now);
+    Ok(cache.get(key).map(|entry| entry.snapshots.clone()))
+}
+
+fn snapshots_cache_store(
+    state: &Arc<AppState>,
+    key: String,
+    snapshots: Vec<serde_json::Value>,
+) -> Result<(), AppError> {
+    let mut cache = state
+        .snapshot_cache
+        .lock()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("lock poisoned: {e}")))?;
+    cache.insert(
+        key,
+        SnapshotCacheEntry {
+            expires_at: std::time::Instant::now() + Duration::from_secs(300),
+            snapshots,
+        },
+    );
+    Ok(())
+}
+
 async fn get_snapshots(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SnapshotsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    let start = std::time::Instant::now();
+    let should_cache = query.village_id.is_some() && query.limit <= 100 && query.offset < 100;
+    let cache_key = snapshots_cache_key(&query);
+
+    if should_cache {
+        if let Some(cached) = snapshots_cache_lookup(&state, &cache_key)? {
+            let elapsed = start.elapsed();
+            debug!(
+                village_id = query.village_id.as_deref(),
+                engine_version = query.engine_version.as_deref(),
+                decision_type = query.decision_type.as_deref(),
+                limit = query.limit,
+                offset = query.offset,
+                result_count = cached.len(),
+                elapsed_ms = elapsed.as_millis() as u64,
+                cached = true,
+                "get_snapshots request completed"
+            );
+            return Ok(Json(cached));
+        }
+    }
+
     let ledger = state.open_ledger()?;
     let rows = ledger.query_snapshots(
         query.village_id.as_deref(),
         query.engine_version.as_deref(),
+        query.decision_type.as_deref(),
         query.limit,
+        query.offset,
     )?;
 
     let mut snapshots = Vec::new();
@@ -1966,6 +2049,23 @@ async fn get_snapshots(
         let snapshot = reconstruct_snapshot(&ledger, row)?;
         snapshots.push(snapshot);
     }
+
+    if should_cache {
+        snapshots_cache_store(&state, cache_key, snapshots.clone())?;
+    }
+
+    let elapsed = start.elapsed();
+    debug!(
+        village_id = query.village_id.as_deref(),
+        engine_version = query.engine_version.as_deref(),
+        decision_type = query.decision_type.as_deref(),
+        limit = query.limit,
+        offset = query.offset,
+        result_count = snapshots.len(),
+        elapsed_ms = elapsed.as_millis() as u64,
+        cached = false,
+        "get_snapshots request completed"
+    );
 
     Ok(Json(snapshots))
 }
@@ -2035,6 +2135,7 @@ fn reconstruct_snapshot(
         "event_id": row.event_id,
         "context_hash": row.context_hash,
         "engine_version": row.engine_version,
+        "decision_type": row.decision_type,
         "schema_version": row.schema_version,
         "redaction_level": row.redaction_level,
         "village_id": row.village_id,
@@ -5978,6 +6079,8 @@ actors:
     fn snapshot_json() -> serde_json::Value {
         serde_json::json!({
             "engine_version": "claude-3.5",
+            "decision_type": "chief",
+            "village_id": "blog-village",
             "context_hash": "abc123def456",
             "context": {"files": ["main.rs"], "prompt": "test"},
             "result": {"decisions": [{"key": "db.engine", "value": "sqlite"}]},
@@ -6190,6 +6293,74 @@ actors:
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_snapshots_filters_decision_type_and_offset() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed snapshots with mixed decision_type and same village
+        let app = router(tmp.path());
+        let body1 = serde_json::json!({
+            "engine_version": "claude-3.5",
+            "decision_type": "chief",
+            "village_id": "blog-village",
+            "context_hash": "ctx-chief-1",
+            "context": {"files": ["a.rs"]},
+            "result": {"ok": true}
+        });
+        let body2 = serde_json::json!({
+            "engine_version": "claude-3.5",
+            "decision_type": "chief",
+            "village_id": "blog-village",
+            "context_hash": "ctx-chief-2",
+            "context": {"files": ["b.rs"]},
+            "result": {"ok": true}
+        });
+        let body3 = serde_json::json!({
+            "engine_version": "claude-3.5",
+            "decision_type": "general",
+            "village_id": "blog-village",
+            "context_hash": "ctx-general-1",
+            "context": {"files": ["c.rs"]},
+            "result": {"ok": true}
+        });
+
+        for body in [body1, body2, body3] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/snapshot")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::CREATED);
+        }
+
+        // Filter by decision_type=chief, limit=1, offset=1
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/snapshots?village_id=blog-village&decision_type=chief&limit=1&offset=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["decision_type"], "chief");
     }
 
     // ── POST /api/decisions/batch tests ──
@@ -6642,6 +6813,7 @@ actors:
             repo_root: repo_root.to_path_buf(),
             chronicle,
             pending_pairings: Mutex::new(HashMap::new()),
+            snapshot_cache: Mutex::new(HashMap::new()),
         });
 
         let public_routes = Router::new().route("/api/health", get(health));

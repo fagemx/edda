@@ -422,10 +422,12 @@ impl Ledger {
         &self,
         village_id: Option<&str>,
         engine_version: Option<&str>,
+        decision_type: Option<&str>,
         limit: usize,
+        offset: usize,
     ) -> anyhow::Result<Vec<crate::sqlite_store::DecideSnapshotRow>> {
         self.sqlite
-            .query_snapshots(village_id, engine_version, limit)
+            .query_snapshots(village_id, engine_version, decision_type, limit, offset)
     }
 
     /// Find all snapshots for a given context_hash.
