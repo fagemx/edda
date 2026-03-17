@@ -3,7 +3,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
@@ -16,6 +16,7 @@ use axum::{Json, Router};
 use edda_ledger::device_token::{generate_device_token, hash_token};
 use serde::{Deserialize, Serialize};
 use tower_http::cors::{AllowOrigin, CorsLayer};
+use tracing::{debug, warn};
 
 use edda_aggregate::aggregate::{
     aggregate_decisions, aggregate_overview, per_project_metrics, DateRange, ProjectMetrics,
@@ -50,6 +51,13 @@ struct AppState {
     repo_root: PathBuf,
     chronicle: Option<ChronicleContext>,
     pending_pairings: Mutex<HashMap<String, PairingRequest>>,
+    snapshot_cache: Mutex<HashMap<String, SnapshotCacheEntry>>,
+}
+
+#[derive(Clone)]
+struct SnapshotCacheEntry {
+    rows: Vec<edda_ledger::DecideSnapshotRow>,
+    expires_at: Instant,
 }
 
 struct PairingRequest {
@@ -149,6 +157,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         repo_root: repo_root.to_path_buf(),
         chronicle,
         pending_pairings: Mutex::new(HashMap::new()),
+        snapshot_cache: Mutex::new(HashMap::new()),
     });
 
     // Public routes (no auth required)
@@ -263,6 +272,7 @@ fn router(repo_root: &Path) -> Router {
         repo_root: repo_root.to_path_buf(),
         chronicle,
         pending_pairings: Mutex::new(HashMap::new()),
+        snapshot_cache: Mutex::new(HashMap::new()),
     });
     Router::new()
         .route("/api/health", get(health))
@@ -1829,6 +1839,7 @@ struct SnapshotBody {
     context_hash: String,
     #[serde(default = "default_redaction_level")]
     redaction_level: String,
+    decision_type: Option<String>,
     village_id: Option<String>,
     cycle_id: Option<String>,
 }
@@ -1899,6 +1910,9 @@ async fn post_snapshot(
         "context_hash": body.context_hash,
         "redaction_level": body.redaction_level,
     });
+    if let Some(ref decision_type) = body.decision_type {
+        payload["decision_type"] = serde_json::Value::String(decision_type.clone());
+    }
     if let Some(ref vid) = body.village_id {
         payload["village_id"] = serde_json::Value::String(vid.clone());
     }
@@ -1933,6 +1947,7 @@ async fn post_snapshot(
         engine_version: body.engine_version,
         schema_version: body.schema_version,
         redaction_level: body.redaction_level,
+        decision_type: body.decision_type,
         village_id: body.village_id,
         cycle_id: body.cycle_id,
         has_blobs,
@@ -1954,29 +1969,142 @@ async fn post_snapshot(
 struct SnapshotsQuery {
     village_id: Option<String>,
     engine_version: Option<String>,
+    decision_type: Option<String>,
     #[serde(default = "default_snapshot_limit")]
     limit: usize,
+    #[serde(default)]
+    offset: usize,
 }
 
 fn default_snapshot_limit() -> usize {
     20
 }
 
+const SNAPSHOT_CACHE_TTL: Duration = Duration::from_secs(300);
+const SNAPSHOT_CACHE_LIMIT: usize = 100;
+
+fn apply_snapshot_filters_and_page(
+    rows: &[edda_ledger::DecideSnapshotRow],
+    decision_type: Option<&str>,
+    offset: usize,
+    limit: usize,
+) -> Vec<edda_ledger::DecideSnapshotRow> {
+    rows.iter()
+        .filter(|row| {
+            decision_type
+                .map(|dt| row.decision_type.as_deref() == Some(dt))
+                .unwrap_or(true)
+        })
+        .skip(offset)
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
 async fn get_snapshots(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SnapshotsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    let started = Instant::now();
+    let limit = query.limit.min(SNAPSHOT_CACHE_LIMIT);
+    let offset = query.offset;
+    let decision_type = query.decision_type.as_deref();
+    let mut cache_hit = false;
+    let mut hot_path = false;
+
     let ledger = state.open_ledger()?;
-    let rows = ledger.query_snapshots(
-        query.village_id.as_deref(),
-        query.engine_version.as_deref(),
-        query.limit,
-    )?;
+    let rows = if let Some(village_id) = query.village_id.as_deref() {
+        hot_path = true;
+        if query.engine_version.is_none() {
+            let now = Instant::now();
+            if let Some(entry) = state
+                .snapshot_cache
+                .lock()
+                .map_err(|_| AppError::Internal(anyhow::anyhow!("snapshot cache lock poisoned")))?
+                .get(village_id)
+                .cloned()
+            {
+                if entry.expires_at > now {
+                    cache_hit = true;
+                    apply_snapshot_filters_and_page(&entry.rows, decision_type, offset, limit)
+                } else {
+                    let mut cache = state.snapshot_cache.lock().map_err(|_| {
+                        AppError::Internal(anyhow::anyhow!("snapshot cache lock poisoned"))
+                    })?;
+                    cache.remove(village_id);
+                    let fetched =
+                        ledger.query_snapshots(Some(village_id), None, SNAPSHOT_CACHE_LIMIT)?;
+                    cache.insert(
+                        village_id.to_string(),
+                        SnapshotCacheEntry {
+                            rows: fetched.clone(),
+                            expires_at: now + SNAPSHOT_CACHE_TTL,
+                        },
+                    );
+                    apply_snapshot_filters_and_page(&fetched, decision_type, offset, limit)
+                }
+            } else {
+                let fetched =
+                    ledger.query_snapshots(Some(village_id), None, SNAPSHOT_CACHE_LIMIT)?;
+                state
+                    .snapshot_cache
+                    .lock()
+                    .map_err(|_| {
+                        AppError::Internal(anyhow::anyhow!("snapshot cache lock poisoned"))
+                    })?
+                    .insert(
+                        village_id.to_string(),
+                        SnapshotCacheEntry {
+                            rows: fetched.clone(),
+                            expires_at: now + SNAPSHOT_CACHE_TTL,
+                        },
+                    );
+                apply_snapshot_filters_and_page(&fetched, decision_type, offset, limit)
+            }
+        } else {
+            let fetched = ledger.query_snapshots(
+                Some(village_id),
+                query.engine_version.as_deref(),
+                SNAPSHOT_CACHE_LIMIT,
+            )?;
+            apply_snapshot_filters_and_page(&fetched, decision_type, offset, limit)
+        }
+    } else {
+        ledger.query_snapshots(None, query.engine_version.as_deref(), limit)?
+    };
 
     let mut snapshots = Vec::new();
     for row in &rows {
         let snapshot = reconstruct_snapshot(&ledger, row)?;
         snapshots.push(snapshot);
+    }
+
+    let elapsed_ms = started.elapsed().as_millis();
+    debug!(
+        cache_hit,
+        hot_path,
+        village_id = query.village_id.as_deref().unwrap_or(""),
+        engine_version = query.engine_version.as_deref().unwrap_or(""),
+        decision_type = decision_type.unwrap_or(""),
+        limit,
+        offset,
+        result_count = snapshots.len(),
+        elapsed_ms,
+        "get_snapshots"
+    );
+    if elapsed_ms > 100 {
+        warn!(
+            cache_hit,
+            hot_path,
+            village_id = query.village_id.as_deref().unwrap_or(""),
+            engine_version = query.engine_version.as_deref().unwrap_or(""),
+            decision_type = decision_type.unwrap_or(""),
+            limit,
+            offset,
+            result_count = snapshots.len(),
+            elapsed_ms,
+            "get_snapshots slow query"
+        );
     }
 
     Ok(Json(snapshots))
@@ -2049,6 +2177,7 @@ fn reconstruct_snapshot(
         "engine_version": row.engine_version,
         "schema_version": row.schema_version,
         "redaction_level": row.redaction_level,
+        "decision_type": row.decision_type,
         "village_id": row.village_id,
         "cycle_id": row.cycle_id,
         "context": context,
@@ -6004,6 +6133,8 @@ actors:
         serde_json::json!({
             "engine_version": "claude-3.5",
             "context_hash": "abc123def456",
+            "decision_type": "approve",
+            "village_id": "village-alpha",
             "context": {"files": ["main.rs"], "prompt": "test"},
             "result": {"decisions": [{"key": "db.engine", "value": "sqlite"}]},
         })
@@ -6215,6 +6346,52 @@ actors:
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn snapshot_filter_and_offset_applies_after_decision_type() {
+        let rows = vec![
+            edda_ledger::DecideSnapshotRow {
+                event_id: "evt_1".to_string(),
+                context_hash: "h1".to_string(),
+                engine_version: "e".to_string(),
+                schema_version: "snapshot.v1".to_string(),
+                redaction_level: "full".to_string(),
+                decision_type: Some("approve".to_string()),
+                village_id: Some("village-beta".to_string()),
+                cycle_id: None,
+                has_blobs: false,
+                created_at: "2026-01-01T00:00:03Z".to_string(),
+            },
+            edda_ledger::DecideSnapshotRow {
+                event_id: "evt_2".to_string(),
+                context_hash: "h2".to_string(),
+                engine_version: "e".to_string(),
+                schema_version: "snapshot.v1".to_string(),
+                redaction_level: "full".to_string(),
+                decision_type: Some("approve".to_string()),
+                village_id: Some("village-beta".to_string()),
+                cycle_id: None,
+                has_blobs: false,
+                created_at: "2026-01-01T00:00:02Z".to_string(),
+            },
+            edda_ledger::DecideSnapshotRow {
+                event_id: "evt_3".to_string(),
+                context_hash: "h3".to_string(),
+                engine_version: "e".to_string(),
+                schema_version: "snapshot.v1".to_string(),
+                redaction_level: "full".to_string(),
+                decision_type: Some("reject".to_string()),
+                village_id: Some("village-beta".to_string()),
+                cycle_id: None,
+                has_blobs: false,
+                created_at: "2026-01-01T00:00:01Z".to_string(),
+            },
+        ];
+
+        let filtered = apply_snapshot_filters_and_page(&rows, Some("approve"), 1, 10);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].event_id, "evt_2");
     }
 
     // ── POST /api/decisions/batch tests ──
@@ -6753,6 +6930,7 @@ actors:
             repo_root: repo_root.to_path_buf(),
             chronicle,
             pending_pairings: Mutex::new(HashMap::new()),
+            snapshot_cache: Mutex::new(HashMap::new()),
         });
 
         let public_routes = Router::new().route("/api/health", get(health));
