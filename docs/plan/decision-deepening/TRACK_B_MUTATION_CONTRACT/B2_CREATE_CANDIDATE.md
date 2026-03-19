@@ -64,6 +64,79 @@ pub struct DecisionPayload {
    compile (Rust struct update syntax or explicit `None`).
 2. Existing JSON payloads without these fields deserialize correctly.
 
+### Step 1b — Update `extract_decision()` to parse new fields
+
+**File**: `crates/edda-core/src/decision.rs`
+**Reference**: Lines 27-61 (`extract_decision()` function)
+**Key changes**:
+
+Both the structured path (`payload.decision`) and text fallback must handle the
+new fields. In the structured path, parse the 5 new fields from the `decision`
+JSON object. In the text fallback, they default to `None` (legacy events don't
+carry these fields).
+
+```rust
+pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
+    // Structured path: payload.decision.{key, value, reason, ...}
+    if let Some(d) = payload.get("decision") {
+        let key = d.get("key").and_then(|v| v.as_str())?.to_string();
+        let value = d.get("value").and_then(|v| v.as_str())?.to_string();
+        let reason = d
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .filter(|r| !r.is_empty())
+            .map(|r| r.to_string());
+        let scope = d
+            .get("scope")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok());
+        // New V10 fields — all Option, gracefully default to None if missing
+        let authority = d.get("authority").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let affected_paths: Option<Vec<String>> = d.get("affected_paths")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let tags: Option<Vec<String>> = d.get("tags")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let review_after = d.get("review_after").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let reversibility = d.get("reversibility").and_then(|v| v.as_str()).map(|s| s.to_string());
+        return Some(DecisionPayload {
+            key,
+            value,
+            reason,
+            scope,
+            authority,
+            affected_paths,
+            tags,
+            review_after,
+            reversibility,
+        });
+    }
+    // Text fallback: "key: value — reason" (legacy events, no new fields)
+    let text = payload.get("text").and_then(|v| v.as_str())?;
+    let (key, rest) = text.split_once(": ")?;
+    let (value, reason) = match rest.split_once(" \u{2014} ") {
+        Some((v, r)) => (v.to_string(), Some(r.to_string())),
+        None => (rest.to_string(), None),
+    };
+    Some(DecisionPayload {
+        key: key.to_string(),
+        value,
+        reason,
+        scope: None,
+        authority: None,
+        affected_paths: None,
+        tags: None,
+        review_after: None,
+        reversibility: None,
+    })
+}
+```
+
+**Why this matters**: Without this change, events created with the new fields
+(via Track D's `--paths`/`--tags`) would lose those fields when re-extracted
+from event payloads (e.g., during reindexing or aggregate graph building).
+The `#[serde(default)]` on `DecisionPayload` ensures old events without these
+fields deserialize with `None` values — no migration needed.
+
 ### Step 2 — Update all `DecisionPayload` construction sites
 
 **File**: Multiple files across the workspace

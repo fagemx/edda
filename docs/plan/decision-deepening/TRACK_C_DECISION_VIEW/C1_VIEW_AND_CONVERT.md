@@ -81,17 +81,11 @@ use crate::sqlite_store::DecisionRow;
 ///
 /// If `affected_paths` or `tags` JSON is invalid or missing, defaults to `vec![]`.
 pub fn to_view(row: &DecisionRow) -> DecisionView {
-    let affected_paths: Vec<String> = row
-        .affected_paths
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+    let affected_paths: Vec<String> =
+        serde_json::from_str(&row.affected_paths).unwrap_or_default();
 
-    let tags: Vec<String> = row
-        .tags
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+    let tags: Vec<String> =
+        serde_json::from_str(&row.tags).unwrap_or_default();
 
     DecisionView {
         event_id: row.event_id.clone(),
@@ -101,9 +95,9 @@ pub fn to_view(row: &DecisionRow) -> DecisionView {
         value: row.value.clone(),
         reason: row.reason.clone(),
         domain: row.domain.clone(),
-        status: row.status.clone().unwrap_or_else(|| "active".to_string()),
-        authority: row.authority.clone().unwrap_or_else(|| "human".to_string()),
-        reversibility: row.reversibility.clone().unwrap_or_else(|| "medium".to_string()),
+        status: row.status.clone(),
+        authority: row.authority.clone(),
+        reversibility: row.reversibility.clone(),
         affected_paths,
         tags,
         propagation: row.scope.clone(),
@@ -132,13 +126,13 @@ pub struct DecisionRow {
 }
 ```
 
-After Track A adds V10 columns, expect these additional fields:
-- `status: Option<String>` (default `"active"`)
-- `authority: Option<String>` (default `"human"`)
-- `affected_paths: Option<String>` (default `"[]"`, JSON string)
-- `tags: Option<String>` (default `"[]"`, JSON string)
-- `review_after: Option<String>` (default `None`)
-- `reversibility: Option<String>` (default `"medium"`)
+After Track A adds V10 columns, expect these additional fields (DB has `NOT NULL DEFAULT`):
+- `status: String` (default `"active"`)
+- `authority: String` (default `"human"`)
+- `affected_paths: String` (default `"[]"`, JSON string)
+- `tags: String` (default `"[]"`, JSON string)
+- `review_after: Option<String>` (default `None` — the only nullable V10 field)
+- `reversibility: String` (default `"medium"`)
 
 ---
 
@@ -175,8 +169,8 @@ fn to_view_parses_json_arrays() {
 
 ```rust
 #[test]
-fn to_view_defaults_empty_on_missing_json() {
-    let row = make_row_with_paths(None, None);  // affected_paths and tags are None
+fn to_view_defaults_empty_on_empty_array() {
+    let row = make_row_with_paths("[]", "[]");  // affected_paths and tags are empty JSON arrays
     let view = to_view(&row);
     assert!(view.affected_paths.is_empty());
     assert!(view.tags.is_empty());
@@ -184,7 +178,7 @@ fn to_view_defaults_empty_on_missing_json() {
 
 #[test]
 fn to_view_defaults_empty_on_invalid_json() {
-    let row = make_row_with_paths(Some("not json"), Some("{bad}"));
+    let row = make_row_with_paths("not json", "{bad}");
     let view = to_view(&row);
     assert!(view.affected_paths.is_empty());
     assert!(view.tags.is_empty());
@@ -234,13 +228,13 @@ fn make_default_row() -> DecisionRow {
         scope: "local".to_string(),
         source_project_id: None,
         source_event_id: None,
-        // V10 fields (after Track A):
-        status: Some("active".to_string()),
-        authority: Some("human".to_string()),
-        affected_paths: Some("[]".to_string()),
-        tags: Some("[]".to_string()),
-        review_after: None,
-        reversibility: Some("medium".to_string()),
+        // V10 fields (after Track A — NOT NULL DEFAULT in DB):
+        status: "active".to_string(),
+        authority: "human".to_string(),
+        affected_paths: "[]".to_string(),
+        tags: "[]".to_string(),
+        review_after: None,  // only nullable V10 field
+        reversibility: "medium".to_string(),
     }
 }
 ```

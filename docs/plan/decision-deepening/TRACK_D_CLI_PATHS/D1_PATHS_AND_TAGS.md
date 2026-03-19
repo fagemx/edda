@@ -155,20 +155,20 @@ pub struct DecisionPayload {
     pub scope: Option<DecisionScope>,
     /// File glob patterns this decision governs.
     /// Stored as JSON array: `["crates/edda-ledger/**"]`
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub affected_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_paths: Option<Vec<String>>,
     /// Classification tags.
     /// Stored as JSON array: `["architecture", "storage"]`
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
 }
 ```
 
-**Backward compatibility**: Both fields use `#[serde(default)]` so existing callers that construct `DecisionPayload` with `..Default` or without these fields will get empty vecs. Existing serialized events without these fields will deserialize correctly.
+**Backward compatibility**: Both fields use `Option` + `#[serde(default)]` so existing callers that construct `DecisionPayload` without these fields pass `None`. Existing serialized events without these fields will deserialize correctly as `None`. This matches B2's `DecisionPayload` definition.
 
 **Check all existing construction sites**: Search for `DecisionPayload {` across the workspace and add the new fields (defaulting to `vec![]`). Key locations:
 - `crates/edda-cli/src/cmd_bridge.rs` (line 543) — updated in Step 4
-- `crates/edda-chronicle/src/extract.rs` — agent extraction, add `affected_paths: vec![], tags: vec![]`
+- `crates/edda-chronicle/src/extract.rs` — agent extraction, add `affected_paths: None, tags: None`
 - Any test helpers — add defaults
 
 ---
@@ -222,8 +222,8 @@ let dp = edda_core::types::DecisionPayload {
     value: value.to_string(),
     reason: reason.map(|r| r.to_string()),
     scope,
-    affected_paths: paths.to_vec(),
-    tags: tags.to_vec(),
+    affected_paths: if paths.is_empty() { None } else { Some(paths.to_vec()) },
+    tags: if tags.is_empty() { None } else { Some(tags.to_vec()) },
 };
 ```
 

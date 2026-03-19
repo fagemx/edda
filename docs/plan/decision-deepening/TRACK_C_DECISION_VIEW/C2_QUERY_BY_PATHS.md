@@ -26,16 +26,16 @@ These are the read-side queries that Injection (Track E, Track F) will use.
 
 ---
 
-## Step 1: Add `glob` dependency
+## Step 1: Add `globset` dependency
 
 In `crates/edda-ledger/Cargo.toml`:
 
 ```toml
 [dependencies]
-glob = "0.3"
+globset.workspace = true
 ```
 
-Only the `glob::Pattern` type is needed for matching. No filesystem access — we match string patterns against string paths.
+Uses `globset::Glob` for pattern matching (`globset` is already in the workspace `Cargo.toml`). No filesystem access — we match string patterns against string paths. This matches E1's usage of `globset` (already a dependency in `edda-bridge-claude`).
 
 ---
 
@@ -79,8 +79,7 @@ pub fn active_decisions_with_paths(
         param_values.push(Box::new(lim as i64));
     }
 
-    let conn = self.conn.lock().unwrap();
-    let mut stmt = conn.prepare(&sql)?;
+    let mut stmt = self.conn.prepare(&sql)?;
     let refs: Vec<&dyn rusqlite::types::ToSql> =
         param_values.iter().map(|b| b.as_ref()).collect();
     let rows = stmt.query_map(refs.as_slice(), |r| {
@@ -152,8 +151,11 @@ pub fn query_by_paths(
     let mut matched: Vec<DecisionView> = Vec::new();
     for decision in candidates {
         let dominated = decision.affected_paths.iter().any(|glob_pattern| {
-            match glob::Pattern::new(glob_pattern) {
-                Ok(pattern) => paths.iter().any(|p| pattern.matches(p)),
+            match globset::Glob::new(glob_pattern) {
+                Ok(glob) => {
+                    let matcher = glob.compile_matcher();
+                    paths.iter().any(|p| matcher.is_match(p))
+                }
                 Err(_) => false,  // invalid glob → skip silently
             }
         });

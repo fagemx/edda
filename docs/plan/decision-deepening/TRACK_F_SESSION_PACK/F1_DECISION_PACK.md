@@ -217,14 +217,18 @@ pub fn render_decision_pack_md(pack: &DecisionPack) -> String {
 | BOUNDARY-01 | `edda-pack` must NOT import `DecisionRow` — only `DecisionView` |
 | BOUNDARY-02 | Must read through `to_view()`, never parse JSON directly |
 
-## Cargo.toml
+## Cargo.toml — REQUIRED STEP
 
-Add `edda-ledger` as a dependency of `edda-pack` if not already present:
+**Before implementing**, add `edda-ledger` to `crates/edda-pack/Cargo.toml` dependencies:
 
 ```toml
 [dependencies]
 edda-ledger = { path = "../edda-ledger" }
 ```
+
+This is required because `edda-pack` does not currently depend on `edda-ledger`.
+Without this step, `use edda_ledger::view::DecisionView` will fail to compile.
+Add this dependency **first**, then implement the code below.
 
 ## Tests
 

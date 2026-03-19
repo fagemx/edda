@@ -94,15 +94,14 @@ fn load_decisions_cached(ledger_path: &Path, branch: &str) -> Vec<DecisionView> 
         }
     }
 
-    // Query via edda-ledger view API (Track C provides this)
+    // Query via edda-ledger view API (Track C2 provides this)
+    // query_active_with_paths() already returns Vec<DecisionView> with
+    // non-empty affected_paths, converted via to_view(). No manual
+    // to_view() or filtering needed here (BOUNDARY-02).
     let decisions = match edda_ledger::Ledger::open_path(ledger_path) {
         Ok(ledger) => ledger
-            .active_decisions_with_paths(branch)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|row| edda_ledger::view::to_view(row))
-            .filter(|v| !v.affected_paths.is_empty())
-            .collect(),
+            .query_active_with_paths(Some(branch), None)
+            .unwrap_or_default(),
         Err(_) => Vec::new(),
     };
 
