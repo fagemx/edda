@@ -46,6 +46,8 @@ struct DecideParams {
 struct AskParams {
     /// Query string (keyword, domain, or exact key like "db.engine"). Leave empty for all active decisions.
     query: Option<String>,
+    /// Semantic context summary used for similarity retrieval when query is omitted.
+    context_summary: Option<String>,
     /// Maximum results per section (default: 10)
     limit: Option<usize>,
     /// Include superseded decisions (default: false)
@@ -257,7 +259,11 @@ impl EddaServer {
         Parameters(params): Parameters<AskParams>,
     ) -> Result<CallToolResult, McpError> {
         let ledger = self.open_ledger()?;
-        let q = params.query.as_deref().unwrap_or("");
+        let q = params
+            .query
+            .as_deref()
+            .or(params.context_summary.as_deref())
+            .unwrap_or("");
         let opts = edda_ask::AskOptions {
             limit: params.limit.unwrap_or(10),
             include_superseded: params.include_superseded.unwrap_or(false),
@@ -704,6 +710,7 @@ mod tests {
         let result = server
             .edda_ask(Parameters(AskParams {
                 query: Some("postgres".to_string()),
+                context_summary: None,
                 limit: None,
                 include_superseded: None,
                 branch: None,
@@ -741,6 +748,7 @@ mod tests {
         let result = server
             .edda_ask(Parameters(AskParams {
                 query: None,
+                context_summary: None,
                 limit: None,
                 include_superseded: None,
                 branch: None,
@@ -784,6 +792,7 @@ mod tests {
         let result = server
             .edda_ask(Parameters(AskParams {
                 query: Some("db".to_string()),
+                context_summary: None,
                 limit: None,
                 include_superseded: None,
                 branch: None,
@@ -805,6 +814,7 @@ mod tests {
         let result = server
             .edda_ask(Parameters(AskParams {
                 query: Some("nonexistent".to_string()),
+                context_summary: None,
                 limit: None,
                 include_superseded: None,
                 branch: None,
@@ -815,6 +825,37 @@ mod tests {
         let text = result.content[0].raw.as_text().unwrap().text.as_str();
         let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
         assert!(parsed["decisions"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_ask_context_summary_fallback() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "pricing.discount_policy=daytime_revenue_shield".to_string(),
+                reason: Some("avoid aggressive daytime markdowns".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .edda_ask(Parameters(AskParams {
+                query: None,
+                context_summary: Some("daytime discount outcome".to_string()),
+                limit: None,
+                include_superseded: None,
+                branch: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["input_type"], "keyword");
+        assert!(parsed["decisions"].is_array());
+        assert_eq!(parsed["decisions"][0]["key"], "pricing.discount_policy");
     }
 
     // --- edda_log tests ---

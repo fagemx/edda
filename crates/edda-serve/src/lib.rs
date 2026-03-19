@@ -752,6 +752,7 @@ async fn get_context(
 #[derive(Deserialize)]
 struct DecisionsQuery {
     q: Option<String>,
+    context_summary: Option<String>,
     limit: Option<usize>,
     all: Option<bool>,
     branch: Option<String>,
@@ -780,7 +781,11 @@ async fn get_decisions(
     }
 
     let ledger = state.open_ledger()?;
-    let q = params.q.as_deref().unwrap_or("");
+    let q = params
+        .q
+        .as_deref()
+        .or(params.context_summary.as_deref())
+        .unwrap_or("");
     let opts = edda_ask::AskOptions {
         limit: params.limit.unwrap_or(20),
         include_superseded: params.all.unwrap_or(false),
@@ -806,6 +811,8 @@ struct BatchQuery {
 struct BatchSubQuery {
     #[serde(default)]
     q: Option<String>,
+    #[serde(default)]
+    context_summary: Option<String>,
     #[serde(default)]
     domain: Option<String>,
     #[serde(default)]
@@ -854,7 +861,12 @@ async fn post_decisions_batch(
     let mut results = Vec::with_capacity(body.queries.len());
 
     for (i, sub) in body.queries.iter().enumerate() {
-        let q = sub.q.as_deref().or(sub.domain.as_deref()).unwrap_or("");
+        let q = sub
+            .q
+            .as_deref()
+            .or(sub.context_summary.as_deref())
+            .or(sub.domain.as_deref())
+            .unwrap_or("");
 
         let opts = edda_ask::AskOptions {
             limit: sub.limit.unwrap_or(20).min(100),
@@ -3660,6 +3672,14 @@ mod tests {
     /// Serialize tests that set EDDA_STORE_ROOT env var.
     static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// RAII guard that removes EDDA_STORE_ROOT on drop (panic-safe cleanup).
+    struct StoreRootGuard;
+    impl Drop for StoreRootGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("EDDA_STORE_ROOT");
+        }
+    }
+
     fn setup_workspace(dir: &Path) {
         let paths = edda_ledger::EddaPaths::discover(dir);
         paths.ensure_layout().unwrap();
@@ -3910,7 +3930,12 @@ mod tests {
 
     #[tokio::test]
     async fn overview_returns_structure() {
+        let _lock = STORE_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::env::set_var("EDDA_STORE_ROOT", &store_dir);
+        let _guard = StoreRootGuard;
         setup_workspace(tmp.path());
         let app = router(tmp.path());
 
@@ -6381,6 +6406,92 @@ actors:
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["query_index"], 0);
         assert!(results[0]["decisions"].is_array());
+    }
+
+    #[tokio::test]
+    async fn decisions_supports_context_summary_param() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let parent_hash = ledger.last_event_hash().unwrap();
+        let dp = DecisionPayload {
+            key: "pricing.discount_policy".into(),
+            value: "daytime_revenue_shield".into(),
+            reason: Some("avoid aggressive daytime markdowns".into()),
+            scope: None,
+        };
+        let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
+        ledger.append_event(&event).unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/decisions?context_summary=daytime%20discount%20outcome")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["decisions"].is_array());
+        assert_eq!(json["decisions"][0]["key"], "pricing.discount_policy");
+    }
+
+    #[tokio::test]
+    async fn batch_supports_context_summary_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let parent_hash = ledger.last_event_hash().unwrap();
+        let dp = DecisionPayload {
+            key: "pricing.discount_policy".into(),
+            value: "daytime_revenue_shield".into(),
+            reason: Some("avoid aggressive daytime markdowns".into()),
+            scope: None,
+        };
+        let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
+        ledger.append_event(&event).unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decisions/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "queries": [
+                                { "context_summary": "daytime discount outcome" }
+                            ]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let results = json["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0]["decisions"].is_array());
+        assert_eq!(results[0]["decisions"][0]["key"], "pricing.discount_policy");
     }
 
     // ── Causal chain endpoint tests ─────────────────────────────────

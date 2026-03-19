@@ -185,7 +185,20 @@ impl Ledger {
         before: Option<&str>,
     ) -> anyhow::Result<Vec<DecisionRow>> {
         self.sqlite
-            .active_decisions(domain, key_pattern, after, before)
+            .active_decisions(domain, key_pattern, after, before, None)
+    }
+
+    /// Query active decisions with limit for hot path optimization.
+    pub fn active_decisions_limited(
+        &self,
+        domain: Option<&str>,
+        key_pattern: Option<&str>,
+        after: Option<&str>,
+        before: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<DecisionRow>> {
+        self.sqlite
+            .active_decisions(domain, key_pattern, after, before, Some(limit))
     }
 
     /// All decisions for a key (active + superseded), ordered by time.

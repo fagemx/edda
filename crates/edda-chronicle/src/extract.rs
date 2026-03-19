@@ -285,8 +285,7 @@ mod tests {
     #[test]
     fn test_missing_index_file() {
         let tmp = tempfile::tempdir().unwrap();
-        let result =
-            extract_key_turns("nonexistent", &SessionType::Coding, tmp.path(), 5).unwrap();
+        let result = extract_key_turns("nonexistent", &SessionType::Coding, tmp.path(), 5).unwrap();
         assert!(result.is_empty());
     }
 
@@ -355,7 +354,10 @@ mod tests {
         let turns = extract_key_turns("s1", &SessionType::Discussion, tmp.path(), 10).unwrap();
         // head(3) + tail(3), indices 0-2 and 7-9
         assert_eq!(turns.len(), 6);
-        let head_turns: Vec<_> = turns.iter().filter(|t| t.reason == "Session start").collect();
+        let head_turns: Vec<_> = turns
+            .iter()
+            .filter(|t| t.reason == "Session start")
+            .collect();
         let tail_turns: Vec<_> = turns.iter().filter(|t| t.reason == "Session end").collect();
         assert_eq!(head_turns.len(), 3);
         assert_eq!(tail_turns.len(), 3);

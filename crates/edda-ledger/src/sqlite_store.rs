@@ -6,6 +6,8 @@
 use edda_core::types::{Digest, Event, Provenance, Refs};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
+use std::time::Instant;
+use tracing::debug;
 
 const SCHEMA_SQL: &str = "
 PRAGMA journal_mode = WAL;
@@ -154,6 +156,13 @@ ALTER TABLE decisions ADD COLUMN source_project_id TEXT;
 ALTER TABLE decisions ADD COLUMN source_event_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_decisions_scope ON decisions(scope) WHERE scope != 'local';
 CREATE INDEX IF NOT EXISTS idx_decisions_source ON decisions(source_project_id) WHERE source_project_id IS NOT NULL;
+";
+
+const SCHEMA_V9_SQL: &str = "
+CREATE INDEX IF NOT EXISTS idx_decisions_active_domain_branch
+    ON decisions(is_active, domain, branch) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_decisions_active_domain
+    ON decisions(is_active, domain) WHERE is_active = TRUE;
 ";
 
 /// A row from the `decisions` table.
@@ -389,6 +398,12 @@ impl SqliteStore {
             self.migrate_v7_to_v8()?;
         }
 
+        // Migrate to v9 if needed (hot path query optimization indexes)
+        let current = self.schema_version()?;
+        if current < 9 {
+            self.migrate_v8_to_v9()?;
+        }
+
         Ok(())
     }
 
@@ -460,8 +475,8 @@ impl SqliteStore {
 
             self.conn.execute(
                 "INSERT OR IGNORE INTO decisions
-                 (event_id, key, value, reason, domain, branch, supersedes_id, is_active, scope)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, TRUE, 'local')",
+                 (event_id, key, value, reason, domain, branch, supersedes_id, is_active)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, TRUE)",
                 params![event_id, key, value, reason, domain, branch, supersedes_id],
             )?;
         }
@@ -656,6 +671,12 @@ impl SqliteStore {
         }
 
         self.set_schema_version(8)?;
+        Ok(())
+    }
+
+    fn migrate_v8_to_v9(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V9_SQL)?;
+        self.set_schema_version(9)?;
         Ok(())
     }
 
@@ -1396,13 +1417,16 @@ impl SqliteStore {
 
     /// Query active decisions, optionally filtered by domain or key prefix.
     /// `after`/`before` are optional ISO 8601 bounds for temporal filtering.
+    /// `limit` caps the result set to prevent full table scans on hot path.
     pub fn active_decisions(
         &self,
         domain: Option<&str>,
         key_pattern: Option<&str>,
         after: Option<&str>,
         before: Option<&str>,
+        limit: Option<usize>,
     ) -> anyhow::Result<Vec<DecisionRow>> {
+        let start = Instant::now();
         let has_temporal = after.is_some() || before.is_some();
 
         let mut sql = String::from(
@@ -1444,13 +1468,30 @@ impl SqliteStore {
             sql.push_str(" ORDER BY d.domain, d.key");
         }
 
+        if let Some(lim) = limit {
+            sql.push_str(&format!(" LIMIT {lim}"));
+        }
+
         let mut stmt = self.conn.prepare(&sql)?;
         let params_ref: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(params_ref.as_slice(), map_decision_row)?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| anyhow::anyhow!("decision query failed: {e}"))
+        let result = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("decision query failed: {e}"))?;
+
+        let elapsed = start.elapsed();
+        debug!(
+            domain = domain,
+            key_pattern = key_pattern,
+            limit = limit,
+            result_count = result.len(),
+            elapsed_ms = elapsed.as_millis() as u64,
+            "active_decisions query completed"
+        );
+
+        Ok(result)
     }
 
     /// All decisions for a key (active + superseded), ordered by time.
@@ -3082,7 +3123,9 @@ mod tests {
         let e = make_decision_event("main", "db.engine", "postgres", Some("JSONB support"), None);
         store.append_event(&e).unwrap();
 
-        let active = store.active_decisions(None, None, None, None).unwrap();
+        let active = store
+            .active_decisions(None, None, None, None, None)
+            .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].key, "db.engine");
         assert_eq!(active[0].value, "postgres");
@@ -3106,7 +3149,9 @@ mod tests {
         let d2 = make_decision_event("main", "db.engine", "postgres", Some("JSONB"), Some(&d1_id));
         store.append_event(&d2).unwrap();
 
-        let active = store.active_decisions(None, None, None, None).unwrap();
+        let active = store
+            .active_decisions(None, None, None, None, None)
+            .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].value, "postgres");
         assert_eq!(active[0].supersedes_id.as_deref(), Some(d1_id.as_str()));
@@ -3153,12 +3198,12 @@ mod tests {
             .unwrap();
 
         let db_decisions = store
-            .active_decisions(Some("db"), None, None, None)
+            .active_decisions(Some("db"), None, None, None, None)
             .unwrap();
         assert_eq!(db_decisions.len(), 2);
 
         let auth_decisions = store
-            .active_decisions(Some("auth"), None, None, None)
+            .active_decisions(Some("auth"), None, None, None, None)
             .unwrap();
         assert_eq!(auth_decisions.len(), 1);
         assert_eq!(auth_decisions[0].key, "auth.method");
@@ -3188,7 +3233,9 @@ mod tests {
         finalize_event(&mut event).unwrap();
         store.append_event(&event).unwrap();
 
-        let active = store.active_decisions(None, None, None, None).unwrap();
+        let active = store
+            .active_decisions(None, None, None, None, None)
+            .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].key, "orm");
         assert_eq!(active[0].value, "sqlx");
@@ -3231,13 +3278,13 @@ mod tests {
 
         // Search by key/value pattern
         let results = store
-            .active_decisions(None, Some("postgres"), None, None)
+            .active_decisions(None, Some("postgres"), None, None, None)
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "db.engine");
 
         let results = store
-            .active_decisions(None, Some("auth"), None, None)
+            .active_decisions(None, Some("auth"), None, None, None)
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "auth.method");
@@ -3296,7 +3343,9 @@ mod tests {
             ))
             .unwrap();
 
-        let all = store.active_decisions(None, None, None, None).unwrap();
+        let all = store
+            .active_decisions(None, None, None, None, None)
+            .unwrap();
         assert_eq!(all.len(), 2);
 
         let main = store
@@ -3352,7 +3401,9 @@ mod tests {
         assert!(store.schema_version().unwrap() >= 2);
 
         // Verify decisions table was populated by backfill
-        let active = store.active_decisions(None, None, None, None).unwrap();
+        let active = store
+            .active_decisions(None, None, None, None, None)
+            .unwrap();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].key, "db.engine");
         assert_eq!(active[0].value, "postgres");
@@ -3369,7 +3420,9 @@ mod tests {
         let e = new_note_event("main", None, "system", "just a note", &["todo".into()]).unwrap();
         store.append_event(&e).unwrap();
 
-        let active = store.active_decisions(None, None, None, None).unwrap();
+        let active = store
+            .active_decisions(None, None, None, None, None)
+            .unwrap();
         assert!(active.is_empty());
 
         drop(store);
@@ -3652,7 +3705,7 @@ mod tests {
         assert!(tables.contains(&"task_briefs".to_string()));
         assert!(tables.contains(&"device_tokens".to_string()));
         assert!(tables.contains(&"decide_snapshots".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 8);
+        assert_eq!(store.schema_version().unwrap(), 9);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4686,7 +4739,7 @@ mod tests {
             .unwrap();
 
         let results = store
-            .active_decisions(None, None, Some("2026-03-11T00:00:00Z"), None)
+            .active_decisions(None, None, Some("2026-03-11T00:00:00Z"), None, None)
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "db.pool");
@@ -4716,7 +4769,7 @@ mod tests {
             .unwrap();
 
         let results = store
-            .active_decisions(None, None, None, Some("2026-03-11T00:00:00Z"))
+            .active_decisions(None, None, None, Some("2026-03-11T00:00:00Z"), None)
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "db.engine");
@@ -4759,6 +4812,7 @@ mod tests {
                 None,
                 Some("2026-03-09T00:00:00Z"),
                 Some("2026-03-12T00:00:00Z"),
+                None,
             )
             .unwrap();
         assert_eq!(results.len(), 1);
@@ -4797,7 +4851,7 @@ mod tests {
             .unwrap();
 
         let results = store
-            .active_decisions(Some("db"), None, Some("2026-03-11T00:00:00Z"), None)
+            .active_decisions(Some("db"), None, Some("2026-03-11T00:00:00Z"), None, None)
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "db.pool");
@@ -4827,7 +4881,13 @@ mod tests {
             .unwrap();
 
         let results = store
-            .active_decisions(None, Some("engine"), Some("2026-03-11T00:00:00Z"), None)
+            .active_decisions(
+                None,
+                Some("engine"),
+                Some("2026-03-11T00:00:00Z"),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "cache.engine");
@@ -4854,6 +4914,7 @@ mod tests {
                 None,
                 Some("2026-03-15T00:00:00Z"),
                 Some("2026-03-05T00:00:00Z"),
+                None,
             )
             .unwrap();
         assert!(results.is_empty());
@@ -4882,7 +4943,9 @@ mod tests {
             ))
             .unwrap();
 
-        let results = store.active_decisions(None, None, None, None).unwrap();
+        let results = store
+            .active_decisions(None, None, None, None, None)
+            .unwrap();
         assert_eq!(results.len(), 2);
         // Original sort order: domain, key (auth before db)
         assert_eq!(results[0].key, "auth.method");
@@ -4921,7 +4984,7 @@ mod tests {
             .unwrap();
 
         let results = store
-            .active_decisions(None, None, Some("2026-03-07T00:00:00Z"), None)
+            .active_decisions(None, None, Some("2026-03-07T00:00:00Z"), None, None)
             .unwrap();
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].key, "c.third");
@@ -5170,6 +5233,74 @@ mod tests {
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].decision.key, "db.pool");
         assert_eq!(chain[0].depth, 1);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hot_path_query_performance() {
+        use std::time::Instant;
+
+        let (dir, store) = tmp_db();
+
+        // Seed with 500 decisions across 5 domains (typical workload)
+        let domains = ["db", "auth", "api", "cache", "infra"];
+        for (i, dom) in domains.iter().enumerate() {
+            for j in 0..100 {
+                let key = format!("{}.key{}", dom, j);
+                let value = format!("value{}_{}", i, j);
+                let reason = format!("reason for {} decision", key);
+                let e = make_decision_event("main", &key, &value, Some(&reason), None);
+                store.append_event(&e).unwrap();
+            }
+        }
+
+        // Warm up
+        let _ = store
+            .active_decisions(None, None, None, None, Some(20))
+            .unwrap();
+
+        // Benchmark: query all active decisions with limit (hot path)
+        let start = Instant::now();
+        for _ in 0..100 {
+            let results = store
+                .active_decisions(None, None, None, None, Some(20))
+                .unwrap();
+            assert_eq!(results.len(), 20);
+        }
+        let elapsed_all = start.elapsed();
+        let avg_ms_all = elapsed_all.as_millis() as f64 / 100.0;
+
+        // Benchmark: query by domain (hot path)
+        let start = Instant::now();
+        for _ in 0..100 {
+            let results = store
+                .active_decisions(Some("db"), None, None, None, Some(20))
+                .unwrap();
+            assert_eq!(results.len(), 20);
+        }
+        let elapsed_domain = start.elapsed();
+        let avg_ms_domain = elapsed_domain.as_millis() as f64 / 100.0;
+
+        // Verify hot path queries are under 100ms (requirement from GH-319)
+        // With index optimization, should be well under 10ms
+        assert!(
+            avg_ms_all < 100.0,
+            "hot path query (all) avg {}ms exceeds 100ms threshold",
+            avg_ms_all
+        );
+        assert!(
+            avg_ms_domain < 100.0,
+            "hot path query (domain) avg {}ms exceeds 100ms threshold",
+            avg_ms_domain
+        );
+
+        // Log results for visibility
+        eprintln!(
+            "hot_path_query_performance: avg_all={:.2}ms, avg_domain={:.2}ms",
+            avg_ms_all, avg_ms_domain
+        );
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
