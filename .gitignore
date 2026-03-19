@@ -4,4 +4,6 @@
 CLAUDE.md
 docs/archive/
 /tmp/
+.tmp/
+push.log
 nul
