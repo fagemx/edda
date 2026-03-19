@@ -125,9 +125,9 @@ See `schema-v0.md` for full TypeScript types. Key additions over current `Decisi
 
 | Spec | Relationship | Contract Surface |
 |------|-------------|-----------------|
-| **Intake** (`docs/decision-intake/`) | Creates candidates, nothing more | `create_candidate()`, `edit_candidate()` |
-| **Injection** (`docs/decision-injection/`) | Reads `DecisionView` for packs | `query_active()`, `query_by_path()`, `to_view()` |
-| **Governance** (`docs/decision-governance/`) | Owns ALL lifecycle transitions | `promote()`, `reject()`, `supersede()`, `freeze()`, `transition()` |
+| **Intake** (`docs/decision-intake/`) | Creates candidates, nothing more | `create_candidate()`, `set_affected_paths()`, `set_tags()` |
+| **Injection** (`docs/decision-injection/`) | Reads `DecisionView` for packs | `query_for_context()`, `query_by_paths()`, `to_view()` |
+| **Governance** (`docs/decision-governance/`) | Owns ALL lifecycle transitions | `promote()`, `reject()`, `supersede()`, `freeze()`, `unfreeze()`, `trial()`, `transition()` |
 | **edda-postmortem** (existing L3) | Separate lifecycle, may reference decisions | Read-only. Rules ≠ decisions |
 | **coordination.jsonl** (existing L2) | Session-scoped bindings, may trigger decisions | Bindings are ephemeral; decisions are persistent |
 

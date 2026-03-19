@@ -264,6 +264,8 @@ This is what `bg_extract.rs` implements TODAY.
 - **No Decision Model integration:** Extraction does NOT call `create_candidate()`. Draft files are the sole source of truth for inbox candidates.
 - **Triage operations** (`--paths`, `--tags`, `--reason`) update the draft JSON file directly. They do NOT call `set_affected_paths()` or `set_tags()` on the Decision Model API.
 
+> **Known boundary violation:** In Phase 0, `edda inbox request-promote` creates the decision via `edda decide` (bootstrap path), going directly to `active` without Governance mediation. This means Phase 0 Intake effectively bypasses the "Governance owns all transitions" rule. This is an accepted transitional compromise — Phase 1 replaces this with a proper Governance request that routes through `gov_promote()`.
+
 ### Phase 1 (target) — Decision Model Bridge
 
 Requires Schema V10 and the Decision Model mutation contract to be implemented.

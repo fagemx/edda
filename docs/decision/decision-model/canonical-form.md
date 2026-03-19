@@ -171,7 +171,7 @@ Schema V10 adds `status TEXT NOT NULL DEFAULT 'active'` column. Existing rows:
 
 | Transition | Event Written | Side Effects |
 |-----------|--------------|-------------|
-| `create_decision()` | `note` event with decision payload | Insert into `decisions` table |
+| `create_candidate()` | `note` event with decision payload | Insert into `decisions` table |
 | `promote()` | `note` event with `tags: ["decision_promoted"]` | Update `status`, set `is_active=TRUE` |
 | `reject()` | `note` event with `tags: ["decision_rejected"]` | Update `status` |
 | `supersede()` | New decision event with `supersedes` provenance | Old: `status=superseded, is_active=FALSE`. New: inserted |

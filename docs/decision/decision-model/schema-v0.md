@@ -217,7 +217,7 @@ After Phase 0, update the Rust mutation contract to:
 
 1. Set `status` on every insert/update (instead of relying on `is_active` alone)
 2. Maintain the `is_active ↔ status` invariant (see §5 Backward Compatibility Contract)
-3. Accept `authority`, `affected_paths`, `tags`, `review_after`, `reversibility` in `create_decision()` / `create_candidate()`
+3. Accept `authority`, `affected_paths`, `tags`, `review_after`, `reversibility` in `create_candidate()`
 4. Validate enum values at write time (`DecisionStatus`, `DecisionAuthority`, `Reversibility`)
 
 ```text

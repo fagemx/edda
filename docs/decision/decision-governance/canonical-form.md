@@ -319,7 +319,7 @@ Governance detects conflicts deterministically. No LLM involved.
 
 ### In Scope
 
-- Execution semantics for all 8 transitions (T1-T8 from decision-model)
+- Execution semantics for all 9 transitions (T1-T9 from decision-model)
 - Authority matrix and escalation rules
 - Supersede orchestration (multi-decision atomic operation)
 - Conflict detection pipeline (3 checks: key, path, branch)

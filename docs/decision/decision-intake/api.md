@@ -49,8 +49,8 @@ Intake cannot update arbitrary decision fields. It can set paths and tags on `pr
 │  (bridge hook)              run_extraction()                │
 │                             extract_decisions()             │
 │                             list_pending_drafts()           │
-│                             accept_decisions()              │
-│                             reject_decisions()              │
+│                             mark_for_promote()              │
+│                             mark_for_reject()              │
 │                                                             │
 ├─────────────────────────────────────────────────────────────┤
 │  Phase 0: ALL writes go to draft files in                   │
@@ -247,21 +247,21 @@ function parse_llm_decisions(text: string): ExtractedDecision[];
 // List all sessions with pending drafts
 function list_pending_drafts(project_id: string): Result<DraftDecisionFile[]>;
 
-// Accept specific decisions by index
-function accept_decisions(
+// Mark specific decisions for promotion (Phase 0: updates DraftStatus to Accepted)
+function mark_for_promote(
   project_id: string,
   session_id: string,
   indices: number[]
 ): Result<ExtractedDecision[]>;
 
-// Accept all pending decisions for a session
-function accept_all_decisions(
+// Mark all pending decisions for promotion
+function mark_all_for_promote(
   project_id: string,
   session_id: string
 ): Result<ExtractedDecision[]>;
 
-// Reject specific decisions by index
-function reject_decisions(
+// Mark specific decisions as rejected (Phase 0: updates DraftStatus to Rejected)
+function mark_for_reject(
   project_id: string,
   session_id: string,
   indices: number[]

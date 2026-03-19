@@ -149,7 +149,11 @@ $ edda inbox edit 1 --reason "better reason" --paths "crates/foo/**"
 
 $ edda inbox request-promote 1
   → marks draft as DraftStatus::Accepted
-  → creates the decision via edda decide (or future Governance bridge)
+  → creates the decision via `edda decide` (bootstrap path → active directly)
+  ⚠️ KNOWN BOUNDARY VIOLATION: In Phase 0, this bypasses Governance entirely.
+     The decision goes straight to active via create_candidate() bootstrap path.
+     This is acceptable as a transitional compromise — Phase 1 routes through
+     Governance's gov_promote() which enforces preconditions and handles supersede.
 
 $ edda inbox request-reject 1
   → marks draft as DraftStatus::Rejected

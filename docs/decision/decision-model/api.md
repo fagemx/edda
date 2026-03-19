@@ -188,8 +188,9 @@ function promote(event_id: string): MutationResult;
 **Side effects:**
 - Sets `is_active = TRUE`
 - If promoting from `proposed`: updates `authority` from `agent_proposed` → `agent_approved`
-- If promoting from `proposed`: checks for existing active decision with same key → auto-supersede if found
 - Writes promotion event
+
+**Note:** `promote()` does NOT check for existing active decisions or trigger auto-supersede. That is Governance's responsibility — `gov_promote()` calls `check_supersede_needed()` BEFORE calling `promote()`. This separation ensures supersede logic lives in exactly one place (Governance), not two.
 
 **Callers:** Governance only
 
@@ -241,7 +242,7 @@ function find_active_by_key(
 ): DecisionRow | null;
 ```
 
-Used by `create_decision()` to detect auto-supersede, and by Governance to check conflicts.
+Used by `create_candidate()` for bootstrap path conflict check, and by Governance to check conflicts.
 
 ### 6.2 `get_decision`
 
@@ -282,18 +283,7 @@ Parses `affected_paths` and `tags` from JSON strings to arrays, renames `scope` 
 
 ## 7. Return Type
 
-All mutations return `MutationResult`:
-
-```typescript
-// Canonical definition: see ./shared-types.md §3
-type MutationResult = {
-  ok: boolean;
-  event_id?: string;               // the event written by this mutation
-  decision_id?: string;            // the decision affected
-  superseded_id?: string;          // if auto-supersede occurred
-  error?: string;                  // if ok == false
-};
-```
+All mutations return `MutationResult` — see `./shared-types.md` §3.1 for the canonical definition (includes optional `conflicts` field for non-blocking conflict detection).
 
 ---
 
@@ -304,8 +294,8 @@ type MutationResult = {
 | I1 | Every mutation writes an event | All functions call `ledger.append_event()` before updating `decisions` table |
 | I2 | `is_active` agrees with `status` | Mutation contract sets both in the same transaction |
 | I3 | State transitions follow the state machine | `transition()` validates against allowed transitions map |
-| I4 | `supersedes_id` is set only by supersede operations | Only `transition(_, "superseded", { superseded_by })` and `create_decision()` auto-supersede path set this field |
-| I5 | `domain` is always derived from `key` | `create_decision()` computes `domain = key.split('.')[0]` |
+| I4 | `supersedes_id` is set only by supersede operations | Only `transition(_, "superseded", { superseded_by })` sets this field. `create_candidate()` never auto-supersedes — Governance handles supersede via `gov_promote()` |
+| I5 | `domain` is always derived from `key` | `create_candidate()` computes `domain = key.split('.')[0]` |
 | I6 | No orphan supersessions | If old decision is superseded, new decision must exist and be active |
 
 ---

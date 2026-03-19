@@ -100,7 +100,7 @@ Governance validates that the caller has sufficient authority for the requested 
 
 | Capability | Description | Spec File |
 |-----------|-------------|-----------|
-| Lifecycle execution | All 8 transitions from `canonical-form.md` | `canonical-form.md` |
+| Lifecycle execution | All 9 transitions (T1-T9) from `canonical-form.md` | `canonical-form.md` |
 | Conflict detection | Structural classification of contradictions | `schema-v0.md`, `api.md` |
 | Supersede orchestration | old → superseded, new → active, provenance link | `canonical-form.md` |
 | Coverage analysis | Stale decisions, uncovered domains, churn rate | `schema-v0.md`, `api.md` |
