@@ -6,4 +6,5 @@ docs/archive/
 /tmp/
 .tmp/
 push.log
+.env
 nul
