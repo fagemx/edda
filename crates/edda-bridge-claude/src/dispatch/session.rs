@@ -676,6 +676,39 @@ pub(super) fn dispatch_session_start(
         });
     }
 
+    // Inject active decisions as context (Track F — Decision Deepening)
+    {
+        let decision_pack_md = {
+            let cwd_path = std::path::Path::new(cwd);
+            match edda_ledger::EddaPaths::find_root(cwd_path) {
+                Some(root) => {
+                    let branch = edda_ledger::Ledger::open(&root)
+                        .and_then(|l| l.head_branch())
+                        .unwrap_or_default();
+                    let max_items: usize = std::env::var("EDDA_DECISION_PACK_MAX")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(7);
+                    let pack = edda_pack::build_decision_pack(&root, &branch, max_items);
+                    let md = edda_pack::render_decision_pack_md(&pack);
+                    if md.is_empty() {
+                        None
+                    } else {
+                        Some(md)
+                    }
+                }
+                None => None,
+            }
+        };
+
+        if let Some(dp) = decision_pack_md {
+            content = Some(match content {
+                Some(c) => format!("{c}\n\n{dp}"),
+                None => dp,
+            });
+        }
+    }
+
     // Previous session context is now rendered within the workspace section's
     // "## Session History" (tiered rendering). No separate injection needed.
 

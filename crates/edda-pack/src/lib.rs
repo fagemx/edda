@@ -1,6 +1,7 @@
 use edda_index::{fetch_store_line, read_index_tail, IndexRecordV1};
+use edda_ledger::view::DecisionView;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 const DEFAULT_INDEX_TAIL_LINES: usize = 5000;
@@ -375,6 +376,139 @@ pub fn write_pack(project_dir: &Path, pack_md: &str, meta: &PackMetadata) -> any
     Ok(())
 }
 
+// ── Decision Pack ──
+
+/// A pack of active decisions grouped by domain, ready for session injection.
+#[derive(Debug, Clone)]
+pub struct DecisionPack {
+    /// Decisions grouped by domain (e.g., "db", "error", "auth")
+    pub groups: Vec<DecisionGroup>,
+    /// Total number of decisions included
+    pub total: usize,
+    /// Branch these decisions are scoped to
+    pub branch: String,
+}
+
+/// A group of decisions sharing the same domain prefix.
+#[derive(Debug, Clone)]
+pub struct DecisionGroup {
+    /// Domain name (e.g., "db", "error", "auth")
+    pub domain: String,
+    /// Decisions in this domain, sorted by key
+    pub decisions: Vec<DecisionSummary>,
+}
+
+/// Minimal decision summary for pack rendering (avoids carrying full DecisionView).
+#[derive(Debug, Clone)]
+pub struct DecisionSummary {
+    pub key: String,
+    pub value: String,
+    pub reason: String,
+    pub status: String,
+    pub authority: String,
+    pub reversibility: String,
+    pub affected_paths: Vec<String>,
+}
+
+impl From<&DecisionView> for DecisionSummary {
+    fn from(v: &DecisionView) -> Self {
+        Self {
+            key: v.key.clone(),
+            value: v.value.clone(),
+            reason: v.reason.clone(),
+            status: v.status.clone(),
+            authority: v.authority.clone(),
+            reversibility: v.reversibility.clone(),
+            affected_paths: v.affected_paths.clone(),
+        }
+    }
+}
+
+/// Build a decision pack from active decisions in the ledger.
+///
+/// Queries active decisions (status IN active, experimental) on the given
+/// branch, groups by domain, and limits to `max_items` total decisions.
+///
+/// Returns a pack with 0 groups if no active decisions exist.
+pub fn build_decision_pack(repo_root: &Path, branch: &str, max_items: usize) -> DecisionPack {
+    let views: Vec<DecisionView> = match edda_ledger::Ledger::open(repo_root) {
+        Ok(ledger) => ledger
+            .active_decisions_limited(None, None, None, None, max_items)
+            .unwrap_or_default()
+            .iter()
+            .map(edda_ledger::view::to_view)
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    if views.is_empty() {
+        return DecisionPack {
+            groups: Vec::new(),
+            total: 0,
+            branch: branch.to_string(),
+        };
+    }
+
+    // Group by domain, limit to max_items total
+    let mut by_domain: BTreeMap<String, Vec<DecisionSummary>> = BTreeMap::new();
+    let mut count = 0;
+
+    for d in &views {
+        if count >= max_items {
+            break;
+        }
+        by_domain
+            .entry(d.domain.clone())
+            .or_default()
+            .push(DecisionSummary::from(d));
+        count += 1;
+    }
+
+    let groups = by_domain
+        .into_iter()
+        .map(|(domain, mut decisions)| {
+            decisions.sort_by(|a, b| a.key.cmp(&b.key));
+            DecisionGroup { domain, decisions }
+        })
+        .collect();
+
+    DecisionPack {
+        groups,
+        total: count,
+        branch: branch.to_string(),
+    }
+}
+
+/// Render a decision pack as a markdown section.
+///
+/// Returns an empty string if the pack has 0 decisions.
+pub fn render_decision_pack_md(pack: &DecisionPack) -> String {
+    if pack.total == 0 {
+        return String::new();
+    }
+
+    let mut lines = vec![format!(
+        "## Active Decisions ({} on `{}`)",
+        pack.total, pack.branch
+    )];
+
+    for group in &pack.groups {
+        lines.push(format!("\n### {}", group.domain));
+        for d in &group.decisions {
+            let mut entry = format!("- **`{}={}`**", d.key, d.value);
+            if !d.reason.is_empty() {
+                entry.push_str(&format!(" — {}", d.reason));
+            }
+            if !d.affected_paths.is_empty() {
+                entry.push_str(&format!("\n  paths: `{}`", d.affected_paths.join("`, `")));
+            }
+            lines.push(entry);
+        }
+    }
+
+    lines.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +590,143 @@ mod tests {
 
         let meta_path = tmp.path().join("packs").join("hot.meta.json");
         assert!(meta_path.exists());
+    }
+
+    // ── Decision Pack tests ──
+
+    fn make_summary(key: &str, value: &str, reason: &str, paths: Vec<&str>) -> DecisionSummary {
+        DecisionSummary {
+            key: key.to_string(),
+            value: value.to_string(),
+            reason: reason.to_string(),
+            status: "active".to_string(),
+            authority: "human".to_string(),
+            reversibility: "medium".to_string(),
+            affected_paths: paths.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    fn make_pack(groups: Vec<(&str, Vec<DecisionSummary>)>, branch: &str) -> DecisionPack {
+        let total: usize = groups.iter().map(|(_, ds)| ds.len()).sum();
+        DecisionPack {
+            groups: groups
+                .into_iter()
+                .map(|(domain, decisions)| DecisionGroup {
+                    domain: domain.to_string(),
+                    decisions,
+                })
+                .collect(),
+            total,
+            branch: branch.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_empty_pack() {
+        let pack = DecisionPack {
+            groups: Vec::new(),
+            total: 0,
+            branch: "main".to_string(),
+        };
+        let md = render_decision_pack_md(&pack);
+        assert!(md.is_empty());
+    }
+
+    #[test]
+    fn test_full_pack_grouped_by_domain() {
+        let pack = make_pack(
+            vec![
+                (
+                    "auth",
+                    vec![make_summary("auth.strategy", "JWT", "stateless", vec![])],
+                ),
+                (
+                    "db",
+                    vec![
+                        make_summary("db.engine", "sqlite", "embedded", vec![]),
+                        make_summary("db.pool", "r2d2", "connection pooling", vec![]),
+                    ],
+                ),
+                (
+                    "error",
+                    vec![
+                        make_summary("error.lib", "thiserror", "typed errors", vec![]),
+                        make_summary("error.pattern", "enum", "exhaustive", vec![]),
+                    ],
+                ),
+            ],
+            "main",
+        );
+
+        assert_eq!(pack.groups.len(), 3);
+        assert_eq!(pack.total, 5);
+
+        let md = render_decision_pack_md(&pack);
+        assert!(md.contains("## Active Decisions (5 on `main`)"));
+        assert!(md.contains("### auth"));
+        assert!(md.contains("### db"));
+        assert!(md.contains("### error"));
+    }
+
+    #[test]
+    fn test_domain_grouping_order() {
+        let pack = make_pack(
+            vec![
+                ("a_first", vec![make_summary("a_first.x", "1", "r", vec![])]),
+                (
+                    "m_middle",
+                    vec![make_summary("m_middle.x", "2", "r", vec![])],
+                ),
+                ("z_test", vec![make_summary("z_test.x", "3", "r", vec![])]),
+            ],
+            "main",
+        );
+
+        let md = render_decision_pack_md(&pack);
+        let a_pos = md.find("### a_first").unwrap();
+        let m_pos = md.find("### m_middle").unwrap();
+        let z_pos = md.find("### z_test").unwrap();
+        assert!(a_pos < m_pos);
+        assert!(m_pos < z_pos);
+    }
+
+    #[test]
+    fn test_render_with_paths() {
+        let pack = make_pack(
+            vec![(
+                "db",
+                vec![make_summary(
+                    "db.engine",
+                    "sqlite",
+                    "embedded",
+                    vec!["crates/foo/**", "src/**"],
+                )],
+            )],
+            "main",
+        );
+
+        let md = render_decision_pack_md(&pack);
+        assert!(md.contains("paths: `crates/foo/**`, `src/**`"));
+    }
+
+    #[test]
+    fn test_render_without_reason() {
+        let pack = make_pack(
+            vec![("db", vec![make_summary("db.engine", "sqlite", "", vec![])])],
+            "main",
+        );
+
+        let md = render_decision_pack_md(&pack);
+        assert!(md.contains("**`db.engine=sqlite`**"));
+        assert!(!md.contains(" — "));
+    }
+
+    #[test]
+    fn test_build_decision_pack_nonexistent_repo() {
+        // Non-existent path should return empty pack
+        let pack = build_decision_pack(Path::new("/nonexistent/path"), "main", 7);
+        assert_eq!(pack.total, 0);
+        assert!(pack.groups.is_empty());
+        assert_eq!(render_decision_pack_md(&pack), "");
     }
 }
