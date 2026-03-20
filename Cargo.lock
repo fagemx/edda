@@ -891,6 +891,7 @@ dependencies = [
  "anyhow",
  "edda-core",
  "fs2",
+ "globset",
  "hex",
  "rand 0.8.5",
  "rusqlite",

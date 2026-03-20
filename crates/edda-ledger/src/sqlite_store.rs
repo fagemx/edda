@@ -1575,6 +1575,53 @@ impl SqliteStore {
         Ok(result)
     }
 
+    /// Return active/experimental decisions where `affected_paths` is non-empty.
+    /// This pre-filters at the SQL level so glob matching runs on a small set.
+    pub fn active_decisions_with_paths(
+        &self,
+        branch: Option<&str>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<DecisionRow>> {
+        let mut sql = String::from(
+            "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
+                    d.supersedes_id, d.is_active, e.ts,
+                    d.scope, d.source_project_id, d.source_event_id,
+                    d.status, d.authority, d.affected_paths, d.tags,
+                    d.review_after, d.reversibility
+             FROM decisions d JOIN events e ON d.event_id = e.event_id
+             WHERE d.is_active = TRUE
+               AND d.affected_paths IS NOT NULL
+               AND d.affected_paths != '[]'",
+        );
+
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+
+        if let Some(b) = branch {
+            sql.push_str(&format!(" AND d.branch = ?{idx}"));
+            param_values.push(Box::new(b.to_string()));
+            idx += 1;
+        }
+
+        sql.push_str(" ORDER BY e.ts DESC");
+
+        if let Some(lim) = limit {
+            sql.push_str(&format!(" LIMIT ?{idx}"));
+            param_values.push(Box::new(lim as i64));
+        }
+
+        let mut stmt = self.conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), map_decision_row)?;
+
+        let result = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| anyhow::anyhow!("active_decisions_with_paths query failed: {e}"))?;
+
+        Ok(result)
+    }
+
     /// All decisions for a key (active + superseded), ordered by time.
     /// `after`/`before` are optional ISO 8601 bounds for temporal filtering.
     pub fn decision_timeline(

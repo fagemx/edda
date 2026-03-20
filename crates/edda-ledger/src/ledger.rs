@@ -1,5 +1,6 @@
 use crate::paths::EddaPaths;
 use crate::sqlite_store::{BundleRow, DecisionRow, SqliteStore};
+use crate::view::{self, DecisionView};
 use edda_core::Event;
 use std::path::Path;
 
@@ -235,6 +236,61 @@ impl Ledger {
         key: &str,
     ) -> anyhow::Result<Option<DecisionRow>> {
         self.sqlite.find_active_decision(branch, key)
+    }
+
+    /// Return active decisions that have non-empty `affected_paths`.
+    /// Used by Injection to get the candidate set for glob matching.
+    pub fn query_active_with_paths(
+        &self,
+        branch: Option<&str>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<DecisionView>> {
+        let rows = self.sqlite.active_decisions_with_paths(branch, limit)?;
+        Ok(rows.iter().map(view::to_view).collect())
+    }
+
+    /// Given a list of file paths, return decisions whose `affected_paths` globs
+    /// match any of them. Uses `globset` for pattern matching.
+    ///
+    /// This is the primary query for PreToolUse hook (Track E):
+    /// "which active decisions govern the file I'm about to edit?"
+    ///
+    /// # Arguments
+    /// - `paths`: concrete file paths to check (e.g., `["crates/edda-ledger/src/lib.rs"]`)
+    /// - `branch`: optional branch filter
+    /// - `limit`: max decisions to return
+    pub fn query_by_paths(
+        &self,
+        paths: &[&str],
+        branch: Option<&str>,
+        limit: Option<usize>,
+    ) -> anyhow::Result<Vec<DecisionView>> {
+        // 1. Get all active decisions that have affected_paths
+        let candidates = self.query_active_with_paths(branch, None)?;
+
+        // 2. Filter by glob match
+        let mut matched: Vec<DecisionView> = Vec::new();
+        for decision in candidates {
+            let dominated = decision.affected_paths.iter().any(|glob_pattern| {
+                match globset::Glob::new(glob_pattern) {
+                    Ok(glob) => {
+                        let matcher = glob.compile_matcher();
+                        paths.iter().any(|p| matcher.is_match(p))
+                    }
+                    Err(_) => false, // invalid glob -> skip silently
+                }
+            });
+            if dominated {
+                matched.push(decision);
+            }
+            if let Some(lim) = limit {
+                if matched.len() >= lim {
+                    break;
+                }
+            }
+        }
+
+        Ok(matched)
     }
 
     // ── Cross-Project Sync ────────────────────────────────────────────
@@ -962,6 +1018,143 @@ mod tests {
         let active: Vec<_> = all.iter().filter(|t| t.revoked_at.is_none()).collect();
         assert_eq!(active.len(), 1);
         assert_eq!(active[0].device_name, "active-dev");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── query_by_paths tests ─────────────────────────────────────────
+
+    /// Helper: create a decision event and set its affected_paths via raw SQL.
+    fn insert_decision_with_paths(
+        ledger: &Ledger,
+        key: &str,
+        value: &str,
+        paths: &[&str],
+    ) -> String {
+        let event = make_decision_event("main", key, value);
+        let event_id = event.event_id.clone();
+        ledger.append_event(&event).unwrap();
+
+        // Update affected_paths via raw SQL (materialization doesn't set it from payload)
+        let paths_json = serde_json::to_string(paths).unwrap();
+        let conn = rusqlite::Connection::open(&ledger.paths.ledger_db).unwrap();
+        conn.execute(
+            "UPDATE decisions SET affected_paths = ?1 WHERE event_id = ?2",
+            rusqlite::params![paths_json, event_id],
+        )
+        .unwrap();
+
+        event_id
+    }
+
+    #[test]
+    fn query_by_paths_glob_matches() {
+        let (tmp, ledger) = setup_workspace();
+        insert_decision_with_paths(&ledger, "db.engine", "sqlite", &["crates/edda-ledger/**"]);
+
+        let results = ledger
+            .query_by_paths(&["crates/edda-ledger/src/lib.rs"], Some("main"), None)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "db.engine");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn query_by_paths_no_match() {
+        let (tmp, ledger) = setup_workspace();
+        insert_decision_with_paths(&ledger, "db.engine", "sqlite", &["crates/edda-ledger/**"]);
+
+        let results = ledger
+            .query_by_paths(
+                &["crates/edda-cli/src/main.rs"], // doesn't match ledger glob
+                Some("main"),
+                None,
+            )
+            .unwrap();
+
+        assert!(results.is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn query_by_paths_skips_superseded() {
+        let (tmp, ledger) = setup_workspace();
+
+        // First decision: db.engine=postgres
+        insert_decision_with_paths(&ledger, "db.engine", "postgres", &["crates/**"]);
+
+        // Second decision supersedes first (same key+branch → first becomes is_active=FALSE)
+        insert_decision_with_paths(&ledger, "db.engine", "sqlite", &["crates/**"]);
+
+        let results = ledger
+            .query_by_paths(&["crates/edda-ledger/src/lib.rs"], Some("main"), None)
+            .unwrap();
+
+        // Only the active decision should appear
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].value, "sqlite");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn query_by_paths_multiple_globs() {
+        let (tmp, ledger) = setup_workspace();
+        insert_decision_with_paths(
+            &ledger,
+            "error.pattern",
+            "thiserror",
+            &["crates/edda-ledger/**", "crates/edda-core/**"],
+        );
+
+        // Match on second glob
+        let results = ledger
+            .query_by_paths(&["crates/edda-core/src/types.rs"], Some("main"), None)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "error.pattern");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn query_by_paths_respects_limit() {
+        let (tmp, ledger) = setup_workspace();
+
+        // Insert 3 decisions all matching "crates/**"
+        insert_decision_with_paths(&ledger, "db.engine", "sqlite", &["crates/**"]);
+        insert_decision_with_paths(&ledger, "error.pattern", "thiserror", &["crates/**"]);
+        insert_decision_with_paths(&ledger, "auth.strategy", "jwt", &["crates/**"]);
+
+        let results = ledger
+            .query_by_paths(&["crates/edda-ledger/src/lib.rs"], Some("main"), Some(2))
+            .unwrap();
+
+        assert!(results.len() <= 2);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn query_active_with_paths_excludes_empty() {
+        let (tmp, ledger) = setup_workspace();
+
+        // Decision without paths (defaults to "[]")
+        ledger
+            .append_event(&make_decision_event("main", "no.paths", "val"))
+            .unwrap();
+
+        // Decision with paths
+        insert_decision_with_paths(&ledger, "has.paths", "val", &["src/**"]);
+
+        let results = ledger.query_active_with_paths(Some("main"), None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "has.paths");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
