@@ -7,6 +7,7 @@ pub mod paths;
 pub mod sqlite_store;
 pub mod sync;
 pub mod tombstone;
+pub mod view;
 
 pub use blob_meta::{BlobClass, BlobMetaEntry, BlobMetaMap, ClassChange};
 pub use blob_store::{
@@ -22,3 +23,4 @@ pub use sqlite_store::{
     TaskBriefRow,
 };
 pub use tombstone::{append_tombstone, list_tombstones, make_tombstone, DeleteReason, Tombstone};
+pub use view::DecisionView;
