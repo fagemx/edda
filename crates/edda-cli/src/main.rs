@@ -97,6 +97,12 @@ enum Command {
         /// Decision scope: local (default), shared, or global
         #[arg(long, default_value = "local")]
         scope: String,
+        /// File glob patterns this decision governs (repeatable)
+        #[arg(long = "paths")]
+        paths: Vec<String>,
+        /// Comma-separated tags for this decision
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
     },
     /// Manage project groups for cross-project sync
     Group {
@@ -655,6 +661,12 @@ enum BridgeClaudeCmd {
         /// Session ID (auto-inferred from active heartbeats if omitted)
         #[arg(long)]
         session: Option<String>,
+        /// File glob patterns this decision governs (repeatable)
+        #[arg(long = "paths")]
+        paths: Vec<String>,
+        /// Comma-separated tags for this decision
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
     },
     /// Send a request to another session
     Request {
@@ -942,6 +954,8 @@ fn main() -> anyhow::Result<()> {
             refs,
             session,
             scope,
+            paths,
+            tags,
         } => cmd_bridge::decide(
             &repo_root,
             &decision,
@@ -949,6 +963,8 @@ fn main() -> anyhow::Result<()> {
             &refs,
             session.as_deref(),
             Some(&scope),
+            &paths,
+            &tags,
         ),
         Command::Group { cmd } => cmd_group::execute(cmd, &repo_root),
         Command::Sync { from, dry_run } => cmd_sync::execute(&repo_root, from.as_deref(), dry_run),

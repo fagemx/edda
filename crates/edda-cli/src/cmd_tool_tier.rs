@@ -62,6 +62,8 @@ pub fn run(cmd: ToolTierCmd, repo_root: &Path) -> anyhow::Result<()> {
                 &[],
                 None,
                 None,
+                &[],
+                &[],
             )?;
 
             println!("Set {tool} = {tier}");
