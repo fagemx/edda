@@ -35,3 +35,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }

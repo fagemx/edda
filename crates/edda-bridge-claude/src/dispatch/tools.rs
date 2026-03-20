@@ -3,6 +3,7 @@ use std::path::Path;
 
 use globset::Glob;
 
+use crate::decision_warning::decision_file_warning;
 use crate::parse::*;
 
 use super::events::{
@@ -102,8 +103,39 @@ pub(super) fn dispatch_pre_tool_use(
     // L3: evaluate learned rules (warn-only, via additionalContext)
     let rules_warning = evaluate_learned_rules(raw, project_id, cwd);
 
-    // Combine pattern context, request nudge, and rules warning
-    let combined_ctx = [pattern_ctx, request_nudge, rules_warning]
+    // Decision file warning: check if edited file is governed by active decisions
+    let decision_warning = {
+        let dw_start = std::time::Instant::now();
+        let tool_name_dw = get_str(raw, "tool_name");
+        let result = if tool_name_dw == "Edit" {
+            let file_path = raw
+                .pointer("/tool_input/file_path")
+                .or_else(|| raw.pointer("/input/file_path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if file_path.is_empty() {
+                None
+            } else {
+                let cwd_path = std::path::Path::new(cwd);
+                match edda_ledger::EddaPaths::find_root(cwd_path) {
+                    Some(root) => {
+                        let branch = edda_ledger::Ledger::open(&root)
+                            .and_then(|l| l.head_branch())
+                            .unwrap_or_default();
+                        decision_file_warning(&root, file_path, &branch)
+                    }
+                    None => None,
+                }
+            }
+        } else {
+            None // Only trigger on Edit tool
+        };
+        tracing::debug!("decision_warning_ms={}", dw_start.elapsed().as_millis());
+        result
+    };
+
+    // Combine pattern context, request nudge, rules warning, and decision warning
+    let combined_ctx = [pattern_ctx, request_nudge, rules_warning, decision_warning]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();

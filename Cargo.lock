@@ -774,6 +774,7 @@ dependencies = [
  "edda-transcript",
  "globset",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
