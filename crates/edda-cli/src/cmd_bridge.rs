@@ -63,6 +63,12 @@ pub enum BridgeClaudeCmd {
         /// Session ID (auto-inferred from active heartbeats if omitted)
         #[arg(long)]
         session: Option<String>,
+        /// File glob patterns this decision governs (repeatable)
+        #[arg(long = "paths")]
+        paths: Vec<String>,
+        /// Comma-separated tags for this decision
+        #[arg(long, value_delimiter = ',')]
+        tags: Vec<String>,
     },
     /// Send a request to another session
     Request {
@@ -212,6 +218,8 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
                 reason,
                 refs,
                 session,
+                paths,
+                tags,
             } => decide(
                 repo_root,
                 &decision,
@@ -219,6 +227,8 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
                 &refs,
                 session.as_deref(),
                 None,
+                &paths,
+                &tags,
             ),
             BridgeClaudeCmd::Request {
                 to,
@@ -491,6 +501,7 @@ pub fn claim(
 /// Writes to both:
 /// 1. Peers `coordination.jsonl` — real-time broadcast to active peers
 /// 2. Workspace ledger — permanent record visible to all sessions
+#[allow(clippy::too_many_arguments)]
 pub fn decide(
     repo_root: &Path,
     decision: &str,
@@ -498,6 +509,8 @@ pub fn decide(
     refs: &[String],
     cli_session: Option<&str>,
     scope_str: Option<&str>,
+    paths: &[String],
+    tags: &[String],
 ) -> anyhow::Result<()> {
     let (key, value) = decision.split_once('=').ok_or_else(|| {
         anyhow::anyhow!("decision must be in key=value format (e.g. \"auth.method=JWT RS256\")")
@@ -546,8 +559,16 @@ pub fn decide(
         reason: reason.map(|r| r.to_string()),
         scope,
         authority: None,
-        affected_paths: None,
-        tags: None,
+        affected_paths: if paths.is_empty() {
+            None
+        } else {
+            Some(paths.to_vec())
+        },
+        tags: if tags.is_empty() {
+            None
+        } else {
+            Some(tags.to_vec())
+        },
         review_after: None,
         reversibility: None,
     };
@@ -613,6 +634,12 @@ pub fn decide(
     }
     if let Some(s) = scope {
         println!("  scope: {s}");
+    }
+    if !paths.is_empty() {
+        println!("  paths: {}", paths.join(", "));
+    }
+    if !tags.is_empty() {
+        println!("  tags: {}", tags.join(", "));
     }
     Ok(())
 }
@@ -1153,6 +1180,8 @@ mod tests {
             &[],
             None,
             None,
+            &[],
+            &[],
         )
         .unwrap();
 
@@ -1191,6 +1220,8 @@ mod tests {
             &[],
             None,
             None,
+            &[],
+            &[],
         )
         .unwrap();
 
@@ -1224,7 +1255,7 @@ mod tests {
         std::env::set_var("EDDA_SESSION_ID", "test-decide-super-s3");
         std::env::set_var("EDDA_SESSION_LABEL", "infra");
 
-        decide(&tmp, "db.engine=SQLite", None, &[], None, None).unwrap();
+        decide(&tmp, "db.engine=SQLite", None, &[], None, None, &[], &[]).unwrap();
         decide(
             &tmp,
             "db.engine=PostgreSQL",
@@ -1232,6 +1263,8 @@ mod tests {
             &[],
             None,
             None,
+            &[],
+            &[],
         )
         .unwrap();
 
