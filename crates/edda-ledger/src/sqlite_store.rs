@@ -7,7 +7,7 @@ use edda_core::types::{Digest, Event, Provenance, Refs};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::time::Instant;
-use tracing::debug;
+use tracing::{debug, warn};
 
 const SCHEMA_SQL: &str = "
 PRAGMA journal_mode = WAL;
@@ -450,6 +450,10 @@ impl SqliteStore {
             self.migrate_v9_to_v10()?;
         }
 
+        // Post-migration verification: repair any columns that migrations
+        // failed to add (e.g. version was bumped but ALTER TABLE didn't stick).
+        self.verify_decisions_schema()?;
+
         Ok(())
     }
 
@@ -470,6 +474,98 @@ impl SqliteStore {
             "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?1)",
             params![version.to_string()],
         )?;
+        Ok(())
+    }
+
+    /// Verify that the `decisions` table has all expected columns.
+    ///
+    /// If a migration partially failed (version bumped but ALTER TABLE didn't
+    /// stick), this repairs the schema by re-adding missing columns with their
+    /// correct defaults. Each ALTER TABLE ADD COLUMN is individually wrapped so
+    /// that already-existing columns are silently skipped.
+    fn verify_decisions_schema(&self) -> anyhow::Result<()> {
+        // Only run if the decisions table exists (schema >= v2).
+        let has_decisions: bool = self
+            .conn
+            .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='decisions'")
+            .and_then(|mut s| s.exists([]))
+            .unwrap_or(false);
+        if !has_decisions {
+            return Ok(());
+        }
+
+        // Collect actual column names from PRAGMA table_info.
+        let mut stmt = self.conn.prepare("PRAGMA table_info(decisions)")?;
+        let actual_columns: std::collections::HashSet<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Expected columns and their ALTER TABLE definitions.
+        // Base V2 columns (event_id, key, value, reason, domain, branch,
+        // supersedes_id, is_active) are created via CREATE TABLE so they
+        // should always be present. We verify the columns added by later
+        // migrations (V5, V10).
+        let expected_alters: &[(&str, &str)] = &[
+            // V5 columns
+            (
+                "scope",
+                "ALTER TABLE decisions ADD COLUMN scope TEXT NOT NULL DEFAULT 'local'",
+            ),
+            (
+                "source_project_id",
+                "ALTER TABLE decisions ADD COLUMN source_project_id TEXT",
+            ),
+            (
+                "source_event_id",
+                "ALTER TABLE decisions ADD COLUMN source_event_id TEXT",
+            ),
+            // V10 columns
+            (
+                "status",
+                "ALTER TABLE decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            ),
+            (
+                "authority",
+                "ALTER TABLE decisions ADD COLUMN authority TEXT NOT NULL DEFAULT 'human'",
+            ),
+            (
+                "affected_paths",
+                "ALTER TABLE decisions ADD COLUMN affected_paths TEXT NOT NULL DEFAULT '[]'",
+            ),
+            (
+                "tags",
+                "ALTER TABLE decisions ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+            ),
+            (
+                "review_after",
+                "ALTER TABLE decisions ADD COLUMN review_after TEXT",
+            ),
+            (
+                "reversibility",
+                "ALTER TABLE decisions ADD COLUMN reversibility TEXT NOT NULL DEFAULT 'medium'",
+            ),
+        ];
+
+        for (col_name, alter_sql) in expected_alters {
+            if !actual_columns.contains(*col_name) {
+                warn!(
+                    column = col_name,
+                    "decisions table missing column — repairing"
+                );
+                // SQLite ALTER TABLE ADD COLUMN will error if the column
+                // already exists, but we checked above so this should succeed.
+                // Wrap in a match so one failure doesn't abort the rest.
+                if let Err(e) = self.conn.execute_batch(alter_sql) {
+                    warn!(
+                        column = col_name,
+                        error = %e,
+                        "failed to repair column — may already exist"
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -5913,6 +6009,89 @@ mod tests {
         assert_eq!(row.2, "[]"); // tags default
         assert_eq!(row.3, None); // review_after default
         assert_eq!(row.4, "medium"); // reversibility default
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_decisions_schema_repairs_missing_columns() {
+        // Simulate the bug: create a DB at schema V10 but with the V5 `scope`
+        // column missing from the decisions table.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "edda_sqlite_verify_schema_{}_{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+
+        // Manually create a DB with an incomplete decisions table
+        // (missing scope, source_project_id, source_event_id from V5
+        //  and all V10 columns).
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            conn.execute_batch(
+                "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '10');",
+            )
+            .unwrap();
+            // Create decisions with only base V2 columns — skip V5 + V10
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS decisions (
+                    event_id TEXT PRIMARY KEY REFERENCES events(event_id),
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    domain TEXT NOT NULL DEFAULT '',
+                    branch TEXT NOT NULL,
+                    supersedes_id TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE
+                );",
+            )
+            .unwrap();
+        }
+
+        // Now open via the normal path — apply_schema sees version=10, so
+        // no migrations run, but verify_decisions_schema should repair.
+        let store = SqliteStore::open_or_create(&db_path).unwrap();
+
+        // Check that all expected columns now exist.
+        let columns: std::collections::HashSet<String> = {
+            let mut stmt = store.conn.prepare("PRAGMA table_info(decisions)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        let expected = [
+            "event_id",
+            "key",
+            "value",
+            "reason",
+            "domain",
+            "branch",
+            "supersedes_id",
+            "is_active",
+            "scope",
+            "source_project_id",
+            "source_event_id",
+            "status",
+            "authority",
+            "affected_paths",
+            "tags",
+            "review_after",
+            "reversibility",
+        ];
+
+        for col in &expected {
+            assert!(
+                columns.contains(&col.to_string()),
+                "expected column `{col}` to exist after verify_decisions_schema, but it was missing. actual: {columns:?}"
+            );
+        }
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
