@@ -38,11 +38,35 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
             .get("scope")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse().ok());
+        // V10 fields — all Option, gracefully default to None if missing
+        let authority = d
+            .get("authority")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let affected_paths: Option<Vec<String>> = d
+            .get("affected_paths")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let tags: Option<Vec<String>> = d
+            .get("tags")
+            .and_then(|v| serde_json::from_value(v.clone()).ok());
+        let review_after = d
+            .get("review_after")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let reversibility = d
+            .get("reversibility")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         return Some(DecisionPayload {
             key,
             value,
             reason,
             scope,
+            authority,
+            affected_paths,
+            tags,
+            review_after,
+            reversibility,
         });
     }
     // Text fallback: "key: value — reason"
@@ -57,6 +81,11 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
         value,
         reason,
         scope: None,
+        authority: None,
+        affected_paths: None,
+        tags: None,
+        review_after: None,
+        reversibility: None,
     })
 }
 

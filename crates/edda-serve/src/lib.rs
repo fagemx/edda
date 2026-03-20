@@ -1678,6 +1678,11 @@ async fn post_decide(
         value: value.to_string(),
         reason: body.reason,
         scope: None,
+        authority: None,
+        affected_paths: None,
+        tags: None,
+        review_after: None,
+        reversibility: None,
     };
     let mut event = new_decision_event(&branch, parent_hash.as_deref(), "system", &dp)?;
 
@@ -3663,6 +3668,7 @@ async fn get_event_stream(
 // ── Tests ──
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock, clippy::len_zero)]
 mod tests {
     use super::*;
     use axum::body::Body;
@@ -5317,6 +5323,11 @@ actors:
             value: "test_val".into(),
             reason: Some("testing".into()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let decision = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         ledger.append_event(&decision).unwrap();
@@ -6232,6 +6243,11 @@ actors:
             value: "sqlite".into(),
             reason: Some("embedded".into()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
         ledger.append_event(&event).unwrap();
@@ -6372,6 +6388,11 @@ actors:
             value: "redis".into(),
             reason: Some("fast".into()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
         ledger.append_event(&event).unwrap();
@@ -6420,6 +6441,11 @@ actors:
             value: "daytime_revenue_shield".into(),
             reason: Some("avoid aggressive daytime markdowns".into()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
         ledger.append_event(&event).unwrap();
@@ -6458,6 +6484,11 @@ actors:
             value: "daytime_revenue_shield".into(),
             reason: Some("avoid aggressive daytime markdowns".into()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
         ledger.append_event(&event).unwrap();

@@ -123,6 +123,21 @@ pub struct DecisionPayload {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<DecisionScope>,
+    /// Decision authority: "human", "agent", "system". Default: "human".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
+    /// Glob patterns for guarded file paths. Default: [].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_paths: Option<Vec<String>>,
+    /// Categorization tags. Default: [].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tags: Option<Vec<String>>,
+    /// ISO-8601 date for scheduled re-evaluation. Default: None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_after: Option<String>,
+    /// Reversibility level: "easy", "medium", "hard". Default: "medium".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reversibility: Option<String>,
 }
 
 /// Status of a task brief.
@@ -460,6 +475,11 @@ mod tests {
             value: "sqlite".to_string(),
             reason: Some("embedded, zero-config".to_string()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let json = serde_json::to_string(&dp).expect("serialize");
         let decoded: DecisionPayload = serde_json::from_str(&json).expect("deserialize");
@@ -471,6 +491,11 @@ mod tests {
             value: "JWT".to_string(),
             reason: None,
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let json2 = serde_json::to_string(&dp_no_reason).expect("serialize");
         assert!(!json2.contains("reason"), "None reason should be omitted");
@@ -486,6 +511,11 @@ mod tests {
             value: "v3".to_string(),
             reason: Some("breaking change".to_string()),
             scope: Some(DecisionScope::Shared),
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let json = serde_json::to_string(&dp).expect("serialize");
         assert!(json.contains("\"scope\":\"shared\""));
@@ -663,5 +693,47 @@ mod tests {
         assert_eq!(json, "\"fix\"");
         let decoded: TaskBriefIntent = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, TaskBriefIntent::Fix);
+    }
+
+    // ── DecisionPayload V10 fields tests ─────────────────────────
+
+    #[test]
+    fn test_decision_payload_serde_backward_compat() {
+        let json = r#"{"key":"db.engine","value":"sqlite","reason":"embedded"}"#;
+        let dp: DecisionPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(dp.key, "db.engine");
+        assert_eq!(dp.authority, None);
+        assert_eq!(dp.affected_paths, None);
+        assert_eq!(dp.tags, None);
+        assert_eq!(dp.review_after, None);
+        assert_eq!(dp.reversibility, None);
+    }
+
+    #[test]
+    fn test_decision_payload_serde_with_new_fields() {
+        let json = r#"{
+            "key": "db.engine",
+            "value": "sqlite",
+            "reason": "embedded",
+            "authority": "agent",
+            "affected_paths": ["crates/edda-ledger/**"],
+            "tags": ["arch"],
+            "review_after": "2026-06-01",
+            "reversibility": "hard"
+        }"#;
+        let dp: DecisionPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(dp.authority.as_deref(), Some("agent"));
+        assert_eq!(
+            dp.affected_paths,
+            Some(vec!["crates/edda-ledger/**".to_string()])
+        );
+        assert_eq!(dp.tags, Some(vec!["arch".to_string()]));
+        assert_eq!(dp.review_after.as_deref(), Some("2026-06-01"));
+        assert_eq!(dp.reversibility.as_deref(), Some("hard"));
+
+        // Round-trip: serialize and deserialize
+        let serialized = serde_json::to_string(&dp).unwrap();
+        let dp2: DecisionPayload = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(dp, dp2);
     }
 }

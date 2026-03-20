@@ -272,6 +272,11 @@ pub(super) fn harvest_inferred_decisions(
             value: pkg.to_string(),
             reason: Some(reason.clone()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let mut event =
             edda_core::event::new_decision_event(branch, chain_hash.as_deref(), "system", &dp)

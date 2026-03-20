@@ -294,6 +294,7 @@ pub(crate) mod digest_helpers {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn make_digest_note_with_tasks(
         branch: &str,
         session_id: &str,
@@ -317,6 +318,7 @@ pub(crate) mod digest_helpers {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn make_digest_note_full(
         branch: &str,
         session_id: &str,

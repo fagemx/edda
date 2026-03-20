@@ -219,6 +219,11 @@ impl EddaServer {
             value: value.to_string(),
             reason: params.reason.clone(),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let mut event = new_decision_event(&branch, parent_hash.as_deref(), "system", &dp)
             .map_err(to_mcp_err)?;

@@ -101,6 +101,11 @@ mod tests {
             value: value.to_string(),
             reason: reason.map(|r| r.to_string()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         }
     }
 
