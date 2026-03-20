@@ -59,9 +59,14 @@ pub(crate) fn decision_file_warning(
         return None;
     }
 
+    // Strip repo root prefix to get relative path for glob matching.
+    // file_path from Claude Code is absolute (e.g., "C:/ai_agent/edda/crates/foo/src/lib.rs")
+    // but affected_paths patterns are relative (e.g., "crates/foo/**").
+    let relative = make_relative(file_path, repo_root);
+
     let matched: Vec<&DecisionView> = decisions
         .iter()
-        .filter(|d| !d.affected_paths.is_empty() && matches_any_path(file_path, &d.affected_paths))
+        .filter(|d| !d.affected_paths.is_empty() && matches_any_path(&relative, &d.affected_paths))
         .collect();
 
     if matched.is_empty() {
@@ -97,14 +102,30 @@ fn load_decisions_cached(repo_root: &Path, branch: &str) -> Vec<DecisionView> {
     decisions
 }
 
-fn matches_any_path(file_path: &str, affected_paths: &[String]) -> bool {
-    // Normalize path separators (Windows compat)
+/// Convert an absolute file path to a repo-relative path.
+/// E.g., `C:\ai_agent\edda\crates\foo\lib.rs` with root `C:\ai_agent\edda`
+/// → `crates/foo/lib.rs`
+fn make_relative(file_path: &str, repo_root: &Path) -> String {
     let normalized = file_path.replace('\\', "/");
+    let root_str = repo_root.to_string_lossy().replace('\\', "/");
+    let root_prefix = if root_str.ends_with('/') {
+        root_str
+    } else {
+        format!("{root_str}/")
+    };
+    if let Some(rel) = normalized.strip_prefix(&root_prefix) {
+        rel.to_string()
+    } else {
+        // Already relative or different root — use as-is
+        normalized
+    }
+}
 
+fn matches_any_path(file_path: &str, affected_paths: &[String]) -> bool {
     for pattern in affected_paths {
         if let Ok(glob) = globset::Glob::new(pattern) {
             let matcher = glob.compile_matcher();
-            if matcher.is_match(&normalized) {
+            if matcher.is_match(file_path) {
                 return true;
             }
         }
@@ -242,12 +263,30 @@ mod tests {
     }
 
     #[test]
-    fn test_matches_any_path_normalization() {
-        // Backslash paths should match forward-slash globs
-        assert!(matches_any_path(
-            r"crates\edda-ledger\src\lib.rs",
-            &["crates/edda-ledger/**".to_string()]
-        ));
+    fn test_make_relative_strips_root() {
+        let root = std::path::PathBuf::from("C:/ai_agent/edda");
+        assert_eq!(
+            make_relative("C:/ai_agent/edda/crates/edda-core/src/types.rs", &root),
+            "crates/edda-core/src/types.rs"
+        );
+    }
+
+    #[test]
+    fn test_make_relative_backslash() {
+        let root = std::path::PathBuf::from(r"C:\ai_agent\edda");
+        assert_eq!(
+            make_relative(r"C:\ai_agent\edda\crates\edda-core\src\types.rs", &root),
+            "crates/edda-core/src/types.rs"
+        );
+    }
+
+    #[test]
+    fn test_make_relative_already_relative() {
+        let root = std::path::PathBuf::from("/other/root");
+        assert_eq!(
+            make_relative("crates/edda-core/src/types.rs", &root),
+            "crates/edda-core/src/types.rs"
+        );
     }
 
     #[test]
