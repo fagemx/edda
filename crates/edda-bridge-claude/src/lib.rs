@@ -14,6 +14,7 @@ pub mod state;
 pub mod watch;
 
 mod admin;
+pub(crate) mod decision_warning;
 mod dispatch;
 mod narrative;
 pub mod nudge;
