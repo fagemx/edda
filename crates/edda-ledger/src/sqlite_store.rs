@@ -343,6 +343,14 @@ pub struct ExecutionLinked {
     pub latency_ms: Option<u64>,
 }
 
+/// Map a decision status string to the legacy is_active boolean.
+///
+/// `is_active = true` iff status is "active" or "experimental".
+/// This enforces CONTRACT COMPAT-01.
+fn status_to_is_active(status: &str) -> bool {
+    matches!(status, "active" | "experimental")
+}
+
 /// SQLite-backed storage engine.
 pub struct SqliteStore {
     conn: Connection,
@@ -1004,7 +1012,7 @@ impl SqliteStore {
 
                 // Deactivate prior decision with same key on same branch
                 tx.execute(
-                    "UPDATE decisions SET is_active = FALSE
+                    "UPDATE decisions SET is_active = FALSE, status = 'superseded'
                      WHERE key = ?1 AND branch = ?2 AND is_active = TRUE",
                     params![key, event.branch],
                 )?;
@@ -1013,10 +1021,31 @@ impl SqliteStore {
                     .scope
                     .unwrap_or(edda_core::types::DecisionScope::Local)
                     .to_string();
+
+                // Read new V10 fields from payload, with safe defaults
+                let status = "active";
+                let is_active = status_to_is_active(status);
+                let authority = dp.authority.as_deref().unwrap_or("human");
+                let affected_paths = dp
+                    .affected_paths
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
+                    .unwrap_or_else(|| "[]".to_string());
+                let tags = dp
+                    .tags
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()))
+                    .unwrap_or_else(|| "[]".to_string());
+                let review_after = dp.review_after.as_deref();
+                let reversibility = dp.reversibility.as_deref().unwrap_or("medium");
+
                 tx.execute(
                     "INSERT INTO decisions
-                     (event_id, key, value, reason, domain, branch, supersedes_id, is_active, scope)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, TRUE, ?8)",
+                     (event_id, key, value, reason, domain, branch, supersedes_id,
+                      is_active, scope, status, authority, affected_paths, tags,
+                      review_after, reversibility)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                             ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                     params![
                         event.event_id,
                         key,
@@ -1025,7 +1054,14 @@ impl SqliteStore {
                         domain,
                         event.branch,
                         supersedes_id,
-                        scope_str
+                        is_active,
+                        scope_str,
+                        status,
+                        authority,
+                        affected_paths,
+                        tags,
+                        review_after,
+                        reversibility,
                     ],
                 )?;
             }
@@ -1718,18 +1754,19 @@ impl SqliteStore {
         // If active, deactivate prior local decision with same key
         if p.is_active {
             tx.execute(
-                "UPDATE decisions SET is_active = FALSE
+                "UPDATE decisions SET is_active = FALSE, status = 'superseded'
                  WHERE key = ?1 AND branch = ?2 AND is_active = TRUE
                    AND source_project_id IS NULL",
                 params![p.key, p.event.branch],
             )?;
         }
 
+        let status = if p.is_active { "active" } else { "superseded" };
         tx.execute(
             "INSERT INTO decisions
              (event_id, key, value, reason, domain, branch, supersedes_id, is_active,
-              scope, source_project_id, source_event_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10)",
+              scope, source_project_id, source_event_id, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)",
             params![
                 p.event.event_id,
                 p.key,
@@ -1741,6 +1778,7 @@ impl SqliteStore {
                 p.scope,
                 p.source_project_id,
                 p.source_event_id,
+                status,
             ],
         )?;
 
@@ -3877,6 +3915,7 @@ mod tests {
         latency_ms: u64,
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_execution_event_with_decision_ref(
         branch: &str,
         event_id: &str,
@@ -5625,6 +5664,208 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── B1: Status Sync tests ──────────────────────────────────────
+
+    #[test]
+    fn test_status_to_is_active() {
+        assert!(status_to_is_active("active"));
+        assert!(status_to_is_active("experimental"));
+        assert!(!status_to_is_active("proposed"));
+        assert!(!status_to_is_active("deprecated"));
+        assert!(!status_to_is_active("superseded"));
+    }
+
+    #[test]
+    fn test_status_is_active_sync_on_insert() {
+        let (dir, store) = tmp_db();
+
+        let dp = edda_core::types::DecisionPayload {
+            key: "sync.test".to_string(),
+            value: "v1".to_string(),
+            reason: Some("testing sync".to_string()),
+            scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+        };
+        let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
+        store.append_event(&event).unwrap();
+
+        // Verify status and is_active agree
+        let (status, is_active): (String, bool) = store
+            .conn
+            .query_row(
+                "SELECT status, is_active FROM decisions WHERE key = 'sync.test'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "active");
+        assert!(is_active);
+
+        // Supersede with a new value
+        let dp2 = edda_core::types::DecisionPayload {
+            key: "sync.test".to_string(),
+            value: "v2".to_string(),
+            reason: Some("supersede".to_string()),
+            scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+        };
+        let mut event2 =
+            edda_core::event::new_decision_event("main", Some(&event.hash), "system", &dp2)
+                .unwrap();
+        event2.refs.provenance.push(edda_core::types::Provenance {
+            target: event.event_id.clone(),
+            rel: "supersedes".to_string(),
+            note: None,
+        });
+        edda_core::event::finalize_event(&mut event2).unwrap();
+        store.append_event(&event2).unwrap();
+
+        // Old decision: is_active=false, status=superseded
+        let (old_status, old_active): (String, bool) = store
+            .conn
+            .query_row(
+                "SELECT status, is_active FROM decisions WHERE key = 'sync.test' AND value = 'v1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(old_status, "superseded");
+        assert!(!old_active);
+
+        // New decision: is_active=true, status=active
+        let (new_status, new_active): (String, bool) = store
+            .conn
+            .query_row(
+                "SELECT status, is_active FROM decisions WHERE key = 'sync.test' AND value = 'v2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(new_status, "active");
+        assert!(new_active);
+
+        // COMPAT-01 full table check
+        let violations: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM decisions
+                 WHERE (is_active = 1 AND status NOT IN ('active', 'experimental'))
+                    OR (is_active = 0 AND status IN ('active', 'experimental'))",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(violations, 0, "COMPAT-01 violated");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── B2: DecisionPayload new fields tests ───────────────────────
+
+    #[test]
+    fn test_decision_payload_new_fields_roundtrip() {
+        let (dir, store) = tmp_db();
+
+        let dp = edda_core::types::DecisionPayload {
+            key: "db.engine".to_string(),
+            value: "sqlite".to_string(),
+            reason: Some("embedded".to_string()),
+            scope: None,
+            authority: Some("human".to_string()),
+            affected_paths: Some(vec![
+                "crates/edda-ledger/**".to_string(),
+                "crates/edda-store/**".to_string(),
+            ]),
+            tags: Some(vec!["architecture".to_string(), "storage".to_string()]),
+            review_after: Some("2026-06-01".to_string()),
+            reversibility: Some("hard".to_string()),
+        };
+        let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
+        store.append_event(&event).unwrap();
+
+        let row = store
+            .conn
+            .query_row(
+                "SELECT authority, affected_paths, tags, review_after, reversibility
+                 FROM decisions WHERE key = 'db.engine'",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(row.0, "human");
+        assert_eq!(row.1, r#"["crates/edda-ledger/**","crates/edda-store/**"]"#);
+        assert_eq!(row.2, r#"["architecture","storage"]"#);
+        assert_eq!(row.3.as_deref(), Some("2026-06-01"));
+        assert_eq!(row.4, "hard");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_decision_payload_defaults_when_none() {
+        let (dir, store) = tmp_db();
+
+        let dp = edda_core::types::DecisionPayload {
+            key: "default.test".to_string(),
+            value: "val".to_string(),
+            reason: None,
+            scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+        };
+        let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
+        store.append_event(&event).unwrap();
+
+        let row = store
+            .conn
+            .query_row(
+                "SELECT authority, affected_paths, tags, review_after, reversibility
+                 FROM decisions WHERE key = 'default.test'",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(row.0, "human"); // authority default
+        assert_eq!(row.1, "[]"); // affected_paths default
+        assert_eq!(row.2, "[]"); // tags default
+        assert_eq!(row.3, None); // review_after default
+        assert_eq!(row.4, "medium"); // reversibility default
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);

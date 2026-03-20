@@ -263,6 +263,11 @@ mod tests {
             value: value.to_string(),
             reason: Some(reason.to_string()),
             scope: Some(DecisionScope::Shared),
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         ledger.append_event(&event).unwrap();
@@ -274,6 +279,11 @@ mod tests {
             value: value.to_string(),
             reason: None,
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         ledger.append_event(&event).unwrap();

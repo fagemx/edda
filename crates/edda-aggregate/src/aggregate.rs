@@ -872,6 +872,11 @@ mod tests {
             value: "sqlite".to_string(),
             reason: Some("embedded".to_string()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let event =
             edda_core::event::new_decision_event("main", None, "system", &decision).unwrap();

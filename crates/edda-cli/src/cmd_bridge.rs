@@ -545,6 +545,11 @@ pub fn decide(
         value: value.to_string(),
         reason: reason.map(|r| r.to_string()),
         scope,
+        authority: None,
+        affected_paths: None,
+        tags: None,
+        review_after: None,
+        reversibility: None,
     };
     let mut event =
         edda_core::event::new_decision_event(&branch, parent_hash.as_deref(), actor, &dp)?;
@@ -991,6 +996,11 @@ fn write_accepted_to_ledger(
             value: d.value.clone(),
             reason: d.reason.clone(),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
 
         let actor = match d.kind {

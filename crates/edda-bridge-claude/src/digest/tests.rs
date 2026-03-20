@@ -1047,6 +1047,11 @@ fn collect_session_ledger_extras_basic() {
         value: "jwt".to_string(),
         reason: Some("stateless".to_string()),
         scope: None,
+        authority: None,
+        affected_paths: None,
+        tags: None,
+        review_after: None,
+        reversibility: None,
     };
     let evt = edda_core::event::new_decision_event(&branch, None, "system", &dp).unwrap();
     let decision_ts = evt.ts.clone();

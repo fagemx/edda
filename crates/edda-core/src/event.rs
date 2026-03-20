@@ -779,6 +779,11 @@ mod tests {
             value: "sqlite".to_string(),
             reason: Some("embedded, zero-config".to_string()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let event = new_decision_event("main", None, "system", &dp).unwrap();
         assert_eq!(event.event_type, "note");
@@ -802,6 +807,11 @@ mod tests {
             value: "JWT".to_string(),
             reason: None,
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let event = new_decision_event("main", None, "system", &dp).unwrap();
         assert_eq!(event.payload["decision"]["key"], "auth.method");
@@ -817,6 +827,11 @@ mod tests {
             value: "REST".to_string(),
             reason: Some("compatibility".to_string()),
             scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
         };
         let event = new_decision_event("main", None, "system", &dp).unwrap();
         let extracted = crate::decision::extract_decision(&event.payload).unwrap();
