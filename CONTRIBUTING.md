@@ -7,6 +7,18 @@ Thanks for your interest in contributing! This guide covers how to build, test, 
 - Rust stable (1.75+)
 - Git
 
+## Git Hooks (optional)
+
+We use [Lefthook](https://github.com/evilmartians/lefthook) for local pre-commit and pre-push checks:
+
+```bash
+npm install -g @evilmartians/lefthook
+lefthook install
+```
+
+This runs `cargo fmt --check` on commit and `cargo clippy --workspace -- -D warnings` on push.
+Lefthook is local-only and does not affect CI.
+
 ## Build and Test
 
 ```bash

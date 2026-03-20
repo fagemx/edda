@@ -1,0 +1,13 @@
+# Lefthook — Git hooks for Rust quality checks
+# Install: npm install -g @evilmartians/lefthook && lefthook install
+
+pre-commit:
+  commands:
+    fmt-check:
+      run: cargo fmt --check
+      stage_fixed: true
+
+pre-push:
+  commands:
+    clippy:
+      run: cargo clippy --workspace -- -D warnings
