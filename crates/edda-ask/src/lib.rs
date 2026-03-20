@@ -71,6 +71,9 @@ pub struct DecisionHit {
     pub branch: String,
     pub ts: String,
     pub is_active: bool,
+    /// Tags parsed from JSON array in the decision row.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -129,6 +132,8 @@ pub struct AskOptions {
     pub after: Option<String>,
     /// ISO 8601 upper bound (inclusive) for temporal filtering.
     pub before: Option<String>,
+    /// Filter decisions whose tags contain any of these values (OR semantics).
+    pub tags: Vec<String>,
 }
 
 impl Default for AskOptions {
@@ -140,6 +145,7 @@ impl Default for AskOptions {
             impact: false,
             after: None,
             before: None,
+            tags: vec![],
         }
     }
 }
@@ -164,6 +170,16 @@ pub fn ask(
             Some(b) => hits.into_iter().filter(|d| d.branch == *b).collect(),
             None => hits,
         }
+    };
+
+    // Tags filter helper: keep only decisions that have at least one matching tag (OR semantics)
+    let tags_filter = |hits: Vec<DecisionHit>| -> Vec<DecisionHit> {
+        if opts.tags.is_empty() {
+            return hits;
+        }
+        hits.into_iter()
+            .filter(|d| d.tags.iter().any(|t| opts.tags.contains(t)))
+            .collect()
     };
 
     let after_ref = opts.after.as_deref();
@@ -263,6 +279,7 @@ pub fn ask(
                                     branch: event.branch.clone(),
                                     ts: event.ts.clone(),
                                     is_active: false,
+                                    tags: dp.tags.unwrap_or_default(),
                                 });
                             }
                         }
@@ -282,6 +299,10 @@ pub fn ask(
             (active, vec![])
         }
     };
+
+    // Apply tags filter (OR semantics) across all code paths
+    let decisions = tags_filter(decisions);
+    let timeline = tags_filter(timeline);
 
     // Collect decision event_ids for evidence chain matching
     let decision_event_ids: Vec<&str> = decisions
@@ -768,6 +789,7 @@ pub fn format_human(result: &AskResult) -> String {
 // ── Internal helpers ─────────────────────────────────────────────────
 
 fn to_decision_hit(row: &DecisionRow) -> DecisionHit {
+    let tags: Vec<String> = serde_json::from_str(&row.tags).unwrap_or_default();
     DecisionHit {
         event_id: row.event_id.clone(),
         key: row.key.clone(),
@@ -777,6 +799,7 @@ fn to_decision_hit(row: &DecisionRow) -> DecisionHit {
         branch: row.branch.clone(),
         ts: row.ts.clone().unwrap_or_default(),
         is_active: row.is_active,
+        tags,
     }
 }
 
@@ -1178,6 +1201,7 @@ mod tests {
                 branch: "main".into(),
                 ts: "2026-02-15".into(),
                 is_active: true,
+                tags: vec![],
             }],
             timeline: vec![],
             related_commits: vec![CommitHit {
@@ -1571,6 +1595,7 @@ mod tests {
                 branch: "main".into(),
                 ts: "2026-02-15".into(),
                 is_active: true,
+                tags: vec![],
             }],
             timeline: vec![],
             related_commits: vec![],

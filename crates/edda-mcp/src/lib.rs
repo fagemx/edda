@@ -276,6 +276,7 @@ impl EddaServer {
             impact: false,
             after: None,
             before: None,
+            tags: vec![],
         };
 
         let result = edda_ask::ask(&ledger, q, &opts, None).map_err(to_mcp_err)?;

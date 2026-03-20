@@ -760,6 +760,8 @@ struct DecisionsQuery {
     after: Option<String>,
     /// ISO 8601 upper bound (inclusive) for temporal filtering.
     before: Option<String>,
+    /// Comma-separated tags to filter by (OR semantics).
+    tags: Option<String>,
 }
 
 /// Validate that a string looks like a valid ISO 8601 / RFC 3339 timestamp.
@@ -786,6 +788,12 @@ async fn get_decisions(
         .as_deref()
         .or(params.context_summary.as_deref())
         .unwrap_or("");
+    let tags: Vec<String> = params
+        .tags
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split(',').map(|t| t.trim().to_string()).collect())
+        .unwrap_or_default();
     let opts = edda_ask::AskOptions {
         limit: params.limit.unwrap_or(20),
         include_superseded: params.all.unwrap_or(false),
@@ -793,6 +801,7 @@ async fn get_decisions(
         impact: false,
         after: params.after,
         before: params.before,
+        tags,
     };
     let result = edda_ask::ask(&ledger, q, &opts, None)?;
     Ok(Json(result))
@@ -875,6 +884,7 @@ async fn post_decisions_batch(
             impact: false,
             after: None,
             before: None,
+            tags: vec![],
         };
 
         match edda_ask::ask(&ledger, q, &opts, None) {
