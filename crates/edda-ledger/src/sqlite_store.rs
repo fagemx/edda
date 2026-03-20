@@ -165,6 +165,26 @@ CREATE INDEX IF NOT EXISTS idx_decisions_active_domain
     ON decisions(is_active, domain) WHERE is_active = TRUE;
 ";
 
+const SCHEMA_V10_SQL: &str = "
+ALTER TABLE decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE decisions ADD COLUMN authority TEXT NOT NULL DEFAULT 'human';
+ALTER TABLE decisions ADD COLUMN affected_paths TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE decisions ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE decisions ADD COLUMN review_after TEXT;
+ALTER TABLE decisions ADD COLUMN reversibility TEXT NOT NULL DEFAULT 'medium';
+
+-- Backfill: sync status from existing is_active boolean
+UPDATE decisions SET status = CASE WHEN is_active = 1 THEN 'active' ELSE 'superseded' END;
+
+-- Indexes for status-based queries
+CREATE INDEX IF NOT EXISTS idx_decisions_status
+    ON decisions(status);
+CREATE INDEX IF NOT EXISTS idx_decisions_status_domain
+    ON decisions(status, domain);
+CREATE INDEX IF NOT EXISTS idx_decisions_affected_paths
+    ON decisions(affected_paths) WHERE affected_paths != '[]';
+";
+
 /// A row from the `decisions` table.
 #[derive(Debug, Clone)]
 pub struct DecisionRow {
@@ -183,6 +203,18 @@ pub struct DecisionRow {
     pub source_project_id: Option<String>,
     /// Source event ID if this decision was imported from another project.
     pub source_event_id: Option<String>,
+    /// Lifecycle status: "proposed", "active", "experimental", "deprecated", "superseded"
+    pub status: String,
+    /// Decision authority: "human", "agent", "system"
+    pub authority: String,
+    /// JSON array of glob patterns for guarded file paths
+    pub affected_paths: String,
+    /// JSON array of tag strings
+    pub tags: String,
+    /// Optional ISO-8601 date for scheduled re-evaluation
+    pub review_after: Option<String>,
+    /// Reversibility level: "easy", "medium", "hard"
+    pub reversibility: String,
 }
 
 /// An entry in a causal chain traversal result.
@@ -402,6 +434,12 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 9 {
             self.migrate_v8_to_v9()?;
+        }
+
+        // Migrate to v10 if needed (decision deepening columns)
+        let current = self.schema_version()?;
+        if current < 10 {
+            self.migrate_v9_to_v10()?;
         }
 
         Ok(())
@@ -677,6 +715,12 @@ impl SqliteStore {
     fn migrate_v8_to_v9(&self) -> anyhow::Result<()> {
         self.conn.execute_batch(SCHEMA_V9_SQL)?;
         self.set_schema_version(9)?;
+        Ok(())
+    }
+
+    fn migrate_v9_to_v10(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V10_SQL)?;
+        self.set_schema_version(10)?;
         Ok(())
     }
 
@@ -1432,7 +1476,8 @@ impl SqliteStore {
         let mut sql = String::from(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
-                    d.scope, d.source_project_id, d.source_event_id
+                    d.scope, d.source_project_id, d.source_event_id,
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.is_active = TRUE",
         );
@@ -1507,7 +1552,8 @@ impl SqliteStore {
         let mut sql = String::from(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
-                    d.scope, d.source_project_id, d.source_event_id
+                    d.scope, d.source_project_id, d.source_event_id,
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.key = ?1",
         );
@@ -1554,7 +1600,8 @@ impl SqliteStore {
         let mut sql = String::from(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
-                    d.scope, d.source_project_id, d.source_event_id
+                    d.scope, d.source_project_id, d.source_event_id,
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.domain = ?1",
         );
@@ -1606,7 +1653,8 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
-                    d.scope, d.source_project_id, d.source_event_id
+                    d.scope, d.source_project_id, d.source_event_id,
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.is_active = TRUE AND d.scope IN ('shared', 'global')
                AND d.source_project_id IS NULL
@@ -1755,7 +1803,8 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
-                    d.scope, d.source_project_id, d.source_event_id
+                    d.scope, d.source_project_id, d.source_event_id,
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.key = ?1 AND d.branch = ?2 AND d.is_active = TRUE
              LIMIT 1",
@@ -1851,7 +1900,8 @@ impl SqliteStore {
             "SELECT dd.source_key, dd.target_key, dd.dep_type, dd.created_event, dd.created_at,
                     d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
-                    d.scope, d.source_project_id, d.source_event_id
+                    d.scope, d.source_project_id, d.source_event_id,
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
              FROM decision_deps dd
              JOIN decisions d ON d.key = dd.source_key AND d.is_active = TRUE
              JOIN events e ON d.event_id = e.event_id
@@ -1878,6 +1928,12 @@ impl SqliteStore {
                 scope: row.get(14)?,
                 source_project_id: row.get(15)?,
                 source_event_id: row.get(16)?,
+                status: row.get(17)?,
+                authority: row.get(18)?,
+                affected_paths: row.get(19)?,
+                tags: row.get(20)?,
+                review_after: row.get(21)?,
+                reversibility: row.get(22)?,
             };
             Ok((dep, decision))
         })?;
@@ -1892,7 +1948,8 @@ impl SqliteStore {
         let mut stmt = self.conn.prepare(
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
-                    d.scope, d.source_project_id, d.source_event_id
+                    d.scope, d.source_project_id, d.source_event_id,
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
              FROM decisions d
              JOIN events e ON d.event_id = e.event_id
              WHERE d.event_id = ?1
@@ -1912,6 +1969,12 @@ impl SqliteStore {
                 scope: row.get(9)?,
                 source_project_id: row.get(10)?,
                 source_event_id: row.get(11)?,
+                status: row.get(12)?,
+                authority: row.get(13)?,
+                affected_paths: row.get(14)?,
+                tags: row.get(15)?,
+                review_after: row.get(16)?,
+                reversibility: row.get(17)?,
             })
         })?;
         match rows.next() {
@@ -1959,6 +2022,7 @@ impl SqliteStore {
             let dep_stmt_sql = "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                         d.supersedes_id, d.is_active, e.ts,
                         d.scope, d.source_project_id, d.source_event_id,
+                        d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility,
                         dd.dep_type
                  FROM decision_deps dd
                  JOIN decisions d ON d.key = dd.source_key
@@ -1979,8 +2043,14 @@ impl SqliteStore {
                     scope: row.get(9)?,
                     source_project_id: row.get(10)?,
                     source_event_id: row.get(11)?,
+                    status: row.get(12)?,
+                    authority: row.get(13)?,
+                    affected_paths: row.get(14)?,
+                    tags: row.get(15)?,
+                    review_after: row.get(16)?,
+                    reversibility: row.get(17)?,
                 };
-                let dep_type: String = row.get(12)?;
+                let dep_type: String = row.get(18)?;
                 Ok((decision, dep_type))
             })?;
             for row in dep_rows {
@@ -2010,7 +2080,8 @@ impl SqliteStore {
             let mut sup_by_stmt = self.conn.prepare(
                 "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                         d.supersedes_id, d.is_active, e.ts,
-                        d.scope, d.source_project_id, d.source_event_id
+                        d.scope, d.source_project_id, d.source_event_id,
+                        d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
                  FROM decisions d
                  JOIN events e ON d.event_id = e.event_id
                  WHERE d.supersedes_id = ?1",
@@ -2029,6 +2100,12 @@ impl SqliteStore {
                     scope: row.get(9)?,
                     source_project_id: row.get(10)?,
                     source_event_id: row.get(11)?,
+                    status: row.get(12)?,
+                    authority: row.get(13)?,
+                    affected_paths: row.get(14)?,
+                    tags: row.get(15)?,
+                    review_after: row.get(16)?,
+                    reversibility: row.get(17)?,
                 })
             })?;
             for row in sup_by_rows {
@@ -2564,6 +2641,12 @@ fn map_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRow> {
         scope: row.get(9)?,
         source_project_id: row.get(10)?,
         source_event_id: row.get(11)?,
+        status: row.get(12)?,
+        authority: row.get(13)?,
+        affected_paths: row.get(14)?,
+        tags: row.get(15)?,
+        review_after: row.get(16)?,
+        reversibility: row.get(17)?,
     })
 }
 
@@ -3705,7 +3788,7 @@ mod tests {
         assert!(tables.contains(&"task_briefs".to_string()));
         assert!(tables.contains(&"device_tokens".to_string()));
         assert!(tables.contains(&"decide_snapshots".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 9);
+        assert_eq!(store.schema_version().unwrap(), 10);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5301,6 +5384,247 @@ mod tests {
             "hot_path_query_performance: avg_all={:.2}ms, avg_domain={:.2}ms",
             avg_ms_all, avg_ms_domain
         );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_schema_v10_fresh_db() {
+        let (dir, store) = tmp_db();
+
+        // Version should be 10
+        assert_eq!(store.schema_version().unwrap(), 10);
+
+        // Verify new columns exist by inserting a test row
+        store
+            .conn
+            .execute(
+                "INSERT INTO events (event_id, ts, event_type, branch, hash, payload)
+                 VALUES ('evt_test', '2026-01-01T00:00:00Z', 'note', 'main', 'h1', '{}')",
+                [],
+            )
+            .unwrap();
+
+        store
+            .conn
+            .execute(
+                "INSERT INTO decisions
+                 (event_id, key, value, reason, domain, branch, is_active, scope,
+                  status, authority, affected_paths, tags, reversibility)
+                 VALUES ('evt_test', 'test.key', 'val', 'reason', 'test', 'main', TRUE, 'local',
+                         'active', 'human', '[\"src/**\"]', '[\"arch\"]', 'medium')",
+                [],
+            )
+            .unwrap();
+
+        // Read back and verify
+        let status: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM decisions WHERE key = 'test.key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "active");
+
+        let paths: String = store
+            .conn
+            .query_row(
+                "SELECT affected_paths FROM decisions WHERE key = 'test.key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(paths, "[\"src/**\"]");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_schema_v9_to_v10_migration() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("edda_sqlite_v10_mig_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+
+        // Phase 1: Create a V9 database manually
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            conn.execute(
+                "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '1')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V2_SQL).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '2')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V3_SQL).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '3')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V4_SQL).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '4')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V5_SQL).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '5')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V6_SQL).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '6')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V7_SQL).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '7')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V8_SQL).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '8')",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V9_SQL).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '9')",
+                [],
+            )
+            .unwrap();
+
+            // Insert test events + decisions (V9 schema — no status/authority columns)
+            conn.execute(
+                "INSERT INTO events (event_id, ts, event_type, branch, hash, payload)
+                 VALUES ('evt_a', '2026-01-01T00:00:00Z', 'note', 'main', 'h1', '{}')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO events (event_id, ts, event_type, branch, hash, payload)
+                 VALUES ('evt_b', '2026-01-02T00:00:00Z', 'note', 'main', 'h2', '{}')",
+                [],
+            )
+            .unwrap();
+
+            conn.execute(
+                "INSERT INTO decisions (event_id, key, value, reason, domain, branch, is_active, scope)
+                 VALUES ('evt_a', 'db.engine', 'sqlite', 'embedded', 'db', 'main', TRUE, 'local')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO decisions (event_id, key, value, reason, domain, branch, is_active, scope)
+                 VALUES ('evt_b', 'old.key', 'old_val', 'deprecated', 'old', 'main', FALSE, 'local')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Phase 2: Reopen — should auto-migrate to V10
+        let store = SqliteStore::open_or_create(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 10);
+
+        // Active decision should have status='active'
+        let status: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM decisions WHERE key = 'db.engine'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "active");
+
+        // Inactive decision should have status='superseded'
+        let status: String = store
+            .conn
+            .query_row(
+                "SELECT status FROM decisions WHERE key = 'old.key'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "superseded");
+
+        // COMPAT-01 invariant check
+        let violations: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM decisions
+                 WHERE (is_active = 1 AND status NOT IN ('active', 'experimental'))
+                    OR (is_active = 0 AND status IN ('active', 'experimental'))",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(violations, 0, "COMPAT-01 violated after migration");
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_v10_backward_compat_is_active_queries() {
+        let (dir, store) = tmp_db();
+
+        // Insert events + decisions directly for unit test isolation
+        store
+            .conn
+            .execute(
+                "INSERT INTO events (event_id, ts, event_type, branch, hash, payload)
+                 VALUES ('evt_c1', '2026-01-01T00:00:00Z', 'note', 'main', 'h1', '{}')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO decisions
+                 (event_id, key, value, reason, domain, branch, is_active, scope, status)
+                 VALUES ('evt_c1', 'compat.test', 'yes', 'test', 'compat', 'main', TRUE, 'local', 'active')",
+                [],
+            )
+            .unwrap();
+
+        // Existing query pattern: WHERE is_active = TRUE
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM decisions WHERE is_active = TRUE AND domain = 'compat'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Existing partial index query pattern
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM decisions WHERE is_active = TRUE AND domain = 'compat' AND branch = 'main'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
