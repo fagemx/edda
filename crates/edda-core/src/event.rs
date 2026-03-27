@@ -1469,7 +1469,9 @@ mod tests {
     }
 
     #[test]
-    fn finalize_returns_error_on_non_finite_float() {
+    fn finalize_coerces_nan_to_null() {
+        // serde_json::json! converts f64::NAN to Value::Null, so finalize
+        // succeeds — NaN never reaches serialization.
         let mut event = Event {
             event_id: "test".into(),
             ts: "2026-01-01T00:00:00Z".into(),
@@ -1484,10 +1486,10 @@ mod tests {
             event_family: None,
             event_level: None,
         };
-        let result = finalize_event(&mut event);
         assert!(
-            result.is_err(),
-            "finalize should return Err for NaN payload"
+            event.payload["value"].is_null(),
+            "NAN should be coerced to null by json! macro"
         );
+        assert!(finalize_event(&mut event).is_ok());
     }
 }
