@@ -298,6 +298,19 @@ pub fn rollup_metrics_by_date(projects: &[ProjectEntry], range: &DateRange) -> R
                 q_entry.1 += 1;
             }
 
+            // Accumulate cost from cycle_telemetry events
+            if event.event_type == "cycle_telemetry" {
+                let cost_val = event
+                    .payload
+                    .get("cost")
+                    .and_then(|c| c.get("total_usd"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                if cost_val > 0.0 {
+                    *cost.entry(date_str.clone()).or_insert(0.0) += cost_val;
+                }
+            }
+
             // Accumulate file edits from session_stats
             let stats = match event.payload.get("session_stats") {
                 Some(s) => s,
