@@ -56,6 +56,33 @@ pub fn finalize_event(event: &mut Event) -> anyhow::Result<()> {
     finalize(event)
 }
 
+/// Build a new event with common fields, finalize it, and return it.
+/// All event constructors should use this to avoid repeating the same boilerplate.
+fn build_event(
+    event_type: &str,
+    branch: &str,
+    parent_hash: Option<&str>,
+    payload: serde_json::Value,
+    refs: Refs,
+) -> anyhow::Result<Event> {
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: event_type.to_string(),
+        branch: branch.to_string(),
+        parent_hash: parent_hash.map(|s| s.to_string()),
+        hash: String::new(),
+        payload,
+        refs,
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+    finalize(&mut event)?;
+    Ok(event)
+}
+
 /// Create a new `note` event.
 pub fn new_note_event(
     branch: &str,
@@ -69,24 +96,7 @@ pub fn new_note_event(
         "text": text,
         "tags": tags,
     });
-
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "note".to_string(),
-        branch: branch.to_string(),
-        parent_hash: parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
-        payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+    build_event("note", branch, parent_hash, payload, Refs::default())
 }
 
 /// Create a new `decision` event (a note event with structured decision payload).
@@ -138,26 +148,13 @@ pub fn new_cmd_event(params: &CmdEventParams<'_>) -> anyhow::Result<Event> {
         blob_refs.push(params.stderr_blob.to_string());
     }
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "cmd".to_string(),
-        branch: params.branch.to_string(),
-        parent_hash: params.parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
+    build_event(
+        "cmd",
+        params.branch,
+        params.parent_hash,
         payload,
-        refs: Refs {
-            blobs: blob_refs,
-            ..Default::default()
-        },
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+        Refs { blobs: blob_refs, ..Default::default() },
+    )
 }
 
 /// Parameters for creating a `commit` event.
@@ -197,26 +194,13 @@ pub fn new_commit_event(params: &mut CommitEventParams<'_>) -> anyhow::Result<Ev
         }
     }
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "commit".to_string(),
-        branch: params.branch.to_string(),
-        parent_hash: params.parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
+    build_event(
+        "commit",
+        params.branch,
+        params.parent_hash,
         payload,
-        refs: Refs {
-            events: event_refs,
-            ..Default::default()
-        },
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+        Refs { events: event_refs, ..Default::default() },
+    )
 }
 
 /// Create a new `rebuild` event.
@@ -233,23 +217,7 @@ pub fn new_rebuild_event(
         "reason": reason,
     });
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "rebuild".to_string(),
-        branch: branch.to_string(),
-        parent_hash: parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
-        payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+    build_event("rebuild", branch, parent_hash, payload, Refs::default())
 }
 
 /// Create a new `branch_create` event.
@@ -268,23 +236,7 @@ pub fn new_branch_create_event(
         "from_event_id": from_event_id.unwrap_or(""),
     });
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "branch_create".to_string(),
-        branch: branch.to_string(),
-        parent_hash: parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
-        payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+    build_event("branch_create", branch, parent_hash, payload, Refs::default())
 }
 
 /// Create a new `branch_switch` event.
@@ -299,23 +251,7 @@ pub fn new_branch_switch_event(
         "to": to,
     });
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "branch_switch".to_string(),
-        branch: branch.to_string(),
-        parent_hash: parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
-        payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+    build_event("branch_switch", branch, parent_hash, payload, Refs::default())
 }
 
 /// Create a new `merge` event.
@@ -334,23 +270,7 @@ pub fn new_merge_event(
         "adopted_commits": adopted_commits,
     });
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "merge".to_string(),
-        branch: branch.to_string(),
-        parent_hash: parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
-        payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+    build_event("merge", branch, parent_hash, payload, Refs::default())
 }
 
 /// Parameters for creating an approval event.
@@ -383,23 +303,7 @@ pub fn new_approval_event(p: &ApprovalEventParams<'_>) -> anyhow::Result<Event> 
         payload["device_id"] = serde_json::Value::String(device_id.to_string());
     }
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "approval".to_string(),
-        branch: p.branch.to_string(),
-        parent_hash: p.parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
-        payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+    build_event("approval", p.branch, p.parent_hash, payload, Refs::default())
 }
 
 /// Parameters for creating an approval_request event.
@@ -427,23 +331,7 @@ pub fn new_approval_request_event(p: &ApprovalRequestParams<'_>) -> anyhow::Resu
         "reason": p.reason,
     });
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "approval_request".to_string(),
-        branch: p.branch.to_string(),
-        parent_hash: p.parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
-        payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+    build_event("approval_request", p.branch, p.parent_hash, payload, Refs::default())
 }
 
 /// Parameters for creating a `task_intake` event.
@@ -473,23 +361,13 @@ pub fn new_task_intake_event(params: &TaskIntakeParams) -> anyhow::Result<Event>
         "constraints": params.constraints,
     });
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "task_intake".to_string(),
-        branch: params.branch.clone(),
-        parent_hash: params.parent_hash.clone(),
-        hash: String::new(),
+    build_event(
+        "task_intake",
+        &params.branch,
+        params.parent_hash.as_deref(),
         payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+        Refs::default(),
+    )
 }
 
 /// Parameters for creating an agent_phase_change event.
@@ -521,23 +399,7 @@ pub fn new_agent_phase_change_event(p: &AgentPhaseChangeParams<'_>) -> anyhow::R
         payload["issue"] = serde_json::json!(issue);
     }
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "agent_phase_change".to_string(),
-        branch: p.branch.to_string(),
-        parent_hash: p.parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
-        payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+    build_event("agent_phase_change", p.branch, p.parent_hash, payload, Refs::default())
 }
 
 /// Parameters for creating a `review_bundle` event.
@@ -551,23 +413,13 @@ pub struct ReviewBundleParams {
 pub fn new_review_bundle_event(params: &ReviewBundleParams) -> anyhow::Result<Event> {
     let payload = serde_json::to_value(&params.bundle)?;
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "review_bundle".to_string(),
-        branch: params.branch.clone(),
-        parent_hash: params.parent_hash.clone(),
-        hash: String::new(),
+    build_event(
+        "review_bundle",
+        &params.branch,
+        params.parent_hash.as_deref(),
         payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+        Refs::default(),
+    )
 }
 
 /// Parameters for creating a `pr` event.
@@ -600,23 +452,13 @@ pub fn new_pr_event(params: &PrEventParams) -> anyhow::Result<Event> {
         "title": params.title,
     });
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "pr".to_string(),
-        branch: params.branch.clone(),
-        parent_hash: params.parent_hash.clone(),
-        hash: String::new(),
+    build_event(
+        "pr",
+        &params.branch,
+        params.parent_hash.as_deref(),
         payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+        Refs::default(),
+    )
 }
 
 /// Create a new `execution_event` for Karvi execution events.
@@ -677,26 +519,13 @@ pub fn new_snapshot_event(
     payload: serde_json::Value,
     blob_refs: Vec<String>,
 ) -> anyhow::Result<Event> {
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "decide_snapshot".to_string(),
-        branch: branch.to_string(),
-        parent_hash: parent_hash.map(|s| s.to_string()),
-        hash: String::new(),
+    build_event(
+        "decide_snapshot",
+        branch,
+        parent_hash,
         payload,
-        refs: Refs {
-            blobs: blob_refs,
-            ..Default::default()
-        },
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+        Refs { blobs: blob_refs, ..Default::default() },
+    )
 }
 
 /// Parameters for creating an `approval_policy_match` event.
@@ -734,23 +563,13 @@ pub fn new_approval_policy_match_event(
         payload["files_changed"] = serde_json::json!(fc);
     }
 
-    let mut event = Event {
-        event_id: new_event_id(),
-        ts: now_rfc3339(),
-        event_type: "approval_policy_match".to_string(),
-        branch: params.branch.clone(),
-        parent_hash: params.parent_hash.clone(),
-        hash: String::new(),
+    build_event(
+        "approval_policy_match",
+        &params.branch,
+        params.parent_hash.as_deref(),
         payload,
-        refs: Refs::default(),
-        schema_version: SCHEMA_VERSION,
-        digests: Vec::new(),
-        event_family: None,
-        event_level: None,
-    };
-
-    finalize(&mut event)?;
-    Ok(event)
+        Refs::default(),
+    )
 }
 
 #[cfg(test)]
