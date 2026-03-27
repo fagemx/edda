@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Context;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -35,7 +34,7 @@ struct ActorsListResponse {
 async fn get_actors(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ActorsListResponse>, AppError> {
-    let ledger = state.open_ledger().context("GET /api/actors")?;
+    let ledger = state.open_ledger()?;
     let cfg = policy::load_actors_from_dir(&ledger.paths.edda_dir)?;
     let actors = cfg
         .actors
@@ -58,7 +57,7 @@ async fn get_actor(
     State(state): State<Arc<AppState>>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<ActorResponse>, AppError> {
-    let ledger = state.open_ledger().context("GET /api/actors/:name")?;
+    let ledger = state.open_ledger()?;
     let cfg = policy::load_actors_from_dir(&ledger.paths.edda_dir)?;
     match cfg.actors.get(&name) {
         Some(def) => Ok(Json(ActorResponse {
@@ -90,7 +89,7 @@ async fn get_briefs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<BriefsQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let ledger = state.open_ledger().context("GET /api/briefs")?;
+    let ledger = state.open_ledger()?;
     let briefs = ledger.list_task_briefs(params.status.as_deref(), params.intent.as_deref())?;
 
     let items: Vec<serde_json::Value> = briefs
@@ -125,7 +124,7 @@ async fn get_brief(
     State(state): State<Arc<AppState>>,
     AxumPath(task_id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let ledger = state.open_ledger().context("GET /api/briefs/:task_id")?;
+    let ledger = state.open_ledger()?;
     let brief = ledger
         .get_task_brief(&task_id)?
         .ok_or_else(|| AppError::NotFound(format!("task brief not found: {task_id}")))?;

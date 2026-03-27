@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Context;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::routing::{get, post};
@@ -34,7 +33,7 @@ async fn get_quality_metrics(
         after: params.after,
         before: params.before,
     };
-    let ledger = state.open_ledger().context("GET /api/metrics/quality")?;
+    let ledger = state.open_ledger()?;
     let events = ledger.iter_events_by_type("execution_event")?;
     let report = model_quality_from_events(&events, &range);
     Ok(Json(report))
@@ -63,9 +62,7 @@ async fn get_controls_suggestions(
         after: params.after,
         before: params.before,
     };
-    let ledger = state
-        .open_ledger()
-        .context("GET /api/controls/suggestions")?;
+    let ledger = state.open_ledger()?;
     let events = ledger.iter_events_by_type("execution_event")?;
     let report = model_quality_from_events(&events, &range);
 
@@ -170,7 +167,9 @@ async fn get_metrics_overview(
     Query(params): Query<MetricsOverviewQuery>,
 ) -> Result<Json<MetricsOverviewResponse>, AppError> {
     if state.chronicle.is_none() {
-        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+        return Err(AppError::NotImplemented(
+            "chronicle feature not enabled".into(),
+        ));
     }
 
     let all_projects = list_projects();
@@ -268,7 +267,9 @@ async fn get_metrics_trends(
     Query(params): Query<TrendsQuery>,
 ) -> Result<Json<TrendsResponse>, AppError> {
     if state.chronicle.is_none() {
-        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+        return Err(AppError::NotImplemented(
+            "chronicle feature not enabled".into(),
+        ));
     }
 
     let all_projects = list_projects();

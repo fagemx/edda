@@ -29,7 +29,7 @@ pub(crate) struct ChronicleContext {
 }
 
 impl AppState {
-    pub(crate) fn open_ledger(&self) -> anyhow::Result<Ledger> {
-        Ledger::open(&self.repo_root)
+    pub(crate) fn open_ledger(&self) -> Result<Ledger, crate::error::AppError> {
+        Ledger::open(&self.repo_root).map_err(crate::error::classify_open_error)
     }
 }

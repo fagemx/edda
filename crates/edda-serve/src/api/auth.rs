@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
@@ -126,7 +125,7 @@ async fn complete_pairing(
     let event_id = format!("evt_{}", ulid::Ulid::new());
 
     // Write device_pair event to ledger
-    let ledger = state.open_ledger().context("GET /pair")?;
+    let ledger = state.open_ledger()?;
     let branch = ledger.head_branch()?;
 
     let payload = serde_json::json!({
@@ -183,7 +182,7 @@ struct DeviceInfo {
 async fn list_paired_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<DeviceInfo>>, AppError> {
-    let ledger = state.open_ledger().context("GET /api/pair/list")?;
+    let ledger = state.open_ledger()?;
     let tokens = ledger.list_device_tokens()?;
 
     let devices: Vec<DeviceInfo> = tokens
@@ -215,7 +214,7 @@ async fn revoke_device(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let Json(req) = body.map_err(|e| AppError::Validation(e.to_string()))?;
 
-    let ledger = state.open_ledger().context("POST /api/pair/revoke")?;
+    let ledger = state.open_ledger()?;
 
     // Check the token exists *before* writing the ledger event
     let existing = ledger.list_device_tokens()?;
@@ -273,7 +272,7 @@ async fn revoke_all_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let event_id = format!("evt_{}", ulid::Ulid::new());
-    let ledger = state.open_ledger().context("POST /api/pair/revoke-all")?;
+    let ledger = state.open_ledger()?;
     let branch = ledger.head_branch()?;
 
     let now = time::OffsetDateTime::now_utc();

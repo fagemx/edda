@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
-use anyhow::Context;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use edda_core::policy;
-use edda_ledger::Ledger;
 
 use crate::error::AppError;
 use crate::state::AppState;
@@ -208,7 +206,7 @@ async fn post_approval_check(
 
     // Build ReviewBundle from request or from ledger
     let bundle = if let Some(bundle_id) = &body.bundle_id {
-        let ledger = Ledger::open(&state.repo_root).context("POST /api/approval/check")?;
+        let ledger = state.open_ledger()?;
         let Some(row) = ledger.get_bundle(bundle_id)? else {
             return Err(AppError::NotFound(format!(
                 "Bundle '{}' not found",

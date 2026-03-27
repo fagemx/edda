@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Context;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -82,7 +81,7 @@ struct MinimalStage {
 }
 
 async fn get_drafts(State(state): State<Arc<AppState>>) -> Result<Json<DraftsResponse>, AppError> {
-    let ledger = state.open_ledger().context("GET /api/drafts")?;
+    let ledger = state.open_ledger()?;
     let drafts_dir = &ledger.paths.drafts_dir;
 
     if !drafts_dir.exists() {
@@ -280,7 +279,7 @@ async fn handle_draft_action(
     action: &str,
     body: &ApproveRequest,
 ) -> Result<Response, AppError> {
-    let ledger = state.open_ledger().context("POST /api/drafts/:id/action")?;
+    let ledger = state.open_ledger()?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     // Read the draft

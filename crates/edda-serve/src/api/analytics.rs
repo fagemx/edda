@@ -85,7 +85,9 @@ async fn get_recap(
     Query(params): Query<RecapQuery>,
 ) -> Result<Json<RecapResponse>, AppError> {
     if state.chronicle.is_none() {
-        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+        return Err(AppError::NotImplemented(
+            "chronicle feature not enabled".into(),
+        ));
     }
 
     let anchor = if let Some(ref project) = params.project {
@@ -149,7 +151,9 @@ async fn get_recap_cached(
     Query(params): Query<RecapCachedQuery>,
 ) -> Result<Json<RecapResponse>, AppError> {
     if state.chronicle.is_none() {
-        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+        return Err(AppError::NotImplemented(
+            "chronicle feature not enabled".into(),
+        ));
     }
 
     let anchor = if let Some(ref project) = params.project {
@@ -221,7 +225,9 @@ async fn get_overview(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<OverviewResponse>, AppError> {
     if state.chronicle.is_none() {
-        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+        return Err(AppError::NotImplemented(
+            "chronicle feature not enabled".into(),
+        ));
     }
 
     let projects = list_projects();
@@ -293,7 +299,9 @@ async fn get_projects(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ProjectsResponse>, AppError> {
     if state.chronicle.is_none() {
-        return Err(anyhow::anyhow!("chronicle feature not enabled").into());
+        return Err(AppError::NotImplemented(
+            "chronicle feature not enabled".into(),
+        ));
     }
 
     let projects = list_projects();

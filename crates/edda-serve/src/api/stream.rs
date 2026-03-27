@@ -2,7 +2,6 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event as SseEvent, KeepAlive};
@@ -71,7 +70,7 @@ async fn get_event_stream(
 
     // Resolve the initial cursor (rowid) from `since` event_id.
     let mut cursor: i64 = if let Some(ref event_id) = since {
-        let ledger = state.open_ledger().context("GET /api/events/stream")?;
+        let ledger = state.open_ledger()?;
         ledger.rowid_for_event_id(event_id)?.unwrap_or(0)
     } else {
         0

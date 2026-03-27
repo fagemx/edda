@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Context;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
@@ -40,7 +39,7 @@ struct LastCommit {
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> Result<Json<StatusResponse>, AppError> {
-    let ledger = state.open_ledger().context("GET /api/status")?;
+    let ledger = state.open_ledger()?;
     let head = ledger.head_branch()?;
     let snap = rebuild_branch(&ledger, &head)?;
 
@@ -73,7 +72,7 @@ async fn get_context(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ContextQuery>,
 ) -> Result<Json<ContextResponse>, AppError> {
-    let ledger = state.open_ledger().context("GET /api/context")?;
+    let ledger = state.open_ledger()?;
     let head = ledger.head_branch()?;
     let depth = params.depth.unwrap_or(5);
     let text = render_context(&ledger, &head, DeriveOptions { depth })?;
@@ -110,7 +109,7 @@ async fn get_decisions(
         crate::helpers::validate_iso8601(before).map_err(AppError::Validation)?;
     }
 
-    let ledger = state.open_ledger().context("GET /api/decisions")?;
+    let ledger = state.open_ledger()?;
     let q = params
         .q
         .as_deref()
@@ -195,7 +194,7 @@ async fn post_decisions_batch(
         ));
     }
 
-    let ledger = state.open_ledger().context("POST /api/decisions/batch")?;
+    let ledger = state.open_ledger()?;
     let mut results = Vec::with_capacity(body.queries.len());
 
     for (i, sub) in body.queries.iter().enumerate() {
@@ -264,9 +263,7 @@ async fn get_decision_outcomes(
     State(state): State<Arc<AppState>>,
     AxumPath(event_id): AxumPath<String>,
 ) -> Result<Response, AppError> {
-    let ledger = state
-        .open_ledger()
-        .context("GET /api/decisions/:id/outcomes")?;
+    let ledger = state.open_ledger()?;
     let outcomes = ledger.decision_outcomes(&event_id)?;
 
     match outcomes {
@@ -321,9 +318,7 @@ async fn get_decision_chain(
     Query(params): Query<ChainQuery>,
 ) -> Result<Json<ChainResponse>, AppError> {
     let depth = params.depth.unwrap_or(3).min(10);
-    let ledger = state
-        .open_ledger()
-        .context("GET /api/decisions/:id/chain")?;
+    let ledger = state.open_ledger()?;
 
     let (root, chain) = ledger
         .causal_chain(&event_id, depth)?
@@ -397,7 +392,7 @@ async fn get_log(
     State(state): State<Arc<AppState>>,
     Query(params): Query<LogQuery>,
 ) -> Result<Json<LogResponse>, AppError> {
-    let ledger = state.open_ledger().context("GET /api/log")?;
+    let ledger = state.open_ledger()?;
     let head = ledger.head_branch()?;
     let limit = params.limit.unwrap_or(50);
 
@@ -463,7 +458,7 @@ async fn post_note(
 ) -> Result<impl IntoResponse, AppError> {
     let Json(body) = body.map_err(|e| AppError::Validation(e.body_text()))?;
 
-    let ledger = state.open_ledger().context("POST /api/note")?;
+    let ledger = state.open_ledger()?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let branch = ledger.head_branch()?;
@@ -511,7 +506,7 @@ async fn post_decide(
     let key = key.trim();
     let value = value.trim();
 
-    let ledger = state.open_ledger().context("POST /api/decide")?;
+    let ledger = state.open_ledger()?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let branch = ledger.head_branch()?;
@@ -633,7 +628,7 @@ async fn post_karvi_event(
         "decision_ref": body.decision_ref,
     });
 
-    let ledger = state.open_ledger().context("POST /api/events/karvi")?;
+    let ledger = state.open_ledger()?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;

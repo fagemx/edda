@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Context;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
@@ -63,7 +62,7 @@ async fn post_snapshot(
         ));
     }
 
-    let ledger = state.open_ledger().context("POST /api/snapshot")?;
+    let ledger = state.open_ledger()?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let branch = ledger.head_branch()?;
@@ -165,7 +164,7 @@ async fn get_snapshots(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SnapshotsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ledger = state.open_ledger().context("GET /api/snapshots")?;
+    let ledger = state.open_ledger()?;
     let rows = ledger.query_snapshots(
         query.village_id.as_deref(),
         query.engine_version.as_deref(),
@@ -187,7 +186,7 @@ async fn get_snapshots_by_hash(
     State(state): State<Arc<AppState>>,
     AxumPath(context_hash): AxumPath<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ledger = state.open_ledger().context("GET /api/snapshots/:hash")?;
+    let ledger = state.open_ledger()?;
     let rows = ledger.snapshots_by_context_hash(&context_hash)?;
 
     if rows.is_empty() {
@@ -227,7 +226,7 @@ async fn get_village_stats(
         crate::helpers::validate_iso8601(before).map_err(AppError::Validation)?;
     }
 
-    let ledger = state.open_ledger().context("GET /api/villages/:id/stats")?;
+    let ledger = state.open_ledger()?;
     let stats = ledger.village_stats(
         &village_id,
         params.after.as_deref(),
@@ -268,7 +267,7 @@ async fn get_patterns(
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
 
-    let ledger = state.open_ledger().context("GET /api/patterns")?;
+    let ledger = state.open_ledger()?;
     let patterns = ledger.detect_village_patterns(village_id, &after_str, min_occurrences)?;
     let total = patterns.len();
 
@@ -288,7 +287,7 @@ fn reconstruct_snapshot(
 ) -> Result<serde_json::Value, AppError> {
     let event = ledger
         .get_event(&row.event_id)?
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("event {} not found", row.event_id)))?;
+        .ok_or_else(|| AppError::NotFound(format!("event {} not found", row.event_id)))?;
 
     let payload = &event.payload;
 
