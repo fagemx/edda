@@ -928,6 +928,7 @@ fn post_tool_use_after_decide_cooldown_still_applies() {
 fn post_tool_use_cooldown_suppresses() {
     let pid = "test_nudge_cooldown";
     let sid = "sess-nudge-3";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
 
     // First commit → nudge
@@ -1046,6 +1047,7 @@ fn counter_increment_and_read() {
 fn post_tool_use_increments_nudge_counter() {
     let pid = "test_nudge_counter";
     let sid = "sess-nudge-cnt-1";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
 
     // First commit → nudge emitted → counter = 1
@@ -1080,6 +1082,7 @@ fn post_tool_use_increments_nudge_counter() {
 fn post_tool_use_increments_decide_counter() {
     let pid = "test_decide_counter";
     let sid = "sess-decide-cnt-1";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
 
     let raw = serde_json::json!({
