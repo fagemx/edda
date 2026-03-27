@@ -13,7 +13,6 @@ pub mod types;
 mod village;
 
 pub use types::*;
-pub use village::detect_trend_direction;
 
 use rusqlite::Connection;
 use std::path::Path;
@@ -28,7 +27,7 @@ fn status_to_is_active(status: &str) -> bool {
 
 /// SQLite-backed storage engine.
 pub struct SqliteStore {
-    pub(crate) conn: Connection,
+    conn: Connection,
 }
 
 impl SqliteStore {

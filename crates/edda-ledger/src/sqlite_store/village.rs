@@ -305,7 +305,7 @@ impl SqliteStore {
 /// Sorts dates and splits at the midpoint index. Returns `true` only if the
 /// second half has strictly more occurrences than the first half AND dates are
 /// not all identical (a burst on one day is not a trend).
-pub fn detect_trend_direction(dates: &[String], _after: &str) -> bool {
+pub(super) fn detect_trend_direction(dates: &[String], _after: &str) -> bool {
     if dates.len() < 2 {
         return false;
     }
