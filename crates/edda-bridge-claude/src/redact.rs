@@ -30,6 +30,21 @@ static SECRET_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| 
             Regex::new(r"(?i)(Bearer\s+)[a-zA-Z0-9._\-]{20,}").expect("static regex"),
             "${1}[REDACTED_BEARER]",
         ),
+        // Slack tokens: xoxb-, xoxp-, xoxs-
+        (
+            Regex::new(r"\b(xox[bps]-[A-Za-z0-9\-]{10,})").expect("static regex"),
+            "[REDACTED_SLACK_TOKEN]",
+        ),
+        // Stripe keys: sk_live_, pk_live_, rk_live_
+        (
+            Regex::new(r"\b((?:sk|pk|rk)_live_[A-Za-z0-9]{10,})").expect("static regex"),
+            "[REDACTED_STRIPE_KEY]",
+        ),
+        // npm tokens: npm_
+        (
+            Regex::new(r"\b(npm_[A-Za-z0-9]{10,})").expect("static regex"),
+            "[REDACTED_NPM_TOKEN]",
+        ),
         // Shell export of sensitive env vars
         (
             Regex::new(r#"(?mi)^(export\s+\w*(?:KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)\w*\s*=\s*)\S+"#).expect("static regex"),
@@ -197,5 +212,61 @@ mod tests {
         let output = redact_secrets(input);
         assert!(!output.contains("sk-aaaa"));
         assert!(!output.contains("ghp_CCCC"));
+    }
+
+    #[test]
+    fn redact_slack_bot_token() {
+        let input = "SLACK_TOKEN=xoxb-1234567890-abcdefghij";
+        let output = redact_secrets(input);
+        assert!(output.contains("[REDACTED_SLACK_TOKEN]"));
+        assert!(!output.contains("xoxb-"));
+    }
+
+    #[test]
+    fn redact_slack_user_token() {
+        let input = "token: xoxp-9876543210-zyxwvutsrq";
+        let output = redact_secrets(input);
+        assert!(output.contains("[REDACTED_SLACK_TOKEN]"));
+        assert!(!output.contains("xoxp-"));
+    }
+
+    #[test]
+    fn redact_slack_session_token() {
+        let input = "session: xoxs-abcdef1234-567890ghij";
+        let output = redact_secrets(input);
+        assert!(output.contains("[REDACTED_SLACK_TOKEN]"));
+        assert!(!output.contains("xoxs-"));
+    }
+
+    #[test]
+    fn redact_stripe_secret_key() {
+        let input = "STRIPE_KEY=sk_live_abcdefghij1234567890";
+        let output = redact_secrets(input);
+        assert!(output.contains("[REDACTED_STRIPE_KEY]"));
+        assert!(!output.contains("sk_live_"));
+    }
+
+    #[test]
+    fn redact_stripe_publishable_key() {
+        let input = "key: pk_live_abcdefghij1234567890";
+        let output = redact_secrets(input);
+        assert!(output.contains("[REDACTED_STRIPE_KEY]"));
+        assert!(!output.contains("pk_live_"));
+    }
+
+    #[test]
+    fn redact_stripe_restricted_key() {
+        let input = "restricted: rk_live_abcdefghij1234567890";
+        let output = redact_secrets(input);
+        assert!(output.contains("[REDACTED_STRIPE_KEY]"));
+        assert!(!output.contains("rk_live_"));
+    }
+
+    #[test]
+    fn redact_npm_token() {
+        let input = "//registry.npmjs.org/:_authToken=npm_abcdefghij1234567890";
+        let output = redact_secrets(input);
+        assert!(output.contains("[REDACTED_NPM_TOKEN]"));
+        assert!(!output.contains("npm_abcdefghij"));
     }
 }
