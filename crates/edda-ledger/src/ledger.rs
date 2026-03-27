@@ -386,10 +386,7 @@ impl Ledger {
     }
 
     /// Insert an imported decision from another project.
-    pub fn insert_imported_decision(
-        &self,
-        params: crate::ImportParams<'_>,
-    ) -> anyhow::Result<()> {
+    pub fn insert_imported_decision(&self, params: crate::ImportParams<'_>) -> anyhow::Result<()> {
         self.sqlite
             .insert_imported_decision(params)
             .context("Ledger::insert_imported_decision")
@@ -411,14 +408,14 @@ impl Ledger {
     }
 
     /// What does `key` depend on?
-    pub fn deps_of(&self, key: &str) -> anyhow::Result<Vec<crate::sqlite_store::DepRow>> {
+    pub fn deps_of(&self, key: &str) -> anyhow::Result<Vec<crate::DependencyEdge>> {
         self.sqlite
             .deps_of(key)
             .with_context(|| format!("Ledger::deps_of({key})"))
     }
 
     /// Who depends on `key`?
-    pub fn dependents_of(&self, key: &str) -> anyhow::Result<Vec<crate::sqlite_store::DepRow>> {
+    pub fn dependents_of(&self, key: &str) -> anyhow::Result<Vec<crate::DependencyEdge>> {
         self.sqlite
             .dependents_of(key)
             .with_context(|| format!("Ledger::dependents_of({key})"))
@@ -428,7 +425,7 @@ impl Ledger {
     pub fn active_dependents_of(
         &self,
         key: &str,
-    ) -> anyhow::Result<Vec<(crate::sqlite_store::DepRow, DecisionView)>> {
+    ) -> anyhow::Result<Vec<(crate::DependencyEdge, DecisionView)>> {
         let rows = self
             .sqlite
             .active_dependents_of(key)
@@ -462,12 +459,12 @@ impl Ledger {
     }
 
     /// Transitive dependents of `key` via BFS, up to `max_depth` hops.
-    /// Returns `(DepRow, DecisionView, depth)` — only active decisions, deduplicated.
+    /// Returns `(DependencyEdge, DecisionView, depth)` — only active decisions, deduplicated.
     pub fn transitive_dependents_of(
         &self,
         key: &str,
         max_depth: usize,
-    ) -> anyhow::Result<Vec<(crate::sqlite_store::DepRow, DecisionView, usize)>> {
+    ) -> anyhow::Result<Vec<(crate::DependencyEdge, DecisionView, usize)>> {
         let rows = self
             .sqlite
             .transitive_dependents_of(key, max_depth)
@@ -481,10 +478,7 @@ impl Ledger {
     // ── Causal Chain ─────────────────────────────────────────────────
 
     /// Look up a single decision by event_id.
-    pub fn get_decision_by_event_id(
-        &self,
-        event_id: &str,
-    ) -> anyhow::Result<Option<DecisionView>> {
+    pub fn get_decision_by_event_id(&self, event_id: &str) -> anyhow::Result<Option<DecisionView>> {
         let row = self
             .sqlite
             .get_decision_by_event_id(event_id)
@@ -519,10 +513,7 @@ impl Ledger {
     // ── Task Briefs ──────────────────────────────────────────────────
 
     /// Get a task brief by task_id.
-    pub fn get_task_brief(
-        &self,
-        task_id: &str,
-    ) -> anyhow::Result<Option<crate::TaskBriefRow>> {
+    pub fn get_task_brief(&self, task_id: &str) -> anyhow::Result<Option<crate::TaskBriefRow>> {
         self.sqlite
             .get_task_brief(task_id)
             .with_context(|| format!("Ledger::get_task_brief({task_id})"))
@@ -558,10 +549,7 @@ impl Ledger {
     // ── Device Tokens ───────────────────────────────────────────────
 
     /// Insert a new device token row.
-    pub fn insert_device_token(
-        &self,
-        row: &crate::DeviceTokenRow,
-    ) -> anyhow::Result<()> {
+    pub fn insert_device_token(&self, row: &crate::DeviceTokenRow) -> anyhow::Result<()> {
         self.sqlite
             .insert_device_token(row)
             .context("Ledger::insert_device_token")
@@ -605,10 +593,7 @@ impl Ledger {
     // ── Decide Snapshots ────────────────────────────────────────────
 
     /// Insert a row into the `decide_snapshots` materialized view.
-    pub fn insert_snapshot(
-        &self,
-        row: &crate::DecideSnapshotRow,
-    ) -> anyhow::Result<()> {
+    pub fn insert_snapshot(&self, row: &crate::DecideSnapshotRow) -> anyhow::Result<()> {
         self.sqlite
             .insert_snapshot(row)
             .context("Ledger::insert_snapshot")
@@ -639,10 +624,7 @@ impl Ledger {
     // ── Suggestions ──────────────────────────────────────────────────
 
     /// Insert a new suggestion row.
-    pub fn insert_suggestion(
-        &self,
-        row: &crate::SuggestionRow,
-    ) -> anyhow::Result<()> {
+    pub fn insert_suggestion(&self, row: &crate::SuggestionRow) -> anyhow::Result<()> {
         self.sqlite
             .insert_suggestion(row)
             .context("Ledger::insert_suggestion")
@@ -659,10 +641,7 @@ impl Ledger {
     }
 
     /// Get a single suggestion by id.
-    pub fn get_suggestion(
-        &self,
-        id: &str,
-    ) -> anyhow::Result<Option<crate::SuggestionRow>> {
+    pub fn get_suggestion(&self, id: &str) -> anyhow::Result<Option<crate::SuggestionRow>> {
         self.sqlite
             .get_suggestion(id)
             .with_context(|| format!("Ledger::get_suggestion({id})"))
