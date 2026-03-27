@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::read_workspace_config_bool;
+use crate::render;
 
 // ── Active Plan ──
 
@@ -139,7 +139,7 @@ pub(super) fn run_auto_digest(
     // Check if auto_digest is enabled (default: true)
     let enabled = match std::env::var("EDDA_BRIDGE_AUTO_DIGEST") {
         Ok(val) => val != "0",
-        Err(_) => read_workspace_config_bool(cwd, "bridge.auto_digest").unwrap_or(true),
+        Err(_) => render::config_bool(cwd, "bridge.auto_digest").unwrap_or(true),
     };
     if !enabled {
         return None;
@@ -152,7 +152,7 @@ pub(super) fn run_auto_digest(
 
     let digest_failed_cmds = match std::env::var("EDDA_BRIDGE_DIGEST_FAILED_CMDS") {
         Ok(val) => val != "0",
-        Err(_) => read_workspace_config_bool(cwd, "bridge.digest_failed_cmds").unwrap_or(true),
+        Err(_) => render::config_bool(cwd, "bridge.digest_failed_cmds").unwrap_or(true),
     };
 
     match crate::digest::digest_previous_sessions_with_opts(

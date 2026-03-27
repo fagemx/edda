@@ -9,10 +9,9 @@ use crate::parse::*;
 use super::events::{
     is_karvi_project, try_post_karvi_signal, try_write_commit_event, try_write_merge_event,
 };
-use super::{
-    increment_counter, mark_nudge_sent, read_counter, read_peer_count, read_workspace_config_bool,
-    should_nudge, wrap_context_boundary, HookResult,
-};
+use crate::state;
+
+use super::{wrap_context_boundary, HookResult};
 
 pub(super) fn dispatch_pre_tool_use(
     raw: &serde_json::Value,
@@ -60,7 +59,7 @@ pub(super) fn dispatch_pre_tool_use(
     // ── Off-limits enforcement: block Edit/Write on peer-claimed files ──
     let enforce_offlimits = match std::env::var("EDDA_ENFORCE_OFFLIMITS") {
         Ok(val) => val == "1",
-        Err(_) => read_workspace_config_bool(cwd, "bridge.enforce_offlimits").unwrap_or(false),
+        Err(_) => crate::render::config_bool(cwd, "bridge.enforce_offlimits").unwrap_or(false),
     };
     if enforce_offlimits {
         let tool_name_ol = get_str(raw, "tool_name");
@@ -175,12 +174,12 @@ pub(super) fn dispatch_pre_tool_use(
 /// Skips all I/O for solo sessions (no peers).
 pub(super) fn check_pending_requests(project_id: &str, session_id: &str) -> Option<String> {
     // Solo gate: skip counter I/O entirely when no peers are active.
-    if read_peer_count(project_id, session_id) == 0 {
+    if state::read_peer_count(project_id, session_id) == 0 {
         return None;
     }
 
-    let counter = read_counter(project_id, session_id, "request_nudge_count");
-    increment_counter(project_id, session_id, "request_nudge_count");
+    let counter = state::read_counter(project_id, session_id, "request_nudge_count");
+    state::increment_counter(project_id, session_id, "request_nudge_count");
     if !counter.is_multiple_of(3) {
         return None;
     }
@@ -207,7 +206,7 @@ pub(super) fn check_offlimits(
     file_path: &str,
 ) -> Option<(String, String)> {
     // Solo gate: skip when no peers are active.
-    if read_peer_count(project_id, session_id) == 0 {
+    if state::read_peer_count(project_id, session_id) == 0 {
         return None;
     }
 
@@ -339,7 +338,7 @@ pub(super) fn dispatch_post_tool_use(
     };
 
     // Count every detected signal (including SelfRecord and cooldown-suppressed ones).
-    increment_counter(project_id, session_id, "signal_count");
+    state::increment_counter(project_id, session_id, "signal_count");
 
     // Auto-write events to workspace ledger (best-effort, try-lock).
     match &signal {
@@ -358,19 +357,19 @@ pub(super) fn dispatch_post_tool_use(
     // Agent is recording a decision → increment counter, but do NOT suppress future nudges.
     // This allows the agent to receive nudges for subsequent signals after cooldown.
     if signal == crate::nudge::NudgeSignal::SelfRecord {
-        increment_counter(project_id, session_id, "decide_count");
+        state::increment_counter(project_id, session_id, "decide_count");
         return Ok(HookResult::empty());
     }
 
     // Check cooldown
-    if !should_nudge(project_id, session_id) {
+    if !state::should_nudge(project_id, session_id) {
         return Ok(HookResult::empty());
     }
 
-    let decide_count = read_counter(project_id, session_id, "decide_count");
+    let decide_count = state::read_counter(project_id, session_id, "decide_count");
     let nudge_text = crate::nudge::format_nudge(&signal, decide_count);
-    mark_nudge_sent(project_id, session_id);
-    increment_counter(project_id, session_id, "nudge_count");
+    state::mark_nudge_sent(project_id, session_id);
+    state::increment_counter(project_id, session_id, "nudge_count");
 
     let wrapped = wrap_context_boundary(&nudge_text);
     let output = serde_json::json!({
@@ -511,7 +510,7 @@ pub(super) fn match_tool_patterns(raw: &serde_json::Value, cwd: &str) -> Option<
     // Check if patterns feature is enabled
     let enabled = match std::env::var("EDDA_PATTERNS_ENABLED") {
         Ok(val) => val == "1",
-        Err(_) => read_workspace_config_bool(cwd, "patterns_enabled").unwrap_or(false),
+        Err(_) => crate::render::config_bool(cwd, "patterns_enabled").unwrap_or(false),
     };
     if !enabled {
         return None;
