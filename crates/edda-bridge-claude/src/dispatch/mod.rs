@@ -215,7 +215,7 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
             // Also set compact_pending flag so the next UserPromptSubmit
             // re-ingests (keeping state fresh) instead of lightweight workspace-only.
             ingest_and_build_pack(&project_id, &session_id, &transcript_path, &cwd);
-            set_compact_pending(&project_id);
+            state::set_compact_pending(&project_id);
             Ok(HookResult::empty())
         }
         "SessionEnd" => {
@@ -316,53 +316,6 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
         _ => Ok(HookResult::empty()),
     }
 }
-// ── State Management (delegates to state module) ──
-
-fn set_compact_pending(project_id: &str) {
-    state::set_compact_pending(project_id);
-}
-
-fn take_compact_pending(project_id: &str) -> bool {
-    state::take_compact_pending(project_id)
-}
-
-fn should_nudge(project_id: &str, session_id: &str) -> bool {
-    state::should_nudge(project_id, session_id)
-}
-
-fn mark_nudge_sent(project_id: &str, session_id: &str) {
-    state::mark_nudge_sent(project_id, session_id);
-}
-
-fn increment_counter(project_id: &str, session_id: &str, name: &str) {
-    state::increment_counter(project_id, session_id, name);
-}
-
-fn read_counter(project_id: &str, session_id: &str, name: &str) -> u64 {
-    state::read_counter(project_id, session_id, name)
-}
-
-fn is_same_as_last_inject(project_id: &str, session_id: &str, content: &str) -> bool {
-    state::is_same_as_last_inject(project_id, session_id, content)
-}
-
-fn write_inject_hash(project_id: &str, session_id: &str, content: &str) {
-    state::write_inject_hash(project_id, session_id, content);
-}
-
-fn read_peer_count(project_id: &str, session_id: &str) -> usize {
-    state::read_peer_count(project_id, session_id)
-}
-
-fn write_peer_count(project_id: &str, session_id: &str, count: usize) {
-    state::write_peer_count(project_id, session_id, count);
-}
-// ── Config Helpers (delegates to render module) ──
-
-fn read_workspace_config_bool(cwd: &str, key: &str) -> Option<bool> {
-    render::config_bool(cwd, key)
-}
-
 pub(crate) fn read_hot_pack(project_id: &str) -> Option<String> {
     let pack_path = edda_store::project_dir(project_id)
         .join("packs")

@@ -7,11 +7,11 @@ use super::helpers::{
     extract_prior_session_last_message, inject_karvi_brief, read_project_state, render_active_plan,
     render_skill_guide_directive, run_auto_digest,
 };
+use crate::state;
+
 use super::{
-    apply_context_budget, context_budget, is_same_as_last_inject, read_counter, read_hot_pack,
-    read_peer_count, read_workspace_config_bool, render_workspace_section,
-    render_write_back_protocol, take_compact_pending, wrap_context_boundary, write_inject_hash,
-    write_peer_count, HookResult,
+    apply_context_budget, context_budget, read_hot_pack, render_workspace_section,
+    render_write_back_protocol, wrap_context_boundary, HookResult,
 };
 
 pub(super) fn ingest_and_build_pack(
@@ -145,9 +145,9 @@ pub(super) fn dispatch_with_workspace_only(
     // On 0→N transition, inject the full coordination protocol instead of
     // lightweight peer updates so the agent learns L2 commands and sees
     // peer scope claims.
-    let prev_count = read_peer_count(project_id, session_id);
+    let prev_count = state::read_peer_count(project_id, session_id);
     let first_peers = prev_count == 0 && !peers.is_empty();
-    write_peer_count(project_id, session_id, peers.len());
+    state::write_peer_count(project_id, session_id, peers.len());
 
     if first_peers {
         // First time seeing peers — inject full coordination protocol
@@ -182,11 +182,11 @@ pub(super) fn dispatch_with_workspace_only(
     if let Some(ws) = ws {
         let wrapped = wrap_context_boundary(&ws);
         // Dedup: skip if identical to last injection
-        if !session_id.is_empty() && is_same_as_last_inject(project_id, session_id, &wrapped) {
+        if !session_id.is_empty() && state::is_same_as_last_inject(project_id, session_id, &wrapped) {
             return Ok(HookResult::empty());
         }
         if !session_id.is_empty() {
-            write_inject_hash(project_id, session_id, &wrapped);
+            state::write_inject_hash(project_id, session_id, &wrapped);
         }
         let output = serde_json::json!({
             "hookSpecificOutput": {
@@ -210,7 +210,7 @@ pub(super) fn dispatch_user_prompt_submit(
     transcript_path: &str,
     cwd: &str,
 ) -> anyhow::Result<HookResult> {
-    let post_compact = take_compact_pending(project_id);
+    let post_compact = state::take_compact_pending(project_id);
 
     if post_compact {
         // Re-ingest so state files are fresh for future hooks.
@@ -271,9 +271,9 @@ pub(super) fn dispatch_session_end(
     let _ = run_auto_digest(project_id, session_id, cwd);
 
     // 2b. Read recall rate counters before cleanup
-    let nudge_count = read_counter(project_id, session_id, "nudge_count");
-    let decide_count = read_counter(project_id, session_id, "decide_count");
-    let signal_count = read_counter(project_id, session_id, "signal_count");
+    let nudge_count = state::read_counter(project_id, session_id, "nudge_count");
+    let decide_count = state::read_counter(project_id, session_id, "decide_count");
+    let signal_count = state::read_counter(project_id, session_id, "signal_count");
 
     // 2c. Snapshot session digest for next session's "## Previous Session"
     crate::digest::write_prev_digest_from_store(
@@ -621,7 +621,7 @@ pub(super) fn dispatch_session_start(
     let pack = read_hot_pack(project_id);
     let guide_mode = match std::env::var("EDDA_SKILL_GUIDE") {
         Ok(val) => val == "1",
-        Err(_) => read_workspace_config_bool(cwd, "skill_guide").unwrap_or(false),
+        Err(_) => crate::render::config_bool(cwd, "skill_guide").unwrap_or(false),
     };
     let mut content = if guide_mode {
         let directive = render_skill_guide_directive();
@@ -735,7 +735,7 @@ pub(super) fn dispatch_session_start(
     // Seed peer count so UserPromptSubmit knows the baseline and doesn't
     // re-inject the full protocol on the first prompt after SessionStart (#11).
     let peers = crate::peers::discover_active_peers(project_id, session_id);
-    write_peer_count(project_id, session_id, peers.len());
+    state::write_peer_count(project_id, session_id, peers.len());
 
     // Seed coordination offset so first UserPromptSubmit only diffs new events (#146).
     let coord_path = crate::peers::coordination_path(project_id);
