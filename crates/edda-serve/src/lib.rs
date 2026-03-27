@@ -1,3 +1,12 @@
+mod error;
+mod helpers;
+mod middleware;
+mod state;
+
+pub(crate) use error::AppError;
+pub use state::ServeConfig;
+pub(crate) use state::{AppState, ChronicleContext, PairingRequest};
+
 use anyhow::Context;
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -7,9 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{ConnectInfo, Path as AxumPath, Query, State};
-use axum::http::{HeaderMap, Request, StatusCode};
-use axum::middleware::{self, Next};
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::middleware as axum_mw;
 use axum::response::sse::{Event as SseEvent, KeepAlive};
 use axum::response::{IntoResponse, Response, Sse};
 use axum::routing::{get, post};
@@ -38,96 +47,7 @@ use edda_ledger::lock::WorkspaceLock;
 use edda_ledger::Ledger;
 use edda_store::registry::list_projects;
 
-// ── Config ──
 
-pub struct ServeConfig {
-    pub bind: String,
-    pub port: u16,
-}
-
-// ── App State ──
-
-struct AppState {
-    repo_root: PathBuf,
-    chronicle: Option<ChronicleContext>,
-    pending_pairings: Mutex<HashMap<String, PairingRequest>>,
-}
-
-struct PairingRequest {
-    device_name: String,
-    expires_at: std::time::Instant,
-}
-
-struct ChronicleContext {
-    _store_root: PathBuf,
-}
-
-impl AppState {
-    fn open_ledger(&self) -> anyhow::Result<Ledger> {
-        Ledger::open(&self.repo_root)
-    }
-}
-
-// ── Error Handling ──
-
-#[derive(Debug, thiserror::Error)]
-enum AppError {
-    #[error("{0}")]
-    Validation(String),
-
-    #[error("{0}")]
-    NotFound(String),
-
-    #[error("{0}")]
-    Conflict(String),
-
-    #[error("{0}")]
-    Unauthorized(String),
-
-    #[error("{0}")]
-    Internal(#[from] anyhow::Error),
-}
-
-impl From<serde_json::Error> for AppError {
-    fn from(err: serde_json::Error) -> Self {
-        Self::Internal(err.into())
-    }
-}
-
-impl From<serde_yaml::Error> for AppError {
-    fn from(err: serde_yaml::Error) -> Self {
-        Self::Internal(err.into())
-    }
-}
-
-impl From<globset::Error> for AppError {
-    fn from(err: globset::Error) -> Self {
-        Self::Internal(err.into())
-    }
-}
-
-impl From<std::io::Error> for AppError {
-    fn from(err: std::io::Error) -> Self {
-        Self::Internal(err.into())
-    }
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let (status, code) = match &self {
-            AppError::Validation(_) => (StatusCode::BAD_REQUEST, "VALIDATION_ERROR"),
-            AppError::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
-            AppError::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
-            AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
-            AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
-        };
-        let body = serde_json::json!({
-            "error": self.to_string(),
-            "code": code,
-        });
-        (status, Json(body)).into_response()
-    }
-}
 
 // ── Entrypoint ──
 
@@ -225,9 +145,9 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/pair/list", get(list_paired_devices))
         .route("/api/pair/revoke", post(revoke_device))
         .route("/api/pair/revoke-all", post(revoke_all_devices))
-        .layer(middleware::from_fn_with_state(
+        .layer(axum_mw::from_fn_with_state(
             state.clone(),
-            auth_middleware,
+            middleware::auth_middleware,
         ));
 
     // SECURITY: restrict CORS to localhost origins only. edda is a local
@@ -356,73 +276,6 @@ fn router(repo_root: &Path) -> Router {
         .with_state(state)
 }
 
-// ── Auth Middleware ──
-
-/// Check if a socket address is localhost.
-fn is_localhost(addr: &SocketAddr) -> bool {
-    let ip = addr.ip();
-    ip.is_loopback()
-        || match ip {
-            std::net::IpAddr::V6(v6) => {
-                // IPv4-mapped IPv6: ::ffff:127.0.0.1
-                if let Some(v4) = v6.to_ipv4_mapped() {
-                    v4.is_loopback()
-                } else {
-                    false
-                }
-            }
-            _ => false,
-        }
-}
-
-/// Generate a pairing token (random hex, shorter).
-fn generate_pairing_token() -> String {
-    use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let mut bytes = [0u8; 16];
-    rng.fill(&mut bytes);
-    hex::encode(bytes)
-}
-
-/// Auth middleware: localhost passes through, remote needs Bearer token.
-async fn auth_middleware(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    State(state): State<Arc<AppState>>,
-    req: Request<axum::body::Body>,
-    next: Next,
-) -> Result<Response, AppError> {
-    // Localhost: always allowed (backward compat)
-    if is_localhost(&addr) {
-        return Ok(next.run(req).await);
-    }
-
-    // Remote: check Authorization header
-    let auth_header = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok());
-
-    let raw_token = match auth_header {
-        Some(h) if h.starts_with("Bearer ") => &h[7..],
-        _ => {
-            return Err(AppError::Unauthorized(
-                "missing or invalid Authorization header".to_string(),
-            ));
-        }
-    };
-
-    let token_hash = hash_token(raw_token);
-    let ledger = state.open_ledger().context("auth_middleware")?;
-    let device = ledger.validate_device_token(&token_hash)?;
-
-    match device {
-        Some(_) => Ok(next.run(req).await),
-        None => Err(AppError::Unauthorized(
-            "invalid or revoked device token".to_string(),
-        )),
-    }
-}
-
 // ── Pairing Endpoints ──
 
 #[derive(Deserialize)]
@@ -449,7 +302,7 @@ async fn create_pairing(
         return Err(AppError::Validation("device_name is required".to_string()));
     }
 
-    let pairing_token = generate_pairing_token();
+    let pairing_token = middleware::generate_pairing_token();
     let ttl = Duration::from_secs(600); // 10 minutes
 
     {
@@ -803,22 +656,15 @@ struct DecisionsQuery {
     village_id: Option<String>,
 }
 
-/// Validate that a string looks like a valid ISO 8601 / RFC 3339 timestamp.
-fn validate_iso8601(s: &str) -> Result<(), String> {
-    time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
-        .map(|_| ())
-        .map_err(|_| format!("invalid ISO 8601 timestamp: {s}"))
-}
-
 async fn get_decisions(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DecisionsQuery>,
 ) -> Result<Json<edda_ask::AskResult>, AppError> {
     if let Some(ref after) = params.after {
-        validate_iso8601(after).map_err(AppError::Validation)?;
+        helpers::validate_iso8601(after).map_err(AppError::Validation)?;
     }
     if let Some(ref before) = params.before {
-        validate_iso8601(before).map_err(AppError::Validation)?;
+        helpers::validate_iso8601(before).map_err(AppError::Validation)?;
     }
 
     let ledger = state.open_ledger().context("GET /api/decisions")?;
@@ -2395,10 +2241,10 @@ async fn get_village_stats(
     Query(params): Query<VillageStatsQuery>,
 ) -> Result<Json<edda_ledger::sqlite_store::VillageStats>, AppError> {
     if let Some(ref after) = params.after {
-        validate_iso8601(after).map_err(AppError::Validation)?;
+        helpers::validate_iso8601(after).map_err(AppError::Validation)?;
     }
     if let Some(ref before) = params.before {
-        validate_iso8601(before).map_err(AppError::Validation)?;
+        helpers::validate_iso8601(before).map_err(AppError::Validation)?;
     }
 
     let ledger = state.open_ledger().context("GET /api/villages/:id/stats")?;
@@ -4166,12 +4012,6 @@ struct IngestionRecordsQuery {
 
 // ── Ingestion handlers ──
 
-fn time_now_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .expect("RFC3339 formatting should not fail")
-}
-
 // POST /api/ingestion/evaluate
 async fn post_ingestion_evaluate(
     State(state): State<Arc<AppState>>,
@@ -4203,7 +4043,7 @@ async fn post_ingestion_evaluate(
                 summary,
                 detail: body.detail.unwrap_or(serde_json::json!({})),
                 tags: body.tags,
-                created_at: time_now_rfc3339(),
+                created_at: helpers::time_now_rfc3339(),
             };
 
             edda_ingestion::write_ingestion_record(&ledger, &record)?;
@@ -4236,7 +4076,7 @@ async fn post_ingestion_evaluate(
                 detail: body.detail.unwrap_or(serde_json::json!({})),
                 tags: body.tags,
                 status: edda_ingestion::SuggestionStatus::Pending,
-                created_at: time_now_rfc3339(),
+                created_at: helpers::time_now_rfc3339(),
                 reviewed_at: None,
             };
 
@@ -4291,7 +4131,7 @@ async fn post_ingestion_record(
         summary: body.summary,
         detail: body.detail,
         tags: body.tags,
-        created_at: time_now_rfc3339(),
+        created_at: helpers::time_now_rfc3339(),
     };
 
     edda_ingestion::write_ingestion_record(&ledger, &record)?;
@@ -4400,6 +4240,7 @@ async fn post_suggestion_reject(
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::extract::ConnectInfo;
     use axum::http::Request;
     use tower::ServiceExt;
 
@@ -7769,7 +7610,7 @@ actors:
         let public_routes = Router::new().route("/api/health", get(health));
 
         let protected_routes = Router::new().route("/api/status", get(get_status)).layer(
-            middleware::from_fn_with_state(state.clone(), auth_middleware),
+            axum_mw::from_fn_with_state(state.clone(), middleware::auth_middleware),
         );
 
         Router::new()
