@@ -3576,30 +3576,27 @@ struct EventRow {
 
 /// Detect if rollback frequency is trending upward by comparing first half vs second half.
 ///
-/// Splits the dates at the window midpoint. Returns `true` if the second half
-/// has more occurrences than the first half.
-fn detect_trend_direction(dates: &[String], after: &str) -> bool {
+/// Sorts dates and splits at the midpoint index. Returns `true` only if the
+/// second half has strictly more occurrences than the first half AND dates are
+/// not all identical (a burst on one day is not a trend).
+fn detect_trend_direction(dates: &[String], _after: &str) -> bool {
     if dates.len() < 2 {
         return false;
     }
-    // Use the `after` date and the last date to compute midpoint
-    let after_date = after.split('T').next().unwrap_or(after);
-    let last_date = dates.last().map(|s| s.as_str()).unwrap_or(after_date);
 
-    // Simple midpoint: sort dates, split in half
     let mut sorted: Vec<&str> = dates.iter().map(|s| s.as_str()).collect();
     sorted.sort();
-    let mid = sorted.len() / 2;
 
-    // If we have a midpoint date, use it; otherwise just compare halves
-    if let Some(&mid_date) = sorted.get(mid) {
-        let first_half = sorted.iter().filter(|&&d| d < mid_date).count();
-        let second_half = sorted.iter().filter(|&&d| d >= mid_date).count();
-        second_half > first_half
-    } else {
-        let _ = (after_date, last_date);
-        false
+    // All dates identical means a burst, not a trend
+    if sorted.first() == sorted.last() {
+        return false;
     }
+
+    let mid = sorted.len() / 2;
+    let mid_date = sorted[mid]; // safe: len >= 2 guarantees mid is valid
+    let first_half = sorted.iter().filter(|&&d| d < mid_date).count();
+    let second_half = sorted.iter().filter(|&&d| d >= mid_date).count();
+    second_half > first_half
 }
 
 fn row_to_event(row: EventRow) -> anyhow::Result<Event> {
