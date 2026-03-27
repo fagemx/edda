@@ -1486,7 +1486,10 @@ mod tests {
             event_family: None,
             event_level: None,
         };
-        assert!(event.payload["value"].is_null(), "NAN should be coerced to null by json! macro");
+        assert!(
+            event.payload["value"].is_null(),
+            "NAN should be coerced to null by json! macro"
+        );
         assert!(finalize_event(&mut event).is_ok());
     }
 }
