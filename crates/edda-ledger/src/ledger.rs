@@ -16,7 +16,7 @@ impl Ledger {
         let paths = EddaPaths::discover(repo_root);
         if !paths.is_initialized() {
             anyhow::bail!(
-                "not a edda workspace ({}/.edda not found). Run `edda init` first.",
+                "not an edda workspace ({}/.edda not found). Run `edda init` first.",
                 paths.root.display()
             );
         }

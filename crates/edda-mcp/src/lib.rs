@@ -508,7 +508,7 @@ fn to_mcp_err(e: anyhow::Error) -> McpError {
 pub async fn serve(repo_root: &Path) -> anyhow::Result<()> {
     let paths = edda_ledger::paths::EddaPaths::discover(repo_root);
     if !paths.is_initialized() {
-        anyhow::bail!("not a edda workspace (run `edda init` first)");
+        anyhow::bail!("not an edda workspace (run `edda init` first)");
     }
 
     let server = EddaServer::new(repo_root.to_path_buf());
@@ -553,6 +553,273 @@ mod tests {
     fn open_ledger_fails_for_invalid_path() {
         let server = EddaServer::new(PathBuf::from("/nonexistent/path"));
         assert!(server.open_ledger().is_err());
+    }
+
+    // --- edda_status tests ---
+
+    #[tokio::test]
+    async fn test_status_shows_branch_and_no_commit() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        let result = server.edda_status().await.unwrap();
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("On branch main"));
+        assert!(text.contains("Last commit: (none)"));
+        assert!(text.contains("Uncommitted events: 0"));
+    }
+
+    #[tokio::test]
+    async fn test_status_after_events() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        server
+            .edda_note(Parameters(NoteParams {
+                text: "status check".to_string(),
+                role: None,
+                tags: None,
+            }))
+            .await
+            .unwrap();
+
+        let result = server.edda_status().await.unwrap();
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("On branch main"));
+        assert!(text.contains("Uncommitted events: 1"));
+    }
+
+    // --- edda_note tests ---
+
+    #[tokio::test]
+    async fn test_note_basic() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root.clone());
+
+        let result = server
+            .edda_note(Parameters(NoteParams {
+                text: "hello world".to_string(),
+                role: None,
+                tags: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.starts_with("Wrote NOTE evt_"));
+
+        // Verify event in ledger
+        let ledger = Ledger::open(&root).unwrap();
+        let events = ledger.iter_events().unwrap();
+        let note = events
+            .iter()
+            .find(|e| e.event_type == "note")
+            .unwrap();
+        assert_eq!(note.payload["text"].as_str().unwrap(), "hello world");
+        assert_eq!(note.payload["role"].as_str().unwrap(), "assistant");
+    }
+
+    #[tokio::test]
+    async fn test_note_with_role_and_tags() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root.clone());
+
+        let result = server
+            .edda_note(Parameters(NoteParams {
+                text: "user feedback".to_string(),
+                role: Some("user".to_string()),
+                tags: Some(vec!["todo".to_string(), "important".to_string()]),
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.starts_with("Wrote NOTE evt_"));
+
+        let ledger = Ledger::open(&root).unwrap();
+        let events = ledger.iter_events().unwrap();
+        let note = events.iter().find(|e| e.event_type == "note").unwrap();
+        assert_eq!(note.payload["role"].as_str().unwrap(), "user");
+        let tags: Vec<&str> = note.payload["tags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(tags.contains(&"todo"));
+        assert!(tags.contains(&"important"));
+    }
+
+    #[tokio::test]
+    async fn test_note_multiple_sequential() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root.clone());
+
+        for i in 0..3 {
+            server
+                .edda_note(Parameters(NoteParams {
+                    text: format!("note {i}"),
+                    role: None,
+                    tags: None,
+                }))
+                .await
+                .unwrap();
+        }
+
+        let ledger = Ledger::open(&root).unwrap();
+        let events = ledger.iter_events().unwrap();
+        let notes: Vec<_> = events.iter().filter(|e| e.event_type == "note").collect();
+        assert_eq!(notes.len(), 3);
+    }
+
+    // --- edda_context tests ---
+
+    #[tokio::test]
+    async fn test_context_empty_workspace() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        let result = server
+            .edda_context(Parameters(ContextParams { depth: None }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(!text.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_context_includes_notes_and_decisions() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        server
+            .edda_note(Parameters(NoteParams {
+                text: "context test note".to_string(),
+                role: None,
+                tags: None,
+            }))
+            .await
+            .unwrap();
+
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "lang.primary=rust".to_string(),
+                reason: Some("performance".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .edda_context(Parameters(ContextParams { depth: Some(10) }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("context test note") || text.contains("lang.primary"));
+    }
+
+    #[tokio::test]
+    async fn test_context_custom_depth() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        let result = server
+            .edda_context(Parameters(ContextParams { depth: Some(1) }))
+            .await;
+        assert!(result.is_ok());
+    }
+
+    // --- edda_tool_tier tests ---
+
+    #[tokio::test]
+    async fn test_tool_tier_default_config() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        let result = server
+            .edda_tool_tier(Parameters(ToolTierParams {
+                tool_name: "bash".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["tool"], "bash");
+        assert!(parsed["tier"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_tool_tier_unknown_tool() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        let result = server
+            .edda_tool_tier(Parameters(ToolTierParams {
+                tool_name: "completely_unknown_xyz".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["tool"], "completely_unknown_xyz");
+        assert!(parsed["tier"].is_string());
+    }
+
+    // --- edda_log additional tests ---
+
+    #[tokio::test]
+    async fn test_log_respects_limit() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        for i in 0..5 {
+            server
+                .edda_note(Parameters(NoteParams {
+                    text: format!("log limit note {i}"),
+                    role: None,
+                    tags: None,
+                }))
+                .await
+                .unwrap();
+        }
+
+        let result = server
+            .edda_log(Parameters(LogParams {
+                event_type: None,
+                keyword: None,
+                after: None,
+                before: None,
+                limit: Some(2),
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_log_empty() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        let result = server
+            .edda_log(Parameters(LogParams {
+                event_type: None,
+                keyword: None,
+                after: None,
+                before: None,
+                limit: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(text.contains("No events match"));
     }
 
     // --- edda_decide tests ---
@@ -1043,5 +1310,54 @@ mod tests {
         assert!(text.contains("Add auth module"));
         assert!(text.contains("stage: lead"));
         assert!(text.contains("approvals: 0/1"));
+    }
+
+    #[tokio::test]
+    async fn test_draft_inbox_skips_applied() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root.clone());
+
+        let drafts_dir = root.join(".edda").join("drafts");
+        let draft_json = serde_json::json!({
+            "version": 1,
+            "draft_id": "drf_applied",
+            "title": "Already applied",
+            "status": "applied",
+            "stages": [
+                {
+                    "stage_id": "lead",
+                    "role": "lead",
+                    "min_approvals": 1,
+                    "approved_by": ["alice"],
+                    "status": "approved"
+                }
+            ]
+        });
+        std::fs::write(
+            drafts_dir.join("drf_applied.json"),
+            serde_json::to_string_pretty(&draft_json).unwrap(),
+        )
+        .unwrap();
+
+        let result = server.edda_draft_inbox().await.unwrap();
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert_eq!(text, "No pending items.");
+    }
+
+    #[tokio::test]
+    async fn test_draft_inbox_skips_latest_json() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root.clone());
+
+        let drafts_dir = root.join(".edda").join("drafts");
+        std::fs::write(
+            drafts_dir.join("latest.json"),
+            r#"{"draft_id":"latest","title":"symlink","status":"proposed","stages":[]}"#,
+        )
+        .unwrap();
+
+        let result = server.edda_draft_inbox().await.unwrap();
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        assert_eq!(text, "No pending items.");
     }
 }
