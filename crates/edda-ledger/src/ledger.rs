@@ -1,6 +1,7 @@
 use crate::paths::EddaPaths;
 use crate::sqlite_store::{BundleRow, DecisionRow, SqliteStore};
 use crate::view::{self, DecisionView};
+use anyhow::Context;
 use edda_core::Event;
 use std::path::Path;
 
@@ -67,49 +68,63 @@ impl Ledger {
 
     /// Read the current HEAD branch name.
     pub fn head_branch(&self) -> anyhow::Result<String> {
-        self.sqlite.head_branch()
+        self.sqlite.head_branch().context("Ledger::head_branch")
     }
 
     /// Write the HEAD branch name.
     pub fn set_head_branch(&self, name: &str) -> anyhow::Result<()> {
-        self.sqlite.set_head_branch(name)
+        self.sqlite
+            .set_head_branch(name)
+            .context("Ledger::set_head_branch")
     }
 
     // ── Events ──────────────────────────────────────────────────────
 
     /// Append an event to the ledger. Append-only (CONTRACT LEDGER-02).
     pub fn append_event(&self, event: &Event) -> anyhow::Result<()> {
-        self.sqlite.append_event(event)
+        self.sqlite
+            .append_event(event)
+            .with_context(|| format!("Ledger::append_event({})", event.event_id))
     }
 
     /// Append an event idempotently. Returns `true` if inserted, `false` if duplicate.
     pub fn append_event_idempotent(&self, event: &Event) -> anyhow::Result<bool> {
-        self.sqlite.append_event_idempotent(event)
+        self.sqlite
+            .append_event_idempotent(event)
+            .with_context(|| format!("Ledger::append_event_idempotent({})", event.event_id))
     }
 
     /// Get the hash of the last event, or `None` if the ledger is empty.
     pub fn last_event_hash(&self) -> anyhow::Result<Option<String>> {
-        self.sqlite.last_event_hash()
+        self.sqlite
+            .last_event_hash()
+            .context("Ledger::last_event_hash")
     }
 
     /// Read all events in the ledger.
     pub fn iter_events(&self) -> anyhow::Result<Vec<Event>> {
-        self.sqlite.iter_events()
+        self.sqlite.iter_events().context("Ledger::iter_events")
     }
 
     /// Get a single event by event_id.
     pub fn get_event(&self, event_id: &str) -> anyhow::Result<Option<Event>> {
-        self.sqlite.get_event(event_id)
+        self.sqlite
+            .get_event(event_id)
+            .with_context(|| format!("Ledger::get_event({event_id})"))
     }
 
     /// Get all events of a given type, filtered at the SQL level.
     pub fn iter_events_by_type(&self, event_type: &str) -> anyhow::Result<Vec<Event>> {
-        self.sqlite.iter_events_by_type(event_type)
+        self.sqlite
+            .iter_events_by_type(event_type)
+            .with_context(|| format!("Ledger::iter_events_by_type({event_type})"))
     }
 
     /// Get all events for a specific branch, filtered at the SQL level.
     pub fn iter_branch_events(&self, branch: &str) -> anyhow::Result<Vec<Event>> {
-        self.sqlite.iter_branch_events(branch)
+        self.sqlite
+            .iter_branch_events(branch)
+            .with_context(|| format!("Ledger::iter_branch_events({branch})"))
     }
 
     /// Get events filtered by branch with optional type/keyword/date/limit,
@@ -125,6 +140,7 @@ impl Ledger {
     ) -> anyhow::Result<Vec<Event>> {
         self.sqlite
             .iter_events_filtered(branch, event_type, keyword, after, before, limit)
+            .with_context(|| format!("Ledger::iter_events_filtered(branch={branch})"))
     }
 
     /// Find commit events related to a query by evidence chain or keyword match.
@@ -137,6 +153,7 @@ impl Ledger {
     ) -> anyhow::Result<Vec<Event>> {
         self.sqlite
             .find_related_commits(branch, keyword, decision_event_ids, limit)
+            .context("Ledger::find_related_commits")
     }
 
     /// Find note events matching a keyword, excluding decisions and session digests.
@@ -146,7 +163,9 @@ impl Ledger {
         keyword: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<Event>> {
-        self.sqlite.find_related_notes(branch, keyword, limit)
+        self.sqlite
+            .find_related_notes(branch, keyword, limit)
+            .context("Ledger::find_related_notes")
     }
 
     /// Get all events with rowid strictly greater than `after_rowid`.
@@ -154,24 +173,30 @@ impl Ledger {
     /// Returns `(rowid, Event)` pairs ordered by rowid, useful for cursor-based
     /// polling (e.g. SSE streaming).
     pub fn events_after_rowid(&self, after_rowid: i64) -> anyhow::Result<Vec<(i64, Event)>> {
-        self.sqlite.events_after_rowid(after_rowid)
+        self.sqlite
+            .events_after_rowid(after_rowid)
+            .context("Ledger::events_after_rowid")
     }
 
     /// Look up the rowid for a given `event_id`.
     pub fn rowid_for_event_id(&self, event_id: &str) -> anyhow::Result<Option<i64>> {
-        self.sqlite.rowid_for_event_id(event_id)
+        self.sqlite
+            .rowid_for_event_id(event_id)
+            .with_context(|| format!("Ledger::rowid_for_event_id({event_id})"))
     }
 
     // ── Branches JSON ───────────────────────────────────────────────
 
     /// Read branches.json content.
     pub fn branches_json(&self) -> anyhow::Result<serde_json::Value> {
-        self.sqlite.branches_json()
+        self.sqlite.branches_json().context("Ledger::branches_json")
     }
 
     /// Write branches.json content.
     pub fn set_branches_json(&self, value: &serde_json::Value) -> anyhow::Result<()> {
-        self.sqlite.set_branches_json(value)
+        self.sqlite
+            .set_branches_json(value)
+            .context("Ledger::set_branches_json")
     }
 
     // ── Decisions ───────────────────────────────────────────────────
@@ -187,6 +212,7 @@ impl Ledger {
     ) -> anyhow::Result<Vec<DecisionRow>> {
         self.sqlite
             .active_decisions(domain, key_pattern, after, before, None)
+            .with_context(|| format!("Ledger::active_decisions(domain={domain:?})"))
     }
 
     /// Query active decisions with limit for hot path optimization.
@@ -200,6 +226,7 @@ impl Ledger {
     ) -> anyhow::Result<Vec<DecisionRow>> {
         self.sqlite
             .active_decisions(domain, key_pattern, after, before, Some(limit))
+            .with_context(|| format!("Ledger::active_decisions_limited(domain={domain:?})"))
     }
 
     /// All decisions for a key (active + superseded), ordered by time.
@@ -210,7 +237,9 @@ impl Ledger {
         after: Option<&str>,
         before: Option<&str>,
     ) -> anyhow::Result<Vec<DecisionRow>> {
-        self.sqlite.decision_timeline(key, after, before)
+        self.sqlite
+            .decision_timeline(key, after, before)
+            .with_context(|| format!("Ledger::decision_timeline(key={key})"))
     }
 
     /// All decisions for a domain (active + superseded), ordered by time.
@@ -221,12 +250,14 @@ impl Ledger {
         after: Option<&str>,
         before: Option<&str>,
     ) -> anyhow::Result<Vec<DecisionRow>> {
-        self.sqlite.domain_timeline(domain, after, before)
+        self.sqlite
+            .domain_timeline(domain, after, before)
+            .with_context(|| format!("Ledger::domain_timeline(domain={domain})"))
     }
 
     /// Distinct domain values from active decisions.
     pub fn list_domains(&self) -> anyhow::Result<Vec<String>> {
-        self.sqlite.list_domains()
+        self.sqlite.list_domains().context("Ledger::list_domains")
     }
 
     /// Compute aggregate statistics for a village's decisions.
@@ -236,7 +267,9 @@ impl Ledger {
         after: Option<&str>,
         before: Option<&str>,
     ) -> anyhow::Result<crate::sqlite_store::VillageStats> {
-        self.sqlite.village_stats(village_id, after, before)
+        self.sqlite
+            .village_stats(village_id, after, before)
+            .with_context(|| format!("Ledger::village_stats({village_id})"))
     }
 
     /// Detect recurring patterns in a village's decision history.
@@ -248,6 +281,7 @@ impl Ledger {
     ) -> anyhow::Result<Vec<crate::sqlite_store::DetectedPattern>> {
         self.sqlite
             .detect_village_patterns(village_id, after, min_occurrences)
+            .with_context(|| format!("Ledger::detect_village_patterns({village_id})"))
     }
 
     /// Find the active decision for a specific key on a branch.
@@ -256,7 +290,9 @@ impl Ledger {
         branch: &str,
         key: &str,
     ) -> anyhow::Result<Option<DecisionRow>> {
-        self.sqlite.find_active_decision(branch, key)
+        self.sqlite
+            .find_active_decision(branch, key)
+            .with_context(|| format!("Ledger::find_active_decision(branch={branch}, key={key})"))
     }
 
     /// Return active decisions that have non-empty `affected_paths`.
@@ -266,7 +302,10 @@ impl Ledger {
         branch: Option<&str>,
         limit: Option<usize>,
     ) -> anyhow::Result<Vec<DecisionView>> {
-        let rows = self.sqlite.active_decisions_with_paths(branch, limit)?;
+        let rows = self
+            .sqlite
+            .active_decisions_with_paths(branch, limit)
+            .context("Ledger::query_active_with_paths")?;
         Ok(rows.iter().map(view::to_view).collect())
     }
 
@@ -318,7 +357,9 @@ impl Ledger {
 
     /// Query active decisions with shared or global scope.
     pub fn shared_decisions(&self) -> anyhow::Result<Vec<DecisionRow>> {
-        self.sqlite.shared_decisions()
+        self.sqlite
+            .shared_decisions()
+            .context("Ledger::shared_decisions")
     }
 
     /// Check if a decision has already been imported from a source project.
@@ -329,6 +370,7 @@ impl Ledger {
     ) -> anyhow::Result<bool> {
         self.sqlite
             .is_already_imported(source_project_id, source_event_id)
+            .context("Ledger::is_already_imported")
     }
 
     /// Insert an imported decision from another project.
@@ -336,7 +378,9 @@ impl Ledger {
         &self,
         params: crate::sqlite_store::ImportParams<'_>,
     ) -> anyhow::Result<()> {
-        self.sqlite.insert_imported_decision(params)
+        self.sqlite
+            .insert_imported_decision(params)
+            .context("Ledger::insert_imported_decision")
     }
 
     // ── Decision Dependencies ────────────────────────────────────────
@@ -351,16 +395,21 @@ impl Ledger {
     ) -> anyhow::Result<()> {
         self.sqlite
             .insert_dep(source_key, target_key, dep_type, created_event)
+            .with_context(|| format!("Ledger::insert_dep({source_key} -> {target_key})"))
     }
 
     /// What does `key` depend on?
     pub fn deps_of(&self, key: &str) -> anyhow::Result<Vec<crate::sqlite_store::DepRow>> {
-        self.sqlite.deps_of(key)
+        self.sqlite
+            .deps_of(key)
+            .with_context(|| format!("Ledger::deps_of({key})"))
     }
 
     /// Who depends on `key`?
     pub fn dependents_of(&self, key: &str) -> anyhow::Result<Vec<crate::sqlite_store::DepRow>> {
-        self.sqlite.dependents_of(key)
+        self.sqlite
+            .dependents_of(key)
+            .with_context(|| format!("Ledger::dependents_of({key})"))
     }
 
     /// Who depends on `key`, joined with active decisions only.
@@ -368,7 +417,9 @@ impl Ledger {
         &self,
         key: &str,
     ) -> anyhow::Result<Vec<(crate::sqlite_store::DepRow, DecisionRow)>> {
-        self.sqlite.active_dependents_of(key)
+        self.sqlite
+            .active_dependents_of(key)
+            .with_context(|| format!("Ledger::active_dependents_of({key})"))
     }
 
     // ── Decision Outcomes ─────────────────────────────────────────────
@@ -378,7 +429,9 @@ impl Ledger {
         &self,
         decision_event_id: &str,
     ) -> anyhow::Result<Option<crate::sqlite_store::OutcomeMetrics>> {
-        self.sqlite.decision_outcomes(decision_event_id)
+        self.sqlite
+            .decision_outcomes(decision_event_id)
+            .with_context(|| format!("Ledger::decision_outcomes({decision_event_id})"))
     }
 
     /// Get all execution events linked to a decision via `based_on` provenance.
@@ -386,7 +439,9 @@ impl Ledger {
         &self,
         decision_event_id: &str,
     ) -> anyhow::Result<Vec<crate::sqlite_store::ExecutionLinked>> {
-        self.sqlite.executions_for_decision(decision_event_id)
+        self.sqlite
+            .executions_for_decision(decision_event_id)
+            .with_context(|| format!("Ledger::executions_for_decision({decision_event_id})"))
     }
 
     /// Transitive dependents of `key` via BFS, up to `max_depth` hops.
@@ -396,14 +451,18 @@ impl Ledger {
         key: &str,
         max_depth: usize,
     ) -> anyhow::Result<Vec<(crate::sqlite_store::DepRow, DecisionRow, usize)>> {
-        self.sqlite.transitive_dependents_of(key, max_depth)
+        self.sqlite
+            .transitive_dependents_of(key, max_depth)
+            .with_context(|| format!("Ledger::transitive_dependents_of({key})"))
     }
 
     // ── Causal Chain ─────────────────────────────────────────────────
 
     /// Look up a single decision by event_id.
     pub fn get_decision_by_event_id(&self, event_id: &str) -> anyhow::Result<Option<DecisionRow>> {
-        self.sqlite.get_decision_by_event_id(event_id)
+        self.sqlite
+            .get_decision_by_event_id(event_id)
+            .with_context(|| format!("Ledger::get_decision_by_event_id({event_id})"))
     }
 
     /// Traverse the causal chain from a root decision via unified BFS.
@@ -412,7 +471,9 @@ impl Ledger {
         event_id: &str,
         max_depth: usize,
     ) -> anyhow::Result<Option<(DecisionRow, Vec<crate::sqlite_store::ChainEntry>)>> {
-        self.sqlite.causal_chain(event_id, max_depth)
+        self.sqlite
+            .causal_chain(event_id, max_depth)
+            .with_context(|| format!("Ledger::causal_chain({event_id})"))
     }
 
     // ── Task Briefs ──────────────────────────────────────────────────
@@ -422,7 +483,9 @@ impl Ledger {
         &self,
         task_id: &str,
     ) -> anyhow::Result<Option<crate::sqlite_store::TaskBriefRow>> {
-        self.sqlite.get_task_brief(task_id)
+        self.sqlite
+            .get_task_brief(task_id)
+            .with_context(|| format!("Ledger::get_task_brief({task_id})"))
     }
 
     /// List task briefs, optionally filtered by status and/or intent.
@@ -431,19 +494,25 @@ impl Ledger {
         status: Option<&str>,
         intent: Option<&str>,
     ) -> anyhow::Result<Vec<crate::sqlite_store::TaskBriefRow>> {
-        self.sqlite.list_task_briefs(status, intent)
+        self.sqlite
+            .list_task_briefs(status, intent)
+            .context("Ledger::list_task_briefs")
     }
 
     // ── Review Bundles ───────────────────────────────────────────────
 
     /// Get a review bundle by bundle_id.
     pub fn get_bundle(&self, bundle_id: &str) -> anyhow::Result<Option<BundleRow>> {
-        self.sqlite.get_bundle(bundle_id)
+        self.sqlite
+            .get_bundle(bundle_id)
+            .with_context(|| format!("Ledger::get_bundle({bundle_id})"))
     }
 
     /// List review bundles, optionally filtered by status.
     pub fn list_bundles(&self, status: Option<&str>) -> anyhow::Result<Vec<BundleRow>> {
-        self.sqlite.list_bundles(status)
+        self.sqlite
+            .list_bundles(status)
+            .context("Ledger::list_bundles")
     }
 
     // ── Device Tokens ───────────────────────────────────────────────
@@ -453,7 +522,9 @@ impl Ledger {
         &self,
         row: &crate::sqlite_store::DeviceTokenRow,
     ) -> anyhow::Result<()> {
-        self.sqlite.insert_device_token(row)
+        self.sqlite
+            .insert_device_token(row)
+            .context("Ledger::insert_device_token")
     }
 
     /// Validate a device token by its SHA-256 hash. Returns the row if active.
@@ -461,12 +532,16 @@ impl Ledger {
         &self,
         token_hash: &str,
     ) -> anyhow::Result<Option<crate::sqlite_store::DeviceTokenRow>> {
-        self.sqlite.validate_device_token(token_hash)
+        self.sqlite
+            .validate_device_token(token_hash)
+            .context("Ledger::validate_device_token")
     }
 
     /// List all device tokens (active and revoked).
     pub fn list_device_tokens(&self) -> anyhow::Result<Vec<crate::sqlite_store::DeviceTokenRow>> {
-        self.sqlite.list_device_tokens()
+        self.sqlite
+            .list_device_tokens()
+            .context("Ledger::list_device_tokens")
     }
 
     /// Revoke a device token by device name. Returns true if revoked.
@@ -477,11 +552,14 @@ impl Ledger {
     ) -> anyhow::Result<bool> {
         self.sqlite
             .revoke_device_token(device_name, revoke_event_id)
+            .with_context(|| format!("Ledger::revoke_device_token({device_name})"))
     }
 
     /// Revoke all active device tokens. Returns count of revoked tokens.
     pub fn revoke_all_device_tokens(&self, revoke_event_id: &str) -> anyhow::Result<u64> {
-        self.sqlite.revoke_all_device_tokens(revoke_event_id)
+        self.sqlite
+            .revoke_all_device_tokens(revoke_event_id)
+            .context("Ledger::revoke_all_device_tokens")
     }
 
     // ── Decide Snapshots ────────────────────────────────────────────
@@ -491,7 +569,9 @@ impl Ledger {
         &self,
         row: &crate::sqlite_store::DecideSnapshotRow,
     ) -> anyhow::Result<()> {
-        self.sqlite.insert_snapshot(row)
+        self.sqlite
+            .insert_snapshot(row)
+            .context("Ledger::insert_snapshot")
     }
 
     /// Query snapshots with optional filtering by village_id and engine_version.
@@ -503,6 +583,7 @@ impl Ledger {
     ) -> anyhow::Result<Vec<crate::sqlite_store::DecideSnapshotRow>> {
         self.sqlite
             .query_snapshots(village_id, engine_version, limit)
+            .context("Ledger::query_snapshots")
     }
 
     /// Find all snapshots for a given context_hash.
@@ -510,7 +591,9 @@ impl Ledger {
         &self,
         context_hash: &str,
     ) -> anyhow::Result<Vec<crate::sqlite_store::DecideSnapshotRow>> {
-        self.sqlite.snapshots_by_context_hash(context_hash)
+        self.sqlite
+            .snapshots_by_context_hash(context_hash)
+            .with_context(|| format!("Ledger::snapshots_by_context_hash({context_hash})"))
     }
 
     // ── Suggestions ──────────────────────────────────────────────────
@@ -520,7 +603,9 @@ impl Ledger {
         &self,
         row: &crate::sqlite_store::SuggestionRow,
     ) -> anyhow::Result<()> {
-        self.sqlite.insert_suggestion(row)
+        self.sqlite
+            .insert_suggestion(row)
+            .context("Ledger::insert_suggestion")
     }
 
     /// List suggestions filtered by status.
@@ -528,7 +613,9 @@ impl Ledger {
         &self,
         status: &str,
     ) -> anyhow::Result<Vec<crate::sqlite_store::SuggestionRow>> {
-        self.sqlite.list_suggestions_by_status(status)
+        self.sqlite
+            .list_suggestions_by_status(status)
+            .with_context(|| format!("Ledger::list_suggestions_by_status({status})"))
     }
 
     /// Get a single suggestion by id.
@@ -536,7 +623,9 @@ impl Ledger {
         &self,
         id: &str,
     ) -> anyhow::Result<Option<crate::sqlite_store::SuggestionRow>> {
-        self.sqlite.get_suggestion(id)
+        self.sqlite
+            .get_suggestion(id)
+            .with_context(|| format!("Ledger::get_suggestion({id})"))
     }
 
     /// Update a suggestion's status and reviewed_at timestamp.
@@ -549,6 +638,7 @@ impl Ledger {
     ) -> anyhow::Result<bool> {
         self.sqlite
             .update_suggestion_status(id, status, reviewed_at)
+            .with_context(|| format!("Ledger::update_suggestion_status({id})"))
     }
 }
 

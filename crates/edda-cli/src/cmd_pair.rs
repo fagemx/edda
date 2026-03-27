@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Subcommand;
 use edda_ledger::device_token::{generate_device_token, hash_token};
 use std::path::Path;
@@ -35,7 +36,7 @@ fn execute_new(repo_root: &Path, name: &str) -> anyhow::Result<()> {
         anyhow::bail!("device name cannot be empty");
     }
 
-    let ledger = edda_ledger::Ledger::open(repo_root)?;
+    let ledger = edda_ledger::Ledger::open(repo_root).context("cmd_pair::new: opening ledger")?;
 
     // Check for duplicate name
     let existing = ledger.list_device_tokens()?;
@@ -108,7 +109,7 @@ fn execute_new(repo_root: &Path, name: &str) -> anyhow::Result<()> {
 }
 
 fn execute_list(repo_root: &Path) -> anyhow::Result<()> {
-    let ledger = edda_ledger::Ledger::open(repo_root)?;
+    let ledger = edda_ledger::Ledger::open(repo_root).context("cmd_pair::list: opening ledger")?;
     let tokens = ledger.list_device_tokens()?;
 
     if tokens.is_empty() {
@@ -142,7 +143,8 @@ fn execute_list(repo_root: &Path) -> anyhow::Result<()> {
 }
 
 fn execute_revoke(repo_root: &Path, name: &str) -> anyhow::Result<()> {
-    let ledger = edda_ledger::Ledger::open(repo_root)?;
+    let ledger =
+        edda_ledger::Ledger::open(repo_root).context("cmd_pair::revoke: opening ledger")?;
 
     // Check the token exists before writing the ledger event
     let existing = ledger.list_device_tokens()?;
@@ -187,7 +189,8 @@ fn execute_revoke(repo_root: &Path, name: &str) -> anyhow::Result<()> {
 }
 
 fn execute_revoke_all(repo_root: &Path) -> anyhow::Result<()> {
-    let ledger = edda_ledger::Ledger::open(repo_root)?;
+    let ledger =
+        edda_ledger::Ledger::open(repo_root).context("cmd_pair::revoke_all: opening ledger")?;
 
     let event_id = format!("evt_{}", ulid::Ulid::new());
     let branch = ledger.head_branch()?;
