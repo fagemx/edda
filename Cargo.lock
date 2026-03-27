@@ -895,7 +895,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
  "time",
  "ulid",
 ]
@@ -1008,6 +1007,7 @@ dependencies = [
  "edda-bridge-claude",
  "edda-core",
  "edda-derive",
+ "edda-ingestion",
  "edda-ledger",
  "edda-store",
  "globset",
