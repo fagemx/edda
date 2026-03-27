@@ -239,6 +239,17 @@ impl Ledger {
         self.sqlite.village_stats(village_id, after, before)
     }
 
+    /// Detect recurring patterns in a village's decision history.
+    pub fn detect_village_patterns(
+        &self,
+        village_id: &str,
+        after: &str,
+        min_occurrences: usize,
+    ) -> anyhow::Result<Vec<crate::sqlite_store::DetectedPattern>> {
+        self.sqlite
+            .detect_village_patterns(village_id, after, min_occurrences)
+    }
+
     /// Find the active decision for a specific key on a branch.
     pub fn find_active_decision(
         &self,

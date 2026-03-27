@@ -303,6 +303,42 @@ pub struct VillageStatsPeriod {
     pub before: Option<String>,
 }
 
+/// The type of recurring pattern detected.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternType {
+    RecurringDecision,
+    ChiefRepeatedAction,
+    RollbackTrend,
+}
+
+/// A single detected pattern in a village's decision history.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DetectedPattern {
+    pub pattern_type: PatternType,
+    pub key: String,
+    pub domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
+    pub occurrences: usize,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub dates: Vec<String>,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trending_up: Option<bool>,
+}
+
+/// Result of pattern detection for a village.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PatternDetectionResult {
+    pub village_id: String,
+    pub lookback_days: u32,
+    pub after: String,
+    pub total_patterns: usize,
+    pub patterns: Vec<DetectedPattern>,
+}
+
 /// Domain with decision count.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DomainCount {
@@ -2167,6 +2203,169 @@ impl SqliteStore {
         })
     }
 
+    // ── Pattern Detection ─────────────────────────────────────────────
+
+    /// Detect recurring patterns in a village's decision history.
+    ///
+    /// Runs three SQL queries to find:
+    /// 1. Recurring decisions (same key changed >= min_occurrences times)
+    /// 2. Chief repeated actions (same authority+key >= min_occurrences times)
+    /// 3. Rollback trends (supersession chains >= 2 within the window)
+    pub fn detect_village_patterns(
+        &self,
+        village_id: &str,
+        after: &str,
+        min_occurrences: usize,
+    ) -> anyhow::Result<Vec<DetectedPattern>> {
+        let mut patterns = Vec::new();
+
+        // Query 1: Recurring decisions — same key changed N+ times
+        {
+            let sql = "
+                SELECT d.key, d.domain, COUNT(*) as cnt,
+                       MIN(e.ts) as first_seen, MAX(e.ts) as last_seen,
+                       GROUP_CONCAT(DATE(e.ts), ',') as dates
+                FROM decisions d
+                JOIN events e ON d.event_id = e.event_id
+                WHERE d.village_id = ?1 AND e.ts >= ?2
+                GROUP BY d.key, d.domain
+                HAVING cnt >= ?3
+                ORDER BY cnt DESC
+            ";
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows =
+                stmt.query_map(params![village_id, after, min_occurrences as i64], |row| {
+                    let key: String = row.get(0)?;
+                    let domain: String = row.get(1)?;
+                    let cnt: usize = row.get(2)?;
+                    let first: String = row.get(3)?;
+                    let last: String = row.get(4)?;
+                    let dates_str: String = row.get::<_, Option<String>>(5)?.unwrap_or_default();
+                    Ok((key, domain, cnt, first, last, dates_str))
+                })?;
+            for row in rows {
+                let (key, domain, cnt, first, last, dates_str) = row?;
+                let dates: Vec<String> = dates_str
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                patterns.push(DetectedPattern {
+                    pattern_type: PatternType::RecurringDecision,
+                    description: format!("{key} changed {cnt} times in window"),
+                    key,
+                    domain,
+                    authority: None,
+                    occurrences: cnt,
+                    first_seen: first,
+                    last_seen: last,
+                    dates,
+                    trending_up: None,
+                });
+            }
+        }
+
+        // Query 2: Chief repeated actions — same authority+key N+ times
+        {
+            let sql = "
+                SELECT d.authority, d.key, d.domain, COUNT(*) as cnt,
+                       MIN(e.ts) as first_seen, MAX(e.ts) as last_seen,
+                       GROUP_CONCAT(DATE(e.ts), ',') as dates
+                FROM decisions d
+                JOIN events e ON d.event_id = e.event_id
+                WHERE d.village_id = ?1 AND e.ts >= ?2
+                  AND d.authority != 'system'
+                GROUP BY d.authority, d.key, d.domain
+                HAVING cnt >= ?3
+                ORDER BY cnt DESC
+            ";
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows =
+                stmt.query_map(params![village_id, after, min_occurrences as i64], |row| {
+                    let authority: String = row.get(0)?;
+                    let key: String = row.get(1)?;
+                    let domain: String = row.get(2)?;
+                    let cnt: usize = row.get(3)?;
+                    let first: String = row.get(4)?;
+                    let last: String = row.get(5)?;
+                    let dates_str: String = row.get::<_, Option<String>>(6)?.unwrap_or_default();
+                    Ok((authority, key, domain, cnt, first, last, dates_str))
+                })?;
+            for row in rows {
+                let (authority, key, domain, cnt, first, last, dates_str) = row?;
+                let dates: Vec<String> = dates_str
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+                patterns.push(DetectedPattern {
+                    pattern_type: PatternType::ChiefRepeatedAction,
+                    description: format!("{authority} changed {key} {cnt} times in window"),
+                    key,
+                    domain,
+                    authority: Some(authority),
+                    occurrences: cnt,
+                    first_seen: first,
+                    last_seen: last,
+                    dates,
+                    trending_up: None,
+                });
+            }
+        }
+
+        // Query 3: Rollback trends — keys with supersession chains
+        {
+            let sql = "
+                SELECT d.key, d.domain, COUNT(*) as cnt,
+                       MIN(e.ts) as first_seen, MAX(e.ts) as last_seen,
+                       GROUP_CONCAT(DATE(e.ts), ',') as dates
+                FROM decisions d
+                JOIN events e ON d.event_id = e.event_id
+                WHERE d.village_id = ?1 AND e.ts >= ?2
+                  AND d.supersedes_id IS NOT NULL
+                GROUP BY d.key, d.domain
+                HAVING cnt >= 2
+                ORDER BY cnt DESC
+            ";
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows = stmt.query_map(params![village_id, after], |row| {
+                let key: String = row.get(0)?;
+                let domain: String = row.get(1)?;
+                let cnt: usize = row.get(2)?;
+                let first: String = row.get(3)?;
+                let last: String = row.get(4)?;
+                let dates_str: String = row.get::<_, Option<String>>(5)?.unwrap_or_default();
+                Ok((key, domain, cnt, first, last, dates_str))
+            })?;
+            for row in rows {
+                let (key, domain, cnt, first, last, dates_str) = row?;
+                let dates: Vec<String> = dates_str
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect();
+
+                // Trend detection: compare rollback count in first half vs second half
+                let trending_up = detect_trend_direction(&dates, after);
+
+                patterns.push(DetectedPattern {
+                    pattern_type: PatternType::RollbackTrend,
+                    description: format!("{key} rolled back {cnt} times in window"),
+                    key,
+                    domain,
+                    authority: None,
+                    occurrences: cnt,
+                    first_seen: first,
+                    last_seen: last,
+                    dates,
+                    trending_up: Some(trending_up),
+                });
+            }
+        }
+
+        Ok(patterns)
+    }
+
     // ── Cross-Project Sync ─────────────────────────────────────────────
 
     /// Query active decisions with shared or global scope.
@@ -3373,6 +3572,31 @@ struct EventRow {
     digests_str: String,
     event_family: Option<String>,
     event_level: Option<String>,
+}
+
+/// Detect if rollback frequency is trending upward by comparing first half vs second half.
+///
+/// Sorts dates and splits at the midpoint index. Returns `true` only if the
+/// second half has strictly more occurrences than the first half AND dates are
+/// not all identical (a burst on one day is not a trend).
+fn detect_trend_direction(dates: &[String], _after: &str) -> bool {
+    if dates.len() < 2 {
+        return false;
+    }
+
+    let mut sorted: Vec<&str> = dates.iter().map(|s| s.as_str()).collect();
+    sorted.sort();
+
+    // All dates identical means a burst, not a trend
+    if sorted.first() == sorted.last() {
+        return false;
+    }
+
+    let mid = sorted.len() / 2;
+    let mid_date = sorted[mid]; // safe: len >= 2 guarantees mid is valid
+    let first_half = sorted.iter().filter(|&&d| d < mid_date).count();
+    let second_half = sorted.iter().filter(|&&d| d >= mid_date).count();
+    second_half > first_half
 }
 
 fn row_to_event(row: EventRow) -> anyhow::Result<Event> {
@@ -6562,6 +6786,216 @@ mod tests {
             .unwrap();
         let found = rows.iter().find(|r| r.key == "village.test").unwrap();
         assert_eq!(found.village_id.as_deref(), Some("my-village"));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Pattern Detection Tests ──
+
+    /// Helper to create a decision payload with specific authority and village.
+    fn make_dp(
+        key: &str,
+        value: &str,
+        authority: &str,
+        village: &str,
+    ) -> edda_core::types::DecisionPayload {
+        edda_core::types::DecisionPayload {
+            key: key.to_string(),
+            value: value.to_string(),
+            reason: Some("test".to_string()),
+            scope: None,
+            authority: Some(authority.to_string()),
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: Some(village.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_detect_village_patterns_recurring() {
+        let (dir, store) = tmp_db();
+
+        // Insert 5 decisions with the same key in village "v1"
+        let mut prev_hash: Option<String> = None;
+        for i in 0..5 {
+            let dp = make_dp(
+                "rewards.daily_limit",
+                &format!("{}", 100 + i),
+                "event_chief",
+                "v1",
+            );
+            let event =
+                edda_core::event::new_decision_event("main", prev_hash.as_deref(), "system", &dp)
+                    .unwrap();
+            prev_hash = Some(event.hash.clone());
+            store.append_event(&event).unwrap();
+        }
+
+        let patterns = store
+            .detect_village_patterns("v1", "2020-01-01", 3)
+            .unwrap();
+
+        // Should detect at least one recurring_decision pattern
+        let recurring: Vec<_> = patterns
+            .iter()
+            .filter(|p| {
+                matches!(p.pattern_type, PatternType::RecurringDecision)
+                    && p.key == "rewards.daily_limit"
+            })
+            .collect();
+        assert!(
+            !recurring.is_empty(),
+            "should detect recurring decision pattern"
+        );
+        assert_eq!(recurring[0].occurrences, 5);
+        assert!(recurring[0].description.contains("rewards.daily_limit"));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_village_patterns_chief_repeated() {
+        let (dir, store) = tmp_db();
+
+        // Insert 3 decisions by "safety_chief" on the same key
+        let mut prev_hash: Option<String> = None;
+        for i in 0..3 {
+            let dp = make_dp(
+                "economy.reward_cap",
+                &format!("{}", 50 + i),
+                "safety_chief",
+                "v2",
+            );
+            let event =
+                edda_core::event::new_decision_event("main", prev_hash.as_deref(), "system", &dp)
+                    .unwrap();
+            prev_hash = Some(event.hash.clone());
+            store.append_event(&event).unwrap();
+        }
+
+        let patterns = store
+            .detect_village_patterns("v2", "2020-01-01", 3)
+            .unwrap();
+
+        let chief: Vec<_> = patterns
+            .iter()
+            .filter(|p| {
+                matches!(p.pattern_type, PatternType::ChiefRepeatedAction)
+                    && p.authority.as_deref() == Some("safety_chief")
+            })
+            .collect();
+        assert!(
+            !chief.is_empty(),
+            "should detect chief repeated action pattern"
+        );
+        assert_eq!(chief[0].occurrences, 3);
+        assert!(chief[0].description.contains("safety_chief"));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_village_patterns_rollback() {
+        let (dir, store) = tmp_db();
+
+        // Create a supersession chain: d1 -> d2 supersedes d1 -> d3 supersedes d2
+        let dp1 = make_dp("activity.bonus", "100", "event_chief", "v3");
+        let e1 = edda_core::event::new_decision_event("main", None, "system", &dp1).unwrap();
+        store.append_event(&e1).unwrap();
+
+        let dp2 = make_dp("activity.bonus", "50", "safety_chief", "v3");
+        let e2 =
+            edda_core::event::new_decision_event("main", Some(&e1.hash), "system", &dp2).unwrap();
+        // Manually set supersedes_id via direct SQL update
+        store.append_event(&e2).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE decisions SET supersedes_id = ?1 WHERE event_id = ?2",
+                params![e1.event_id, e2.event_id],
+            )
+            .unwrap();
+
+        let dp3 = make_dp("activity.bonus", "30", "safety_chief", "v3");
+        let e3 =
+            edda_core::event::new_decision_event("main", Some(&e2.hash), "system", &dp3).unwrap();
+        store.append_event(&e3).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE decisions SET supersedes_id = ?1 WHERE event_id = ?2",
+                params![e2.event_id, e3.event_id],
+            )
+            .unwrap();
+
+        let patterns = store
+            .detect_village_patterns("v3", "2020-01-01", 3)
+            .unwrap();
+
+        let rollback: Vec<_> = patterns
+            .iter()
+            .filter(|p| {
+                matches!(p.pattern_type, PatternType::RollbackTrend) && p.key == "activity.bonus"
+            })
+            .collect();
+        assert!(!rollback.is_empty(), "should detect rollback trend pattern");
+        assert_eq!(rollback[0].occurrences, 2);
+        assert!(rollback[0].trending_up.is_some());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_village_patterns_below_threshold() {
+        let (dir, store) = tmp_db();
+
+        // Only 2 decisions — threshold is 3, should not be detected
+        let mut prev_hash: Option<String> = None;
+        for i in 0..2 {
+            let dp = make_dp("db.pool_size", &format!("{}", 10 + i), "human", "v4");
+            let event =
+                edda_core::event::new_decision_event("main", prev_hash.as_deref(), "system", &dp)
+                    .unwrap();
+            prev_hash = Some(event.hash.clone());
+            store.append_event(&event).unwrap();
+        }
+
+        let patterns = store
+            .detect_village_patterns("v4", "2020-01-01", 3)
+            .unwrap();
+
+        let recurring: Vec<_> = patterns
+            .iter()
+            .filter(|p| {
+                matches!(p.pattern_type, PatternType::RecurringDecision) && p.key == "db.pool_size"
+            })
+            .collect();
+        assert!(
+            recurring.is_empty(),
+            "2 decisions should not reach threshold of 3"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_detect_village_patterns_empty_village() {
+        let (dir, store) = tmp_db();
+
+        let patterns = store
+            .detect_village_patterns("nonexistent", "2020-01-01", 3)
+            .unwrap();
+        assert!(
+            patterns.is_empty(),
+            "non-existent village should return empty patterns"
+        );
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);

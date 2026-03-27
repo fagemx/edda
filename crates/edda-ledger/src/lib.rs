@@ -19,8 +19,8 @@ pub use ledger::Ledger;
 pub use lock::WorkspaceLock;
 pub use paths::EddaPaths;
 pub use sqlite_store::{
-    BundleRow, ChainEntry, DecideSnapshotRow, DecisionRow, DepRow, DeviceTokenRow, ImportParams,
-    SuggestionRow, TaskBriefRow,
+    BundleRow, ChainEntry, DecideSnapshotRow, DecisionRow, DepRow, DetectedPattern, DeviceTokenRow,
+    ImportParams, PatternDetectionResult, PatternType, SuggestionRow, TaskBriefRow,
 };
 pub use tombstone::{append_tombstone, list_tombstones, make_tombstone, DeleteReason, Tombstone};
 pub use view::DecisionView;
