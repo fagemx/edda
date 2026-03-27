@@ -6246,11 +6246,12 @@ mod tests {
             "tags",
             "review_after",
             "reversibility",
+            "village_id",
         ];
 
         for col in &expected {
             assert!(
-                columns.contains(&col.to_string()),
+                columns.contains(*col),
                 "expected column `{col}` to exist after verify_decisions_schema, but it was missing. actual: {columns:?}"
             );
         }
