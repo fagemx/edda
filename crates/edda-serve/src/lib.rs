@@ -133,7 +133,7 @@ impl IntoResponse for AppError {
 pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> {
     let paths = edda_ledger::EddaPaths::discover(repo_root);
     if !paths.is_initialized() {
-        anyhow::bail!("not a edda workspace (run `edda init` first)");
+        anyhow::bail!("not an edda workspace (run `edda init` first)");
     }
 
     let store_root = edda_store::store_root();
