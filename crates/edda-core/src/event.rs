@@ -699,6 +699,37 @@ pub fn new_snapshot_event(
     Ok(event)
 }
 
+/// Create a new `cycle_telemetry` event for governance cycle telemetry.
+///
+/// Uses the caller-supplied `cycle_id` as the event_id for idempotency
+/// and `started_at` as the timestamp. The full telemetry body is stored
+/// as `payload`.
+pub fn new_telemetry_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    cycle_id: &str,
+    started_at: &str,
+    payload: serde_json::Value,
+) -> anyhow::Result<Event> {
+    let mut event = Event {
+        event_id: cycle_id.to_string(),
+        ts: started_at.to_string(),
+        event_type: "cycle_telemetry".to_string(),
+        branch: branch.to_string(),
+        parent_hash: parent_hash.map(|s| s.to_string()),
+        hash: String::new(),
+        payload,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event)?;
+    Ok(event)
+}
+
 /// Parameters for creating an `approval_policy_match` event.
 #[derive(Debug, Clone)]
 pub struct ApprovalPolicyMatchParams {

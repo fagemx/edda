@@ -28,7 +28,7 @@ use edda_aggregate::rollup;
 use edda_core::agent_phase::{mobile_context_summary, AgentPhaseState};
 use edda_core::event::{
     finalize_event, new_approval_event, new_decision_event, new_execution_event, new_note_event,
-    new_snapshot_event, ApprovalEventParams,
+    new_snapshot_event, new_telemetry_event, ApprovalEventParams,
 };
 use edda_core::policy::{self, ActorKind};
 use edda_core::types::{rel, DecisionPayload, Provenance};
@@ -174,6 +174,8 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/note", post(post_note))
         .route("/api/decide", post(post_decide))
         .route("/api/events/karvi", post(post_karvi_event))
+        .route("/api/telemetry", post(post_telemetry).get(get_telemetry))
+        .route("/api/telemetry/stats", get(get_telemetry_stats))
         .route("/api/scope/check", post(post_scope_check))
         .route("/api/scope/whitelist", get(get_scope_whitelist))
         .route("/api/authz/check", post(post_authz_check))
@@ -283,6 +285,8 @@ fn router(repo_root: &Path) -> Router {
         .route("/api/note", post(post_note))
         .route("/api/decide", post(post_decide))
         .route("/api/events/karvi", post(post_karvi_event))
+        .route("/api/telemetry", post(post_telemetry).get(get_telemetry))
+        .route("/api/telemetry/stats", get(get_telemetry_stats))
         .route("/api/scope/check", post(post_scope_check))
         .route("/api/scope/whitelist", get(get_scope_whitelist))
         .route("/api/authz/check", post(post_authz_check))
@@ -1837,6 +1841,318 @@ async fn post_karvi_event(
     };
 
     Ok((status, Json(response)).into_response())
+}
+
+// ── POST /api/telemetry ──
+
+#[derive(Deserialize)]
+struct TelemetryBody {
+    cycle_id: String,
+    source: String,
+    started_at: String,
+    total_duration_ms: u64,
+    #[serde(default)]
+    operations: Vec<TelemetryOp>,
+    #[serde(default)]
+    cost: Option<TelemetryCost>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    metadata: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TelemetryOp {
+    name: String,
+    duration_ms: u64,
+    #[serde(default)]
+    token_usage: Option<TelemetryTokenUsage>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TelemetryTokenUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+}
+
+#[derive(Deserialize, Serialize)]
+struct TelemetryCost {
+    total_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    breakdown: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Serialize)]
+struct TelemetryResponse {
+    event_id: String,
+    status: String,
+}
+
+async fn post_telemetry(
+    State(state): State<Arc<AppState>>,
+    body: Result<Json<TelemetryBody>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(body) = body.map_err(|e| AppError::Validation(e.to_string()))?;
+
+    // Serialize full body as payload
+    let payload = serde_json::json!({
+        "cycle_id": body.cycle_id,
+        "source": body.source,
+        "started_at": body.started_at,
+        "total_duration_ms": body.total_duration_ms,
+        "operations": body.operations,
+        "cost": body.cost,
+        "tags": body.tags,
+        "metadata": body.metadata,
+    });
+
+    let ledger = state.open_ledger()?;
+    let _lock = WorkspaceLock::acquire(&ledger.paths)?;
+    let branch = ledger.head_branch()?;
+    let parent_hash = ledger.last_event_hash()?;
+
+    let event = new_telemetry_event(
+        &branch,
+        parent_hash.as_deref(),
+        &body.cycle_id,
+        &body.started_at,
+        payload,
+    )?;
+
+    let inserted = ledger.append_event_idempotent(&event)?;
+
+    let response = TelemetryResponse {
+        event_id: event.event_id,
+        status: if inserted {
+            "created".to_string()
+        } else {
+            "duplicate".to_string()
+        },
+    };
+
+    let status = if inserted {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+
+    Ok((status, Json(response)).into_response())
+}
+
+// ── GET /api/telemetry ──
+
+#[derive(Deserialize)]
+struct TelemetryQuery {
+    #[serde(default)]
+    after: Option<String>,
+    #[serde(default)]
+    before: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn get_telemetry(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<TelemetryQuery>,
+) -> Result<Response, AppError> {
+    let ledger = state.open_ledger()?;
+    let branch = ledger.head_branch()?;
+    let limit = q.limit.unwrap_or(100);
+
+    let events = ledger.iter_events_filtered(
+        &branch,
+        Some("cycle_telemetry"),
+        None,
+        q.after.as_deref(),
+        q.before.as_deref(),
+        limit,
+    )?;
+
+    let mut payloads: Vec<serde_json::Value> = events
+        .into_iter()
+        .map(|e| {
+            let mut p = e.payload;
+            // Inject event_id for cross-reference
+            if let Some(obj) = p.as_object_mut() {
+                obj.insert("event_id".to_string(), serde_json::json!(e.event_id));
+            }
+            p
+        })
+        .collect();
+
+    // Post-filter by source if specified
+    if let Some(ref source) = q.source {
+        payloads.retain(|p| {
+            p.get("source")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s == source)
+        });
+    }
+
+    Ok(Json(payloads).into_response())
+}
+
+// ── GET /api/telemetry/stats ──
+
+#[derive(Deserialize)]
+struct TelemetryStatsQuery {
+    #[serde(default)]
+    days: Option<u32>,
+    #[serde(default)]
+    source: Option<String>,
+}
+
+async fn get_telemetry_stats(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<TelemetryStatsQuery>,
+) -> Result<Response, AppError> {
+    let ledger = state.open_ledger()?;
+    let branch = ledger.head_branch()?;
+    let days = q.days.unwrap_or(7);
+
+    // Compute "after" date
+    let now = time::OffsetDateTime::now_utc();
+    let after_date = now - time::Duration::days(i64::from(days));
+    let after_str = after_date
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+
+    let events = ledger.iter_events_filtered(
+        &branch,
+        Some("cycle_telemetry"),
+        None,
+        Some(&after_str),
+        None,
+        10_000,
+    )?;
+
+    let mut payloads: Vec<serde_json::Value> = events.into_iter().map(|e| e.payload).collect();
+
+    // Post-filter by source if specified
+    if let Some(ref source) = q.source {
+        payloads.retain(|p| {
+            p.get("source")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s == source)
+        });
+    }
+
+    let stats = compute_telemetry_stats(&payloads);
+    Ok(Json(stats).into_response())
+}
+
+/// Compute telemetry statistics from a set of cycle_telemetry payloads.
+fn compute_telemetry_stats(payloads: &[serde_json::Value]) -> serde_json::Value {
+    let cycle_count = payloads.len();
+    if cycle_count == 0 {
+        return serde_json::json!({
+            "cycle_count": 0,
+            "avg_duration_ms": 0.0,
+            "p95_duration_ms": 0.0,
+            "total_cost_usd": 0.0,
+            "slowest_operations": [],
+            "error_rate": 0.0,
+        });
+    }
+
+    // Collect durations
+    let mut durations: Vec<f64> = payloads
+        .iter()
+        .filter_map(|p| p.get("total_duration_ms").and_then(|v| v.as_f64()))
+        .collect();
+    durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let avg_duration_ms = if durations.is_empty() {
+        0.0
+    } else {
+        durations.iter().sum::<f64>() / durations.len() as f64
+    };
+
+    let p95_duration_ms = if durations.is_empty() {
+        0.0
+    } else {
+        let idx = ((durations.len() as f64) * 0.95).ceil() as usize;
+        durations[idx.min(durations.len() - 1)]
+    };
+
+    // Total cost
+    let total_cost_usd: f64 = payloads
+        .iter()
+        .filter_map(|p| {
+            p.get("cost")
+                .and_then(|c| c.get("total_usd"))
+                .and_then(|v| v.as_f64())
+        })
+        .sum();
+
+    // Per-operation stats
+    let mut op_stats: std::collections::HashMap<String, (f64, u64, usize, usize)> =
+        std::collections::HashMap::new(); // (sum_dur, max_dur, count, error_count)
+
+    let mut total_ops = 0usize;
+    let mut total_errors = 0usize;
+
+    for payload in payloads {
+        if let Some(ops) = payload.get("operations").and_then(|v| v.as_array()) {
+            for op in ops {
+                let name = op.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let dur = op.get("duration_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                let status = op.get("status").and_then(|v| v.as_str()).unwrap_or("ok");
+
+                let entry = op_stats.entry(name.to_string()).or_insert((0.0, 0, 0, 0));
+                entry.0 += dur as f64;
+                if dur > entry.1 {
+                    entry.1 = dur;
+                }
+                entry.2 += 1;
+                total_ops += 1;
+                if status == "error" {
+                    entry.3 += 1;
+                    total_errors += 1;
+                }
+            }
+        }
+    }
+
+    // Build slowest operations (top 5 by avg duration)
+    let mut op_list: Vec<serde_json::Value> = op_stats
+        .iter()
+        .map(|(name, (sum, max, count, _))| {
+            serde_json::json!({
+                "name": name,
+                "avg_duration_ms": sum / *count as f64,
+                "max_duration_ms": max,
+                "count": count,
+            })
+        })
+        .collect();
+    op_list.sort_by(|a, b| {
+        let a_avg = a["avg_duration_ms"].as_f64().unwrap_or(0.0);
+        let b_avg = b["avg_duration_ms"].as_f64().unwrap_or(0.0);
+        b_avg
+            .partial_cmp(&a_avg)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    op_list.truncate(5);
+
+    let error_rate = if total_ops > 0 {
+        total_errors as f64 / total_ops as f64
+    } else {
+        0.0
+    };
+
+    serde_json::json!({
+        "cycle_count": cycle_count,
+        "avg_duration_ms": avg_duration_ms,
+        "p95_duration_ms": p95_duration_ms,
+        "total_cost_usd": total_cost_usd,
+        "slowest_operations": op_list,
+        "error_rate": error_rate,
+    })
 }
 
 // ── POST /api/snapshot ──
@@ -7308,5 +7624,231 @@ actors:
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ── Telemetry endpoint tests ──
+
+    fn sample_telemetry_body(cycle_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "cycle_id": cycle_id,
+            "source": "thyra",
+            "started_at": "2026-03-27T10:00:00Z",
+            "total_duration_ms": 5000,
+            "operations": [
+                {
+                    "name": "probe",
+                    "duration_ms": 2000,
+                    "token_usage": { "input_tokens": 1000, "output_tokens": 500 },
+                    "status": "ok"
+                },
+                {
+                    "name": "evaluate",
+                    "duration_ms": 3000,
+                    "status": "ok"
+                }
+            ],
+            "cost": {
+                "total_usd": 0.05
+            },
+            "tags": ["governance"]
+        })
+    }
+
+    #[tokio::test]
+    async fn post_telemetry_creates_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/telemetry")
+                    .header("content-type", "application/json")
+                    .body(Body::from(sample_telemetry_body("cycle_001").to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["event_id"].as_str().unwrap(), "cycle_001");
+        assert_eq!(json["status"].as_str().unwrap(), "created");
+    }
+
+    #[tokio::test]
+    async fn post_telemetry_deduplicates() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // First POST
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/telemetry")
+                    .header("content-type", "application/json")
+                    .body(Body::from(sample_telemetry_body("cycle_dup").to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Second POST with same cycle_id
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/telemetry")
+                    .header("content-type", "application/json")
+                    .body(Body::from(sample_telemetry_body("cycle_dup").to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"].as_str().unwrap(), "duplicate");
+    }
+
+    #[tokio::test]
+    async fn post_telemetry_rejects_bad_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/telemetry")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"not": "valid telemetry"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_telemetry_returns_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // POST two telemetry events
+        let app = router(tmp.path());
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/telemetry")
+                .header("content-type", "application/json")
+                .body(Body::from(sample_telemetry_body("cycle_get_1").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let app = router(tmp.path());
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/telemetry")
+                .header("content-type", "application/json")
+                .body(Body::from(sample_telemetry_body("cycle_get_2").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // GET telemetry
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/telemetry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_telemetry_stats_computes_averages() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // POST 3 telemetry events with different durations
+        for (id, dur) in [("cyc_s1", 1000u64), ("cyc_s2", 2000), ("cyc_s3", 3000)] {
+            let body = serde_json::json!({
+                "cycle_id": id,
+                "source": "thyra",
+                "started_at": "2026-03-27T10:00:00Z",
+                "total_duration_ms": dur,
+                "operations": [
+                    { "name": "probe", "duration_ms": dur / 2, "status": "ok" },
+                    { "name": "evaluate", "duration_ms": dur / 2, "status": "ok" }
+                ],
+                "cost": { "total_usd": 0.01 }
+            });
+            let app = router(tmp.path());
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/telemetry")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+
+        // GET stats
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/telemetry/stats?days=30")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["cycle_count"].as_u64().unwrap(), 3);
+        assert!((json["avg_duration_ms"].as_f64().unwrap() - 2000.0).abs() < 0.1);
+        assert_eq!(json["p95_duration_ms"].as_f64().unwrap(), 3000.0);
+        assert!((json["total_cost_usd"].as_f64().unwrap() - 0.03).abs() < 0.001);
+        assert_eq!(json["error_rate"].as_f64().unwrap(), 0.0);
+
+        let ops = json["slowest_operations"].as_array().unwrap();
+        assert_eq!(ops.len(), 2);
     }
 }
