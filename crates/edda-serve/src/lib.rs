@@ -5305,9 +5305,9 @@ actors:
         let tmp = tempfile::tempdir().unwrap();
         setup_workspace(tmp.path());
 
-        let _guard = STORE_LOCK.lock().unwrap();
+        let _lock = STORE_LOCK.lock().unwrap();
         std::env::set_var("EDDA_STORE_ROOT", tmp.path().join("store"));
-        let _sg = StoreRootGuard;
+        let _guard = StoreRootGuard;
 
         let app = router(tmp.path());
         let resp = app
@@ -5333,9 +5333,9 @@ actors:
         let tmp = tempfile::tempdir().unwrap();
         setup_workspace(tmp.path());
 
-        let _guard = STORE_LOCK.lock().unwrap();
+        let _lock = STORE_LOCK.lock().unwrap();
         std::env::set_var("EDDA_STORE_ROOT", tmp.path().join("store"));
-        let _sg = StoreRootGuard;
+        let _guard = StoreRootGuard;
 
         let app = router(tmp.path());
         let resp = app
