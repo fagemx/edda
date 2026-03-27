@@ -551,6 +551,7 @@ impl SqliteStore {
     /// matches the previous event's `hash`.
     ///
     /// Returns `Err` describing the first break found.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn verify_chain(&self) -> anyhow::Result<()> {
         let events = self.iter_events()?;
         if events.is_empty() {

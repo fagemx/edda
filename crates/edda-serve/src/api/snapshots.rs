@@ -218,7 +218,7 @@ async fn get_village_stats(
     State(state): State<Arc<AppState>>,
     AxumPath(village_id): AxumPath<String>,
     Query(params): Query<VillageStatsQuery>,
-) -> Result<Json<edda_ledger::sqlite_store::VillageStats>, AppError> {
+) -> Result<Json<edda_ledger::VillageStats>, AppError> {
     if let Some(ref after) = params.after {
         crate::helpers::validate_iso8601(after).map_err(AppError::Validation)?;
     }
@@ -251,7 +251,7 @@ struct PatternsQuery {
 async fn get_patterns(
     State(state): State<Arc<AppState>>,
     Query(params): Query<PatternsQuery>,
-) -> Result<Json<edda_ledger::sqlite_store::PatternDetectionResult>, AppError> {
+) -> Result<Json<edda_ledger::PatternDetectionResult>, AppError> {
     let village_id = params
         .village_id
         .as_deref()
@@ -271,7 +271,7 @@ async fn get_patterns(
     let patterns = ledger.detect_village_patterns(village_id, &after_str, min_occurrences)?;
     let total = patterns.len();
 
-    Ok(Json(edda_ledger::sqlite_store::PatternDetectionResult {
+    Ok(Json(edda_ledger::PatternDetectionResult {
         village_id: village_id.to_string(),
         lookback_days,
         after: after_str,

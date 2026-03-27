@@ -1,5 +1,5 @@
 use edda_core::Event;
-use edda_ledger::sqlite_store::DecisionRow;
+use edda_ledger::DecisionView;
 use edda_ledger::Ledger;
 use serde::Serialize;
 
@@ -7,7 +7,7 @@ const SEMANTIC_CANDIDATE_LIMIT: usize = 500;
 
 #[derive(Debug)]
 struct ScoredDecision {
-    row: DecisionRow,
+    row: DecisionView,
     score: f64,
 }
 
@@ -603,7 +603,7 @@ fn semantic_decision_search(
 
 fn rank_decisions_by_similarity(
     query: &str,
-    candidates: Vec<DecisionRow>,
+    candidates: Vec<DecisionView>,
     branch: Option<&str>,
 ) -> Vec<ScoredDecision> {
     let query_tokens = tokenize_for_similarity(query);
@@ -611,7 +611,7 @@ fn rank_decisions_by_similarity(
         return vec![];
     }
 
-    let mut tokenized_docs: Vec<(DecisionRow, Vec<String>)> = Vec::new();
+    let mut tokenized_docs: Vec<(DecisionView, Vec<String>)> = Vec::new();
     for row in candidates {
         if branch.is_some_and(|b| row.branch != b) {
             continue;
@@ -810,8 +810,7 @@ pub fn format_human(result: &AskResult) -> String {
 
 // ── Internal helpers ─────────────────────────────────────────────────
 
-fn to_decision_hit(row: &DecisionRow) -> DecisionHit {
-    let tags: Vec<String> = serde_json::from_str(&row.tags).unwrap_or_default();
+fn to_decision_hit(row: &DecisionView) -> DecisionHit {
     DecisionHit {
         event_id: row.event_id.clone(),
         key: row.key.clone(),
@@ -820,8 +819,8 @@ fn to_decision_hit(row: &DecisionRow) -> DecisionHit {
         domain: row.domain.clone(),
         branch: row.branch.clone(),
         ts: row.ts.clone().unwrap_or_default(),
-        is_active: row.is_active,
-        tags,
+        is_active: matches!(row.status.as_str(), "active" | "experimental"),
+        tags: row.tags.clone(),
         village_id: row.village_id.clone(),
     }
 }

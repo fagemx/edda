@@ -3784,7 +3784,7 @@ actors:
         let pair_evt = seed_dummy_event(&ledger);
         let revoke_evt = seed_dummy_event(&ledger);
         ledger
-            .insert_device_token(&edda_ledger::sqlite_store::DeviceTokenRow {
+            .insert_device_token(&edda_ledger::DeviceTokenRow {
                 token_hash: token_hash.clone(),
                 device_name: "test-device".to_string(),
                 paired_at: "2026-01-01T00:00:00Z".to_string(),
@@ -3815,7 +3815,7 @@ actors:
         let ledger = Ledger::open(tmp.path()).unwrap();
         let pair_evt = seed_dummy_event(&ledger);
         ledger
-            .insert_device_token(&edda_ledger::sqlite_store::DeviceTokenRow {
+            .insert_device_token(&edda_ledger::DeviceTokenRow {
                 token_hash,
                 device_name: "test-device".to_string(),
                 paired_at: "2026-01-01T00:00:00Z".to_string(),

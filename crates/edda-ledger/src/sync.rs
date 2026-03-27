@@ -92,7 +92,9 @@ pub fn sync_from_sources(
             }
         };
 
-        let shared = match source_ledger.shared_decisions() {
+        // Use internal SqliteStore to get raw DecisionRow (sync needs scope,
+        // source_project_id fields not exposed via DecisionView).
+        let shared = match source_ledger.sqlite.shared_decisions() {
             Ok(d) => d,
             Err(e) => {
                 result.errors.push(SourceError {
@@ -110,8 +112,8 @@ pub fn sync_from_sources(
                 continue;
             }
 
-            // Check for local conflict
-            let local = target.find_active_decision(&branch, &decision.key)?;
+            // Check for local conflict (use raw row to access source_project_id)
+            let local = target.sqlite.find_active_decision(&branch, &decision.key)?;
             let is_conflict = local
                 .as_ref()
                 .map(|l| l.value != decision.value && l.source_project_id.is_none())
@@ -319,8 +321,11 @@ mod tests {
         assert_eq!(result.imported[0].key, "api.version");
         assert_eq!(result.imported[0].value, "v3");
 
-        // Verify it was written to the ledger
-        let decisions = tgt_ledger.active_decisions(None, None, None, None).unwrap();
+        // Verify it was written to the ledger (use raw rows to check source_project_id)
+        let decisions = tgt_ledger
+            .sqlite
+            .active_decisions(None, None, None, None, None)
+            .unwrap();
         assert!(decisions.iter().any(|d| d.key == "api.version"
             && d.value == "v3"
             && d.source_project_id.as_deref() == Some("source_proj")));

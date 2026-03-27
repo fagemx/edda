@@ -434,10 +434,7 @@ pub fn build_decision_pack(repo_root: &Path, branch: &str, max_items: usize) -> 
     let views: Vec<DecisionView> = match edda_ledger::Ledger::open(repo_root) {
         Ok(ledger) => ledger
             .active_decisions_limited(None, None, None, None, max_items)
-            .unwrap_or_default()
-            .iter()
-            .map(edda_ledger::view::to_view)
-            .collect(),
+            .unwrap_or_default(),
         Err(_) => Vec::new(),
     };
 
