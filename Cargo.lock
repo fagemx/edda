@@ -886,6 +886,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "edda-ingestion"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "edda-core",
+ "edda-ledger",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "time",
+ "ulid",
+]
+
+[[package]]
 name = "edda-ledger"
 version = "0.1.1"
 dependencies = [

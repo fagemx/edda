@@ -1,0 +1,23 @@
+[package]
+name = "edda-ingestion"
+description = "Ingestion trigger evaluation engine for Edda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+edda-core = { path = "../edda-core", version = "0.1.1" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ulid.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
