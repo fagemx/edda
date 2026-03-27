@@ -4772,4 +4772,781 @@ actors:
             Some("1")
         );
     }
+
+    // ── Auth Pairing Endpoint Tests (GH-374, Step 1) ──
+
+    #[tokio::test]
+    async fn create_pairing_returns_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pair/new")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"device_name": "my-phone"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["pairing_token"].as_str().is_some());
+        assert!(json["pairing_url"].as_str().is_some());
+        assert_eq!(json["expires_in_seconds"].as_u64().unwrap(), 600);
+    }
+
+    #[tokio::test]
+    async fn create_pairing_rejects_empty_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pair/new")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"device_name": ""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn complete_pairing_invalid_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/pair?token=bad_token_value")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid or expired"));
+    }
+
+    #[tokio::test]
+    async fn list_paired_devices_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/pair/list")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn revoke_device_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pair/revoke")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"device_name": "nonexistent"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn revoke_device_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed a device token directly
+        let raw_token = generate_device_token();
+        let token_hash = hash_token(&raw_token);
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let pair_evt = seed_dummy_event(&ledger);
+        ledger
+            .insert_device_token(&edda_ledger::DeviceTokenRow {
+                token_hash,
+                device_name: "test-phone".to_string(),
+                paired_at: "2026-01-01T00:00:00Z".to_string(),
+                paired_from_ip: "127.0.0.1".to_string(),
+                revoked_at: None,
+                pair_event_id: pair_evt,
+                revoke_event_id: None,
+            })
+            .unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pair/revoke")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"device_name": "test-phone"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["device_name"], "test-phone");
+    }
+
+    #[tokio::test]
+    async fn revoke_all_devices() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed two device tokens
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        for name in &["device-a", "device-b"] {
+            let raw = generate_device_token();
+            let hash = hash_token(&raw);
+            let evt = seed_dummy_event(&ledger);
+            ledger
+                .insert_device_token(&edda_ledger::DeviceTokenRow {
+                    token_hash: hash,
+                    device_name: name.to_string(),
+                    paired_at: "2026-01-01T00:00:00Z".to_string(),
+                    paired_from_ip: "127.0.0.1".to_string(),
+                    revoked_at: None,
+                    pair_event_id: evt,
+                    revoke_event_id: None,
+                })
+                .unwrap();
+        }
+        drop(ledger);
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pair/revoke-all")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["revoked_count"].as_u64().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn pair_and_list_device() {
+        use std::sync::Arc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Build a shared router (need same AppState for pending_pairings)
+        let store_root = edda_store::store_root();
+        let chronicle = if store_root.exists() {
+            Some(ChronicleContext {
+                _store_root: store_root,
+            })
+        } else {
+            None
+        };
+        let state = Arc::new(AppState {
+            repo_root: tmp.path().to_path_buf(),
+            chronicle,
+            pending_pairings: Mutex::new(HashMap::new()),
+        });
+
+        let make_app = || {
+            api::events::routes()
+                .merge(api::auth::routes())
+                .with_state(state.clone())
+        };
+
+        // Step 1: Create pairing
+        let resp = make_app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/pair/new")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"device_name": "laptop"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = json["pairing_token"].as_str().unwrap().to_string();
+
+        // Step 2: Complete pairing
+        let resp = make_app()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pair?token={token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["device_token"].as_str().is_some());
+        assert_eq!(json["device_name"], "laptop");
+
+        // Step 3: List — should show the newly paired device
+        let resp = make_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/pair/list")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let devices: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0]["device_name"], "laptop");
+        assert_eq!(devices[0]["status"], "active");
+    }
+
+    // ── Briefs Endpoint Tests (GH-374, Step 2) ──
+
+    #[tokio::test]
+    async fn get_briefs_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/briefs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["count"].as_u64().unwrap(), 0);
+        assert!(json["briefs"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_brief_not_found_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/briefs/nonexistent_task")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_briefs_with_task_intake() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed a task_intake event to materialize a brief
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let parent_hash = ledger.last_event_hash().unwrap();
+        let params = edda_core::event::TaskIntakeParams {
+            branch: "main".to_string(),
+            parent_hash,
+            source: "github_issue".to_string(),
+            source_id: "99".to_string(),
+            source_url: "https://github.com/owner/repo/issues/99".to_string(),
+            title: "Test Brief Task".to_string(),
+            intent: "implement".to_string(),
+            labels: vec!["test".to_string()],
+            priority: "normal".to_string(),
+            constraints: vec![],
+        };
+        let event = edda_core::event::new_task_intake_event(&params).unwrap();
+        ledger.append_event(&event).unwrap();
+        drop(ledger);
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/briefs")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["count"].as_u64().unwrap(), 1);
+        let briefs = json["briefs"].as_array().unwrap();
+        assert_eq!(briefs[0]["title"], "Test Brief Task");
+        assert_eq!(briefs[0]["intent"], "implement");
+    }
+
+    // ── Village Stats Endpoint Tests (GH-374, Step 3) ──
+
+    #[tokio::test]
+    async fn village_stats_returns_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed decisions with village_id
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let mut prev_hash = ledger.last_event_hash().unwrap();
+        for i in 0..3 {
+            let dp = DecisionPayload {
+                key: format!("test.key{i}"),
+                value: format!("val{i}"),
+                reason: Some("testing".to_string()),
+                scope: None,
+                authority: Some("system".to_string()),
+                affected_paths: None,
+                tags: None,
+                review_after: None,
+                reversibility: None,
+                village_id: Some("v-stats".to_string()),
+            };
+            let event = new_decision_event("main", prev_hash.as_deref(), "system", &dp).unwrap();
+            prev_hash = Some(event.hash.clone());
+            ledger.append_event(&event).unwrap();
+        }
+        drop(ledger);
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/villages/v-stats/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["village_id"], "v-stats");
+        assert!(json["total_decisions"].as_u64().unwrap() >= 3);
+    }
+
+    #[tokio::test]
+    async fn village_stats_invalid_after_400() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/villages/v-test/stats?after=not-a-date")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Approval Check Endpoint Tests (GH-374, Step 4) ──
+
+    #[tokio::test]
+    async fn approval_check_inline_returns_decision() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/approval/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "step": "deploy",
+                            "risk_level": "low",
+                            "files_changed": 2
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        // ApprovalDecision always has an "action" field
+        assert!(json["action"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn approval_check_nonexistent_bundle_404() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/approval/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "step": "deploy",
+                            "bundle_id": "nonexistent_bundle"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ── Controls Patches Endpoint Tests (GH-374, Step 5) ──
+
+    #[tokio::test]
+    async fn controls_patches_returns_empty_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let _lock = STORE_LOCK.lock().unwrap();
+        std::env::set_var("EDDA_STORE_ROOT", tmp.path().join("store"));
+        let _guard = StoreRootGuard;
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/controls/patches")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(json.is_empty());
+    }
+
+    #[tokio::test]
+    async fn controls_patches_invalid_status_400() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let _lock = STORE_LOCK.lock().unwrap();
+        std::env::set_var("EDDA_STORE_ROOT", tmp.path().join("store"));
+        let _guard = StoreRootGuard;
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/controls/patches?status=invalid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Decisions ISO Validation Test (GH-374, Step 6) ──
+
+    #[tokio::test]
+    async fn decisions_invalid_after_param_400() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/decisions?after=not-a-date")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "VALIDATION_ERROR");
+    }
+
+    // ── Log Filter Tests (GH-374, Step 7) ──
+
+    #[tokio::test]
+    async fn log_filters_by_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed a note and a decision
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let parent_hash = ledger.last_event_hash().unwrap();
+        let note = new_note_event("main", parent_hash.as_deref(), "user", "a note", &[]).unwrap();
+        ledger.append_event(&note).unwrap();
+
+        let dp = DecisionPayload {
+            key: "filter.test".to_string(),
+            value: "val".to_string(),
+            reason: Some("testing".to_string()),
+            scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: None,
+        };
+        let decide = new_decision_event("main", Some(&note.hash), "system", &dp).unwrap();
+        ledger.append_event(&decide).unwrap();
+        drop(ledger);
+
+        // Filter by type=note
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/log?type=note")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let events = json["events"].as_array().unwrap();
+        assert!(!events.is_empty());
+        for e in events {
+            assert_eq!(e["type"], "note");
+        }
+    }
+
+    #[tokio::test]
+    async fn log_filters_by_keyword() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed two notes with different text
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let parent_hash = ledger.last_event_hash().unwrap();
+        let note1 = new_note_event(
+            "main",
+            parent_hash.as_deref(),
+            "user",
+            "alpha keyword search",
+            &[],
+        )
+        .unwrap();
+        ledger.append_event(&note1).unwrap();
+        let note2 = new_note_event(
+            "main",
+            Some(&note1.hash),
+            "user",
+            "beta unrelated text",
+            &[],
+        )
+        .unwrap();
+        ledger.append_event(&note2).unwrap();
+        drop(ledger);
+
+        // Filter by keyword=alpha
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/log?keyword=alpha")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let events = json["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0]["summary"].as_str().unwrap().contains("alpha"));
+    }
+
+    // ── Telemetry Source Filter Test (GH-374, Step 8) ──
+
+    #[tokio::test]
+    async fn get_telemetry_filters_by_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // POST two telemetry events with different sources
+        let body_thyra = serde_json::json!({
+            "cycle_id": "cyc_thyra",
+            "source": "thyra",
+            "started_at": "2026-03-27T10:00:00Z",
+            "total_duration_ms": 1000,
+            "operations": [{"name": "probe", "duration_ms": 1000, "status": "ok"}],
+            "cost": {"total_usd": 0.01}
+        });
+        let body_other = serde_json::json!({
+            "cycle_id": "cyc_other",
+            "source": "custom",
+            "started_at": "2026-03-27T11:00:00Z",
+            "total_duration_ms": 2000,
+            "operations": [{"name": "scan", "duration_ms": 2000, "status": "ok"}],
+            "cost": {"total_usd": 0.02}
+        });
+
+        let app = router(tmp.path());
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/telemetry")
+                .header("content-type", "application/json")
+                .body(Body::from(body_thyra.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let app = router(tmp.path());
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/telemetry")
+                .header("content-type", "application/json")
+                .body(Body::from(body_other.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // GET with source filter
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/telemetry?source=thyra")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["source"], "thyra");
+    }
 }
