@@ -1,3 +1,4 @@
+use anyhow::Context;
 use clap::Subcommand;
 use std::io::Read;
 use std::path::Path;
@@ -537,7 +538,7 @@ pub fn decide(
     edda_bridge_claude::peers::write_binding(&project_id, &session_id, &label, key, value);
 
     // 2. Write to workspace ledger (permanent)
-    let ledger = edda_ledger::Ledger::open(repo_root)?;
+    let ledger = edda_ledger::Ledger::open(repo_root).context("cmd_bridge: opening ledger")?;
     let _lock = edda_ledger::lock::WorkspaceLock::acquire(&ledger.paths)?;
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;
@@ -1013,7 +1014,8 @@ fn write_accepted_to_ledger(
     repo_root: &Path,
     decisions: &[edda_bridge_claude::bg_extract::ExtractedDecision],
 ) -> anyhow::Result<()> {
-    let ledger = edda_ledger::Ledger::open(repo_root)?;
+    let ledger = edda_ledger::Ledger::open(repo_root)
+        .context("cmd_bridge::write_accepted_to_ledger: opening ledger")?;
     let _lock = edda_ledger::lock::WorkspaceLock::acquire(&ledger.paths)?;
     let branch = ledger.head_branch()?;
 

@@ -1,3 +1,4 @@
+use anyhow::Context;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -383,7 +384,7 @@ async fn auth_middleware(
     };
 
     let token_hash = hash_token(raw_token);
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("auth_middleware")?;
     let device = ledger.validate_device_token(&token_hash)?;
 
     match device {
@@ -507,7 +508,7 @@ async fn complete_pairing(
     let event_id = format!("evt_{}", ulid::Ulid::new());
 
     // Write device_pair event to ledger
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /pair")?;
     let branch = ledger.head_branch()?;
 
     let payload = serde_json::json!({
@@ -564,7 +565,7 @@ struct DeviceInfo {
 async fn list_paired_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<DeviceInfo>>, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/pair/list")?;
     let tokens = ledger.list_device_tokens()?;
 
     let devices: Vec<DeviceInfo> = tokens
@@ -596,7 +597,7 @@ async fn revoke_device(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let Json(req) = body.map_err(|e| AppError::Validation(e.to_string()))?;
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("POST /api/pair/revoke")?;
 
     // Check the token exists *before* writing the ledger event
     let existing = ledger.list_device_tokens()?;
@@ -654,7 +655,7 @@ async fn revoke_all_devices(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let event_id = format!("evt_{}", ulid::Ulid::new());
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("POST /api/pair/revoke-all")?;
     let branch = ledger.head_branch()?;
 
     let now = time::OffsetDateTime::now_utc();
@@ -715,7 +716,7 @@ struct LastCommit {
 }
 
 async fn get_status(State(state): State<Arc<AppState>>) -> Result<Json<StatusResponse>, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/status")?;
     let head = ledger.head_branch()?;
     let snap = rebuild_branch(&ledger, &head)?;
 
@@ -748,7 +749,7 @@ async fn get_context(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ContextQuery>,
 ) -> Result<Json<ContextResponse>, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/context")?;
     let head = ledger.head_branch()?;
     let depth = params.depth.unwrap_or(5);
     let text = render_context(&ledger, &head, DeriveOptions { depth })?;
@@ -792,7 +793,7 @@ async fn get_decisions(
         validate_iso8601(before).map_err(AppError::Validation)?;
     }
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/decisions")?;
     let q = params
         .q
         .as_deref()
@@ -877,7 +878,7 @@ async fn post_decisions_batch(
         ));
     }
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("POST /api/decisions/batch")?;
     let mut results = Vec::with_capacity(body.queries.len());
 
     for (i, sub) in body.queries.iter().enumerate() {
@@ -946,7 +947,9 @@ async fn get_decision_outcomes(
     State(state): State<Arc<AppState>>,
     AxumPath(event_id): AxumPath<String>,
 ) -> Result<Response, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state
+        .open_ledger()
+        .context("GET /api/decisions/:id/outcomes")?;
     let outcomes = ledger.decision_outcomes(&event_id)?;
 
     match outcomes {
@@ -1001,7 +1004,9 @@ async fn get_decision_chain(
     Query(params): Query<ChainQuery>,
 ) -> Result<Json<ChainResponse>, AppError> {
     let depth = params.depth.unwrap_or(3).min(10);
-    let ledger = state.open_ledger()?;
+    let ledger = state
+        .open_ledger()
+        .context("GET /api/decisions/:id/chain")?;
 
     let (root, chain) = ledger
         .causal_chain(&event_id, depth)?
@@ -1075,7 +1080,7 @@ async fn get_log(
     State(state): State<Arc<AppState>>,
     Query(params): Query<LogQuery>,
 ) -> Result<Json<LogResponse>, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/log")?;
     let head = ledger.head_branch()?;
     let limit = params.limit.unwrap_or(50);
 
@@ -1186,7 +1191,7 @@ struct MinimalStage {
 }
 
 async fn get_drafts(State(state): State<Arc<AppState>>) -> Result<Json<DraftsResponse>, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/drafts")?;
     let drafts_dir = &ledger.paths.drafts_dir;
 
     if !drafts_dir.exists() {
@@ -1384,7 +1389,7 @@ async fn handle_draft_action(
     action: &str,
     body: &ApproveRequest,
 ) -> Result<Response, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("POST /api/drafts/:id/action")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     // Read the draft
@@ -1641,7 +1646,7 @@ async fn post_note(
 ) -> Result<impl IntoResponse, AppError> {
     let Json(body) = body.map_err(|e| AppError::Validation(e.body_text()))?;
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("POST /api/note")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let branch = ledger.head_branch()?;
@@ -1689,7 +1694,7 @@ async fn post_decide(
     let key = key.trim();
     let value = value.trim();
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("POST /api/decide")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let branch = ledger.head_branch()?;
@@ -1811,7 +1816,7 @@ async fn post_karvi_event(
         "decision_ref": body.decision_ref,
     });
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("POST /api/events/karvi")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;
@@ -1910,7 +1915,7 @@ async fn post_telemetry(
         "metadata": body.metadata,
     });
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("POST /api/telemetry")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;
@@ -1961,7 +1966,7 @@ async fn get_telemetry(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TelemetryQuery>,
 ) -> Result<Response, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/telemetry")?;
     let branch = ledger.head_branch()?;
     let limit = q.limit.unwrap_or(100);
 
@@ -2012,7 +2017,7 @@ async fn get_telemetry_stats(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TelemetryStatsQuery>,
 ) -> Result<Response, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/telemetry/stats")?;
     let branch = ledger.head_branch()?;
     let days = q.days.unwrap_or(7);
 
@@ -2204,7 +2209,7 @@ async fn post_snapshot(
         ));
     }
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("POST /api/snapshot")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let branch = ledger.head_branch()?;
@@ -2306,7 +2311,7 @@ async fn get_snapshots(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SnapshotsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/snapshots")?;
     let rows = ledger.query_snapshots(
         query.village_id.as_deref(),
         query.engine_version.as_deref(),
@@ -2328,7 +2333,7 @@ async fn get_snapshots_by_hash(
     State(state): State<Arc<AppState>>,
     AxumPath(context_hash): AxumPath<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/snapshots/:hash")?;
     let rows = ledger.snapshots_by_context_hash(&context_hash)?;
 
     if rows.is_empty() {
@@ -2368,7 +2373,7 @@ async fn get_village_stats(
         validate_iso8601(before).map_err(AppError::Validation)?;
     }
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/villages/:id/stats")?;
     let stats = ledger.village_stats(
         &village_id,
         params.after.as_deref(),
@@ -2409,7 +2414,7 @@ async fn get_patterns(
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default();
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/patterns")?;
     let patterns = ledger.detect_village_patterns(village_id, &after_str, min_occurrences)?;
     let total = patterns.len();
 
@@ -2793,7 +2798,7 @@ struct ActorsListResponse {
 async fn get_actors(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ActorsListResponse>, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/actors")?;
     let cfg = policy::load_actors_from_dir(&ledger.paths.edda_dir)?;
     let actors = cfg
         .actors
@@ -2816,7 +2821,7 @@ async fn get_actor(
     State(state): State<Arc<AppState>>,
     AxumPath(name): AxumPath<String>,
 ) -> Result<Json<ActorResponse>, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/actors/:name")?;
     let cfg = policy::load_actors_from_dir(&ledger.paths.edda_dir)?;
     match cfg.actors.get(&name) {
         Some(def) => Ok(Json(ActorResponse {
@@ -2847,7 +2852,7 @@ async fn get_quality_metrics(
         after: params.after,
         before: params.before,
     };
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/metrics/quality")?;
     let events = ledger.iter_events_by_type("execution_event")?;
     let report = model_quality_from_events(&events, &range);
     Ok(Json(report))
@@ -2876,7 +2881,9 @@ async fn get_controls_suggestions(
         after: params.after,
         before: params.before,
     };
-    let ledger = state.open_ledger()?;
+    let ledger = state
+        .open_ledger()
+        .context("GET /api/controls/suggestions")?;
     let events = ledger.iter_events_by_type("execution_event")?;
     let report = model_quality_from_events(&events, &range);
 
@@ -3361,7 +3368,7 @@ async fn post_approval_check(
 
     // Build ReviewBundle from request or from ledger
     let bundle = if let Some(bundle_id) = &body.bundle_id {
-        let ledger = Ledger::open(&state.repo_root)?;
+        let ledger = Ledger::open(&state.repo_root).context("POST /api/approval/check")?;
         let Some(row) = ledger.get_bundle(bundle_id)? else {
             return Err(AppError::NotFound(format!(
                 "Bundle '{}' not found",
@@ -3511,7 +3518,7 @@ async fn post_sync(
         dry_run: false,
     });
 
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("POST /api/sync")?;
 
     let sources = if let Some(name) = &body.from {
         sources_from_name(name)
@@ -3565,7 +3572,7 @@ async fn get_briefs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<BriefsQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/briefs")?;
     let briefs = ledger.list_task_briefs(params.status.as_deref(), params.intent.as_deref())?;
 
     let items: Vec<serde_json::Value> = briefs
@@ -3600,7 +3607,7 @@ async fn get_brief(
     State(state): State<Arc<AppState>>,
     AxumPath(task_id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let ledger = state.open_ledger()?;
+    let ledger = state.open_ledger().context("GET /api/briefs/:task_id")?;
     let brief = ledger
         .get_task_brief(&task_id)?
         .ok_or_else(|| AppError::NotFound(format!("task brief not found: {task_id}")))?;
@@ -4009,7 +4016,7 @@ async fn get_event_stream(
 
     // Resolve the initial cursor (rowid) from `since` event_id.
     let mut cursor: i64 = if let Some(ref event_id) = since {
-        let ledger = state.open_ledger()?;
+        let ledger = state.open_ledger().context("GET /api/events/stream")?;
         ledger.rowid_for_event_id(event_id)?.unwrap_or(0)
     } else {
         0

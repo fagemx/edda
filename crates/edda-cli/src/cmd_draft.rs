@@ -589,7 +589,7 @@ pub struct ProposeParams<'a> {
 }
 
 pub fn propose(p: ProposeParams<'_>) -> anyhow::Result<()> {
-    let ledger = Ledger::open(p.repo_root)?;
+    let ledger = Ledger::open(p.repo_root).context("cmd_draft::propose: opening ledger")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let branch = ledger.head_branch()?;
@@ -756,7 +756,7 @@ pub fn propose(p: ProposeParams<'_>) -> anyhow::Result<()> {
 }
 
 pub fn show(repo_root: &Path, id: &str) -> anyhow::Result<()> {
-    let ledger = Ledger::open(repo_root)?;
+    let ledger = Ledger::open(repo_root).context("cmd_draft::show: opening ledger")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let draft = read_draft(&ledger, id)?;
@@ -765,7 +765,7 @@ pub fn show(repo_root: &Path, id: &str) -> anyhow::Result<()> {
 }
 
 pub fn list(repo_root: &Path, json: bool) -> anyhow::Result<()> {
-    let ledger = Ledger::open(repo_root)?;
+    let ledger = Ledger::open(repo_root).context("cmd_draft::list: opening ledger")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let dir = &ledger.paths.drafts_dir;
@@ -857,7 +857,7 @@ pub fn inbox(
     role: Option<&str>,
     json: bool,
 ) -> anyhow::Result<()> {
-    let ledger = Ledger::open(repo_root)?;
+    let ledger = Ledger::open(repo_root).context("cmd_draft::inbox: opening ledger")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let dir = &ledger.paths.drafts_dir;
@@ -952,7 +952,7 @@ pub fn approve(
     note: &str,
     stage_id: Option<&str>,
 ) -> anyhow::Result<()> {
-    let ledger = Ledger::open(repo_root)?;
+    let ledger = Ledger::open(repo_root).context("cmd_draft::approve: opening ledger")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let mut draft = read_draft(&ledger, id)?;
@@ -1121,7 +1121,7 @@ pub fn reject(
     note: &str,
     stage_id: Option<&str>,
 ) -> anyhow::Result<()> {
-    let ledger = Ledger::open(repo_root)?;
+    let ledger = Ledger::open(repo_root).context("cmd_draft::reject: opening ledger")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let mut draft = read_draft(&ledger, id)?;
@@ -1250,7 +1250,7 @@ pub fn reject(
 }
 
 pub fn apply(repo_root: &Path, id: &str, dry_run: bool, delete_after: bool) -> anyhow::Result<()> {
-    let ledger = Ledger::open(repo_root)?;
+    let ledger = Ledger::open(repo_root).context("cmd_draft::apply: opening ledger")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let mut draft = read_draft(&ledger, id)?;
@@ -1375,7 +1375,7 @@ pub fn apply(repo_root: &Path, id: &str, dry_run: bool, delete_after: bool) -> a
 }
 
 pub fn delete(repo_root: &Path, id: &str) -> anyhow::Result<()> {
-    let ledger = Ledger::open(repo_root)?;
+    let ledger = Ledger::open(repo_root).context("cmd_draft::delete: opening ledger")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let path = draft_path(&ledger, id);

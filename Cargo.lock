@@ -895,7 +895,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
  "time",
  "ulid",
 ]
