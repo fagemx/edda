@@ -100,6 +100,17 @@ pub struct OutcomeMetrics {
     pub last_execution_ts: Option<String>,
 }
 
+/// An entry in a causal chain traversal result (domain view).
+///
+/// Unlike the internal `ChainEntry` which embeds `DecisionRow`, this type
+/// uses `DecisionView` to hide storage details from consumers.
+#[derive(Debug, Clone)]
+pub struct ChainEntryView {
+    pub decision: crate::view::DecisionView,
+    pub relation: String,
+    pub depth: usize,
+}
+
 /// An execution event linked to a decision.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionLinked {

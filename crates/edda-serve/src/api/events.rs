@@ -330,27 +330,27 @@ async fn get_decision_chain(
         .ok_or_else(|| AppError::NotFound(format!("decision not found: {}", event_id)))?;
 
     let root_node = ChainNodeResponse {
-        event_id: root.event_id,
+        event_id: root.event_id.clone(),
         key: root.key,
         value: root.value,
         reason: root.reason,
         relation: None,
         depth: None,
         ts: root.ts.unwrap_or_default(),
-        is_active: root.is_active,
+        is_active: matches!(root.status.as_str(), "active" | "experimental"),
     };
 
     let chain_nodes: Vec<ChainNodeResponse> = chain
         .into_iter()
         .map(|entry| ChainNodeResponse {
-            event_id: entry.decision.event_id,
+            event_id: entry.decision.event_id.clone(),
             key: entry.decision.key,
             value: entry.decision.value,
             reason: entry.decision.reason,
             relation: Some(entry.relation),
             depth: Some(entry.depth),
             ts: entry.decision.ts.unwrap_or_default(),
-            is_active: entry.decision.is_active,
+            is_active: matches!(entry.decision.status.as_str(), "active" | "experimental"),
         })
         .collect();
 

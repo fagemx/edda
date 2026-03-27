@@ -17,7 +17,7 @@ pub use blob_store::{
     SNAPSHOT_BLOB_THRESHOLD,
 };
 pub use domain::{
-    DayCount, DetectedPattern, DomainCount, ExecutionLinked, OutcomeMetrics,
+    ChainEntryView, DayCount, DetectedPattern, DomainCount, ExecutionLinked, OutcomeMetrics,
     PatternDetectionResult, PatternType, VillageStats, VillageStatsPeriod,
 };
 pub use ledger::Ledger;
