@@ -100,6 +100,67 @@ impl IngestionRecord {
     }
 }
 
+/// Suggestion review status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuggestionStatus {
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+impl std::fmt::Display for SuggestionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Accepted => write!(f, "accepted"),
+            Self::Rejected => write!(f, "rejected"),
+        }
+    }
+}
+
+impl std::str::FromStr for SuggestionStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "accepted" => Ok(Self::Accepted),
+            "rejected" => Ok(Self::Rejected),
+            other => Err(format!(
+                "unknown suggestion status: {other} (expected pending, accepted, rejected)"
+            )),
+        }
+    }
+}
+
+/// A suggestion queued for human review before ingestion.
+/// Wire format: camelCase (WIRE-01).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Suggestion {
+    pub id: String,
+    pub event_type: String,
+    pub source_layer: SourceLayer,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<SourceRef>,
+    pub summary: String,
+    pub suggested_because: String,
+    pub detail: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    pub status: SuggestionStatus,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_at: Option<String>,
+}
+
+impl Suggestion {
+    /// Generate a new suggestion ID with `sug_` prefix + ULID.
+    pub fn new_id() -> String {
+        IngestionRecord::new_id("sug")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,5 +270,72 @@ mod tests {
             let back: SourceLayer = serde_json::from_value(json).expect("deserialize");
             assert_eq!(back, layer);
         }
+    }
+
+    #[test]
+    fn suggestion_status_serde_round_trip() {
+        for status in [
+            SuggestionStatus::Pending,
+            SuggestionStatus::Accepted,
+            SuggestionStatus::Rejected,
+        ] {
+            let json = serde_json::to_value(status).expect("serialize");
+            let back: SuggestionStatus = serde_json::from_value(json).expect("deserialize");
+            assert_eq!(back, status);
+        }
+    }
+
+    #[test]
+    fn suggestion_status_display_and_parse() {
+        for (status, s) in [
+            (SuggestionStatus::Pending, "pending"),
+            (SuggestionStatus::Accepted, "accepted"),
+            (SuggestionStatus::Rejected, "rejected"),
+        ] {
+            assert_eq!(status.to_string(), s);
+            let parsed: SuggestionStatus = s.parse().expect("valid status");
+            assert_eq!(parsed, status);
+        }
+    }
+
+    #[test]
+    fn suggestion_wire_format() {
+        let sug = Suggestion {
+            id: "sug_test".to_string(),
+            event_type: "route.changed".to_string(),
+            source_layer: SourceLayer::L1,
+            source_refs: vec![],
+            summary: "test suggestion".to_string(),
+            suggested_because: "May indicate routing anti-pattern".to_string(),
+            detail: serde_json::json!({}),
+            tags: vec![],
+            status: SuggestionStatus::Pending,
+            created_at: "2025-01-01T00:00:00Z".to_string(),
+            reviewed_at: None,
+        };
+        let json = serde_json::to_value(&sug).expect("serialize");
+
+        // Verify camelCase field names
+        assert!(json.get("eventType").is_some());
+        assert!(json.get("sourceLayer").is_some());
+        assert!(json.get("suggestedBecause").is_some());
+        assert!(json.get("createdAt").is_some());
+        assert!(json.get("reviewedAt").is_none()); // None is omitted
+
+        // Verify empty vecs are omitted
+        assert!(json.get("sourceRefs").is_none());
+        assert!(json.get("tags").is_none());
+
+        // Verify round-trip
+        let json_str = serde_json::to_string(&sug).expect("serialize");
+        let back: Suggestion = serde_json::from_str(&json_str).expect("deserialize");
+        assert_eq!(back, sug);
+    }
+
+    #[test]
+    fn suggestion_new_id_prefix() {
+        let id = Suggestion::new_id();
+        assert!(id.starts_with("sug_"));
+        assert!(id.len() > 4);
     }
 }

@@ -193,6 +193,23 @@ CREATE INDEX IF NOT EXISTS idx_decisions_village_status
     ON decisions(village_id, status) WHERE village_id IS NOT NULL;
 ";
 
+const SCHEMA_V12_SQL: &str = "
+CREATE TABLE IF NOT EXISTS suggestions (
+    id                TEXT PRIMARY KEY,
+    event_type        TEXT NOT NULL,
+    source_layer      TEXT NOT NULL,
+    source_refs       TEXT NOT NULL DEFAULT '[]',
+    summary           TEXT NOT NULL,
+    suggested_because TEXT NOT NULL,
+    detail            TEXT NOT NULL DEFAULT '{}',
+    tags              TEXT NOT NULL DEFAULT '[]',
+    status            TEXT NOT NULL DEFAULT 'pending',
+    created_at        TEXT NOT NULL,
+    reviewed_at       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
+";
+
 /// A row from the `decisions` table.
 #[derive(Debug, Clone)]
 pub struct DecisionRow {
@@ -357,6 +374,22 @@ pub struct DecideSnapshotRow {
     pub created_at: String,
 }
 
+/// A row from the `suggestions` table.
+#[derive(Debug, Clone)]
+pub struct SuggestionRow {
+    pub id: String,
+    pub event_type: String,
+    pub source_layer: String,
+    pub source_refs: String,
+    pub summary: String,
+    pub suggested_because: String,
+    pub detail: String,
+    pub tags: String,
+    pub status: String,
+    pub created_at: String,
+    pub reviewed_at: Option<String>,
+}
+
 /// Aggregated outcome metrics for a decision.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OutcomeMetrics {
@@ -502,6 +535,12 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 11 {
             self.migrate_v10_to_v11()?;
+        }
+
+        // Migrate to v12 if needed (suggestions table for ingestion queue)
+        let current = self.schema_version()?;
+        if current < 12 {
+            self.migrate_v11_to_v12()?;
         }
 
         // Post-migration verification: repair any columns that migrations
@@ -893,6 +932,13 @@ impl SqliteStore {
         Ok(())
     }
 
+    fn migrate_v11_to_v12(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V12_SQL)?;
+        // No backfill needed — suggestions is a new table with no existing data.
+        self.set_schema_version(12)?;
+        Ok(())
+    }
+
     /// Backfill task brief updates from existing commit/note/merge events.
     fn backfill_task_brief_updates(&self) -> anyhow::Result<()> {
         let mut brief_stmt = self
@@ -1116,6 +1162,106 @@ impl SqliteStore {
             params![now, revoke_event_id],
         )?;
         Ok(count as u64)
+    }
+
+    // ── Suggestions ──────────────────────────────────────────────────
+
+    /// Insert a new suggestion row.
+    pub fn insert_suggestion(&self, row: &SuggestionRow) -> anyhow::Result<()> {
+        self.conn.execute(
+            "INSERT INTO suggestions
+             (id, event_type, source_layer, source_refs, summary,
+              suggested_because, detail, tags, status, created_at, reviewed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                row.id,
+                row.event_type,
+                row.source_layer,
+                row.source_refs,
+                row.summary,
+                row.suggested_because,
+                row.detail,
+                row.tags,
+                row.status,
+                row.created_at,
+                row.reviewed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List suggestions filtered by status.
+    pub fn list_suggestions_by_status(&self, status: &str) -> anyhow::Result<Vec<SuggestionRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, event_type, source_layer, source_refs, summary,
+                    suggested_because, detail, tags, status, created_at, reviewed_at
+             FROM suggestions
+             WHERE status = ?1
+             ORDER BY created_at DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![status], |row| {
+                Ok(SuggestionRow {
+                    id: row.get(0)?,
+                    event_type: row.get(1)?,
+                    source_layer: row.get(2)?,
+                    source_refs: row.get(3)?,
+                    summary: row.get(4)?,
+                    suggested_because: row.get(5)?,
+                    detail: row.get(6)?,
+                    tags: row.get(7)?,
+                    status: row.get(8)?,
+                    created_at: row.get(9)?,
+                    reviewed_at: row.get(10)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Get a single suggestion by id.
+    pub fn get_suggestion(&self, id: &str) -> anyhow::Result<Option<SuggestionRow>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT id, event_type, source_layer, source_refs, summary,
+                        suggested_because, detail, tags, status, created_at, reviewed_at
+                 FROM suggestions
+                 WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(SuggestionRow {
+                        id: row.get(0)?,
+                        event_type: row.get(1)?,
+                        source_layer: row.get(2)?,
+                        source_refs: row.get(3)?,
+                        summary: row.get(4)?,
+                        suggested_because: row.get(5)?,
+                        detail: row.get(6)?,
+                        tags: row.get(7)?,
+                        status: row.get(8)?,
+                        created_at: row.get(9)?,
+                        reviewed_at: row.get(10)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Update a suggestion's status and reviewed_at timestamp.
+    /// Returns true if a row was updated.
+    pub fn update_suggestion_status(
+        &self,
+        id: &str,
+        status: &str,
+        reviewed_at: &str,
+    ) -> anyhow::Result<bool> {
+        let count = self.conn.execute(
+            "UPDATE suggestions SET status = ?1, reviewed_at = ?2 WHERE id = ?3",
+            params![status, reviewed_at, id],
+        )?;
+        Ok(count > 0)
     }
 
     // ── Events ──────────────────────────────────────────────────────
@@ -4127,7 +4273,8 @@ mod tests {
         assert!(tables.contains(&"task_briefs".to_string()));
         assert!(tables.contains(&"device_tokens".to_string()));
         assert!(tables.contains(&"decide_snapshots".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 11);
+        assert!(tables.contains(&"suggestions".to_string()));
+        assert_eq!(store.schema_version().unwrap(), 12);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5733,8 +5880,8 @@ mod tests {
     fn test_schema_v10_fresh_db() {
         let (dir, store) = tmp_db();
 
-        // Version should be 11 (V11 added village_id)
-        assert_eq!(store.schema_version().unwrap(), 11);
+        // Version should be 12 (V11 village_id, V12 suggestions)
+        assert_eq!(store.schema_version().unwrap(), 12);
 
         // Verify new columns exist by inserting a test row
         store
@@ -5878,9 +6025,9 @@ mod tests {
             .unwrap();
         }
 
-        // Phase 2: Reopen — should auto-migrate to V11
+        // Phase 2: Reopen — should auto-migrate to V12
         let store = SqliteStore::open_or_create(&db_path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 11);
+        assert_eq!(store.schema_version().unwrap(), 12);
 
         // Active decision should have status='active'
         let status: String = store
@@ -6277,8 +6424,7 @@ mod tests {
             reversibility: None,
             village_id: Some("village-abc".to_string()),
         };
-        let event1 =
-            edda_core::event::new_decision_event("main", None, "system", &dp1).unwrap();
+        let event1 = edda_core::event::new_decision_event("main", None, "system", &dp1).unwrap();
         store.append_event(&event1).unwrap();
 
         let dp2 = edda_core::types::DecisionPayload {
@@ -6293,13 +6439,9 @@ mod tests {
             reversibility: None,
             village_id: Some("village-abc".to_string()),
         };
-        let event2 = edda_core::event::new_decision_event(
-            "main",
-            Some(&event1.hash),
-            "system",
-            &dp2,
-        )
-        .unwrap();
+        let event2 =
+            edda_core::event::new_decision_event("main", Some(&event1.hash), "system", &dp2)
+                .unwrap();
         store.append_event(&event2).unwrap();
 
         // Insert one decision with a different village
@@ -6315,13 +6457,9 @@ mod tests {
             reversibility: None,
             village_id: Some("village-other".to_string()),
         };
-        let event3 = edda_core::event::new_decision_event(
-            "main",
-            Some(&event2.hash),
-            "system",
-            &dp3,
-        )
-        .unwrap();
+        let event3 =
+            edda_core::event::new_decision_event("main", Some(&event2.hash), "system", &dp3)
+                .unwrap();
         store.append_event(&event3).unwrap();
 
         // Village stats for "village-abc" should see exactly 2 decisions
@@ -6368,8 +6506,7 @@ mod tests {
             reversibility: None,
             village_id: Some("village-t".to_string()),
         };
-        let event =
-            edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
+        let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         store.append_event(&event).unwrap();
 
         // With a future "after" filter, should still include (ts is now)
@@ -6405,8 +6542,7 @@ mod tests {
             reversibility: None,
             village_id: Some("my-village".to_string()),
         };
-        let event =
-            edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
+        let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         store.append_event(&event).unwrap();
 
         // Verify village_id is persisted in the DB
@@ -6421,7 +6557,9 @@ mod tests {
         assert_eq!(stored.as_deref(), Some("my-village"));
 
         // Query back via active decisions and check village_id
-        let rows = store.active_decisions(None, None, None, None, None).unwrap();
+        let rows = store
+            .active_decisions(None, None, None, None, None)
+            .unwrap();
         let found = rows.iter().find(|r| r.key == "village.test").unwrap();
         assert_eq!(found.village_id.as_deref(), Some("my-village"));
 

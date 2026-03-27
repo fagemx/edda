@@ -501,6 +501,44 @@ impl Ledger {
     ) -> anyhow::Result<Vec<crate::sqlite_store::DecideSnapshotRow>> {
         self.sqlite.snapshots_by_context_hash(context_hash)
     }
+
+    // ── Suggestions ──────────────────────────────────────────────────
+
+    /// Insert a new suggestion row.
+    pub fn insert_suggestion(
+        &self,
+        row: &crate::sqlite_store::SuggestionRow,
+    ) -> anyhow::Result<()> {
+        self.sqlite.insert_suggestion(row)
+    }
+
+    /// List suggestions filtered by status.
+    pub fn list_suggestions_by_status(
+        &self,
+        status: &str,
+    ) -> anyhow::Result<Vec<crate::sqlite_store::SuggestionRow>> {
+        self.sqlite.list_suggestions_by_status(status)
+    }
+
+    /// Get a single suggestion by id.
+    pub fn get_suggestion(
+        &self,
+        id: &str,
+    ) -> anyhow::Result<Option<crate::sqlite_store::SuggestionRow>> {
+        self.sqlite.get_suggestion(id)
+    }
+
+    /// Update a suggestion's status and reviewed_at timestamp.
+    /// Returns true if a row was updated.
+    pub fn update_suggestion_status(
+        &self,
+        id: &str,
+        status: &str,
+        reviewed_at: &str,
+    ) -> anyhow::Result<bool> {
+        self.sqlite
+            .update_suggestion_status(id, status, reviewed_at)
+    }
 }
 
 // ── Init functions ──────────────────────────────────────────────────

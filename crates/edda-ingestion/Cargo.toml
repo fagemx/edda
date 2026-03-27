@@ -13,7 +13,6 @@ keywords.workspace = true
 edda-core = { path = "../edda-core", version = "0.1.1" }
 edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
 anyhow.workspace = true
-thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ulid.workspace = true
