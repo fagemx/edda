@@ -1,7 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use anyhow::Context;
 use axum::extract::{ConnectInfo, State};
 use axum::http::Request;
 use axum::middleware::Next;
@@ -65,7 +64,7 @@ pub(crate) async fn auth_middleware(
     };
 
     let token_hash = hash_token(raw_token);
-    let ledger = state.open_ledger().context("auth_middleware")?;
+    let ledger = state.open_ledger()?;
     let device = ledger.validate_device_token(&token_hash)?;
 
     match device {

@@ -18,8 +18,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 #[cfg(test)]
 use crate::error::AppError;
-#[cfg(test)]
-use anyhow::Context;
+
 #[cfg(test)]
 use axum::extract::rejection::JsonRejection;
 #[cfg(test)]
@@ -217,7 +216,7 @@ async fn post_sync(
         dry_run: false,
     });
 
-    let ledger = state.open_ledger().context("POST /api/sync")?;
+    let ledger = state.open_ledger()?;
 
     let sources = if let Some(name) = &body.from {
         sources_from_name(name)
@@ -4653,5 +4652,124 @@ actors:
             .await
             .unwrap();
         assert_eq!(resp3.status(), StatusCode::CONFLICT);
+    }
+
+    // ── Error differentiation tests (GH-379) ──
+
+    /// Build a router without chronicle context (for testing 501 responses).
+    fn router_no_chronicle(repo_root: &Path) -> Router {
+        let state = Arc::new(AppState {
+            repo_root: repo_root.to_path_buf(),
+            chronicle: None,
+            pending_pairings: Mutex::new(HashMap::new()),
+        });
+        api::events::routes()
+            .merge(api::drafts::routes())
+            .merge(api::telemetry::routes())
+            .merge(api::snapshots::routes())
+            .merge(api::analytics::routes())
+            .merge(api::metrics::routes())
+            .merge(api::dashboard::routes())
+            .merge(api::policy::routes())
+            .merge(api::briefs::routes())
+            .merge(api::stream::routes())
+            .merge(api::ingestion::routes())
+            .merge(api::auth::routes())
+            .with_state(state)
+    }
+
+    #[test]
+    fn classify_open_error_not_edda_workspace() {
+        use crate::error::classify_open_error;
+        let err = anyhow::anyhow!("not an edda workspace (run `edda init` first)");
+        match classify_open_error(err) {
+            crate::error::AppError::NotFound(_) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_open_error_database_locked() {
+        use crate::error::classify_open_error;
+        let err = anyhow::anyhow!("database is locked");
+        match classify_open_error(err) {
+            crate::error::AppError::ServiceUnavailable(_) => {}
+            other => panic!("expected ServiceUnavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_open_error_unknown_becomes_internal() {
+        use crate::error::classify_open_error;
+        let err = anyhow::anyhow!("some random error");
+        match classify_open_error(err) {
+            crate::error::AppError::Internal(_) => {}
+            other => panic!("expected Internal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn status_returns_404_for_non_edda_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Do NOT call setup_workspace — leave it as a bare directory
+        let app = router_no_chronicle(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn recap_returns_501_without_chronicle() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router_no_chronicle(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/recap")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["code"], "NOT_IMPLEMENTED");
+    }
+
+    #[tokio::test]
+    async fn service_unavailable_includes_retry_after_header() {
+        use crate::error::AppError;
+        use axum::response::IntoResponse;
+
+        let err = AppError::ServiceUnavailable("database is temporarily unavailable".into());
+        let resp = err.into_response();
+
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            resp.headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
     }
 }

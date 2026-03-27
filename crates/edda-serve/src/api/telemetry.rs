@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::Context;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -80,7 +79,7 @@ async fn post_telemetry(
         "metadata": body.metadata,
     });
 
-    let ledger = state.open_ledger().context("POST /api/telemetry")?;
+    let ledger = state.open_ledger()?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;
@@ -131,7 +130,7 @@ async fn get_telemetry(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TelemetryQuery>,
 ) -> Result<Response, AppError> {
-    let ledger = state.open_ledger().context("GET /api/telemetry")?;
+    let ledger = state.open_ledger()?;
     let branch = ledger.head_branch()?;
     let limit = q.limit.unwrap_or(100);
 
@@ -182,7 +181,7 @@ async fn get_telemetry_stats(
     State(state): State<Arc<AppState>>,
     Query(q): Query<TelemetryStatsQuery>,
 ) -> Result<Response, AppError> {
-    let ledger = state.open_ledger().context("GET /api/telemetry/stats")?;
+    let ledger = state.open_ledger()?;
     let branch = ledger.head_branch()?;
     let days = q.days.unwrap_or(7);
 

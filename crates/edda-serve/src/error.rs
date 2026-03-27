@@ -19,6 +19,12 @@ pub(crate) enum AppError {
     Unauthorized(String),
 
     #[error("{0}")]
+    ServiceUnavailable(String),
+
+    #[error("{0}")]
+    NotImplemented(String),
+
+    #[error("{0}")]
     Internal(#[from] anyhow::Error),
 }
 
@@ -53,12 +59,43 @@ impl IntoResponse for AppError {
             AppError::NotFound(_) => (StatusCode::NOT_FOUND, "NOT_FOUND"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "CONFLICT"),
             AppError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"),
+            AppError::ServiceUnavailable(_) => {
+                (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE")
+            }
+            AppError::NotImplemented(_) => (StatusCode::NOT_IMPLEMENTED, "NOT_IMPLEMENTED"),
             AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
         };
         let body = serde_json::json!({
             "error": self.to_string(),
             "code": code,
         });
+        if matches!(&self, AppError::ServiceUnavailable(_)) {
+            let mut resp = (status, Json(body)).into_response();
+            resp.headers_mut()
+                .insert("retry-after", "1".parse().expect("valid header value"));
+            return resp;
+        }
         (status, Json(body)).into_response()
     }
+}
+
+/// Classify a ledger `open()` error into the appropriate `AppError` variant.
+///
+/// - "not an edda workspace" → `NotFound` (project not initialized)
+/// - "database is locked" → `ServiceUnavailable` (transient SQLite busy)
+/// - Everything else → `Internal`
+pub(crate) fn classify_open_error(err: anyhow::Error) -> AppError {
+    let msg = format!("{err:#}");
+
+    if msg.contains("not an edda workspace") {
+        return AppError::NotFound(err.to_string());
+    }
+
+    if msg.contains("database is locked") {
+        return AppError::ServiceUnavailable(
+            "database is temporarily unavailable, please retry".into(),
+        );
+    }
+
+    AppError::Internal(err)
 }
