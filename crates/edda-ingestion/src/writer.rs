@@ -39,7 +39,7 @@ pub fn write_ingestion_record(ledger: &Ledger, record: &IngestionRecord) -> anyh
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{IngestionRecord, SourceLayer};
+    use crate::types::{IngestionRecord, SourceLayer, TriggerType};
 
     #[test]
     fn write_and_read_back() {
@@ -48,7 +48,7 @@ mod tests {
 
         let record = IngestionRecord {
             id: IngestionRecord::new_id("prec"),
-            trigger_type: "auto".to_string(),
+            trigger_type: TriggerType::Auto,
             event_type: "decision.commit".to_string(),
             source_layer: SourceLayer::L1,
             source_refs: vec![],
@@ -72,7 +72,7 @@ mod tests {
         let back: IngestionRecord =
             serde_json::from_value(event.payload.clone()).expect("deserialize");
         assert_eq!(back.id, record.id);
-        assert_eq!(back.trigger_type, "auto");
+        assert_eq!(back.trigger_type, TriggerType::Auto);
         assert_eq!(back.event_type, "decision.commit");
         assert_eq!(back.source_layer, SourceLayer::L1);
         assert_eq!(back.summary, "Formal decision committed");
@@ -86,7 +86,7 @@ mod tests {
 
         let make_record = |event_type: &str| IngestionRecord {
             id: IngestionRecord::new_id("prec"),
-            trigger_type: "auto".to_string(),
+            trigger_type: TriggerType::Auto,
             event_type: event_type.to_string(),
             source_layer: SourceLayer::L1,
             source_refs: vec![],

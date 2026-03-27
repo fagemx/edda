@@ -62,14 +62,22 @@ pub enum TriggerResult {
     Skip,
 }
 
+/// How the ingestion was triggered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerType {
+    Auto,
+    Suggested,
+    Manual,
+}
+
 /// An ingestion record to be written to the ledger.
 /// Wire format: camelCase (WIRE-01).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct IngestionRecord {
     pub id: String,
-    /// "auto" | "suggested" | "manual"
-    pub trigger_type: String,
+    pub trigger_type: TriggerType,
     pub event_type: String,
     pub source_layer: SourceLayer,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -153,7 +161,7 @@ mod tests {
     fn ingestion_record_wire_format() {
         let rec = IngestionRecord {
             id: "prec_test".to_string(),
-            trigger_type: "auto".to_string(),
+            trigger_type: TriggerType::Auto,
             event_type: "decision.commit".to_string(),
             source_layer: SourceLayer::L1,
             source_refs: vec![],
