@@ -4273,7 +4273,8 @@ mod tests {
         assert!(tables.contains(&"task_briefs".to_string()));
         assert!(tables.contains(&"device_tokens".to_string()));
         assert!(tables.contains(&"decide_snapshots".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 11);
+        assert!(tables.contains(&"suggestions".to_string()));
+        assert_eq!(store.schema_version().unwrap(), 12);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5879,8 +5880,8 @@ mod tests {
     fn test_schema_v10_fresh_db() {
         let (dir, store) = tmp_db();
 
-        // Version should be 11 (V11 added village_id)
-        assert_eq!(store.schema_version().unwrap(), 11);
+        // Version should be 12 (V11 village_id, V12 suggestions)
+        assert_eq!(store.schema_version().unwrap(), 12);
 
         // Verify new columns exist by inserting a test row
         store
@@ -6024,9 +6025,9 @@ mod tests {
             .unwrap();
         }
 
-        // Phase 2: Reopen — should auto-migrate to V11
+        // Phase 2: Reopen — should auto-migrate to V12
         let store = SqliteStore::open_or_create(&db_path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 11);
+        assert_eq!(store.schema_version().unwrap(), 12);
 
         // Active decision should have status='active'
         let status: String = store
