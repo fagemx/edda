@@ -4231,6 +4231,253 @@ mod tests {
         assert_eq!(event.refs.provenance[0].rel, "based_on");
     }
 
+    // ── Karvi harvest integration tests (GH-342) ──
+
+    #[tokio::test]
+    async fn post_note_with_karvi_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/note")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "text": "[GH-598] spawn fix pattern",
+                            "role": "system",
+                            "tags": ["auto-harvest", "lesson"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let event_id = json["event_id"].as_str().unwrap();
+        assert!(event_id.starts_with("evt_"));
+
+        // Verify tags and role persisted in ledger
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let event = ledger.get_event(event_id).unwrap().unwrap();
+        assert_eq!(event.payload["role"], "system");
+        let tags = event.payload["tags"].as_array().unwrap();
+        assert!(tags.contains(&serde_json::json!("auto-harvest")));
+        assert!(tags.contains(&serde_json::json!("lesson")));
+    }
+
+    #[tokio::test]
+    async fn post_decide_auto_supersedes_same_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = Router::new().merge(router(tmp.path()));
+
+        // First decide
+        let resp1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "decision": "runtime.spawn=sh",
+                            "reason": "initial"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp1.status(), StatusCode::CREATED);
+        let body1 = axum::body::to_bytes(resp1.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json1: serde_json::Value = serde_json::from_slice(&body1).unwrap();
+        let first_id = json1["event_id"].as_str().unwrap().to_string();
+        assert!(json1.get("superseded").is_none() || json1["superseded"].is_null());
+
+        // Second decide with same key, different value
+        let resp2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "decision": "runtime.spawn=cmd.exe",
+                            "reason": "verified in #598"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::CREATED);
+        let body2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json2: serde_json::Value = serde_json::from_slice(&body2).unwrap();
+        assert_eq!(json2["superseded"].as_str().unwrap(), first_id);
+
+        // Verify only the second decision is active
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let active = ledger
+            .find_active_decision("main", "runtime.spawn")
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.value, "cmd.exe");
+    }
+
+    #[tokio::test]
+    async fn karvi_harvest_full_smoke() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = Router::new().merge(router(tmp.path()));
+
+        // 1. POST decide
+        let decide_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "decision": "test.harvest=works",
+                            "reason": "integration test"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decide_resp.status(), StatusCode::CREATED);
+        let decide_body = axum::body::to_bytes(decide_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let decide_json: serde_json::Value = serde_json::from_slice(&decide_body).unwrap();
+        let decide_id = decide_json["event_id"].as_str().unwrap().to_string();
+
+        // 2. POST note
+        let note_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/note")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "text": "test harvest note",
+                            "role": "system",
+                            "tags": ["auto-harvest", "test"]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(note_resp.status(), StatusCode::CREATED);
+        let note_body = axum::body::to_bytes(note_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let note_json: serde_json::Value = serde_json::from_slice(&note_body).unwrap();
+        let note_id = note_json["event_id"].as_str().unwrap().to_string();
+
+        // 3. POST karvi event
+        let karvi_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/events/karvi")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        karvi_event_json("karvi-smoke-001", "step_completed").to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(karvi_resp.status(), StatusCode::CREATED);
+
+        // Verify all three events exist in ledger
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        assert!(ledger.get_event(&decide_id).unwrap().is_some());
+        assert!(ledger.get_event(&note_id).unwrap().is_some());
+        assert!(ledger.get_event("karvi-smoke-001").unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn karvi_harvest_decide_queryback() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = Router::new().merge(router(tmp.path()));
+
+        // POST decide
+        let decide_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/decide")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "decision": "runtime.spawn=cmd.exe",
+                            "reason": "verified in #598"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decide_resp.status(), StatusCode::CREATED);
+
+        // GET /api/decisions?q=runtime
+        let query_resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/decisions?q=runtime")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(query_resp.status(), StatusCode::OK);
+        let query_body = axum::body::to_bytes(query_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let query_json: serde_json::Value = serde_json::from_slice(&query_body).unwrap();
+
+        let decisions = query_json["decisions"].as_array().unwrap();
+        assert!(
+            decisions
+                .iter()
+                .any(|d| d["key"] == "runtime.spawn" && d["value"] == "cmd.exe"),
+            "expected runtime.spawn=cmd.exe in decisions: {decisions:?}"
+        );
+    }
+
     #[tokio::test]
     async fn get_decision_outcomes_returns_metrics() {
         let tmp = tempfile::tempdir().unwrap();
