@@ -8411,7 +8411,7 @@ actors:
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/ingestion/suggestions/{sug_id}/accept"))
+                    .uri(format!("/api/ingestion/suggestions/{sug_id}/accept"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -8648,7 +8648,7 @@ actors:
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(&format!("/api/ingestion/suggestions/{sug_id}/reject"))
+                    .uri(format!("/api/ingestion/suggestions/{sug_id}/reject"))
                     .body(Body::empty())
                     .unwrap(),
             )
