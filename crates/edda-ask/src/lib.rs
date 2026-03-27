@@ -1670,4 +1670,55 @@ mod tests {
             "should show override order suggestion"
         );
     }
+
+    #[test]
+    fn ask_filters_by_village_id() {
+        let (_tmp, ledger) = setup();
+
+        // Create two decisions: one with village_id, one without
+        let mut ev1 = make_decision("main", "db.engine", "sqlite", Some("embedded"), None);
+        ev1.payload["decision"]["village_id"] = serde_json::json!("village-a");
+        finalize_event(&mut ev1).unwrap();
+        ledger.append_event(&ev1).unwrap();
+
+        let ev2 = make_decision("main", "cache.ttl", "3600", Some("perf"), None);
+        ledger.append_event(&ev2).unwrap();
+
+        // Without village filter: should find both
+        let opts_all = AskOptions::default();
+        let result_all = ask(&ledger, "db OR cache", &opts_all, None).unwrap();
+        assert!(
+            result_all.decisions.len() >= 2,
+            "expected at least 2 decisions without village filter, got {}",
+            result_all.decisions.len()
+        );
+
+        // With village filter: should find only village-a
+        let opts_village = AskOptions {
+            village_id: Some("village-a".to_string()),
+            ..Default::default()
+        };
+        let result_village = ask(&ledger, "db OR cache", &opts_village, None).unwrap();
+        assert_eq!(
+            result_village.decisions.len(),
+            1,
+            "expected 1 decision with village filter"
+        );
+        assert_eq!(result_village.decisions[0].key, "db.engine");
+        assert_eq!(
+            result_village.decisions[0].village_id.as_deref(),
+            Some("village-a")
+        );
+
+        // Non-existent village: should find none
+        let opts_empty = AskOptions {
+            village_id: Some("no-such-village".to_string()),
+            ..Default::default()
+        };
+        let result_empty = ask(&ledger, "db OR cache", &opts_empty, None).unwrap();
+        assert!(
+            result_empty.decisions.is_empty(),
+            "expected 0 decisions for non-existent village"
+        );
+    }
 }

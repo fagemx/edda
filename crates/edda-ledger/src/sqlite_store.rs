@@ -6259,4 +6259,173 @@ mod tests {
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn test_village_stats_basic() {
+        let (dir, store) = tmp_db();
+
+        // Insert two decisions with village_id "village-abc"
+        let dp1 = edda_core::types::DecisionPayload {
+            key: "db.engine".to_string(),
+            value: "sqlite".to_string(),
+            reason: Some("embedded".to_string()),
+            scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: Some("village-abc".to_string()),
+        };
+        let event1 =
+            edda_core::event::new_decision_event("main", None, "system", &dp1).unwrap();
+        store.append_event(&event1).unwrap();
+
+        let dp2 = edda_core::types::DecisionPayload {
+            key: "auth.strategy".to_string(),
+            value: "jwt".to_string(),
+            reason: Some("stateless".to_string()),
+            scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: Some("village-abc".to_string()),
+        };
+        let event2 = edda_core::event::new_decision_event(
+            "main",
+            Some(&event1.hash),
+            "system",
+            &dp2,
+        )
+        .unwrap();
+        store.append_event(&event2).unwrap();
+
+        // Insert one decision with a different village
+        let dp3 = edda_core::types::DecisionPayload {
+            key: "log.level".to_string(),
+            value: "debug".to_string(),
+            reason: None,
+            scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: Some("village-other".to_string()),
+        };
+        let event3 = edda_core::event::new_decision_event(
+            "main",
+            Some(&event2.hash),
+            "system",
+            &dp3,
+        )
+        .unwrap();
+        store.append_event(&event3).unwrap();
+
+        // Village stats for "village-abc" should see exactly 2 decisions
+        let stats = store.village_stats("village-abc", None, None).unwrap();
+        assert_eq!(stats.village_id, "village-abc");
+        assert_eq!(stats.total_decisions, 2);
+        assert!(stats.period.is_none(), "no temporal filter => no period");
+        assert!(stats.decisions_per_day > 0.0);
+
+        // by_status should have "active" entries
+        assert!(
+            stats.by_status.get("active").copied().unwrap_or(0) >= 1,
+            "should have at least one active decision"
+        );
+
+        // top_domains should be populated
+        assert!(!stats.top_domains.is_empty());
+
+        // Village stats for "village-other" should see exactly 1 decision
+        let stats_other = store.village_stats("village-other", None, None).unwrap();
+        assert_eq!(stats_other.total_decisions, 1);
+
+        // Non-existent village should return 0 decisions
+        let stats_empty = store.village_stats("no-such-village", None, None).unwrap();
+        assert_eq!(stats_empty.total_decisions, 0);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_village_stats_with_temporal_filter() {
+        let (dir, store) = tmp_db();
+
+        let dp = edda_core::types::DecisionPayload {
+            key: "cache.ttl".to_string(),
+            value: "3600".to_string(),
+            reason: None,
+            scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: Some("village-t".to_string()),
+        };
+        let event =
+            edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
+        store.append_event(&event).unwrap();
+
+        // With a future "after" filter, should still include (ts is now)
+        let stats = store
+            .village_stats("village-t", Some("2020-01-01"), None)
+            .unwrap();
+        assert_eq!(stats.total_decisions, 1);
+        assert!(stats.period.is_some());
+
+        // With a past "before" filter, should exclude
+        let stats_empty = store
+            .village_stats("village-t", None, Some("2020-01-01"))
+            .unwrap();
+        assert_eq!(stats_empty.total_decisions, 0);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_village_id_stored_and_queried() {
+        let (dir, store) = tmp_db();
+
+        let dp = edda_core::types::DecisionPayload {
+            key: "village.test".to_string(),
+            value: "v1".to_string(),
+            reason: None,
+            scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: Some("my-village".to_string()),
+        };
+        let event =
+            edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
+        store.append_event(&event).unwrap();
+
+        // Verify village_id is persisted in the DB
+        let stored: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT village_id FROM decisions WHERE key = 'village.test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("my-village"));
+
+        // Query back via active decisions and check village_id
+        let rows = store.active_decisions(None, None, None, None, None).unwrap();
+        let found = rows.iter().find(|r| r.key == "village.test").unwrap();
+        assert_eq!(found.village_id.as_deref(), Some("my-village"));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
