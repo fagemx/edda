@@ -185,6 +185,14 @@ CREATE INDEX IF NOT EXISTS idx_decisions_affected_paths
     ON decisions(affected_paths) WHERE affected_paths != '[]';
 ";
 
+const SCHEMA_V11_SQL: &str = "
+ALTER TABLE decisions ADD COLUMN village_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_decisions_village
+    ON decisions(village_id) WHERE village_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_decisions_village_status
+    ON decisions(village_id, status) WHERE village_id IS NOT NULL;
+";
+
 /// A row from the `decisions` table.
 #[derive(Debug, Clone)]
 pub struct DecisionRow {
@@ -215,6 +223,8 @@ pub struct DecisionRow {
     pub review_after: Option<String>,
     /// Reversibility level: "easy", "medium", "hard"
     pub reversibility: String,
+    /// Village scope identifier
+    pub village_id: Option<String>,
 }
 
 /// An entry in a causal chain traversal result.
@@ -250,6 +260,44 @@ pub struct DepRow {
     pub dep_type: String,
     pub created_event: Option<String>,
     pub created_at: String,
+}
+
+/// Statistics for a village's decisions.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VillageStats {
+    pub village_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub period: Option<VillageStatsPeriod>,
+    pub total_decisions: usize,
+    pub decisions_per_day: f64,
+    pub by_status: std::collections::HashMap<String, usize>,
+    pub by_authority: std::collections::HashMap<String, usize>,
+    pub top_domains: Vec<DomainCount>,
+    pub rollback_rate: f64,
+    pub trend: Vec<DayCount>,
+}
+
+/// Time period for village stats.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VillageStatsPeriod {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+}
+
+/// Domain with decision count.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DomainCount {
+    pub domain: String,
+    pub count: usize,
+}
+
+/// Daily decision count.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DayCount {
+    pub date: String,
+    pub count: usize,
 }
 
 /// Parameters for inserting an imported decision from another project.
@@ -450,6 +498,12 @@ impl SqliteStore {
             self.migrate_v9_to_v10()?;
         }
 
+        // Migrate to v11 if needed (village_id on decisions)
+        let current = self.schema_version()?;
+        if current < 11 {
+            self.migrate_v10_to_v11()?;
+        }
+
         // Post-migration verification: repair any columns that migrations
         // failed to add (e.g. version was bumped but ALTER TABLE didn't stick).
         self.verify_decisions_schema()?;
@@ -544,6 +598,11 @@ impl SqliteStore {
             (
                 "reversibility",
                 "ALTER TABLE decisions ADD COLUMN reversibility TEXT NOT NULL DEFAULT 'medium'",
+            ),
+            // V11 column
+            (
+                "village_id",
+                "ALTER TABLE decisions ADD COLUMN village_id TEXT",
             ),
         ];
 
@@ -825,6 +884,12 @@ impl SqliteStore {
     fn migrate_v9_to_v10(&self) -> anyhow::Result<()> {
         self.conn.execute_batch(SCHEMA_V10_SQL)?;
         self.set_schema_version(10)?;
+        Ok(())
+    }
+
+    fn migrate_v10_to_v11(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V11_SQL)?;
+        self.set_schema_version(11)?;
         Ok(())
     }
 
@@ -1134,14 +1199,15 @@ impl SqliteStore {
                     .unwrap_or_else(|| "[]".to_string());
                 let review_after = dp.review_after.as_deref();
                 let reversibility = dp.reversibility.as_deref().unwrap_or("medium");
+                let village_id = dp.village_id.as_deref();
 
                 tx.execute(
                     "INSERT INTO decisions
                      (event_id, key, value, reason, domain, branch, supersedes_id,
                       is_active, scope, status, authority, affected_paths, tags,
-                      review_after, reversibility)
+                      review_after, reversibility, village_id)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
-                             ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                             ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                     params![
                         event.event_id,
                         key,
@@ -1158,6 +1224,7 @@ impl SqliteStore {
                         tags,
                         review_after,
                         reversibility,
+                        village_id,
                     ],
                 )?;
             }
@@ -1609,7 +1676,7 @@ impl SqliteStore {
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
                     d.scope, d.source_project_id, d.source_event_id,
-                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility, d.village_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.is_active = TRUE",
         );
@@ -1683,7 +1750,7 @@ impl SqliteStore {
                     d.supersedes_id, d.is_active, e.ts,
                     d.scope, d.source_project_id, d.source_event_id,
                     d.status, d.authority, d.affected_paths, d.tags,
-                    d.review_after, d.reversibility
+                    d.review_after, d.reversibility, d.village_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.is_active = TRUE
                AND d.affected_paths IS NOT NULL
@@ -1732,7 +1799,7 @@ impl SqliteStore {
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
                     d.scope, d.source_project_id, d.source_event_id,
-                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility, d.village_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.key = ?1",
         );
@@ -1780,7 +1847,7 @@ impl SqliteStore {
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
                     d.scope, d.source_project_id, d.source_event_id,
-                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility, d.village_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.domain = ?1",
         );
@@ -1824,6 +1891,136 @@ impl SqliteStore {
             .map_err(|e| anyhow::anyhow!("list domains query failed: {e}"))
     }
 
+    /// Compute aggregate statistics for a village's decisions.
+    pub fn village_stats(
+        &self,
+        village_id: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+    ) -> anyhow::Result<VillageStats> {
+        use std::collections::HashMap;
+
+        // Build temporal WHERE clause fragments and string params
+        let mut temporal_sql = String::new();
+        let mut string_params: Vec<String> = vec![village_id.to_string()];
+        let mut idx = 2;
+
+        if let Some(a) = after {
+            temporal_sql.push_str(&format!(" AND e.ts >= ?{idx}"));
+            string_params.push(a.to_string());
+            idx += 1;
+        }
+        if let Some(b) = before {
+            temporal_sql.push_str(&format!(" AND e.ts <= ?{idx}"));
+            string_params.push(b.to_string());
+            let _ = idx;
+        }
+
+        // Helper: convert string params to rusqlite param refs
+        let refs = || -> Vec<&dyn rusqlite::types::ToSql> {
+            string_params
+                .iter()
+                .map(|s| s as &dyn rusqlite::types::ToSql)
+                .collect()
+        };
+
+        // Total count
+        let total_sql = format!(
+            "SELECT COUNT(*) FROM decisions d JOIN events e ON d.event_id = e.event_id
+             WHERE d.village_id = ?1{temporal_sql}"
+        );
+        let total: usize = self
+            .conn
+            .query_row(&total_sql, refs().as_slice(), |row| row.get::<_, usize>(0))?;
+
+        // By status
+        let status_sql = format!(
+            "SELECT d.status, COUNT(*) FROM decisions d JOIN events e ON d.event_id = e.event_id
+             WHERE d.village_id = ?1{temporal_sql} GROUP BY d.status"
+        );
+        let mut status_stmt = self.conn.prepare(&status_sql)?;
+        let status_rows = status_stmt.query_map(refs().as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
+        })?;
+        let by_status: HashMap<String, usize> = status_rows.filter_map(|r| r.ok()).collect();
+
+        // By authority
+        let auth_sql = format!(
+            "SELECT d.authority, COUNT(*) FROM decisions d JOIN events e ON d.event_id = e.event_id
+             WHERE d.village_id = ?1{temporal_sql} GROUP BY d.authority"
+        );
+        let mut auth_stmt = self.conn.prepare(&auth_sql)?;
+        let auth_rows = auth_stmt.query_map(refs().as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, usize>(1)?))
+        })?;
+        let by_authority: HashMap<String, usize> = auth_rows.filter_map(|r| r.ok()).collect();
+
+        // Top domains (limit 10)
+        let domain_sql = format!(
+            "SELECT d.domain, COUNT(*) as cnt FROM decisions d JOIN events e ON d.event_id = e.event_id
+             WHERE d.village_id = ?1{temporal_sql} GROUP BY d.domain ORDER BY cnt DESC LIMIT 10"
+        );
+        let mut domain_stmt = self.conn.prepare(&domain_sql)?;
+        let domain_rows = domain_stmt.query_map(refs().as_slice(), |row| {
+            Ok(DomainCount {
+                domain: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?;
+        let top_domains: Vec<DomainCount> = domain_rows.filter_map(|r| r.ok()).collect();
+
+        // Daily trend
+        let trend_sql = format!(
+            "SELECT DATE(e.ts) as day, COUNT(*) FROM decisions d JOIN events e ON d.event_id = e.event_id
+             WHERE d.village_id = ?1{temporal_sql} GROUP BY day ORDER BY day"
+        );
+        let mut trend_stmt = self.conn.prepare(&trend_sql)?;
+        let trend_rows = trend_stmt.query_map(refs().as_slice(), |row| {
+            Ok(DayCount {
+                date: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?;
+        let trend: Vec<DayCount> = trend_rows.filter_map(|r| r.ok()).collect();
+
+        // Rollback rate: superseded / total
+        let superseded_count = by_status.get("superseded").copied().unwrap_or(0);
+        let rollback_rate = if total > 0 {
+            superseded_count as f64 / total as f64
+        } else {
+            0.0
+        };
+
+        // Decisions per day
+        let days = if trend.is_empty() {
+            1.0
+        } else {
+            trend.len() as f64
+        };
+        let decisions_per_day = total as f64 / days;
+
+        let period = if after.is_some() || before.is_some() {
+            Some(VillageStatsPeriod {
+                after: after.map(|s| s.to_string()),
+                before: before.map(|s| s.to_string()),
+            })
+        } else {
+            None
+        };
+
+        Ok(VillageStats {
+            village_id: village_id.to_string(),
+            period,
+            total_decisions: total,
+            decisions_per_day,
+            by_status,
+            by_authority,
+            top_domains,
+            rollback_rate,
+            trend,
+        })
+    }
+
     // ── Cross-Project Sync ─────────────────────────────────────────────
 
     /// Query active decisions with shared or global scope.
@@ -1833,7 +2030,7 @@ impl SqliteStore {
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
                     d.scope, d.source_project_id, d.source_event_id,
-                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility, d.village_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.is_active = TRUE AND d.scope IN ('shared', 'global')
                AND d.source_project_id IS NULL
@@ -1985,7 +2182,7 @@ impl SqliteStore {
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
                     d.scope, d.source_project_id, d.source_event_id,
-                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility, d.village_id
              FROM decisions d JOIN events e ON d.event_id = e.event_id
              WHERE d.key = ?1 AND d.branch = ?2 AND d.is_active = TRUE
              LIMIT 1",
@@ -2082,7 +2279,7 @@ impl SqliteStore {
                     d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
                     d.scope, d.source_project_id, d.source_event_id,
-                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility, d.village_id
              FROM decision_deps dd
              JOIN decisions d ON d.key = dd.source_key AND d.is_active = TRUE
              JOIN events e ON d.event_id = e.event_id
@@ -2115,6 +2312,7 @@ impl SqliteStore {
                 tags: row.get(20)?,
                 review_after: row.get(21)?,
                 reversibility: row.get(22)?,
+                village_id: row.get(23)?,
             };
             Ok((dep, decision))
         })?;
@@ -2130,34 +2328,13 @@ impl SqliteStore {
             "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                     d.supersedes_id, d.is_active, e.ts,
                     d.scope, d.source_project_id, d.source_event_id,
-                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
+                    d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility, d.village_id
              FROM decisions d
              JOIN events e ON d.event_id = e.event_id
              WHERE d.event_id = ?1
              LIMIT 1",
         )?;
-        let mut rows = stmt.query_map(params![event_id], |row| {
-            Ok(DecisionRow {
-                event_id: row.get(0)?,
-                key: row.get(1)?,
-                value: row.get(2)?,
-                reason: row.get(3)?,
-                domain: row.get(4)?,
-                branch: row.get(5)?,
-                supersedes_id: row.get(6)?,
-                is_active: row.get(7)?,
-                ts: row.get(8)?,
-                scope: row.get(9)?,
-                source_project_id: row.get(10)?,
-                source_event_id: row.get(11)?,
-                status: row.get(12)?,
-                authority: row.get(13)?,
-                affected_paths: row.get(14)?,
-                tags: row.get(15)?,
-                review_after: row.get(16)?,
-                reversibility: row.get(17)?,
-            })
-        })?;
+        let mut rows = stmt.query_map(params![event_id], map_decision_row)?;
         match rows.next() {
             Some(Ok(row)) => Ok(Some(row)),
             Some(Err(e)) => Err(anyhow::anyhow!("get_decision_by_event_id failed: {e}")),
@@ -2203,7 +2380,7 @@ impl SqliteStore {
             let dep_stmt_sql = "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                         d.supersedes_id, d.is_active, e.ts,
                         d.scope, d.source_project_id, d.source_event_id,
-                        d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility,
+                        d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility, d.village_id,
                         dd.dep_type
                  FROM decision_deps dd
                  JOIN decisions d ON d.key = dd.source_key
@@ -2230,8 +2407,9 @@ impl SqliteStore {
                     tags: row.get(15)?,
                     review_after: row.get(16)?,
                     reversibility: row.get(17)?,
+                    village_id: row.get(18)?,
                 };
-                let dep_type: String = row.get(18)?;
+                let dep_type: String = row.get(19)?;
                 Ok((decision, dep_type))
             })?;
             for row in dep_rows {
@@ -2262,33 +2440,12 @@ impl SqliteStore {
                 "SELECT d.event_id, d.key, d.value, d.reason, d.domain, d.branch,
                         d.supersedes_id, d.is_active, e.ts,
                         d.scope, d.source_project_id, d.source_event_id,
-                        d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility
+                        d.status, d.authority, d.affected_paths, d.tags, d.review_after, d.reversibility, d.village_id
                  FROM decisions d
                  JOIN events e ON d.event_id = e.event_id
                  WHERE d.supersedes_id = ?1",
             )?;
-            let sup_by_rows = sup_by_stmt.query_map(params![current_event_id], |row| {
-                Ok(DecisionRow {
-                    event_id: row.get(0)?,
-                    key: row.get(1)?,
-                    value: row.get(2)?,
-                    reason: row.get(3)?,
-                    domain: row.get(4)?,
-                    branch: row.get(5)?,
-                    supersedes_id: row.get(6)?,
-                    is_active: row.get(7)?,
-                    ts: row.get(8)?,
-                    scope: row.get(9)?,
-                    source_project_id: row.get(10)?,
-                    source_event_id: row.get(11)?,
-                    status: row.get(12)?,
-                    authority: row.get(13)?,
-                    affected_paths: row.get(14)?,
-                    tags: row.get(15)?,
-                    review_after: row.get(16)?,
-                    reversibility: row.get(17)?,
-                })
-            })?;
+            let sup_by_rows = sup_by_stmt.query_map(params![current_event_id], map_decision_row)?;
             for row in sup_by_rows {
                 let decision = row
                     .map_err(|e| anyhow::anyhow!("causal_chain superseded_by query failed: {e}"))?;
@@ -2828,6 +2985,7 @@ fn map_decision_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DecisionRow> {
         tags: row.get(15)?,
         review_after: row.get(16)?,
         reversibility: row.get(17)?,
+        village_id: row.get(18)?,
     })
 }
 
@@ -5837,6 +5995,7 @@ mod tests {
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         store.append_event(&event).unwrap();
@@ -5864,6 +6023,7 @@ mod tests {
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let mut event2 =
             edda_core::event::new_decision_event("main", Some(&event.hash), "system", &dp2)
@@ -5936,6 +6096,7 @@ mod tests {
             tags: Some(vec!["architecture".to_string(), "storage".to_string()]),
             review_after: Some("2026-06-01".to_string()),
             reversibility: Some("hard".to_string()),
+            village_id: None,
         };
         let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         store.append_event(&event).unwrap();
@@ -5982,6 +6143,7 @@ mod tests {
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         store.append_event(&event).unwrap();

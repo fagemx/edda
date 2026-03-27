@@ -571,6 +571,7 @@ pub fn decide(
         },
         review_after: None,
         reversibility: None,
+        village_id: None,
     };
     let mut event =
         edda_core::event::new_decision_event(&branch, parent_hash.as_deref(), actor, &dp)?;
@@ -1028,6 +1029,7 @@ fn write_accepted_to_ledger(
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
 
         let actor = match d.kind {

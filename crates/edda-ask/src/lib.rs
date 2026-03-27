@@ -74,6 +74,9 @@ pub struct DecisionHit {
     /// Tags parsed from JSON array in the decision row.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Village scope identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub village_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +137,8 @@ pub struct AskOptions {
     pub before: Option<String>,
     /// Filter decisions whose tags contain any of these values (OR semantics).
     pub tags: Vec<String>,
+    /// Filter decisions belonging to a specific village.
+    pub village_id: Option<String>,
 }
 
 impl Default for AskOptions {
@@ -146,6 +151,7 @@ impl Default for AskOptions {
             after: None,
             before: None,
             tags: vec![],
+            village_id: None,
         }
     }
 }
@@ -180,6 +186,17 @@ pub fn ask(
         hits.into_iter()
             .filter(|d| d.tags.iter().any(|t| opts.tags.contains(t)))
             .collect()
+    };
+
+    // Village filter helper: keep only decisions belonging to the specified village
+    let village_filter = |hits: Vec<DecisionHit>| -> Vec<DecisionHit> {
+        match &opts.village_id {
+            Some(v) => hits
+                .into_iter()
+                .filter(|d| d.village_id.as_deref() == Some(v.as_str()))
+                .collect(),
+            None => hits,
+        }
     };
 
     let after_ref = opts.after.as_deref();
@@ -280,6 +297,7 @@ pub fn ask(
                                     ts: event.ts.clone(),
                                     is_active: false,
                                     tags: dp.tags.unwrap_or_default(),
+                                    village_id: dp.village_id,
                                 });
                             }
                         }
@@ -303,6 +321,10 @@ pub fn ask(
     // Apply tags filter (OR semantics) across all code paths
     let decisions = tags_filter(decisions);
     let timeline = tags_filter(timeline);
+
+    // Apply village filter across all code paths
+    let decisions = village_filter(decisions);
+    let timeline = village_filter(timeline);
 
     // Collect decision event_ids for evidence chain matching
     let decision_event_ids: Vec<&str> = decisions
@@ -800,6 +822,7 @@ fn to_decision_hit(row: &DecisionRow) -> DecisionHit {
         ts: row.ts.clone().unwrap_or_default(),
         is_active: row.is_active,
         tags,
+        village_id: row.village_id.clone(),
     }
 }
 
@@ -1202,6 +1225,7 @@ mod tests {
                 ts: "2026-02-15".into(),
                 is_active: true,
                 tags: vec![],
+                village_id: None,
             }],
             timeline: vec![],
             related_commits: vec![CommitHit {
@@ -1596,6 +1620,7 @@ mod tests {
                 ts: "2026-02-15".into(),
                 is_active: true,
                 tags: vec![],
+                village_id: None,
             }],
             timeline: vec![],
             related_commits: vec![],

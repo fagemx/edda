@@ -138,6 +138,9 @@ pub struct DecisionPayload {
     /// Reversibility level: "easy", "medium", "hard". Default: "medium".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reversibility: Option<String>,
+    /// Village scope identifier. Default: None (not village-scoped).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub village_id: Option<String>,
 }
 
 /// Status of a task brief.
@@ -480,6 +483,7 @@ mod tests {
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let json = serde_json::to_string(&dp).expect("serialize");
         let decoded: DecisionPayload = serde_json::from_str(&json).expect("deserialize");
@@ -496,6 +500,7 @@ mod tests {
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let json2 = serde_json::to_string(&dp_no_reason).expect("serialize");
         assert!(!json2.contains("reason"), "None reason should be omitted");
@@ -516,6 +521,7 @@ mod tests {
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let json = serde_json::to_string(&dp).expect("serialize");
         assert!(json.contains("\"scope\":\"shared\""));
@@ -735,5 +741,26 @@ mod tests {
         let serialized = serde_json::to_string(&dp).unwrap();
         let dp2: DecisionPayload = serde_json::from_str(&serialized).unwrap();
         assert_eq!(dp, dp2);
+    }
+
+    #[test]
+    fn test_decision_payload_serde_with_village_id() {
+        let json = r#"{
+            "key": "db.engine",
+            "value": "sqlite",
+            "village_id": "village-abc"
+        }"#;
+        let dp: DecisionPayload = serde_json::from_str(json).unwrap();
+        assert_eq!(dp.village_id.as_deref(), Some("village-abc"));
+
+        // Round-trip
+        let serialized = serde_json::to_string(&dp).unwrap();
+        let dp2: DecisionPayload = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(dp.village_id, dp2.village_id);
+
+        // Backward compat: missing village_id defaults to None
+        let json_no_village = r#"{"key":"db.engine","value":"sqlite"}"#;
+        let dp3: DecisionPayload = serde_json::from_str(json_no_village).unwrap();
+        assert_eq!(dp3.village_id, None);
     }
 }

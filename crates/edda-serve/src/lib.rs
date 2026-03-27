@@ -133,7 +133,7 @@ impl IntoResponse for AppError {
 pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> {
     let paths = edda_ledger::EddaPaths::discover(repo_root);
     if !paths.is_initialized() {
-        anyhow::bail!("not a edda workspace (run `edda init` first)");
+        anyhow::bail!("not an edda workspace (run `edda init` first)");
     }
 
     let store_root = edda_store::store_root();
@@ -202,6 +202,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/snapshot", post(post_snapshot))
         .route("/api/snapshots", get(get_snapshots))
         .route("/api/snapshots/{context_hash}", get(get_snapshots_by_hash))
+        .route("/api/villages/{village_id}/stats", get(get_village_stats))
         .route("/api/pair/new", post(create_pairing))
         .route("/api/pair/list", get(list_paired_devices))
         .route("/api/pair/revoke", post(revoke_device))
@@ -311,6 +312,7 @@ fn router(repo_root: &Path) -> Router {
         .route("/api/snapshot", post(post_snapshot))
         .route("/api/snapshots", get(get_snapshots))
         .route("/api/snapshots/{context_hash}", get(get_snapshots_by_hash))
+        .route("/api/villages/{village_id}/stats", get(get_village_stats))
         .route("/pair", get(complete_pairing))
         .route("/api/pair/new", post(create_pairing))
         .route("/api/pair/list", get(list_paired_devices))
@@ -762,6 +764,8 @@ struct DecisionsQuery {
     before: Option<String>,
     /// Comma-separated tags to filter by (OR semantics).
     tags: Option<String>,
+    /// Filter decisions belonging to a specific village.
+    village_id: Option<String>,
 }
 
 /// Validate that a string looks like a valid ISO 8601 / RFC 3339 timestamp.
@@ -802,6 +806,7 @@ async fn get_decisions(
         after: params.after,
         before: params.before,
         tags,
+        village_id: params.village_id,
     };
     let result = edda_ask::ask(&ledger, q, &opts, None)?;
     Ok(Json(result))
@@ -885,6 +890,7 @@ async fn post_decisions_batch(
             after: None,
             before: None,
             tags: vec![],
+            village_id: None,
         };
 
         match edda_ask::ask(&ledger, q, &opts, None) {
@@ -1693,6 +1699,7 @@ async fn post_decide(
         tags: None,
         review_after: None,
         reversibility: None,
+        village_id: None,
     };
     let mut event = new_decision_event(&branch, parent_hash.as_deref(), "system", &dp)?;
 
@@ -2019,6 +2026,37 @@ async fn get_snapshots_by_hash(
     }
 
     Ok(Json(snapshots))
+}
+
+// ── GET /api/villages/{village_id}/stats ──
+
+#[derive(Deserialize)]
+struct VillageStatsQuery {
+    /// ISO 8601 lower bound (inclusive).
+    after: Option<String>,
+    /// ISO 8601 upper bound (inclusive).
+    before: Option<String>,
+}
+
+async fn get_village_stats(
+    State(state): State<Arc<AppState>>,
+    AxumPath(village_id): AxumPath<String>,
+    Query(params): Query<VillageStatsQuery>,
+) -> Result<Json<edda_ledger::sqlite_store::VillageStats>, AppError> {
+    if let Some(ref after) = params.after {
+        validate_iso8601(after).map_err(AppError::Validation)?;
+    }
+    if let Some(ref before) = params.before {
+        validate_iso8601(before).map_err(AppError::Validation)?;
+    }
+
+    let ledger = state.open_ledger()?;
+    let stats = ledger.village_stats(
+        &village_id,
+        params.after.as_deref(),
+        params.before.as_deref(),
+    )?;
+    Ok(Json(stats))
 }
 
 /// Reconstruct a full snapshot JSON from a materialized view row + event payload.
@@ -5338,6 +5376,7 @@ actors:
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let decision = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         ledger.append_event(&decision).unwrap();
@@ -6258,6 +6297,7 @@ actors:
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
         ledger.append_event(&event).unwrap();
@@ -6403,6 +6443,7 @@ actors:
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
         ledger.append_event(&event).unwrap();
@@ -6456,6 +6497,7 @@ actors:
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
         ledger.append_event(&event).unwrap();
@@ -6499,6 +6541,7 @@ actors:
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
         ledger.append_event(&event).unwrap();

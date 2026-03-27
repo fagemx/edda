@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Instant;
 use tokio::process::Command;
 
-/// Check that a edda event of the given type exists.
+/// Check that an edda event of the given type exists.
 /// Shells out to `edda log` (or `edda log` after rename).
 pub async fn check_edda_event(event_type: &str, after: Option<&str>, cwd: &Path) -> CheckOutput {
     let start = Instant::now();
