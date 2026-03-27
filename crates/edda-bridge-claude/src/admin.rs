@@ -22,7 +22,7 @@ const HOOK_EVENTS: &[&str] = &[
     "TeammateIdle",
 ];
 
-/// Check if a matcher group (Claude Code hook format) contains a edda hook.
+/// Check if a matcher group (Claude Code hook format) contains an edda hook.
 fn matcher_group_contains_edda(group: &serde_json::Value) -> bool {
     // New format: { "matcher": "", "hooks": [{ "type": "command", "command": "edda hook claude" }] }
     if let Some(hooks_arr) = group.get("hooks").and_then(|h| h.as_array()) {

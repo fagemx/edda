@@ -508,7 +508,7 @@ fn to_mcp_err(e: anyhow::Error) -> McpError {
 pub async fn serve(repo_root: &Path) -> anyhow::Result<()> {
     let paths = edda_ledger::paths::EddaPaths::discover(repo_root);
     if !paths.is_initialized() {
-        anyhow::bail!("not a edda workspace (run `edda init` first)");
+        anyhow::bail!("not an edda workspace (run `edda init` first)");
     }
 
     let server = EddaServer::new(repo_root.to_path_buf());
