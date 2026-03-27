@@ -4127,7 +4127,7 @@ mod tests {
         assert!(tables.contains(&"task_briefs".to_string()));
         assert!(tables.contains(&"device_tokens".to_string()));
         assert!(tables.contains(&"decide_snapshots".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 10);
+        assert_eq!(store.schema_version().unwrap(), 11);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -5733,8 +5733,8 @@ mod tests {
     fn test_schema_v10_fresh_db() {
         let (dir, store) = tmp_db();
 
-        // Version should be 10
-        assert_eq!(store.schema_version().unwrap(), 10);
+        // Version should be 11 (V11 added village_id)
+        assert_eq!(store.schema_version().unwrap(), 11);
 
         // Verify new columns exist by inserting a test row
         store
@@ -5878,9 +5878,9 @@ mod tests {
             .unwrap();
         }
 
-        // Phase 2: Reopen — should auto-migrate to V10
+        // Phase 2: Reopen — should auto-migrate to V11
         let store = SqliteStore::open_or_create(&db_path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 10);
+        assert_eq!(store.schema_version().unwrap(), 11);
 
         // Active decision should have status='active'
         let status: String = store
@@ -6178,7 +6178,7 @@ mod tests {
 
     #[test]
     fn verify_decisions_schema_repairs_missing_columns() {
-        // Simulate the bug: create a DB at schema V10 but with the V5 `scope`
+        // Simulate the bug: create a DB at schema V11 but with the V5 `scope`
         // column missing from the decisions table.
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!(
@@ -6191,15 +6191,15 @@ mod tests {
 
         // Manually create a DB with an incomplete decisions table
         // (missing scope, source_project_id, source_event_id from V5
-        //  and all V10 columns).
+        //  and all V10/V11 columns).
         {
             let conn = rusqlite::Connection::open(&db_path).unwrap();
             conn.execute_batch(SCHEMA_SQL).unwrap();
             conn.execute_batch(
-                "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '10');",
+                "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('version', '11');",
             )
             .unwrap();
-            // Create decisions with only base V2 columns — skip V5 + V10
+            // Create decisions with only base V2 columns — skip V5 + V10 + V11
             conn.execute_batch(
                 "CREATE TABLE IF NOT EXISTS decisions (
                     event_id TEXT PRIMARY KEY REFERENCES events(event_id),
@@ -6215,7 +6215,7 @@ mod tests {
             .unwrap();
         }
 
-        // Now open via the normal path — apply_schema sees version=10, so
+        // Now open via the normal path — apply_schema sees version=11, so
         // no migrations run, but verify_decisions_schema should repair.
         let store = SqliteStore::open_or_create(&db_path).unwrap();
 
