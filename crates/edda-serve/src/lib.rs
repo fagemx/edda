@@ -205,6 +205,7 @@ pub async fn serve(repo_root: &Path, config: ServeConfig) -> anyhow::Result<()> 
         .route("/api/snapshots", get(get_snapshots))
         .route("/api/snapshots/{context_hash}", get(get_snapshots_by_hash))
         .route("/api/villages/{village_id}/stats", get(get_village_stats))
+        .route("/api/patterns", get(get_patterns))
         .route("/api/pair/new", post(create_pairing))
         .route("/api/pair/list", get(list_paired_devices))
         .route("/api/pair/revoke", post(revoke_device))
@@ -317,6 +318,7 @@ fn router(repo_root: &Path) -> Router {
         .route("/api/snapshots", get(get_snapshots))
         .route("/api/snapshots/{context_hash}", get(get_snapshots_by_hash))
         .route("/api/villages/{village_id}/stats", get(get_village_stats))
+        .route("/api/patterns", get(get_patterns))
         .route("/pair", get(complete_pairing))
         .route("/api/pair/new", post(create_pairing))
         .route("/api/pair/list", get(list_paired_devices))
@@ -2373,6 +2375,51 @@ async fn get_village_stats(
         params.before.as_deref(),
     )?;
     Ok(Json(stats))
+}
+
+// ── GET /api/patterns ──
+
+#[derive(Deserialize)]
+struct PatternsQuery {
+    village_id: Option<String>,
+    /// Number of days to look back (default 7, max 90).
+    #[serde(default)]
+    lookback_days: Option<u32>,
+    /// Minimum occurrences to qualify as a pattern (default 3).
+    #[serde(default)]
+    min_occurrences: Option<usize>,
+}
+
+async fn get_patterns(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<PatternsQuery>,
+) -> Result<Json<edda_ledger::sqlite_store::PatternDetectionResult>, AppError> {
+    let village_id = params
+        .village_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| AppError::Validation("village_id query parameter is required".into()))?;
+
+    let lookback_days = params.lookback_days.unwrap_or(7).min(90);
+    let min_occurrences = params.min_occurrences.unwrap_or(3).max(2);
+
+    let now = time::OffsetDateTime::now_utc();
+    let after_date = now - time::Duration::days(i64::from(lookback_days));
+    let after_str = after_date
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default();
+
+    let ledger = state.open_ledger()?;
+    let patterns = ledger.detect_village_patterns(village_id, &after_str, min_occurrences)?;
+    let total = patterns.len();
+
+    Ok(Json(edda_ledger::sqlite_store::PatternDetectionResult {
+        village_id: village_id.to_string(),
+        lookback_days,
+        after: after_str,
+        total_patterns: total,
+        patterns,
+    }))
 }
 
 /// Reconstruct a full snapshot JSON from a materialized view row + event payload.
@@ -7850,5 +7897,87 @@ actors:
 
         let ops = json["slowest_operations"].as_array().unwrap();
         assert_eq!(ops.len(), 2);
+    }
+
+    // ── Pattern Detection Endpoint Tests ──
+
+    #[tokio::test]
+    async fn get_patterns_returns_recurring() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Seed 4 decisions with same key in village "v-test"
+        let ledger = Ledger::open(tmp.path()).unwrap();
+        let mut prev_hash = ledger.last_event_hash().unwrap();
+        for i in 0..4 {
+            let dp = edda_core::types::DecisionPayload {
+                key: "rewards.cap".to_string(),
+                value: format!("{}", 100 + i),
+                reason: Some("adjusting".to_string()),
+                scope: None,
+                authority: Some("event_chief".to_string()),
+                affected_paths: None,
+                tags: None,
+                review_after: None,
+                reversibility: None,
+                village_id: Some("v-test".to_string()),
+            };
+            let event =
+                edda_core::event::new_decision_event("main", prev_hash.as_deref(), "system", &dp)
+                    .unwrap();
+            prev_hash = Some(event.hash.clone());
+            ledger.append_event(&event).unwrap();
+        }
+        drop(ledger);
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/patterns?village_id=v-test&lookback_days=30&min_occurrences=3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["village_id"].as_str().unwrap(), "v-test");
+        assert_eq!(json["lookback_days"].as_u64().unwrap(), 30);
+        assert!(json["after"].as_str().is_some());
+        assert!(json["total_patterns"].as_u64().unwrap() >= 1);
+
+        let patterns = json["patterns"].as_array().unwrap();
+        let recurring: Vec<_> = patterns
+            .iter()
+            .filter(|p| p["pattern_type"].as_str() == Some("recurring_decision"))
+            .collect();
+        assert!(!recurring.is_empty());
+        assert_eq!(recurring[0]["key"].as_str().unwrap(), "rewards.cap");
+        assert_eq!(recurring[0]["occurrences"].as_u64().unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn get_patterns_missing_village_id_returns_400() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/patterns")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }
