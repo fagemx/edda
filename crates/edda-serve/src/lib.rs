@@ -4313,10 +4313,12 @@ async fn get_ingestion_records(
     }
     if let Some(ref tt) = params.trigger_type {
         records.retain(|r| {
-            serde_json::to_value(r.trigger_type)
-                .ok()
-                .and_then(|v| v.as_str().map(|s| s == tt))
-                .unwrap_or(false)
+            let label = match r.trigger_type {
+                edda_ingestion::TriggerType::Auto => "auto",
+                edda_ingestion::TriggerType::Suggested => "suggested",
+                edda_ingestion::TriggerType::Manual => "manual",
+            };
+            label == tt.as_str()
         });
     }
 
@@ -8706,5 +8708,67 @@ actors:
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn ingestion_accept_already_accepted_409() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+
+        // Queue a suggestion
+        let app = router(tmp.path());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/ingestion/evaluate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "eventType": "route.changed",
+                            "sourceLayer": "L1",
+                            "summary": "Route change for double-accept test",
+                            "detail": {}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let sug_id = json["suggestionId"].as_str().unwrap().to_string();
+
+        // Accept it (first time — should succeed)
+        let app2 = router(tmp.path());
+        let resp2 = app2
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/ingestion/suggestions/{sug_id}/accept"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+
+        // Accept again — should get 409 Conflict
+        let app3 = router(tmp.path());
+        let resp3 = app3
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/ingestion/suggestions/{sug_id}/accept"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp3.status(), StatusCode::CONFLICT);
     }
 }
