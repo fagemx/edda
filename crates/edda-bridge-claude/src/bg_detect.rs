@@ -964,6 +964,7 @@ mod tests {
     fn audit_log_appends() {
         let pid = "test_detect_audit";
         let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_file(audit_log_path(pid));
 
         let entry = AuditEntry {
             ts: "2026-03-12T10:00:00Z".to_string(),
