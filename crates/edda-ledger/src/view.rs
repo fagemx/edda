@@ -39,6 +39,10 @@ pub struct DecisionView {
 
     // Review schedule
     pub review_after: Option<String>,
+
+    // Village scope
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub village_id: Option<String>,
 }
 
 /// Convert a storage row into a delivery view.
@@ -69,6 +73,7 @@ pub fn to_view(row: &DecisionRow) -> DecisionView {
         propagation: row.scope.clone(),
         supersedes_id: row.supersedes_id.clone(),
         review_after: row.review_after.clone(),
+        village_id: row.village_id.clone(),
     }
 }
 
@@ -96,6 +101,7 @@ mod tests {
             tags: "[]".to_string(),
             review_after: None,
             reversibility: "medium".to_string(),
+            village_id: None,
         }
     }
 

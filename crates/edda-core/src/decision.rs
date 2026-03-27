@@ -57,6 +57,10 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
             .get("reversibility")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let village_id = d
+            .get("village_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         return Some(DecisionPayload {
             key,
             value,
@@ -67,6 +71,7 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
             tags,
             review_after,
             reversibility,
+            village_id,
         });
     }
     // Text fallback: "key: value — reason"
@@ -86,6 +91,7 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
         tags: None,
         review_after: None,
         reversibility: None,
+        village_id: None,
     })
 }
 

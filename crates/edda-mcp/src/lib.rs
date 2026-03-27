@@ -224,6 +224,7 @@ impl EddaServer {
             tags: None,
             review_after: None,
             reversibility: None,
+            village_id: None,
         };
         let mut event = new_decision_event(&branch, parent_hash.as_deref(), "system", &dp)
             .map_err(to_mcp_err)?;
@@ -277,6 +278,7 @@ impl EddaServer {
             after: None,
             before: None,
             tags: vec![],
+            village_id: None,
         };
 
         let result = edda_ask::ask(&ledger, q, &opts, None).map_err(to_mcp_err)?;
@@ -508,7 +510,7 @@ fn to_mcp_err(e: anyhow::Error) -> McpError {
 pub async fn serve(repo_root: &Path) -> anyhow::Result<()> {
     let paths = edda_ledger::paths::EddaPaths::discover(repo_root);
     if !paths.is_initialized() {
-        anyhow::bail!("not a edda workspace (run `edda init` first)");
+        anyhow::bail!("not an edda workspace (run `edda init` first)");
     }
 
     let server = EddaServer::new(repo_root.to_path_buf());

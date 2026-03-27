@@ -74,6 +74,9 @@ pub struct DecisionHit {
     /// Tags parsed from JSON array in the decision row.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Village scope identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub village_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +137,8 @@ pub struct AskOptions {
     pub before: Option<String>,
     /// Filter decisions whose tags contain any of these values (OR semantics).
     pub tags: Vec<String>,
+    /// Filter decisions belonging to a specific village.
+    pub village_id: Option<String>,
 }
 
 impl Default for AskOptions {
@@ -146,6 +151,7 @@ impl Default for AskOptions {
             after: None,
             before: None,
             tags: vec![],
+            village_id: None,
         }
     }
 }
@@ -180,6 +186,17 @@ pub fn ask(
         hits.into_iter()
             .filter(|d| d.tags.iter().any(|t| opts.tags.contains(t)))
             .collect()
+    };
+
+    // Village filter helper: keep only decisions belonging to the specified village
+    let village_filter = |hits: Vec<DecisionHit>| -> Vec<DecisionHit> {
+        match &opts.village_id {
+            Some(v) => hits
+                .into_iter()
+                .filter(|d| d.village_id.as_deref() == Some(v.as_str()))
+                .collect(),
+            None => hits,
+        }
     };
 
     let after_ref = opts.after.as_deref();
@@ -280,6 +297,7 @@ pub fn ask(
                                     ts: event.ts.clone(),
                                     is_active: false,
                                     tags: dp.tags.unwrap_or_default(),
+                                    village_id: dp.village_id,
                                 });
                             }
                         }
@@ -303,6 +321,10 @@ pub fn ask(
     // Apply tags filter (OR semantics) across all code paths
     let decisions = tags_filter(decisions);
     let timeline = tags_filter(timeline);
+
+    // Apply village filter across all code paths
+    let decisions = village_filter(decisions);
+    let timeline = village_filter(timeline);
 
     // Collect decision event_ids for evidence chain matching
     let decision_event_ids: Vec<&str> = decisions
@@ -800,6 +822,7 @@ fn to_decision_hit(row: &DecisionRow) -> DecisionHit {
         ts: row.ts.clone().unwrap_or_default(),
         is_active: row.is_active,
         tags,
+        village_id: row.village_id.clone(),
     }
 }
 
@@ -1202,6 +1225,7 @@ mod tests {
                 ts: "2026-02-15".into(),
                 is_active: true,
                 tags: vec![],
+                village_id: None,
             }],
             timeline: vec![],
             related_commits: vec![CommitHit {
@@ -1596,6 +1620,7 @@ mod tests {
                 ts: "2026-02-15".into(),
                 is_active: true,
                 tags: vec![],
+                village_id: None,
             }],
             timeline: vec![],
             related_commits: vec![],
@@ -1643,6 +1668,57 @@ mod tests {
         assert!(
             output.contains("建議覆蓋順序"),
             "should show override order suggestion"
+        );
+    }
+
+    #[test]
+    fn ask_filters_by_village_id() {
+        let (_tmp, ledger) = setup();
+
+        // Create two decisions: one with village_id, one without
+        let mut ev1 = make_decision("main", "db.engine", "sqlite", Some("embedded"), None);
+        ev1.payload["decision"]["village_id"] = serde_json::json!("village-a");
+        finalize_event(&mut ev1).unwrap();
+        ledger.append_event(&ev1).unwrap();
+
+        let ev2 = make_decision("main", "cache.ttl", "3600", Some("perf"), None);
+        ledger.append_event(&ev2).unwrap();
+
+        // Without village filter: should find both
+        let opts_all = AskOptions::default();
+        let result_all = ask(&ledger, "db OR cache", &opts_all, None).unwrap();
+        assert!(
+            result_all.decisions.len() >= 2,
+            "expected at least 2 decisions without village filter, got {}",
+            result_all.decisions.len()
+        );
+
+        // With village filter: should find only village-a
+        let opts_village = AskOptions {
+            village_id: Some("village-a".to_string()),
+            ..Default::default()
+        };
+        let result_village = ask(&ledger, "db OR cache", &opts_village, None).unwrap();
+        assert_eq!(
+            result_village.decisions.len(),
+            1,
+            "expected 1 decision with village filter"
+        );
+        assert_eq!(result_village.decisions[0].key, "db.engine");
+        assert_eq!(
+            result_village.decisions[0].village_id.as_deref(),
+            Some("village-a")
+        );
+
+        // Non-existent village: should find none
+        let opts_empty = AskOptions {
+            village_id: Some("no-such-village".to_string()),
+            ..Default::default()
+        };
+        let result_empty = ask(&ledger, "db OR cache", &opts_empty, None).unwrap();
+        assert!(
+            result_empty.decisions.is_empty(),
+            "expected 0 decisions for non-existent village"
         );
     }
 }

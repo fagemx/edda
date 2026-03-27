@@ -307,6 +307,7 @@ mod tests {
             propagation: "local".to_string(),
             supersedes_id: None,
             review_after: None,
+            village_id: None,
         };
         let warning = format_warning(&[&view]);
         assert!(warning.contains("`test.key=val` [active]"));

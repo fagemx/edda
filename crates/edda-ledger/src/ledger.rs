@@ -16,7 +16,7 @@ impl Ledger {
         let paths = EddaPaths::discover(repo_root);
         if !paths.is_initialized() {
             anyhow::bail!(
-                "not a edda workspace ({}/.edda not found). Run `edda init` first.",
+                "not an edda workspace ({}/.edda not found). Run `edda init` first.",
                 paths.root.display()
             );
         }
@@ -227,6 +227,16 @@ impl Ledger {
     /// Distinct domain values from active decisions.
     pub fn list_domains(&self) -> anyhow::Result<Vec<String>> {
         self.sqlite.list_domains()
+    }
+
+    /// Compute aggregate statistics for a village's decisions.
+    pub fn village_stats(
+        &self,
+        village_id: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+    ) -> anyhow::Result<crate::sqlite_store::VillageStats> {
+        self.sqlite.village_stats(village_id, after, before)
     }
 
     /// Find the active decision for a specific key on a branch.
