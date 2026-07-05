@@ -46,6 +46,7 @@ mod pipeline_templates;
 mod tui;
 
 use clap::{Parser, Subcommand};
+use std::ffi::OsString;
 
 #[derive(Parser)]
 #[command(name = "edda", version, about = "Decision memory for coding agents")]
@@ -937,7 +938,7 @@ fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
+    let cli = parse_cli();
     let cwd = std::env::current_dir()?;
     let repo_root = edda_ledger::EddaPaths::find_root(&cwd).unwrap_or(cwd);
 
@@ -1174,5 +1175,37 @@ fn main() -> anyhow::Result<()> {
         Command::ProposePatch { cmd } => cmd_controls::execute(cmd, &repo_root),
         Command::Skill { cmd } => cmd_skill::execute(cmd, &repo_root),
         Command::ToolTier { cmd } => cmd_tool_tier::run(cmd, &repo_root),
+    }
+}
+
+fn parse_cli() -> Cli {
+    parse_cli_from(std::env::args_os().collect())
+}
+
+#[cfg(windows)]
+fn parse_cli_from(args: Vec<OsString>) -> Cli {
+    std::thread::Builder::new()
+        .name("edda-cli-parser".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || Cli::parse_from(args))
+        .expect("failed to spawn CLI parser thread")
+        .join()
+        .expect("CLI parser thread panicked")
+}
+
+#[cfg(not(windows))]
+fn parse_cli_from(args: Vec<OsString>) -> Cli {
+    Cli::parse_from(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_cli_through_stack_safe_entrypoint() {
+        let cli = parse_cli_from(vec![OsString::from("edda"), OsString::from("status")]);
+
+        assert!(matches!(cli.cmd, Command::Status));
     }
 }
