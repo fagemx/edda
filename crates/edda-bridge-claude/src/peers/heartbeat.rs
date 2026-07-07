@@ -32,7 +32,7 @@ pub(crate) fn write_heartbeat(
     let derived_label = label
         .map(|s| s.to_string())
         .or_else(env_label)
-        .unwrap_or_else(|| auto_label(signals));
+        .unwrap_or_else(|| auto_label(signals, Some(cwd)));
 
     let heartbeat = SessionHeartbeat {
         session_id: session_id.to_string(),

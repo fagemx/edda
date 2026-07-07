@@ -434,8 +434,24 @@ pub fn peers(repo_root: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    println!("Active sessions ({}):\n", sessions.len());
-    for p in &sessions {
+    // Collapse stale sessions (heartbeat older than threshold) to a count so
+    // dead heartbeat files do not read as live contention.
+    let stale_threshold = edda_bridge_claude::peers::stale_secs();
+    let (active, stale): (Vec<_>, Vec<_>) = sessions
+        .iter()
+        .partition(|p| p.age_secs <= stale_threshold);
+
+    if active.is_empty() {
+        println!(
+            "No active sessions ({} stale heartbeat{}).",
+            stale.len(),
+            if stale.len() == 1 { "" } else { "s" }
+        );
+        return Ok(());
+    }
+
+    println!("Active sessions ({}):\n", active.len());
+    for p in &active {
         let age = edda_bridge_claude::peers::format_age(p.age_secs);
         let scope = if p.claimed_paths.is_empty() {
             String::new()
@@ -474,6 +490,13 @@ pub fn peers(repo_root: &Path) -> anyhow::Result<()> {
                 println!("    commit: {c}");
             }
         }
+    }
+    if !stale.is_empty() {
+        println!(
+            "\n  (+{} stale session{} not shown)",
+            stale.len(),
+            if stale.len() == 1 { "" } else { "s" }
+        );
     }
     Ok(())
 }

@@ -37,8 +37,42 @@ pub(crate) fn pending_requests_for_session(
 
 // ── Helpers ──
 
+/// True if a normalized path is absolute (`/...` or `C:/...`).
+pub(super) fn is_absolute_normalized(path: &str) -> bool {
+    path.starts_with('/') || matches!(path.as_bytes(), [a, b':', b'/', ..] if a.is_ascii_alphabetic())
+}
+
+/// Make a path project-relative when possible.
+///
+/// Hook payloads carry absolute paths (e.g. `C:\repo\docs\x.md`), but scope
+/// and label derivation assume repo-relative paths — feeding absolute Windows
+/// paths through produced garbage like label `C:` / claim `C:/*`.
+/// Strips the cwd prefix (case-insensitive, for Windows); returns `None` for
+/// absolute paths outside cwd so callers can skip them instead of deriving
+/// garbage. Relative paths pass through normalized.
+pub(super) fn relativize(path: &str, cwd: Option<&str>) -> Option<String> {
+    let norm = path.replace('\\', "/");
+    if !is_absolute_normalized(&norm) {
+        return Some(norm);
+    }
+    let cwd = cwd?;
+    let cwd_norm = cwd.replace('\\', "/");
+    let cwd_trim = cwd_norm.trim_end_matches('/');
+    if cwd_trim.is_empty() {
+        return None;
+    }
+    if norm.len() > cwd_trim.len() + 1
+        && norm[..cwd_trim.len()].eq_ignore_ascii_case(cwd_trim)
+        && norm.as_bytes()[cwd_trim.len()] == b'/'
+    {
+        Some(norm[cwd_trim.len() + 1..].to_string())
+    } else {
+        None
+    }
+}
+
 /// Auto-derive a label from session signals (focus files).
-pub(super) fn auto_label(signals: &SessionSignals) -> String {
+pub(super) fn auto_label(signals: &SessionSignals, cwd: Option<&str>) -> String {
     if signals.files_modified.is_empty() {
         return String::new();
     }
@@ -51,7 +85,12 @@ pub(super) fn auto_label(signals: &SessionSignals) -> String {
         .map(|f| f.path.as_str())
         .unwrap_or("");
 
-    let normalized = top_file.replace('\\', "/");
+    // Relativize so absolute hook paths don't leak drive letters or
+    // machine-specific prefixes into labels.
+    let normalized = match relativize(top_file, cwd) {
+        Some(p) => p,
+        None => top_file.replace('\\', "/"),
+    };
     let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
 
     // Look for crate name pattern: crates/{name}/src/...
@@ -70,9 +109,13 @@ pub(super) fn auto_label(signals: &SessionSignals) -> String {
         }
     }
 
-    // Fall back to parent directory of top file
+    // Fall back to parent directory of top file — but never a path-artifact
+    // segment like a drive letter (`C:`).
     if segments.len() >= 2 {
-        return segments[segments.len() - 2].to_string();
+        let parent = segments[segments.len() - 2];
+        if !parent.ends_with(':') {
+            return parent.to_string();
+        }
     }
 
     String::new()

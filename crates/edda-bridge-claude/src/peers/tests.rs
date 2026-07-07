@@ -152,7 +152,7 @@ fn auto_label_from_crate_path() {
         }],
         ..Default::default()
     };
-    assert_eq!(auto_label(&signals), "edda-bridge-claude");
+    assert_eq!(auto_label(&signals, None), "edda-bridge-claude");
 }
 
 #[test]
@@ -164,7 +164,32 @@ fn auto_label_from_src_module() {
         }],
         ..Default::default()
     };
-    assert_eq!(auto_label(&signals), "auth");
+    assert_eq!(auto_label(&signals, None), "auth");
+}
+
+#[test]
+fn auto_label_absolute_windows_path_uses_relative_parent() {
+    let signals = SessionSignals {
+        files_modified: vec![FileEditCount {
+            path: r"C:\repo\docs\product\mission-runtime-control.json".into(),
+            count: 9,
+        }],
+        ..Default::default()
+    };
+    assert_eq!(auto_label(&signals, Some(r"C:\repo")), "product");
+}
+
+#[test]
+fn auto_label_never_returns_drive_letter() {
+    let signals = SessionSignals {
+        files_modified: vec![FileEditCount {
+            path: r"C:\stray.md".into(),
+            count: 1,
+        }],
+        ..Default::default()
+    };
+    // Parent segment would be "C:" — must be rejected.
+    assert_eq!(auto_label(&signals, None), "");
 }
 
 #[test]
@@ -1120,7 +1145,7 @@ fn derive_scope_from_crate_files() {
             count: 3,
         },
     ];
-    let (label, paths) = derive_scope_from_files(&files).unwrap();
+    let (label, paths) = derive_scope_from_files(&files, None).unwrap();
     assert_eq!(label, "edda-store");
     assert_eq!(paths, vec!["crates/edda-store/*"]);
 }
@@ -1137,14 +1162,57 @@ fn derive_scope_from_src_module() {
             count: 2,
         },
     ];
-    let (label, paths) = derive_scope_from_files(&files).unwrap();
+    let (label, paths) = derive_scope_from_files(&files, None).unwrap();
     assert_eq!(label, "auth");
     assert_eq!(paths, vec!["src/auth/*"]);
 }
 
 #[test]
 fn derive_scope_empty_files() {
-    assert!(derive_scope_from_files(&[]).is_none());
+    assert!(derive_scope_from_files(&[], None).is_none());
+}
+
+// ── Absolute-path regression tests (Windows hook payloads) ──
+// Hook payloads carry absolute paths; before the relativize fix these
+// produced garbage like label "C:" with claim "C:/*".
+
+#[test]
+fn derive_scope_absolute_windows_path_relativized_by_cwd() {
+    let files = vec![
+        FileEditCount {
+            path: r"C:\ai_project\AI Delivery Foundry\docs\product\mission-runtime-control.json"
+                .into(),
+            count: 4,
+        },
+        FileEditCount {
+            path: r"C:\ai_project\AI Delivery Foundry\docs\architecture\evidence\pkg.md".into(),
+            count: 1,
+        },
+    ];
+    let cwd = r"C:\ai_project\AI Delivery Foundry";
+    let (label, paths) = derive_scope_from_files(&files, Some(cwd)).unwrap();
+    assert_eq!(label, "docs");
+    assert_eq!(paths, vec!["docs/*"]);
+}
+
+#[test]
+fn derive_scope_absolute_path_outside_cwd_never_yields_drive_letter() {
+    let files = vec![FileEditCount {
+        path: r"D:\elsewhere\notes\todo.md".into(),
+        count: 3,
+    }];
+    let cwd = r"C:\ai_project\AI Delivery Foundry";
+    // Not under cwd and no crates/src pattern → no claim at all, never "D:".
+    assert!(derive_scope_from_files(&files, Some(cwd)).is_none());
+}
+
+#[test]
+fn derive_scope_absolute_path_without_cwd_never_yields_drive_letter() {
+    let files = vec![FileEditCount {
+        path: r"C:\ai_project\repo\docs\a.md".into(),
+        count: 2,
+    }];
+    assert!(derive_scope_from_files(&files, None).is_none());
 }
 
 #[test]
@@ -2128,7 +2196,7 @@ mod derive_scope_tests {
             },
         ];
 
-        let result = derive_scope_from_files(&files);
+        let result = derive_scope_from_files(&files, None);
         assert_eq!(
             result,
             Some(("server".to_string(), vec!["server/*".to_string()]))
@@ -2148,7 +2216,7 @@ mod derive_scope_tests {
             },
         ];
 
-        let result = derive_scope_from_files(&files);
+        let result = derive_scope_from_files(&files, None);
         // "app" has higher count
         assert_eq!(result, Some(("app".to_string(), vec!["app/*".to_string()])));
     }
@@ -2166,7 +2234,7 @@ mod derive_scope_tests {
             },
         ];
 
-        let result = derive_scope_from_files(&files);
+        let result = derive_scope_from_files(&files, None);
         // Should skip .github and use server
         assert_eq!(
             result,
@@ -2187,7 +2255,7 @@ mod derive_scope_tests {
             },
         ];
 
-        let result = derive_scope_from_files(&files);
+        let result = derive_scope_from_files(&files, None);
         // Root-level files should not produce a scope
         assert_eq!(result, None);
     }
@@ -2205,7 +2273,7 @@ mod derive_scope_tests {
             },
         ];
 
-        let result = derive_scope_from_files(&files);
+        let result = derive_scope_from_files(&files, None);
         // Should still use crate-level grouping
         assert_eq!(
             result,
@@ -2229,7 +2297,7 @@ mod derive_scope_tests {
             },
         ];
 
-        let result = derive_scope_from_files(&files);
+        let result = derive_scope_from_files(&files, None);
         // Should still use src/module grouping
         assert_eq!(
             result,
@@ -2250,7 +2318,7 @@ mod derive_scope_tests {
             },
         ];
 
-        let result = derive_scope_from_files(&files);
+        let result = derive_scope_from_files(&files, None);
         // Should normalize backslashes
         assert_eq!(
             result,

@@ -52,11 +52,20 @@ fn try_src_pattern(files: &[FileEditCount]) -> Option<(String, Vec<String>)> {
 
 /// Try to derive scope from top-level directory pattern.
 /// Handles non-Rust projects (JS, Python, Go, etc.).
-fn try_top_level_directory(files: &[FileEditCount]) -> Option<(String, Vec<String>)> {
+///
+/// Only project-relative paths participate: absolute paths that cannot be
+/// relativized against `cwd` are skipped, because their first segment is a
+/// path artifact (drive letter `C:`, `/home`, ...), not a project directory.
+fn try_top_level_directory(
+    files: &[FileEditCount],
+    cwd: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     let mut groups: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
 
     for f in files {
-        let normalized = f.path.replace('\\', "/");
+        let Some(normalized) = super::helpers::relativize(&f.path, cwd) else {
+            continue;
+        };
         let segments: Vec<&str> = normalized.split('/').filter(|s| !s.is_empty()).collect();
 
         // Get first directory segment
@@ -79,7 +88,11 @@ fn try_top_level_directory(files: &[FileEditCount]) -> Option<(String, Vec<Strin
 ///
 /// Groups files by crate/package directory, returns the dominant group.
 /// Returns `None` if no files modified or no clear grouping.
-pub(super) fn derive_scope_from_files(files: &[FileEditCount]) -> Option<(String, Vec<String>)> {
+/// `cwd` is used to relativize absolute hook paths before top-level grouping.
+pub(super) fn derive_scope_from_files(
+    files: &[FileEditCount],
+    cwd: Option<&str>,
+) -> Option<(String, Vec<String>)> {
     if files.is_empty() {
         return None;
     }
@@ -95,7 +108,7 @@ pub(super) fn derive_scope_from_files(files: &[FileEditCount]) -> Option<(String
     }
 
     // Try 3: top-level directory (for non-Rust projects)
-    if let Some(result) = try_top_level_directory(files) {
+    if let Some(result) = try_top_level_directory(files, cwd) {
         return Some(result);
     }
 
@@ -127,7 +140,7 @@ pub(crate) fn maybe_auto_claim(
     }
 
     // 2. Derive scope from edited files, fallback to git branch
-    let (label, paths) = match derive_scope_from_files(&signals.files_modified) {
+    let (label, paths) = match derive_scope_from_files(&signals.files_modified, Some(cwd)) {
         Some(v) => v,
         None => {
             // No file edits yet (fresh session) — use git branch as fallback label
@@ -200,7 +213,12 @@ pub(crate) fn maybe_auto_claim_file(project_id: &str, session_id: &str, file_pat
             count: 1,
         })
         .collect();
-    let Some((label, paths)) = derive_scope_from_files(&file_counts) else {
+    // PostToolUse hooks run with cwd = project root, so process cwd is the
+    // right relativization base here.
+    let proc_cwd = std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    let Some((label, paths)) = derive_scope_from_files(&file_counts, proc_cwd.as_deref()) else {
         // Save files set even if no scope derived yet
         if let Ok(data) = serde_json::to_string_pretty(&state) {
             let _ = edda_store::write_atomic(&state_path, data.as_bytes());
