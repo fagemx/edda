@@ -633,6 +633,25 @@ pub(super) fn dispatch_session_start(
         pack
     };
 
+    // Inject doctrine pack (judgment layer — havamal contract).
+    // Facts flow automatically (turns, decisions, signals); judgment enters
+    // curated: the project generates `.havamal-pack.md` via `havamal pack`
+    // and edda transports it. Placed early so budget cuts hit it last.
+    {
+        let doctrine_budget: usize = std::env::var("EDDA_DOCTRINE_BUDGET_CHARS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4000);
+        if let Some(doctrine) =
+            edda_pack::read_doctrine_pack(std::path::Path::new(cwd), doctrine_budget)
+        {
+            content = Some(match content {
+                Some(c) => format!("{c}\n\n{doctrine}"),
+                None => doctrine,
+            });
+        }
+    }
+
     // Append active plan file excerpt for cross-session continuity.
     // Conductor mode: skip — conductor provides plan context via --append-system-prompt.
     if !conductor_mode {

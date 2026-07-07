@@ -376,6 +376,57 @@ pub fn write_pack(project_dir: &Path, pack_md: &str, meta: &PackMetadata) -> any
     Ok(())
 }
 
+// ── Doctrine Pack (judgment layer) ──
+
+const DEFAULT_DOCTRINE_FILE: &str = ".havamal-pack.md";
+
+/// Read the project's doctrine hot pack (judgment layer).
+///
+/// Contract with havamal (github.com/fagemx/havamal): the project curates
+/// judgment — ideology, failure memory, taste — as doctrine files and
+/// generates a compressed pack via `havamal pack --out .havamal-pack.md`.
+/// edda transports that pack into the session. edda never generates judgment
+/// itself: machine-extracted judgment without curation is noise; facts flow
+/// automatically, judgment enters signed.
+///
+/// Resolution order:
+/// 1. `EDDA_DOCTRINE_PATH` env var (absolute, or relative to `repo_root`)
+/// 2. `<repo_root>/.havamal-pack.md`
+///
+/// Returns `None` when no doctrine source exists or the file is empty.
+/// Content is truncated at `budget` bytes on a char boundary.
+pub fn read_doctrine_pack(repo_root: &Path, budget: usize) -> Option<String> {
+    let path = match std::env::var("EDDA_DOCTRINE_PATH") {
+        Ok(p) if !p.trim().is_empty() => {
+            let pb = std::path::PathBuf::from(p.trim());
+            if pb.is_absolute() {
+                pb
+            } else {
+                repo_root.join(pb)
+            }
+        }
+        _ => repo_root.join(DEFAULT_DOCTRINE_FILE),
+    };
+
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut body = trimmed.to_string();
+    if body.len() > budget {
+        let mut end = budget;
+        while end > 0 && !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        body.truncate(end);
+        body.push_str("\n<!-- doctrine truncated by EDDA_DOCTRINE_BUDGET_CHARS -->");
+    }
+
+    Some(format!("## Doctrine (judgment layer)\n\n{body}"))
+}
+
 // ── Decision Pack ──
 
 /// A pack of active decisions grouped by domain, ready for session injection.
@@ -587,6 +638,44 @@ mod tests {
 
         let meta_path = tmp.path().join("packs").join("hot.meta.json");
         assert!(meta_path.exists());
+    }
+
+    // ── Doctrine Pack tests ──
+
+    #[test]
+    fn doctrine_pack_missing_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(read_doctrine_pack(tmp.path(), 4000).is_none());
+    }
+
+    #[test]
+    fn doctrine_pack_reads_default_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".havamal-pack.md"),
+            "## L1 — MUST STAY TRUE\nClaims never close work.",
+        )
+        .unwrap();
+        let md = read_doctrine_pack(tmp.path(), 4000).unwrap();
+        assert!(md.starts_with("## Doctrine (judgment layer)"));
+        assert!(md.contains("Claims never close work."));
+    }
+
+    #[test]
+    fn doctrine_pack_empty_file_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".havamal-pack.md"), "  \n\n").unwrap();
+        assert!(read_doctrine_pack(tmp.path(), 4000).is_none());
+    }
+
+    #[test]
+    fn doctrine_pack_truncates_at_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let long = "x".repeat(500);
+        std::fs::write(tmp.path().join(".havamal-pack.md"), &long).unwrap();
+        let md = read_doctrine_pack(tmp.path(), 100).unwrap();
+        assert!(md.contains("doctrine truncated"));
+        assert!(md.len() < 300);
     }
 
     // ── Decision Pack tests ──

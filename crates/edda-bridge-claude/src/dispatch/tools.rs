@@ -286,11 +286,18 @@ pub(super) fn evaluate_learned_rules(
         vec![file_path]
     };
 
+    let command = raw
+        .pointer("/tool_input/command")
+        .or_else(|| raw.pointer("/input/command"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let hook_ctx = edda_postmortem::hooks::HookContext {
         hook_event: "PreToolUse".to_string(),
         tool_name,
         files_touched,
         cwd: cwd.to_string(),
+        command,
     };
 
     let result = edda_postmortem::hooks::evaluate_rules(&rules_store, &hook_ctx);

@@ -32,6 +32,8 @@ pub struct HookContext {
     pub files_touched: Vec<String>,
     /// Current working directory.
     pub cwd: String,
+    /// The command about to run (Bash tool_input.command), when available.
+    pub command: Option<String>,
 }
 
 /// Result of evaluating all active rules against a hook context.
@@ -137,10 +139,34 @@ fn matches_trigger(trigger: &str, ctx: &HookContext) -> bool {
         return ctx.files_touched.iter().any(|f| f.contains(path));
     }
 
-    if let Some(_cmd) = trigger.strip_prefix("command_failure:") {
-        // command_failure rules warn whenever Bash is used, as a reminder
-        // about the past failure pattern.
-        return ctx.tool_name == "Bash";
+    if let Some(cmd) = trigger.strip_prefix("command_failure:") {
+        // Match only when the incoming Bash command actually contains the
+        // previously failed command token. Matching every Bash call floods
+        // hooks with irrelevant warnings AND record_hit() keeps resetting the
+        // rule's TTL, so noise rules never decay — a self-feeding loop.
+        // No command available → no match (silence over noise).
+        if ctx.tool_name != "Bash" {
+            return false;
+        }
+        let cmd = cmd.trim();
+        if cmd.is_empty() {
+            return false;
+        }
+        // Simple tokens (e.g., "ls", "python") match as whole words so they
+        // don't hit substrings like "tools"; complex tokens (e.g., "WS=$(cat")
+        // fall back to substring containment.
+        let is_simple_token = cmd
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
+        return ctx.command.as_deref().is_some_and(|current| {
+            if is_simple_token {
+                current
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'))
+                    .any(|word| word == cmd)
+            } else {
+                current.contains(cmd)
+            }
+        });
     }
 
     if trigger == "multi_agent_start" {
@@ -198,6 +224,7 @@ mod tests {
             tool_name: "Write".to_string(),
             files_touched: vec!["src/main.rs".to_string()],
             cwd: "/project".to_string(),
+            command: None,
         };
 
         let result = evaluate_rules(&store, &ctx);
@@ -217,6 +244,7 @@ mod tests {
             tool_name: "Write".to_string(),
             files_touched: vec!["src/lib.rs".to_string()],
             cwd: "/project".to_string(),
+            command: None,
         };
 
         let result = evaluate_rules(&store, &ctx);
@@ -238,10 +266,58 @@ mod tests {
             tool_name: "Write".to_string(),
             files_touched: vec!["src/main.rs".to_string()],
             cwd: "/project".to_string(),
+            command: None,
         };
 
         let result = evaluate_rules(&store, &ctx);
         assert_eq!(result.rules_matched, 0);
+    }
+
+    #[test]
+    fn command_failure_matches_only_same_command() {
+        let store = make_store(vec![active_rule(
+            "command_failure:python",
+            "Verify python is available",
+            RuleCategory::Workflow,
+        )]);
+
+        // Bash call containing the failed command → match
+        let hit_ctx = HookContext {
+            hook_event: "PreToolUse".to_string(),
+            tool_name: "Bash".to_string(),
+            files_touched: vec![],
+            cwd: "/project".to_string(),
+            command: Some("python scripts/run.py".to_string()),
+        };
+        assert_eq!(evaluate_rules(&store, &hit_ctx).rules_matched, 1);
+
+        // Unrelated Bash call → no match (this was the noise bug)
+        let miss_ctx = HookContext {
+            command: Some("git status".to_string()),
+            ..hit_ctx.clone()
+        };
+        assert_eq!(evaluate_rules(&store, &miss_ctx).rules_matched, 0);
+
+        // Substring-only occurrence inside another word → no match
+        let substr_ctx = HookContext {
+            command: Some("pythonic-helper --run".to_string()),
+            ..hit_ctx.clone()
+        };
+        assert_eq!(evaluate_rules(&store, &substr_ctx).rules_matched, 0);
+
+        // No command available → no match (silence over noise)
+        let none_ctx = HookContext {
+            command: None,
+            ..hit_ctx.clone()
+        };
+        assert_eq!(evaluate_rules(&store, &none_ctx).rules_matched, 0);
+
+        // Non-Bash tool → no match
+        let write_ctx = HookContext {
+            tool_name: "Write".to_string(),
+            ..hit_ctx
+        };
+        assert_eq!(evaluate_rules(&store, &write_ctx).rules_matched, 0);
     }
 
     #[test]
