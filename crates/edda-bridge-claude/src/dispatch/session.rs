@@ -532,6 +532,22 @@ pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
         let _ = lessons_store.sync_to_claude_md(&claude_md_path, 10);
     }
 
+    // Doctrine candidates (judgment flywheel — havamal contract). Opt-in via
+    // EDDA_INCUBATION_PATH; unset ⇒ no-op. The machine writes candidates only:
+    // promotion into doctrine is always a human edit (incubation sign-off).
+    if let Some(inc_path) = edda_postmortem::candidates::resolve_incubation_path(
+        std::env::var("EDDA_INCUBATION_PATH").ok().as_deref(),
+        Path::new(cwd),
+    ) {
+        let cands = edda_postmortem::candidates::select_candidates(
+            &result,
+            edda_postmortem::candidates::MAX_CANDIDATES_PER_RUN,
+        );
+        if !cands.is_empty() {
+            let _ = edda_postmortem::candidates::sync_candidates_to_incubation(&inc_path, &cands);
+        }
+    }
+
     tracing::info!(
         triggers = result.triggers.len(),
         lessons = result.lessons.len(),

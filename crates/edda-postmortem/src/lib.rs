@@ -1,4 +1,5 @@
 pub mod analyzer;
+pub mod candidates;
 pub mod hooks;
 pub mod lessons;
 pub mod rules;
