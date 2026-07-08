@@ -167,6 +167,20 @@ edda bridge openclaw install    # 安裝全域插件
 
 **Havamal**（判斷層）— 在 repo 放一個 `.havamal-pack.md`，edda 會在 session 開始自動注入為 doctrine 段。見 [havamal](https://github.com/fagemx/havamal)——事實走 edda，判斷簽核進場。
 
+<details>
+<summary><strong>一定要一起用嗎？</strong></summary>
+
+短答：**不用——edda 自己就有用**。兩個都在時會自動接上,但誰也不依賴誰。
+
+| 你的痛 | 用 |
+|---|---|
+| 「上次 session 做的決策，開新 session 就消失。」 | **只用 edda** |
+| 「agent 不知道我這個專案在乎什麼、拒絕什麼、試過什麼。」 | **只用 havamal**（寫 doctrine，在 `CLAUDE.md` / `AGENTS.md` 裡引用） |
+| 兩個都有，尤其是長專案跨很多 session | **兩個都用**——edda 自動注入 havamal pack，跳過「先讀 doctrine」的手動步驟 |
+
+Havamal 因為契約是純 markdown 檔，可獨立配任何 harness（Claude Code、Codex、Cursor、Gemini CLI）。edda 也獨立可用——記錄決策和注入功能不需要 doctrine 存在也能運作。
+</details>
+
 **任何 MCP 客戶端**（Cursor、Windsurf 等）— 透過 MCP server 提供 7 個工具：
 
 ```bash

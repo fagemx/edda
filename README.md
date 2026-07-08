@@ -167,6 +167,20 @@ edda bridge openclaw install    # installs global plugin
 
 **Havamal** (judgment layer) — drop a `.havamal-pack.md` in your repo and edda auto-injects it as the doctrine section at session start. See [havamal](https://github.com/fagemx/havamal) — facts flow through edda, judgment enters curated.
 
+<details>
+<summary><strong>Do I need havamal too?</strong></summary>
+
+Short answer: **no — edda is useful on its own**. They compose when both are present, but neither depends on the other.
+
+| Your pain | Use |
+|---|---|
+| "Decisions I made last session vanish when a new session starts." | **edda only** |
+| "The agent doesn't know what my project values, refuses, or has already tried." | **havamal only** (write doctrine, reference it from `CLAUDE.md` / `AGENTS.md`) |
+| Both of the above, especially on a long project with many sessions | **both** — edda auto-injects the havamal pack, so you skip the manual "read the doctrine first" step |
+
+Havamal works standalone with any harness (Claude Code, Codex, Cursor, Gemini CLI) because its contract is a plain markdown file. Edda works standalone because decisions and injection don't need doctrine to function.
+</details>
+
 **Any MCP client** (Cursor, Windsurf, etc.) — 7 tools via MCP server:
 
 ```bash
