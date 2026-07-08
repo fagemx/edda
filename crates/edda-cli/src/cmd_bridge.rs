@@ -22,6 +22,11 @@ pub enum BridgeCmd {
         #[command(subcommand)]
         cmd: BridgeCodexCmd,
     },
+    /// Hermes agent bridge operations
+    Hermes {
+        #[command(subcommand)]
+        cmd: BridgeHermesCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -35,6 +40,22 @@ pub enum BridgeCodexCmd {
     /// Uninstall edda hooks from Codex hooks.json
     Uninstall {
         /// Custom hooks.json path
+        #[arg(long)]
+        target: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BridgeHermesCmd {
+    /// Install edda hooks into ~/.hermes/cli-config.yaml (merges into existing hooks: block)
+    Install {
+        /// Custom cli-config.yaml path (default: ~/.hermes/cli-config.yaml)
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Uninstall edda hooks from Hermes cli-config.yaml
+    Uninstall {
+        /// Custom cli-config.yaml path
         #[arg(long)]
         target: Option<String>,
     },
@@ -192,6 +213,8 @@ pub enum HookCmd {
     Claude,
     /// Codex CLI hook entrypoint (reads stdin JSON)
     Codex,
+    /// Hermes agent shell-hook entrypoint (reads stdin JSON)
+    Hermes,
     /// OpenClaw hook entrypoint (reads stdin JSON)
     Openclaw,
 }
@@ -202,6 +225,8 @@ pub enum DoctorCmd {
     Claude,
     /// Check Codex bridge health
     Codex,
+    /// Check Hermes bridge health
+    Hermes,
     /// Check OpenClaw bridge health
     Openclaw,
 }
@@ -304,6 +329,14 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
                 uninstall_codex(target.as_deref().map(std::path::Path::new))
             }
         },
+        BridgeCmd::Hermes { cmd } => match cmd {
+            BridgeHermesCmd::Install { target } => {
+                install_hermes(target.as_deref().map(std::path::Path::new))
+            }
+            BridgeHermesCmd::Uninstall { target } => {
+                uninstall_hermes(target.as_deref().map(std::path::Path::new))
+            }
+        },
     }
 }
 
@@ -311,6 +344,7 @@ pub fn run_hook(cmd: HookCmd) -> anyhow::Result<()> {
     match cmd {
         HookCmd::Claude => hook_claude(),
         HookCmd::Codex => hook_codex(),
+        HookCmd::Hermes => hook_hermes(),
         HookCmd::Openclaw => hook_openclaw(),
     }
 }
@@ -319,6 +353,7 @@ pub fn run_doctor(cmd: DoctorCmd, repo_root: &Path) -> anyhow::Result<()> {
     match cmd {
         DoctorCmd::Claude => doctor(repo_root),
         DoctorCmd::Codex => doctor_codex(),
+        DoctorCmd::Hermes => doctor_hermes(),
         DoctorCmd::Openclaw => doctor_openclaw(),
     }
 }
@@ -1187,6 +1222,35 @@ pub fn hook_codex() -> anyhow::Result<()> {
 /// `edda doctor codex`
 pub fn doctor_codex() -> anyhow::Result<()> {
     edda_bridge_codex::doctor()
+}
+
+/// `edda bridge hermes install`
+pub fn install_hermes(target: Option<&Path>) -> anyhow::Result<()> {
+    edda_bridge_hermes::install(target).map(|_| ())
+}
+
+/// `edda bridge hermes uninstall`
+pub fn uninstall_hermes(target: Option<&Path>) -> anyhow::Result<()> {
+    edda_bridge_hermes::uninstall(target)
+}
+
+/// `edda hook hermes` — read stdin, dispatch hook
+pub fn hook_hermes() -> anyhow::Result<()> {
+    let mut stdin = String::new();
+    std::io::stdin().read_to_string(&mut stdin)?;
+    let r = edda_bridge_hermes::hook_entrypoint_from_stdin(&stdin)?;
+    if let Some(out) = r.stdout {
+        println!("{out}");
+    }
+    if let Some(err) = r.stderr {
+        eprintln!("{err}");
+    }
+    Ok(())
+}
+
+/// `edda doctor hermes`
+pub fn doctor_hermes() -> anyhow::Result<()> {
+    edda_bridge_hermes::doctor()
 }
 
 #[cfg(test)]
