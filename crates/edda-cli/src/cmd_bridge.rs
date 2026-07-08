@@ -612,6 +612,27 @@ pub fn decide(
     let key = key.trim();
     let value = value.trim();
 
+    // EDDA-SECRET-GUARD1 q331: scrub value + reason before ANY persistence
+    // (peer broadcast, ledger, coordination log). Deterministic zero-LLM.
+    let (safe_value, value_hits) = edda_core::secret_guard::redact(value);
+    let value = safe_value.as_str();
+    let (safe_reason, reason_hits) = match reason {
+        Some(r) => {
+            let (out, hits) = edda_core::secret_guard::redact(r);
+            (Some(out), hits)
+        }
+        None => (None, Vec::new()),
+    };
+    let reason: Option<&str> = safe_reason.as_deref();
+    let all_hits = value_hits.len() + reason_hits.len();
+    if all_hits > 0 {
+        let kinds: Vec<_> = value_hits.iter().chain(reason_hits.iter()).map(|h| h.kind).collect();
+        eprintln!(
+            "⚠ secret-guard: redacted {all_hits} secret pattern(s) before writing decision ({})",
+            kinds.join(", ")
+        );
+    }
+
     let project_id = edda_store::project_id(repo_root);
     let (session_id, label) = resolve_session_id(cli_session, &project_id, "cli");
 

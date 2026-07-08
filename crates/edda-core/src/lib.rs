@@ -7,6 +7,7 @@ pub mod event;
 pub mod git;
 pub mod hash;
 pub mod policy;
+pub mod secret_guard;
 pub mod tool_tier;
 pub mod types;
 

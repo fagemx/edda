@@ -20,6 +20,7 @@ ulid.workspace = true
 time.workspace = true
 serde_yaml.workspace = true
 globset.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
