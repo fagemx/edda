@@ -251,7 +251,7 @@ edda watch                 # real-time TUI: peers, events, decisions
 | `edda-store` | Per-user store, atomic writes |
 | `edda-search-fts` | Full-text search (Tantivy) |
 | `edda-index` | Transcript index |
-| `edda-conductor` | Multi-phase plan orchestration |
+| `edda-conductor` | Multi-phase plan orchestration — self-domain phase pipelines only; mission dispatch belongs to [bryti](https://github.com/fagemx/bryti), and conductor never touches external work queues |
 
 <details>
 <summary>What's inside .edda/</summary>
