@@ -37,11 +37,11 @@ jobs:
         include:
           - name: linux-x86_64
             os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             archive: tar.gz
           - name: linux-aarch64
             os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
+            target: aarch64-unknown-linux-gnu
             archive: tar.gz
           - name: macos-x86_64
             os: macos-latest
@@ -59,9 +59,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install musl tools
-        if: contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install Linux native deps
+        if: contains(matrix.target, 'linux-gnu')
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Install Rust
         run: |
