@@ -507,9 +507,8 @@ pub fn peers(repo_root: &Path) -> anyhow::Result<()> {
     // Collapse stale sessions (heartbeat older than threshold) to a count so
     // dead heartbeat files do not read as live contention.
     let stale_threshold = edda_bridge_claude::peers::stale_secs();
-    let (active, stale): (Vec<_>, Vec<_>) = sessions
-        .iter()
-        .partition(|p| p.age_secs <= stale_threshold);
+    let (active, stale): (Vec<_>, Vec<_>) =
+        sessions.iter().partition(|p| p.age_secs <= stale_threshold);
 
     if active.is_empty() {
         println!(
@@ -625,6 +624,12 @@ pub fn decide(
             conflict.existing_value, conflict.by_label, conflict.ts
         );
         eprintln!("  Recording your decision \"{key}={value}\" — consider resolving with the other agent.");
+        // Postmortem supply line: best-effort, never blocks the decide.
+        let _ = edda_postmortem::signals::record_decision_signal(
+            &project_id,
+            edda_postmortem::signals::SignalKind::BindingConflict,
+            key,
+        );
     }
 
     // 1. Broadcast to peers (real-time)
@@ -684,6 +689,12 @@ pub fn decide(
                 rel: edda_core::types::rel::SUPERSEDES.to_string(),
                 note: Some(format!("key '{}' re-decided", key)),
             });
+            // Postmortem supply line: best-effort, never blocks the decide.
+            let _ = edda_postmortem::signals::record_decision_signal(
+                &project_id,
+                edda_postmortem::signals::SignalKind::Superseded,
+                key,
+            );
         }
     }
 

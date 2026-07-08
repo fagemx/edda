@@ -464,14 +464,23 @@ pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
         Err(_) => return,
     };
 
+    // Decision signals (supersede / binding conflict) recorded at decide time,
+    // counted back by this session's ledger window — the supply line for the
+    // two natural High-severity paths (SELECTOR2; previously hardcoded 0/false).
+    let signals = edda_postmortem::signals::count_signals_between(
+        project_id,
+        stats.first_ts.as_deref(),
+        stats.last_ts.as_deref(),
+    );
+
     let summary = edda_postmortem::trigger::SessionSummary {
         session_id: session_id.to_string(),
         user_prompts: stats.user_prompts,
         tool_failures: stats.tool_failures,
         failed_commands: stats.failed_commands.clone(),
         file_edit_counts: stats.file_edit_counts.clone(),
-        decisions_superseded: 0,
-        had_conflict: false,
+        decisions_superseded: signals.superseded,
+        had_conflict: signals.conflicts > 0,
         outcome: stats.outcome.to_string(),
     };
 
@@ -488,8 +497,8 @@ pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
         files_modified: stats.files_modified.clone(),
         file_edit_counts: stats.file_edit_counts.clone(),
         commits_made: stats.commits_made.clone(),
-        decisions_superseded: 0,
-        had_conflict: false,
+        decisions_superseded: signals.superseded,
+        had_conflict: signals.conflicts > 0,
         outcome: stats.outcome.to_string(),
         duration_minutes: stats.duration_minutes,
     };
