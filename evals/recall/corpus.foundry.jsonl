@@ -1,0 +1,20 @@
+# edda-recall-eval corpus — Foundry workspace baseline (queue 325)
+# Authoring rule: write each question using only the key/domain and general
+# knowledge of the fleet — do NOT read the decision's value/reason before
+# authoring. That keeps the questions user-shaped, not implementation-shaped.
+# Skipped rows (expected_key not in ledger) are excluded from denominators.
+{"id":"q001","question":"why not run agents headless","expected_key":"bryti.acp","notes":"transport story"}
+{"id":"q002","question":"can codex verify what claude produced","expected_key":"bryti.codex-acp","notes":"cross-model pair"}
+{"id":"q003","question":"where does bryti get doctrine from","expected_key":"bryti.doctrine-source","notes":"config source"}
+{"id":"q004","question":"has the full dispatch drill been run yet","expected_key":"bryti.drill01","notes":"live drill status"}
+{"id":"q005","question":"windows terminal spawn from bryti","expected_key":"bryti.f4","notes":"launcher fix"}
+{"id":"q006","question":"bryti frictions f10 to f13 status","expected_key":"bryti.frictions-f10-f13","notes":"exact-key style"}
+{"id":"q007","question":"how is kickoff context assembled","expected_key":"bryti.kickoff-pack","notes":"assembly"}
+{"id":"q008","question":"how do we detect if an executor is alive","expected_key":"bryti.liveness","notes":"work-evidence rule"}
+{"id":"q009","question":"is bryti open source","expected_key":"bryti.oss","notes":"license posture"}
+{"id":"q010","question":"machine-extracted doctrine candidates approach","expected_key":"edda.doctrine-candidates","notes":"additive lane vs rewrite"}
+{"id":"q011","question":"who is the fleet dispatcher","expected_key":"ecosystem.dispatcher.name","notes":"naming"}
+{"id":"q012","question":"cross-harness codex bridge status","expected_key":"fleet.bridge-codex","notes":"bridge lane"}
+{"id":"q013","question":"m2 handoff-watch scope","expected_key":"bryti.m2","notes":"milestone key"}
+{"id":"q014","question":"worktree edda bridge decision","expected_key":"bryti.worktree-edda","notes":"exact-key style"}
+{"id":"q015","question":"havamal as the judgment layer","expected_key":"edda.pilot.judgment-layer","notes":"pilot binding"}
