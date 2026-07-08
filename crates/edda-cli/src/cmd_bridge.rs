@@ -624,11 +624,13 @@ pub fn decide(
             conflict.existing_value, conflict.by_label, conflict.ts
         );
         eprintln!("  Recording your decision \"{key}={value}\" — consider resolving with the other agent.");
-        // Postmortem supply line: best-effort, never blocks the decide.
-        let _ = edda_postmortem::signals::record_decision_signal(
+        // Postmortem supply line: SELECTOR3 病一——same label = own progression,
+        // not a cross-agent conflict; only record when actors differ. Best-effort, never blocks.
+        let _ = edda_postmortem::signals::record_conflict_signal_if_cross_actor(
             &project_id,
-            edda_postmortem::signals::SignalKind::BindingConflict,
             key,
+            &conflict.by_label,
+            &label,
         );
     }
 

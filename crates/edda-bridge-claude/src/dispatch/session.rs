@@ -503,7 +503,26 @@ pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
         duration_minutes: stats.duration_minutes,
     };
 
-    let result = edda_postmortem::analyzer::analyze(&trigger, &input);
+    let mut result = edda_postmortem::analyzer::analyze(&trigger, &input);
+
+    // SELECTOR3 病二: real scars — read `review`/`friction` notes from the
+    // workspace ledger and, per havamal's 二犯 rule, propose High-severity
+    // lessons only when the same problem recurs within 30 days. Scar lessons
+    // are prepended so they take the priority slots in the candidate cap.
+    if let Ok(ledger) = edda_ledger::Ledger::open_path(Path::new(cwd)) {
+        if let Ok(note_events) = ledger.iter_events_by_type("note") {
+            let notes = edda_postmortem::scars::notes_from_events(&note_events);
+            let scar_lessons = edda_postmortem::scars::analyze_recurring_scars(
+                &notes,
+                time::OffsetDateTime::now_utc(),
+            );
+            if !scar_lessons.is_empty() {
+                let mut ordered = scar_lessons;
+                ordered.append(&mut result.lessons);
+                result.lessons = ordered;
+            }
+        }
+    }
 
     let mut rules_store = edda_postmortem::RulesStore::load_project(project_id);
     for proposal in &result.rule_proposals {

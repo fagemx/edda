@@ -63,6 +63,37 @@ pub fn record_decision_signal(project_id: &str, kind: SignalKind, key: &str) -> 
     record_signal_at(&signals_path(project_id), kind, key)
 }
 
+/// SELECTOR3 病一:conflict 訊號的自/他區分。
+/// 同 actor(session 進版自己的 binding)=不記 conflict;異 actor=真跨 agent 衝突,記。
+/// `superseded` 訊號**不**經此路——那是判斷含量的正貨,自/他都要記。
+pub fn should_record_conflict(existing_actor: &str, current_actor: &str) -> bool {
+    existing_actor != current_actor
+}
+
+/// Record a `binding_conflict` signal only when the two actors differ.
+/// Wraps `record_signal_at` for the tested path (病一 治法).
+pub fn record_conflict_if_cross_actor(
+    path: &Path,
+    key: &str,
+    existing_actor: &str,
+    current_actor: &str,
+) -> io::Result<()> {
+    if !should_record_conflict(existing_actor, current_actor) {
+        return Ok(());
+    }
+    record_signal_at(path, SignalKind::BindingConflict, key)
+}
+
+/// Same as `record_conflict_if_cross_actor` but resolves the project's signals file.
+pub fn record_conflict_signal_if_cross_actor(
+    project_id: &str,
+    key: &str,
+    existing_actor: &str,
+    current_actor: &str,
+) -> io::Result<()> {
+    record_conflict_if_cross_actor(&signals_path(project_id), key, existing_actor, current_actor)
+}
+
 /// Append one signal to an explicit file path (testable core).
 pub fn record_signal_at(path: &Path, kind: SignalKind, key: &str) -> io::Result<()> {
     if let Some(parent) = path.parent() {
@@ -139,6 +170,38 @@ mod tests {
     fn write_lines(path: &Path, lines: &[&str]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, lines.join("\n")).unwrap();
+    }
+
+    // SELECTOR3 病一:solo/peer 區分——同 by_label=進版不記 conflict,異 label=真衝突才記
+    #[test]
+    fn conflict_signal_dropped_when_same_actor_as_existing_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sig.jsonl");
+        // 同 actor 進版:should_record_conflict=false
+        assert!(!should_record_conflict("cli", "cli"),
+            "same actor progressing own binding is not a conflict (病一)");
+        // 呼叫 record_conflict_if_cross_actor 應該不寫檔
+        record_conflict_if_cross_actor(&path, "db.engine", "cli", "cli").unwrap();
+        assert_eq!(count_signals_at(&path, None, None).conflicts, 0);
+    }
+
+    #[test]
+    fn conflict_signal_recorded_when_different_actor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sig.jsonl");
+        assert!(should_record_conflict("cli", "product"),
+            "different actor = real cross-agent conflict (照記)");
+        record_conflict_if_cross_actor(&path, "db.engine", "product", "cli").unwrap();
+        assert_eq!(count_signals_at(&path, None, None).conflicts, 1);
+    }
+
+    #[test]
+    fn superseded_signal_still_recorded_regardless_of_actor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sig.jsonl");
+        // Supersede 訊號:自己改自己=正常進版訊號,自/他都要記(analyzer 判斷含量真源)
+        record_signal_at(&path, SignalKind::Superseded, "db.engine").unwrap();
+        assert_eq!(count_signals_at(&path, None, None).superseded, 1);
     }
 
     #[test]
