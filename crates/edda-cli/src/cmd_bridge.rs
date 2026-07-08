@@ -17,6 +17,27 @@ pub enum BridgeCmd {
         #[command(subcommand)]
         cmd: BridgeOpenclawCmd,
     },
+    /// Codex CLI bridge operations
+    Codex {
+        #[command(subcommand)]
+        cmd: BridgeCodexCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BridgeCodexCmd {
+    /// Install edda hooks into ~/.codex/hooks.json
+    Install {
+        /// Custom hooks.json path (default: ~/.codex/hooks.json)
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Uninstall edda hooks from Codex hooks.json
+    Uninstall {
+        /// Custom hooks.json path
+        #[arg(long)]
+        target: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -169,6 +190,8 @@ pub enum BridgeOpenclawCmd {
 pub enum HookCmd {
     /// Claude Code hook entrypoint (reads stdin JSON)
     Claude,
+    /// Codex CLI hook entrypoint (reads stdin JSON)
+    Codex,
     /// OpenClaw hook entrypoint (reads stdin JSON)
     Openclaw,
 }
@@ -177,6 +200,8 @@ pub enum HookCmd {
 pub enum DoctorCmd {
     /// Check Claude Code bridge health
     Claude,
+    /// Check Codex bridge health
+    Codex,
     /// Check OpenClaw bridge health
     Openclaw,
 }
@@ -271,12 +296,21 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
                 digest(repo_root, session.as_deref(), all)
             }
         },
+        BridgeCmd::Codex { cmd } => match cmd {
+            BridgeCodexCmd::Install { target } => {
+                install_codex(target.as_deref().map(std::path::Path::new))
+            }
+            BridgeCodexCmd::Uninstall { target } => {
+                uninstall_codex(target.as_deref().map(std::path::Path::new))
+            }
+        },
     }
 }
 
 pub fn run_hook(cmd: HookCmd) -> anyhow::Result<()> {
     match cmd {
         HookCmd::Claude => hook_claude(),
+        HookCmd::Codex => hook_codex(),
         HookCmd::Openclaw => hook_openclaw(),
     }
 }
@@ -284,6 +318,7 @@ pub fn run_hook(cmd: HookCmd) -> anyhow::Result<()> {
 pub fn run_doctor(cmd: DoctorCmd, repo_root: &Path) -> anyhow::Result<()> {
     match cmd {
         DoctorCmd::Claude => doctor(repo_root),
+        DoctorCmd::Codex => doctor_codex(),
         DoctorCmd::Openclaw => doctor_openclaw(),
     }
 }
@@ -1123,6 +1158,35 @@ pub fn hook_openclaw() -> anyhow::Result<()> {
 /// `edda doctor openclaw`
 pub fn doctor_openclaw() -> anyhow::Result<()> {
     edda_bridge_openclaw::doctor()
+}
+
+/// `edda bridge codex install`
+pub fn install_codex(target: Option<&Path>) -> anyhow::Result<()> {
+    edda_bridge_codex::install(target).map(|_| ())
+}
+
+/// `edda bridge codex uninstall`
+pub fn uninstall_codex(target: Option<&Path>) -> anyhow::Result<()> {
+    edda_bridge_codex::uninstall(target)
+}
+
+/// `edda hook codex` — read stdin, dispatch hook
+pub fn hook_codex() -> anyhow::Result<()> {
+    let mut stdin = String::new();
+    std::io::stdin().read_to_string(&mut stdin)?;
+    let r = edda_bridge_codex::hook_entrypoint_from_stdin(&stdin)?;
+    if let Some(out) = r.stdout {
+        println!("{out}");
+    }
+    if let Some(err) = r.stderr {
+        eprintln!("{err}");
+    }
+    Ok(())
+}
+
+/// `edda doctor codex`
+pub fn doctor_codex() -> anyhow::Result<()> {
+    edda_bridge_codex::doctor()
 }
 
 #[cfg(test)]

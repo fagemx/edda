@@ -1,0 +1,27 @@
+[package]
+name = "edda-bridge-codex"
+description = "Codex CLI hooks and context injection for Edda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+edda-core = { path = "../edda-core", version = "0.1.1" }
+edda-store = { path = "../edda-store", version = "0.1.1" }
+edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
+edda-pack = { path = "../edda-pack", version = "0.1.1" }
+edda-postmortem = { path = "../edda-postmortem", version = "0.1.1" }
+edda-derive = { path = "../edda-derive", version = "0.1.1" }
+edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.1.1" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

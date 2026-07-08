@@ -699,6 +699,7 @@ dependencies = [
  "edda-aggregate",
  "edda-ask",
  "edda-bridge-claude",
+ "edda-bridge-codex",
  "edda-bridge-openclaw",
  "edda-chronicle",
  "edda-conductor",
@@ -783,6 +784,25 @@ dependencies = [
  "tracing",
  "ulid",
  "ureq",
+]
+
+[[package]]
+name = "edda-bridge-codex"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "edda-bridge-claude",
+ "edda-core",
+ "edda-derive",
+ "edda-ledger",
+ "edda-pack",
+ "edda-postmortem",
+ "edda-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
 ]
 
 [[package]]
