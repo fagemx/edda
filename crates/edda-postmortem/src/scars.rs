@@ -28,7 +28,9 @@ pub const RECURRENCE_WINDOW_DAYS: i64 = 30;
 /// Family-key length: short enough to catch "same problem, different wording",
 /// long enough to distinguish unrelated tickets. Bumped down from 80 after a
 /// real friction pair collided at the semicolon (queue 324 test fixture).
-const PREFIX_LEN: usize = 40;
+/// `pub` since q328 SIGNCHECK so sign_check reuses the exact same family key
+/// (single vocabulary, no rival contradiction concept).
+pub const PREFIX_LEN: usize = 40;
 
 /// One ledger note fed into the scar analyzer.
 #[derive(Debug, Clone)]

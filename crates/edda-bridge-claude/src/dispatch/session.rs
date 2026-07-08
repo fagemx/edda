@@ -572,7 +572,30 @@ pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
             edda_postmortem::candidates::MAX_CANDIDATES_PER_RUN,
         );
         if !cands.is_empty() {
-            let _ = edda_postmortem::candidates::sync_candidates_to_incubation(&inc_path, &cands);
+            // Sign-check hints (Foundry q328 FLYWHEEL-SIGNCHECK1): if
+            // EDDA_DOCTRINE_PATH is set, surface same-family doctrine entries
+            // next to each candidate ("machine hint, not judgment"). Doctrine
+            // path unset ⇒ zero behavior change (empty hint slice; byte-for-byte
+            // identical to the base sync path — regression-tested in
+            // candidates::tests::sync_with_empty_hints_matches_base_behavior_byte_for_byte).
+            let doctrine_entries = std::env::var("EDDA_DOCTRINE_PATH")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(|p| {
+                    let path = std::path::Path::new(&p).to_path_buf();
+                    let resolved = if path.is_absolute() {
+                        path
+                    } else {
+                        std::path::Path::new(cwd).join(path)
+                    };
+                    edda_postmortem::sign_check::load_doctrine_entries(&resolved)
+                })
+                .unwrap_or_default();
+            let _ = edda_postmortem::candidates::sync_candidates_to_incubation_with_hints(
+                &inc_path,
+                &cands,
+                &doctrine_entries,
+            );
         }
     }
 

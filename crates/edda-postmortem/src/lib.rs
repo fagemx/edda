@@ -4,6 +4,7 @@ pub mod hooks;
 pub mod lessons;
 pub mod rules;
 pub mod scars;
+pub mod sign_check;
 pub mod signals;
 pub mod trigger;
 

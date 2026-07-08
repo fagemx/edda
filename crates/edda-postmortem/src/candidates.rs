@@ -119,6 +119,18 @@ pub fn sync_candidates_to_incubation(
     path: &Path,
     candidates: &[DoctrineCandidate],
 ) -> io::Result<usize> {
+    sync_candidates_to_incubation_with_hints(path, candidates, &[])
+}
+
+/// Same as [`sync_candidates_to_incubation`] but appends per-candidate
+/// "Related in doctrine (machine hint, not judgment)" blocks derived from
+/// `doctrine_entries` (see [`crate::sign_check`]). Passing an empty slice
+/// reproduces the base behavior exactly — sign-check is opt-in, off by default.
+pub fn sync_candidates_to_incubation_with_hints(
+    path: &Path,
+    candidates: &[DoctrineCandidate],
+    doctrine_entries: &[crate::sign_check::DoctrineEntry],
+) -> io::Result<usize> {
     let existing = match fs::read_to_string(path) {
         Ok(content) => Some(content),
         Err(err) if err.kind() == io::ErrorKind::NotFound => None,
@@ -139,7 +151,22 @@ pub fn sync_candidates_to_incubation(
         return Ok(0);
     }
 
-    let rendered: String = fresh.iter().map(|c| render_candidate(c)).collect();
+    let rendered: String = fresh
+        .iter()
+        .map(|c| {
+            let base = render_candidate(c);
+            let hint = crate::sign_check::render_related_hint(&c.maxim, doctrine_entries);
+            if hint.is_empty() {
+                base
+            } else {
+                // Splice hint before the trailing newline of the base entry.
+                let mut merged = base.trim_end_matches('\n').to_string();
+                merged.push_str(&hint);
+                merged.push('\n');
+                merged
+            }
+        })
+        .collect();
 
     let new_content = match existing {
         None => format!(
@@ -368,6 +395,47 @@ mod tests {
             inside.contains("## Candidate:"),
             "entry landed inside block"
         );
+    }
+
+    #[test]
+    fn sync_with_empty_hints_matches_base_behavior_byte_for_byte() {
+        use tempfile::tempdir;
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        let result = result_with(vec![lesson("shared maxim", LessonSeverity::High)], vec![]);
+        let cands = select_candidates(&result, 3);
+
+        // Path 1: base API.
+        sync_candidates_to_incubation(&dir_a.path().join("i.md"), &cands).unwrap();
+        // Path 2: hints API with empty slice.
+        sync_candidates_to_incubation_with_hints(&dir_b.path().join("i.md"), &cands, &[]).unwrap();
+
+        let a = fs::read_to_string(dir_a.path().join("i.md")).unwrap();
+        let b = fs::read_to_string(dir_b.path().join("i.md")).unwrap();
+        assert_eq!(a, b, "empty hint slice = zero behavior change (opt-in guard)");
+    }
+
+    #[test]
+    fn sync_with_matching_hint_appends_related_block_inside_candidate() {
+        use crate::sign_check::parse_entries;
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("incubation.md");
+        // Candidate maxim contains "shared family" — align a doctrine entry to it.
+        let entries = parse_entries(
+            "### FM-9: shared family topic\nbody\n",
+            "failure-memory.md",
+        );
+        let result = result_with(
+            vec![lesson("shared family topic (surfaced)", LessonSeverity::High)],
+            vec![],
+        );
+        let cands = select_candidates(&result, 3);
+        sync_candidates_to_incubation_with_hints(&path, &cands, &entries).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Related in doctrine"), "hint block present");
+        assert!(content.contains("FM-9"), "specific matching heading named");
+        assert!(content.contains("not judgment"), "machine-hint red-line phrasing kept");
     }
 
     #[test]
