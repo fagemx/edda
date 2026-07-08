@@ -4036,13 +4036,16 @@ actors:
     async fn get_telemetry_stats_computes_averages() {
         let tmp = tempfile::tempdir().unwrap();
         setup_workspace(tmp.path());
+        let started_at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
 
         // POST 3 telemetry events with different durations
         for (id, dur) in [("cyc_s1", 1000u64), ("cyc_s2", 2000), ("cyc_s3", 3000)] {
             let body = serde_json::json!({
                 "cycle_id": id,
                 "source": "thyra",
-                "started_at": "2026-03-27T10:00:00Z",
+                "started_at": started_at.as_str(),
                 "total_duration_ms": dur,
                 "operations": [
                     { "name": "probe", "duration_ms": dur / 2, "status": "ok" },

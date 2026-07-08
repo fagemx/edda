@@ -10,9 +10,9 @@ categories.workspace = true
 keywords.workspace = true
 
 [dependencies]
-edda-store = { path = "../edda-store", version = "0.1.1" }
-edda-index = { path = "../edda-index", version = "0.1.1" }
-edda-ledger = { path = "../edda-ledger", version = "0.1.1" }
+edda-store = { path = "../edda-store", version = "0.2.0" }
+edda-index = { path = "../edda-index", version = "0.2.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.2.0" }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
