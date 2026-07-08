@@ -3,6 +3,8 @@ use edda_ledger::DecisionView;
 use edda_ledger::Ledger;
 use serde::Serialize;
 
+pub mod staleness;
+
 const SEMANTIC_CANDIDATE_LIMIT: usize = 500;
 
 #[derive(Debug)]
@@ -77,6 +79,11 @@ pub struct DecisionHit {
     /// Village scope identifier.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub village_id: Option<String>,
+    /// Decision-code freshness (q334 EDDA-STALENESS1). None ⇒ not checked
+    /// (feature off, or repo_root missing at query time). Serialized only when
+    /// present so existing JSON consumers stay unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staleness: Option<crate::staleness::DecisionStaleness>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -298,6 +305,7 @@ pub fn ask(
                                     is_active: false,
                                     tags: dp.tags.unwrap_or_default(),
                                     village_id: dp.village_id,
+                                    staleness: None,
                                 });
                             }
                         }
@@ -718,9 +726,22 @@ pub fn format_human(result: &AskResult) -> String {
         for d in &result.decisions {
             let status = if d.is_active { "active" } else { "superseded" };
             out.push_str(&format!(
-                "  {} = {} — {}\n  branch: {} | {} | {}\n\n",
+                "  {} = {} — {}\n  branch: {} | {} | {}\n",
                 d.key, d.value, d.reason, d.branch, d.ts, status
             ));
+            if let Some(st) = &d.staleness {
+                if st.is_stale {
+                    let bad: Vec<String> = st.paths.iter()
+                        .filter(|p| p.status != staleness::PathStatus::Fresh
+                                 && p.status != staleness::PathStatus::Unknown)
+                        .map(|p| format!("{} ({:?})", p.path, p.status))
+                        .collect();
+                    if !bad.is_empty() {
+                        out.push_str(&format!("  ⚠ stale-code hint: {}\n", bad.join(", ")));
+                    }
+                }
+            }
+            out.push('\n');
         }
     }
 
@@ -822,7 +843,27 @@ fn to_decision_hit(row: &DecisionView) -> DecisionHit {
         is_active: matches!(row.status.as_str(), "active" | "experimental"),
         tags: row.tags.clone(),
         village_id: row.village_id.clone(),
+        staleness: None,
     }
+}
+
+/// Return the affected_paths carried by each decision in `result.decisions`,
+/// looked up from the ledger by event_id. Position-aligned with the input;
+/// missing/unreadable rows return empty Vec (best-effort).
+pub fn affected_paths_for_hits(
+    ledger: &Ledger,
+    hits: &[DecisionHit],
+) -> Vec<Vec<String>> {
+    hits.iter()
+        .map(|h| {
+            ledger
+                .get_decision_by_event_id(&h.event_id)
+                .ok()
+                .flatten()
+                .map(|row| row.affected_paths)
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 // Decision helpers centralized in edda_core::decision.
@@ -1225,6 +1266,7 @@ mod tests {
                 is_active: true,
                 tags: vec![],
                 village_id: None,
+                staleness: None,
             }],
             timeline: vec![],
             related_commits: vec![CommitHit {
@@ -1620,6 +1662,7 @@ mod tests {
                 is_active: true,
                 tags: vec![],
                 village_id: None,
+                staleness: None,
             }],
             timeline: vec![],
             related_commits: vec![],

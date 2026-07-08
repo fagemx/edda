@@ -15,7 +15,7 @@ edda-core = { path = "../edda-core", version = "0.1.1" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+time = { workspace = true, features = ["formatting", "parsing"] }
 
 [dev-dependencies]
 ulid = { workspace = true }
-time = { workspace = true }

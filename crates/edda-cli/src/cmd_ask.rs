@@ -1,4 +1,7 @@
-use edda_ask::{ask, format_human, AskOptions, ConversationHit, TranscriptSearchFn};
+use edda_ask::{
+    affected_paths_for_hits, ask, format_human, staleness::annotate_hits, AskOptions,
+    ConversationHit, TranscriptSearchFn,
+};
 use edda_ledger::Ledger;
 use std::path::Path;
 
@@ -28,7 +31,15 @@ pub fn execute(
     let transcript_ref: Option<&edda_ask::TranscriptSearchFn> =
         transcript_cb.as_ref().map(|f| f.as_ref());
 
-    let result = ask(&ledger, q, &opts, transcript_ref)?;
+    let mut result = ask(&ledger, q, &opts, transcript_ref)?;
+
+    // EDDA-STALENESS1 q334: annotate decisions whose affected_paths have
+    // shifted since the decision was recorded. Query-time derivation; ledger
+    // untouched. Best-effort: file-system errors leave staleness=None.
+    let decisions_paths = affected_paths_for_hits(&ledger, &result.decisions);
+    annotate_hits(&mut result.decisions, &decisions_paths, Some(repo_root));
+    let timeline_paths = affected_paths_for_hits(&ledger, &result.timeline);
+    annotate_hits(&mut result.timeline, &timeline_paths, Some(repo_root));
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
