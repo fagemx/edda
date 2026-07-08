@@ -11,6 +11,7 @@ mod cmd_config;
 mod cmd_context;
 mod cmd_controls;
 mod cmd_draft;
+mod cmd_export;
 mod cmd_gc;
 mod cmd_group;
 mod cmd_init;
@@ -315,6 +316,17 @@ enum Command {
     Draft {
         #[command(subcommand)]
         cmd: cmd_draft::DraftCmd,
+    },
+    /// Export the ledger as human-readable Markdown (read-only projection; SQLite stays authoritative)
+    Export {
+        /// Output format (currently only "md" is supported)
+        format: String,
+        /// Output directory
+        #[arg(long)]
+        out: std::path::PathBuf,
+        /// Include a notes.md file in addition to decisions/
+        #[arg(long = "include-notes")]
+        include_notes: bool,
     },
     /// Bridge operations (install/uninstall hooks for Claude Code)
     Bridge {
@@ -1086,6 +1098,12 @@ fn main() -> anyhow::Result<()> {
         Command::Switch { name } => cmd_switch::execute(&repo_root, &name),
         Command::Merge { src, dst, reason } => cmd_merge::execute(&repo_root, &src, &dst, &reason),
         Command::Draft { cmd } => cmd_draft::run(cmd, &repo_root),
+        Command::Export { format, out, include_notes } => {
+            if format != "md" {
+                anyhow::bail!("only 'md' export format is supported (got: {format})");
+            }
+            cmd_export::execute(&repo_root, &out, include_notes)
+        }
         Command::Bridge { cmd } => cmd_bridge::run_bridge(cmd, &repo_root),
         Command::Hook { cmd } => cmd_bridge::run_hook(cmd),
         Command::Doctor { cmd } => cmd_bridge::run_doctor(cmd, &repo_root),
