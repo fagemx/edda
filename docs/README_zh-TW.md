@@ -1,8 +1,8 @@
 <h1 align="center">Edda</h1>
 
 <p align="center">
-  <strong>Claude Code 的自動決策記憶系統，支援跨 session 持續性。</strong><br/>
-  本地優先、確定性查詢、零 API 成本 — 不需要 LLM、不需要 embeddings、不需要雲端。
+  <strong>AI coding session 的自動、hash-chained 記憶——決策、協調、判斷跨 session 保存。</strong><br/>
+  本地優先。核心確定性（ledger、檢索、hooks）。session 摘要與模式萃取可選配 LLM 增強。
 </p>
 
 <p align="center">
@@ -60,7 +60,7 @@ Session 1                          Session 2
   Edda 消化 transcript               Agent 從上次中斷的地方繼續
 ```
 
-**所有資料都在本地** — 資料存在 `.edda/`（SQLite + 本地檔案），沒有雲端、沒有帳號、沒有 API 呼叫。
+**資料都在本地** — ledger 存在 `.edda/`（SQLite + 本地檔案），沒有雲端、沒有帳號。核心迴圈（記錄、檢索、注入）是確定性的、永不外呼。**可選的 LLM 增強**（session 摘要、決策萃取、模式關聯）需設 `EDDA_LLM_API_KEY` 且有每日預算上限——不設 key，edda 就是完全零 egress。
 
 ## 安裝
 
@@ -110,23 +110,28 @@ CLAUDE.md 的段落會教 agent 何時以及如何記錄決策：
 ```
 Claude Code session
         │
-   Bridge hooks（自動）
-        │
+   Bridge hooks（確定性，永遠開）
+        │  ├── 記錄決策 / 筆記 / peer 訊號
+        │  ├── session 開始注入前次 context
+        │  └── 可選：注入 havamal doctrine pack
         ▼
    ┌─────────┐
    │  .edda/  │  ← append-only SQLite ledger
    │  ledger  │  ← hash-chained 事件
    └─────────┘
         │
-   Context 注入（下次 session）
-        │
+   Session 結束
+        │  ├── 確定性摘要（永遠）
+        │  └── LLM 摘要 + 模式偵測（可選、預算上限）
         ▼
-   Agent 看到所有過去的決策
+   下次 session 看到全部
 ```
 
-Edda 將每個事件以 hash-chained JSON 記錄儲存在本地 SQLite 資料庫中。事件包括決策、筆記、session 摘要和指令輸出。Hash chain 讓歷史記錄具有防篡改性。
+Edda 將每個事件以 hash-chained JSON 記錄儲存在本地 SQLite 資料庫中。事件包括決策、筆記、session 摘要和指令輸出。Hash chain 讓歷史記錄防篡改、檢索確定性——同一個查詢永遠得同一個答案，迴圈裡沒有 LLM。
 
-在每次 session 開始時，Edda 從 ledger 組裝 context snapshot 並注入 — agent 可以看到最近的決策、進行中的任務和相關歷史，不需要閱讀舊的 transcript。
+每次 session 開始時，edda 從 ledger 組裝 context snapshot 並注入——agent 看到最近的決策、進行中的任務、peer 協調狀態，以及（若有配置）來自 [havamal](https://github.com/fagemx/havamal) 的判斷層 pack，不需要閱讀舊 transcript。
+
+**LLM 只在這裡用（皆為可選）：** 長 transcript 決策萃取、更豐富的 session 結束摘要、跨 session 模式關聯——分別住在 `bg_extract` / `bg_digest` / `bg_detect`。三者皆需 `EDDA_LLM_API_KEY` 且套用每日預算；沒 key 時 edda 降級為確定性 heuristic。
 
 ## 比較
 
@@ -134,15 +139,17 @@ Edda 將每個事件以 hash-chained JSON 記錄儲存在本地 SQLite 資料庫
 |--|-----------|-----------------|---------|----------|
 | **儲存** | Markdown 檔案 | 向量 embeddings | LLM 生成的文字 | Append-only SQLite |
 | **檢索** | Agent 讀取整個檔案 | 語意相似度 | LLM 重新摘要 | Tantivy 全文搜尋 + 結構化查詢 |
-| **需要 LLM？** | 否 | 是（embeddings） | 是（每次讀寫） | **否** |
+| **需要 LLM？** | 否 | 是（embeddings） | 是（每次讀寫） | **核心不用；摘要可選** ¹ |
 | **需要向量資料庫？** | 否 | 是 | 否 | **否** |
 | **防篡改？** | 否 | 否 | 否 | **是**（hash chain） |
 | **追蹤「為什麼」？** | 偶爾 | 否 | 有損 | **是**（理由 + 被拒絕的方案） |
 | **跨 Session？** | 手動複製 | 是 | Session 範圍內 | **是**（自動） |
-| **每次查詢成本** | 免費 | Embedding API 呼叫 | LLM API 呼叫 | **免費**（本地 SQLite） |
+| **每次查詢成本** | 免費 | Embedding API 呼叫 | LLM API 呼叫 | **免費**（本地 SQLite）；可選 LLM 摘要有預算上限 |
 | **範例** | Claude Code 內建、OpenClaw | mem0、Zep、Chroma | ChatGPT Memory、Copilot | — |
 
-每次查詢都在本地 SQLite 上執行 — 每次都得到相同答案，毫秒級，零成本。
+每次 ledger 查詢都在本地 SQLite 上執行 — 每次都得到相同答案，毫秒級，零成本。
+
+¹ *LLM 增強預設關閉。設 `EDDA_LLM_API_KEY` 啟用：session 結束摘要、長 transcript 決策萃取、跨 session 模式關聯，每個呼叫皆套每日預算上限。核心迴圈——記錄決策、hash chain、檢索、hook 注入——永不呼叫 LLM。*
 
 ## 整合
 
@@ -157,6 +164,8 @@ edda init    # 偵測 Claude Code，自動安裝 hooks
 ```bash
 edda bridge openclaw install    # 安裝全域插件
 ```
+
+**Havamal**（判斷層）— 在 repo 放一個 `.havamal-pack.md`，edda 會在 session 開始自動注入為 doctrine 段。見 [havamal](https://github.com/fagemx/havamal)——事實走 edda，判斷簽核進場。
 
 **任何 MCP 客戶端**（Cursor、Windsurf 等）— 透過 MCP server 提供 7 個工具：
 

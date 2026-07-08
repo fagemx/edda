@@ -1,8 +1,8 @@
 <h1 align="center">Edda</h1>
 
 <p align="center">
-  <strong>Automatic decision memory for Claude Code with cross-session persistence.</strong><br/>
-  Local, deterministic, and zero API cost — no LLM, no embeddings, no cloud.
+  <strong>Automatic, hash-chained memory for AI coding sessions — decisions, coordination, and doctrine across sessions.</strong><br/>
+  Local-first. Deterministic core (ledger, retrieval, hooks). Optional LLM assist for session digests and pattern extraction.
 </p>
 
 <p align="center">
@@ -60,7 +60,7 @@ Session 1                          Session 2
   Edda digests transcript            Agent continues where it left off
 ```
 
-**Everything stays local** — data lives in `.edda/` (SQLite + local files), with no cloud, no accounts, and no API calls.
+**Data stays local** — the ledger lives in `.edda/` (SQLite + local files), with no cloud and no accounts. The core loop (record, retrieve, inject) is deterministic and never calls out. **Optional LLM assist** for session digests, decision extraction, and pattern correlation is opt-in via `EDDA_LLM_API_KEY` and budget-capped — leave the key unset and edda runs zero-egress.
 
 ## Install
 
@@ -110,23 +110,28 @@ This is the key to Edda's automation — the agent learns to call `edda decide` 
 ```
 Claude Code session
         │
-   Bridge hooks (automatic)
-        │
+   Bridge hooks (deterministic, always on)
+        │  ├── record decisions / notes / peer signals
+        │  ├── inject prior context on session start
+        │  └── optional: doctrine pack from havamal
         ▼
    ┌─────────┐
    │  .edda/  │  ← append-only SQLite ledger
    │  ledger  │  ← hash-chained events
    └─────────┘
         │
-   Context injection (next session)
-        │
+   Session end
+        │  ├── deterministic digest (always)
+        │  └── LLM digest + pattern detection (opt-in, budget-capped)
         ▼
-   Agent sees all prior decisions
+   Next session sees everything
 ```
 
-Edda stores every event as a hash-chained JSON record in a local SQLite database. Events include decisions, notes, session digests, and command outputs. The hash chain makes the history tamper-evident.
+Edda stores every event as a hash-chained JSON record in a local SQLite database. Events include decisions, notes, session digests, and command outputs. The hash chain makes the history tamper-evident and the retrieval deterministic — same query, same answer, no LLM in the loop.
 
-At the start of each session, Edda assembles a context snapshot from the ledger and injects it — the agent sees recent decisions, active tasks, and relevant history without reading through old transcripts.
+At the start of each session, edda assembles a context snapshot from the ledger and injects it — the agent sees recent decisions, active tasks, peer coordination, and (if configured) a doctrine pack from [havamal](https://github.com/fagemx/havamal), without reading through old transcripts.
+
+**Where LLM shows up (opt-in only):** long-transcript decision extraction, richer session-end digests, and cross-session pattern correlation live in `bg_extract` / `bg_digest` / `bg_detect`. All three are gated on `EDDA_LLM_API_KEY` plus a daily budget; without the key, edda falls back to deterministic heuristics.
 
 ## How Edda Compares
 
@@ -134,15 +139,17 @@ At the start of each session, Edda assembles a context snapshot from the ledger 
 |--|-----------|----------------|-------------|----------|
 | **Storage** | Markdown file | Vector embeddings | LLM-generated text | Append-only SQLite |
 | **Retrieval** | Agent reads whole file | Semantic similarity | LLM re-summarizes | Tantivy full-text + structured query |
-| **Needs LLM?** | No | Yes (embeddings) | Yes (every read/write) | **No** |
+| **Needs LLM?** | No | Yes (embeddings) | Yes (every read/write) | **No for core; opt-in for digests** ¹ |
 | **Needs vector DB?** | No | Yes | No | **No** |
 | **Tamper-evident?** | No | No | No | **Yes** (hash chain) |
 | **Tracks "why"?** | Sometimes | No | Lossy | **Yes** (rationale + rejected alternatives) |
 | **Cross-session?** | Manual copy | Yes | Session-scoped | **Yes** (automatic) |
-| **Cost per query** | Free | Embedding API call | LLM API call | **Free** (local SQLite) |
-| **Examples** | Claude Code built-in, OpenClaw | mem0, Zep, Chroma | ChatGPT Memory, Copilot | — |
+| **Cost per query** | Free | Embedding API call | LLM API call | **Free** (local SQLite); optional digests budget-capped |
 
-Every query runs locally against SQLite — same answer every time, in milliseconds, at zero cost.
+Every ledger query runs locally against SQLite — same answer every time, in milliseconds, at zero cost.
+
+¹ *LLM assist is off by default. Set `EDDA_LLM_API_KEY` to enable session-end digests, decision extraction from long transcripts, and cross-session pattern correlation; each caller has a daily budget cap. The core loop — recording decisions, hash chaining, retrieval, hook-based injection — never calls an LLM.*
+| **Examples** | Claude Code built-in, OpenClaw | mem0, Zep, Chroma | ChatGPT Memory, Copilot | — |
 
 ## Integration
 
@@ -157,6 +164,8 @@ edda init    # detects Claude Code, installs hooks automatically
 ```bash
 edda bridge openclaw install    # installs global plugin
 ```
+
+**Havamal** (judgment layer) — drop a `.havamal-pack.md` in your repo and edda auto-injects it as the doctrine section at session start. See [havamal](https://github.com/fagemx/havamal) — facts flow through edda, judgment enters curated.
 
 **Any MCP client** (Cursor, Windsurf, etc.) — 7 tools via MCP server:
 
