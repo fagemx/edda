@@ -26,5 +26,12 @@ pub fn execute(repo_root: &Path, text: &str, role: &str, tags: &[String]) -> any
     ledger.append_event(&event)?;
 
     println!("Wrote NOTE {}", event.event_id);
+
+    // Refresh derived markdown views (log.md / main.md / commit.md) so operators
+    // reading the ledger by eye see the note immediately, not only after the
+    // next `edda commit` / `edda rebuild`. Same best-effort pattern as
+    // edda-serve::api::drafts.rs:508 — failure never blocks a successful write.
+    let _ = edda_derive::rebuild_branch(&ledger, &branch);
+
     Ok(())
 }

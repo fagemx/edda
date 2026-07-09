@@ -27,6 +27,27 @@ pub enum BridgeCmd {
         #[command(subcommand)]
         cmd: BridgeHermesCmd,
     },
+    /// Cursor IDE bridge operations
+    Cursor {
+        #[command(subcommand)]
+        cmd: BridgeCursorCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum BridgeCursorCmd {
+    /// Install edda hooks into ~/.cursor/hooks.json
+    Install {
+        /// Custom hooks.json path (default: ~/.cursor/hooks.json)
+        #[arg(long)]
+        target: Option<String>,
+    },
+    /// Uninstall edda hooks from Cursor hooks.json
+    Uninstall {
+        /// Custom hooks.json path
+        #[arg(long)]
+        target: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -217,6 +238,8 @@ pub enum HookCmd {
     Hermes,
     /// OpenClaw hook entrypoint (reads stdin JSON)
     Openclaw,
+    /// Cursor IDE hook entrypoint (reads stdin JSON)
+    Cursor,
 }
 
 #[derive(Subcommand)]
@@ -229,6 +252,8 @@ pub enum DoctorCmd {
     Hermes,
     /// Check OpenClaw bridge health
     Openclaw,
+    /// Check Cursor bridge health
+    Cursor,
 }
 
 #[derive(Subcommand)]
@@ -337,6 +362,14 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
                 uninstall_hermes(target.as_deref().map(std::path::Path::new))
             }
         },
+        BridgeCmd::Cursor { cmd } => match cmd {
+            BridgeCursorCmd::Install { target } => {
+                install_cursor(target.as_deref().map(std::path::Path::new))
+            }
+            BridgeCursorCmd::Uninstall { target } => {
+                uninstall_cursor(target.as_deref().map(std::path::Path::new))
+            }
+        },
     }
 }
 
@@ -346,6 +379,7 @@ pub fn run_hook(cmd: HookCmd) -> anyhow::Result<()> {
         HookCmd::Codex => hook_codex(),
         HookCmd::Hermes => hook_hermes(),
         HookCmd::Openclaw => hook_openclaw(),
+        HookCmd::Cursor => hook_cursor(),
     }
 }
 
@@ -355,6 +389,7 @@ pub fn run_doctor(cmd: DoctorCmd, repo_root: &Path) -> anyhow::Result<()> {
         DoctorCmd::Codex => doctor_codex(),
         DoctorCmd::Hermes => doctor_hermes(),
         DoctorCmd::Openclaw => doctor_openclaw(),
+        DoctorCmd::Cursor => doctor_cursor(),
     }
 }
 
@@ -770,6 +805,13 @@ pub fn decide(
     if !tags.is_empty() {
         println!("  tags: {}", tags.join(", "));
     }
+
+    // Refresh derived markdown views (log.md / main.md / commit.md) so operators
+    // reading the ledger by eye see the decision immediately, not only after the
+    // next `edda commit` / `edda rebuild`. Same best-effort pattern as
+    // edda-serve::api::drafts.rs:508 — failure never blocks a successful decide.
+    let _ = edda_derive::rebuild_branch(&ledger, &branch);
+
     Ok(())
 }
 
@@ -1285,6 +1327,29 @@ pub fn hook_hermes() -> anyhow::Result<()> {
 /// `edda doctor hermes`
 pub fn doctor_hermes() -> anyhow::Result<()> {
     edda_bridge_hermes::doctor()
+}
+
+/// `edda bridge cursor install`
+pub fn install_cursor(target: Option<&Path>) -> anyhow::Result<()> {
+    edda_bridge_cursor::install(target).map(|_| ())
+}
+
+/// `edda bridge cursor uninstall`
+pub fn uninstall_cursor(target: Option<&Path>) -> anyhow::Result<()> {
+    edda_bridge_cursor::uninstall(target)
+}
+
+/// `edda hook cursor` — read stdin, dispatch hook
+pub fn hook_cursor() -> anyhow::Result<()> {
+    run_hook_resilient("CURSOR ", |stdin| {
+        let r = edda_bridge_cursor::hook_entrypoint_from_stdin(&stdin)?;
+        Ok((r.stdout, r.stderr))
+    })
+}
+
+/// `edda doctor cursor`
+pub fn doctor_cursor() -> anyhow::Result<()> {
+    edda_bridge_cursor::doctor()
 }
 
 #[cfg(test)]
