@@ -661,7 +661,11 @@ pub fn decide(
     let reason: Option<&str> = safe_reason.as_deref();
     let all_hits = value_hits.len() + reason_hits.len();
     if all_hits > 0 {
-        let kinds: Vec<_> = value_hits.iter().chain(reason_hits.iter()).map(|h| h.kind).collect();
+        let kinds: Vec<_> = value_hits
+            .iter()
+            .chain(reason_hits.iter())
+            .map(|h| h.kind)
+            .collect();
         eprintln!(
             "⚠ secret-guard: redacted {all_hits} secret pattern(s) before writing decision ({})",
             kinds.join(", ")

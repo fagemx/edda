@@ -131,7 +131,10 @@ mod tests {
     fn openai_key_redacted() {
         let text = "auth: sk-abcdefghijklmnopqrstuvwxyz012345 do stuff";
         let (out, hits) = redact(text);
-        assert!(out.contains("[REDACTED:openai_api_key]"), "openai key redacted; got: {out}");
+        assert!(
+            out.contains("[REDACTED:openai_api_key]"),
+            "openai key redacted; got: {out}"
+        );
         assert_eq!(hits.len(), 1);
     }
 

@@ -45,7 +45,7 @@ pub(super) fn render_persistent_tasks(digests: &[SessionDigestEntry]) -> String 
         .into_iter()
         .filter(|(_, t)| t.pending_sessions >= 2)
         .collect();
-    persistent.sort_by(|a, b| b.1.pending_sessions.cmp(&a.1.pending_sessions));
+    persistent.sort_by_key(|entry| std::cmp::Reverse(entry.1.pending_sessions));
 
     if persistent.is_empty() {
         return String::new();

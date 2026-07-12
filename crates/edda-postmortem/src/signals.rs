@@ -91,7 +91,12 @@ pub fn record_conflict_signal_if_cross_actor(
     existing_actor: &str,
     current_actor: &str,
 ) -> io::Result<()> {
-    record_conflict_if_cross_actor(&signals_path(project_id), key, existing_actor, current_actor)
+    record_conflict_if_cross_actor(
+        &signals_path(project_id),
+        key,
+        existing_actor,
+        current_actor,
+    )
 }
 
 /// Append one signal to an explicit file path (testable core).
@@ -178,8 +183,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sig.jsonl");
         // 同 actor 進版:should_record_conflict=false
-        assert!(!should_record_conflict("cli", "cli"),
-            "same actor progressing own binding is not a conflict (病一)");
+        assert!(
+            !should_record_conflict("cli", "cli"),
+            "same actor progressing own binding is not a conflict (病一)"
+        );
         // 呼叫 record_conflict_if_cross_actor 應該不寫檔
         record_conflict_if_cross_actor(&path, "db.engine", "cli", "cli").unwrap();
         assert_eq!(count_signals_at(&path, None, None).conflicts, 0);
@@ -189,8 +196,10 @@ mod tests {
     fn conflict_signal_recorded_when_different_actor() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sig.jsonl");
-        assert!(should_record_conflict("cli", "product"),
-            "different actor = real cross-agent conflict (照記)");
+        assert!(
+            should_record_conflict("cli", "product"),
+            "different actor = real cross-agent conflict (照記)"
+        );
         record_conflict_if_cross_actor(&path, "db.engine", "product", "cli").unwrap();
         assert_eq!(count_signals_at(&path, None, None).conflicts, 1);
     }

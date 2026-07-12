@@ -412,7 +412,10 @@ mod tests {
 
         let a = fs::read_to_string(dir_a.path().join("i.md")).unwrap();
         let b = fs::read_to_string(dir_b.path().join("i.md")).unwrap();
-        assert_eq!(a, b, "empty hint slice = zero behavior change (opt-in guard)");
+        assert_eq!(
+            a, b,
+            "empty hint slice = zero behavior change (opt-in guard)"
+        );
     }
 
     #[test]
@@ -422,20 +425,26 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("incubation.md");
         // Candidate maxim contains "shared family" — align a doctrine entry to it.
-        let entries = parse_entries(
-            "### FM-9: shared family topic\nbody\n",
-            "failure-memory.md",
-        );
+        let entries = parse_entries("### FM-9: shared family topic\nbody\n", "failure-memory.md");
         let result = result_with(
-            vec![lesson("shared family topic (surfaced)", LessonSeverity::High)],
+            vec![lesson(
+                "shared family topic (surfaced)",
+                LessonSeverity::High,
+            )],
             vec![],
         );
         let cands = select_candidates(&result, 3);
         sync_candidates_to_incubation_with_hints(&path, &cands, &entries).unwrap();
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains("Related in doctrine"), "hint block present");
+        assert!(
+            content.contains("Related in doctrine"),
+            "hint block present"
+        );
         assert!(content.contains("FM-9"), "specific matching heading named");
-        assert!(content.contains("not judgment"), "machine-hint red-line phrasing kept");
+        assert!(
+            content.contains("not judgment"),
+            "machine-hint red-line phrasing kept"
+        );
     }
 
     #[test]

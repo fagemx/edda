@@ -368,7 +368,7 @@ pub fn rollup_metrics_by_date(projects: &[ProjectEntry], range: &DateRange) -> R
                 revert_count: 0,
             })
             .collect();
-        edits.sort_by(|a, b| b.edit_count.cmp(&a.edit_count));
+        edits.sort_by_key(|stat| std::cmp::Reverse(stat.edit_count));
         file_edits.insert(date, edits);
     }
 
@@ -529,7 +529,7 @@ pub fn file_edits_by_date(
             })
             .collect();
         // Sort by edit_count descending for consistent output
-        edits.sort_by(|a, b| b.edit_count.cmp(&a.edit_count));
+        edits.sort_by_key(|stat| std::cmp::Reverse(stat.edit_count));
         result.insert(date, edits);
     }
 

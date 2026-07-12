@@ -8,9 +8,9 @@
 //!   normalized to "generated at run-time" in the header only; body content is
 //!   sorted so idempotent re-export doesn't create noise.
 //! - Layout:
-//!     <out>/INDEX.md             — table of contents
-//!     <out>/decisions/<domain>.md — one file per domain (active decisions)
-//!     <out>/notes.md             — chronological notes (optional)
+//!   <out>/INDEX.md             — table of contents
+//!   <out>/decisions/<domain>.md — one file per domain (active decisions)
+//!   <out>/notes.md             — chronological notes (optional)
 
 use anyhow::{Context, Result};
 use edda_core::secret_guard::redact;
@@ -55,13 +55,19 @@ pub fn execute(repo_root: &Path, out_dir: &Path, include_notes: bool) -> Result<
         "wrote {} decision files ({} total) + INDEX.md{} at {}",
         domain_stats.len(),
         domain_stats.iter().map(|(_, n, _)| n).sum::<usize>(),
-        if notes_line.is_some() { " + notes.md" } else { "" },
+        if notes_line.is_some() {
+            " + notes.md"
+        } else {
+            ""
+        },
         out_dir.display(),
     );
     Ok(())
 }
 
-fn group_by_domain(rows: Vec<edda_ledger::DecisionView>) -> BTreeMap<String, Vec<edda_ledger::DecisionView>> {
+fn group_by_domain(
+    rows: Vec<edda_ledger::DecisionView>,
+) -> BTreeMap<String, Vec<edda_ledger::DecisionView>> {
     let mut out: BTreeMap<String, Vec<edda_ledger::DecisionView>> = BTreeMap::new();
     for row in rows {
         let dom = if row.domain.is_empty() {
@@ -74,14 +80,18 @@ fn group_by_domain(rows: Vec<edda_ledger::DecisionView>) -> BTreeMap<String, Vec
     out
 }
 
-const HEADER: &str = "<!-- edda-ledger-export v1 — GENERATED FILE, DO NOT EDIT — SQLite ledger is authoritative -->";
+const HEADER: &str =
+    "<!-- edda-ledger-export v1 — GENERATED FILE, DO NOT EDIT — SQLite ledger is authoritative -->";
 
 fn render_domain(domain: &str, rows: &[edda_ledger::DecisionView]) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str(HEADER);
     out.push('\n');
     out.push_str(&format!("# Domain: `{}`\n\n", domain));
-    out.push_str(&format!("{} active decision(s), sorted by key.\n\n", rows.len()));
+    out.push_str(&format!(
+        "{} active decision(s), sorted by key.\n\n",
+        rows.len()
+    ));
     for row in rows {
         // Secret guard the reason at export time as a belt-and-braces safety
         // — decisions written before secret_guard shipped may still carry
@@ -96,13 +106,21 @@ fn render_domain(domain: &str, rows: &[edda_ledger::DecisionView]) -> String {
         if !row.affected_paths.is_empty() {
             out.push_str(&format!(
                 "- **Affected paths**: {}\n",
-                row.affected_paths.iter().map(|p| format!("`{}`", p)).collect::<Vec<_>>().join(", ")
+                row.affected_paths
+                    .iter()
+                    .map(|p| format!("`{}`", p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if !row.tags.is_empty() {
             out.push_str(&format!(
                 "- **Tags**: {}\n",
-                row.tags.iter().map(|t| format!("`{}`", t)).collect::<Vec<_>>().join(", ")
+                row.tags
+                    .iter()
+                    .map(|t| format!("`{}`", t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         out.push_str(&format!("- **event_id**: `{}`\n\n", row.event_id));
@@ -118,7 +136,11 @@ fn render_notes(events: &[edda_core::Event]) -> String {
     let mut sorted: Vec<&edda_core::Event> = events.iter().collect();
     sorted.sort_by(|a, b| a.ts.cmp(&b.ts));
     for ev in sorted {
-        let text = ev.payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        let text = ev
+            .payload
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if text.trim().is_empty() {
             continue;
         }
@@ -234,7 +256,10 @@ mod tests {
         let mut row = dec("test.key", "val", "test", vec![]);
         row.reason = "temp token sk-abcdefghijklmnopqrstuvwxyz012345".into();
         let md = render_domain("test", &[row]);
-        assert!(md.contains("[REDACTED:openai_api_key]"), "export must not leak old secrets: {md}");
+        assert!(
+            md.contains("[REDACTED:openai_api_key]"),
+            "export must not leak old secrets: {md}"
+        );
         assert!(!md.contains("sk-abcdefghijklmnopqrstuvwxyz012345"));
     }
 
