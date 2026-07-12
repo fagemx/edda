@@ -200,7 +200,7 @@ pub fn run_detect(project_id: &str, cwd: &str) -> Result<DetectResult> {
 
     let detect_id = format!(
         "detect_{}",
-        &ulid::Ulid::new().to_string()[..12].to_lowercase()
+        ulid::Ulid::new().to_string()[..12].to_lowercase()
     );
     let result = DetectResult {
         detect_id: detect_id.clone(),

@@ -445,7 +445,7 @@ fn compute_override_risk(dependents: &[DependentHit]) -> OverrideRisk {
     // Suggestion: reverse BFS order = override leaves first
     let suggestion = if count > 0 {
         let mut sorted: Vec<&DependentHit> = dependents.iter().collect();
-        sorted.sort_by(|a, b| b.depth.cmp(&a.depth));
+        sorted.sort_by_key(|dependent| std::cmp::Reverse(dependent.depth));
         let keys: Vec<&str> = sorted.iter().map(|d| d.key.as_str()).collect();
         Some(format!("建議覆蓋順序: {}", keys.join(" → ")))
     } else {

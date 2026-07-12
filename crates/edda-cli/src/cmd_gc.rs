@@ -369,7 +369,7 @@ pub fn execute(params: &GcParams) -> anyhow::Result<()> {
                     let _ = tombstone::append_tombstone(&ledger.paths, &t);
                 }
             }
-            Err(e) => eprintln!("  warning: failed to process blob {}: {e}", &candidate.hash),
+            Err(e) => eprintln!("  warning: failed to process blob {}: {e}", candidate.hash),
         }
     }
 

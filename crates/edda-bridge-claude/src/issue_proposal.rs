@@ -67,7 +67,7 @@ struct AuditEntry {
 pub fn new_proposal_id() -> String {
     format!(
         "prop_{}",
-        &ulid::Ulid::new().to_string()[..12].to_lowercase()
+        ulid::Ulid::new().to_string()[..12].to_lowercase()
     )
 }
 
