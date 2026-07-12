@@ -328,12 +328,12 @@ enum Command {
         #[arg(long = "include-notes")]
         include_notes: bool,
     },
-    /// Bridge operations (install/uninstall hooks for Claude Code)
+    /// Bridge operations (install/uninstall hooks for supported coding agents)
     Bridge {
         #[command(subcommand)]
         cmd: cmd_bridge::BridgeCmd,
     },
-    /// Hook entrypoint (called by Claude Code hooks)
+    /// Hook entrypoint (called by supported coding-agent hooks)
     Hook {
         #[command(subcommand)]
         cmd: cmd_bridge::HookCmd,
@@ -1098,7 +1098,11 @@ fn main() -> anyhow::Result<()> {
         Command::Switch { name } => cmd_switch::execute(&repo_root, &name),
         Command::Merge { src, dst, reason } => cmd_merge::execute(&repo_root, &src, &dst, &reason),
         Command::Draft { cmd } => cmd_draft::run(cmd, &repo_root),
-        Command::Export { format, out, include_notes } => {
+        Command::Export {
+            format,
+            out,
+            include_notes,
+        } => {
             if format != "md" {
                 anyhow::bail!("only 'md' export format is supported (got: {format})");
             }
