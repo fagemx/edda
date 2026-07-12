@@ -1,8 +1,9 @@
 <h1 align="center">Edda</h1>
 
 <p align="center">
-  <strong>AI coding session 的自動、hash-chained 記憶——決策、協調、判斷跨 session 保存。</strong><br/>
-  本地優先。核心確定性（ledger、檢索、hooks）。session 摘要與模式萃取可選配 LLM 增強。
+  <strong>你的 agent 的決策，不該每開新 session 就歸零。</strong><br/>
+  Edda 給 coding agent 一份本地、自動的記憶：記住決定了什麼——以及為什麼。<br/>
+  支援 Claude Code、Codex、OpenClaw 和任何 MCP 客戶端。
 </p>
 
 <p align="center">
@@ -14,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="#edda-是什麼">Edda 是什麼？</a> ·
+  <a href="#為什麼需要-edda">為什麼需要 Edda？</a> ·
   <a href="#安裝">安裝</a> ·
   <a href="#快速開始">快速開始</a> ·
   <a href="#運作原理">運作原理</a> ·
@@ -33,15 +34,20 @@
 
 ---
 
-## Edda 是什麼？
+## 為什麼需要 Edda？
 
-Claude Code 可以在 session 內壓縮 context，但重要的決策仍然會被淹沒在雜訊中，而且 context 預設不會跨 session 保留。
+昨天你和 agent 把利弊吵完，定案用 SQLite。今天開新 session——它又提議 Postgres。又來一次。推理跟著 transcript 一起消失了，context 壓縮救不回來。
 
-Edda 採取不同的方式：不是壓縮所有內容，而是提取關鍵決策和其理由，儲存在本地決策 ledger 中，讓未來的 session 可以取用。
+Edda 治的就是這個：hooks 看著你的 session，把每個決策連同理由記進本地 ledger，在下一個 session 開始前交到它手上。agent 從此不再失憶。
 
-當新 session 開始時，agent 可以取得過去的相關決策，了解之前決定了什麼、為什麼這樣決定，然後帶著更好的延續性繼續工作。
-
-Edda 也支援 OpenClaw 和任何 MCP 客戶端。
+```
+沒有 edda                             有 edda
+────────                              ───────
+Session 2 開場：                      Session 2 開場：
+  「我建議這裡用 Postgres——             「延續 SQLite（昨天已定案：
+    它有 JSONB，而且…」                   單一寫入者、不需要 JSONB）…」
+你：「這我們昨天就定案了！」
+```
 
 **你不需要做任何事。** `edda init` 之後，hooks 會處理一切：
 
@@ -52,15 +58,21 @@ Edda 也支援 OpenClaw 和任何 MCP 客戶端。
 | Session 結束 | 將 session 摘要寫入 ledger | 什麼都不用做 |
 | 下次 Session 開始 | Agent 看到所有過去 session 的相關決策 | 什麼都不用做 |
 
+**資料都在本地** — ledger 存在 `.edda/`（SQLite + 本地檔案），沒有雲端、沒有帳號。核心迴圈（記錄、檢索、注入）是確定性的、永不外呼。**可選的 LLM 增強**（session 摘要、決策萃取、模式關聯）需設 `EDDA_LLM_API_KEY` 且有每日預算上限——不設 key，edda 就是完全零 egress。
+
+## 一份記憶，每個 agent 都看得到
+
+越來越多開發者在 agent 之間交替——這個任務用 Claude Code，下個任務找 Codex 要第二意見。兩邊的模型都強，壞掉的是記憶：每家工具的記憶都是自家孤島，每切換一次，就得從零重講一次專案。
+
+Edda 的 ledger 是工具中立的本地檔案。兩邊的 bridge 讀寫同一個 `.edda/`——在一個 agent 裡做的決策，另一個 agent 開場時就已經在了：
+
 ```
-Session 1                          Session 2
-  Agent 決定 "db=SQLite"             Agent 開始
-  Agent 決定 "cache=Redis"    →      Edda 自動注入 context
-  Session 結束                       Agent 看到：db=SQLite, cache=Redis
-  Edda 消化 transcript               Agent 從上次中斷的地方繼續
+Claude Code（早上）                  Codex（下午）
+  edda decide "auth=JWT"       →      開場就知道 auth=JWT
+          └────────── 同一本本地 ledger (.edda/) ──────────┘
 ```
 
-**資料都在本地** — ledger 存在 `.edda/`（SQLite + 本地檔案），沒有雲端、沒有帳號。核心迴圈（記錄、檢索、注入）是確定性的、永不外呼。**可選的 LLM 增強**（session 摘要、決策萃取、模式關聯）需設 `EDDA_LLM_API_KEY` 且有每日預算上限——不設 key，edda 就是完全零 egress。
+同一套接線也涵蓋「一個寫、一個審」的工作流：兩個模型用同一份決策史對質，而不是各抱一本私帳。
 
 ## 安裝
 
@@ -144,6 +156,7 @@ Edda 將每個事件以 hash-chained JSON 記錄儲存在本地 SQLite 資料庫
 | **防篡改？** | 否 | 否 | 否 | **是**（hash chain） |
 | **追蹤「為什麼」？** | 偶爾 | 否 | 有損 | **是**（理由 + 被拒絕的方案） |
 | **跨 Session？** | 手動複製 | 是 | Session 範圍內 | **是**（自動） |
+| **跨 Agent？** | 否——單一工具的檔案 | 每個 app 各自整合 | 否——vendor 孤島 | **是**（Claude Code、Codex、OpenClaw、MCP） |
 | **每次查詢成本** | 免費 | Embedding API 呼叫 | LLM API 呼叫 | **免費**（本地 SQLite）；可選 LLM 摘要有預算上限 |
 | **範例** | Claude Code 內建、OpenClaw | mem0、Zep、Chroma | ChatGPT Memory、Copilot | — |
 
@@ -314,4 +327,4 @@ MIT OR Apache-2.0
 
 ---
 
-*你的 agent 的架構決策不應該每次 session 都重置。*
+*別再重教 agent 你已經決定過的事。*
