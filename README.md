@@ -1,8 +1,9 @@
 <h1 align="center">Edda</h1>
 
 <p align="center">
-  <strong>Automatic, hash-chained memory for AI coding sessions — decisions, coordination, and doctrine across sessions.</strong><br/>
-  Local-first. Deterministic core (ledger, retrieval, hooks). Optional LLM assist for session digests and pattern extraction.
+  <strong>Your agent's decisions shouldn't reset every session.</strong><br/>
+  Edda gives coding agents a local, automatic memory of what was decided — and why.<br/>
+  Works with Claude Code, OpenClaw, and any MCP client.
 </p>
 
 <p align="center">
@@ -14,7 +15,7 @@
 </p>
 
 <p align="center">
-  <a href="#what-is-edda">What is Edda?</a> ·
+  <a href="#why-edda">Why Edda?</a> ·
   <a href="#install">Install</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#how-it-works">How It Works</a> ·
@@ -33,15 +34,20 @@
 
 ---
 
-## What is Edda?
+## Why Edda?
 
-Claude Code can compact context within a session, but important decisions can still get buried in noise, and that context does not persist across sessions by default.
+Yesterday you and your agent argued through the tradeoffs and settled on SQLite. Today's session opens — and it proposes Postgres. Again. The reasoning died with the transcript, and compaction can't bring it back.
 
-Edda takes a different approach: instead of compressing everything, it extracts key decisions and their rationale, stores them in a local decision ledger, and makes them available to future sessions.
+Edda fixes exactly this: hooks watch your sessions, capture each decision with its rationale into a local ledger, and hand it to the next session before it starts. The agent stops forgetting.
 
-When a new session starts, the agent can retrieve relevant past decisions, understand what was decided and why, and continue work with better continuity.
-
-Edda also works with OpenClaw and any MCP client.
+```
+Without edda                          With edda
+────────────                          ─────────
+Session 2 opens:                      Session 2 opens:
+  "I suggest Postgres for this —        "Continuing with SQLite
+   it gives us JSONB and…"               (decided yesterday: single
+You: "We settled this. YESTERDAY."       writer, JSONB not needed)…"
+```
 
 **You don't need to do anything.** After `edda init`, hooks handle everything:
 
@@ -51,14 +57,6 @@ Edda also works with OpenClaw and any MCP client.
 | Agent makes decisions | Hooks detect and extract them from the transcript | Nothing |
 | Session ends | Writes session digest to the ledger | Nothing |
 | Next session starts | Agent sees relevant decisions from all prior sessions | Nothing |
-
-```
-Session 1                          Session 2
-  Agent decides "db=SQLite"          Agent starts
-  Agent decides "cache=Redis"   →    Edda injects context automatically
-  Session ends                       Agent sees: db=SQLite, cache=Redis
-  Edda digests transcript            Agent continues where it left off
-```
 
 **Data stays local** — the ledger lives in `.edda/` (SQLite + local files), with no cloud and no accounts. The core loop (record, retrieve, inject) is deterministic and never calls out. **Optional LLM assist** for session digests, decision extraction, and pattern correlation is opt-in via `EDDA_LLM_API_KEY` and budget-capped — leave the key unset and edda runs zero-egress.
 
@@ -146,10 +144,11 @@ At the start of each session, edda assembles a context snapshot from the ledger 
 | **Cross-session?** | Manual copy | Yes | Session-scoped | **Yes** (automatic) |
 | **Cost per query** | Free | Embedding API call | LLM API call | **Free** (local SQLite); optional digests budget-capped |
 
+| **Examples** | Claude Code built-in, OpenClaw | mem0, Zep, Chroma | ChatGPT Memory, Copilot | — |
+
 Every ledger query runs locally against SQLite — same answer every time, in milliseconds, at zero cost.
 
 ¹ *LLM assist is off by default. Set `EDDA_LLM_API_KEY` to enable session-end digests, decision extraction from long transcripts, and cross-session pattern correlation; each caller has a daily budget cap. The core loop — recording decisions, hash chaining, retrieval, hook-based injection — never calls an LLM.*
-| **Examples** | Claude Code built-in, OpenClaw | mem0, Zep, Chroma | ChatGPT Memory, Copilot | — |
 
 ## Integration
 
@@ -314,4 +313,4 @@ MIT OR Apache-2.0
 
 ---
 
-*Your agent's architecture decisions shouldn't reset every session.*
+*Stop re-teaching your agent what you already decided.*
