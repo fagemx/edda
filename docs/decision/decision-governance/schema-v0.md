@@ -1,6 +1,6 @@
 # Schema v0 — Governance-specific types
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 >
 > Purpose: Define the types that Governance owns — conflict classification, coverage metrics, governance-specific request/response types. Base types (DecisionStatus, ConflictInfo, ConflictType, MutationResult, TransitionError) live in `../decision-model/shared-types.md`.
 >

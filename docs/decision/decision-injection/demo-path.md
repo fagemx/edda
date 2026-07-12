@@ -1,6 +1,6 @@
 # Demo Path — Incremental implementation plan
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 > Purpose: Define the minimum viable implementation steps to get Decision Injection working end-to-end.
 > Shared types: see `../decision-model/shared-types.md`
 

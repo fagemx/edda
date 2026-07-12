@@ -1,6 +1,6 @@
 # Demo Path — How to validate Intake end-to-end
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 > Purpose: Define a concrete, step-by-step demonstration path that proves Intake works correctly from extraction through triage to Governance handoff.
 > Shared types: see `../decision-model/shared-types.md`
 

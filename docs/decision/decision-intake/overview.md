@@ -1,6 +1,6 @@
 # Decision Intake — How do candidates enter the system?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 > Purpose: Define how decision candidates are created, triaged, and prepared for Governance review.
 > Shared types: see `../decision-model/shared-types.md`
 

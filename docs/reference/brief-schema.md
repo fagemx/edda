@@ -1,4 +1,4 @@
-# BRIEF_SCHEMA: Karvi ↔ Edda Field Mapping
+# Brief Schema: Karvi ↔ Edda Field Mapping
 
 This document defines the canonical field mapping between **karvi task-engine** (management layer) and **edda conductor** (execution layer). It is the source of truth for implementing `runtime-edda.js` (#124) and the edda brief schema (#125).
 
@@ -489,7 +489,7 @@ PATCH 9: { phases: { test: { status: "failed", error: "cmd `cargo test` exited 1
 ```
                     ┌─────────────────────┐
                     │ This doc (#127)      │
-                    │ BRIEF_SCHEMA.md      │
+                    │ brief-schema.md      │
                     │ (canonical mapping)  │
                     └──┬──────────┬────────┘
                        │          │

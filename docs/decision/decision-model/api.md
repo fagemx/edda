@@ -1,6 +1,6 @@
 # Mutation Contract API — How do other specs interact with Decision Model?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 >
 > Purpose: Define the complete set of operations that other specs (Intake, Injection, Governance) call. This is the firewall — nothing outside this contract touches the decisions table.
 >

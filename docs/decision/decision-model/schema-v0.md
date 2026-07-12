@@ -1,6 +1,6 @@
 # Schema v0 — What does a Decision object look like?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 >
 > Purpose: Define the complete Decision object type, including new fields, and the SQLite schema migration from v9 → v10.
 >

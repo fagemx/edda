@@ -1,6 +1,6 @@
 # Decision Model — What is a decision in Edda?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 >
 > Purpose: Define the decision object's identity, lifecycle, and mutation boundary — the foundation that Intake, Injection, and Governance specs build on.
 >

@@ -1,6 +1,6 @@
 # Intake API — How do callers interact with the Intake subsystem?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 > Purpose: Define the CLI commands, MCP tools, and internal functions that constitute the Intake API surface.
 > Shared types: see `../decision-model/shared-types.md`
 

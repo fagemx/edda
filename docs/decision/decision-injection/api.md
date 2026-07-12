@@ -1,6 +1,6 @@
 # Query API & Hook Integration Points
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 > Purpose: Define the function-level API that hooks and HTTP endpoints call into Injection, plus the hook integration contract.
 > Shared types: see `../decision-model/shared-types.md`
 

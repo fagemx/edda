@@ -1,6 +1,6 @@
 # Decision Governance — Who controls the decision lifecycle?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 >
 > Purpose: Define the bounded context that owns ALL decision lifecycle transitions, conflict detection, supersede orchestration, coverage analysis, and authority enforcement.
 >

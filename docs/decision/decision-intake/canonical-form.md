@@ -1,6 +1,6 @@
 # Canonical Form — What does one candidate's journey through Intake look like?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 > Purpose: Define the extraction-to-inbox pipeline, the triage workflow, and the handoff to Governance.
 > Shared types: see `../decision-model/shared-types.md`
 

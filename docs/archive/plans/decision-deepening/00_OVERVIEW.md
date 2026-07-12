@@ -1,5 +1,11 @@
 # Decision Deepening — Planning Pack
 
+> **Status: executed** (archived 2026-07-12). The tracks shipped and are live in
+> the product: `--paths`-scoped decisions, PreToolUse guard warnings, the
+> session-start decision pack, and the status lifecycle enum. This pack is kept
+> as construction history; the living references are the `docs/decision/` spec
+> stack and the code itself.
+
 ## Goal
 
 把 Edda 從「決策存檔層」推到「決策施壓層」：

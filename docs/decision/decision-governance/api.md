@@ -1,6 +1,6 @@
 # Governance API — How do callers interact with Governance?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 >
 > Purpose: Define the complete set of operations that Governance exposes: transition operations, conflict detection, coverage analysis, and drift detection. This is Governance's public contract.
 >

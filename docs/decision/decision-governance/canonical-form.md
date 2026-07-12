@@ -1,6 +1,6 @@
 # Canonical Form — How does Governance execute the lifecycle?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 >
 > Purpose: Define the execution semantics for every lifecycle transition. The state machine is defined in `../decision-model/canonical-form.md` — this file defines HOW Governance executes each transition, with preconditions, authority rules, and side effects.
 >

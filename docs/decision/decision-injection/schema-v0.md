@@ -1,6 +1,6 @@
 # Schema v0 — Read-Side View Models and Pack Types
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 > Purpose: Define the types that Injection owns: retrieval context, ranked results, pack formats, and hook output shapes.
 > Shared types: see `../decision-model/shared-types.md`
 

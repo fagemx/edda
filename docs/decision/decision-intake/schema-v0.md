@@ -1,6 +1,6 @@
 # Schema v0 — Intake-owned types and storage
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 > Purpose: Define types that Intake owns — extraction results, draft files, inbox state. Shared types (DecisionPayload, MutationResult, etc.) are NOT redefined here.
 > Shared types: see `../decision-model/shared-types.md`
 

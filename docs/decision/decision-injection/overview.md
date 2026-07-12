@@ -1,6 +1,6 @@
 # Decision Injection — When and where do decisions surface?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 > Purpose: Define retrieval, ranking, pack generation, and hook-triggered delivery of decisions to agents and humans.
 > Shared types: see `../decision-model/shared-types.md`
 

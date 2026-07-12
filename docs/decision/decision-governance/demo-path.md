@@ -1,6 +1,6 @@
 # Demo Path — Prove Governance controls the lifecycle end-to-end
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 >
 > Purpose: Walk through concrete Governance scenarios — conflict detection, supersede orchestration, authority enforcement, coverage analysis — proving that all lifecycle control flows through Governance.
 >

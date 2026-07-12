@@ -1,6 +1,6 @@
 # Canonical Form — What does one decision lifecycle look like?
 
-> Status: `working draft`
+> Status: `v0 design spec` — the implementation shipped via the [decision-deepening tracks](../../archive/plans/decision-deepening/00_OVERVIEW.md); where details differ, the code is authoritative.
 >
 > Purpose: Define the state machine, legal transitions, and the complete lifecycle from birth to supersession.
 >
