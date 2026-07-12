@@ -3,7 +3,7 @@
 <p align="center">
   <strong>Your agent's decisions shouldn't reset every session.</strong><br/>
   Edda gives coding agents a local, automatic memory of what was decided — and why.<br/>
-  Works with Claude Code, OpenClaw, and any MCP client.
+  Works with Claude Code, Codex, OpenClaw, and any MCP client.
 </p>
 
 <p align="center">
@@ -59,6 +59,20 @@ You: "We settled this. YESTERDAY."       writer, JSONB not needed)…"
 | Next session starts | Agent sees relevant decisions from all prior sessions | Nothing |
 
 **Data stays local** — the ledger lives in `.edda/` (SQLite + local files), with no cloud and no accounts. The core loop (record, retrieve, inject) is deterministic and never calls out. **Optional LLM assist** for session digests, decision extraction, and pattern correlation is opt-in via `EDDA_LLM_API_KEY` and budget-capped — leave the key unset and edda runs zero-egress.
+
+## One memory, every agent
+
+More and more developers alternate between agents — Claude Code for one task, Codex for a second opinion on the next. Both models are strong; what breaks is the memory. Each tool keeps its own silo, so every switch means re-explaining the project from zero.
+
+Edda's ledger is tool-neutral and local. Bridges on each side read and write the same `.edda/`, so a decision made in one agent is simply there when the other starts:
+
+```
+Claude Code (morning)                Codex (afternoon)
+  edda decide "auth=JWT"        →      session opens knowing auth=JWT
+          └───────────── one local ledger (.edda/) ─────────────┘
+```
+
+The same wiring covers produce-and-verify workflows: one model writes, the other reviews, and both argue from the same decision history instead of two private ones.
 
 ## Install
 
@@ -142,6 +156,7 @@ At the start of each session, edda assembles a context snapshot from the ledger 
 | **Tamper-evident?** | No | No | No | **Yes** (hash chain) |
 | **Tracks "why"?** | Sometimes | No | Lossy | **Yes** (rationale + rejected alternatives) |
 | **Cross-session?** | Manual copy | Yes | Session-scoped | **Yes** (automatic) |
+| **Cross-agent?** | No — one tool's file | Per-app integration | No — vendor silo | **Yes** (Claude Code, Codex, OpenClaw, MCP) |
 | **Cost per query** | Free | Embedding API call | LLM API call | **Free** (local SQLite); optional digests budget-capped |
 
 | **Examples** | Claude Code built-in, OpenClaw | mem0, Zep, Chroma | ChatGPT Memory, Copilot | — |
