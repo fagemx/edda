@@ -74,6 +74,23 @@ Claude Code（早上）                  Codex（下午）
 
 同一套接線也涵蓋「一個寫、一個審」的工作流：兩個模型用同一份決策史對質，而不是各抱一本私帳。
 
+<details>
+<summary><strong>只用 Claude Code 的話，需要它嗎？</strong></summary>
+
+誠實回答：**不一定需要。** 單人、單工具、一次只開一個 session 的輕量專案，Claude Code 內建的記憶就夠了。
+
+以下任一情況成立時，edda 才開始值回票價：
+
+| 情況 | edda 加了什麼 |
+|---|---|
+| 決策要連「為什麼」一起留下來 | 結構化帳本贏過散文筆記——理由、日期、範圍，下個 session 自動注入 |
+| 同時開多個 session | peers/claims 協調：session 看得見誰在動哪裡，不互踩 |
+| 用多個工具（Claude Code + Codex…） | 一本本地帳，兩邊共讀共寫 |
+| 在 Claude Code「裡面」切換模型（router 類工具） | 正交不競爭：edda 掛在 hook 層，誰在開車都照記——而切完模型，新模型正是最需要舊模型決策的那個 |
+| session 跑在 container 裡 | 每個 container 都是孤島；你要 mount 的那份共享狀態，就是 `.edda/` |
+
+</details>
+
 ## 安裝
 
 ```bash

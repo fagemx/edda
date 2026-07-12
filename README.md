@@ -74,6 +74,24 @@ Claude Code (morning)                Codex (afternoon)
 
 The same wiring covers produce-and-verify workflows: one model writes, the other reviews, and both argue from the same decision history instead of two private ones.
 
+<details>
+<summary><strong>Do I need this if I only use Claude Code?</strong></summary>
+
+Honest answer: **maybe not.** If you're one person, one tool, running one
+session at a time on a light project, Claude Code's built-in memory is enough.
+
+Edda starts paying for itself when any of these is true:
+
+| Situation | What edda adds |
+|---|---|
+| Decisions need to survive with their *reasoning* | A structured ledger entry beats prose notes — rationale, date, and scope, injected automatically next session |
+| More than one session runs at once | Peers/claims coordination: sessions see who is working where and stop trampling each other |
+| More than one tool (Claude Code + Codex, …) | One local ledger both sides read and write |
+| You switch models *inside* Claude Code (router tools) | Orthogonal, not competing: edda sits at the hook layer and keeps recording whichever model is driving — and the new model is exactly the one that needs the old model's decisions |
+| Sessions run in containers | Each container is an island; the shared state you'd mount *is* `.edda/` |
+
+</details>
+
 ## Install
 
 ```bash
