@@ -113,7 +113,12 @@ mod tests {
         #[cfg(not(windows))]
         let cmd = "sleep 60";
         #[cfg(windows)]
-        let cmd = "ping -n 60 127.0.0.1";
+        // Keep the delay inside the selected shell so no child retains captured pipes.
+        let cmd = if which_exists("pwsh") || which_exists("powershell") {
+            "while ($true) { Start-Sleep -Milliseconds 100 }"
+        } else {
+            "for /L %i in (1,1,2147483647) do @rem"
+        };
         let out = check_cmd_succeeds(cmd, 1, dir.path()).await;
         assert!(!out.passed);
         assert!(out.detail.unwrap().contains("timed out"));
