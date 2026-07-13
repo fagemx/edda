@@ -189,6 +189,21 @@ Edda 將每個事件以 hash-chained JSON 記錄儲存在本地 SQLite 資料庫
 edda init    # 偵測 Claude Code，自動安裝 hooks
 ```
 
+**Cursor** — 透過原生 Cursor hooks 支援。Session 開始時會把既有 hot pack、doctrine 與 workspace context 推送進 Agent 模型。
+
+```bash
+edda bridge cursor install      # 安裝 ~/.cursor/hooks.json 條目
+edda doctor cursor              # 驗證 PATH、hooks 與 store 可寫性
+```
+
+Cursor v1 與 Codex bridge 共用相同的讀取路徑。Cursor 在 `sessionStart` 可能送出 `transcript_path: null`，因此 bridge 會讀取既有 hot pack，不會宣稱在該時點重建 Cursor transcript。
+
+**Codex** — 透過原生 hooks 支援，並共用 Edda 的 context 機制。
+
+```bash
+edda bridge codex install
+```
+
 **OpenClaw** — 透過 bridge 插件支援。
 
 ```bash
@@ -264,7 +279,7 @@ edda watch                 # 即時 TUI：peers、事件、決策
 
 ## 架構
 
-14 個 Rust crates：
+16 個 Rust crates：
 
 | Crate | 功能 |
 |-------|------|
@@ -272,6 +287,8 @@ edda watch                 # 即時 TUI：peers、事件、決策
 | `edda-ledger` | Append-only ledger（SQLite）、blob store、locking |
 | `edda-cli` | 所有指令 + TUI（`tui` feature，預設開啟） |
 | `edda-bridge-claude` | Claude Code hooks、transcript 攝取、context 注入 |
+| `edda-bridge-cursor` | Cursor 原生 hooks、context 注入、生命週期追蹤 |
+| `edda-bridge-codex` | Codex hooks 與 context 注入 |
 | `edda-bridge-openclaw` | OpenClaw hooks 和插件 |
 | `edda-mcp` | MCP server（7 個工具） |
 | `edda-ask` | 跨來源決策查詢引擎 |

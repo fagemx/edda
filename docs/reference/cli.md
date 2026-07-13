@@ -36,6 +36,8 @@ Health check for bridge integration.
 
 ```bash
 edda doctor claude     # check Claude Code hooks
+edda doctor cursor     # check Cursor native hooks
+edda doctor codex      # check Codex hooks
 edda doctor openclaw   # check OpenClaw hooks
 ```
 
@@ -288,6 +290,10 @@ Install or uninstall bridge hooks.
 ```bash
 edda bridge claude install      # install Claude Code hooks
 edda bridge claude uninstall    # remove hooks
+edda bridge cursor install      # install native Cursor hooks
+edda bridge cursor uninstall
+edda bridge codex install       # install Codex hooks
+edda bridge codex uninstall
 edda bridge openclaw install    # install OpenClaw plugin
 edda bridge openclaw uninstall
 ```

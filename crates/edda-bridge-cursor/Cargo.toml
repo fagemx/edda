@@ -1,0 +1,24 @@
+[package]
+name = "edda-bridge-cursor"
+description = "Cursor Agent hooks and context injection for Edda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+[dependencies]
+edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.2.0" }
+edda-pack = { path = "../edda-pack", version = "0.2.0" }
+edda-postmortem = { path = "../edda-postmortem", version = "0.2.0" }
+edda-store = { path = "../edda-store", version = "0.2.0" }
+anyhow.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

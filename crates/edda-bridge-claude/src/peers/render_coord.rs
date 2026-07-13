@@ -82,7 +82,9 @@ pub(super) fn suggest_claim_command(label: &str, heartbeat: &Option<SessionHeart
             let proc_cwd = std::env::current_dir()
                 .ok()
                 .map(|p| p.to_string_lossy().to_string());
-            if let Some((derived_label, paths)) = derive_scope_from_files(&files, proc_cwd.as_deref()) {
+            if let Some((derived_label, paths)) =
+                derive_scope_from_files(&files, proc_cwd.as_deref())
+            {
                 let claim_label = if !label.is_empty() {
                     label
                 } else {

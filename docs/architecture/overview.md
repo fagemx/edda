@@ -14,7 +14,7 @@ below it, never above.
 | **L1 Foundation** | Event model, schema, hashing | `edda-core` |
 | **L2 Persistence** | Storage, ledger, blobs | `edda-ledger`, `edda-store` |
 | **L3 Processing** | View building, indexing, orchestration, analysis | `edda-derive`, `edda-transcript`, `edda-index`, `edda-conductor`, `edda-aggregate`, `edda-chronicle`, `edda-postmortem` |
-| **L3 Bridge** | External system integration | `edda-bridge-claude`, `edda-bridge-openclaw` |
+| **L3 Bridge** | External system integration | `edda-bridge-claude`, `edda-bridge-cursor`, `edda-bridge-codex`, `edda-bridge-hermes`, `edda-bridge-openclaw` |
 | **L3 Query** | Cross-source queries, context generation | `edda-ask`, `edda-pack`, `edda-search-fts` |
 | **L4 Interface** | User-facing CLI, MCP, HTTP, notifications | `edda-cli`, `edda-mcp`, `edda-serve`, `edda-notify` |
 
@@ -51,9 +51,12 @@ Same-layer dependencies are allowed (e.g. an L3 crate may depend on another L3 c
 L4 Interface         L3 Bridge                 L2 Persistence     L1 Foundation
 ─────────────        ──────────────────        ──────────────     ──────────────
 edda-cli             edda-bridge-claude        edda-ledger        edda-core
-edda-mcp             edda-bridge-openclaw      edda-store
+edda-mcp             edda-bridge-cursor        edda-store
 edda-serve
 edda-notify
+                     edda-bridge-codex
+                     edda-bridge-hermes
+                     edda-bridge-openclaw
 
 L3 Query             L3 Processing
 ──────────────       ──────────────
@@ -72,6 +75,9 @@ edda-search-fts      edda-index
 | `edda-ledger` | L2 Persistence | Append-only ledger (SQLite), blob store, locking |
 | `edda-store` | L2 Persistence | Per-user store, atomic writes |
 | `edda-bridge-claude` | L3 Bridge | Claude Code hooks, transcript ingest, context injection, peer coordination |
+| `edda-bridge-cursor` | L3 Bridge | Cursor native hooks, context injection, lifecycle tracking |
+| `edda-bridge-codex` | L3 Bridge | Codex hooks and context injection |
+| `edda-bridge-hermes` | L3 Bridge | Hermes shell hooks and context injection |
 | `edda-bridge-openclaw` | L3 Bridge | OpenClaw hooks and plugin |
 | `edda-transcript` | L3 Processing | Transcript delta ingest, classification |
 | `edda-derive` | L3 Processing | View rebuilding, tiered history |

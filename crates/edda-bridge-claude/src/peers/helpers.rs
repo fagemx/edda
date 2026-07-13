@@ -39,7 +39,8 @@ pub(crate) fn pending_requests_for_session(
 
 /// True if a normalized path is absolute (`/...` or `C:/...`).
 pub(super) fn is_absolute_normalized(path: &str) -> bool {
-    path.starts_with('/') || matches!(path.as_bytes(), [a, b':', b'/', ..] if a.is_ascii_alphabetic())
+    path.starts_with('/')
+        || matches!(path.as_bytes(), [a, b':', b'/', ..] if a.is_ascii_alphabetic())
 }
 
 /// Make a path project-relative when possible.

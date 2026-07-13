@@ -132,15 +132,15 @@ pub fn uninstall(target: Option<&Path>) -> anyhow::Result<()> {
     let mut config: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(_) => {
-            println!("Hooks config at {} is not valid JSON; leaving untouched", path.display());
+            println!(
+                "Hooks config at {} is not valid JSON; leaving untouched",
+                path.display()
+            );
             return Ok(());
         }
     };
 
-    if let Some(hooks_map) = config
-        .get_mut("hooks")
-        .and_then(|h| h.as_object_mut())
-    {
+    if let Some(hooks_map) = config.get_mut("hooks").and_then(|h| h.as_object_mut()) {
         for entries in hooks_map.values_mut() {
             if let Some(array) = entries.as_array_mut() {
                 array.retain(|group| {
@@ -158,9 +158,7 @@ pub fn uninstall(target: Option<&Path>) -> anyhow::Result<()> {
             }
         }
         // Drop empty event arrays entirely.
-        hooks_map.retain(|_, v| {
-            v.as_array().map(|a| !a.is_empty()).unwrap_or(true)
-        });
+        hooks_map.retain(|_, v| v.as_array().map(|a| !a.is_empty()).unwrap_or(true));
     }
 
     let pretty = serde_json::to_string_pretty(&config)?;

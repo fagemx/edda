@@ -3,7 +3,7 @@
 <p align="center">
   <strong>Your agent's decisions shouldn't reset every session.</strong><br/>
   Edda gives coding agents a local, automatic memory of what was decided — and why.<br/>
-  Works with Claude Code, Codex, OpenClaw, and any MCP client.
+  Works with Claude Code, Cursor, Codex, OpenClaw, and any MCP client.
 </p>
 
 <p align="center">
@@ -191,6 +191,21 @@ Every ledger query runs locally against SQLite — same answer every time, in mi
 edda init    # detects Claude Code, installs hooks automatically
 ```
 
+**Cursor** — supported via native Cursor hooks. Session start pushes the existing hot pack, doctrine, and workspace context into the Agent model.
+
+```bash
+edda bridge cursor install      # installs ~/.cursor/hooks.json entries
+edda doctor cursor              # verifies PATH, hooks, and writable store
+```
+
+Cursor v1 uses the same read path as the Codex bridge. Cursor can send `transcript_path: null` at `sessionStart`, so the bridge reads the existing hot pack and does not claim to rebuild the Cursor transcript at that point.
+
+**Codex** — supported via native hooks with the same shared Edda context machinery.
+
+```bash
+edda bridge codex install
+```
+
 **OpenClaw** — supported via bridge plugin.
 
 ```bash
@@ -266,7 +281,7 @@ edda watch                 # real-time TUI: peers, events, decisions
 
 ## Architecture
 
-14 Rust crates:
+16 Rust crates:
 
 | Crate | What it does |
 |-------|-------------|
@@ -274,6 +289,8 @@ edda watch                 # real-time TUI: peers, events, decisions
 | `edda-ledger` | Append-only ledger (SQLite), blob store, locking |
 | `edda-cli` | All commands + TUI (`tui` feature, default on) |
 | `edda-bridge-claude` | Claude Code hooks, transcript ingest, context injection |
+| `edda-bridge-cursor` | Cursor native hooks, context injection, lifecycle tracking |
+| `edda-bridge-codex` | Codex hooks and context injection |
 | `edda-bridge-openclaw` | OpenClaw hooks and plugin |
 | `edda-mcp` | MCP server (7 tools) |
 | `edda-ask` | Cross-source decision query engine |

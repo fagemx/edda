@@ -133,7 +133,7 @@ fn new_lesson_id(tag: &str, prefix: &str) -> String {
     hasher.update(tag.as_bytes());
     hasher.update(b"|");
     hasher.update(prefix.as_bytes());
-    format!("lesson_scar_{}", hex::encode(hasher.finalize())[..12].to_string())
+    format!("lesson_scar_{}", &hex::encode(hasher.finalize())[..12])
 }
 
 /// JSONL row shape used by `edda log --json` output (only the fields we need).
@@ -205,7 +205,9 @@ pub fn notes_from_events(events: &[edda_core::types::Event]) -> Vec<LedgerNote> 
             .cloned()
             .unwrap_or_default();
         for tag in tags {
-            let Some(tag_str) = tag.as_str() else { continue };
+            let Some(tag_str) = tag.as_str() else {
+                continue;
+            };
             if is_scar_tag(tag_str) {
                 out.push(LedgerNote {
                     ts: event.ts.clone(),
@@ -241,17 +243,25 @@ mod tests {
             "friction",
             "worktree has no .edda, executor cannot inject context",
         )];
-        assert!(analyze_recurring_scars(&notes, now()).is_empty(),
-            "one hit is not a scar (havamal 二犯規矩)");
+        assert!(
+            analyze_recurring_scars(&notes, now()).is_empty(),
+            "one hit is not a scar (havamal 二犯規矩)"
+        );
     }
 
     #[test]
     fn two_occurrences_same_prefix_yields_high_lesson_with_excerpt() {
         let notes = vec![
-            note("2026-07-05T01:00:00Z", "friction",
-                "Worktree has no .edda; executor cannot inject context on start"),
-            note("2026-07-08T01:00:00Z", "friction",
-                "worktree has no .edda — executor context broken again in nested session"),
+            note(
+                "2026-07-05T01:00:00Z",
+                "friction",
+                "Worktree has no .edda; executor cannot inject context on start",
+            ),
+            note(
+                "2026-07-08T01:00:00Z",
+                "friction",
+                "worktree has no .edda — executor context broken again in nested session",
+            ),
         ];
         let lessons = analyze_recurring_scars(&notes, now());
         assert_eq!(lessons.len(), 1);
@@ -259,40 +269,75 @@ mod tests {
         assert!(lessons[0].tags.contains(&"friction".to_string()));
         assert!(lessons[0].tags.contains(&"recurring".to_string()));
         assert!(lessons[0].text.contains("2x"), "count in text");
-        assert!(lessons[0].text.to_lowercase().contains("worktree has no .edda"),
-            "candidate cites the scar text verbatim (not template)");
+        assert!(
+            lessons[0]
+                .text
+                .to_lowercase()
+                .contains("worktree has no .edda"),
+            "candidate cites the scar text verbatim (not template)"
+        );
     }
 
     #[test]
     fn out_of_window_occurrences_dont_count() {
         let notes = vec![
-            note("2026-05-01T00:00:00Z", "friction", "old worktree issue in stale window"),
-            note("2026-07-08T00:00:00Z", "friction", "old worktree issue back in fresh window"),
+            note(
+                "2026-05-01T00:00:00Z",
+                "friction",
+                "old worktree issue in stale window",
+            ),
+            note(
+                "2026-07-08T00:00:00Z",
+                "friction",
+                "old worktree issue back in fresh window",
+            ),
         ];
-        assert!(analyze_recurring_scars(&notes, now()).is_empty(),
-            "one in-window hit only (窗外的不算)");
+        assert!(
+            analyze_recurring_scars(&notes, now()).is_empty(),
+            "one in-window hit only (窗外的不算)"
+        );
     }
 
     #[test]
     fn non_scar_tags_ignored() {
         let notes = vec![
-            note("2026-07-08T01:00:00Z", "session", "same prefix same day tag session"),
-            note("2026-07-08T02:00:00Z", "session", "same prefix same day tag session"),
+            note(
+                "2026-07-08T01:00:00Z",
+                "session",
+                "same prefix same day tag session",
+            ),
+            note(
+                "2026-07-08T02:00:00Z",
+                "session",
+                "same prefix same day tag session",
+            ),
         ];
-        assert!(analyze_recurring_scars(&notes, now()).is_empty(),
-            "session tag is not a scar family");
+        assert!(
+            analyze_recurring_scars(&notes, now()).is_empty(),
+            "session tag is not a scar family"
+        );
     }
 
     #[test]
     fn prefix_normalization_matches_case_and_whitespace_variants() {
         let notes = vec![
-            note("2026-07-08T01:00:00Z", "review",
-                "  Findings: dispatch layer authored discipline text\n\nmore detail"),
-            note("2026-07-08T02:00:00Z", "review",
-                "FINDINGS:   dispatch  layer authored discipline text!"),
+            note(
+                "2026-07-08T01:00:00Z",
+                "review",
+                "  Findings: dispatch layer authored discipline text\n\nmore detail",
+            ),
+            note(
+                "2026-07-08T02:00:00Z",
+                "review",
+                "FINDINGS:   dispatch  layer authored discipline text!",
+            ),
         ];
         let lessons = analyze_recurring_scars(&notes, now());
-        assert_eq!(lessons.len(), 1, "case+whitespace+punct differences collapse to one family");
+        assert_eq!(
+            lessons.len(),
+            1,
+            "case+whitespace+punct differences collapse to one family"
+        );
     }
 
     #[test]
@@ -303,6 +348,10 @@ mod tests {
             note("2026-07-08T02:00:00Z", "friction", "hit b"),
         ];
         let lessons = analyze_recurring_scars(&notes, now());
-        assert_eq!(lessons.len(), 1, "garbage-ts note dropped, valid pair remains");
+        assert_eq!(
+            lessons.len(),
+            1,
+            "garbage-ts note dropped, valid pair remains"
+        );
     }
 }

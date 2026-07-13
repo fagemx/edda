@@ -306,7 +306,7 @@ pub(crate) fn extract_session_signals(transcript_store_path: &Path) -> SessionSi
         .into_iter()
         .map(|(path, count)| FileEditCount { path, count })
         .collect();
-    sorted_files.sort_by(|a, b| b.count.cmp(&a.count));
+    sorted_files.sort_by_key(|file| std::cmp::Reverse(file.count));
 
     // Build failed commands list, sorted by count descending
     let mut failed_commands: Vec<FailedBashCmd> = failed_cmd_map
@@ -317,7 +317,7 @@ pub(crate) fn extract_session_signals(transcript_store_path: &Path) -> SessionSi
             count,
         })
         .collect();
-    failed_commands.sort_by(|a, b| b.count.cmp(&a.count));
+    failed_commands.sort_by_key(|command| std::cmp::Reverse(command.count));
 
     SessionSignals {
         tasks: sorted_tasks,

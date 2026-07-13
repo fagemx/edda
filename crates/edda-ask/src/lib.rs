@@ -445,7 +445,7 @@ fn compute_override_risk(dependents: &[DependentHit]) -> OverrideRisk {
     // Suggestion: reverse BFS order = override leaves first
     let suggestion = if count > 0 {
         let mut sorted: Vec<&DependentHit> = dependents.iter().collect();
-        sorted.sort_by(|a, b| b.depth.cmp(&a.depth));
+        sorted.sort_by_key(|dependent| std::cmp::Reverse(dependent.depth));
         let keys: Vec<&str> = sorted.iter().map(|d| d.key.as_str()).collect();
         Some(format!("建議覆蓋順序: {}", keys.join(" → ")))
     } else {
@@ -731,9 +731,13 @@ pub fn format_human(result: &AskResult) -> String {
             ));
             if let Some(st) = &d.staleness {
                 if st.is_stale {
-                    let bad: Vec<String> = st.paths.iter()
-                        .filter(|p| p.status != staleness::PathStatus::Fresh
-                                 && p.status != staleness::PathStatus::Unknown)
+                    let bad: Vec<String> = st
+                        .paths
+                        .iter()
+                        .filter(|p| {
+                            p.status != staleness::PathStatus::Fresh
+                                && p.status != staleness::PathStatus::Unknown
+                        })
                         .map(|p| format!("{} ({:?})", p.path, p.status))
                         .collect();
                     if !bad.is_empty() {
@@ -850,10 +854,7 @@ fn to_decision_hit(row: &DecisionView) -> DecisionHit {
 /// Return the affected_paths carried by each decision in `result.decisions`,
 /// looked up from the ledger by event_id. Position-aligned with the input;
 /// missing/unreadable rows return empty Vec (best-effort).
-pub fn affected_paths_for_hits(
-    ledger: &Ledger,
-    hits: &[DecisionHit],
-) -> Vec<Vec<String>> {
+pub fn affected_paths_for_hits(ledger: &Ledger, hits: &[DecisionHit]) -> Vec<Vec<String>> {
     hits.iter()
         .map(|h| {
             ledger

@@ -79,10 +79,7 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
         "PreCompact" => dispatch_pre_compact(&project_id),
         "SessionEnd" | "Stop" => dispatch_session_end(&project_id, &envelope),
         // Codex-only events — forward-compatible stubs
-        "SubagentStart"
-        | "SubagentStop"
-        | "PostCompact"
-        | "PermissionRequest"
+        "SubagentStart" | "SubagentStop" | "PostCompact" | "PermissionRequest"
         | "PostToolUseFailure" => Ok(ok()),
         _ => Ok(ok()),
     }
@@ -184,10 +181,7 @@ fn dispatch_user_prompt_submit(
 
 // ── PreToolUse: L3 rule evaluation ──
 
-fn dispatch_pre_tool_use(
-    project_id: &str,
-    envelope: &CodexEnvelope,
-) -> anyhow::Result<HookResult> {
+fn dispatch_pre_tool_use(project_id: &str, envelope: &CodexEnvelope) -> anyhow::Result<HookResult> {
     if std::env::var("EDDA_POSTMORTEM").unwrap_or_else(|_| "1".into()) == "0" {
         return Ok(ok());
     }
@@ -268,10 +262,7 @@ fn dispatch_pre_compact(project_id: &str) -> anyhow::Result<HookResult> {
     Ok(ok())
 }
 
-fn dispatch_session_end(
-    project_id: &str,
-    envelope: &CodexEnvelope,
-) -> anyhow::Result<HookResult> {
+fn dispatch_session_end(project_id: &str, envelope: &CodexEnvelope) -> anyhow::Result<HookResult> {
     let cwd = &envelope.cwd;
     let session_id = &envelope.session_id;
     if !session_id.is_empty() {

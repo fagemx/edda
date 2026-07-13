@@ -164,7 +164,7 @@ pub fn run_scan(project_id: &str, cwd: &str) -> Result<ScanResult> {
 
     let scan_id = format!(
         "scan_{}",
-        &ulid::Ulid::new().to_string()[..12].to_lowercase()
+        ulid::Ulid::new().to_string()[..12].to_lowercase()
     );
     let result = ScanResult {
         scan_id: scan_id.clone(),

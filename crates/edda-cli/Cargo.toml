@@ -23,6 +23,7 @@ edda-derive = { path = "../edda-derive", version = "0.2.0" }
 edda-store = { path = "../edda-store", version = "0.2.0" }
 edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.2.0" }
 edda-bridge-codex = { path = "../edda-bridge-codex", version = "0.2.0" }
+edda-bridge-cursor = { path = "../edda-bridge-cursor", version = "0.2.0" }
 edda-bridge-hermes = { path = "../edda-bridge-hermes", version = "0.2.0" }
 edda-bridge-openclaw = { path = "../edda-bridge-openclaw", version = "0.2.0" }
 edda-transcript = { path = "../edda-transcript", version = "0.2.0" }

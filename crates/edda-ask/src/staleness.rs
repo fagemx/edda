@@ -165,7 +165,9 @@ mod tests {
     }
     impl MockFs {
         fn new() -> Self {
-            Self { entries: RefCell::new(HashMap::new()) }
+            Self {
+                entries: RefCell::new(HashMap::new()),
+            }
         }
         fn set(&self, path: &str, exists: bool, mtime: Option<&str>) {
             self.entries
@@ -200,7 +202,8 @@ mod tests {
             "2026-07-01T00:00:00Z",
             Some(Path::new("/repo")),
             &fs,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(out.is_stale);
         assert_eq!(out.paths[0].status, PathStatus::StaleModified);
     }
@@ -214,7 +217,8 @@ mod tests {
             "2026-07-01T00:00:00Z",
             Some(Path::new("/repo")),
             &fs,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!out.is_stale);
         assert_eq!(out.paths[0].status, PathStatus::Fresh);
     }
@@ -228,7 +232,8 @@ mod tests {
             "2026-07-01T00:00:00Z",
             Some(Path::new("/repo")),
             &fs,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(out.is_stale, "missing counts as stale");
         assert_eq!(out.paths[0].status, PathStatus::Missing);
     }
@@ -237,14 +242,14 @@ mod tests {
     fn absolute_path_bypasses_repo_root() {
         let fs = MockFs::new();
         // Use OS-appropriate absolute path so Path::is_absolute agrees.
-        let abs = if cfg!(windows) { "C:/opt/config.json" } else { "/opt/config.json" };
+        let abs = if cfg!(windows) {
+            "C:/opt/config.json"
+        } else {
+            "/opt/config.json"
+        };
         fs.set(abs, true, Some("2026-07-05T00:00:00Z"));
-        let out = check_paths_staleness(
-            &[abs.to_string()],
-            "2026-07-01T00:00:00Z",
-            None,
-            &fs,
-        ).unwrap();
+        let out =
+            check_paths_staleness(&[abs.to_string()], "2026-07-01T00:00:00Z", None, &fs).unwrap();
         assert_eq!(out.paths[0].status, PathStatus::StaleModified);
     }
 
@@ -256,8 +261,12 @@ mod tests {
             "2026-07-01T00:00:00Z",
             None,
             &fs,
-        ).unwrap();
-        assert!(!out.is_stale, "unknown does not flip is_stale (F9-shaped restraint)");
+        )
+        .unwrap();
+        assert!(
+            !out.is_stale,
+            "unknown does not flip is_stale (F9-shaped restraint)"
+        );
         assert_eq!(out.paths[0].status, PathStatus::Unknown);
     }
 
@@ -270,7 +279,8 @@ mod tests {
             "not-a-date",
             Some(Path::new("/repo")),
             &fs,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!out.is_stale);
         assert_eq!(out.paths[0].status, PathStatus::Unknown);
     }
@@ -281,11 +291,16 @@ mod tests {
         fs.set("/repo/fresh.rs", true, Some("2026-06-01T00:00:00Z"));
         fs.set("/repo/modified.rs", true, Some("2026-07-05T00:00:00Z"));
         let out = check_paths_staleness(
-            &["fresh.rs".to_string(), "modified.rs".to_string(), "deleted.rs".to_string()],
+            &[
+                "fresh.rs".to_string(),
+                "modified.rs".to_string(),
+                "deleted.rs".to_string(),
+            ],
             "2026-07-01T00:00:00Z",
             Some(Path::new("/repo")),
             &fs,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(out.is_stale);
         assert_eq!(out.paths[0].status, PathStatus::Fresh);
         assert_eq!(out.paths[1].status, PathStatus::StaleModified);
@@ -301,7 +316,11 @@ mod tests {
             "2026-07-01T00:00:00Z",
             Some(Path::new("/repo")),
             &fs,
-        ).unwrap();
-        assert_eq!(out.paths[0].touched_at.as_deref(), Some("2026-07-05T10:00:00Z"));
+        )
+        .unwrap();
+        assert_eq!(
+            out.paths[0].touched_at.as_deref(),
+            Some("2026-07-05T10:00:00Z")
+        );
     }
 }

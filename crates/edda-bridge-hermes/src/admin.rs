@@ -59,7 +59,8 @@ pub fn install(target: Option<&Path>) -> anyhow::Result<PathBuf> {
     // mapping — never crash the user's config.
     let mut root: serde_yaml::Value = if path.exists() {
         let raw = fs::read_to_string(&path)?;
-        serde_yaml::from_str(&raw).unwrap_or_else(|_| serde_yaml::Value::Mapping(Default::default()))
+        serde_yaml::from_str(&raw)
+            .unwrap_or_else(|_| serde_yaml::Value::Mapping(Default::default()))
     } else {
         serde_yaml::Value::Mapping(Default::default())
     };
@@ -72,7 +73,10 @@ pub fn install(target: Option<&Path>) -> anyhow::Result<PathBuf> {
     // Get or create the top-level `hooks:` mapping.
     let hooks_key = serde_yaml::Value::String("hooks".into());
     if !root_map.contains_key(&hooks_key)
-        || !root_map.get(&hooks_key).map(|v| v.is_mapping()).unwrap_or(false)
+        || !root_map
+            .get(&hooks_key)
+            .map(|v| v.is_mapping())
+            .unwrap_or(false)
     {
         root_map.insert(
             hooks_key.clone(),
@@ -105,7 +109,7 @@ pub fn install(target: Option<&Path>) -> anyhow::Result<PathBuf> {
         let already_present = entries.iter().any(|entry| {
             entry
                 .as_mapping()
-                .and_then(|m| m.get(&serde_yaml::Value::String("command".into())))
+                .and_then(|m| m.get(serde_yaml::Value::String("command".into())))
                 .and_then(|c| c.as_str())
                 .map(|c| c == HOOK_COMMAND)
                 .unwrap_or(false)
@@ -163,7 +167,7 @@ pub fn uninstall(target: Option<&Path>) -> anyhow::Result<()> {
 
     if let Some(hooks) = root
         .as_mapping_mut()
-        .and_then(|m| m.get_mut(&serde_yaml::Value::String("hooks".into())))
+        .and_then(|m| m.get_mut(serde_yaml::Value::String("hooks".into())))
     {
         if let Some(hooks_map) = hooks.as_mapping_mut() {
             let event_names: Vec<serde_yaml::Value> = hooks_map.keys().cloned().collect();
@@ -175,7 +179,7 @@ pub fn uninstall(target: Option<&Path>) -> anyhow::Result<()> {
                     seq.retain(|entry| {
                         entry
                             .as_mapping()
-                            .and_then(|m| m.get(&serde_yaml::Value::String("command".into())))
+                            .and_then(|m| m.get(serde_yaml::Value::String("command".into())))
                             .and_then(|c| c.as_str())
                             .map(|c| c != HOOK_COMMAND)
                             .unwrap_or(true)
@@ -226,8 +230,8 @@ pub fn doctor() -> anyhow::Result<()> {
 
     // Check consent status. Even if hooks are installed, they don't fire
     // until approved once via TTY/env/config.
-    let allowlist_path = dirs::home_dir()
-        .map(|h| h.join(".hermes").join("shell-hooks-allowlist.json"));
+    let allowlist_path =
+        dirs::home_dir().map(|h| h.join(".hermes").join("shell-hooks-allowlist.json"));
     let approved_here = allowlist_path
         .as_ref()
         .and_then(|p| fs::read_to_string(p).ok())
@@ -235,7 +239,12 @@ pub fn doctor() -> anyhow::Result<()> {
         .unwrap_or(false);
     let auto_accept_env = std::env::var("HERMES_ACCEPT_HOOKS")
         .ok()
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
         .unwrap_or(false);
     let consent_ok = approved_here || auto_accept_env;
     println!(
@@ -338,7 +347,7 @@ hooks_auto_accept: false
         let v: serde_yaml::Value = serde_yaml::from_str(&raw).unwrap();
         // Other top-level keys preserved.
         assert_eq!(v["model"].as_str().unwrap(), "claude-sonnet");
-        assert_eq!(v["hooks_auto_accept"].as_bool().unwrap(), false);
+        assert!(!v["hooks_auto_accept"].as_bool().unwrap());
         assert_eq!(
             v["providers"]["anthropic"]["api_key"].as_str().unwrap(),
             "fake"

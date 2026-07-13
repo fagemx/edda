@@ -158,7 +158,7 @@ pub fn suggest_controls_patch(
 pub fn new_patch_id() -> String {
     format!(
         "cpatch_{}",
-        &ulid::Ulid::new().to_string()[..12].to_lowercase()
+        ulid::Ulid::new().to_string()[..12].to_lowercase()
     )
 }
 

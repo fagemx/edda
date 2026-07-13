@@ -67,7 +67,7 @@ pub fn parse_entries(body: &str, file_label: &str) -> Vec<DoctrineEntry> {
                     break;
                 }
                 let cleaned = candidate
-                    .trim_start_matches(|c: char| matches!(c, '-' | '*' | '>' | ' '))
+                    .trim_start_matches(['-', '*', '>', ' '])
                     .to_string();
                 first_line = cleaned;
                 break;
@@ -208,7 +208,9 @@ mod tests {
         let entries = parse_entries(body, "failure-memory.md");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].heading, "FM-1: watch out for silent walls");
-        assert!(entries[0].first_line.contains("retrying without new signal"));
+        assert!(entries[0]
+            .first_line
+            .contains("retrying without new signal"));
     }
 
     #[test]
@@ -255,7 +257,10 @@ mod tests {
         assert_eq!(strip_entry_number("6.3: Paid lesson"), "Paid lesson");
         assert_eq!(strip_entry_number("L1.2: The belief"), "The belief");
         // Not a number: keep as-is (defensive — arbitrary long prefixes stay).
-        assert_eq!(strip_entry_number("Something: with colon"), "Something: with colon");
+        assert_eq!(
+            strip_entry_number("Something: with colon"),
+            "Something: with colon"
+        );
         // No colon: keep as-is.
         assert_eq!(strip_entry_number("No colon here"), "No colon here");
     }
@@ -291,13 +296,17 @@ mod tests {
         // Case + whitespace variation (safe: no clause-break chars).
         let a = "Retrying   Into a Silent WALL";
         let b = "retrying into a silent wall";
-        assert_eq!(normalize_prefix(a), normalize_prefix(b),
-            "scars.rs normalize_prefix is the single family key vocabulary");
-        let entries = parse_entries(
-            &format!("### FM-x: {a}\nbody\n"),
-            "failure-memory.md",
+        assert_eq!(
+            normalize_prefix(a),
+            normalize_prefix(b),
+            "scars.rs normalize_prefix is the single family key vocabulary"
         );
+        let entries = parse_entries(&format!("### FM-x: {a}\nbody\n"), "failure-memory.md");
         let related = related_entries(b, &entries);
-        assert_eq!(related.len(), 1, "case/whitespace-normalized keys collide as scars.rs guarantees");
+        assert_eq!(
+            related.len(),
+            1,
+            "case/whitespace-normalized keys collide as scars.rs guarantees"
+        );
     }
 }

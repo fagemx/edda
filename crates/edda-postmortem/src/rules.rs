@@ -326,7 +326,7 @@ impl RulesStore {
             .filter(|r| r.status == RuleStatus::Active)
             .map(|r| (r.id.clone(), r.hits))
             .collect();
-        active_ids.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by hits descending
+        active_ids.sort_by_key(|entry| std::cmp::Reverse(entry.1)); // Sort by hits descending
         if active_ids.len() > MAX_ACTIVE_RULES {
             let demote_ids: Vec<String> = active_ids[MAX_ACTIVE_RULES..]
                 .iter()

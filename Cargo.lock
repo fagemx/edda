@@ -689,7 +689,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "edda"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -700,6 +700,7 @@ dependencies = [
  "edda-ask",
  "edda-bridge-claude",
  "edda-bridge-codex",
+ "edda-bridge-cursor",
  "edda-bridge-hermes",
  "edda-bridge-openclaw",
  "edda-chronicle",
@@ -732,7 +733,7 @@ dependencies = [
 
 [[package]]
 name = "edda-aggregate"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -746,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "edda-ask"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -759,7 +760,7 @@ dependencies = [
 
 [[package]]
 name = "edda-bridge-claude"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -789,7 +790,7 @@ dependencies = [
 
 [[package]]
 name = "edda-bridge-codex"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -807,8 +808,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "edda-bridge-cursor"
+version = "0.2.1"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "edda-bridge-claude",
+ "edda-pack",
+ "edda-postmortem",
+ "edda-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+]
+
+[[package]]
 name = "edda-bridge-hermes"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -828,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "edda-bridge-openclaw"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "dirs",
@@ -845,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "edda-chronicle"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -867,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "edda-conductor"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -886,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "edda-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "globset",
@@ -904,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "edda-derive"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -917,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "edda-index"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-store",
@@ -929,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "edda-ingestion"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -943,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "edda-ledger"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -963,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "edda-mcp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-ask",
@@ -980,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "edda-notify"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-ledger",
@@ -992,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "edda-pack"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-index",
@@ -1006,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "edda-postmortem"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -1022,7 +1039,7 @@ dependencies = [
 
 [[package]]
 name = "edda-search-fts"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -1039,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "edda-serve"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1073,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "edda-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1089,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "edda-transcript"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "edda-store",

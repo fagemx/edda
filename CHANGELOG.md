@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-13
+
+### Added
+
+- **Cursor bridge** with native hook installation, context injection, lifecycle tracking, and CLI doctor support
+
+### Fixed
+
+- Workspace formatting and Clippy failures that prevented CI from completing
+
 ## [0.2.0] - 2026-07-08
 
 ### Added

@@ -139,7 +139,8 @@ mod tests {
 
     #[test]
     fn parse_subsequent_turn_defaults_to_false() {
-        let stdin = r#"{"hook_event_name":"pre_llm_call","session_id":"h3","cwd":"/tmp","extra":{}}"#;
+        let stdin =
+            r#"{"hook_event_name":"pre_llm_call","session_id":"h3","cwd":"/tmp","extra":{}}"#;
         let env = parse_hook_stdin(stdin).unwrap();
         assert!(!extra_bool(&env, "is_first_turn"));
     }

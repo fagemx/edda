@@ -105,7 +105,7 @@ impl LessonsStore {
     /// Get the top N lessons by occurrence count, for CLAUDE.md sync.
     pub fn top_lessons(&self, n: usize) -> Vec<&StoredLesson> {
         let mut sorted: Vec<&StoredLesson> = self.lessons.iter().collect();
-        sorted.sort_by(|a, b| b.occurrences.cmp(&a.occurrences));
+        sorted.sort_by_key(|lesson| std::cmp::Reverse(lesson.occurrences));
         sorted.truncate(n);
         sorted
     }
