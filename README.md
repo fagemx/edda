@@ -341,12 +341,16 @@ Every event follows a hash-chained JSON schema (stored in the local SQLite ledge
 
 ## Roadmap
 
-- [x] Prebuilt binaries (macOS, Linux, Windows)
-- [x] One-line install script (`curl | sh`)
-- [x] Homebrew tap (`brew install fagemx/tap/edda`)
-- [ ] Decision recall metrics
-- [ ] Cross-project decision search
-- [ ] tmux-based multi-pane TUI (L3)
+Shipped:
+
+- [x] Distribution — prebuilt binaries (macOS, Linux, Windows), one-line installer, Homebrew tap
+- [x] v0.2.0 — `edda watch` TUI, `edda ask`, peers/coordination commands, sub-agent visibility, model/token/cost capture in session hooks, user-level store (`~/.edda/`), post-mortem learned rules
+- [x] Decision deepening — `--paths`-scoped decisions, PreToolUse guard warnings, session-start decision pack, decision status lifecycle
+
+Next:
+
+- [ ] Cross-repo decision query surface — the user-level store already aggregates across projects; a first-class search/ask across repos is the remaining gap
+- [ ] Decision recall metrics — measure how often injected decisions actually change behavior
 
 ## Contributing
 

@@ -339,12 +339,16 @@ edda watch                 # 即時 TUI：peers、事件、決策
 
 ## 路線圖
 
-- [x] 預編譯二進位檔（macOS、Linux、Windows）
-- [x] 一行安裝腳本（`curl | sh`）
-- [x] Homebrew tap（`brew install fagemx/tap/edda`）
-- [ ] 決策回憶指標
-- [ ] 跨專案決策搜尋
-- [ ] 基於 tmux 的多面板 TUI（L3）
+已出貨：
+
+- [x] 發行面——預編譯二進位檔（macOS、Linux、Windows）、一行安裝腳本、Homebrew tap
+- [x] v0.2.0——`edda watch` TUI、`edda ask`、peers／協調指令、sub-agent 可見性、session hooks 記錄 model／token／成本、使用者層 store（`~/.edda/`）、post-mortem learned rules
+- [x] Decision deepening——`--paths` 範圍決策、PreToolUse 守護警告、session 開始注入決策 pack、決策狀態生命週期
+
+接下來：
+
+- [ ] 跨 repo 決策查詢面——使用者層 store 已跨專案聚合；缺的是第一級的跨 repo search／ask 介面
+- [ ] 決策回憶指標——量測注入的決策實際改變行為的頻率
 
 ## 貢獻
 
