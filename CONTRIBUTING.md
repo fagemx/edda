@@ -35,24 +35,12 @@ cargo clippy --workspace --all-targets
 
 ## Project Structure
 
-Edda is a Cargo workspace with 14 crates:
-
-| Crate | Purpose |
-|-------|---------|
-| `edda-core` | Event model, hash chain, schema |
-| `edda-ledger` | SQLite ledger, blob store |
-| `edda-cli` | All CLI commands + TUI (`tui` feature, default on) |
-| `edda-bridge-claude` | Claude Code hooks and context injection |
-| `edda-bridge-openclaw` | OpenClaw hooks and plugin |
-| `edda-mcp` | MCP server (7 tools) |
-| `edda-ask` | Cross-source decision query engine |
-| `edda-derive` | View rebuilding |
-| `edda-pack` | Context generation and budget controls |
-| `edda-transcript` | Transcript ingest and classification |
-| `edda-store` | Per-user store, atomic writes |
-| `edda-search-fts` | Full-text search (Tantivy) |
-| `edda-index` | Transcript index |
-| `edda-conductor` | Multi-phase plan orchestration |
+Edda is a Cargo workspace; the crate map lives in the
+[Architecture section of the README](README.md#architecture) and is kept
+current there — this file deliberately doesn't duplicate it. Quick
+orientation: `edda-core` (event model, hash chain) and `edda-ledger`
+(SQLite store) are the foundation, `edda-cli` is the entry point,
+`edda-bridge-*` integrate each harness, and everything else builds on those.
 
 ## Making Changes
 

@@ -281,7 +281,7 @@ edda watch                 # real-time TUI: peers, events, decisions
 
 ## Architecture
 
-16 Rust crates:
+The Cargo workspace, one crate per organ:
 
 | Crate | What it does |
 |-------|-------------|
@@ -292,14 +292,21 @@ edda watch                 # real-time TUI: peers, events, decisions
 | `edda-bridge-cursor` | Cursor native hooks, context injection, lifecycle tracking |
 | `edda-bridge-codex` | Codex hooks and context injection |
 | `edda-bridge-openclaw` | OpenClaw hooks and plugin |
+| `edda-bridge-hermes` | Hermes agent shell hooks and context injection |
 | `edda-mcp` | MCP server (7 tools) |
+| `edda-serve` | HTTP API server for the workspace |
 | `edda-ask` | Cross-source decision query engine |
+| `edda-aggregate` | Cross-repo aggregation queries and rollup statistics |
 | `edda-derive` | View rebuilding, tiered history |
+| `edda-chronicle` | Chronicle synthesis — recap and cognitive zoom |
 | `edda-pack` | Context generation, budget controls |
 | `edda-transcript` | Transcript delta ingest, classification |
+| `edda-ingestion` | Ingestion trigger evaluation engine |
 | `edda-store` | Per-user store, atomic writes |
 | `edda-search-fts` | Full-text search (Tantivy) |
 | `edda-index` | Transcript index |
+| `edda-postmortem` | L3 post-mortem analysis, learned rules with TTL decay |
+| `edda-notify` | Push notification dispatch for workspace events |
 | `edda-conductor` | Multi-phase plan orchestration — self-domain phase pipelines only; mission dispatch belongs to [bryti](https://github.com/fagemx/bryti), and conductor never touches external work queues |
 
 <details>

@@ -279,7 +279,7 @@ edda watch                 # 即時 TUI：peers、事件、決策
 
 ## 架構
 
-16 個 Rust crates：
+Cargo workspace，一個 crate 一個器官：
 
 | Crate | 功能 |
 |-------|------|
@@ -290,14 +290,21 @@ edda watch                 # 即時 TUI：peers、事件、決策
 | `edda-bridge-cursor` | Cursor 原生 hooks、context 注入、生命週期追蹤 |
 | `edda-bridge-codex` | Codex hooks 與 context 注入 |
 | `edda-bridge-openclaw` | OpenClaw hooks 和插件 |
+| `edda-bridge-hermes` | Hermes agent shell hooks 與 context 注入 |
 | `edda-mcp` | MCP server（7 個工具） |
+| `edda-serve` | Workspace 的 HTTP API server |
 | `edda-ask` | 跨來源決策查詢引擎 |
+| `edda-aggregate` | 跨 repo 聚合查詢與 rollup 統計 |
 | `edda-derive` | View 重建、分層歷史 |
+| `edda-chronicle` | Chronicle 綜合引擎——回顧與認知變焦 |
 | `edda-pack` | Context 生成、預算控制 |
 | `edda-transcript` | Transcript delta 攝取、分類 |
+| `edda-ingestion` | 攝取觸發評估引擎 |
 | `edda-store` | 每用戶 store、原子寫入 |
 | `edda-search-fts` | 全文搜尋（Tantivy） |
 | `edda-index` | Transcript 索引 |
+| `edda-postmortem` | L3 事後分析、learned rules（TTL 衰減） |
+| `edda-notify` | Workspace 事件推播 |
 | `edda-conductor` | 多階段計畫編排 |
 
 <details>
