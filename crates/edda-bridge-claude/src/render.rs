@@ -61,7 +61,12 @@ pub fn writeback() -> String {
      Do NOT record: formatting changes, test fixes, minor refactors, dependency bumps.\n\
      \n\
      Before ending a session, summarize open context:\n  \
-     `edda note \"completed X; decided Y; next: Z\" --tag session`"
+     `edda note \"completed X; decided Y; next: Z\" --tag session`\n\
+     \n\
+     Hand off work on the task rail:\n  \
+     `edda task new \"run integration tests\" --assignee tester --after 12`\n  \
+     `edda task start 13` → work → `edda task done 13 --receipt \"110/601 green, artifact in dist/\"`\n\
+     A done without a receipt does not exist; done unlocks successor tasks (`edda task list`)."
         .to_string()
 }
 

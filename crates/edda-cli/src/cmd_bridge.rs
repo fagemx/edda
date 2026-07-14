@@ -1650,6 +1650,10 @@ mod tests {
         );
         assert!(output.contains("edda decide"), "should teach edda decide");
         assert!(output.contains("edda note"), "should teach edda note");
+        assert!(
+            output.contains("edda task done") && output.contains("--receipt"),
+            "should teach the task rail verbs at the same level as decide/note (§5)"
+        );
     }
 
     #[test]
