@@ -370,11 +370,17 @@ impl SqliteStore {
         }
 
         let status = if p.is_active { "active" } else { "superseded" };
+        // GH-401: preserve the imported decision's authorship. Omitting the
+        // column would fall back to the table default ('human') and rewrite an
+        // agent-authored shared decision into false operator authorship.
+        let authority = edda_core::decision::extract_decision(&p.event.payload)
+            .and_then(|d| d.authority)
+            .unwrap_or_else(|| edda_core::types::authority::UNKNOWN.to_string());
         tx.execute(
             "INSERT INTO decisions
              (event_id, key, value, reason, domain, branch, supersedes_id, is_active,
-              scope, source_project_id, source_event_id, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)",
+              scope, source_project_id, source_event_id, status, authority)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 p.event.event_id,
                 p.key,
@@ -387,6 +393,7 @@ impl SqliteStore {
                 p.source_project_id,
                 p.source_event_id,
                 status,
+                authority,
             ],
         )?;
 

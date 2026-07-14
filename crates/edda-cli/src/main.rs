@@ -683,7 +683,7 @@ enum BridgeClaudeCmd {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Record a binding decision for all sessions
+    /// Record a decision — agent-authored, unratified until `edda ratify`
     Decide {
         /// Decision in key=value format (e.g. "auth.method=JWT RS256")
         decision: String,

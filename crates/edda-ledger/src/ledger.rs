@@ -120,39 +120,55 @@ impl Ledger {
             .with_context(|| format!("Ledger::iter_events_by_type({event_type})"))
     }
 
-    /// Map each decision key to the timestamp of its latest `decision_ratify`
-    /// event (GH-401). Combined with [`crate::view::is_decision_ratified`],
-    /// this derives per-decision ratified-state without storing it: a key is
-    /// binding only while its latest ratification is at least as new as the
-    /// active decision. `branch` filters to one branch, or `None` for all.
-    pub fn ratified_keys(
+    /// The set of `(branch, key)` decisions currently operator-ratified (GH-401).
+    ///
+    /// Ratified-state is derived from event **insertion order** (rowid), not
+    /// timestamps: decision keys are branch-scoped, and RFC3339 strings with
+    /// mixed precision do not sort chronologically. A decision is ratified iff
+    /// a `decision_ratify` event for the same `(branch, key)` has a higher
+    /// rowid than the active decision's own event — i.e. the ratification came
+    /// after the current value. Re-deciding a key (a newer decision event)
+    /// therefore resets ratification until it is ratified again.
+    pub fn ratified_decision_set(
         &self,
-        branch: Option<&str>,
-    ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
-        let events = self
+    ) -> anyhow::Result<std::collections::BTreeSet<(String, String)>> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // Latest ratify rowid per (branch, key). Ratify events are few.
+        let ratifies = self
             .iter_events_by_type("decision_ratify")
-            .context("Ledger::ratified_keys")?;
-        let mut latest: std::collections::BTreeMap<String, String> =
-            std::collections::BTreeMap::new();
-        for e in events {
-            if let Some(b) = branch {
-                if e.branch != b {
-                    continue;
-                }
-            }
+            .context("Ledger::ratified_decision_set: ratifies")?;
+        let mut ratify_rowid: BTreeMap<(String, String), i64> = BTreeMap::new();
+        for e in &ratifies {
             let Some(key) = e.payload.get("key").and_then(|v| v.as_str()) else {
                 continue;
             };
-            latest
-                .entry(key.to_string())
-                .and_modify(|cur| {
-                    if e.ts > *cur {
-                        *cur = e.ts.clone();
-                    }
-                })
-                .or_insert_with(|| e.ts.clone());
+            let rowid = self.rowid_for_event_id(&e.event_id)?.unwrap_or(0);
+            let entry = ratify_rowid
+                .entry((e.branch.clone(), key.to_string()))
+                .or_insert(0);
+            if rowid > *entry {
+                *entry = rowid;
+            }
         }
-        Ok(latest)
+        if ratify_rowid.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+
+        // A decision is ratified iff its active event predates the ratify.
+        let mut out: BTreeSet<(String, String)> = BTreeSet::new();
+        for v in self.active_decisions(None, None, None, None)? {
+            let k = (v.branch.clone(), v.key.clone());
+            if let Some(&rr) = ratify_rowid.get(&k) {
+                // Missing decision rowid (shouldn't happen) → conservatively
+                // unratified: a MAX rowid means no ratify can precede it.
+                let drow = self.rowid_for_event_id(&v.event_id)?.unwrap_or(i64::MAX);
+                if rr > drow {
+                    out.insert(k);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// All `task.*` events in insertion order — the task rail's fold input.
@@ -1057,46 +1073,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[test]
-    fn ratified_keys_returns_latest_ts_per_key() {
-        use edda_core::event::{finalize_event, new_decision_ratify_event};
+    // GH-401: ratified-state derives from insertion order (rowid), not
+    // timestamps, and is branch-scoped.
 
-        let (tmp, ledger) = setup_workspace();
-
-        let append_ratify = |key: &str, ts: &str, parent: Option<&str>| -> String {
-            let mut e = new_decision_ratify_event("main", parent, key, "operator", None).unwrap();
-            e.ts = ts.to_string();
-            finalize_event(&mut e).unwrap();
-            let hash = e.hash.clone();
-            ledger.append_event(&e).unwrap();
-            hash
+    fn append_decision(ledger: &Ledger, branch: &str, key: &str, value: &str) {
+        let parent = ledger.last_event_hash().unwrap();
+        let dp = edda_core::types::DecisionPayload {
+            key: key.into(),
+            value: value.into(),
+            reason: None,
+            scope: None,
+            authority: Some("agent".into()),
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: None,
         };
+        let ev =
+            edda_core::event::new_decision_event(branch, parent.as_deref(), "worker", &dp).unwrap();
+        ledger.append_event(&ev).unwrap();
+    }
 
-        // db.engine ratified twice — the later ts must win, regardless of order.
-        let h1 = append_ratify("db.engine", "2026-07-15T00:00:00Z", None);
-        let h2 = append_ratify("db.engine", "2026-07-14T00:00:00Z", Some(&h1));
-        append_ratify("auth.method", "2026-07-13T00:00:00Z", Some(&h2));
+    fn append_ratify(ledger: &Ledger, branch: &str, key: &str) {
+        let parent = ledger.last_event_hash().unwrap();
+        let ev =
+            edda_core::event::new_decision_ratify_event(branch, parent.as_deref(), key, "op", None)
+                .unwrap();
+        ledger.append_event(&ev).unwrap();
+    }
 
-        let map = ledger.ratified_keys(None).unwrap();
-        assert_eq!(map.len(), 2);
-        assert_eq!(
-            map.get("db.engine").map(String::as_str),
-            Some("2026-07-15T00:00:00Z")
-        );
-        assert_eq!(
-            map.get("auth.method").map(String::as_str),
-            Some("2026-07-13T00:00:00Z")
-        );
-
+    #[test]
+    fn ratified_set_empty_when_no_ratify_events() {
+        let (tmp, ledger) = setup_workspace();
+        append_decision(&ledger, "main", "db.engine", "pg");
+        assert!(ledger.ratified_decision_set().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn ratified_keys_empty_when_no_ratify_events() {
+    fn ratify_after_decide_is_ratified() {
         let (tmp, ledger) = setup_workspace();
-        let note = new_note_event("main", None, "system", "x", &[]).unwrap();
-        ledger.append_event(&note).unwrap();
-        assert!(ledger.ratified_keys(None).unwrap().is_empty());
+        append_decision(&ledger, "main", "db.engine", "pg");
+        append_ratify(&ledger, "main", "db.engine");
+        let set = ledger.ratified_decision_set().unwrap();
+        assert!(set.contains(&("main".into(), "db.engine".into())));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn redecide_after_ratify_resets_to_unratified() {
+        // ratify, then re-decide (higher rowid) → the new value is unratified.
+        let (tmp, ledger) = setup_workspace();
+        append_decision(&ledger, "main", "db.engine", "pg");
+        append_ratify(&ledger, "main", "db.engine");
+        append_decision(&ledger, "main", "db.engine", "sqlite");
+        let set = ledger.ratified_decision_set().unwrap();
+        assert!(!set.contains(&("main".into(), "db.engine".into())));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn reratify_after_redecide_is_ratified_again() {
+        // ratify → re-decide → re-ratify: the last ratify has the highest
+        // rowid, so the current value is ratified. (A timestamp model with
+        // sub-second lexical compare gets this backwards.)
+        let (tmp, ledger) = setup_workspace();
+        append_decision(&ledger, "main", "db.engine", "pg");
+        append_ratify(&ledger, "main", "db.engine");
+        append_decision(&ledger, "main", "db.engine", "sqlite");
+        append_ratify(&ledger, "main", "db.engine");
+        let set = ledger.ratified_decision_set().unwrap();
+        assert!(set.contains(&("main".into(), "db.engine".into())));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ratify_is_branch_scoped() {
+        // Same key active on two branches; ratifying on main must not bind dev.
+        let (tmp, ledger) = setup_workspace();
+        append_decision(&ledger, "main", "db.engine", "pg");
+        append_decision(&ledger, "dev", "db.engine", "sqlite");
+        append_ratify(&ledger, "main", "db.engine");
+        let set = ledger.ratified_decision_set().unwrap();
+        assert!(set.contains(&("main".into(), "db.engine".into())));
+        assert!(!set.contains(&("dev".into(), "db.engine".into())));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

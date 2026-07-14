@@ -114,7 +114,7 @@ pub enum BridgeClaudeCmd {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Record a binding decision for all sessions
+    /// Record a decision — agent-authored, unratified until `edda ratify`
     Decide {
         /// Decision in key=value format (e.g. "auth.method=JWT RS256")
         decision: String,
@@ -1605,8 +1605,8 @@ mod tests {
         .unwrap();
 
         // Before ratify: the active decision is not binding.
-        let keys = ledger.ratified_keys(None).unwrap();
-        assert!(!keys.contains_key("db.engine"));
+        let set = ledger.ratified_decision_set().unwrap();
+        assert!(!set.contains(&("main".to_string(), "db.engine".to_string())));
 
         ratify(
             &tmp,
@@ -1626,8 +1626,8 @@ mod tests {
         // The projection now reports the key as binding.
         let views = ledger.active_decisions(None, None, None, None).unwrap();
         let view = views.iter().find(|v| v.key == "db.engine").unwrap();
-        let keys = ledger.ratified_keys(None).unwrap();
-        assert!(edda_ledger::view::is_decision_ratified(view, &keys));
+        let set = ledger.ratified_decision_set().unwrap();
+        assert!(edda_ledger::view::is_decision_ratified(view, &set));
 
         std::env::remove_var("EDDA_SESSION_ID");
         std::env::remove_var("EDDA_SESSION_LABEL");

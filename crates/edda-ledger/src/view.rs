@@ -79,112 +79,58 @@ pub fn to_view(row: &DecisionRow) -> DecisionView {
 
 /// Whether a decision is operator-ratified (GH-401).
 ///
-/// Ratified-state is derived, never stored: a key is ratified while its
-/// latest `decision_ratify` event is at least as new as the active
-/// decision's timestamp. Re-deciding a key (a newer decision event)
-/// therefore resets ratification — a changed decision must be re-ratified.
-///
-/// `ratified_keys` maps decision key → latest ratify timestamp (RFC3339,
-/// which sorts chronologically). A decision with no `ts` cannot be proven
-/// ratified and is treated as unratified.
+/// Membership test against the ratified `(branch, key)` set produced by
+/// [`crate::Ledger::ratified_decision_set`], which derives ratified-state
+/// from event insertion order (rowid), not timestamps. Keys are
+/// branch-scoped, so both `branch` and `key` must match.
 pub fn is_decision_ratified(
     view: &DecisionView,
-    ratified_keys: &std::collections::BTreeMap<String, String>,
+    ratified: &std::collections::BTreeSet<(String, String)>,
 ) -> bool {
-    let (Some(decision_ts), Some(ratify_ts)) = (view.ts.as_deref(), ratified_keys.get(&view.key))
-    else {
-        return false;
-    };
-    // Compare as instants, not strings: RFC3339 timestamps mix precision
-    // (`...00Z` vs `...00.1Z`), and lexical order gets that backwards
-    // (`.` < `Z`). Parse both; if either fails to parse, treat as unratified
-    // (conservative — never claim binding on an unparseable timestamp).
-    use time::format_description::well_known::Rfc3339;
-    let (Ok(d), Ok(r)) = (
-        time::OffsetDateTime::parse(decision_ts, &Rfc3339),
-        time::OffsetDateTime::parse(ratify_ts, &Rfc3339),
-    ) else {
-        return false;
-    };
-    r >= d
+    ratified.contains(&(view.branch.clone(), view.key.clone()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
 
-    fn ratified_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+    fn ratified_set(pairs: &[(&str, &str)]) -> BTreeSet<(String, String)> {
         pairs
             .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .map(|(b, k)| (b.to_string(), k.to_string()))
             .collect()
     }
 
     #[test]
-    fn ratified_when_ratify_newer_than_decision() {
+    fn ratified_when_branch_and_key_in_set() {
         let mut view = to_view(&make_default_row());
+        view.branch = "main".into();
         view.key = "db.engine".into();
-        view.ts = Some("2026-07-14T10:00:00Z".into());
-        let keys = ratified_map(&[("db.engine", "2026-07-15T09:00:00Z")]);
-        assert!(is_decision_ratified(&view, &keys));
+        assert!(is_decision_ratified(
+            &view,
+            &ratified_set(&[("main", "db.engine")])
+        ));
     }
 
     #[test]
-    fn unratified_when_ratify_older_than_decision() {
-        // Decision was changed after the last ratification → stale, unratified.
+    fn unratified_when_not_in_set() {
         let mut view = to_view(&make_default_row());
+        view.branch = "main".into();
         view.key = "db.engine".into();
-        view.ts = Some("2026-07-15T12:00:00Z".into());
-        let keys = ratified_map(&[("db.engine", "2026-07-14T09:00:00Z")]);
-        assert!(!is_decision_ratified(&view, &keys));
+        assert!(!is_decision_ratified(&view, &BTreeSet::new()));
     }
 
     #[test]
-    fn ratified_when_timestamps_equal() {
+    fn unratified_when_only_other_branch_ratified() {
+        // Keys are branch-scoped: a ratify on `dev` must not bind `main`.
         let mut view = to_view(&make_default_row());
-        view.key = "k".into();
-        view.ts = Some("2026-07-15T10:00:00Z".into());
-        let keys = ratified_map(&[("k", "2026-07-15T10:00:00Z")]);
-        assert!(is_decision_ratified(&view, &keys));
-    }
-
-    #[test]
-    fn unratified_when_no_ratify_event() {
-        let mut view = to_view(&make_default_row());
-        view.key = "k".into();
-        view.ts = Some("2026-07-15T10:00:00Z".into());
-        assert!(!is_decision_ratified(&view, &BTreeMap::new()));
-    }
-
-    #[test]
-    fn mixed_precision_timestamps_compare_as_instants() {
-        // Decision re-made 0.1s AFTER the ratification → must be unratified.
-        // Lexical string compare gets this wrong ("...00.1Z" < "...00Z"
-        // because '.' < 'Z'), so this guards the parse-based comparison.
-        let mut view = to_view(&make_default_row());
+        view.branch = "main".into();
         view.key = "db.engine".into();
-        view.ts = Some("2026-07-15T00:00:00.1Z".into());
-        let keys = ratified_map(&[("db.engine", "2026-07-15T00:00:00Z")]);
-        assert!(!is_decision_ratified(&view, &keys));
-    }
-
-    #[test]
-    fn unparseable_timestamp_is_unratified() {
-        let mut view = to_view(&make_default_row());
-        view.key = "k".into();
-        view.ts = Some("not-a-timestamp".into());
-        let keys = ratified_map(&[("k", "2026-07-15T00:00:00Z")]);
-        assert!(!is_decision_ratified(&view, &keys));
-    }
-
-    #[test]
-    fn unratified_when_decision_has_no_ts() {
-        let mut view = to_view(&make_default_row());
-        view.key = "k".into();
-        view.ts = None;
-        let keys = ratified_map(&[("k", "2026-07-15T10:00:00Z")]);
-        assert!(!is_decision_ratified(&view, &keys));
+        assert!(!is_decision_ratified(
+            &view,
+            &ratified_set(&[("dev", "db.engine")])
+        ));
     }
 
     fn make_default_row() -> DecisionRow {

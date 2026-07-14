@@ -442,7 +442,7 @@ fn collect_active_decisions(cwd: &str) -> Option<String> {
     let root = edda_ledger::EddaPaths::find_root(cwd_path)?;
     let ledger = edda_ledger::Ledger::open(&root).ok()?;
     let decisions = ledger.active_decisions(None, None, None, None).ok()?;
-    let ratified = ledger.ratified_keys(None).ok()?;
+    let ratified = ledger.ratified_decision_set().ok()?;
     render_decisions_two_tier(&decisions, &ratified)
 }
 
@@ -469,7 +469,7 @@ fn authorship_tag(authority: &str) -> &'static str {
 /// authorship so agent-authored and legacy decisions read as non-binding.
 fn render_decisions_two_tier(
     decisions: &[edda_ledger::view::DecisionView],
-    ratified: &std::collections::BTreeMap<String, String>,
+    ratified: &std::collections::BTreeSet<(String, String)>,
 ) -> Option<String> {
     if decisions.is_empty() {
         return None;
@@ -854,8 +854,8 @@ mod tests {
             dv("db.engine", "postgres", "operator", "2026-07-14T00:00:00Z"),
             dv("api.style", "REST", "agent", "2026-07-14T00:00:00Z"),
         ];
-        let mut ratified = std::collections::BTreeMap::new();
-        ratified.insert("db.engine".to_string(), "2026-07-15T00:00:00Z".to_string());
+        let ratified: std::collections::BTreeSet<(String, String)> =
+            [("main".to_string(), "db.engine".to_string())].into();
 
         let out = render_decisions_two_tier(&decisions, &ratified).unwrap();
         // Ratified section names the binding key; unratified section names the other.
@@ -876,7 +876,7 @@ mod tests {
             dv("c.d", "2", "human", "2026-07-14T00:00:00Z"),
         ];
         let out =
-            render_decisions_two_tier(&decisions, &std::collections::BTreeMap::new()).unwrap();
+            render_decisions_two_tier(&decisions, &std::collections::BTreeSet::new()).unwrap();
         assert!(
             !out.contains("Operator-ratified"),
             "no ratified section expected"
@@ -891,7 +891,7 @@ mod tests {
         // event — they must land in the unratified tier, never binding.
         let decisions = vec![dv("legacy.key", "v", "human", "2026-01-01T00:00:00Z")];
         let out =
-            render_decisions_two_tier(&decisions, &std::collections::BTreeMap::new()).unwrap();
+            render_decisions_two_tier(&decisions, &std::collections::BTreeSet::new()).unwrap();
         assert!(!out.contains("Operator-ratified"));
         assert!(out.contains("Unratified"));
         assert!(out.contains("legacy.key"));
@@ -899,14 +899,14 @@ mod tests {
 
     #[test]
     fn two_tier_empty_returns_none() {
-        assert!(render_decisions_two_tier(&[], &std::collections::BTreeMap::new()).is_none());
+        assert!(render_decisions_two_tier(&[], &std::collections::BTreeSet::new()).is_none());
     }
 
     #[test]
     fn two_tier_all_ratified_omits_unratified_section() {
         let decisions = vec![dv("k", "v", "operator", "2026-07-14T00:00:00Z")];
-        let mut ratified = std::collections::BTreeMap::new();
-        ratified.insert("k".to_string(), "2026-07-15T00:00:00Z".to_string());
+        let ratified: std::collections::BTreeSet<(String, String)> =
+            [("main".to_string(), "k".to_string())].into();
         let out = render_decisions_two_tier(&decisions, &ratified).unwrap();
         assert!(out.contains("Operator-ratified"));
         assert!(!out.contains("Unratified"));

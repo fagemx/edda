@@ -253,7 +253,7 @@ edda watch                 # real-time TUI: peers, events, decisions
 | Command | Description |
 |---------|-------------|
 | `edda init` | Initialize `.edda/` (auto-installs hooks if `.claude/` detected) |
-| `edda decide` | Record a binding decision |
+| `edda decide` | Record a decision (agent-authored; `edda ratify` to make binding) |
 | `edda note` | Record a note |
 | `edda ratify` | Confer operator authority on a decision (recorded ≠ ratified) |
 | `edda task` | Task rail: create, hand off, and track tasks (`new/start/done/fail/list/show`) |

@@ -501,20 +501,19 @@ fn authorship_tag(authority: &str) -> &'static str {
 ///
 /// Returns a pack with 0 groups if no active decisions exist.
 pub fn build_decision_pack(repo_root: &Path, branch: &str, max_items: usize) -> DecisionPack {
-    let (views, ratified): (Vec<DecisionView>, BTreeMap<String, String>) =
-        match edda_ledger::Ledger::open(repo_root) {
-            Ok(ledger) => (
-                ledger
-                    .active_decisions_limited(None, None, None, None, max_items)
-                    .unwrap_or_default(),
-                // GH-401: ratified-state to split tiers at render time.
-                // Decision keys are workspace-global and active_decisions is
-                // not branch-filtered, so ratified_keys must not be either —
-                // otherwise a ratification could bind/mislabel across branches.
-                ledger.ratified_keys(None).unwrap_or_default(),
-            ),
-            Err(_) => (Vec::new(), BTreeMap::new()),
-        };
+    let (views, ratified): (
+        Vec<DecisionView>,
+        std::collections::BTreeSet<(String, String)>,
+    ) = match edda_ledger::Ledger::open(repo_root) {
+        Ok(ledger) => (
+            ledger
+                .active_decisions_limited(None, None, None, None, max_items)
+                .unwrap_or_default(),
+            // GH-401: ratified (branch, key) set, derived by rowid order.
+            ledger.ratified_decision_set().unwrap_or_default(),
+        ),
+        Err(_) => (Vec::new(), std::collections::BTreeSet::new()),
+    };
 
     if views.is_empty() {
         return DecisionPack {
