@@ -107,6 +107,20 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
     },
+    /// Ratify an active decision — confer operator authority (GH-401)
+    Ratify {
+        /// Decision key to ratify (e.g. "db.engine")
+        key: String,
+        /// Optional note recorded with the ratification
+        #[arg(long)]
+        note: Option<String>,
+        /// Who ratified (defaults to the resolved session label)
+        #[arg(long)]
+        by: Option<String>,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Manage project groups for cross-project sync
     Group {
         #[command(subcommand)]
@@ -984,6 +998,18 @@ fn main() -> anyhow::Result<()> {
             Some(&scope),
             &paths,
             &tags,
+        ),
+        Command::Ratify {
+            key,
+            note,
+            by,
+            session,
+        } => cmd_bridge::ratify(
+            &repo_root,
+            &key,
+            note.as_deref(),
+            by.as_deref(),
+            session.as_deref(),
         ),
         Command::Group { cmd } => cmd_group::execute(cmd, &repo_root),
         Command::Sync { from, dry_run } => cmd_sync::execute(&repo_root, from.as_deref(), dry_run),
