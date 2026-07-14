@@ -173,6 +173,7 @@ mod tests {
             rel: edda_core::types::rel::SUPERSEDES.to_string(),
             note: Some("key 'db.engine' re-decided".to_string()),
         });
+        event2.parent_hash = ledger.last_event_hash().unwrap();
         edda_core::event::finalize_event(&mut event2).unwrap();
         ledger.append_event(&event2).unwrap();
 

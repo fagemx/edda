@@ -1791,6 +1791,10 @@ mod tests {
             output.contains("edda task done") && output.contains("--receipt"),
             "should teach the task rail verbs at the same level as decide/note (§5)"
         );
+        assert!(
+            output.contains("edda ask") && output.contains("edda search query"),
+            "should teach the read verbs — read before you write, or the ledger is write-only"
+        );
     }
 
     #[test]

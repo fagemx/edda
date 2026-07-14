@@ -1,9 +1,10 @@
 //! Decision queries: active decisions, timelines, domains, cross-project sync.
 
-use rusqlite::params;
+use rusqlite::{params, Transaction, TransactionBehavior};
 use std::time::Instant;
 use tracing::debug;
 
+use super::events::validate_event_for_append;
 use super::mappers::*;
 use super::types::*;
 use super::SqliteStore;
@@ -333,7 +334,8 @@ impl SqliteStore {
         let refs_provenance = serde_json::to_string(&p.event.refs.provenance)?;
         let digests = serde_json::to_string(&p.event.digests)?;
 
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        validate_event_for_append(&tx, p.event)?;
 
         tx.execute(
             "INSERT INTO events (
@@ -359,12 +361,12 @@ impl SqliteStore {
             ],
         )?;
 
-        // If active, deactivate prior local decision with same key
+        // If active, deactivate the prior winner regardless of origin so the
+        // branch/key active invariant remains deterministic.
         if p.is_active {
             tx.execute(
                 "UPDATE decisions SET is_active = FALSE, status = 'superseded'
-                 WHERE key = ?1 AND branch = ?2 AND is_active = TRUE
-                   AND source_project_id IS NULL",
+                 WHERE key = ?1 AND branch = ?2 AND is_active = TRUE",
                 params![p.key, p.event.branch],
             )?;
         }
@@ -373,14 +375,13 @@ impl SqliteStore {
         // GH-401: preserve the imported decision's authorship. Omitting the
         // column would fall back to the table default ('human') and rewrite an
         // agent-authored shared decision into false operator authorship.
-        let authority = edda_core::decision::extract_decision(&p.event.payload)
-            .and_then(|d| d.authority)
-            .unwrap_or_else(|| edda_core::types::authority::UNKNOWN.to_string());
         tx.execute(
             "INSERT INTO decisions
              (event_id, key, value, reason, domain, branch, supersedes_id, is_active,
-              scope, source_project_id, source_event_id, status, authority)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12)",
+               scope, source_project_id, source_event_id, status, authority,
+               affected_paths, tags, review_after, reversibility, village_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11,
+                     ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 p.event.event_id,
                 p.key,
@@ -393,7 +394,12 @@ impl SqliteStore {
                 p.source_project_id,
                 p.source_event_id,
                 status,
-                authority,
+                p.authority,
+                p.affected_paths,
+                p.tags,
+                p.review_after,
+                p.reversibility,
+                p.village_id,
             ],
         )?;
 

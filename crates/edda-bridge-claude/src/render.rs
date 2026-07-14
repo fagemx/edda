@@ -48,9 +48,15 @@ pub fn apply_budget(content: &str, budget: usize) -> String {
 
 // ── Write-Back Protocol ──
 
-/// Static write-back protocol text that teaches agents to use `edda decide` and `edda note`.
+/// Static write-back protocol text that teaches agents the read verbs first
+/// (ask/search), then the write verbs (decide/note/task). Read before you
+/// write: an unqueried ledger is a write-only ledger.
 pub fn writeback() -> String {
     "## Write-Back Protocol\n\
+     Read before you write — the ledger answers questions:\n  \
+     `edda ask \"<domain or keyword>\"` — has this been decided already? (run before any `edda decide`)\n  \
+     `edda search query \"<keyword>\"` — has this been done before? (run before building)\n\
+     \n\
      Record architectural decisions with: `edda decide \"domain.aspect=value\" --reason \"justification\"`\n\
      \n\
      Examples:\n  \

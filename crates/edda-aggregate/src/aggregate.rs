@@ -928,6 +928,12 @@ mod tests {
         event
     }
 
+    fn append_test_event(ledger: &Ledger, mut event: edda_core::types::Event) {
+        event.parent_hash = ledger.last_event_hash().unwrap();
+        edda_core::event::finalize_event(&mut event).unwrap();
+        ledger.append_event(&event).unwrap();
+    }
+
     #[test]
     fn file_edits_by_date_empty_projects() {
         let result = file_edits_by_date(&[], &DateRange::default());
@@ -945,7 +951,7 @@ mod tests {
 
         let ledger = Ledger::open(root).unwrap();
         let event = make_session_event("sess-1", &[("src/main.rs", 5), ("src/lib.rs", 3)]);
-        ledger.append_event(&event).unwrap();
+        append_test_event(&ledger, event);
 
         let entry = ProjectEntry {
             project_id: "test".to_string(),
@@ -985,10 +991,10 @@ mod tests {
 
         // Two different sessions editing the same file
         let event1 = make_session_event("sess-1", &[("src/main.rs", 5)]);
-        ledger.append_event(&event1).unwrap();
+        append_test_event(&ledger, event1);
 
         let event2 = make_session_event("sess-2", &[("src/main.rs", 3)]);
-        ledger.append_event(&event2).unwrap();
+        append_test_event(&ledger, event2);
 
         let entry = ProjectEntry {
             project_id: "test".to_string(),
@@ -1045,21 +1051,17 @@ mod tests {
         let ledger = Ledger::open(root).unwrap();
 
         // Add a commit event
-        ledger.append_event(&make_commit_event()).unwrap();
+        append_test_event(&ledger, make_commit_event());
 
         // Add an execution event with cost
-        ledger
-            .append_event(&make_execution_event(0.05, "success"))
-            .unwrap();
+        append_test_event(&ledger, make_execution_event(0.05, "success"));
 
         // Add a failed execution event
-        ledger
-            .append_event(&make_execution_event(0.02, "failure"))
-            .unwrap();
+        append_test_event(&ledger, make_execution_event(0.02, "failure"));
 
         // Add a session event with file edits
         let session_event = make_session_event("sess-1", &[("src/main.rs", 3), ("src/lib.rs", 1)]);
-        ledger.append_event(&session_event).unwrap();
+        append_test_event(&ledger, session_event);
 
         let entry = ProjectEntry {
             project_id: "test".to_string(),
@@ -1108,15 +1110,11 @@ mod tests {
         edda_ledger::ledger::init_head(&paths, "main").unwrap();
 
         let ledger = Ledger::open(root).unwrap();
-        ledger.append_event(&make_commit_event()).unwrap();
-        ledger
-            .append_event(&make_execution_event(0.10, "success"))
-            .unwrap();
-        ledger
-            .append_event(&make_execution_event(0.03, "failure"))
-            .unwrap();
+        append_test_event(&ledger, make_commit_event());
+        append_test_event(&ledger, make_execution_event(0.10, "success"));
+        append_test_event(&ledger, make_execution_event(0.03, "failure"));
         let session_event = make_session_event("sess-1", &[("src/main.rs", 7)]);
-        ledger.append_event(&session_event).unwrap();
+        append_test_event(&ledger, session_event);
 
         let entry = ProjectEntry {
             project_id: "test".to_string(),

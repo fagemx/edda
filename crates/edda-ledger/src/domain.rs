@@ -165,6 +165,12 @@ pub struct ImportParams<'a> {
     pub source_project_id: &'a str,
     pub source_event_id: &'a str,
     pub is_active: bool,
+    pub authority: &'a str,
+    pub affected_paths: &'a str,
+    pub tags: &'a str,
+    pub review_after: Option<&'a str>,
+    pub reversibility: &'a str,
+    pub village_id: Option<&'a str>,
 }
 
 /// A task brief row.

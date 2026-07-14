@@ -1,7 +1,7 @@
 use edda_core::event::new_merge_event;
 use edda_derive::rebuild_all;
 use edda_ledger::lock::WorkspaceLock;
-use edda_ledger::Ledger;
+use edda_ledger::{validate_branch_name, Ledger};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -16,6 +16,8 @@ fn collect_commit_ids(ledger: &Ledger, branch: &str) -> anyhow::Result<Vec<Strin
 }
 
 pub fn execute(repo_root: &Path, src: &str, dst: &str, reason: &str) -> anyhow::Result<()> {
+    validate_branch_name(src)?;
+    validate_branch_name(dst)?;
     let ledger = Ledger::open(repo_root)?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
@@ -25,10 +27,10 @@ pub fn execute(repo_root: &Path, src: &str, dst: &str, reason: &str) -> anyhow::
     }
 
     // Check both branches exist
-    if !ledger.paths.branch_dir(src).exists() {
+    if !ledger.paths.branch_dir(src)?.exists() {
         anyhow::bail!("branch does not exist: {src}");
     }
-    if !ledger.paths.branch_dir(dst).exists() {
+    if !ledger.paths.branch_dir(dst)?.exists() {
         anyhow::bail!("branch does not exist: {dst}");
     }
 

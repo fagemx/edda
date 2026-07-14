@@ -63,10 +63,61 @@ impl EddaPaths {
         self.edda_dir.is_dir()
     }
 
-    /// Resolve a branch directory under `.edda/branches/<name>/`.
-    pub fn branch_dir(&self, name: &str) -> PathBuf {
-        self.branches_dir.join(name)
+    /// Resolve a validated branch directory under `.edda/branches/<name>/`.
+    pub fn branch_dir(&self, name: &str) -> anyhow::Result<PathBuf> {
+        validate_branch_name(name)?;
+        let candidate = self.branches_dir.join(name);
+        if candidate.strip_prefix(&self.branches_dir).is_err() {
+            anyhow::bail!("invalid branch name: resolved path escapes branch root");
+        }
+
+        if self.branches_dir.exists() {
+            let canonical_root = self.branches_dir.canonicalize()?;
+            let mut existing = candidate.as_path();
+            while !existing.exists() {
+                existing = existing.parent().ok_or_else(|| {
+                    anyhow::anyhow!("invalid branch name: no contained path ancestor")
+                })?;
+            }
+            let canonical_existing = existing.canonicalize()?;
+            if !canonical_existing.starts_with(&canonical_root) {
+                anyhow::bail!("invalid branch name: resolved path escapes branch root");
+            }
+        }
+
+        Ok(candidate)
     }
+}
+
+/// Validate a branch name before using it in an event or filesystem path.
+///
+/// Hierarchical names such as `feature/auth` are supported. Empty path
+/// components, `.` and `..`, absolute paths, platform prefixes, and path
+/// separators other than `/` are rejected.
+pub fn validate_branch_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty() || name.len() > 64 {
+        anyhow::bail!("invalid branch name: must be 1-64 characters");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+    {
+        anyhow::bail!("invalid branch name: only [A-Za-z0-9._-/] allowed");
+    }
+    if name
+        .split('/')
+        .any(|part| part.is_empty() || matches!(part, "." | ".."))
+    {
+        anyhow::bail!("invalid branch name: path components must not be empty, '.' or '..'");
+    }
+    if Path::new(name).is_absolute()
+        || !Path::new(name)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        anyhow::bail!("invalid branch name: absolute or prefixed paths are not allowed");
+    }
+    Ok(())
 }
 
 impl EddaPaths {
@@ -118,6 +169,38 @@ mod tests {
             p.archive_blobs_dir,
             PathBuf::from("/tmp/repo/.edda/archive/blobs")
         );
+    }
+
+    #[test]
+    fn branch_dir_accepts_hierarchical_branch_name() {
+        let paths = EddaPaths::discover("/tmp/repo");
+
+        let branch = paths.branch_dir("feature/auth").unwrap();
+
+        assert_eq!(branch, paths.branches_dir.join("feature").join("auth"));
+    }
+
+    #[test]
+    fn branch_dir_rejects_path_traversal_and_absolute_names() {
+        let paths = EddaPaths::discover("/tmp/repo");
+
+        for name in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "feature/../escape",
+            "feature//escape",
+            "/absolute",
+            r"C:\escape",
+            r"..\escape",
+            r"\\server\share",
+        ] {
+            assert!(
+                paths.branch_dir(name).is_err(),
+                "accepted unsafe name: {name}"
+            );
+        }
     }
 
     #[test]

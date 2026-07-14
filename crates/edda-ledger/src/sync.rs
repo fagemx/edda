@@ -112,17 +112,21 @@ pub fn sync_from_sources(
                 continue;
             }
 
-            // Check for local conflict (use raw row to access source_project_id)
-            let local = target.sqlite.find_active_decision(&branch, &decision.key)?;
-            let is_conflict = local
+            // Any differing active value is a conflict, regardless of whether
+            // the current winner originated locally or from another source.
+            let current = target.sqlite.find_active_decision(&branch, &decision.key)?;
+            let is_conflict = current
                 .as_ref()
-                .map(|l| l.value != decision.value && l.source_project_id.is_none())
+                .map(|active| active.value != decision.value)
                 .unwrap_or(false);
 
             if is_conflict {
                 result.conflicts.push(ConflictInfo {
                     key: decision.key.clone(),
-                    local_value: local.as_ref().map(|l| l.value.clone()).unwrap_or_default(),
+                    local_value: current
+                        .as_ref()
+                        .map(|active| active.value.clone())
+                        .unwrap_or_default(),
                     remote_value: decision.value.clone(),
                     source_project: source.project_name.clone(),
                 });
@@ -162,6 +166,12 @@ pub fn sync_from_sources(
                 source_project_id: &source.project_id,
                 source_event_id: &decision.event_id,
                 is_active: import_active,
+                authority: &decision.authority,
+                affected_paths: &decision.affected_paths,
+                tags: &decision.tags,
+                review_after: decision.review_after.as_deref(),
+                reversibility: &decision.reversibility,
+                village_id: decision.village_id.as_deref(),
             })?;
 
             result.imported.push(ImportedDecision {
@@ -183,6 +193,8 @@ fn make_import_event(
     source_project_id: &str,
     source_project_name: &str,
 ) -> anyhow::Result<Event> {
+    let affected_paths: serde_json::Value = serde_json::from_str(&decision.affected_paths)?;
+    let decision_tags: serde_json::Value = serde_json::from_str(&decision.tags)?;
     let payload = serde_json::json!({
         "role": "system",
         "text": format!(
@@ -197,6 +209,12 @@ fn make_import_event(
             "value": decision.value,
             "reason": decision.reason,
             "scope": decision.scope,
+            "authority": decision.authority,
+            "affected_paths": affected_paths,
+            "tags": decision_tags,
+            "review_after": decision.review_after,
+            "reversibility": decision.reversibility,
+            "village_id": decision.village_id,
         },
         "source_project_id": source_project_id,
         "source_project_name": source_project_name,
@@ -385,6 +403,140 @@ mod tests {
         assert_eq!(result.imported.len(), 1);
 
         let _ = std::fs::remove_dir_all(&tmp_src);
+        let _ = std::fs::remove_dir_all(&tmp_tgt);
+    }
+
+    #[test]
+    fn sync_preserves_governance_metadata() {
+        let (tmp_src, source) = setup_workspace();
+        let (tmp_tgt, target) = setup_workspace();
+        let payload = edda_core::types::DecisionPayload {
+            key: "security.auth".to_string(),
+            value: "passkey".to_string(),
+            reason: Some("phishing resistance".to_string()),
+            scope: Some(DecisionScope::Shared),
+            authority: Some("human".to_string()),
+            affected_paths: Some(vec!["crates/auth/**".to_string()]),
+            tags: Some(vec!["security".to_string(), "identity".to_string()]),
+            review_after: Some("2027-01-01".to_string()),
+            reversibility: Some("hard".to_string()),
+            village_id: Some("village-alpha".to_string()),
+        };
+        let event = edda_core::event::new_decision_event("main", None, "system", &payload).unwrap();
+        source.append_event(&event).unwrap();
+        let sources = vec![SyncSource {
+            project_id: "source_meta".to_string(),
+            project_name: "source-meta".to_string(),
+            ledger_path: tmp_src.clone(),
+        }];
+
+        sync_from_sources(&target, &sources, "target", false).unwrap();
+        let imported = target
+            .sqlite
+            .find_active_decision("main", "security.auth")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(imported.authority, "human");
+        assert_eq!(imported.affected_paths, r#"["crates/auth/**"]"#);
+        assert_eq!(imported.tags, r#"["security","identity"]"#);
+        assert_eq!(imported.review_after.as_deref(), Some("2027-01-01"));
+        assert_eq!(imported.reversibility, "hard");
+        assert_eq!(imported.village_id.as_deref(), Some("village-alpha"));
+        assert_eq!(imported.scope, "shared");
+        assert_eq!(imported.source_project_id.as_deref(), Some("source_meta"));
+        assert_eq!(
+            imported.source_event_id.as_deref(),
+            Some(event.event_id.as_str())
+        );
+
+        let governed = target
+            .query_by_paths(&["crates/auth/src/lib.rs"], Some("main"), None)
+            .unwrap();
+        assert_eq!(governed.len(), 1);
+        assert_eq!(governed[0].key, "security.auth");
+
+        let import_event = target.get_event(&imported.event_id).unwrap().unwrap();
+        assert_eq!(import_event.refs.events, vec![event.event_id.clone()]);
+        assert_eq!(import_event.refs.provenance.len(), 1);
+        assert_eq!(
+            import_event.refs.provenance[0].rel,
+            edda_core::types::rel::IMPORTED_FROM
+        );
+        assert_eq!(import_event.refs.provenance[0].target, event.event_id);
+
+        let _ = std::fs::remove_dir_all(&tmp_src);
+        let _ = std::fs::remove_dir_all(&tmp_tgt);
+    }
+
+    #[test]
+    fn sync_keeps_one_active_decision_across_remote_sources() {
+        let (tmp_a, ledger_a) = setup_workspace();
+        let (tmp_b, ledger_b) = setup_workspace();
+        let (tmp_tgt, target) = setup_workspace();
+        write_shared_decision(&ledger_a, "api.version", "v3", "source a");
+        write_shared_decision(&ledger_b, "api.version", "v4", "source b");
+
+        let sources = vec![
+            SyncSource {
+                project_id: "source_a".to_string(),
+                project_name: "source-a".to_string(),
+                ledger_path: tmp_a.clone(),
+            },
+            SyncSource {
+                project_id: "source_b".to_string(),
+                project_name: "source-b".to_string(),
+                ledger_path: tmp_b.clone(),
+            },
+        ];
+
+        let result = sync_from_sources(&target, &sources, "target", false).unwrap();
+        let active = target
+            .sqlite
+            .active_decisions(None, Some("api.version"), None, None, None)
+            .unwrap();
+
+        assert_eq!(result.conflicts.len(), 1);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].value, "v3");
+
+        let _ = std::fs::remove_dir_all(&tmp_a);
+        let _ = std::fs::remove_dir_all(&tmp_b);
+        let _ = std::fs::remove_dir_all(&tmp_tgt);
+    }
+
+    #[test]
+    fn sync_replaces_same_value_import_without_duplicate_active_rows() {
+        let (tmp_a, ledger_a) = setup_workspace();
+        let (tmp_b, ledger_b) = setup_workspace();
+        let (tmp_tgt, target) = setup_workspace();
+        write_shared_decision(&ledger_a, "api.version", "v3", "source a");
+        write_shared_decision(&ledger_b, "api.version", "v3", "source b");
+        let sources = vec![
+            SyncSource {
+                project_id: "source_a".to_string(),
+                project_name: "source-a".to_string(),
+                ledger_path: tmp_a.clone(),
+            },
+            SyncSource {
+                project_id: "source_b".to_string(),
+                project_name: "source-b".to_string(),
+                ledger_path: tmp_b.clone(),
+            },
+        ];
+
+        let result = sync_from_sources(&target, &sources, "target", false).unwrap();
+        let active = target
+            .sqlite
+            .active_decisions(None, Some("api.version"), None, None, None)
+            .unwrap();
+
+        assert!(result.conflicts.is_empty());
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].source_project_id.as_deref(), Some("source_b"));
+
+        let _ = std::fs::remove_dir_all(&tmp_a);
+        let _ = std::fs::remove_dir_all(&tmp_b);
         let _ = std::fs::remove_dir_all(&tmp_tgt);
     }
 

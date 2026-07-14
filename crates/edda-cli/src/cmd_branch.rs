@@ -2,7 +2,7 @@ use clap::Subcommand;
 use edda_core::event::{new_branch_create_event, new_note_event};
 use edda_derive::{rebuild_all, rebuild_branch};
 use edda_ledger::lock::WorkspaceLock;
-use edda_ledger::Ledger;
+use edda_ledger::{validate_branch_name, Ledger};
 use std::path::Path;
 
 // ── CLI Schema ──
@@ -29,29 +29,15 @@ pub fn run(cmd: BranchCmd, repo_root: &Path) -> anyhow::Result<()> {
 
 // ── Command Implementations ──
 
-fn validate_branch_name(name: &str) -> anyhow::Result<()> {
-    if name.is_empty() || name.len() > 64 {
-        anyhow::bail!("invalid branch name: must be 1-64 characters");
-    }
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' || c == '/')
-    {
-        anyhow::bail!("invalid branch name: only [A-Za-z0-9._-/] allowed");
-    }
-    Ok(())
-}
-
 pub fn create(repo_root: &Path, name: &str, purpose: &str) -> anyhow::Result<()> {
     validate_branch_name(name)?;
-
     let ledger = Ledger::open(repo_root)?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
     let head = ledger.head_branch()?;
 
     // Check branch doesn't already exist
-    let branch_dir = ledger.paths.branch_dir(name);
+    let branch_dir = ledger.paths.branch_dir(name)?;
     if branch_dir.exists() {
         anyhow::bail!("branch already exists: {name}");
     }
