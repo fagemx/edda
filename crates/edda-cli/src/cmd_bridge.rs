@@ -1363,6 +1363,17 @@ mod tests {
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// Serialize tests that mutate process-global env vars
+    /// (EDDA_SESSION_ID/LABEL, EDDA_HOOK_TIMEOUT_MS) — without this they
+    /// race each other under the parallel test runner. Same pattern as
+    /// edda-bridge-claude's ENV_LOCK. Poisoned locks are recovered so one
+    /// failing test doesn't cascade.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     fn setup_workspace() -> (std::path::PathBuf, edda_ledger::Ledger) {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let tmp = std::env::temp_dir().join(format!("edda_bridge_test_{}_{n}", std::process::id()));
@@ -1421,6 +1432,7 @@ mod tests {
 
     #[test]
     fn decide_writes_binding_to_coordination_log() {
+        let _env = env_guard();
         let (tmp, _ledger) = setup_workspace();
         let pid = edda_store::project_id(&tmp);
         let _ = edda_store::ensure_dirs(&pid);
@@ -1464,6 +1476,7 @@ mod tests {
 
     #[test]
     fn decide_writes_structured_ledger_event() {
+        let _env = env_guard();
         let (tmp, ledger) = setup_workspace();
         let pid = edda_store::project_id(&tmp);
         let _ = edda_store::ensure_dirs(&pid);
@@ -1506,6 +1519,7 @@ mod tests {
 
     #[test]
     fn decide_supersedes_prior_decision_same_key() {
+        let _env = env_guard();
         let (tmp, ledger) = setup_workspace();
         let pid = edda_store::project_id(&tmp);
         let _ = edda_store::ensure_dirs(&pid);
@@ -1551,6 +1565,7 @@ mod tests {
 
     #[test]
     fn resolve_session_id_tiers() {
+        let _env = env_guard();
         let pid = "test_resolve_sid_tiers";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1767,12 +1782,14 @@ mod tests {
 
     #[test]
     fn hook_timeout_ms_defaults_to_60s() {
+        let _env = env_guard();
         std::env::remove_var("EDDA_HOOK_TIMEOUT_MS");
         assert_eq!(hook_timeout_ms(), 60_000);
     }
 
     #[test]
     fn hook_timeout_ms_reads_env() {
+        let _env = env_guard();
         std::env::set_var("EDDA_HOOK_TIMEOUT_MS", "5000");
         assert_eq!(hook_timeout_ms(), 5000);
         std::env::remove_var("EDDA_HOOK_TIMEOUT_MS");
