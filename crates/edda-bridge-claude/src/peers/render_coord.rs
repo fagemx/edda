@@ -290,9 +290,9 @@ pub fn render_coordination_protocol_with(
 
 /// Render lightweight peer updates for UserPromptSubmit (new recorded decisions/requests).
 ///
-/// - Multi-session: peers header + tasks + bindings + requests.
-/// - Solo with bindings: binding lines only (no header).
-/// - Solo without bindings: returns None.
+/// - Multi-session: peers header + tasks + recorded decisions + requests.
+/// - Solo with recorded decisions: labelled decision lines only.
+/// - Solo without recorded decisions: returns None.
 #[cfg(test)]
 pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);

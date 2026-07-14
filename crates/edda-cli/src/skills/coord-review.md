@@ -80,7 +80,7 @@ Present the review as a health report:
 - [WARN] M unresolved requests:
   - From <label> to <label>: <message> (sent <time ago>)
 
-### Binding Conflicts
+### Decision Conflicts (recorded — not binding until ratified)
 - [PASS] No conflicts detected
   OR
 - [WARN] Conflict on key "<key>":
