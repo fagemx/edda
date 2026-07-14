@@ -288,7 +288,7 @@ pub fn render_coordination_protocol_with(
     }
 }
 
-/// Render lightweight peer updates for UserPromptSubmit (only new bindings/requests).
+/// Render lightweight peer updates for UserPromptSubmit (new recorded decisions/requests).
 ///
 /// - Multi-session: peers header + tasks + bindings + requests.
 /// - Solo with bindings: binding lines only (no header).
@@ -359,8 +359,10 @@ pub(crate) fn render_peer_updates_with(
         }
     }
 
-    // Latest bindings (max 3)
+    // Latest recorded decisions (coordination broadcasts, max 3). GH-401:
+    // labelled and not-binding — these are agent-authored until ratified.
     if !board.bindings.is_empty() {
+        lines.push("Recorded decisions (coordination, not binding until ratified):".to_string());
         for d in board.bindings.iter().rev().take(3) {
             lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
         }

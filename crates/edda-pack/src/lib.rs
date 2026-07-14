@@ -503,19 +503,25 @@ fn authorship_tag(authority: &str) -> &'static str {
 pub fn build_decision_pack(repo_root: &Path, branch: &str, max_items: usize) -> DecisionPack {
     let (mut views, ratified): (Vec<DecisionView>, std::collections::BTreeSet<String>) =
         match edda_ledger::Ledger::open(repo_root) {
+            // Fetch ALL active decisions (not SQL-limited): active_decisions is
+            // not branch-filtered, so a SQL LIMIT applied before the branch
+            // retain below could be entirely consumed by other branches and
+            // drop every decision for this branch. Filter by branch first,
+            // then cap at max_items.
             Ok(ledger) => (
                 ledger
-                    .active_decisions_limited(None, None, None, None, max_items)
+                    .active_decisions(None, None, None, None)
                     .unwrap_or_default(),
                 // GH-401: ratified decision event_ids, derived by rowid order.
                 ledger.ratified_decision_events().unwrap_or_default(),
             ),
             Err(_) => (Vec::new(), std::collections::BTreeSet::new()),
         };
-    // active_decisions is not branch-filtered, but the pack is labelled with a
-    // single branch — keep only that branch's decisions so a decision (and its
-    // ratified-state) from another branch is never rendered under this header.
+    // Keep only this branch's decisions (see above), then cap at max_items so
+    // a decision — and its ratified-state — from another branch is never
+    // rendered under this branch's header.
     views.retain(|v| v.branch == branch);
+    views.truncate(max_items);
 
     if views.is_empty() {
         return DecisionPack {

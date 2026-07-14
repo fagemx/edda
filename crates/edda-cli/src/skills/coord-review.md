@@ -39,13 +39,15 @@ List all requests that have NOT been acknowledged:
 
 Flag requests that are blocking work.
 
-### Step 3: Check Binding Conflicts
+### Step 3: Check Decision Conflicts
 
-Review binding decisions for potential conflicts:
+Review recorded decisions for potential conflicts. Note (GH-401): decisions
+are agent-authored and *not binding* until an operator ratifies them via
+`edda ratify` — treat unratified records as working guidance, not settled law.
 - Same key set by different sessions with different values (last-write-wins, but may indicate disagreement)
 - Decisions that contradict each other semantically
 
-Run `edda ask <key>` for any suspicious bindings to see full history.
+Run `edda ask <key>` for any suspicious decision to see full history.
 
 ### Step 4: Check Scope Overlaps
 

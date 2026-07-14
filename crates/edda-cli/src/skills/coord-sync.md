@@ -1,6 +1,6 @@
 ---
 name: coord-sync
-description: Sync with peers before starting multi-agent work — see claims, bindings, suggest scope
+description: Sync with peers before starting multi-agent work — see claims, recorded decisions, suggest scope
 ---
 
 # Coordination Sync

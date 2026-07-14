@@ -441,7 +441,11 @@ fn collect_active_decisions(cwd: &str) -> Option<String> {
     let cwd_path = Path::new(cwd);
     let root = edda_ledger::EddaPaths::find_root(cwd_path)?;
     let ledger = edda_ledger::Ledger::open(&root).ok()?;
-    let decisions = ledger.active_decisions(None, None, None, None).ok()?;
+    let branch = ledger.head_branch().ok()?;
+    // GH-401: active_decisions is not branch-filtered; keep only this branch's
+    // decisions so another branch's ratified value is not shown as binding here.
+    let mut decisions = ledger.active_decisions(None, None, None, None).ok()?;
+    decisions.retain(|d| d.branch == branch);
     let ratified = ledger.ratified_decision_events().ok()?;
     render_decisions_two_tier(&decisions, &ratified)
 }

@@ -1182,6 +1182,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[test]
+    fn multiple_active_imports_bind_only_the_pre_ratify_one() {
+        // Two active decisions share (main, db.engine) — cross-project imports
+        // do not supersede each other. Import A, ratify, import B. The ratify
+        // binds the decision current at ratify time (A, lower rowid); the newer
+        // import B must NOT be falsely ratified. This is why ratified-state is
+        // keyed by event_id, not (branch, key).
+        let (tmp, ledger) = setup_workspace();
+
+        let import = |value: &str, src: &str| -> String {
+            let parent = ledger.last_event_hash().unwrap();
+            let dp = edda_core::types::DecisionPayload {
+                key: "db.engine".into(),
+                value: value.into(),
+                reason: None,
+                scope: None,
+                authority: Some("agent".into()),
+                affected_paths: None,
+                tags: None,
+                review_after: None,
+                reversibility: None,
+                village_id: None,
+            };
+            let ev = edda_core::event::new_decision_event("main", parent.as_deref(), "worker", &dp)
+                .unwrap();
+            let eid = ev.event_id.clone();
+            ledger
+                .insert_imported_decision(crate::ImportParams {
+                    event: &ev,
+                    key: "db.engine",
+                    value,
+                    reason: "",
+                    domain: "db",
+                    scope: "shared",
+                    source_project_id: src,
+                    source_event_id: &eid,
+                    is_active: true,
+                })
+                .unwrap();
+            eid
+        };
+
+        let a = import("pgA", "projA");
+        append_ratify(&ledger, "main", "db.engine");
+        let b = import("pgB", "projB");
+
+        let set = ledger.ratified_decision_events().unwrap();
+        assert!(set.contains(&a), "the pre-ratify import must be ratified");
+        assert!(
+            !set.contains(&b),
+            "a newer sibling import must not be falsely ratified"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // ── Device Token tests ──────────────────────────────────────────
 
     /// Helper: append a note event and return its event_id (satisfies FK on device_tokens).
