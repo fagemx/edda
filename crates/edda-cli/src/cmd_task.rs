@@ -117,7 +117,7 @@ pub struct DoneOutcome {
     pub unlocked: Vec<(u64, String, Option<String>)>,
 }
 
-fn find_view<'a>(views: &'a [TaskView], id: u64) -> anyhow::Result<&'a TaskView> {
+fn find_view(views: &[TaskView], id: u64) -> anyhow::Result<&TaskView> {
     views
         .iter()
         .find(|v| v.task_id == id)
@@ -131,9 +131,9 @@ fn parse_status(s: &str) -> anyhow::Result<TaskStatus> {
         "running" => TaskStatus::Running,
         "done" => TaskStatus::Done,
         "failed" => TaskStatus::Failed,
-        other => anyhow::bail!(
-            "unknown status '{other}' (expected blocked|ready|running|done|failed)"
-        ),
+        other => {
+            anyhow::bail!("unknown status '{other}' (expected blocked|ready|running|done|failed)")
+        }
     })
 }
 
@@ -212,8 +212,7 @@ fn do_start(repo_root: &Path, id: u64, lease_ttl_s: u64) -> anyhow::Result<Start
 
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;
-    let event =
-        new_task_started_event(&branch, parent_hash.as_deref(), id, lease_ttl_s, attempt)?;
+    let event = new_task_started_event(&branch, parent_hash.as_deref(), id, lease_ttl_s, attempt)?;
     ledger.append_event(&event)?;
     let _ = edda_derive::rebuild_branch(&ledger, &branch);
 
@@ -238,9 +237,9 @@ fn do_done(
              (start/done pairs are what make the ledger replayable)"
         ),
         TaskStatus::Done => anyhow::bail!("task #{id} is already done"),
-        TaskStatus::Failed => anyhow::bail!(
-            "task #{id} is failed — run `edda task start {id}` to retry, then done"
-        ),
+        TaskStatus::Failed => {
+            anyhow::bail!("task #{id} is failed — run `edda task start {id}` to retry, then done")
+        }
     }
     if receipt.trim().is_empty() {
         anyhow::bail!(
@@ -250,8 +249,7 @@ fn do_done(
 
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;
-    let event =
-        new_task_done_event(&branch, parent_hash.as_deref(), id, receipt, evidence_paths)?;
+    let event = new_task_done_event(&branch, parent_hash.as_deref(), id, receipt, evidence_paths)?;
     ledger.append_event(&event)?;
     let _ = edda_derive::rebuild_branch(&ledger, &branch);
 

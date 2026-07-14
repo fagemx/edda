@@ -25,7 +25,7 @@ pub use domain::{
 };
 pub use ledger::Ledger;
 pub use lock::WorkspaceLock;
-pub use tasks::{TaskStatus, TaskView};
 pub use paths::EddaPaths;
+pub use tasks::{TaskStatus, TaskView};
 pub use tombstone::{append_tombstone, list_tombstones, make_tombstone, DeleteReason, Tombstone};
 pub use view::DecisionView;

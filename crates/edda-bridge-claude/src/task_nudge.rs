@@ -191,9 +191,18 @@ mod tests {
         let a = mk_view(7, TaskStatus::Ready, Some("tester"));
         let msg = render_nudge(&[&a]);
         assert!(msg.contains("#7"), "message should name the task: {msg}");
-        assert!(msg.contains("edda task start"), "message should teach the verb: {msg}");
-        assert!(msg.contains("edda task done"), "message should teach done: {msg}");
-        assert!(msg.contains("--receipt"), "receipt culture rides along: {msg}");
+        assert!(
+            msg.contains("edda task start"),
+            "message should teach the verb: {msg}"
+        );
+        assert!(
+            msg.contains("edda task done"),
+            "message should teach done: {msg}"
+        );
+        assert!(
+            msg.contains("--receipt"),
+            "receipt culture rides along: {msg}"
+        );
     }
 
     #[test]
@@ -247,7 +256,10 @@ mod tests {
             r#"{{"session_id":"other-s","hook_event_name":"Stop","cwd":"{cwd}","transcript_path":"","permission_mode":"default","stop_hook_active":true}}"#
         );
         let third = crate::dispatch::hook_entrypoint_from_stdin(&active).unwrap();
-        assert!(third.stdout.is_none(), "stop_hook_active must suppress the nudge");
+        assert!(
+            third.stdout.is_none(),
+            "stop_hook_active must suppress the nudge"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(&project_id));
         let _ = fs::remove_dir_all(&ws);

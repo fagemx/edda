@@ -122,7 +122,9 @@ impl Ledger {
 
     /// All `task.*` events in insertion order — the task rail's fold input.
     pub fn task_events(&self) -> anyhow::Result<Vec<Event>> {
-        self.sqlite.iter_task_events().context("Ledger::task_events")
+        self.sqlite
+            .iter_task_events()
+            .context("Ledger::task_events")
     }
 
     /// Project task rail views. Status/readiness is derived from events,

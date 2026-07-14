@@ -206,7 +206,7 @@ pub fn find_by_idempotency_key<'a>(views: &'a [TaskView], key: &str) -> Option<&
 
 /// Tasks that are now ready and list `done_id` as a dependency —
 /// the successors unlocked by that completion (§2 L1: done ⇒ successor ready).
-pub fn ready_successors_of<'a>(views: &'a [TaskView], done_id: u64) -> Vec<&'a TaskView> {
+pub fn ready_successors_of(views: &[TaskView], done_id: u64) -> Vec<&TaskView> {
     views
         .iter()
         .filter(|v| v.status == TaskStatus::Ready && v.after.contains(&done_id))
@@ -218,8 +218,7 @@ mod tests {
     use super::*;
     use edda_core::event::{
         new_task_created_event, new_task_done_event, new_task_failed_event,
-        new_task_requeued_event, new_task_session_event, new_task_started_event,
-        TaskCreatedParams,
+        new_task_requeued_event, new_task_session_event, new_task_started_event, TaskCreatedParams,
     };
 
     fn created(task_id: u64, title: &str, after: &[u64]) -> Event {
@@ -429,7 +428,10 @@ mod tests {
             new_task_session_event("main", None, 1, "sess-acp-42").unwrap(),
         ];
         let views = project_tasks(&events);
-        assert_eq!(view(&views, 1).acp_session_id.as_deref(), Some("sess-acp-42"));
+        assert_eq!(
+            view(&views, 1).acp_session_id.as_deref(),
+            Some("sess-acp-42")
+        );
     }
 
     #[test]
@@ -457,7 +459,11 @@ mod tests {
 
     #[test]
     fn views_sorted_by_task_id() {
-        let events = vec![created(3, "c", &[]), created(1, "a", &[]), created(2, "b", &[])];
+        let events = vec![
+            created(3, "c", &[]),
+            created(1, "a", &[]),
+            created(2, "b", &[]),
+        ];
         let views = project_tasks(&events);
         let ids: Vec<u64> = views.iter().map(|v| v.task_id).collect();
         assert_eq!(ids, vec![1, 2, 3]);
