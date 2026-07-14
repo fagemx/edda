@@ -255,6 +255,7 @@ edda watch                 # real-time TUI: peers, events, decisions
 | `edda init` | Initialize `.edda/` (auto-installs hooks if `.claude/` detected) |
 | `edda decide` | Record a binding decision |
 | `edda note` | Record a note |
+| `edda ratify` | Confer operator authority on a decision (recorded ≠ ratified) |
 | `edda task` | Task rail: create, hand off, and track tasks (`new/start/done/fail/list/show`) |
 | `edda ask` | Query decisions, history, and conversations |
 | `edda search` | Full-text search across transcripts (Tantivy) |

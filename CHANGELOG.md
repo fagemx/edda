@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Decision provenance** (`edda ratify`) — decisions are now *recorded ≠ ratified*. Every `edda decide` is tagged `authority=agent` (or `system`), never operator; the background decision extractor is tagged `agent` too. Operator authority is conferred only by a separate, append-only `decision_ratify` event via `edda ratify <key> [--by] [--note]`, so the hash chain can no longer launder machine inference into authoritative fact. The SessionStart decision pack now splits into **Ratified Decisions** (binding) and **Unratified Decisions** (recorded, not binding), with authorship tags. Ratified-state is derived, never stored (a re-decided key must be re-ratified). Spec: [GH-401](https://github.com/fagemx/edda/issues/401). Existing decisions render as unratified until ratified — a deliberate clean sweep, not a regression
 - **Task rail P1** (`edda task`) — hash-chained `task.*` event family, derived status/readiness projection (never stored), CLI verbs `new/start/done/fail/list/show` (done requires a receipt and reports which successors became ready), Stop-hook nudge for newly-ready assigned tasks, and task-rail verbs taught in the write-back protocol. Spec: `docs/plan/task-rail/TASK_RAIL_V1.md` §3–§7; acceptance drill: `docs/plan/task-rail/P1_DRILL_2026-07-14.md`. Existing installs: re-run `edda init` (or `edda bridge claude install`) once to register the new `Stop` hook
 
 ### Fixed
