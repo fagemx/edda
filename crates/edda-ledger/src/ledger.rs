@@ -1268,7 +1268,7 @@ mod tests {
         assert!(is_ratified(&ledger, "main", "db.engine"));
 
         import("pgB", "projB"); // supersedes A; B is now the active decision
-        // B was imported after the ratify → it must not inherit A's binding.
+                                // B was imported after the ratify → it must not inherit A's binding.
         assert!(!is_ratified(&ledger, "main", "db.engine"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
