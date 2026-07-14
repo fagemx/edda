@@ -118,6 +118,10 @@ async fn post_snapshot(
 
     let event = new_snapshot_event(&branch, parent_hash.as_deref(), payload, blob_refs)?;
     let event_id = event.event_id.clone();
+
+    // Blob writes happen before the SQLite transaction and are content-addressed,
+    // so an append failure intentionally leaves them as unreferenced GC candidates.
+    // Deleting them here could remove content already referenced by another event.
     ledger.append_event(&event)?;
 
     Ok((
