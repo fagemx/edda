@@ -77,9 +77,83 @@ pub fn to_view(row: &DecisionRow) -> DecisionView {
     }
 }
 
+/// Whether a decision is operator-ratified (GH-401).
+///
+/// Ratified-state is derived, never stored: a key is ratified while its
+/// latest `decision_ratify` event is at least as new as the active
+/// decision's timestamp. Re-deciding a key (a newer decision event)
+/// therefore resets ratification — a changed decision must be re-ratified.
+///
+/// `ratified_keys` maps decision key → latest ratify timestamp (RFC3339,
+/// which sorts chronologically). A decision with no `ts` cannot be proven
+/// ratified and is treated as unratified.
+pub fn is_decision_ratified(
+    view: &DecisionView,
+    ratified_keys: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let (Some(decision_ts), Some(ratify_ts)) = (view.ts.as_deref(), ratified_keys.get(&view.key))
+    else {
+        return false;
+    };
+    ratify_ts.as_str() >= decision_ts
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    fn ratified_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn ratified_when_ratify_newer_than_decision() {
+        let mut view = to_view(&make_default_row());
+        view.key = "db.engine".into();
+        view.ts = Some("2026-07-14T10:00:00Z".into());
+        let keys = ratified_map(&[("db.engine", "2026-07-15T09:00:00Z")]);
+        assert!(is_decision_ratified(&view, &keys));
+    }
+
+    #[test]
+    fn unratified_when_ratify_older_than_decision() {
+        // Decision was changed after the last ratification → stale, unratified.
+        let mut view = to_view(&make_default_row());
+        view.key = "db.engine".into();
+        view.ts = Some("2026-07-15T12:00:00Z".into());
+        let keys = ratified_map(&[("db.engine", "2026-07-14T09:00:00Z")]);
+        assert!(!is_decision_ratified(&view, &keys));
+    }
+
+    #[test]
+    fn ratified_when_timestamps_equal() {
+        let mut view = to_view(&make_default_row());
+        view.key = "k".into();
+        view.ts = Some("2026-07-15T10:00:00Z".into());
+        let keys = ratified_map(&[("k", "2026-07-15T10:00:00Z")]);
+        assert!(is_decision_ratified(&view, &keys));
+    }
+
+    #[test]
+    fn unratified_when_no_ratify_event() {
+        let mut view = to_view(&make_default_row());
+        view.key = "k".into();
+        view.ts = Some("2026-07-15T10:00:00Z".into());
+        assert!(!is_decision_ratified(&view, &BTreeMap::new()));
+    }
+
+    #[test]
+    fn unratified_when_decision_has_no_ts() {
+        let mut view = to_view(&make_default_row());
+        view.key = "k".into();
+        view.ts = None;
+        let keys = ratified_map(&[("k", "2026-07-15T10:00:00Z")]);
+        assert!(!is_decision_ratified(&view, &keys));
+    }
 
     fn make_default_row() -> DecisionRow {
         DecisionRow {

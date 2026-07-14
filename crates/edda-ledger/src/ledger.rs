@@ -120,6 +120,41 @@ impl Ledger {
             .with_context(|| format!("Ledger::iter_events_by_type({event_type})"))
     }
 
+    /// Map each decision key to the timestamp of its latest `decision_ratify`
+    /// event (GH-401). Combined with [`crate::view::is_decision_ratified`],
+    /// this derives per-decision ratified-state without storing it: a key is
+    /// binding only while its latest ratification is at least as new as the
+    /// active decision. `branch` filters to one branch, or `None` for all.
+    pub fn ratified_keys(
+        &self,
+        branch: Option<&str>,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, String>> {
+        let events = self
+            .iter_events_by_type("decision_ratify")
+            .context("Ledger::ratified_keys")?;
+        let mut latest: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        for e in events {
+            if let Some(b) = branch {
+                if e.branch != b {
+                    continue;
+                }
+            }
+            let Some(key) = e.payload.get("key").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            latest
+                .entry(key.to_string())
+                .and_modify(|cur| {
+                    if e.ts > *cur {
+                        *cur = e.ts.clone();
+                    }
+                })
+                .or_insert_with(|| e.ts.clone());
+        }
+        Ok(latest)
+    }
+
     /// All `task.*` events in insertion order — the task rail's fold input.
     pub fn task_events(&self) -> anyhow::Result<Vec<Event>> {
         self.sqlite
@@ -1019,6 +1054,46 @@ mod tests {
         ledger.append_event(&note).unwrap();
         let result = ledger.iter_events_by_type("nonexistent_type").unwrap();
         assert!(result.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ratified_keys_returns_latest_ts_per_key() {
+        use edda_core::event::{finalize_event, new_decision_ratify_event};
+
+        let (tmp, ledger) = setup_workspace();
+
+        let append_ratify = |key: &str, ts: &str, parent: Option<&str>| -> String {
+            let mut e = new_decision_ratify_event("main", parent, key, "operator", None).unwrap();
+            e.ts = ts.to_string();
+            finalize_event(&mut e).unwrap();
+            let hash = e.hash.clone();
+            ledger.append_event(&e).unwrap();
+            hash
+        };
+
+        // db.engine ratified twice — the later ts must win, regardless of order.
+        let h1 = append_ratify("db.engine", "2026-07-15T00:00:00Z", None);
+        let h2 = append_ratify("db.engine", "2026-07-14T00:00:00Z", Some(&h1));
+        append_ratify("auth.method", "2026-07-13T00:00:00Z", Some(&h2));
+
+        let map = ledger.ratified_keys(None).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get("db.engine").map(String::as_str), Some("2026-07-15T00:00:00Z"));
+        assert_eq!(
+            map.get("auth.method").map(String::as_str),
+            Some("2026-07-13T00:00:00Z")
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ratified_keys_empty_when_no_ratify_events() {
+        let (tmp, ledger) = setup_workspace();
+        let note = new_note_event("main", None, "system", "x", &[]).unwrap();
+        ledger.append_event(&note).unwrap();
+        assert!(ledger.ratified_keys(None).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
