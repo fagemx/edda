@@ -100,7 +100,14 @@ pub(crate) fn dispatch_stop(
     let Some(hb) = crate::peers::read_heartbeat(project_id, session_id) else {
         return HookResult::empty();
     };
-    if hb.label.is_empty() {
+    let board = crate::peers::compute_board_state(project_id);
+    let label = board
+        .claims
+        .iter()
+        .find(|c| c.session_id == session_id)
+        .map(|c| c.label.as_str())
+        .unwrap_or(&hb.label);
+    if label.is_empty() {
         return HookResult::empty();
     }
     let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
@@ -111,7 +118,7 @@ pub(crate) fn dispatch_stop(
     };
 
     let already = read_watermark(project_id, session_id);
-    let picks = select_nudges(&views, &hb.label, &already);
+    let picks = select_nudges(&views, label, &already);
     if picks.is_empty() {
         return HookResult::empty();
     }
@@ -235,7 +242,10 @@ mod tests {
         let cwd = ws.to_string_lossy().replace('\\', "/");
         let project_id = crate::parse::resolve_project_id(&cwd);
         let session_id = "s-stopnudge";
-        crate::peers::write_heartbeat_minimal(&project_id, session_id, "rail-tester", &cwd);
+        // A normal interactive session starts with an unlabeled heartbeat and
+        // establishes its identity through `edda claim`.
+        crate::peers::write_heartbeat_minimal(&project_id, session_id, "", &cwd);
+        crate::peers::write_claim(&project_id, session_id, "rail-tester", &[]);
 
         let stdin = format!(
             r#"{{"session_id":"{session_id}","hook_event_name":"Stop","cwd":"{cwd}","transcript_path":"","permission_mode":"default"}}"#

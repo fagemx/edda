@@ -230,13 +230,14 @@ fn do_done(
 
     let views = ledger.task_views()?;
     let v = find_view(&views, id)?;
+    let correction = v.status == TaskStatus::Done;
     match v.status {
-        TaskStatus::Running => {}
+        TaskStatus::Running | TaskStatus::Done => {}
+        TaskStatus::Ready if v.attempts > 0 => {}
         TaskStatus::Ready | TaskStatus::Blocked => anyhow::bail!(
             "task #{id} has not been started — run `edda task start {id}` first \
              (start/done pairs are what make the ledger replayable)"
         ),
-        TaskStatus::Done => anyhow::bail!("task #{id} is already done"),
         TaskStatus::Failed => {
             anyhow::bail!("task #{id} is failed — run `edda task start {id}` to retry, then done")
         }
@@ -253,11 +254,15 @@ fn do_done(
     ledger.append_event(&event)?;
     let _ = edda_derive::rebuild_branch(&ledger, &branch);
 
-    let after_views = ledger.task_views()?;
-    let unlocked = tasks::ready_successors_of(&after_views, id)
-        .into_iter()
-        .map(|s| (s.task_id, s.title.clone(), s.assignee.clone()))
-        .collect();
+    let unlocked = if correction {
+        Vec::new()
+    } else {
+        let after_views = ledger.task_views()?;
+        tasks::ready_successors_of(&after_views, id)
+            .into_iter()
+            .map(|s| (s.task_id, s.title.clone(), s.assignee.clone()))
+            .collect()
+    };
     Ok(DoneOutcome { unlocked })
 }
 
@@ -578,12 +583,41 @@ mod tests {
     }
 
     #[test]
-    fn done_twice_errors() {
+    fn done_twice_corrects_receipt_without_reunlocking_successor() {
         let ws = temp_ws("donetwice");
         do_new(&ws, &args("build", &[])).unwrap();
+        do_new(&ws, &args("test", &[1])).unwrap();
         do_start(&ws, 1, 3600).unwrap();
-        do_done(&ws, 1, "built", &[]).unwrap();
-        assert!(do_done(&ws, 1, "again", &[]).is_err());
+        assert_eq!(do_done(&ws, 1, "built", &[]).unwrap().unlocked.len(), 1);
+
+        let correction = do_done(&ws, 1, "corrected receipt", &[]).unwrap();
+        assert!(correction.unlocked.is_empty());
+        assert_eq!(
+            do_show(&ws, 1).unwrap().receipt.as_deref(),
+            Some("corrected receipt")
+        );
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn late_done_after_requeue_is_accepted() {
+        let ws = temp_ws("latedone");
+        do_new(&ws, &args("build", &[])).unwrap();
+        do_start(&ws, 1, 3600).unwrap();
+        do_fail(&ws, 1, "lease expired").unwrap();
+        {
+            let ledger = Ledger::open(&ws).unwrap();
+            let _lock = WorkspaceLock::acquire(&ledger.paths).unwrap();
+            let branch = ledger.head_branch().unwrap();
+            let parent_hash = ledger.last_event_hash().unwrap();
+            let event =
+                edda_core::event::new_task_requeued_event(&branch, parent_hash.as_deref(), 1, 2)
+                    .unwrap();
+            ledger.append_event(&event).unwrap();
+        }
+
+        do_done(&ws, 1, "late but real", &[]).unwrap();
+        assert_eq!(do_show(&ws, 1).unwrap().status, TaskStatus::Done);
         let _ = std::fs::remove_dir_all(&ws);
     }
 
