@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Task rail P1** (`edda task`) — hash-chained `task.*` event family, derived status/readiness projection (never stored), CLI verbs `new/start/done/fail/list/show` (done requires a receipt and reports which successors became ready), Stop-hook nudge for newly-ready assigned tasks, and task-rail verbs taught in the write-back protocol. Spec: `docs/plan/task-rail/TASK_RAIL_V1.md` §3–§7; acceptance drill: `docs/plan/task-rail/P1_DRILL_2026-07-14.md`. Existing installs: re-run `edda init` (or `edda bridge claude install`) once to register the new `Stop` hook
+
+### Fixed
+
+- `edda bundle create` and `edda pair new/revoke/revoke-all` appended chain events without the workspace lock — a concurrent locked writer could interleave and fork the hash chain (two events claiming the same parent). Now serialized like every other writer
+- Latent env-var race between `resolve_session_id_tiers` and the `decide()` tests under the parallel test runner (serialized with `ENV_LOCK`, same pattern as edda-bridge-claude)
+
 ## [0.2.1] - 2026-07-13
 
 ### Added

@@ -11,6 +11,7 @@ pub mod peers;
 pub mod redact;
 pub mod render;
 pub mod state;
+pub mod task_nudge;
 pub mod watch;
 
 mod admin;

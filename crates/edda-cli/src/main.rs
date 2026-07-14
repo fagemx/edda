@@ -39,6 +39,7 @@ mod cmd_skill;
 mod cmd_status;
 mod cmd_switch;
 mod cmd_sync;
+mod cmd_task;
 mod cmd_tool_tier;
 mod cmd_user;
 mod cmd_watch;
@@ -119,6 +120,11 @@ enum Command {
         /// Preview without writing
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Task rail — create, hand off, and track tasks on the ledger
+    Task {
+        #[command(subcommand)]
+        cmd: cmd_task::TaskCmd,
     },
     /// Claim a scope for coordination (shortcut for `bridge claude claim`)
     Claim {
@@ -981,6 +987,7 @@ fn main() -> anyhow::Result<()> {
         ),
         Command::Group { cmd } => cmd_group::execute(cmd, &repo_root),
         Command::Sync { from, dry_run } => cmd_sync::execute(&repo_root, from.as_deref(), dry_run),
+        Command::Task { cmd } => cmd_task::execute(cmd, &repo_root),
         Command::Claim {
             label,
             paths,

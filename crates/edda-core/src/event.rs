@@ -784,6 +784,183 @@ pub fn new_approval_policy_match_event(
     Ok(event)
 }
 
+// ── Task rail events (task.*) ──
+//
+// Ledger event family for the task rail (TASK_RAIL_V1 §3): tasks are created,
+// leased, executed, and completed as hash-chained events. State is always
+// derived from these events — there is no second store.
+
+/// Parameters for creating a `task.created` event.
+pub struct TaskCreatedParams<'a> {
+    pub branch: &'a str,
+    pub parent_hash: Option<&'a str>,
+    pub task_id: u64,
+    pub title: &'a str,
+    /// Agent label this task is assigned to (e.g. "tester").
+    pub assignee: Option<&'a str>,
+    /// Agent transport kind (e.g. "claude-acp", "codex-acp").
+    pub agent_kind: Option<&'a str>,
+    /// DAG dependencies: task_ids that must be done before this task is ready.
+    pub after: &'a [u64],
+    pub plan_id: Option<&'a str>,
+    /// Mapping to a wusanto work unit (§8) — in schema from P1 on.
+    pub work_unit_ref: Option<&'a str>,
+    pub brief_ref: Option<&'a str>,
+    /// Dedupe key: a second `task new` with the same key must not create a twin.
+    pub idempotency_key: Option<&'a str>,
+}
+
+/// Build a finalized task.* event with the shared envelope fields.
+fn build_task_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    event_type: &str,
+    payload: serde_json::Value,
+) -> anyhow::Result<Event> {
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: event_type.to_string(),
+        branch: branch.to_string(),
+        parent_hash: parent_hash.map(|s| s.to_string()),
+        hash: String::new(),
+        payload,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+    finalize(&mut event)?;
+    Ok(event)
+}
+
+/// Create a new `task.created` event.
+pub fn new_task_created_event(p: &TaskCreatedParams<'_>) -> anyhow::Result<Event> {
+    let mut payload = serde_json::json!({
+        "task_id": p.task_id,
+        "title": p.title,
+        "after": p.after,
+    });
+    if let Some(v) = p.assignee {
+        payload["assignee"] = serde_json::json!(v);
+    }
+    if let Some(v) = p.agent_kind {
+        payload["agent_kind"] = serde_json::json!(v);
+    }
+    if let Some(v) = p.plan_id {
+        payload["plan_id"] = serde_json::json!(v);
+    }
+    if let Some(v) = p.work_unit_ref {
+        payload["work_unit_ref"] = serde_json::json!(v);
+    }
+    if let Some(v) = p.brief_ref {
+        payload["brief_ref"] = serde_json::json!(v);
+    }
+    if let Some(v) = p.idempotency_key {
+        payload["idempotency_key"] = serde_json::json!(v);
+    }
+    build_task_event(p.branch, p.parent_hash, "task.created", payload)
+}
+
+/// Create a new `task.started` event (lease acquisition).
+pub fn new_task_started_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    task_id: u64,
+    lease_ttl_s: u64,
+    attempt: u32,
+) -> anyhow::Result<Event> {
+    build_task_event(
+        branch,
+        parent_hash,
+        "task.started",
+        serde_json::json!({
+            "task_id": task_id,
+            "lease_ttl_s": lease_ttl_s,
+            "attempt": attempt,
+        }),
+    )
+}
+
+/// Create a new `task.session` event (ACP session id recorded for resume).
+pub fn new_task_session_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    task_id: u64,
+    acp_session_id: &str,
+) -> anyhow::Result<Event> {
+    build_task_event(
+        branch,
+        parent_hash,
+        "task.session",
+        serde_json::json!({
+            "task_id": task_id,
+            "acp_session_id": acp_session_id,
+        }),
+    )
+}
+
+/// Create a new `task.done` event. A completion without a receipt does not
+/// exist: an empty/blank receipt is an error, not a default.
+pub fn new_task_done_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    task_id: u64,
+    receipt: &str,
+    evidence_paths: &[String],
+) -> anyhow::Result<Event> {
+    if receipt.trim().is_empty() {
+        anyhow::bail!("task.done requires a non-empty receipt (task {task_id})");
+    }
+    build_task_event(
+        branch,
+        parent_hash,
+        "task.done",
+        serde_json::json!({
+            "task_id": task_id,
+            "receipt": receipt,
+            "evidence_paths": evidence_paths,
+        }),
+    )
+}
+
+/// Create a new `task.failed` event.
+pub fn new_task_failed_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    task_id: u64,
+    reason: &str,
+) -> anyhow::Result<Event> {
+    build_task_event(
+        branch,
+        parent_hash,
+        "task.failed",
+        serde_json::json!({
+            "task_id": task_id,
+            "reason": reason,
+        }),
+    )
+}
+
+/// Create a new `task.requeued` event (written by the reconciler).
+pub fn new_task_requeued_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    task_id: u64,
+    attempt: u32,
+) -> anyhow::Result<Event> {
+    build_task_event(
+        branch,
+        parent_hash,
+        "task.requeued",
+        serde_json::json!({
+            "task_id": task_id,
+            "attempt": attempt,
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1525,5 +1702,144 @@ mod tests {
             "NAN should be coerced to null by json! macro"
         );
         assert!(finalize_event(&mut event).is_ok());
+    }
+
+    // ── task.* rail events ──
+
+    #[test]
+    fn task_created_event_full_fields() {
+        let after = vec![11u64, 12];
+        let event = new_task_created_event(&TaskCreatedParams {
+            branch: "main",
+            parent_hash: None,
+            task_id: 13,
+            title: "run integration tests",
+            assignee: Some("tester"),
+            agent_kind: Some("codex-acp"),
+            after: &after,
+            plan_id: Some("plan-release"),
+            work_unit_ref: Some("wu_2"),
+            brief_ref: Some("briefs/wu2.md"),
+            idempotency_key: Some("wu2-test-1"),
+        })
+        .unwrap();
+        assert_eq!(event.event_type, "task.created");
+        assert!(event.event_id.starts_with("evt_"));
+        assert_eq!(event.hash.len(), 64);
+        assert_eq!(event.payload["task_id"], 13);
+        assert_eq!(event.payload["title"], "run integration tests");
+        assert_eq!(event.payload["assignee"], "tester");
+        assert_eq!(event.payload["agent_kind"], "codex-acp");
+        assert_eq!(event.payload["after"][0], 11);
+        assert_eq!(event.payload["after"][1], 12);
+        assert_eq!(event.payload["plan_id"], "plan-release");
+        assert_eq!(event.payload["work_unit_ref"], "wu_2");
+        assert_eq!(event.payload["brief_ref"], "briefs/wu2.md");
+        assert_eq!(event.payload["idempotency_key"], "wu2-test-1");
+        assert_eq!(event.schema_version, SCHEMA_VERSION);
+        assert_eq!(event.digests[0].value, event.hash);
+    }
+
+    #[test]
+    fn task_created_event_minimal_omits_optional_fields() {
+        let event = new_task_created_event(&TaskCreatedParams {
+            branch: "main",
+            parent_hash: None,
+            task_id: 1,
+            title: "solo task",
+            assignee: None,
+            agent_kind: None,
+            after: &[],
+            plan_id: None,
+            work_unit_ref: None,
+            brief_ref: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+        assert_eq!(event.payload["task_id"], 1);
+        assert_eq!(event.payload["after"].as_array().unwrap().len(), 0);
+        assert!(event.payload.get("assignee").is_none());
+        assert!(event.payload.get("agent_kind").is_none());
+        assert!(event.payload.get("plan_id").is_none());
+        assert!(event.payload.get("work_unit_ref").is_none());
+        assert!(event.payload.get("brief_ref").is_none());
+        assert!(event.payload.get("idempotency_key").is_none());
+    }
+
+    #[test]
+    fn task_created_taxonomy_signal_info() {
+        let event = new_task_created_event(&TaskCreatedParams {
+            branch: "main",
+            parent_hash: None,
+            task_id: 2,
+            title: "t",
+            assignee: None,
+            agent_kind: None,
+            after: &[],
+            plan_id: None,
+            work_unit_ref: None,
+            brief_ref: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+        assert_eq!(event.event_family.as_deref(), Some("signal"));
+        assert_eq!(event.event_level.as_deref(), Some("info"));
+    }
+
+    #[test]
+    fn task_started_event_fields() {
+        let event = new_task_started_event("main", Some("abc"), 13, 3600, 1).unwrap();
+        assert_eq!(event.event_type, "task.started");
+        assert_eq!(event.payload["task_id"], 13);
+        assert_eq!(event.payload["lease_ttl_s"], 3600);
+        assert_eq!(event.payload["attempt"], 1);
+        assert_eq!(event.parent_hash.as_deref(), Some("abc"));
+        assert_eq!(event.digests[0].value, event.hash);
+    }
+
+    #[test]
+    fn task_session_event_fields() {
+        let event = new_task_session_event("main", None, 13, "sess-acp-42").unwrap();
+        assert_eq!(event.event_type, "task.session");
+        assert_eq!(event.payload["task_id"], 13);
+        assert_eq!(event.payload["acp_session_id"], "sess-acp-42");
+        assert_eq!(event.event_family.as_deref(), Some("signal"));
+        assert_eq!(event.event_level.as_deref(), Some("trace"));
+    }
+
+    #[test]
+    fn task_done_event_fields_and_milestone_taxonomy() {
+        let evidence = vec!["dist/report.md".to_string()];
+        let event = new_task_done_event("main", None, 13, "110/601 green", &evidence).unwrap();
+        assert_eq!(event.event_type, "task.done");
+        assert_eq!(event.payload["task_id"], 13);
+        assert_eq!(event.payload["receipt"], "110/601 green");
+        assert_eq!(event.payload["evidence_paths"][0], "dist/report.md");
+        assert_eq!(event.event_family.as_deref(), Some("milestone"));
+        assert_eq!(event.event_level.as_deref(), Some("milestone"));
+    }
+
+    #[test]
+    fn task_done_event_rejects_empty_receipt() {
+        assert!(new_task_done_event("main", None, 13, "", &[]).is_err());
+        assert!(new_task_done_event("main", None, 13, "   ", &[]).is_err());
+    }
+
+    #[test]
+    fn task_failed_event_fields() {
+        let event = new_task_failed_event("main", None, 13, "ended-without-receipt").unwrap();
+        assert_eq!(event.event_type, "task.failed");
+        assert_eq!(event.payload["task_id"], 13);
+        assert_eq!(event.payload["reason"], "ended-without-receipt");
+    }
+
+    #[test]
+    fn task_requeued_event_fields() {
+        let event = new_task_requeued_event("main", None, 13, 2).unwrap();
+        assert_eq!(event.event_type, "task.requeued");
+        assert_eq!(event.payload["task_id"], 13);
+        assert_eq!(event.payload["attempt"], 2);
+        assert_eq!(event.event_family.as_deref(), Some("admin"));
+        assert_eq!(event.event_level.as_deref(), Some("info"));
     }
 }

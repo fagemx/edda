@@ -230,6 +230,24 @@ impl SqliteStore {
         events.into_iter().map(row_to_event).collect()
     }
 
+    /// Read all `task.*` events in insertion order — the task rail's fold input.
+    /// The LIKE dot is literal (`_` is the LIKE single-char wildcard), so
+    /// legacy `task_intake` events are not matched.
+    pub fn iter_task_events(&self) -> anyhow::Result<Vec<Event>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, event_type, branch, parent_hash, hash,
+                    payload, refs_blobs, refs_events, refs_provenance,
+                    schema_version, digests, event_family, event_level
+             FROM events WHERE event_type LIKE 'task.%' ORDER BY rowid",
+        )?;
+
+        let events = stmt
+            .query_map([], map_event_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        events.into_iter().map(row_to_event).collect()
+    }
+
     /// Get all events for a specific branch, filtered at the SQL level using `idx_events_branch`.
     pub fn iter_branch_events(&self, branch: &str) -> anyhow::Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(

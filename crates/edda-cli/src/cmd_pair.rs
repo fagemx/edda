@@ -37,6 +37,7 @@ fn execute_new(repo_root: &Path, name: &str) -> anyhow::Result<()> {
     }
 
     let ledger = edda_ledger::Ledger::open(repo_root).context("cmd_pair::new: opening ledger")?;
+    let _lock = edda_ledger::WorkspaceLock::acquire(&ledger.paths)?;
 
     // Check for duplicate name
     let existing = ledger.list_device_tokens()?;
@@ -145,6 +146,7 @@ fn execute_list(repo_root: &Path) -> anyhow::Result<()> {
 fn execute_revoke(repo_root: &Path, name: &str) -> anyhow::Result<()> {
     let ledger =
         edda_ledger::Ledger::open(repo_root).context("cmd_pair::revoke: opening ledger")?;
+    let _lock = edda_ledger::WorkspaceLock::acquire(&ledger.paths)?;
 
     // Check the token exists before writing the ledger event
     let existing = ledger.list_device_tokens()?;
@@ -191,6 +193,7 @@ fn execute_revoke(repo_root: &Path, name: &str) -> anyhow::Result<()> {
 fn execute_revoke_all(repo_root: &Path) -> anyhow::Result<()> {
     let ledger =
         edda_ledger::Ledger::open(repo_root).context("cmd_pair::revoke_all: opening ledger")?;
+    let _lock = edda_ledger::WorkspaceLock::acquire(&ledger.paths)?;
 
     let event_id = format!("evt_{}", ulid::Ulid::new());
     let branch = ledger.head_branch()?;

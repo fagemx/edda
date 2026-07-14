@@ -16,6 +16,7 @@ const HOOK_EVENTS: &[&str] = &[
     "UserPromptSubmit",
     "PreCompact",
     "SessionEnd",
+    "Stop",
     "SubagentStart",
     "SubagentStop",
     "TaskCompleted",
@@ -443,6 +444,13 @@ mod tests {
         assert_eq!(
             group["hooks"][0]["command"].as_str().unwrap(),
             "edda hook claude"
+        );
+
+        // Stop must be registered (task-rail nudge rides it); checked via
+        // the parsed key because "SubagentStop" contains "Stop" as substring.
+        assert!(
+            settings["hooks"]["Stop"].is_array(),
+            "Stop hook must be registered for task-rail nudges"
         );
 
         // Verify CLAUDE.md was created with edda section
