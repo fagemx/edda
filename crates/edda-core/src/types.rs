@@ -56,6 +56,10 @@ pub mod authority {
     pub const OPERATOR: &str = "operator";
     pub const AGENT: &str = "agent";
     pub const SYSTEM: &str = "system";
+    /// Provenance not recorded (pre-401 events, or a write path that omits
+    /// authority). Never treated as operator — absence of authority is not
+    /// authority.
+    pub const UNKNOWN: &str = "unknown";
     /// Legacy synonym for OPERATOR, written by pre-401 code.
     pub const LEGACY_HUMAN: &str = "human";
 }

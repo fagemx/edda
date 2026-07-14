@@ -448,13 +448,13 @@ fn collect_active_decisions(cwd: &str) -> Option<String> {
 
 /// Short authorship tag for an unratified decision line (GH-401).
 fn authorship_tag(authority: &str) -> &'static str {
-    if authority.is_empty() {
+    use edda_core::types::authority as a;
+    if authority.is_empty() || authority == a::UNKNOWN {
         "unknown"
     } else if edda_core::types::is_operator_authority(authority) {
-        // Pre-401 default is "human"; claims operator authorship but is not
-        // ratified, so it is still shown as not-binding here.
+        // Claims operator authorship but is not ratified — still not-binding.
         "human"
-    } else if authority == edda_core::types::authority::SYSTEM {
+    } else if authority == a::SYSTEM {
         "system"
     } else {
         "agent"

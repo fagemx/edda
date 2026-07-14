@@ -135,7 +135,10 @@ pub fn render_coordination_protocol_with(
         if board.bindings.is_empty() {
             return None;
         }
-        let mut lines = vec!["## Binding Decisions".to_string()];
+        // GH-401: these are coordination broadcasts, not operator-ratified
+        // bindings. Binding status is shown in the decision pack's
+        // Ratified/Unratified split; do not overclaim "binding" here.
+        let mut lines = vec!["## Recorded Decisions (coordination)".to_string()];
         for d in board.bindings.iter().rev().take(5) {
             lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
         }
@@ -229,9 +232,10 @@ pub fn render_coordination_protocol_with(
         }
     }
 
-    // Binding decisions
+    // Recorded decisions (coordination broadcasts — not operator-ratified;
+    // GH-401). Binding status lives in the decision pack's Ratified split.
     if !board.bindings.is_empty() {
-        lines.push("### Binding Decisions".to_string());
+        lines.push("### Recorded Decisions (coordination)".to_string());
         for d in board.bindings.iter().rev().take(5) {
             lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
         }

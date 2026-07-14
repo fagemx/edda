@@ -74,7 +74,16 @@ impl SqliteStore {
                 // Read new V10 fields from payload, with safe defaults
                 let status = "active";
                 let is_active = status_to_is_active(status);
-                let authority = dp.authority.as_deref().unwrap_or("human");
+                // GH-401: absence of provenance is not operator authority. A
+                // decision written without an explicit authority (pre-401
+                // events, or any write path that omits it) projects as
+                // "unknown", never "human" — the projection must not mint
+                // operator authorship. Explicit tags (agent/system/operator)
+                // pass through unchanged.
+                let authority = dp
+                    .authority
+                    .as_deref()
+                    .unwrap_or(edda_core::types::authority::UNKNOWN);
                 let affected_paths = dp
                     .affected_paths
                     .as_ref()

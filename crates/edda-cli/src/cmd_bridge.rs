@@ -1605,7 +1605,6 @@ mod tests {
         .unwrap();
 
         // Before ratify: the active decision is not binding.
-        let branch = ledger.head_branch().unwrap();
         let keys = ledger.ratified_keys(None).unwrap();
         assert!(!keys.contains_key("db.engine"));
 
@@ -1625,7 +1624,6 @@ mod tests {
         assert_eq!(ratify_events[0].payload["ratified_by"], "operator");
 
         // The projection now reports the key as binding.
-        let _ = branch;
         let views = ledger.active_decisions(None, None, None, None).unwrap();
         let view = views.iter().find(|v| v.key == "db.engine").unwrap();
         let keys = ledger.ratified_keys(None).unwrap();

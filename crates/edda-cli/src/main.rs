@@ -84,7 +84,7 @@ enum Command {
         #[arg(long = "tag")]
         tags: Vec<String>,
     },
-    /// Record a binding decision (shortcut for `bridge claude decide`)
+    /// Record a decision — agent-authored, unratified until `edda ratify` (shortcut for `bridge claude decide`)
     Decide {
         /// Decision in key=value format (e.g. "db=PostgreSQL")
         decision: String,
@@ -114,7 +114,9 @@ enum Command {
         /// Optional note recorded with the ratification
         #[arg(long)]
         note: Option<String>,
-        /// Who ratified (defaults to the resolved session label)
+        /// Who ratified — recorded for audit; self-asserted, not verified
+        /// (identity enforcement is a policy-layer concern). Defaults to the
+        /// resolved session label.
         #[arg(long)]
         by: Option<String>,
         /// Session ID (auto-inferred from active heartbeats if omitted)

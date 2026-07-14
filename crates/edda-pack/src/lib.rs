@@ -482,11 +482,12 @@ impl From<&DecisionView> for DecisionSummary {
 
 /// Short authorship tag for an unratified decision line (GH-401).
 fn authorship_tag(authority: &str) -> &'static str {
-    if authority.is_empty() {
+    use edda_core::types::authority as a;
+    if authority.is_empty() || authority == a::UNKNOWN {
         "unknown"
     } else if edda_core::types::is_operator_authority(authority) {
         "human"
-    } else if authority == edda_core::types::authority::SYSTEM {
+    } else if authority == a::SYSTEM {
         "system"
     } else {
         "agent"
@@ -507,7 +508,10 @@ pub fn build_decision_pack(repo_root: &Path, branch: &str, max_items: usize) -> 
                     .active_decisions_limited(None, None, None, None, max_items)
                     .unwrap_or_default(),
                 // GH-401: ratified-state to split tiers at render time.
-                ledger.ratified_keys(Some(branch)).unwrap_or_default(),
+                // Decision keys are workspace-global and active_decisions is
+                // not branch-filtered, so ratified_keys must not be either —
+                // otherwise a ratification could bind/mislabel across branches.
+                ledger.ratified_keys(None).unwrap_or_default(),
             ),
             Err(_) => (Vec::new(), BTreeMap::new()),
         };
@@ -935,5 +939,58 @@ mod tests {
         assert_eq!(pack.total, 0);
         assert!(pack.groups.is_empty());
         assert_eq!(render_decision_pack_md(&pack), "");
+    }
+
+    #[test]
+    fn build_decision_pack_derives_ratified_from_real_ledger() {
+        // End-to-end: a real ledger with two decisions and one ratify event
+        // must split into ratified/unratified through the full
+        // ledger → ratified_keys → is_decision_ratified → render chain.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let ledger = edda_ledger::Ledger::open_or_init(root).unwrap();
+
+        let decide = |key: &str, value: &str| {
+            let parent = ledger.last_event_hash().unwrap();
+            let dp = edda_core::types::DecisionPayload {
+                key: key.into(),
+                value: value.into(),
+                reason: None,
+                scope: None,
+                authority: Some("agent".into()),
+                affected_paths: None,
+                tags: None,
+                review_after: None,
+                reversibility: None,
+                village_id: None,
+            };
+            let ev = edda_core::event::new_decision_event("main", parent.as_deref(), "worker", &dp)
+                .unwrap();
+            ledger.append_event(&ev).unwrap();
+        };
+        decide("db.engine", "postgres");
+        decide("api.style", "REST");
+
+        // Ratify only db.engine (ts strictly after the decisions).
+        let parent = ledger.last_event_hash().unwrap();
+        let mut rat = edda_core::event::new_decision_ratify_event(
+            "main",
+            parent.as_deref(),
+            "db.engine",
+            "operator",
+            None,
+        )
+        .unwrap();
+        rat.ts = "2099-01-01T00:00:00Z".into();
+        edda_core::event::finalize_event(&mut rat).unwrap();
+        ledger.append_event(&rat).unwrap();
+
+        let pack = build_decision_pack(root, "main", 10);
+        let md = render_decision_pack_md(&pack);
+
+        assert!(md.contains("## Ratified Decisions (1 on `main`)"));
+        assert!(md.contains("**`db.engine=postgres`**"));
+        assert!(md.contains("## Unratified Decisions (1 on `main`)"));
+        assert!(md.contains("[agent] **`api.style=REST`**"));
     }
 }

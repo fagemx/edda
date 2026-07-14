@@ -95,7 +95,18 @@ pub fn is_decision_ratified(
     else {
         return false;
     };
-    ratify_ts.as_str() >= decision_ts
+    // Compare as instants, not strings: RFC3339 timestamps mix precision
+    // (`...00Z` vs `...00.1Z`), and lexical order gets that backwards
+    // (`.` < `Z`). Parse both; if either fails to parse, treat as unratified
+    // (conservative — never claim binding on an unparseable timestamp).
+    use time::format_description::well_known::Rfc3339;
+    let (Ok(d), Ok(r)) = (
+        time::OffsetDateTime::parse(decision_ts, &Rfc3339),
+        time::OffsetDateTime::parse(ratify_ts, &Rfc3339),
+    ) else {
+        return false;
+    };
+    r >= d
 }
 
 #[cfg(test)]
@@ -144,6 +155,27 @@ mod tests {
         view.key = "k".into();
         view.ts = Some("2026-07-15T10:00:00Z".into());
         assert!(!is_decision_ratified(&view, &BTreeMap::new()));
+    }
+
+    #[test]
+    fn mixed_precision_timestamps_compare_as_instants() {
+        // Decision re-made 0.1s AFTER the ratification → must be unratified.
+        // Lexical string compare gets this wrong ("...00.1Z" < "...00Z"
+        // because '.' < 'Z'), so this guards the parse-based comparison.
+        let mut view = to_view(&make_default_row());
+        view.key = "db.engine".into();
+        view.ts = Some("2026-07-15T00:00:00.1Z".into());
+        let keys = ratified_map(&[("db.engine", "2026-07-15T00:00:00Z")]);
+        assert!(!is_decision_ratified(&view, &keys));
+    }
+
+    #[test]
+    fn unparseable_timestamp_is_unratified() {
+        let mut view = to_view(&make_default_row());
+        view.key = "k".into();
+        view.ts = Some("not-a-timestamp".into());
+        let keys = ratified_map(&[("k", "2026-07-15T00:00:00Z")]);
+        assert!(!is_decision_ratified(&view, &keys));
     }
 
     #[test]
