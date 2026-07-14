@@ -1,6 +1,7 @@
 # Task Rail v1: ledger-driven multi-agent handoff（conductor 升級案）
 
-> Status: **design landed**（2026-07-14,owner 裁定方向後落檔;實作未動工）
+> Status: **P1 implemented**（2026-07-14:`task.*` 事件 + 投影 + CLI 動詞 + Stop-hook nudge;
+> 驗收 drill 通過,存證 [P1_DRILL_2026-07-14.md](P1_DRILL_2026-07-14.md);P2+ 未動工）
 > Repo: `C:\ai_agent\edda`
 > Language: **Rust**（ACP client 以 Rust 重寫語義,不是搬 JS 碼)
 > 參考實作: `C:\ai_agent\bryti\adapters\session-acp.js`（ACP 傳輸層,已 live-verified）
