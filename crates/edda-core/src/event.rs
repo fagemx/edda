@@ -107,6 +107,48 @@ pub fn new_decision_event(
     Ok(event)
 }
 
+/// Create a new `decision_ratify` event — an operator's ratification of a
+/// prior `decide` (GH-401).
+///
+/// Ratification is a separate append-only fact, never a mutation of the
+/// decision, so operator authority is conferred by an event and can never be
+/// self-declared on write. Ratified-state is derived downstream: a key is
+/// ratified while its latest ratify event is newer than its latest decision
+/// event (re-deciding a key resets ratification).
+pub fn new_decision_ratify_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    key: &str,
+    ratified_by: &str,
+    note: Option<&str>,
+) -> anyhow::Result<Event> {
+    let mut payload = serde_json::json!({
+        "key": key,
+        "ratified_by": ratified_by,
+    });
+    if let Some(n) = note {
+        payload["note"] = serde_json::json!(n);
+    }
+
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: "decision_ratify".to_string(),
+        branch: branch.to_string(),
+        parent_hash: parent_hash.map(|s| s.to_string()),
+        hash: String::new(),
+        payload,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event)?;
+    Ok(event)
+}
+
 /// Parameters for creating a `cmd` event.
 pub struct CmdEventParams<'a> {
     pub branch: &'a str,
@@ -1702,6 +1744,42 @@ mod tests {
             "NAN should be coerced to null by json! macro"
         );
         assert!(finalize_event(&mut event).is_ok());
+    }
+
+    // ── decision_ratify (GH-401) ──
+
+    #[test]
+    fn decision_ratify_event_fields() {
+        let event = new_decision_ratify_event(
+            "main",
+            None,
+            "db.engine",
+            "operator",
+            Some("confirmed after review"),
+        )
+        .unwrap();
+        assert_eq!(event.event_type, "decision_ratify");
+        assert!(event.event_id.starts_with("evt_"));
+        assert_eq!(event.hash.len(), 64);
+        assert_eq!(event.payload["key"], "db.engine");
+        assert_eq!(event.payload["ratified_by"], "operator");
+        assert_eq!(event.payload["note"], "confirmed after review");
+        assert_eq!(event.digests[0].value, event.hash);
+    }
+
+    #[test]
+    fn decision_ratify_event_without_note_omits_field() {
+        let event = new_decision_ratify_event("main", None, "auth.method", "tim", None).unwrap();
+        assert_eq!(event.payload["key"], "auth.method");
+        assert_eq!(event.payload["ratified_by"], "tim");
+        assert!(event.payload.get("note").is_none());
+    }
+
+    #[test]
+    fn decision_ratify_is_governance() {
+        let event = new_decision_ratify_event("main", None, "k", "operator", None).unwrap();
+        assert_eq!(event.event_family.as_deref(), Some("governance"));
+        assert_eq!(event.event_level.as_deref(), Some("governance"));
     }
 
     // ── task.* rail events ──

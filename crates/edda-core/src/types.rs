@@ -45,6 +45,31 @@ pub mod event_level {
     pub const GOVERNANCE: &str = "governance";
 }
 
+/// Decision authority levels (GH-401).
+///
+/// A written decision defaults to [`AGENT`] — recorded, not yet ratified.
+/// [`OPERATOR`] authority is conferred only by a separate `decision_ratify`
+/// event, never self-declared on write, so the hash chain can never launder
+/// machine inference into operator authority. `"human"` from pre-401 events
+/// is treated as operator-equivalent by [`is_operator_authority`].
+pub mod authority {
+    pub const OPERATOR: &str = "operator";
+    pub const AGENT: &str = "agent";
+    pub const SYSTEM: &str = "system";
+    /// Legacy synonym for OPERATOR, written by pre-401 code.
+    pub const LEGACY_HUMAN: &str = "human";
+}
+
+/// Whether an authority string denotes operator/human authorship.
+///
+/// Note: operator *authorship* is not the same as operator *ratification*.
+/// Binding status is decided by `decision_ratify` events (see the ledger
+/// projection), not by this string. This helper only classifies the
+/// descriptive authority tag for display.
+pub fn is_operator_authority(authority: &str) -> bool {
+    authority == self::authority::OPERATOR || authority == self::authority::LEGACY_HUMAN
+}
+
 /// Map an event_type string to its (family, level) classification.
 pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'static str>) {
     match event_type {
@@ -68,6 +93,10 @@ pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'
         ),
         "pr" => (Some(event_family::MILESTONE), Some(event_level::MILESTONE)),
         "decision_import" => (
+            Some(event_family::GOVERNANCE),
+            Some(event_level::GOVERNANCE),
+        ),
+        "decision_ratify" => (
             Some(event_family::GOVERNANCE),
             Some(event_level::GOVERNANCE),
         ),
@@ -130,7 +159,10 @@ pub struct DecisionPayload {
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<DecisionScope>,
-    /// Decision authority: "human", "agent", "system". Default: "human".
+    /// Decision authorship tag (see [`authority`]): "operator", "agent",
+    /// "system", or legacy "human". A `decide` write defaults to "agent"
+    /// (GH-401) — binding status is conferred by `decision_ratify` events,
+    /// never by this string. `None` = pre-401 legacy (unknown provenance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<String>,
     /// Glob patterns for guarded file paths. Default: [].
@@ -291,6 +323,23 @@ mod tests {
     // ── classify_event_type: data-driven table test ──
 
     #[test]
+    fn authority_constants_are_stable() {
+        assert_eq!(authority::OPERATOR, "operator");
+        assert_eq!(authority::AGENT, "agent");
+        assert_eq!(authority::SYSTEM, "system");
+        assert_eq!(authority::LEGACY_HUMAN, "human");
+    }
+
+    #[test]
+    fn operator_authority_includes_legacy_human() {
+        assert!(is_operator_authority("operator"));
+        assert!(is_operator_authority("human"));
+        assert!(!is_operator_authority("agent"));
+        assert!(!is_operator_authority("system"));
+        assert!(!is_operator_authority(""));
+    }
+
+    #[test]
     fn classify_all_known_event_types() {
         let table: Vec<(&str, &str, &str)> = vec![
             ("note", event_family::SIGNAL, event_level::INFO),
@@ -340,6 +389,11 @@ mod tests {
                 event_level::MILESTONE,
             ),
             ("cycle_telemetry", event_family::SIGNAL, event_level::INFO),
+            (
+                "decision_ratify",
+                event_family::GOVERNANCE,
+                event_level::GOVERNANCE,
+            ),
             ("task.created", event_family::SIGNAL, event_level::INFO),
             ("task.started", event_family::SIGNAL, event_level::INFO),
             ("task.session", event_family::SIGNAL, event_level::TRACE),
