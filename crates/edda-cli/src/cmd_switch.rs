@@ -1,10 +1,11 @@
 use edda_core::event::new_branch_switch_event;
 use edda_derive::rebuild_all;
 use edda_ledger::lock::WorkspaceLock;
-use edda_ledger::Ledger;
+use edda_ledger::{validate_branch_name, Ledger};
 use std::path::Path;
 
 pub fn execute(repo_root: &Path, name: &str) -> anyhow::Result<()> {
+    validate_branch_name(name)?;
     let ledger = Ledger::open(repo_root)?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
 
@@ -16,7 +17,7 @@ pub fn execute(repo_root: &Path, name: &str) -> anyhow::Result<()> {
     }
 
     // Check target branch exists
-    let branch_dir = ledger.paths.branch_dir(name);
+    let branch_dir = ledger.paths.branch_dir(name)?;
     if !branch_dir.exists() {
         anyhow::bail!("branch does not exist: {name}");
     }

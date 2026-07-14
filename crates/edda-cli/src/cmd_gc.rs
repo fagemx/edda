@@ -673,6 +673,7 @@ mod tests {
 
         let mut event = new_note_event("main", None, "system", "test", &[]).unwrap();
         event.refs.blobs.push(ref_a.clone());
+        edda_core::event::finalize_event(&mut event).unwrap();
         ledger.append_event(&event).unwrap();
 
         let hex_b = ref_b.strip_prefix("blob:sha256:").unwrap();

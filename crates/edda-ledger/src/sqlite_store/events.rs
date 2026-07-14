@@ -1,11 +1,77 @@
 //! Event persistence: append, iterate, get, find, refs, chain verification.
 
+use edda_core::event::finalize_event;
 use edda_core::types::Event;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use super::mappers::*;
 use super::status_to_is_active;
 use super::SqliteStore;
+
+fn validate_event_hash(event: &Event) -> anyhow::Result<()> {
+    let mut canonical = event.clone();
+    finalize_event(&mut canonical)?;
+    if event.hash != canonical.hash || event.digests != canonical.digests {
+        anyhow::bail!("event {} has invalid hash or digest", event.event_id);
+    }
+    Ok(())
+}
+
+pub(super) fn validate_event_for_append(conn: &Connection, event: &Event) -> anyhow::Result<()> {
+    let current_tail: Option<String> = conn
+        .query_row(
+            "SELECT hash FROM events ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if event.parent_hash != current_tail {
+        anyhow::bail!(
+            "event {} has stale parent_hash: expected {:?}, got {:?}",
+            event.event_id,
+            current_tail,
+            event.parent_hash,
+        );
+    }
+
+    validate_event_hash(event)
+}
+
+fn materialize_snapshot(conn: &Connection, event: &Event) -> anyhow::Result<()> {
+    let context_hash = event.payload["context_hash"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("snapshot event is missing context_hash"))?;
+    let engine_version = event.payload["engine_version"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("snapshot event is missing engine_version"))?;
+    let schema_version = event.payload["schema_version"]
+        .as_str()
+        .unwrap_or("snapshot.v1");
+    let redaction_level = event.payload["redaction_level"].as_str().unwrap_or("full");
+    let village_id = event.payload["village_id"].as_str();
+    let cycle_id = event.payload["cycle_id"].as_str();
+    let has_blobs =
+        event.payload.get("context_blob").is_some() || event.payload.get("result_blob").is_some();
+
+    conn.execute(
+        "INSERT INTO decide_snapshots
+         (event_id, context_hash, engine_version, schema_version,
+          redaction_level, village_id, cycle_id, has_blobs, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            event.event_id,
+            context_hash,
+            engine_version,
+            schema_version,
+            redaction_level,
+            village_id,
+            cycle_id,
+            has_blobs,
+            event.ts,
+        ],
+    )?;
+    Ok(())
+}
 
 impl SqliteStore {
     /// Append an event. Append-only (CONTRACT LEDGER-02).
@@ -19,7 +85,8 @@ impl SqliteStore {
         let refs_provenance = serde_json::to_string(&event.refs.provenance)?;
         let digests = serde_json::to_string(&event.digests)?;
 
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        validate_event_for_append(&tx, event)?;
 
         tx.execute(
             "INSERT INTO events (
@@ -155,15 +222,19 @@ impl SqliteStore {
             update_task_brief_on_merge(&tx, event)?;
         }
 
+        if event.event_type == "decide_snapshot" {
+            materialize_snapshot(&tx, event)?;
+        }
+
         tx.commit()?;
         Ok(())
     }
 
     /// Append an event idempotently. Returns `true` if inserted, `false` if duplicate.
     ///
-    /// Uses `INSERT OR IGNORE` so that a duplicate `event_id` is silently skipped
-    /// without returning an error. This is used by the Karvi event consumer to
-    /// handle webhook retries gracefully.
+    /// Duplicate `event_id` values are skipped without returning an error. New
+    /// events still pass the same tail and canonical-hash validation as normal
+    /// appends.
     pub fn append_event_idempotent(&self, event: &Event) -> anyhow::Result<bool> {
         let payload = serde_json::to_string(&event.payload)?;
         let refs_blobs = serde_json::to_string(&event.refs.blobs)?;
@@ -171,8 +242,23 @@ impl SqliteStore {
         let refs_provenance = serde_json::to_string(&event.refs.provenance)?;
         let digests = serde_json::to_string(&event.digests)?;
 
-        self.conn.execute(
-            "INSERT OR IGNORE INTO events (
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let exists = tx
+            .query_row(
+                "SELECT 1 FROM events WHERE event_id = ?1",
+                params![event.event_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if exists {
+            return Ok(false);
+        }
+
+        validate_event_for_append(&tx, event)?;
+
+        tx.execute(
+            "INSERT INTO events (
                 event_id, ts, event_type, branch, parent_hash, hash,
                 payload, refs_blobs, refs_events, refs_provenance,
                 schema_version, digests, event_family, event_level
@@ -194,8 +280,12 @@ impl SqliteStore {
                 event.event_level,
             ],
         )?;
+        if event.event_type == "decide_snapshot" {
+            materialize_snapshot(&tx, event)?;
+        }
+        tx.commit()?;
 
-        Ok(self.conn.changes() > 0)
+        Ok(true)
     }
 
     /// Read all events in insertion order.
@@ -569,11 +659,14 @@ impl SqliteStore {
     /// matches the previous event's `hash`.
     ///
     /// Returns `Err` describing the first break found.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn verify_chain(&self) -> anyhow::Result<()> {
         let events = self.iter_events()?;
         if events.is_empty() {
             return Ok(());
+        }
+
+        for event in &events {
+            validate_event_hash(event)?;
         }
 
         // First event must have no parent

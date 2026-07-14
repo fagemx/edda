@@ -73,20 +73,43 @@ mod tests {
     use super::mappers::time_now_rfc3339;
     use super::schema::*;
     use super::*;
-    use edda_core::event::new_note_event;
+    use edda_core::event::{new_note_event, new_snapshot_event};
     use edda_core::types::{Event, Provenance, Refs};
     use rusqlite::params;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    struct TestStore(SqliteStore);
+
+    impl std::ops::Deref for TestStore {
+        type Target = SqliteStore;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl TestStore {
+        fn append_event(&self, event: &Event) -> anyhow::Result<()> {
+            let mut chained = event.clone();
+            chained.parent_hash = self.0.last_event_hash()?;
+            edda_core::event::finalize_event(&mut chained)?;
+            self.0.append_event(&chained)
+        }
+
+        fn append_event_strict(&self, event: &Event) -> anyhow::Result<()> {
+            self.0.append_event(event)
+        }
+    }
+
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn tmp_db() -> (std::path::PathBuf, SqliteStore) {
+    fn tmp_db() -> (std::path::PathBuf, TestStore) {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("edda_sqlite_test_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let db_path = dir.join("ledger.db");
-        let store = SqliteStore::open_or_create(&db_path).unwrap();
+        let store = TestStore(SqliteStore::open_or_create(&db_path).unwrap());
         (dir, store)
     }
     #[test]
@@ -313,6 +336,106 @@ mod tests {
         let store2 = SqliteStore::open_or_create(&db_path).unwrap();
         assert_eq!(store2.head_branch().unwrap(), "main");
         drop(store2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_reopen_recovers_when_v10_columns_exist_but_version_is_stale() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("edda_sqlite_partial_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+
+        let store = SqliteStore::open_or_create(&db_path).unwrap();
+        store
+            .conn
+            .execute("ALTER TABLE decisions DROP COLUMN review_after", [])
+            .unwrap();
+        store.set_schema_version(9).unwrap();
+        drop(store);
+
+        let reopened = SqliteStore::open_or_create(&db_path).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), 12);
+        drop(reopened);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_reopen_repairs_partially_applied_v5() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("edda_sqlite_partial_v5_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+
+        let store = SqliteStore::open_or_create(&db_path).unwrap();
+        store
+            .conn
+            .execute("ALTER TABLE decisions DROP COLUMN source_event_id", [])
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('sentinel', 'kept')",
+                [],
+            )
+            .unwrap();
+        store.set_schema_version(4).unwrap();
+        drop(store);
+
+        let reopened = SqliteStore::open_or_create(&db_path).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), 12);
+        let sentinel: String = reopened
+            .conn
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = 'sentinel'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sentinel, "kept");
+        assert!(table_columns(&reopened.conn, "decisions")
+            .unwrap()
+            .contains("source_event_id"));
+        drop(reopened);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn schema_reopen_repairs_partially_applied_v11() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "edda_sqlite_partial_v11_{}_{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+
+        let store = SqliteStore::open_or_create(&db_path).unwrap();
+        store
+            .conn
+            .execute_batch(
+                "DROP INDEX idx_decisions_village;
+                 DROP INDEX idx_decisions_village_status;
+                 ALTER TABLE decisions DROP COLUMN village_id;",
+            )
+            .unwrap();
+        store.set_schema_version(10).unwrap();
+        drop(store);
+
+        let reopened = SqliteStore::open_or_create(&db_path).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), 12);
+        assert!(table_columns(&reopened.conn, "decisions")
+            .unwrap()
+            .contains("village_id"));
+        drop(reopened);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1032,31 +1155,6 @@ mod tests {
         latency_ms: u64,
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn make_execution_event_with_decision_ref(
-        branch: &str,
-        event_id: &str,
-        ts: &str,
-        decision_ref: Option<&str>,
-        status: &str,
-        cost_usd: f64,
-        token_in: u64,
-        token_out: u64,
-        latency_ms: u64,
-    ) -> Event {
-        make_exec_event_from_params(&ExecEventParams {
-            branch,
-            event_id,
-            ts,
-            decision_ref,
-            status,
-            cost_usd,
-            token_in,
-            token_out,
-            latency_ms,
-        })
-    }
-
     fn make_exec_event_from_params(p: &ExecEventParams<'_>) -> Event {
         use edda_core::types::{Provenance, Refs};
         use edda_core::SCHEMA_VERSION;
@@ -1137,57 +1235,57 @@ mod tests {
         store.append_event(&d1).unwrap();
 
         // Add 3 execution events linked to the decision
-        let e1 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_1",
-            "2026-03-01T10:00:00Z",
-            Some(&d1_id),
-            "success",
-            0.01,
-            100,
-            50,
-            500,
-        );
+        let e1 = make_exec_event_from_params(&ExecEventParams {
+            branch: "main",
+            event_id: "evt_exec_1",
+            ts: "2026-03-01T10:00:00Z",
+            decision_ref: Some(&d1_id),
+            status: "success",
+            cost_usd: 0.01,
+            token_in: 100,
+            token_out: 50,
+            latency_ms: 500,
+        });
         store.append_event(&e1).unwrap();
 
-        let e2 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_2",
-            "2026-03-01T11:00:00Z",
-            Some(&d1_id),
-            "success",
-            0.02,
-            200,
-            100,
-            600,
-        );
+        let e2 = make_exec_event_from_params(&ExecEventParams {
+            branch: "main",
+            event_id: "evt_exec_2",
+            ts: "2026-03-01T11:00:00Z",
+            decision_ref: Some(&d1_id),
+            status: "success",
+            cost_usd: 0.02,
+            token_in: 200,
+            token_out: 100,
+            latency_ms: 600,
+        });
         store.append_event(&e2).unwrap();
 
-        let e3 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_3",
-            "2026-03-01T12:00:00Z",
-            Some(&d1_id),
-            "failed",
-            0.015,
-            150,
-            75,
-            400,
-        );
+        let e3 = make_exec_event_from_params(&ExecEventParams {
+            branch: "main",
+            event_id: "evt_exec_3",
+            ts: "2026-03-01T12:00:00Z",
+            decision_ref: Some(&d1_id),
+            status: "failed",
+            cost_usd: 0.015,
+            token_in: 150,
+            token_out: 75,
+            latency_ms: 400,
+        });
         store.append_event(&e3).unwrap();
 
         // Add an execution NOT linked to this decision (should be ignored)
-        let e4 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_4",
-            "2026-03-01T13:00:00Z",
-            None,
-            "success",
-            0.5,
-            1000,
-            500,
-            1000,
-        );
+        let e4 = make_exec_event_from_params(&ExecEventParams {
+            branch: "main",
+            event_id: "evt_exec_4",
+            ts: "2026-03-01T13:00:00Z",
+            decision_ref: None,
+            status: "success",
+            cost_usd: 0.5,
+            token_in: 1000,
+            token_out: 500,
+            latency_ms: 1000,
+        });
         store.append_event(&e4).unwrap();
 
         let outcomes = store.decision_outcomes(&d1_id).unwrap();
@@ -1240,45 +1338,45 @@ mod tests {
         store.append_event(&d2).unwrap();
 
         // Execution linked to d1
-        let e1 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_d1",
-            "2026-03-01T10:00:00Z",
-            Some(&d1_id),
-            "success",
-            0.01,
-            100,
-            50,
-            500,
-        );
+        let e1 = make_exec_event_from_params(&ExecEventParams {
+            branch: "main",
+            event_id: "evt_exec_d1",
+            ts: "2026-03-01T10:00:00Z",
+            decision_ref: Some(&d1_id),
+            status: "success",
+            cost_usd: 0.01,
+            token_in: 100,
+            token_out: 50,
+            latency_ms: 500,
+        });
         store.append_event(&e1).unwrap();
 
         // Execution linked to d2
-        let e2 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_d2",
-            "2026-03-01T11:00:00Z",
-            Some(&d2_id),
-            "failed",
-            0.02,
-            200,
-            100,
-            600,
-        );
+        let e2 = make_exec_event_from_params(&ExecEventParams {
+            branch: "main",
+            event_id: "evt_exec_d2",
+            ts: "2026-03-01T11:00:00Z",
+            decision_ref: Some(&d2_id),
+            status: "failed",
+            cost_usd: 0.02,
+            token_in: 200,
+            token_out: 100,
+            latency_ms: 600,
+        });
         store.append_event(&e2).unwrap();
 
         // Execution with no decision_ref
-        let e3 = make_execution_event_with_decision_ref(
-            "main",
-            "evt_exec_none",
-            "2026-03-01T12:00:00Z",
-            None,
-            "success",
-            0.03,
-            300,
-            150,
-            700,
-        );
+        let e3 = make_exec_event_from_params(&ExecEventParams {
+            branch: "main",
+            event_id: "evt_exec_none",
+            ts: "2026-03-01T12:00:00Z",
+            decision_ref: None,
+            status: "success",
+            cost_usd: 0.03,
+            token_in: 300,
+            token_out: 150,
+            latency_ms: 700,
+        });
         store.append_event(&e3).unwrap();
 
         let d1_execs = store.executions_for_decision(&d1_id).unwrap();
@@ -1323,17 +1421,24 @@ mod tests {
                 std::thread::spawn(move || {
                     let store = SqliteStore::open(&path).unwrap();
                     for i in 0..events_per_thread {
-                        // Each event gets a unique UUID via new_note_event, no parent_hash
-                        // linkage needed — we're testing concurrent *writes*, not chain integrity.
-                        let e = new_note_event(
-                            "main",
-                            None,
-                            "system",
-                            &format!("thread {t} event {i}"),
-                            &[],
-                        )
-                        .unwrap();
-                        store.append_event(&e).unwrap();
+                        loop {
+                            let parent_hash = store.last_event_hash().unwrap();
+                            let event = new_note_event(
+                                "main",
+                                parent_hash.as_deref(),
+                                "system",
+                                &format!("thread {t} event {i}"),
+                                &[],
+                            )
+                            .unwrap();
+                            match store.append_event(&event) {
+                                Ok(()) => break,
+                                Err(error) if error.to_string().contains("stale parent_hash") => {
+                                    std::thread::yield_now();
+                                }
+                                Err(error) => panic!("unexpected append failure: {error}"),
+                            }
+                        }
                     }
                 })
             })
@@ -1359,6 +1464,7 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), num_threads * events_per_thread);
+        store.verify_chain().unwrap();
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1404,19 +1510,178 @@ mod tests {
         let (dir, store) = tmp_db();
         let e1 = new_note_event("main", None, "system", "first", &[]).unwrap();
         store.append_event(&e1).unwrap();
-
-        // Intentionally use wrong parent_hash
-        let e2 =
-            new_note_event("main", Some("sha256:bogus_hash"), "system", "broken", &[]).unwrap();
+        let e2 = new_note_event("main", Some(&e1.hash), "system", "second", &[]).unwrap();
         store.append_event(&e2).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET parent_hash = 'sha256:bogus_hash' WHERE event_id = ?1",
+                params![e2.event_id],
+            )
+            .unwrap();
 
         let result = store.verify_chain();
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("chain break"),
-            "error should mention 'chain break', got: {msg}"
+            msg.contains("invalid hash"),
+            "error should mention 'invalid hash', got: {msg}"
         );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn active_decision_unique_index_rejects_duplicate() {
+        let (dir, store) = tmp_db();
+        let first = make_decision_event("main", "db.engine", "mysql", None, None);
+        let first_id = first.event_id.clone();
+        store.append_event(&first).unwrap();
+        let second = make_decision_event("main", "db.engine", "postgres", None, None);
+        store.append_event(&second).unwrap();
+
+        let result = store.conn.execute(
+            "UPDATE decisions SET is_active = TRUE, status = 'active' WHERE event_id = ?1",
+            params![first_id],
+        );
+
+        assert!(result.is_err());
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_rejects_broken_parent_hash() {
+        let (dir, store) = tmp_db();
+        let e1 = new_note_event("main", None, "system", "first", &[]).unwrap();
+        store.append_event(&e1).unwrap();
+
+        let e2 =
+            new_note_event("main", Some("sha256:bogus_hash"), "system", "broken", &[]).unwrap();
+        let result = store.append_event_strict(&e2);
+
+        assert!(result.is_err());
+        assert_eq!(store.iter_events().unwrap().len(), 1);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_rejects_invalid_canonical_hash() {
+        let (dir, store) = tmp_db();
+        let mut event = new_note_event("main", None, "system", "original", &[]).unwrap();
+        event.payload["text"] = serde_json::json!("tampered after finalization");
+
+        let result = store.append_event_strict(&event);
+
+        assert!(result.is_err());
+        assert!(store.iter_events().unwrap().is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_materialization_failure_rolls_back_event() {
+        let (dir, store) = tmp_db();
+        let mut event = new_note_event("main", None, "system", "snapshot", &[]).unwrap();
+        event.event_type = "decide_snapshot".to_string();
+        event.payload = serde_json::json!({"engine_version": "engine-v1"});
+        edda_core::event::finalize_event(&mut event).unwrap();
+
+        let result = store.append_event(&event);
+
+        assert!(result.is_err());
+        assert!(store.iter_events().unwrap().is_empty());
+        assert!(store.query_snapshots(None, None, 10).unwrap().is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_event_materializes_in_same_append() {
+        let (dir, store) = tmp_db();
+        let payload = serde_json::json!({
+            "context_hash": "sha256:context",
+            "engine_version": "engine-v1",
+            "schema_version": "snapshot.v2",
+            "redaction_level": "summary",
+            "village_id": "village-1",
+            "cycle_id": "cycle-1",
+            "context_blob": "sha256:blob",
+        });
+        let event = new_snapshot_event("main", None, payload, vec![]).unwrap();
+
+        store.append_event_strict(&event).unwrap();
+
+        let rows = store.query_snapshots(None, None, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, event.event_id);
+        assert_eq!(rows[0].context_hash, "sha256:context");
+        assert_eq!(rows[0].engine_version, "engine-v1");
+        assert_eq!(rows[0].schema_version, "snapshot.v2");
+        assert_eq!(rows[0].redaction_level, "summary");
+        assert_eq!(rows[0].village_id.as_deref(), Some("village-1"));
+        assert_eq!(rows[0].cycle_id.as_deref(), Some("cycle-1"));
+        assert!(rows[0].has_blobs);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reopening_repairs_orphan_snapshot_event_idempotently() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("edda_snapshot_repair_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+        let store = SqliteStore::open_or_create(&db_path).unwrap();
+        let payload = serde_json::json!({
+            "context_hash": "sha256:orphan",
+            "engine_version": "engine-v1",
+        });
+        let event = new_snapshot_event("main", None, payload, vec![]).unwrap();
+        store.append_event(&event).unwrap();
+        store
+            .conn
+            .execute(
+                "DELETE FROM decide_snapshots WHERE event_id = ?1",
+                params![event.event_id],
+            )
+            .unwrap();
+        drop(store);
+
+        for _ in 0..2 {
+            let reopened = SqliteStore::open_or_create(&db_path).unwrap();
+            let snapshots = reopened.snapshots_by_context_hash("sha256:orphan").unwrap();
+            assert_eq!(snapshots.len(), 1);
+            assert_eq!(snapshots[0].event_id, event.event_id);
+            drop(reopened);
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_query_enforces_bounded_limit_contract() {
+        let (dir, store) = tmp_db();
+
+        assert!(store
+            .query_snapshots(None, None, crate::MAX_SNAPSHOT_QUERY_LIMIT)
+            .is_ok());
+        for limit in [0, crate::MAX_SNAPSHOT_QUERY_LIMIT + 1, usize::MAX] {
+            let result = store.query_snapshots(None, None, limit);
+            assert!(result.is_err(), "accepted invalid limit: {limit}");
+            assert!(result.unwrap_err().to_string().contains("limit"));
+        }
+        if let Ok(limit) = usize::try_from(i64::MAX) {
+            assert!(store.query_snapshots(None, None, limit).is_err());
+        }
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1425,21 +1690,45 @@ mod tests {
     #[test]
     fn verify_chain_detects_first_event_with_parent() {
         let (dir, store) = tmp_db();
-        // First event should have parent_hash=None, but we insert one with a parent
-        let e = new_note_event(
-            "main",
-            Some("sha256:unexpected"),
-            "system",
-            "bad first",
-            &[],
-        )
-        .unwrap();
+        let e = new_note_event("main", None, "system", "first", &[]).unwrap();
         store.append_event(&e).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET parent_hash = 'sha256:unexpected' WHERE event_id = ?1",
+                params![e.event_id],
+            )
+            .unwrap();
 
         let result = store.verify_chain();
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("first event"));
+        assert!(msg.contains("invalid hash"));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_chain_detects_tampered_payload() {
+        let (dir, store) = tmp_db();
+        let event = new_note_event("main", None, "system", "original", &[]).unwrap();
+        store.append_event(&event).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET payload = ?1 WHERE event_id = ?2",
+                params![
+                    r#"{"role":"system","tags":[],"text":"tampered"}"#,
+                    event.event_id
+                ],
+            )
+            .unwrap();
+
+        let result = store.verify_chain();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid hash"));
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);

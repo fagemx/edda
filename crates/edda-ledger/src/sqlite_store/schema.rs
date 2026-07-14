@@ -1,10 +1,43 @@
 //! Schema constants, migrations, and version management.
 
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use tracing::warn;
 
 use super::mappers::*;
 use super::SqliteStore;
+
+pub(super) fn table_columns(
+    conn: &Connection,
+    table: &str,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<std::collections::HashSet<_>, _>>()?;
+    Ok(columns)
+}
+
+fn add_missing_columns(
+    conn: &Connection,
+    table: &str,
+    columns: &[(&str, &str)],
+) -> anyhow::Result<()> {
+    let existing = table_columns(conn, table)?;
+    for (name, sql) in columns {
+        if !existing.contains(*name) {
+            conn.execute_batch(sql)?;
+        }
+    }
+    Ok(())
+}
+
+fn set_schema_version_on(conn: &Connection, version: u32) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?1)",
+        params![version.to_string()],
+    )?;
+    Ok(())
+}
 
 pub(super) const SCHEMA_SQL: &str = "
 PRAGMA journal_mode = WAL;
@@ -147,6 +180,7 @@ CREATE INDEX IF NOT EXISTS idx_bundles_status ON review_bundles(status);
 CREATE INDEX IF NOT EXISTS idx_bundles_bundle_id ON review_bundles(bundle_id);
 ";
 
+#[cfg(test)]
 pub(super) const SCHEMA_V5_SQL: &str = "
 ALTER TABLE decisions ADD COLUMN scope TEXT NOT NULL DEFAULT 'local';
 ALTER TABLE decisions ADD COLUMN source_project_id TEXT;
@@ -160,34 +194,6 @@ CREATE INDEX IF NOT EXISTS idx_decisions_active_domain_branch
     ON decisions(is_active, domain, branch) WHERE is_active = TRUE;
 CREATE INDEX IF NOT EXISTS idx_decisions_active_domain
     ON decisions(is_active, domain) WHERE is_active = TRUE;
-";
-
-pub(super) const SCHEMA_V10_SQL: &str = "
-ALTER TABLE decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
-ALTER TABLE decisions ADD COLUMN authority TEXT NOT NULL DEFAULT 'human';
-ALTER TABLE decisions ADD COLUMN affected_paths TEXT NOT NULL DEFAULT '[]';
-ALTER TABLE decisions ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
-ALTER TABLE decisions ADD COLUMN review_after TEXT;
-ALTER TABLE decisions ADD COLUMN reversibility TEXT NOT NULL DEFAULT 'medium';
-
--- Backfill: sync status from existing is_active boolean
-UPDATE decisions SET status = CASE WHEN is_active = 1 THEN 'active' ELSE 'superseded' END;
-
--- Indexes for status-based queries
-CREATE INDEX IF NOT EXISTS idx_decisions_status
-    ON decisions(status);
-CREATE INDEX IF NOT EXISTS idx_decisions_status_domain
-    ON decisions(status, domain);
-CREATE INDEX IF NOT EXISTS idx_decisions_affected_paths
-    ON decisions(affected_paths) WHERE affected_paths != '[]';
-";
-
-pub(super) const SCHEMA_V11_SQL: &str = "
-ALTER TABLE decisions ADD COLUMN village_id TEXT;
-CREATE INDEX IF NOT EXISTS idx_decisions_village
-    ON decisions(village_id) WHERE village_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_decisions_village_status
-    ON decisions(village_id, status) WHERE village_id IS NOT NULL;
 ";
 
 pub(super) const SCHEMA_V12_SQL: &str = "
@@ -287,6 +293,8 @@ impl SqliteStore {
         // Post-migration verification: repair any columns that migrations
         // failed to add (e.g. version was bumped but ALTER TABLE didn't stick).
         self.verify_decisions_schema()?;
+        self.enforce_active_decision_uniqueness()?;
+        self.repair_snapshot_materialization()?;
 
         Ok(())
     }
@@ -304,11 +312,7 @@ impl SqliteStore {
     }
 
     pub(super) fn set_schema_version(&self, version: u32) -> anyhow::Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?1)",
-            params![version.to_string()],
-        )?;
-        Ok(())
+        set_schema_version_on(&self.conn, version)
     }
 
     /// Verify that the `decisions` table has all expected columns.
@@ -557,17 +561,31 @@ impl SqliteStore {
     }
 
     fn migrate_v4_to_v5(&self) -> anyhow::Result<()> {
-        // Add cross-project sync columns to decisions table.
-        // SQLite ALTER TABLE ADD COLUMN must be done one at a time.
-        // Use a check to see if column already exists (idempotent).
-        let has_scope: bool = self
-            .conn
-            .prepare("SELECT scope FROM decisions LIMIT 0")
-            .is_ok();
-        if !has_scope {
-            self.conn.execute_batch(SCHEMA_V5_SQL)?;
-        }
-        self.set_schema_version(5)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        add_missing_columns(
+            &tx,
+            "decisions",
+            &[
+                (
+                    "scope",
+                    "ALTER TABLE decisions ADD COLUMN scope TEXT NOT NULL DEFAULT 'local'",
+                ),
+                (
+                    "source_project_id",
+                    "ALTER TABLE decisions ADD COLUMN source_project_id TEXT",
+                ),
+                (
+                    "source_event_id",
+                    "ALTER TABLE decisions ADD COLUMN source_event_id TEXT",
+                ),
+            ],
+        )?;
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_decisions_scope ON decisions(scope) WHERE scope != 'local';
+             CREATE INDEX IF NOT EXISTS idx_decisions_source ON decisions(source_project_id) WHERE source_project_id IS NOT NULL;",
+        )?;
+        set_schema_version_on(&tx, 5)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -662,15 +680,159 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Rebuild missing snapshot rows from durable events. This is safe to run
+    /// on every open and repairs event-only states created by older versions.
+    fn repair_snapshot_materialization(&self) -> anyhow::Result<()> {
+        let snapshot_table_exists: bool = self.conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'decide_snapshots'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !snapshot_table_exists {
+            return Ok(());
+        }
+
+        let rows: Vec<(String, String, String)> = {
+            let mut stmt = self.conn.prepare(
+                "SELECT e.event_id, e.ts, e.payload
+                 FROM events e
+                 LEFT JOIN decide_snapshots s ON s.event_id = e.event_id
+                 WHERE e.event_type = 'decide_snapshot' AND s.event_id IS NULL
+                 ORDER BY e.rowid",
+            )?;
+            let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        for (event_id, ts, payload_str) in rows {
+            let payload: serde_json::Value = match serde_json::from_str(&payload_str) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let Some(context_hash) = payload["context_hash"].as_str() else {
+                continue;
+            };
+            let Some(engine_version) = payload["engine_version"].as_str() else {
+                continue;
+            };
+            let schema_version = payload["schema_version"].as_str().unwrap_or("snapshot.v1");
+            let redaction_level = payload["redaction_level"].as_str().unwrap_or("full");
+            let village_id = payload["village_id"].as_str();
+            let cycle_id = payload["cycle_id"].as_str();
+            let has_blobs =
+                payload.get("context_blob").is_some() || payload.get("result_blob").is_some();
+
+            tx.execute(
+                "INSERT OR IGNORE INTO decide_snapshots
+                 (event_id, context_hash, engine_version, schema_version,
+                  redaction_level, village_id, cycle_id, has_blobs, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    event_id,
+                    context_hash,
+                    engine_version,
+                    schema_version,
+                    redaction_level,
+                    village_id,
+                    cycle_id,
+                    has_blobs,
+                    ts,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn migrate_v9_to_v10(&self) -> anyhow::Result<()> {
-        self.conn.execute_batch(SCHEMA_V10_SQL)?;
-        self.set_schema_version(10)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        add_missing_columns(
+            &tx,
+            "decisions",
+            &[
+                (
+                    "status",
+                    "ALTER TABLE decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+                ),
+                (
+                    "authority",
+                    "ALTER TABLE decisions ADD COLUMN authority TEXT NOT NULL DEFAULT 'human'",
+                ),
+                (
+                    "affected_paths",
+                    "ALTER TABLE decisions ADD COLUMN affected_paths TEXT NOT NULL DEFAULT '[]'",
+                ),
+                (
+                    "tags",
+                    "ALTER TABLE decisions ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'",
+                ),
+                (
+                    "review_after",
+                    "ALTER TABLE decisions ADD COLUMN review_after TEXT",
+                ),
+                (
+                    "reversibility",
+                    "ALTER TABLE decisions ADD COLUMN reversibility TEXT NOT NULL DEFAULT 'medium'",
+                ),
+            ],
+        )?;
+        tx.execute_batch(
+            "UPDATE decisions SET status = CASE WHEN is_active = 1 THEN 'active' ELSE 'superseded' END;
+             CREATE INDEX IF NOT EXISTS idx_decisions_status ON decisions(status);
+             CREATE INDEX IF NOT EXISTS idx_decisions_status_domain ON decisions(status, domain);
+             CREATE INDEX IF NOT EXISTS idx_decisions_affected_paths ON decisions(affected_paths) WHERE affected_paths != '[]';",
+        )?;
+        set_schema_version_on(&tx, 10)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn enforce_active_decision_uniqueness(&self) -> anyhow::Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE decisions
+             SET is_active = FALSE, status = 'superseded'
+             WHERE is_active = TRUE
+               AND rowid NOT IN (
+                   SELECT MAX(rowid) FROM decisions
+                   WHERE is_active = TRUE
+                   GROUP BY branch, key
+               )",
+            [],
+        )?;
+        tx.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_decisions_one_active_per_key
+             ON decisions(branch, key) WHERE is_active = TRUE",
+            [],
+        )?;
+        tx.commit()?;
         Ok(())
     }
 
     fn migrate_v10_to_v11(&self) -> anyhow::Result<()> {
-        self.conn.execute_batch(SCHEMA_V11_SQL)?;
-        self.set_schema_version(11)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        add_missing_columns(
+            &tx,
+            "decisions",
+            &[(
+                "village_id",
+                "ALTER TABLE decisions ADD COLUMN village_id TEXT",
+            )],
+        )?;
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_decisions_village ON decisions(village_id) WHERE village_id IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS idx_decisions_village_status ON decisions(village_id, status) WHERE village_id IS NOT NULL;",
+        )?;
+        set_schema_version_on(&tx, 11)?;
+        tx.commit()?;
         Ok(())
     }
 

@@ -498,14 +498,17 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         let ledger = crate::Ledger::open_or_init(&tmp).unwrap();
+        let append = |mut event: Event| {
+            event.parent_hash = ledger.last_event_hash().unwrap();
+            edda_core::event::finalize_event(&mut event).unwrap();
+            ledger.append_event(&event).unwrap();
+        };
         let note =
             edda_core::event::new_note_event("main", None, "user", "not a task", &[]).unwrap();
-        ledger.append_event(&note).unwrap();
-        ledger.append_event(&created(1, "build", &[])).unwrap();
-        ledger.append_event(&created(2, "test", &[1])).unwrap();
-        ledger
-            .append_event(&new_task_done_event("main", None, 1, "built ok", &[]).unwrap())
-            .unwrap();
+        append(note);
+        append(created(1, "build", &[]));
+        append(created(2, "test", &[1]));
+        append(new_task_done_event("main", None, 1, "built ok", &[]).unwrap());
 
         let views = ledger.task_views().unwrap();
         assert_eq!(views.len(), 2);

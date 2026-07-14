@@ -88,8 +88,6 @@ async fn post_snapshot(
     )
     .map_err(|e| anyhow::anyhow!("writing result blob: {e}"))?;
 
-    let has_blobs = context_blob.is_some() || result_blob.is_some();
-
     // Build event payload: metadata + inline or blob refs
     let mut payload = serde_json::json!({
         "engine_version": body.engine_version,
@@ -120,22 +118,7 @@ async fn post_snapshot(
 
     let event = new_snapshot_event(&branch, parent_hash.as_deref(), payload, blob_refs)?;
     let event_id = event.event_id.clone();
-    let created_at = event.ts.clone();
-
     ledger.append_event(&event)?;
-
-    // Insert into materialized view
-    ledger.insert_snapshot(&edda_ledger::DecideSnapshotRow {
-        event_id: event_id.clone(),
-        context_hash: body.context_hash.clone(),
-        engine_version: body.engine_version,
-        schema_version: body.schema_version,
-        redaction_level: body.redaction_level,
-        village_id: body.village_id,
-        cycle_id: body.cycle_id,
-        has_blobs,
-        created_at,
-    })?;
 
     Ok((
         StatusCode::CREATED,
@@ -164,6 +147,13 @@ async fn get_snapshots(
     State(state): State<Arc<AppState>>,
     Query(query): Query<SnapshotsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
+    if query.limit == 0 || query.limit > edda_ledger::MAX_SNAPSHOT_QUERY_LIMIT {
+        return Err(AppError::Validation(format!(
+            "limit must be between 1 and {}",
+            edda_ledger::MAX_SNAPSHOT_QUERY_LIMIT
+        )));
+    }
+
     let ledger = state.open_ledger()?;
     let rows = ledger.query_snapshots(
         query.village_id.as_deref(),

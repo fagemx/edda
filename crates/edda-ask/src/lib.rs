@@ -882,7 +882,26 @@ mod tests {
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn setup() -> (std::path::PathBuf, Ledger) {
+    struct TestLedger(Ledger);
+
+    impl std::ops::Deref for TestLedger {
+        type Target = Ledger;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl TestLedger {
+        fn append_event(&self, event: &Event) -> anyhow::Result<()> {
+            let mut chained = event.clone();
+            chained.parent_hash = self.0.last_event_hash()?;
+            finalize_event(&mut chained)?;
+            self.0.append_event(&chained)
+        }
+    }
+
+    fn setup() -> (std::path::PathBuf, TestLedger) {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let tmp = std::env::temp_dir().join(format!("edda_ask_test_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -890,7 +909,7 @@ mod tests {
         init_workspace(&paths).unwrap();
         init_head(&paths, "main").unwrap();
         init_branches_json(&paths, "main").unwrap();
-        let ledger = Ledger::open(&tmp).unwrap();
+        let ledger = TestLedger(Ledger::open(&tmp).unwrap());
         (tmp, ledger)
     }
 
