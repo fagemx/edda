@@ -1584,6 +1584,22 @@ mod tests {
     }
 
     #[test]
+    fn append_rejects_invalid_taxonomy() {
+        let (dir, store) = tmp_db();
+        let mut event = new_note_event("main", None, "system", "original", &[]).unwrap();
+        event.event_family = Some("admin".to_string());
+
+        let result = store.append_event_strict(&event);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid taxonomy"));
+        assert!(store.iter_events().unwrap().is_empty());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn snapshot_materialization_failure_rolls_back_event() {
         let (dir, store) = tmp_db();
         let mut event = new_note_event("main", None, "system", "snapshot", &[]).unwrap();
@@ -1729,6 +1745,28 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invalid hash"));
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_chain_detects_tampered_taxonomy() {
+        let (dir, store) = tmp_db();
+        let event = new_note_event("main", None, "system", "original", &[]).unwrap();
+        store.append_event(&event).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE events SET event_family = 'admin' WHERE event_id = ?1",
+                params![event.event_id],
+            )
+            .unwrap();
+
+        let result = store.verify_chain();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid taxonomy"));
 
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);

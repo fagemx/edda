@@ -11,6 +11,9 @@ use super::SqliteStore;
 fn validate_event_hash(event: &Event) -> anyhow::Result<()> {
     let mut canonical = event.clone();
     finalize_event(&mut canonical)?;
+    if event.event_family != canonical.event_family || event.event_level != canonical.event_level {
+        anyhow::bail!("event {} has invalid taxonomy", event.event_id);
+    }
     if event.hash != canonical.hash || event.digests != canonical.digests {
         anyhow::bail!("event {} has invalid hash or digest", event.event_id);
     }
