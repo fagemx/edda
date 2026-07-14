@@ -442,7 +442,7 @@ fn collect_active_decisions(cwd: &str) -> Option<String> {
     let root = edda_ledger::EddaPaths::find_root(cwd_path)?;
     let ledger = edda_ledger::Ledger::open(&root).ok()?;
     let decisions = ledger.active_decisions(None, None, None, None).ok()?;
-    let ratified = ledger.ratified_decision_set().ok()?;
+    let ratified = ledger.ratified_decision_events().ok()?;
     render_decisions_two_tier(&decisions, &ratified)
 }
 
@@ -469,7 +469,7 @@ fn authorship_tag(authority: &str) -> &'static str {
 /// authorship so agent-authored and legacy decisions read as non-binding.
 fn render_decisions_two_tier(
     decisions: &[edda_ledger::view::DecisionView],
-    ratified: &std::collections::BTreeSet<(String, String)>,
+    ratified: &std::collections::BTreeSet<String>,
 ) -> Option<String> {
     if decisions.is_empty() {
         return None;
@@ -854,8 +854,7 @@ mod tests {
             dv("db.engine", "postgres", "operator", "2026-07-14T00:00:00Z"),
             dv("api.style", "REST", "agent", "2026-07-14T00:00:00Z"),
         ];
-        let ratified: std::collections::BTreeSet<(String, String)> =
-            [("main".to_string(), "db.engine".to_string())].into();
+        let ratified: std::collections::BTreeSet<String> = ["evt_db.engine".to_string()].into();
 
         let out = render_decisions_two_tier(&decisions, &ratified).unwrap();
         // Ratified section names the binding key; unratified section names the other.
@@ -905,8 +904,7 @@ mod tests {
     #[test]
     fn two_tier_all_ratified_omits_unratified_section() {
         let decisions = vec![dv("k", "v", "operator", "2026-07-14T00:00:00Z")];
-        let ratified: std::collections::BTreeSet<(String, String)> =
-            [("main".to_string(), "k".to_string())].into();
+        let ratified: std::collections::BTreeSet<String> = ["evt_k".to_string()].into();
         let out = render_decisions_two_tier(&decisions, &ratified).unwrap();
         assert!(out.contains("Operator-ratified"));
         assert!(!out.contains("Unratified"));

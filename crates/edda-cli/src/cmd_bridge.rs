@@ -624,7 +624,10 @@ pub fn claim(
     Ok(())
 }
 
-/// `edda bridge claude decide <key=value>` — record a binding decision
+/// `edda bridge claude decide <key=value>` — record a decision.
+///
+/// GH-401: the decision is agent-authored and unratified (not binding) until
+/// an operator ratifies it via `edda ratify`.
 ///
 /// Writes to both:
 /// 1. Peers `coordination.jsonl` — real-time broadcast to active peers
@@ -1605,8 +1608,7 @@ mod tests {
         .unwrap();
 
         // Before ratify: the active decision is not binding.
-        let set = ledger.ratified_decision_set().unwrap();
-        assert!(!set.contains(&("main".to_string(), "db.engine".to_string())));
+        assert!(ledger.ratified_decision_events().unwrap().is_empty());
 
         ratify(
             &tmp,
@@ -1626,7 +1628,7 @@ mod tests {
         // The projection now reports the key as binding.
         let views = ledger.active_decisions(None, None, None, None).unwrap();
         let view = views.iter().find(|v| v.key == "db.engine").unwrap();
-        let set = ledger.ratified_decision_set().unwrap();
+        let set = ledger.ratified_decision_events().unwrap();
         assert!(edda_ledger::view::is_decision_ratified(view, &set));
 
         std::env::remove_var("EDDA_SESSION_ID");

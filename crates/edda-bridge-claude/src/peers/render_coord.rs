@@ -315,7 +315,9 @@ pub(crate) fn render_peer_updates_with(
         if board.bindings.is_empty() {
             return None;
         }
-        let mut lines = Vec::new();
+        // GH-401: label the broadcasts so bare bullets are not read as
+        // operator-binding constraints.
+        let mut lines = vec!["## Recorded Decisions (coordination)".to_string()];
         for d in board.bindings.iter().rev().take(3) {
             lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
         }

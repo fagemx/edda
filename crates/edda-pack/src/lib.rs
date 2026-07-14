@@ -501,19 +501,21 @@ fn authorship_tag(authority: &str) -> &'static str {
 ///
 /// Returns a pack with 0 groups if no active decisions exist.
 pub fn build_decision_pack(repo_root: &Path, branch: &str, max_items: usize) -> DecisionPack {
-    let (views, ratified): (
-        Vec<DecisionView>,
-        std::collections::BTreeSet<(String, String)>,
-    ) = match edda_ledger::Ledger::open(repo_root) {
-        Ok(ledger) => (
-            ledger
-                .active_decisions_limited(None, None, None, None, max_items)
-                .unwrap_or_default(),
-            // GH-401: ratified (branch, key) set, derived by rowid order.
-            ledger.ratified_decision_set().unwrap_or_default(),
-        ),
-        Err(_) => (Vec::new(), std::collections::BTreeSet::new()),
-    };
+    let (mut views, ratified): (Vec<DecisionView>, std::collections::BTreeSet<String>) =
+        match edda_ledger::Ledger::open(repo_root) {
+            Ok(ledger) => (
+                ledger
+                    .active_decisions_limited(None, None, None, None, max_items)
+                    .unwrap_or_default(),
+                // GH-401: ratified decision event_ids, derived by rowid order.
+                ledger.ratified_decision_events().unwrap_or_default(),
+            ),
+            Err(_) => (Vec::new(), std::collections::BTreeSet::new()),
+        };
+    // active_decisions is not branch-filtered, but the pack is labelled with a
+    // single branch — keep only that branch's decisions so a decision (and its
+    // ratified-state) from another branch is never rendered under this header.
+    views.retain(|v| v.branch == branch);
 
     if views.is_empty() {
         return DecisionPack {
@@ -944,7 +946,10 @@ mod tests {
     fn build_decision_pack_derives_ratified_from_real_ledger() {
         // End-to-end: a real ledger with two decisions and one ratify event
         // must split into ratified/unratified through the full
-        // ledger → ratified_keys → is_decision_ratified → render chain.
+        // ledger → ratified_decision_events → is_decision_ratified → render
+        // chain. The ratify is given an EARLIER timestamp than the decisions
+        // but appended last (highest rowid) — so a green result proves rowid,
+        // not the timestamp, is authoritative.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let ledger = edda_ledger::Ledger::open_or_init(root).unwrap();
@@ -970,7 +975,9 @@ mod tests {
         decide("db.engine", "postgres");
         decide("api.style", "REST");
 
-        // Ratify only db.engine (ts strictly after the decisions).
+        // Ratify db.engine, appended LAST but with an EARLIER timestamp than
+        // the decisions — a timestamp model would call it stale/unratified;
+        // the rowid model correctly binds it.
         let parent = ledger.last_event_hash().unwrap();
         let mut rat = edda_core::event::new_decision_ratify_event(
             "main",
@@ -980,7 +987,7 @@ mod tests {
             None,
         )
         .unwrap();
-        rat.ts = "2099-01-01T00:00:00Z".into();
+        rat.ts = "2000-01-01T00:00:00Z".into();
         edda_core::event::finalize_event(&mut rat).unwrap();
         ledger.append_event(&rat).unwrap();
 

@@ -25,14 +25,14 @@ If no peers are active, report "Solo session — no coordination needed" and exi
 
 Run `edda coord` to get the full coordination protocol view including:
 - Peer claims (scope ownership)
-- Binding decisions (architecture constraints)
+- Recorded decisions (coordination broadcasts — agent-authored, *not binding* until an operator ratifies them via `edda ratify`)
 - Pending requests
 
 ### Step 3: Analyze Scope
 
 From the board state, identify:
 - **Off-limits areas**: Paths claimed by other agents — do NOT edit these
-- **Binding decisions**: Architecture constraints all agents must follow
+- **Recorded decisions**: coordination broadcasts to be aware of — agent-authored and *not binding* until operator-ratified (do not treat them as hard constraints)
 - **Pending requests for you**: Messages from peers requiring your attention
 - **Unclaimed areas**: Safe zones related to your current task
 
@@ -70,7 +70,7 @@ Present findings in this structure:
 - Claimed: <label> → <paths>
 - Off-limits: <peer claims listed>
 
-### Binding Decisions to Follow
+### Recorded Decisions (coordination — not binding until ratified)
 - <key> = <value> (by <label>)
 
 ### Pending Requests for Me
