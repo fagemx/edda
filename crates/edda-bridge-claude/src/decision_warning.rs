@@ -174,9 +174,10 @@ mod tests {
         paths: &[&str],
     ) {
         let ledger = edda_ledger::Ledger::open(root).expect("open ledger");
+        let parent_hash = ledger.last_event_hash().expect("read ledger tail");
         let event = edda_core::event::new_note_event(
             "main",
-            None,
+            parent_hash.as_deref(),
             "system",
             &format!("{key}: {value}"),
             &[],

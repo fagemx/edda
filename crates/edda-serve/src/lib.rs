@@ -3019,6 +3019,63 @@ actors:
     }
 
     #[tokio::test]
+    async fn get_snapshots_rejects_limit_above_maximum() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/snapshots?limit=101")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_snapshots_accepts_maximum_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/snapshots?limit=100")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_snapshots_rejects_zero_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        setup_workspace(tmp.path());
+        let app = router(tmp.path());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/snapshots?limit=0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn get_snapshots_by_context_hash() {
         let tmp = tempfile::tempdir().unwrap();
         setup_workspace(tmp.path());
@@ -3658,7 +3715,9 @@ actors:
     /// Needed because device_tokens.pair_event_id has a FK to events.
     fn seed_dummy_event(ledger: &Ledger) -> String {
         use edda_core::event::new_note_event;
-        let event = new_note_event("main", None, "system", "seed event", &[]).unwrap();
+        let parent_hash = ledger.last_event_hash().unwrap();
+        let event =
+            new_note_event("main", parent_hash.as_deref(), "system", "seed event", &[]).unwrap();
         let event_id = event.event_id.clone();
         ledger.append_event(&event).unwrap();
         event_id

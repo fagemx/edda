@@ -317,28 +317,6 @@ impl SqliteStore {
 
     // ── Decide Snapshots ─────────────────────────────────────────────
 
-    /// Insert a row into the `decide_snapshots` materialized view.
-    pub fn insert_snapshot(&self, row: &DecideSnapshotRow) -> anyhow::Result<()> {
-        self.conn.execute(
-            "INSERT INTO decide_snapshots
-             (event_id, context_hash, engine_version, schema_version,
-              redaction_level, village_id, cycle_id, has_blobs, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                row.event_id,
-                row.context_hash,
-                row.engine_version,
-                row.schema_version,
-                row.redaction_level,
-                row.village_id,
-                row.cycle_id,
-                row.has_blobs,
-                row.created_at,
-            ],
-        )?;
-        Ok(())
-    }
-
     /// Query snapshots with optional filtering by village_id and engine_version.
     pub fn query_snapshots(
         &self,
@@ -346,6 +324,18 @@ impl SqliteStore {
         engine_version: Option<&str>,
         limit: usize,
     ) -> anyhow::Result<Vec<DecideSnapshotRow>> {
+        if limit == 0 {
+            anyhow::bail!("snapshot query limit must be greater than zero");
+        }
+        if limit > crate::MAX_SNAPSHOT_QUERY_LIMIT {
+            anyhow::bail!(
+                "snapshot query limit {limit} exceeds maximum {}",
+                crate::MAX_SNAPSHOT_QUERY_LIMIT
+            );
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| anyhow::anyhow!("snapshot query limit does not fit in SQLite integer"))?;
+
         let base = "SELECT event_id, context_hash, engine_version, schema_version,
                            redaction_level, village_id, cycle_id, has_blobs, created_at
                     FROM decide_snapshots";
@@ -370,7 +360,7 @@ impl SqliteStore {
                 conditions.join(" AND ")
             )
         };
-        param_values.push(Box::new(limit as i64));
+        param_values.push(Box::new(limit));
 
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();

@@ -14,7 +14,7 @@ use crate::types::*;
 // ── View writers ──
 
 fn ensure_branch_dir(ledger: &Ledger, branch: &str) -> Result<std::path::PathBuf> {
-    let dir = ledger.paths.branch_dir(branch);
+    let dir = ledger.paths.branch_dir(branch)?;
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }

@@ -25,7 +25,10 @@ pub use domain::{
 };
 pub use ledger::Ledger;
 pub use lock::WorkspaceLock;
-pub use paths::EddaPaths;
+pub use paths::{validate_branch_name, EddaPaths};
 pub use tasks::{TaskStatus, TaskView};
 pub use tombstone::{append_tombstone, list_tombstones, make_tombstone, DeleteReason, Tombstone};
 pub use view::DecisionView;
+
+/// Maximum number of decision snapshots returned by one query.
+pub const MAX_SNAPSHOT_QUERY_LIMIT: usize = 100;

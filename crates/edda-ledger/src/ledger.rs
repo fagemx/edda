@@ -106,6 +106,11 @@ impl Ledger {
         self.sqlite.iter_events().context("Ledger::iter_events")
     }
 
+    /// Verify parent linkage and canonical hashes for the complete event log.
+    pub fn verify_chain(&self) -> anyhow::Result<()> {
+        self.sqlite.verify_chain().context("Ledger::verify_chain")
+    }
+
     /// Get a single event by event_id.
     pub fn get_event(&self, event_id: &str) -> anyhow::Result<Option<Event>> {
         self.sqlite
@@ -605,13 +610,6 @@ impl Ledger {
 
     // ── Decide Snapshots ────────────────────────────────────────────
 
-    /// Insert a row into the `decide_snapshots` materialized view.
-    pub fn insert_snapshot(&self, row: &crate::DecideSnapshotRow) -> anyhow::Result<()> {
-        self.sqlite
-            .insert_snapshot(row)
-            .context("Ledger::insert_snapshot")
-    }
-
     /// Query snapshots with optional filtering by village_id and engine_version.
     pub fn query_snapshots(
         &self,
@@ -681,7 +679,7 @@ impl Ledger {
 /// Creates the directory layout AND a fresh `ledger.db` with schema.
 pub fn init_workspace(paths: &EddaPaths) -> anyhow::Result<()> {
     paths.ensure_layout()?;
-    std::fs::create_dir_all(paths.branch_dir("main"))?;
+    std::fs::create_dir_all(paths.branch_dir("main")?)?;
     SqliteStore::open_or_create(&paths.ledger_db)?;
     Ok(())
 }
@@ -726,7 +724,26 @@ mod tests {
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn setup_workspace() -> (std::path::PathBuf, Ledger) {
+    struct TestLedger(Ledger);
+
+    impl std::ops::Deref for TestLedger {
+        type Target = Ledger;
+
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl TestLedger {
+        fn append_event(&self, event: &Event) -> anyhow::Result<()> {
+            let mut chained = event.clone();
+            chained.parent_hash = self.0.last_event_hash()?;
+            edda_core::event::finalize_event(&mut chained)?;
+            self.0.append_event(&chained)
+        }
+    }
+
+    fn setup_workspace() -> (std::path::PathBuf, TestLedger) {
         let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let tmp = std::env::temp_dir().join(format!("edda_ledger_test_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -734,7 +751,7 @@ mod tests {
         init_workspace(&paths).unwrap();
         init_head(&paths, "main").unwrap();
         init_branches_json(&paths, "main").unwrap();
-        let ledger = Ledger::open(&tmp).unwrap();
+        let ledger = TestLedger(Ledger::open(&tmp).unwrap());
         (tmp, ledger)
     }
 
@@ -977,6 +994,20 @@ mod tests {
     }
 
     #[test]
+    fn append_event_idempotent_rejects_stale_parent_for_new_event() {
+        let (tmp, ledger) = setup_workspace();
+        let first = new_note_event("main", None, "system", "first", &[]).unwrap();
+        ledger.append_event(&first).unwrap();
+        let stale = new_note_event("main", None, "system", "stale", &[]).unwrap();
+
+        let result = ledger.append_event_idempotent(&stale);
+
+        assert!(result.is_err());
+        assert_eq!(ledger.iter_events().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn iter_events_by_type_filters_correctly() {
         use edda_core::event::new_execution_event;
 
@@ -1025,7 +1056,7 @@ mod tests {
     // ── Device Token tests ──────────────────────────────────────────
 
     /// Helper: append a note event and return its event_id (satisfies FK on device_tokens).
-    fn insert_pair_event(ledger: &Ledger) -> String {
+    fn insert_pair_event(ledger: &TestLedger) -> String {
         let evt = new_note_event("main", None, "system", "device_pair placeholder", &[]).unwrap();
         let eid = evt.event_id.clone();
         ledger.append_event(&evt).unwrap();
@@ -1207,7 +1238,7 @@ mod tests {
 
     /// Helper: create a decision event and set its affected_paths via raw SQL.
     fn insert_decision_with_paths(
-        ledger: &Ledger,
+        ledger: &TestLedger,
         key: &str,
         value: &str,
         paths: &[&str],
