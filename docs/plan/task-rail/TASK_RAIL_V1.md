@@ -240,3 +240,21 @@ runner 的 `session/request_permission` policy(§4.3)per task class 掛
 6. **bridge 對映與端點**:`work_unit_ref` 欄位 P1 就要進 schema
    (事後補對映最痛);wusanto MCP 是 session 級連線,bridge 作為
    獨立 process 要用哪條路呼叫端點(MCP client / CLI)先驗證再動工。
+
+## 10. 採用路線:每期用一個真場景壓著
+
+原則:**不做沒有案子壓著的基建**——每個分期都有一個真實工作負載
+當驗收場,基建跟著實際需求走,不是反過來。
+
+| 期 | 壓艙場景 | 通過標準 |
+|---|---|---|
+| P1 | dogfood:rail P1 的實作自己上 rail(producer 寫、verifier 審、check 把關) | P1 的開發過程可在帳本上完整重播 |
+| P2 | 例行維運:真實的月度巡檢+報告 plan 掛上 OS 排程 | 無人值守跑完一輪,含一次人為 kill 後被 reconcile 撿回 |
+| P3 | 客戶導入:真實交付案的 work-unit 鏈(§8 全鏈) | 自動閉環,operator 只出現在簽核 / gate / 信封三點 |
+| P4 | fleet 看板 | §7 的 3 步驟 × 3 agent pipeline 於 watch TUI 全程可視 |
+
+順序不能倒:先能記帳,才救得活;救得活,才敢自動接力;
+會接力了,看板才有東西可看。
+
+商業側的完整場景規劃(選用三問、對客鐵律、場景細節)落在
+私有營運 repo,此處不展開。
