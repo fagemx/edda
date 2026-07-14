@@ -131,8 +131,8 @@ impl Ledger {
     /// Ratified-state is derived from event **insertion order** (rowid), not
     /// timestamps: RFC3339 strings with mixed precision do not sort
     /// chronologically. The result is keyed by the specific decision event,
-    /// not by `(branch, key)`, because a key can have more than one active
-    /// decision (cross-project imports do not supersede each other).
+    /// not by `(branch, key)`, so ratification binds one exact decision and
+    /// never leaks onto a later value for the same key.
     ///
     /// A ratify event carries only `(branch, key)`, so it ratifies whichever
     /// decision was current at ratify time: the latest decision for that
