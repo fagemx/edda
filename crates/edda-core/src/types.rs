@@ -74,6 +74,12 @@ pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'
         "device_pair" | "device_revoke" => (Some(event_family::ADMIN), Some(event_level::INFO)),
         "decide_snapshot" => (Some(event_family::GOVERNANCE), Some(event_level::MILESTONE)),
         "cycle_telemetry" => (Some(event_family::SIGNAL), Some(event_level::INFO)),
+        "task.created" | "task.started" | "task.failed" => {
+            (Some(event_family::SIGNAL), Some(event_level::INFO))
+        }
+        "task.session" => (Some(event_family::SIGNAL), Some(event_level::TRACE)),
+        "task.done" => (Some(event_family::MILESTONE), Some(event_level::MILESTONE)),
+        "task.requeued" => (Some(event_family::ADMIN), Some(event_level::INFO)),
         _ => (None, None),
     }
 }
@@ -334,6 +340,12 @@ mod tests {
                 event_level::MILESTONE,
             ),
             ("cycle_telemetry", event_family::SIGNAL, event_level::INFO),
+            ("task.created", event_family::SIGNAL, event_level::INFO),
+            ("task.started", event_family::SIGNAL, event_level::INFO),
+            ("task.session", event_family::SIGNAL, event_level::TRACE),
+            ("task.done", event_family::MILESTONE, event_level::MILESTONE),
+            ("task.failed", event_family::SIGNAL, event_level::INFO),
+            ("task.requeued", event_family::ADMIN, event_level::INFO),
         ];
 
         for (event_type, expected_family, expected_level) in &table {
