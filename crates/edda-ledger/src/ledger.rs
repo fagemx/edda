@@ -120,6 +120,17 @@ impl Ledger {
             .with_context(|| format!("Ledger::iter_events_by_type({event_type})"))
     }
 
+    /// All `task.*` events in insertion order — the task rail's fold input.
+    pub fn task_events(&self) -> anyhow::Result<Vec<Event>> {
+        self.sqlite.iter_task_events().context("Ledger::task_events")
+    }
+
+    /// Project task rail views. Status/readiness is derived from events,
+    /// never stored (TASK_RAIL_V1 §2).
+    pub fn task_views(&self) -> anyhow::Result<Vec<crate::tasks::TaskView>> {
+        Ok(crate::tasks::project_tasks(&self.task_events()?))
+    }
+
     /// Get all events for a specific branch, filtered at the SQL level.
     pub fn iter_branch_events(&self, branch: &str) -> anyhow::Result<Vec<Event>> {
         self.sqlite

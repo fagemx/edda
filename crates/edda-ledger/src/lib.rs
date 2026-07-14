@@ -7,6 +7,7 @@ pub mod lock;
 pub mod paths;
 pub(crate) mod sqlite_store;
 pub mod sync;
+pub mod tasks;
 pub mod tombstone;
 pub mod view;
 
@@ -24,6 +25,7 @@ pub use domain::{
 };
 pub use ledger::Ledger;
 pub use lock::WorkspaceLock;
+pub use tasks::{TaskStatus, TaskView};
 pub use paths::EddaPaths;
 pub use tombstone::{append_tombstone, list_tombstones, make_tombstone, DeleteReason, Tombstone};
 pub use view::DecisionView;
