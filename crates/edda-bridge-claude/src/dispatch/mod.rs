@@ -207,6 +207,22 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
         "PreToolUse" => dispatch_pre_tool_use(&raw, &cwd, &project_id, &session_id),
         "PostToolUse" => dispatch_post_tool_use(&raw, &project_id, &session_id, &cwd),
         "PostToolUseFailure" => Ok(HookResult::empty()),
+        "Stop" => {
+            // Task-rail nudge (TASK_RAIL_V1 §5). Stop cannot inject context,
+            // so newly-assigned ready tasks ride the block/reason channel —
+            // watermarked to once per task per session, and never when a
+            // stop hook already fired this turn.
+            let stop_hook_active = raw
+                .get("stop_hook_active")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            Ok(crate::task_nudge::dispatch_stop(
+                &project_id,
+                &session_id,
+                &cwd,
+                stop_hook_active,
+            ))
+        }
         "PreCompact" => {
             // PreCompact hooks cannot inject context via hookSpecificOutput —
             // Claude Code's schema only allows: SessionStart, UserPromptSubmit,
