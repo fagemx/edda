@@ -1592,14 +1592,31 @@ mod tests {
         std::env::set_var("EDDA_SESSION_ID", "test-ratify-s1");
         std::env::set_var("EDDA_SESSION_LABEL", "worker");
 
-        decide(&tmp, "db.engine=sqlite", Some("embedded"), &[], None, None, &[], &[]).unwrap();
+        decide(
+            &tmp,
+            "db.engine=sqlite",
+            Some("embedded"),
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+        )
+        .unwrap();
 
         // Before ratify: the active decision is not binding.
         let branch = ledger.head_branch().unwrap();
         let keys = ledger.ratified_keys(None).unwrap();
-        assert!(keys.get("db.engine").is_none());
+        assert!(!keys.contains_key("db.engine"));
 
-        ratify(&tmp, "db.engine", Some("looks right"), Some("operator"), None).unwrap();
+        ratify(
+            &tmp,
+            "db.engine",
+            Some("looks right"),
+            Some("operator"),
+            None,
+        )
+        .unwrap();
 
         // A distinct decision_ratify event was written (not a mutation).
         let ratify_events = ledger.iter_events_by_type("decision_ratify").unwrap();
@@ -1626,8 +1643,13 @@ mod tests {
         let (tmp, _ledger) = setup_workspace();
         let pid = edda_store::project_id(&tmp);
         let _ = edda_store::ensure_dirs(&pid);
-        let err = ratify(&tmp, "nope.key", None, None, None).unwrap_err().to_string();
-        assert!(err.contains("no active decision"), "unexpected error: {err}");
+        let err = ratify(&tmp, "nope.key", None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no active decision"),
+            "unexpected error: {err}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
     }

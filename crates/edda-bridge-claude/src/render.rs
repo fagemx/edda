@@ -60,6 +60,10 @@ pub fn writeback() -> String {
      \n\
      Do NOT record: formatting changes, test fixes, minor refactors, dependency bumps.\n\
      \n\
+     Decisions you record are agent-authored and land in the *unratified* tier — \
+     recorded, not binding. Only the operator confers binding authority (via `edda ratify`); \
+     do not ratify your own decisions.\n\
+     \n\
      Before ending a session, summarize open context:\n  \
      `edda note \"completed X; decided Y; next: Z\" --tag session`\n\
      \n\

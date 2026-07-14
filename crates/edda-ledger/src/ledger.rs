@@ -1079,7 +1079,10 @@ mod tests {
 
         let map = ledger.ratified_keys(None).unwrap();
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get("db.engine").map(String::as_str), Some("2026-07-15T00:00:00Z"));
+        assert_eq!(
+            map.get("db.engine").map(String::as_str),
+            Some("2026-07-15T00:00:00Z")
+        );
         assert_eq!(
             map.get("auth.method").map(String::as_str),
             Some("2026-07-13T00:00:00Z")
