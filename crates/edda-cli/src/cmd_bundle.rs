@@ -56,6 +56,7 @@ pub fn execute_create(
 
     // 6. Create event + append to ledger
     let ledger = Ledger::open(repo_root)?;
+    let _lock = edda_ledger::WorkspaceLock::acquire(&ledger.paths)?;
     let branch = ledger.head_branch()?;
     let parent_hash = ledger.last_event_hash()?;
     let event = new_review_bundle_event(&ReviewBundleParams {

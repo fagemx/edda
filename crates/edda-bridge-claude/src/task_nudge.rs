@@ -67,14 +67,17 @@ pub(crate) fn read_watermark(project_id: &str, session_id: &str) -> BTreeSet<u64
         .unwrap_or_default()
 }
 
-/// Persist the nudged task ids (best-effort; errors are swallowed).
-pub(crate) fn write_watermark(project_id: &str, session_id: &str, ids: &BTreeSet<u64>) {
+/// Persist the nudged task ids. Returns `false` when the write failed —
+/// callers must then NOT nudge, or the same task would re-block every
+/// Stop forever (the once-per-session guarantee lives in this file).
+pub(crate) fn write_watermark(project_id: &str, session_id: &str, ids: &BTreeSet<u64>) -> bool {
     let path = watermark_path(project_id, session_id);
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    if let Ok(json) = serde_json::to_string(&ids.iter().collect::<Vec<_>>()) {
-        let _ = fs::write(&path, json);
+    match serde_json::to_string(&ids.iter().collect::<Vec<_>>()) {
+        Ok(json) => fs::write(&path, json).is_ok(),
+        Err(_) => false,
     }
 }
 
@@ -115,9 +118,13 @@ pub(crate) fn dispatch_stop(
 
     // Mark before emitting: a task nudges at most once per session even if
     // the agent ignores it — the rail's transport is the ledger, not this.
+    // If the mark cannot be persisted, stay silent: an unrecorded nudge
+    // would repeat on every Stop.
     let mut marked = already;
     marked.extend(picks.iter().map(|t| t.task_id));
-    write_watermark(project_id, session_id, &marked);
+    if !write_watermark(project_id, session_id, &marked) {
+        return HookResult::empty();
+    }
 
     let payload = serde_json::json!({
         "decision": "block",
@@ -241,6 +248,56 @@ mod tests {
         );
         let third = crate::dispatch::hook_entrypoint_from_stdin(&active).unwrap();
         assert!(third.stdout.is_none(), "stop_hook_active must suppress the nudge");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(&project_id));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn watermark_write_failure_suppresses_nudge() {
+        // If we cannot record that we nudged, we must not nudge — otherwise
+        // the same task re-blocks every Stop forever. Force the failure by
+        // planting a FILE where the state dir should be.
+        let ws = std::env::temp_dir().join(format!("edda_wmfail_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).unwrap();
+        edda_ledger::Ledger::ensure_initialized(&ws).unwrap();
+        {
+            let ledger = edda_ledger::Ledger::open(&ws).unwrap();
+            let ev =
+                edda_core::event::new_task_created_event(&edda_core::event::TaskCreatedParams {
+                    branch: "main",
+                    parent_hash: None,
+                    task_id: 1,
+                    title: "nudge me",
+                    assignee: Some("wm-tester"),
+                    agent_kind: None,
+                    after: &[],
+                    plan_id: None,
+                    work_unit_ref: None,
+                    brief_ref: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
+            ledger.append_event(&ev).unwrap();
+        }
+
+        let cwd = ws.to_string_lossy().replace('\\', "/");
+        let project_id = format!("test_wmfail_{}", std::process::id());
+        let session_id = "s-wmfail";
+        crate::peers::write_heartbeat_minimal(&project_id, session_id, "wm-tester", &cwd);
+
+        // Make ONLY the watermark path unwritable (a directory where the file
+        // should go) — the heartbeat in the same state dir stays readable, so
+        // label lookup still succeeds and the failure under test is isolated.
+        let wm = super::watermark_path(&project_id, session_id);
+        fs::create_dir_all(&wm).unwrap();
+
+        let result = dispatch_stop(&project_id, session_id, &cwd, false);
+        assert!(
+            result.stdout.is_none(),
+            "nudge must degrade to silence when the watermark cannot be persisted"
+        );
 
         let _ = fs::remove_dir_all(edda_store::project_dir(&project_id));
         let _ = fs::remove_dir_all(&ws);

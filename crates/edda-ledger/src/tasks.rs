@@ -4,6 +4,15 @@
 //! (TASK_RAIL_V1 §2: truth lives in the ledger, views are derived).
 //! Readiness is a projection: a task is ready when it exists, is not
 //! running/done/failed, and every task in its `after` list is done.
+//!
+//! **Where invariants live**: the fold applies events as facts and never
+//! rejects them — transition legality (start only when ready, done only
+//! when running, receipts non-empty) is enforced at the write path
+//! (`edda task` verbs, under the workspace lock). This split is deliberate:
+//! a `task.done` arriving after a requeue (the original executor finishing
+//! late) is a real completion and must count; a duplicate `task.done` is a
+//! correction whose newest receipt wins. Done is status-terminal — later
+//! started/failed/requeued events never un-done a task.
 
 use edda_core::types::Event;
 use serde::Serialize;
@@ -367,6 +376,49 @@ mod tests {
         ];
         let views = project_tasks(&events);
         assert_eq!(view(&views, 2).status, TaskStatus::Blocked);
+    }
+
+    #[test]
+    fn late_done_after_requeue_is_accepted() {
+        // P2 semantics: the original executor may finish after the
+        // reconciler requeued the task — that completion is real.
+        let events = vec![
+            created(1, "build", &[]),
+            new_task_started_event("main", None, 1, 60, 1).unwrap(),
+            new_task_failed_event("main", None, 1, "lease expired").unwrap(),
+            new_task_requeued_event("main", None, 1, 2).unwrap(),
+            new_task_done_event("main", None, 1, "late but real", &[]).unwrap(),
+        ];
+        let views = project_tasks(&events);
+        assert_eq!(view(&views, 1).status, TaskStatus::Done);
+        assert_eq!(view(&views, 1).receipt.as_deref(), Some("late but real"));
+    }
+
+    #[test]
+    fn dep_cycle_stays_blocked() {
+        let events = vec![created(1, "a", &[2]), created(2, "b", &[1])];
+        let views = project_tasks(&events);
+        assert_eq!(view(&views, 1).status, TaskStatus::Blocked);
+        assert_eq!(view(&views, 2).status, TaskStatus::Blocked);
+    }
+
+    #[test]
+    fn done_is_status_terminal_and_receipt_corrections_win() {
+        let events = vec![
+            created(1, "build", &[]),
+            new_task_started_event("main", None, 1, 60, 1).unwrap(),
+            new_task_done_event("main", None, 1, "first receipt", &[]).unwrap(),
+            // a later started cannot un-done…
+            new_task_started_event("main", None, 1, 60, 2).unwrap(),
+            // …but a corrected done updates the completion data
+            new_task_done_event("main", None, 1, "corrected receipt", &[]).unwrap(),
+        ];
+        let views = project_tasks(&events);
+        let v = view(&views, 1);
+        assert_eq!(v.status, TaskStatus::Done);
+        assert_eq!(v.receipt.as_deref(), Some("corrected receipt"));
+        // attempts still count starts as facts
+        assert_eq!(v.attempts, 2);
     }
 
     #[test]
