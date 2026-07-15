@@ -27,16 +27,40 @@ corpus (project `043a8e81…`, 2227 events):
 | 1st | 2227 events + 35 turns | 24.661s |
 | 2nd, immediately after, nothing changed | 2227 events + **0** turns | **24.729s** |
 
-A re-index with zero new work still costs 24.7s. Cause: `indexer::index_events`
-issues `delete_term(doc_type="event")` — deleting every event doc — then re-adds
-all of them, on every run. **Turns are already incremental** (`index_watermark`
-holds a per-session transcript byte offset; the 2nd run indexed 0 turns). Events
-are not incremental at all, and they are the entire cost.
+A re-index with zero new work still costs 24.7s.
 
-Consequence: wiring the *current* indexer to SessionEnd would add ~25s to every
-session exit — over half the 45s background-join budget, and a direct violation
-of the issue's own "must never block a session's exit". **Events must become
-incremental first**; that is in scope here, not a follow-up.
+> **CORRECTION (2026-07-15, after live measurement).** The original diagnosis in
+> this section was **wrong**, and is preserved below only so the error is legible.
+>
+> It blamed `indexer::index_events` (which does `delete_term(doc_type="event")`
+> then re-adds every event on each run) and asserted "turns are already
+> incremental, events are the entire cost". Live measurement falsified both
+> halves:
+>
+> | Run | Result | Time |
+> |-----|--------|------|
+> | old code, no-op | 2227 events + 0 turns | 24.7s |
+> | events made incremental, no-op | **0** events + 0 turns | **24.8s** |
+> | 1 session vs 100 sessions | 0 events + 0 turns | **0.111s vs 24.848s** |
+>
+> Making events incremental bought **nothing** on the no-op path. The cost is
+> `index_session`, and it is linear in session count: it reads every index
+> record, builds the uuid map, walks each assistant's parent chain, and fetches
+> and parses that turn's transcript line off disk — all *before* the per-turn
+> `turns_meta` check that decides the turn is already indexed. 100 sessions /
+> 24MB, read and parsed and discarded, every run.
+>
+> Turns are incremental in what they **write**, not in what they **read**. The
+> watermark stopped duplicate writes only. `index_watermark.last_offset` — the
+> byte cursor built for precisely this — was never consulted in `indexer.rs`.
+>
+> **Real fix:** skip a session whose index file has not grown (see "Turns read
+> early-out" below). Event incrementality is still worth having on the rebuild
+> path, but it is not what buys the budget.
+
+Consequence either way: wiring the *current* indexer to SessionEnd would add
+~25s to every session exit — over half the 45s background-join budget, and a
+direct violation of the issue's own "must never block a session's exit".
 
 `Ledger::events_after_rowid(after_rowid)` already exists (edda-serve uses it for
 streaming) but the search indexer never adopted it. There is no event cursor:
@@ -237,9 +261,35 @@ Test-driven; the RED test comes first.
    SessionEnd hook is shippable, so it is verified on the real corpus, not a
    fixture.
 
+## Turns read early-out (added after the premise correction)
+
+`index_session` takes the byte length of `<project_dir>/index/<session_id>.jsonl`
+and compares it against `index_watermark.last_offset` for that
+`(project_id, session_id)`. Equal means nothing new: return without opening the
+file. Otherwise process as before and record the new length, in the same
+transaction as the `turns_meta` rows it corresponds to.
+
+A shrunk file (a rewritten session) will not compare equal, so it is re-read —
+safe, because `turns_meta` dedups by `turn_id`. A grown file is re-read in full
+rather than from the offset; that is deliberate and sufficient, because only the
+live session grows, so a run reads one file instead of a hundred.
+
+`clear_index_watermark` already wipes `index_watermark`, so a fresh index resets
+these offsets along with everything else.
+
+**Known limitation, pre-existing and not introduced here:** `index_session`
+commits `turns_meta` (and now the offset) *before* the caller commits the Tantivy
+writer. A crash in that window leaves turns marked indexed that Tantivy never
+received, making them invisible. This predates GH-403 — the existing per-turn
+`turns_meta` dedup has the same hole — and the events cursor deliberately does
+not share it (it commits first, then advances). Filed separately rather than
+folded in here.
+
 ## Out of scope
 
-- Turns are already incremental; untouched.
+- Making a grown session file read *from* its offset rather than in full.
+  Skipping untouched sessions is what buys the budget; the live session is one
+  file.
 - No new Tantivy field → `INDEX_VERSION` stays 2 → no second forced rebuild.
 - `query` does not auto-catch-up (only cold-builds). Freshness is SessionEnd's
   job; query's job is to be honest about staleness.
