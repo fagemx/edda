@@ -946,6 +946,47 @@ mod tests {
         assert_eq!(reader.searcher().num_docs(), 1, "and to one document");
     }
 
+    /// `index_project` is the production path — `bg_index` passes no session id,
+    /// so every SessionEnd goes through here rather than `index_session`. It is
+    /// also the only caller of `PendingMeta::merge`, so without this the merge is
+    /// never executed by any test.
+    #[test]
+    fn index_project_merges_turns_and_offsets_across_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        write_session_fixture(project_dir, "s1", "1");
+        write_session_fixture(project_dir, "s2", "2");
+
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+        let meta_conn = ensure_meta_db_memory().unwrap();
+
+        let pending = index_project(&writer, &schema, &meta_conn, project_dir, "p1").unwrap();
+        assert_eq!(
+            pending.turns(),
+            2,
+            "both sessions' turns must survive merge"
+        );
+
+        writer.commit().unwrap();
+        assert_eq!(pending.flush(&meta_conn).unwrap(), 2);
+
+        // Every session's offset must survive too. Losing them here would not
+        // fail anything loudly — it would just re-read every session on every
+        // sync forever, which is exactly the GH-403 cost this is built to avoid.
+        for sid in ["s1", "s2"] {
+            assert!(
+                crate::schema::read_session_offset(&meta_conn, "p1", sid).unwrap() > 0,
+                "offset for {sid} must survive merge"
+            );
+        }
+
+        // With the offsets recorded, a second pass does nothing.
+        let again = index_project(&writer, &schema, &meta_conn, project_dir, "p1").unwrap();
+        assert_eq!(again.turns(), 0, "unchanged sessions must all skip");
+    }
+
     #[test]
     fn indexing_a_session_records_its_consumed_offset() {
         let tmp = tempfile::tempdir().unwrap();
