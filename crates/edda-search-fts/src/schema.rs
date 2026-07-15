@@ -1,7 +1,43 @@
+use crate::tokenizer::{CjkBigramTokenizer, CJK_TOKENIZER};
 use rusqlite::Connection;
 use std::path::Path;
 use tantivy::schema::*;
 use tantivy::{Index, IndexWriter};
+
+/// On-disk index schema version (GH-402). Bump whenever the tokenizer or field
+/// layout changes so a stale index is rebuilt rather than mixing tokenizations.
+/// v2: CJK bigram tokenizer on all full-text fields.
+pub const INDEX_VERSION: u32 = 2;
+
+fn version_file(index_dir: &Path) -> std::path::PathBuf {
+    index_dir.join("edda_schema_version")
+}
+
+/// Read the schema version marker beside an index dir, or `None` if absent
+/// (pre-v2 indexes have no marker and are treated as outdated).
+pub fn read_index_version(index_dir: &Path) -> Option<u32> {
+    std::fs::read_to_string(version_file(index_dir))
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+}
+
+/// Write the current [`INDEX_VERSION`] marker beside an index dir.
+pub fn write_index_version(index_dir: &Path) -> anyhow::Result<()> {
+    std::fs::write(version_file(index_dir), INDEX_VERSION.to_string())?;
+    Ok(())
+}
+
+/// Whether the on-disk index needs a full rebuild for a schema upgrade.
+pub fn index_is_outdated(index_dir: &Path) -> bool {
+    index_dir.exists() && read_index_version(index_dir) != Some(INDEX_VERSION)
+}
+
+/// Register edda's custom tokenizers on an index. Must be called on every
+/// opened or created index so both indexing and `QueryParser` tokenize
+/// symmetrically (GH-402).
+pub fn register_tokenizers(index: &Index) {
+    index.tokenizers().register(CJK_TOKENIZER, CjkBigramTokenizer);
+}
 
 /// Build the Tantivy schema used for all search documents.
 ///
@@ -39,11 +75,20 @@ pub fn build_schema() -> Schema {
     // Stored-only field (not indexed)
     builder.add_text_field("ts", STORED);
 
-    // Full-text searchable fields
-    builder.add_text_field("title", TEXT | STORED);
-    builder.add_text_field("body", TEXT | STORED);
-    builder.add_text_field("tags", TEXT | STORED);
-    builder.add_text_field("tokens", TEXT);
+    // Full-text searchable fields — CJK bigram tokenizer (GH-402) with
+    // positions (needed for snippets/phrases).
+    let cjk_indexing = TextFieldIndexing::default()
+        .set_tokenizer(CJK_TOKENIZER)
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+    let cjk_stored = TextOptions::default()
+        .set_indexing_options(cjk_indexing.clone())
+        .set_stored();
+    let cjk_unstored = TextOptions::default().set_indexing_options(cjk_indexing);
+
+    builder.add_text_field("title", cjk_stored.clone());
+    builder.add_text_field("body", cjk_stored.clone());
+    builder.add_text_field("tags", cjk_stored);
+    builder.add_text_field("tokens", cjk_unstored);
 
     builder.build()
 }
@@ -54,7 +99,10 @@ pub fn ensure_index(index_dir: &Path) -> anyhow::Result<Index> {
     if index_dir.exists() {
         // Try to open existing index
         match Index::open_in_dir(index_dir) {
-            Ok(index) => return Ok(index),
+            Ok(index) => {
+                register_tokenizers(&index);
+                return Ok(index);
+            }
             Err(_) => {
                 // Corrupted or incompatible — rebuild
                 std::fs::remove_dir_all(index_dir)?;
@@ -63,6 +111,8 @@ pub fn ensure_index(index_dir: &Path) -> anyhow::Result<Index> {
     }
     std::fs::create_dir_all(index_dir)?;
     let index = Index::create_in_dir(index_dir, schema)?;
+    register_tokenizers(&index);
+    write_index_version(index_dir)?;
     Ok(index)
 }
 
@@ -70,6 +120,7 @@ pub fn ensure_index(index_dir: &Path) -> anyhow::Result<Index> {
 pub fn ensure_index_ram() -> anyhow::Result<Index> {
     let schema = build_schema();
     let index = Index::create_in_ram(schema);
+    register_tokenizers(&index);
     Ok(index)
 }
 

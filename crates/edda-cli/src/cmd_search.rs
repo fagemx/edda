@@ -106,6 +106,15 @@ pub fn query(
         eprintln!("No search index found. Run `edda search index` first.");
         return Ok(());
     }
+    // GH-402: refuse to serve an index built with an older tokenizer — its
+    // results would silently miss CJK matches. Tell the user to rebuild.
+    if schema::index_is_outdated(&index_dir) {
+        eprintln!(
+            "Search index is from an older schema (CJK tokenization changed). \
+             Run `edda search index` to rebuild."
+        );
+        return Ok(());
+    }
 
     let index = schema::ensure_index(&index_dir)?;
     let opts = search::SearchOptions {
@@ -160,6 +169,23 @@ pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> an
     }
 
     let index_dir = proj_dir.join("search").join("tantivy");
+    let meta_db_path = proj_dir.join("search").join("meta.sqlite");
+
+    // GH-402: on a schema upgrade, wipe BOTH the tantivy index and the turns
+    // watermark (meta.sqlite) so every event and turn is re-tokenized. Leaving
+    // the watermark would skip already-indexed turns and mix old/new tokens.
+    if schema::index_is_outdated(&index_dir) {
+        let old = schema::read_index_version(&index_dir)
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "1".to_string());
+        println!(
+            "Search index schema outdated (v{old} → v{}); rebuilding from scratch.",
+            schema::INDEX_VERSION
+        );
+        let _ = std::fs::remove_dir_all(&index_dir);
+        let _ = std::fs::remove_file(&meta_db_path);
+    }
+
     let index = schema::ensure_index(&index_dir)?;
     let tantivy_schema = index.schema();
     let mut writer = schema::index_writer(&index)?;
