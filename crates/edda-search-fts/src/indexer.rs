@@ -6,6 +6,19 @@ use std::path::Path;
 use tantivy::schema::*;
 use tantivy::{doc, IndexWriter, Term};
 
+/// Delete every event document in the index.
+///
+/// For the rebuild path only. The incremental path must never touch documents
+/// outside its batch — but a rebuild must, because events the ledger no longer
+/// has would otherwise stay searchable forever. The removed bulk `index_events`
+/// did this implicitly on every run; doing it only on rebuild keeps the cost off
+/// the hot path while preserving the purge.
+pub fn delete_all_event_docs(writer: &IndexWriter, schema: &Schema) -> anyhow::Result<()> {
+    let f_doc_type = schema.get_field("doc_type")?;
+    writer.delete_term(Term::from_field_text(f_doc_type, "event"));
+    Ok(())
+}
+
 /// Index a batch of `(rowid, Event)` pairs incrementally (GH-403).
 ///
 /// Each event is replaced rather than blindly added: `delete_term` on its

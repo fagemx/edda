@@ -65,7 +65,15 @@ where
     }
 
     let cursor = schema::read_events_cursor(&meta_conn, project_id)?;
-    let (batch, rebuilt) = resolve_batch(&events_after, cursor.rowid)?;
+    let (batch, rebuilt) = resolve_batch(&events_after, &cursor)?;
+
+    // A rebuild must purge events the ledger no longer has. Re-adding the
+    // current ones is not enough: a truncated or replaced ledger would leave
+    // the old documents searchable forever, answering queries with events that
+    // no longer exist. (No-op when the index was just created fresh.)
+    if rebuilt {
+        indexer::delete_all_event_docs(&writer, &tantivy_schema)?;
+    }
 
     let events = indexer::index_events_since(&writer, &tantivy_schema, project_id, &batch)?;
 
@@ -111,26 +119,37 @@ where
 
 /// Choose the events to index and report whether this is a full rebuild.
 ///
-/// Probes at `cursor - 1` rather than `cursor` so the boundary event itself
-/// comes back: if it is gone, the ledger was rebuilt or truncated under a
-/// surviving cursor. Trusting the cursor there would make every event invisible
-/// — the exact failure GH-403 exists to remove — so we rebuild instead. The
-/// probe costs one extra event on the hot path and a second read only in the
-/// rare broken case.
+/// Probes at `rowid - 1` rather than `rowid` so the boundary event itself comes
+/// back, then checks it is still the *same* event we indexed — matching both its
+/// rowid and its timestamp.
+///
+/// The rowid alone is not identity. A ledger restored from a different backup,
+/// or another repo mapped onto this project id, can occupy the same rowid range
+/// with entirely different events; a rowid-only check would see the boundary,
+/// trust the cursor, and silently skip every event in the replacement forever.
+/// Matching the timestamp too means a ledger restored from its *own* backup
+/// still compares equal and avoids a needless rebuild.
+///
+/// Costs one extra event on the hot path, and a second read only in the rare
+/// broken case.
 fn resolve_batch<F>(
     events_after: &F,
-    cursor: i64,
+    cursor: &schema::EventsCursor,
 ) -> anyhow::Result<(Vec<(i64, edda_core::Event)>, bool)>
 where
     F: Fn(i64) -> anyhow::Result<Vec<(i64, edda_core::Event)>>,
 {
-    if cursor <= 0 {
+    if cursor.rowid <= 0 {
         return Ok((events_after(0)?, true));
     }
-    let probe = events_after(cursor - 1)?;
+    let probe = events_after(cursor.rowid - 1)?;
     match probe.first() {
-        // Boundary event still there: it is already indexed, so skip it.
-        Some((rowid, _)) if *rowid == cursor => Ok((probe[1..].to_vec(), false)),
+        // Same rowid AND same event: already indexed, so skip just it.
+        Some((rowid, ev))
+            if *rowid == cursor.rowid && cursor.ts.as_deref() == Some(ev.ts.as_str()) =>
+        {
+            Ok((probe[1..].to_vec(), false))
+        }
         _ => Ok((events_after(0)?, true)),
     }
 }
@@ -271,6 +290,58 @@ mod tests {
         let reader = index.reader().unwrap();
         reader.reload().unwrap();
         assert_eq!(reader.searcher().num_docs(), 2);
+    }
+
+    #[test]
+    fn ledger_replaced_at_the_same_rowids_is_not_trusted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let led = FakeLedger::new(vec![
+            (1, mk_event("evt_a", "2026-07-15T12:00:00Z")),
+            (2, mk_event("evt_b", "2026-07-15T12:01:00Z")),
+        ]);
+        sync(tmp.path(), "p1", None, led.source()).unwrap();
+
+        // A DIFFERENT ledger now occupies the same rowid range — restored from
+        // another backup, or another repo mapped onto this project id. The
+        // boundary rowid still exists, so validating on rowid alone would trust
+        // the cursor and silently skip every event in the replacement.
+        let other = FakeLedger::new(vec![
+            (1, mk_event("evt_x", "2026-07-15T20:00:00Z")),
+            (2, mk_event("evt_y", "2026-07-15T20:01:00Z")),
+        ]);
+        let stats = sync(tmp.path(), "p1", None, other.source()).unwrap();
+
+        assert!(
+            stats.rebuilt,
+            "a replaced ledger must not be trusted on rowid alone"
+        );
+        assert_eq!(stats.events, 2, "the replacement's events must be indexed");
+    }
+
+    #[test]
+    fn rebuild_purges_events_the_ledger_no_longer_has() {
+        let tmp = tempfile::tempdir().unwrap();
+        let led = FakeLedger::new(vec![
+            (1, mk_event("evt_a", "2026-07-15T12:00:00Z")),
+            (2, mk_event("evt_b", "2026-07-15T12:01:00Z")),
+        ]);
+        sync(tmp.path(), "p1", None, led.source()).unwrap();
+
+        // Ledger truncated. The removed bulk path purged orphans implicitly by
+        // deleting every event doc before re-adding; the incremental path must
+        // do it explicitly on rebuild, or these stay searchable forever.
+        let empty = FakeLedger::new(vec![]);
+        let stats = sync(tmp.path(), "p1", None, empty.source()).unwrap();
+        assert!(stats.rebuilt);
+
+        let index = crate::schema::open_index(&tmp.path().join("search").join("tantivy")).unwrap();
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            0,
+            "orphaned event docs must be purged on rebuild"
+        );
     }
 
     #[test]
