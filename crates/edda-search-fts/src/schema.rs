@@ -1,6 +1,6 @@
 use crate::tokenizer::{CjkBigramTokenizer, CJK_TOKENIZER};
 use fs2::FileExt;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 use tantivy::schema::*;
 use tantivy::{Index, IndexWriter};
@@ -193,6 +193,37 @@ pub fn index_writer(index: &Index) -> anyhow::Result<IndexWriter> {
     Ok(writer)
 }
 
+/// Schema for the search meta database, shared by the on-disk and in-memory
+/// builders so a test DB can never drift from the real one. All statements are
+/// `IF NOT EXISTS`, so adding a table needs no migration.
+const META_DDL: &str = "
+    CREATE TABLE IF NOT EXISTS turns_meta (
+        turn_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        ts TEXT,
+        user_uuid TEXT,
+        assistant_uuid TEXT,
+        user_store_offset INTEGER,
+        user_store_len INTEGER,
+        assistant_store_offset INTEGER,
+        assistant_store_len INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS index_watermark (
+        project_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        last_offset INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (project_id, session_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS events_watermark (
+        project_id TEXT PRIMARY KEY,
+        last_rowid INTEGER NOT NULL DEFAULT 0,
+        last_ts TEXT
+    );
+";
+
 /// Open (or create) the SQLite database for turns_meta (byte-offset pointers).
 ///
 /// This is kept alongside Tantivy because `show` needs byte offsets
@@ -204,29 +235,7 @@ pub fn ensure_meta_db(db_path: &Path) -> anyhow::Result<Connection> {
     let conn = Connection::open(db_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
 
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS turns_meta (
-            turn_id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            ts TEXT,
-            user_uuid TEXT,
-            assistant_uuid TEXT,
-            user_store_offset INTEGER,
-            user_store_len INTEGER,
-            assistant_store_offset INTEGER,
-            assistant_store_len INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS index_watermark (
-            project_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            last_offset INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (project_id, session_id)
-        );
-        ",
-    )?;
+    conn.execute_batch(META_DDL)?;
 
     Ok(conn)
 }
@@ -236,36 +245,56 @@ pub fn ensure_meta_db(db_path: &Path) -> anyhow::Result<Connection> {
 /// Lives here (beside `ensure_meta_db`) so the meta-DB table names stay in one
 /// crate rather than being duplicated by callers (GH-402).
 pub fn clear_index_watermark(conn: &Connection) -> anyhow::Result<()> {
-    conn.execute_batch("DELETE FROM turns_meta; DELETE FROM index_watermark;")?;
+    conn.execute_batch(
+        "DELETE FROM turns_meta; DELETE FROM index_watermark; DELETE FROM events_watermark;",
+    )?;
+    Ok(())
+}
+
+/// Where the event index has reached: the ledger rowid of the last indexed
+/// event, plus its timestamp for staleness reporting (GH-403).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EventsCursor {
+    pub rowid: i64,
+    pub ts: Option<String>,
+}
+
+/// Read a project's event cursor. An absent cursor is `rowid = 0` — index from
+/// the beginning — not an error.
+pub fn read_events_cursor(conn: &Connection, project_id: &str) -> anyhow::Result<EventsCursor> {
+    let row = conn
+        .query_row(
+            "SELECT last_rowid, last_ts FROM events_watermark WHERE project_id = ?1",
+            [project_id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((rowid, ts)) => EventsCursor { rowid, ts },
+        None => EventsCursor { rowid: 0, ts: None },
+    })
+}
+
+/// Advance a project's event cursor. Written only AFTER a successful commit, so
+/// a crash in between re-runs the batch instead of skipping it.
+pub fn write_events_cursor(
+    conn: &Connection,
+    project_id: &str,
+    rowid: i64,
+    ts: Option<&str>,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO events_watermark (project_id, last_rowid, last_ts) VALUES (?1, ?2, ?3)
+         ON CONFLICT(project_id) DO UPDATE SET last_rowid = ?2, last_ts = ?3",
+        rusqlite::params![project_id, rowid, ts],
+    )?;
     Ok(())
 }
 
 /// Open an in-memory SQLite database with turns_meta schema (for testing).
 pub fn ensure_meta_db_memory() -> anyhow::Result<Connection> {
     let conn = Connection::open_in_memory()?;
-    conn.execute_batch(
-        "
-        CREATE TABLE IF NOT EXISTS turns_meta (
-            turn_id TEXT PRIMARY KEY,
-            project_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            ts TEXT,
-            user_uuid TEXT,
-            assistant_uuid TEXT,
-            user_store_offset INTEGER,
-            user_store_len INTEGER,
-            assistant_store_offset INTEGER,
-            assistant_store_len INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS index_watermark (
-            project_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
-            last_offset INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (project_id, session_id)
-        );
-        ",
-    )?;
+    conn.execute_batch(META_DDL)?;
     Ok(conn)
 }
 
@@ -385,5 +414,60 @@ mod tests {
             .query_row("SELECT count(*) FROM index_watermark", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn events_cursor_roundtrip_and_default() {
+        let conn = ensure_meta_db_memory().unwrap();
+
+        // Absent cursor reads as zero, not an error.
+        let c = read_events_cursor(&conn, "p1").unwrap();
+        assert_eq!(c.rowid, 0);
+        assert_eq!(c.ts, None);
+
+        write_events_cursor(&conn, "p1", 42, Some("2026-07-15T09:40:00Z")).unwrap();
+        let c = read_events_cursor(&conn, "p1").unwrap();
+        assert_eq!(c.rowid, 42);
+        assert_eq!(c.ts.as_deref(), Some("2026-07-15T09:40:00Z"));
+
+        // Upsert, not a second row.
+        write_events_cursor(&conn, "p1", 99, Some("2026-07-15T10:00:00Z")).unwrap();
+        let c = read_events_cursor(&conn, "p1").unwrap();
+        assert_eq!(c.rowid, 99);
+
+        // Cursors are per project.
+        assert_eq!(read_events_cursor(&conn, "p2").unwrap().rowid, 0);
+    }
+
+    #[test]
+    fn clear_index_watermark_also_clears_events_cursor() {
+        let conn = ensure_meta_db_memory().unwrap();
+        write_events_cursor(&conn, "p1", 42, Some("2026-07-15T09:40:00Z")).unwrap();
+
+        clear_index_watermark(&conn).unwrap();
+
+        // A fresh index must re-index every event, so the cursor must reset too.
+        assert_eq!(read_events_cursor(&conn, "p1").unwrap().rowid, 0);
+    }
+
+    #[test]
+    fn memory_and_file_meta_dbs_have_the_same_tables() {
+        // The two builders share one DDL const; this pins that they cannot drift.
+        let tmp = tempfile::tempdir().unwrap();
+        let file_conn = ensure_meta_db(&tmp.path().join("meta.sqlite")).unwrap();
+        let mem_conn = ensure_meta_db_memory().unwrap();
+
+        let tables = |c: &Connection| -> Vec<String> {
+            let mut stmt = c
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.map(|r| r.unwrap())
+                .filter(|n| !n.starts_with("sqlite_"))
+                .collect()
+        };
+
+        assert_eq!(tables(&file_conn), tables(&mem_conn));
+        assert!(tables(&mem_conn).contains(&"events_watermark".to_string()));
     }
 }
