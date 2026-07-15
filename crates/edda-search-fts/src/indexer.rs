@@ -169,39 +169,50 @@ impl PendingMeta {
     }
 
     /// Write everything in one transaction, returning the number of turns
-    /// recorded.
+    /// actually recorded.
     ///
     /// Call this ONLY after the Tantivy writer has committed. Flushing early
     /// reintroduces GH-413.
+    ///
+    /// `OR IGNORE` is load-bearing, not laziness. The per-turn dedup upstream
+    /// can only see rows previous runs flushed, so two records carrying the same
+    /// `turn_id` within one run both arrive here. A plain `INSERT` would raise a
+    /// PRIMARY KEY error that aborts the whole transaction — recording nothing,
+    /// and failing identically on every retry, which is worse than the crash
+    /// window this deferral exists to close. Collapsing the duplicate is also
+    /// the behaviour the old code had for free, since its dedup read from its
+    /// own open transaction.
     pub fn flush(self, conn: &Connection) -> anyhow::Result<usize> {
         let tx = conn.unchecked_transaction()?;
+        let mut recorded = 0;
         for r in &self.turns {
-            tx.execute(
-                "INSERT INTO turns_meta (turn_id, project_id, session_id, ts, \
-                 user_uuid, assistant_uuid, \
-                 user_store_offset, user_store_len, \
-                 assistant_store_offset, assistant_store_len) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![
-                    r.turn_id,
-                    r.project_id,
-                    r.session_id,
-                    r.ts,
-                    r.user_uuid,
-                    r.assistant_uuid,
-                    r.user_store_offset,
-                    r.user_store_len,
-                    r.assistant_store_offset,
-                    r.assistant_store_len,
-                ],
-            )
-            .context("insert turns_meta")?;
+            recorded += tx
+                .execute(
+                    "INSERT OR IGNORE INTO turns_meta (turn_id, project_id, session_id, ts, \
+                     user_uuid, assistant_uuid, \
+                     user_store_offset, user_store_len, \
+                     assistant_store_offset, assistant_store_len) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    params![
+                        r.turn_id,
+                        r.project_id,
+                        r.session_id,
+                        r.ts,
+                        r.user_uuid,
+                        r.assistant_uuid,
+                        r.user_store_offset,
+                        r.user_store_len,
+                        r.assistant_store_offset,
+                        r.assistant_store_len,
+                    ],
+                )
+                .context("insert turns_meta")?;
         }
         for (project_id, session_id, offset) in &self.offsets {
             crate::schema::write_session_offset(conn, project_id, session_id, *offset)?;
         }
         tx.commit()?;
-        Ok(self.turns.len())
+        Ok(recorded)
     }
 }
 
@@ -369,6 +380,13 @@ pub fn index_session(
         };
 
         let tokens = format!("{tool_names} {tool_commands} {file_paths}");
+
+        // Replace rather than blindly add, exactly as `index_events_since` does.
+        // The caller commits BEFORE flushing, so a crash in between re-runs this
+        // turn on the next pass; without the delete that re-run would add a
+        // second copy of every turn, permanently, and normal syncing has no path
+        // that would ever clean it up.
+        writer.delete_term(Term::from_field_text(f_doc_id, turn_id.as_str()));
 
         // Add Tantivy document
         writer.add_document(doc!(
@@ -845,6 +863,87 @@ mod tests {
             1,
             "the turn must be searchable after recovery"
         );
+    }
+
+    /// GH-413 follow-up: the fix moved the crash window from "before the Tantivy
+    /// commit" to "after it, before the flush". That window must not duplicate.
+    ///
+    /// Events survive it because `index_events_since` deletes the doc_id before
+    /// re-adding. Turns must have the same property or the recovery run adds a
+    /// second copy of every turn, permanently.
+    #[test]
+    fn crash_between_commit_and_flush_does_not_duplicate_turns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        write_session_fixture(project_dir, "s1", "1");
+
+        let index_dir = project_dir.join("search").join("tantivy");
+        let (index, _) = crate::schema::open_or_create_index(&index_dir).unwrap();
+        let tschema = index.schema();
+        let meta_conn =
+            crate::schema::ensure_meta_db(&project_dir.join("search").join("meta.sqlite")).unwrap();
+
+        // Run 1: documents committed, then the crash — flush never happens.
+        {
+            let mut writer = index_writer(&index).unwrap();
+            let _pending =
+                index_session(&writer, &tschema, &meta_conn, project_dir, "p1", "s1").unwrap();
+            writer.commit().unwrap();
+            // dropped without flushing
+        }
+
+        // Run 2: SQLite knows nothing, so the turn is indexed again.
+        let mut writer = index_writer(&index).unwrap();
+        let pending =
+            index_session(&writer, &tschema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        writer.commit().unwrap();
+        pending.flush(&meta_conn).unwrap();
+
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            1,
+            "re-indexing a turn must replace it, not add a second copy"
+        );
+    }
+
+    /// GH-413 follow-up: two records carrying the same turn_id inside ONE run.
+    ///
+    /// The old code deduped against its own open transaction, so this collapsed
+    /// silently. Deferring the writes means the dedup only sees flushed rows, so
+    /// both rows reach the flush — and a plain INSERT makes the PRIMARY KEY blow
+    /// up the whole transaction, recording nothing and failing identically on
+    /// every retry. That is worse than the bug this all started from.
+    #[test]
+    fn duplicate_turn_id_within_one_run_does_not_poison_the_flush() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        // Same suffix twice = same uuids = the same turn_id appearing twice.
+        write_session_fixture(project_dir, "s1", "1");
+        write_session_fixture(project_dir, "s1", "1");
+
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+        let meta_conn = ensure_meta_db_memory().unwrap();
+
+        let pending = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        writer.commit().unwrap();
+
+        let recorded = pending
+            .flush(&meta_conn)
+            .expect("a duplicate turn_id must not abort the whole flush");
+        assert_eq!(recorded, 1, "the duplicate collapses to one row");
+
+        let rows: i64 = meta_conn
+            .query_row("SELECT count(*) FROM turns_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(reader.searcher().num_docs(), 1, "and to one document");
     }
 
     #[test]
