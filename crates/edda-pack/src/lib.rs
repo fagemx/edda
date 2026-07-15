@@ -459,6 +459,10 @@ pub struct DecisionSummary {
     pub authority: String,
     pub reversibility: String,
     pub affected_paths: Vec<String>,
+    /// Operator-ratified (GH-401). Derived from `decision_ratify` events at
+    /// build time — `From<&DecisionView>` alone cannot know it, so callers
+    /// that have ratified-state must set it explicitly.
+    pub ratified: bool,
 }
 
 impl From<&DecisionView> for DecisionSummary {
@@ -471,6 +475,7 @@ impl From<&DecisionView> for DecisionSummary {
             authority: v.authority.clone(),
             reversibility: v.reversibility.clone(),
             affected_paths: v.affected_paths.clone(),
+            ratified: false,
         }
     }
 }
@@ -482,12 +487,27 @@ impl From<&DecisionView> for DecisionSummary {
 ///
 /// Returns a pack with 0 groups if no active decisions exist.
 pub fn build_decision_pack(repo_root: &Path, branch: &str, max_items: usize) -> DecisionPack {
-    let views: Vec<DecisionView> = match edda_ledger::Ledger::open(repo_root) {
-        Ok(ledger) => ledger
-            .active_decisions_limited(None, None, None, None, max_items)
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
+    let (mut views, ratified): (Vec<DecisionView>, std::collections::BTreeSet<String>) =
+        match edda_ledger::Ledger::open(repo_root) {
+            // Fetch ALL active decisions (not SQL-limited): active_decisions is
+            // not branch-filtered, so a SQL LIMIT applied before the branch
+            // retain below could be entirely consumed by other branches and
+            // drop every decision for this branch. Filter by branch first,
+            // then cap at max_items.
+            Ok(ledger) => (
+                ledger
+                    .active_decisions(None, None, None, None)
+                    .unwrap_or_default(),
+                // GH-401: ratified decision event_ids, derived by rowid order.
+                ledger.ratified_decision_events().unwrap_or_default(),
+            ),
+            Err(_) => (Vec::new(), std::collections::BTreeSet::new()),
+        };
+    // Keep only this branch's decisions (see above), then cap at max_items so
+    // a decision — and its ratified-state — from another branch is never
+    // rendered under this branch's header.
+    views.retain(|v| v.branch == branch);
+    views.truncate(max_items);
 
     if views.is_empty() {
         return DecisionPack {
@@ -505,10 +525,9 @@ pub fn build_decision_pack(repo_root: &Path, branch: &str, max_items: usize) -> 
         if count >= max_items {
             break;
         }
-        by_domain
-            .entry(d.domain.clone())
-            .or_default()
-            .push(DecisionSummary::from(d));
+        let mut summary = DecisionSummary::from(d);
+        summary.ratified = edda_ledger::view::is_decision_ratified(d, &ratified);
+        by_domain.entry(d.domain.clone()).or_default().push(summary);
         count += 1;
     }
 
@@ -527,23 +546,76 @@ pub fn build_decision_pack(repo_root: &Path, branch: &str, max_items: usize) -> 
     }
 }
 
-/// Render a decision pack as a markdown section.
+/// Render a decision pack as a markdown section, split into an
+/// operator-ratified (binding) tier and an unratified tier (GH-401).
 ///
-/// Returns an empty string if the pack has 0 decisions.
+/// Binding status comes from `decision_ratify` events (carried on each
+/// summary as `ratified`), never from the authority string — so the pack
+/// can never launder agent inference into operator authority. Each domain
+/// group is preserved within its tier; unratified lines are annotated with
+/// their authorship. Returns an empty string if the pack has 0 decisions.
 pub fn render_decision_pack_md(pack: &DecisionPack) -> String {
     if pack.total == 0 {
         return String::new();
     }
 
-    let mut lines = vec![format!(
-        "## Active Decisions ({} on `{}`)",
-        pack.total, pack.branch
-    )];
+    let ratified_count = pack
+        .groups
+        .iter()
+        .flat_map(|g| &g.decisions)
+        .filter(|d| d.ratified)
+        .count();
+    let unratified_count = pack.total.saturating_sub(ratified_count);
 
+    let mut sections: Vec<String> = Vec::new();
+    if ratified_count > 0 {
+        sections.push(render_decision_tier(
+            pack,
+            true,
+            &format!(
+                "## Ratified Decisions ({} on `{}`)",
+                ratified_count, pack.branch
+            ),
+        ));
+    }
+    if unratified_count > 0 {
+        sections.push(render_decision_tier(
+            pack,
+            false,
+            &format!(
+                "## Unratified Decisions ({} on `{}`) — recorded, not binding until `edda ratify`",
+                unratified_count, pack.branch
+            ),
+        ));
+    }
+    sections.join("\n\n")
+}
+
+/// Render one tier (ratified or not) of a decision pack, preserving domain
+/// grouping. Unratified lines carry an authorship tag; ratified lines do not.
+fn render_decision_tier(pack: &DecisionPack, want_ratified: bool, header: &str) -> String {
+    let mut lines = vec![header.to_string()];
     for group in &pack.groups {
+        let decs: Vec<&DecisionSummary> = group
+            .decisions
+            .iter()
+            .filter(|d| d.ratified == want_ratified)
+            .collect();
+        if decs.is_empty() {
+            continue;
+        }
         lines.push(format!("\n### {}", group.domain));
-        for d in &group.decisions {
-            let mut entry = format!("- **`{}={}`**", d.key, d.value);
+        for d in decs {
+            let mut entry = if want_ratified {
+                format!("- **`{}={}`**", d.key, d.value)
+            } else {
+                format!(
+                    "- [{}] **`{}={}`**",
+                    edda_core::types::authorship_tag(&d.authority),
+                    d.key,
+                    d.value
+                )
+            };
             if !d.reason.is_empty() {
                 entry.push_str(&format!(" — {}", d.reason));
             }
@@ -553,7 +625,6 @@ pub fn render_decision_pack_md(pack: &DecisionPack) -> String {
             lines.push(entry);
         }
     }
-
     lines.join("\n")
 }
 
@@ -686,10 +757,18 @@ mod tests {
             value: value.to_string(),
             reason: reason.to_string(),
             status: "active".to_string(),
-            authority: "human".to_string(),
+            authority: "agent".to_string(),
             reversibility: "medium".to_string(),
             affected_paths: paths.into_iter().map(|s| s.to_string()).collect(),
+            ratified: false,
         }
+    }
+
+    fn make_ratified(key: &str, value: &str, reason: &str) -> DecisionSummary {
+        let mut s = make_summary(key, value, reason, vec![]);
+        s.authority = "operator".to_string();
+        s.ratified = true;
+        s
     }
 
     fn make_pack(groups: Vec<(&str, Vec<DecisionSummary>)>, branch: &str) -> DecisionPack {
@@ -748,10 +827,47 @@ mod tests {
         assert_eq!(pack.total, 5);
 
         let md = render_decision_pack_md(&pack);
-        assert!(md.contains("## Active Decisions (5 on `main`)"));
+        // All make_summary decisions are unratified → Unratified section.
+        assert!(md.contains("## Unratified Decisions (5 on `main`)"));
+        assert!(!md.contains("## Ratified Decisions"));
         assert!(md.contains("### auth"));
         assert!(md.contains("### db"));
         assert!(md.contains("### error"));
+    }
+
+    #[test]
+    fn two_tier_splits_ratified_and_unratified() {
+        let pack = make_pack(
+            vec![
+                ("db", vec![make_ratified("db.engine", "postgres", "JSONB")]),
+                (
+                    "api",
+                    vec![make_summary("api.style", "REST", "compat", vec![])],
+                ),
+            ],
+            "main",
+        );
+        let md = render_decision_pack_md(&pack);
+        assert!(md.contains("## Ratified Decisions (1 on `main`)"));
+        assert!(md.contains("## Unratified Decisions (1 on `main`)"));
+        // Ratified renders before unratified.
+        let r = md.find("## Ratified Decisions").unwrap();
+        let u = md.find("## Unratified Decisions").unwrap();
+        assert!(r < u, "ratified tier must render first");
+        // Ratified line has no authorship tag; unratified line is tagged.
+        assert!(md.contains("**`db.engine=postgres`**"));
+        assert!(md.contains("[agent] **`api.style=REST`**"));
+    }
+
+    #[test]
+    fn all_ratified_omits_unratified_section() {
+        let pack = make_pack(
+            vec![("db", vec![make_ratified("db.engine", "pg", "r")])],
+            "main",
+        );
+        let md = render_decision_pack_md(&pack);
+        assert!(md.contains("## Ratified Decisions (1 on `main`)"));
+        assert!(!md.contains("## Unratified Decisions"));
     }
 
     #[test]
@@ -804,7 +920,9 @@ mod tests {
 
         let md = render_decision_pack_md(&pack);
         assert!(md.contains("**`db.engine=sqlite`**"));
-        assert!(!md.contains(" — "));
+        // The decision line itself carries no reason separator (the header may).
+        let decision_line = md.lines().find(|l| l.contains("db.engine=sqlite")).unwrap();
+        assert!(!decision_line.contains(" — "));
     }
 
     #[test]
@@ -814,5 +932,63 @@ mod tests {
         assert_eq!(pack.total, 0);
         assert!(pack.groups.is_empty());
         assert_eq!(render_decision_pack_md(&pack), "");
+    }
+
+    #[test]
+    fn build_decision_pack_derives_ratified_from_real_ledger() {
+        // End-to-end: a real ledger with two decisions and one ratify event
+        // must split into ratified/unratified through the full
+        // ledger → ratified_decision_events → is_decision_ratified → render
+        // chain. The ratify is given an EARLIER timestamp than the decisions
+        // but appended last (highest rowid) — so a green result proves rowid,
+        // not the timestamp, is authoritative.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let ledger = edda_ledger::Ledger::open_or_init(root).unwrap();
+
+        let decide = |key: &str, value: &str| {
+            let parent = ledger.last_event_hash().unwrap();
+            let dp = edda_core::types::DecisionPayload {
+                key: key.into(),
+                value: value.into(),
+                reason: None,
+                scope: None,
+                authority: Some("agent".into()),
+                affected_paths: None,
+                tags: None,
+                review_after: None,
+                reversibility: None,
+                village_id: None,
+            };
+            let ev = edda_core::event::new_decision_event("main", parent.as_deref(), "worker", &dp)
+                .unwrap();
+            ledger.append_event(&ev).unwrap();
+        };
+        decide("db.engine", "postgres");
+        decide("api.style", "REST");
+
+        // Ratify db.engine, appended LAST but with an EARLIER timestamp than
+        // the decisions — a timestamp model would call it stale/unratified;
+        // the rowid model correctly binds it.
+        let parent = ledger.last_event_hash().unwrap();
+        let mut rat = edda_core::event::new_decision_ratify_event(
+            "main",
+            parent.as_deref(),
+            "db.engine",
+            "operator",
+            None,
+        )
+        .unwrap();
+        rat.ts = "2000-01-01T00:00:00Z".into();
+        edda_core::event::finalize_event(&mut rat).unwrap();
+        ledger.append_event(&rat).unwrap();
+
+        let pack = build_decision_pack(root, "main", 10);
+        let md = render_decision_pack_md(&pack);
+
+        assert!(md.contains("## Ratified Decisions (1 on `main`)"));
+        assert!(md.contains("**`db.engine=postgres`**"));
+        assert!(md.contains("## Unratified Decisions (1 on `main`)"));
+        assert!(md.contains("[agent] **`api.style=REST`**"));
     }
 }

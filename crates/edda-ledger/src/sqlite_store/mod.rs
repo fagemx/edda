@@ -3309,7 +3309,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(row.0, "human"); // authority default
+        // GH-401: absence of provenance projects as "unknown", never "human"
+        // — the projection must not mint operator authority.
+        assert_eq!(row.0, "unknown"); // authority default
         assert_eq!(row.1, "[]"); // affected_paths default
         assert_eq!(row.2, "[]"); // tags default
         assert_eq!(row.3, None); // review_after default

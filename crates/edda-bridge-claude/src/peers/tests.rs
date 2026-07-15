@@ -135,7 +135,7 @@ fn render_protocol_multi_session() {
     assert!(result.contains("Coordination Protocol"));
     assert!(result.contains("Off-limits"));
     assert!(result.contains("auth"));
-    assert!(result.contains("Binding Decisions"));
+    assert!(result.contains("Recorded Decisions (coordination)"));
     assert!(result.contains("JWT RS256"));
 
     remove_heartbeat(pid, "s1");
@@ -307,8 +307,8 @@ fn full_lifecycle_multi_session() {
     remove_heartbeat(pid, "s4");
     let solo = render_coordination_protocol(pid, "s5", ".").unwrap();
     assert!(
-        solo.contains("Binding Decisions"),
-        "solo should show bindings"
+        solo.contains("Recorded Decisions (coordination)"),
+        "solo should show recorded decisions"
     );
     assert!(solo.contains("JWT RS256"), "solo should show binding value");
     assert!(
@@ -617,8 +617,8 @@ fn render_protocol_solo_with_bindings() {
 
     let result = render_coordination_protocol(pid, "solo-session", ".").unwrap();
     assert!(
-        result.contains("Binding Decisions"),
-        "should have binding header, got:\n{result}"
+        result.contains("Recorded Decisions (coordination)"),
+        "should have recorded-decisions header, got:\n{result}"
     );
     assert!(
         result.contains("JWT RS256"),
@@ -1095,7 +1095,7 @@ fn solo_mode_no_l2_instructions() {
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
 
-    // Solo with binding (renders "## Binding Decisions" only)
+    // Solo with a recorded decision (renders "## Recorded Decisions" only)
     write_binding(pid, "s1", "auth", "db.engine", "postgres");
     let result = render_coordination_protocol(pid, "solo", ".").unwrap();
     assert!(

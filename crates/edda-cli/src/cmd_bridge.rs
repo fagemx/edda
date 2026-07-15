@@ -114,7 +114,7 @@ pub enum BridgeClaudeCmd {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Record a binding decision for all sessions
+    /// Record a decision — agent-authored, unratified until `edda ratify`
     Decide {
         /// Decision in key=value format (e.g. "auth.method=JWT RS256")
         decision: String,
@@ -624,7 +624,10 @@ pub fn claim(
     Ok(())
 }
 
-/// `edda bridge claude decide <key=value>` — record a binding decision
+/// `edda bridge claude decide <key=value>` — record a decision.
+///
+/// GH-401: the decision is agent-authored and unratified (not binding) until
+/// an operator ratifies it via `edda ratify`.
 ///
 /// Writes to both:
 /// 1. Peers `coordination.jsonl` — real-time broadcast to active peers
@@ -709,6 +712,14 @@ pub fn decide(
     } else {
         &label
     };
+    // GH-401: a written decision never self-declares operator authority.
+    // It is tagged system (internal) or agent; operator authority is
+    // conferred only by a separate `edda ratify` (decision_ratify event).
+    let authority = if actor == "system" {
+        edda_core::types::authority::SYSTEM
+    } else {
+        edda_core::types::authority::AGENT
+    };
     let scope = scope_str
         .filter(|s| *s != "local")
         .map(|s| s.parse::<edda_core::types::DecisionScope>())
@@ -719,7 +730,7 @@ pub fn decide(
         value: value.to_string(),
         reason: reason.map(|r| r.to_string()),
         scope,
-        authority: None,
+        authority: Some(authority.to_string()),
         affected_paths: if paths.is_empty() {
             None
         } else {
@@ -816,6 +827,57 @@ pub fn decide(
     // edda-serve::api::drafts.rs:508 — failure never blocks a successful decide.
     let _ = edda_derive::rebuild_branch(&ledger, &branch);
 
+    Ok(())
+}
+
+/// `edda ratify <key>` — confer operator authority on an active decision (GH-401).
+///
+/// Ratification is a separate append-only fact (`decision_ratify` event),
+/// never a mutation of the decision, so operator authority is conferred by a
+/// deliberate act and is fully auditable via `ratified_by`. This is the
+/// operator counterpart to `edda decide`; agents are taught `decide` only
+/// (see the write-back protocol), so a compliant agent never self-ratifies.
+///
+/// Identity is not cryptographically enforced here — a session can record any
+/// `ratified_by`. That enforcement is a policy-layer concern (GH-401 scope);
+/// this layer delivers the separation of act, the rendering split, and the
+/// audit trail.
+pub fn ratify(
+    repo_root: &Path,
+    key: &str,
+    note: Option<&str>,
+    by: Option<&str>,
+    cli_session: Option<&str>,
+) -> anyhow::Result<()> {
+    let key = key.trim();
+    let project_id = edda_store::project_id(repo_root);
+    let (_session_id, label) = resolve_session_id(cli_session, &project_id, "cli");
+    let ratified_by = by.unwrap_or(&label);
+
+    let ledger = edda_ledger::Ledger::open(repo_root).context("cmd_bridge: opening ledger")?;
+    let _lock = edda_ledger::lock::WorkspaceLock::acquire(&ledger.paths)?;
+    let branch = ledger.head_branch()?;
+
+    // Only an existing active decision can be ratified.
+    if ledger.find_active_decision(&branch, key)?.is_none() {
+        anyhow::bail!("no active decision for key '{key}' — nothing to ratify (see `edda ask`)");
+    }
+
+    let parent_hash = ledger.last_event_hash()?;
+    let event = edda_core::event::new_decision_ratify_event(
+        &branch,
+        parent_hash.as_deref(),
+        key,
+        ratified_by,
+        note,
+    )?;
+    ledger.append_event(&event)?;
+    let _ = edda_derive::rebuild_branch(&ledger, &branch);
+
+    println!("Ratified '{key}' (by {ratified_by}) — now binding.");
+    if let Some(n) = note {
+        println!("  note: {n}");
+    }
     Ok(())
 }
 
@@ -1199,7 +1261,10 @@ fn write_accepted_to_ledger(
             value: d.value.clone(),
             reason: d.reason.clone(),
             scope: None,
-            authority: None,
+            // GH-401: background-extracted decisions are machine inference from
+            // transcripts — the purest agent-authored case. Tag them honestly
+            // so they land in the unratified tier, not binding.
+            authority: Some(edda_core::types::authority::AGENT.to_string()),
             affected_paths: None,
             tags: None,
             review_after: None,
@@ -1511,8 +1576,80 @@ mod tests {
         assert_eq!(dec["value"].as_str().unwrap(), "JWT RS256");
         assert_eq!(dec["reason"].as_str().unwrap(), "stateless auth");
 
+        // GH-401: an agent-session decide is tagged authority=agent, never
+        // operator — a write can never self-declare operator authority.
+        assert_eq!(dec["authority"].as_str().unwrap(), "agent");
+
         std::env::remove_var("EDDA_SESSION_ID");
         std::env::remove_var("EDDA_SESSION_LABEL");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
+    }
+
+    #[test]
+    fn ratify_records_separate_event_and_makes_decision_binding() {
+        let _env = env_guard();
+        let (tmp, ledger) = setup_workspace();
+        let pid = edda_store::project_id(&tmp);
+        let _ = edda_store::ensure_dirs(&pid);
+        std::env::set_var("EDDA_SESSION_ID", "test-ratify-s1");
+        std::env::set_var("EDDA_SESSION_LABEL", "worker");
+
+        decide(
+            &tmp,
+            "db.engine=sqlite",
+            Some("embedded"),
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        // Before ratify: the active decision is not binding.
+        assert!(ledger.ratified_decision_events().unwrap().is_empty());
+
+        ratify(
+            &tmp,
+            "db.engine",
+            Some("looks right"),
+            Some("operator"),
+            None,
+        )
+        .unwrap();
+
+        // A distinct decision_ratify event was written (not a mutation).
+        let ratify_events = ledger.iter_events_by_type("decision_ratify").unwrap();
+        assert_eq!(ratify_events.len(), 1);
+        assert_eq!(ratify_events[0].payload["key"], "db.engine");
+        assert_eq!(ratify_events[0].payload["ratified_by"], "operator");
+
+        // The projection now reports the key as binding.
+        let views = ledger.active_decisions(None, None, None, None).unwrap();
+        let view = views.iter().find(|v| v.key == "db.engine").unwrap();
+        let set = ledger.ratified_decision_events().unwrap();
+        assert!(edda_ledger::view::is_decision_ratified(view, &set));
+
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
+    }
+
+    #[test]
+    fn ratify_unknown_key_errors() {
+        let _env = env_guard();
+        let (tmp, _ledger) = setup_workspace();
+        let pid = edda_store::project_id(&tmp);
+        let _ = edda_store::ensure_dirs(&pid);
+        let err = ratify(&tmp, "nope.key", None, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no active decision"),
+            "unexpected error: {err}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
     }

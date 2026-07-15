@@ -125,6 +125,71 @@ impl Ledger {
             .with_context(|| format!("Ledger::iter_events_by_type({event_type})"))
     }
 
+    /// The set of active-decision **event_ids** currently operator-ratified
+    /// (GH-401).
+    ///
+    /// Ratified-state is derived from event **insertion order** (rowid), not
+    /// timestamps: RFC3339 strings with mixed precision do not sort
+    /// chronologically. The result is keyed by the specific decision event,
+    /// not by `(branch, key)`, so ratification binds one exact decision and
+    /// never leaks onto a later value for the same key.
+    ///
+    /// A ratify event carries only `(branch, key)`, so it ratifies whichever
+    /// decision was current at ratify time: the latest decision for that
+    /// `(branch, key)` whose event predates the ratify. A decision re-made
+    /// after the ratify (higher rowid) is therefore unratified until ratified
+    /// again.
+    pub fn ratified_decision_events(&self) -> anyhow::Result<std::collections::BTreeSet<String>> {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // Latest ratify rowid per (branch, key). Ratify events are few.
+        let ratifies = self
+            .iter_events_by_type("decision_ratify")
+            .context("Ledger::ratified_decision_events: ratifies")?;
+        let mut ratify_rowid: BTreeMap<(String, String), i64> = BTreeMap::new();
+        for e in &ratifies {
+            let Some(key) = e.payload.get("key").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let rowid = self.rowid_for_event_id(&e.event_id)?.unwrap_or(0);
+            let entry = ratify_rowid
+                .entry((e.branch.clone(), key.to_string()))
+                .or_insert(0);
+            if rowid > *entry {
+                *entry = rowid;
+            }
+        }
+        if ratify_rowid.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+
+        // Group active decisions (with rowids) by (branch, key).
+        let mut by_key: BTreeMap<(String, String), Vec<(i64, String)>> = BTreeMap::new();
+        for v in self.active_decisions(None, None, None, None)? {
+            let k = (v.branch.clone(), v.key.clone());
+            if ratify_rowid.contains_key(&k) {
+                // Missing rowid (shouldn't happen) → MAX, so no ratify precedes
+                // it and it stays unratified (conservative).
+                let rowid = self.rowid_for_event_id(&v.event_id)?.unwrap_or(i64::MAX);
+                by_key
+                    .entry(k)
+                    .or_default()
+                    .push((rowid, v.event_id.clone()));
+            }
+        }
+
+        // For each (branch, key), the ratified decision is the latest active
+        // one whose event predates the ratify.
+        let mut out: BTreeSet<String> = BTreeSet::new();
+        for (k, decs) in by_key {
+            let rr = ratify_rowid[&k];
+            if let Some((_, eid)) = decs.iter().filter(|(r, _)| *r < rr).max_by_key(|(r, _)| *r) {
+                out.insert(eid.clone());
+            }
+        }
+        Ok(out)
+    }
+
     /// All `task.*` events in insertion order — the task rail's fold input.
     pub fn task_events(&self) -> anyhow::Result<Vec<Event>> {
         self.sqlite
@@ -1050,6 +1115,161 @@ mod tests {
         ledger.append_event(&note).unwrap();
         let result = ledger.iter_events_by_type("nonexistent_type").unwrap();
         assert!(result.is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // GH-401: ratified-state derives from insertion order (rowid), not
+    // timestamps, and is branch-scoped.
+
+    fn append_decision(ledger: &Ledger, branch: &str, key: &str, value: &str) {
+        let parent = ledger.last_event_hash().unwrap();
+        let dp = edda_core::types::DecisionPayload {
+            key: key.into(),
+            value: value.into(),
+            reason: None,
+            scope: None,
+            authority: Some("agent".into()),
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: None,
+        };
+        let ev =
+            edda_core::event::new_decision_event(branch, parent.as_deref(), "worker", &dp).unwrap();
+        ledger.append_event(&ev).unwrap();
+    }
+
+    fn append_ratify(ledger: &Ledger, branch: &str, key: &str) {
+        let parent = ledger.last_event_hash().unwrap();
+        let ev =
+            edda_core::event::new_decision_ratify_event(branch, parent.as_deref(), key, "op", None)
+                .unwrap();
+        ledger.append_event(&ev).unwrap();
+    }
+
+    /// True iff the active decision for (branch, key) is ratified.
+    fn is_ratified(ledger: &Ledger, branch: &str, key: &str) -> bool {
+        let set = ledger.ratified_decision_events().unwrap();
+        ledger
+            .active_decisions(None, None, None, None)
+            .unwrap()
+            .iter()
+            .filter(|v| v.branch == branch && v.key == key)
+            .any(|v| crate::view::is_decision_ratified(v, &set))
+    }
+
+    #[test]
+    fn ratified_set_empty_when_no_ratify_events() {
+        let (tmp, ledger) = setup_workspace();
+        append_decision(&ledger, "main", "db.engine", "pg");
+        assert!(ledger.ratified_decision_events().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ratify_after_decide_is_ratified() {
+        let (tmp, ledger) = setup_workspace();
+        append_decision(&ledger, "main", "db.engine", "pg");
+        append_ratify(&ledger, "main", "db.engine");
+        assert!(is_ratified(&ledger, "main", "db.engine"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn redecide_after_ratify_resets_to_unratified() {
+        // ratify, then re-decide (higher rowid) → the new value is unratified.
+        let (tmp, ledger) = setup_workspace();
+        append_decision(&ledger, "main", "db.engine", "pg");
+        append_ratify(&ledger, "main", "db.engine");
+        append_decision(&ledger, "main", "db.engine", "sqlite");
+        assert!(!is_ratified(&ledger, "main", "db.engine"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn reratify_after_redecide_is_ratified_again() {
+        // ratify → re-decide → re-ratify: the last ratify has the highest
+        // rowid, so the current value is ratified. (A timestamp model with
+        // sub-second lexical compare gets this backwards.)
+        let (tmp, ledger) = setup_workspace();
+        append_decision(&ledger, "main", "db.engine", "pg");
+        append_ratify(&ledger, "main", "db.engine");
+        append_decision(&ledger, "main", "db.engine", "sqlite");
+        append_ratify(&ledger, "main", "db.engine");
+        assert!(is_ratified(&ledger, "main", "db.engine"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn ratify_is_branch_scoped() {
+        // Same key active on two branches; ratifying on main must not bind dev.
+        let (tmp, ledger) = setup_workspace();
+        append_decision(&ledger, "main", "db.engine", "pg");
+        append_decision(&ledger, "dev", "db.engine", "sqlite");
+        append_ratify(&ledger, "main", "db.engine");
+        assert!(is_ratified(&ledger, "main", "db.engine"));
+        assert!(!is_ratified(&ledger, "dev", "db.engine"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_superseding_a_ratified_decision_resets_ratification() {
+        // The store keeps one active decision per (branch, key): a later import
+        // supersedes the earlier one. Import A, ratify (A binds), then import B
+        // (supersedes A). The now-active B is a post-ratify import — it must be
+        // unratified, so the ratification of A does not leak onto B. Keying
+        // ratified-state by the specific decision event_id (not the (branch,key)
+        // tuple) is what makes this hold.
+        let (tmp, ledger) = setup_workspace();
+
+        let import = |value: &str, src: &str| -> String {
+            let parent = ledger.last_event_hash().unwrap();
+            let dp = edda_core::types::DecisionPayload {
+                key: "db.engine".into(),
+                value: value.into(),
+                reason: None,
+                scope: None,
+                authority: Some("agent".into()),
+                affected_paths: None,
+                tags: None,
+                review_after: None,
+                reversibility: None,
+                village_id: None,
+            };
+            let ev = edda_core::event::new_decision_event("main", parent.as_deref(), "worker", &dp)
+                .unwrap();
+            let eid = ev.event_id.clone();
+            ledger
+                .insert_imported_decision(crate::ImportParams {
+                    event: &ev,
+                    key: "db.engine",
+                    value,
+                    reason: "",
+                    domain: "db",
+                    scope: "shared",
+                    source_project_id: src,
+                    source_event_id: &eid,
+                    is_active: true,
+                    authority: "agent",
+                    affected_paths: "[]",
+                    tags: "[]",
+                    review_after: None,
+                    reversibility: "medium",
+                    village_id: None,
+                })
+                .unwrap();
+            eid
+        };
+
+        import("pgA", "projA");
+        append_ratify(&ledger, "main", "db.engine");
+        // A is the current, ratified decision.
+        assert!(is_ratified(&ledger, "main", "db.engine"));
+
+        import("pgB", "projB"); // supersedes A; B is now the active decision
+                                // B was imported after the ratify → it must not inherit A's binding.
+        assert!(!is_ratified(&ledger, "main", "db.engine"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

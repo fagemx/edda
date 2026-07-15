@@ -135,7 +135,10 @@ pub fn render_coordination_protocol_with(
         if board.bindings.is_empty() {
             return None;
         }
-        let mut lines = vec!["## Binding Decisions".to_string()];
+        // GH-401: these are coordination broadcasts, not operator-ratified
+        // bindings. Binding status is shown in the decision pack's
+        // Ratified/Unratified split; do not overclaim "binding" here.
+        let mut lines = vec!["## Recorded Decisions (coordination)".to_string()];
         for d in board.bindings.iter().rev().take(5) {
             lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
         }
@@ -229,9 +232,10 @@ pub fn render_coordination_protocol_with(
         }
     }
 
-    // Binding decisions
+    // Recorded decisions (coordination broadcasts — not operator-ratified;
+    // GH-401). Binding status lives in the decision pack's Ratified split.
     if !board.bindings.is_empty() {
-        lines.push("### Binding Decisions".to_string());
+        lines.push("### Recorded Decisions (coordination)".to_string());
         for d in board.bindings.iter().rev().take(5) {
             lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
         }
@@ -284,11 +288,11 @@ pub fn render_coordination_protocol_with(
     }
 }
 
-/// Render lightweight peer updates for UserPromptSubmit (only new bindings/requests).
+/// Render lightweight peer updates for UserPromptSubmit (new recorded decisions/requests).
 ///
-/// - Multi-session: peers header + tasks + bindings + requests.
-/// - Solo with bindings: binding lines only (no header).
-/// - Solo without bindings: returns None.
+/// - Multi-session: peers header + tasks + recorded decisions + requests.
+/// - Solo with recorded decisions: labelled decision lines only.
+/// - Solo without recorded decisions: returns None.
 #[cfg(test)]
 pub(crate) fn render_peer_updates(project_id: &str, session_id: &str) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);
@@ -311,7 +315,9 @@ pub(crate) fn render_peer_updates_with(
         if board.bindings.is_empty() {
             return None;
         }
-        let mut lines = Vec::new();
+        // GH-401: label the broadcasts so bare bullets are not read as
+        // operator-binding constraints.
+        let mut lines = vec!["## Recorded Decisions (coordination)".to_string()];
         for d in board.bindings.iter().rev().take(3) {
             lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
         }
@@ -353,8 +359,10 @@ pub(crate) fn render_peer_updates_with(
         }
     }
 
-    // Latest bindings (max 3)
+    // Latest recorded decisions (coordination broadcasts, max 3). GH-401:
+    // labelled and not-binding — these are agent-authored until ratified.
     if !board.bindings.is_empty() {
+        lines.push("Recorded decisions (coordination, not binding until ratified):".to_string());
         for d in board.bindings.iter().rev().take(3) {
             lines.push(format!("- {}: {} ({})", d.key, d.value, d.by_label));
         }

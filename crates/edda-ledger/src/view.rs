@@ -77,9 +77,50 @@ pub fn to_view(row: &DecisionRow) -> DecisionView {
     }
 }
 
+/// Whether a decision is operator-ratified (GH-401).
+///
+/// Membership test against the ratified event_id set produced by
+/// [`crate::Ledger::ratified_decision_events`], which derives ratified-state
+/// from event insertion order (rowid). Keyed by the specific decision event,
+/// so two active decisions sharing a `(branch, key)` are judged independently.
+pub fn is_decision_ratified(
+    view: &DecisionView,
+    ratified: &std::collections::BTreeSet<String>,
+) -> bool {
+    ratified.contains(&view.event_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    fn ratified_set(event_ids: &[&str]) -> BTreeSet<String> {
+        event_ids.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn ratified_when_event_id_in_set() {
+        let mut view = to_view(&make_default_row());
+        view.event_id = "evt_a".into();
+        assert!(is_decision_ratified(&view, &ratified_set(&["evt_a"])));
+    }
+
+    #[test]
+    fn unratified_when_not_in_set() {
+        let mut view = to_view(&make_default_row());
+        view.event_id = "evt_a".into();
+        assert!(!is_decision_ratified(&view, &BTreeSet::new()));
+    }
+
+    #[test]
+    fn unratified_when_only_other_event_ratified() {
+        // A ratify targets a specific decision event, not the key — a sibling
+        // active decision with the same key is judged independently.
+        let mut view = to_view(&make_default_row());
+        view.event_id = "evt_b".into();
+        assert!(!is_decision_ratified(&view, &ratified_set(&["evt_a"])));
+    }
 
     fn make_default_row() -> DecisionRow {
         DecisionRow {

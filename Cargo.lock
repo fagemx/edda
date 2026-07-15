@@ -1012,6 +1012,7 @@ name = "edda-pack"
 version = "0.2.1"
 dependencies = [
  "anyhow",
+ "edda-core",
  "edda-index",
  "edda-ledger",
  "edda-store",

@@ -372,6 +372,9 @@ impl SqliteStore {
         }
 
         let status = if p.is_active { "active" } else { "superseded" };
+        // GH-401: preserve the imported decision's authorship. Omitting the
+        // column would fall back to the table default ('human') and rewrite an
+        // agent-authored shared decision into false operator authorship.
         tx.execute(
             "INSERT INTO decisions
              (event_id, key, value, reason, domain, branch, supersedes_id, is_active,

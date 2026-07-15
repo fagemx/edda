@@ -158,7 +158,14 @@ pub fn render_context(ledger: &Ledger, branch: &str, opt: DeriveOptions) -> Resu
     let active_decisions: Vec<_> = active_decisions.into_iter().rev().collect();
 
     if !active_decisions.is_empty() {
-        out.push_str(&format!("## Decisions (last {})\n", active_decisions.len()));
+        // GH-401: this signal-derived list has no ratified-state; binding
+        // status lives in the Ratified/Unratified decision pack. Keep the
+        // "## Decisions" prefix but qualify it so a truncation that drops the
+        // pack cannot leave this reading as authoritative bindings.
+        out.push_str(&format!(
+            "## Decisions (last {} — recorded; see the Ratified/Unratified pack for binding status)\n",
+            active_decisions.len()
+        ));
         for d in &active_decisions {
             out.push_str(&format!("- {} ({})\n", d.text, d.event_id));
         }

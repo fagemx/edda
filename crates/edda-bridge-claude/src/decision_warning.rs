@@ -134,7 +134,15 @@ fn matches_any_path(file_path: &str, affected_paths: &[String]) -> bool {
 }
 
 fn format_warning(matches: &[&DecisionView]) -> String {
-    let mut lines = vec!["**[edda] Active decisions governing this file:**".to_string()];
+    // GH-401: these are decisions that *claim* to affect this file, but only
+    // operator-ratified ones are binding. This hot-path warning does not
+    // cross-reference ratify events, so it annotates authorship instead of
+    // asserting all are "governing" — an unratified agent decision must not
+    // read as a hard constraint.
+    let mut lines = vec![
+        "**[edda] Decisions affecting this file** (unratified = guidance, not binding):"
+            .to_string(),
+    ];
     for d in matches {
         let reason_suffix = if d.reason.is_empty() {
             String::new()
@@ -142,8 +150,12 @@ fn format_warning(matches: &[&DecisionView]) -> String {
             format!(" — {}", d.reason)
         };
         lines.push(format!(
-            "  - `{}={}` [{}]{}",
-            d.key, d.value, d.status, reason_suffix
+            "  - [{}] `{}={}` [{}]{}",
+            edda_core::types::authorship_tag(&d.authority),
+            d.key,
+            d.value,
+            d.status,
+            reason_suffix
         ));
     }
     lines.join("\n")
@@ -239,7 +251,7 @@ mod tests {
         let result = decision_file_warning(&root, "crates/edda-ledger/src/lib.rs", "main");
         assert!(result.is_some());
         let warning = result.unwrap();
-        assert!(warning.contains("Active decisions governing this file"));
+        assert!(warning.contains("Decisions affecting this file"));
         assert!(warning.contains("db.engine=sqlite"));
         assert!(warning.contains("embedded"));
     }

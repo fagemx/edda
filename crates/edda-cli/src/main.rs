@@ -84,7 +84,7 @@ enum Command {
         #[arg(long = "tag")]
         tags: Vec<String>,
     },
-    /// Record a binding decision (shortcut for `bridge claude decide`)
+    /// Record a decision — agent-authored, unratified until `edda ratify` (shortcut for `bridge claude decide`)
     Decide {
         /// Decision in key=value format (e.g. "db=PostgreSQL")
         decision: String,
@@ -106,6 +106,22 @@ enum Command {
         /// Comma-separated tags for this decision
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
+    },
+    /// Ratify an active decision — confer operator authority (GH-401)
+    Ratify {
+        /// Decision key to ratify (e.g. "db.engine")
+        key: String,
+        /// Optional note recorded with the ratification
+        #[arg(long)]
+        note: Option<String>,
+        /// Who ratified — recorded for audit; self-asserted, not verified
+        /// (identity enforcement is a policy-layer concern). Defaults to the
+        /// resolved session label.
+        #[arg(long)]
+        by: Option<String>,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Manage project groups for cross-project sync
     Group {
@@ -667,7 +683,7 @@ enum BridgeClaudeCmd {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Record a binding decision for all sessions
+    /// Record a decision — agent-authored, unratified until `edda ratify`
     Decide {
         /// Decision in key=value format (e.g. "auth.method=JWT RS256")
         decision: String,
@@ -984,6 +1000,18 @@ fn main() -> anyhow::Result<()> {
             Some(&scope),
             &paths,
             &tags,
+        ),
+        Command::Ratify {
+            key,
+            note,
+            by,
+            session,
+        } => cmd_bridge::ratify(
+            &repo_root,
+            &key,
+            note.as_deref(),
+            by.as_deref(),
+            session.as_deref(),
         ),
         Command::Group { cmd } => cmd_group::execute(cmd, &repo_root),
         Command::Sync { from, dry_run } => cmd_sync::execute(&repo_root, from.as_deref(), dry_run),
