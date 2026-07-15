@@ -96,10 +96,21 @@ pub struct SyncStats {
     pub indexed_through: Option<String>, // ts of last indexed event
 }
 
-pub fn sync<F>(proj_dir: &Path, project_id: &str, events_after: F) -> anyhow::Result<SyncStats>
+pub fn sync<F>(
+    proj_dir: &Path,
+    project_id: &str,
+    session_id: Option<&str>,
+    events_after: F,
+) -> anyhow::Result<SyncStats>
 where
-    F: FnOnce(i64) -> anyhow::Result<Vec<(i64, edda_core::Event)>>;
+    F: Fn(i64) -> anyhow::Result<Vec<(i64, edda_core::Event)>>;
 ```
+
+`Fn`, not `FnOnce`: detecting a cursor that has run ahead of the ledger means
+probing the boundary event and then re-reading from the start, so the closure is
+called twice in that case. `session_id` preserves the existing `--session` flag's
+behaviour (session-scoped turns except during a rebuild, which must cover every
+session).
 
 `sync` owns: `IndexLock` acquisition, open-or-create, outdated-schema wipe,
 cursor read, incremental event indexing, turn indexing, `commit`, cursor write,
