@@ -773,6 +773,7 @@ dependencies = [
  "edda-notify",
  "edda-pack",
  "edda-postmortem",
+ "edda-search-fts",
  "edda-store",
  "edda-transcript",
  "globset",

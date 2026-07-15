@@ -6,26 +6,38 @@ use std::path::Path;
 use tantivy::schema::*;
 use tantivy::{doc, IndexWriter, Term};
 
-/// Index all ledger events into Tantivy.
+/// Delete every event document in the index.
 ///
-/// Deletes existing event documents first (dedup by rebuild), then re-adds all.
-/// Returns the number of documents added.
-pub fn index_events<F>(
+/// For the rebuild path only. The incremental path must never touch documents
+/// outside its batch — but a rebuild must, because events the ledger no longer
+/// has would otherwise stay searchable forever. The removed bulk `index_events`
+/// did this implicitly on every run; doing it only on rebuild keeps the cost off
+/// the hot path while preserving the purge.
+pub fn delete_all_event_docs(writer: &IndexWriter, schema: &Schema) -> anyhow::Result<()> {
+    let f_doc_type = schema.get_field("doc_type")?;
+    writer.delete_term(Term::from_field_text(f_doc_type, "event"));
+    Ok(())
+}
+
+/// Index a batch of `(rowid, Event)` pairs incrementally (GH-403).
+///
+/// Each event is replaced rather than blindly added: `delete_term` on its
+/// `doc_id` first, then re-add. That makes re-running a batch a no-op in effect,
+/// which is what allows the caller to commit before advancing its cursor — a
+/// crash in between simply re-runs this batch on the next pass.
+///
+/// Unlike the bulk path this deletes nothing outside the batch, so callers must
+/// pass only events the index has not seen.
+pub fn index_events_since(
     writer: &IndexWriter,
     schema: &Schema,
     project_id: &str,
-    iter_fn: F,
-) -> anyhow::Result<usize>
-where
-    F: FnOnce() -> anyhow::Result<Vec<edda_core::Event>>,
-{
-    // Delete all existing event docs to avoid duplicates on re-index
-    let f_doc_type = schema.get_field("doc_type")?;
-    writer.delete_term(Term::from_field_text(f_doc_type, "event"));
-
-    let events = iter_fn()?;
+    events: &[(i64, edda_core::Event)],
+) -> anyhow::Result<usize> {
+    let f_doc_id = schema.get_field("doc_id")?;
     let mut count = 0;
-    for event in &events {
+    for (_rowid, event) in events {
+        writer.delete_term(Term::from_field_text(f_doc_id, event.event_id.as_str()));
         add_event_doc(writer, schema, project_id, event)?;
         count += 1;
     }
@@ -34,7 +46,7 @@ where
 
 /// Add a single ledger event as a Tantivy document.
 ///
-/// Used both by bulk `index_events` and by append-time indexing.
+/// Used by `index_events_since`; kept public for direct use in tests.
 pub fn add_event_doc(
     writer: &IndexWriter,
     schema: &Schema,
@@ -132,6 +144,21 @@ pub fn index_session(
         .join("index")
         .join(format!("{session_id}.jsonl"));
     if !index_path.exists() {
+        return Ok(0);
+    }
+
+    // GH-403: skip a session whose index file has not grown since the last run.
+    //
+    // Everything below — reading every record, building the uuid map, walking
+    // each assistant's parent chain, and fetching + parsing its transcript line
+    // off disk — runs BEFORE the per-turn `turns_meta` check that decides the
+    // turn is already indexed. So without this early-out a no-op reindex does
+    // the entire read and parse of every session, then throws it all away:
+    // measured at ~25s for 100 sessions / 24MB, linear in session count. The
+    // watermark stopped duplicate *writes*, never duplicate *reads*.
+    let file_len = std::fs::metadata(&index_path)?.len() as i64;
+    let consumed = crate::schema::read_session_offset(meta_conn, project_id, session_id)?;
+    if consumed == file_len {
         return Ok(0);
     }
 
@@ -300,6 +327,12 @@ pub fn index_session(
 
         count += 1;
     }
+
+    // Record how much of the file we consumed, in the same transaction as the
+    // turns_meta rows it corresponds to. A rewritten (shrunk) file will not
+    // match on the next run and gets re-read, which is safe because turns_meta
+    // dedups by turn_id.
+    crate::schema::write_session_offset(meta_conn, project_id, session_id, file_len)?;
 
     tx.commit()?;
     Ok(count)
@@ -566,7 +599,12 @@ mod tests {
             },
         ];
 
-        let count = index_events(&writer, &schema, "p1", || Ok(events)).unwrap();
+        let batch: Vec<(i64, edda_core::Event)> = events
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| (i as i64 + 1, e))
+            .collect();
+        let count = index_events_since(&writer, &schema, "p1", &batch).unwrap();
         writer.commit().unwrap();
         assert_eq!(count, 2);
 
@@ -575,51 +613,224 @@ mod tests {
         assert_eq!(searcher.num_docs(), 2);
     }
 
+    /// Write a minimal one-turn session fixture (user + assistant), appending if
+    /// the session already exists. Returns the session's index file path.
+    fn write_session_fixture(project_dir: &Path, session_id: &str, n: &str) -> std::path::PathBuf {
+        let index_dir = project_dir.join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let transcripts_dir = project_dir.join("transcripts");
+        std::fs::create_dir_all(&transcripts_dir).unwrap();
+
+        let u = format!("u{n}");
+        let a = format!("a{n}");
+        let user_record = serde_json::json!({
+            "type": "user", "uuid": u, "timestamp": "2026-02-14T10:00:00Z",
+            "message": { "content": "how do I search?" }
+        });
+        let assistant_record = serde_json::json!({
+            "type": "assistant", "uuid": a, "parentUuid": u,
+            "timestamp": "2026-02-14T10:00:05Z",
+            "message": { "content": [{"type": "text", "text": "use tantivy"}] }
+        });
+
+        let store_path = transcripts_dir.join(format!("{session_id}.jsonl"));
+        let user_line = serde_json::to_string(&user_record).unwrap();
+        let asst_line = serde_json::to_string(&assistant_record).unwrap();
+        let user_len = user_line.len() as u64 + 1;
+        let asst_len = asst_line.len() as u64 + 1;
+
+        let base = std::fs::metadata(&store_path).map(|m| m.len()).unwrap_or(0);
+        let mut content = std::fs::read_to_string(&store_path).unwrap_or_default();
+        content.push_str(&format!("{user_line}\n{asst_line}\n"));
+        std::fs::write(&store_path, content).unwrap();
+
+        let user_index = edda_index::IndexRecordV1 {
+            v: 1,
+            session_id: session_id.into(),
+            uuid: u.clone(),
+            parent_uuid: None,
+            record_type: "user".into(),
+            ts: "2026-02-14T10:00:00Z".into(),
+            git_branch: Some("main".into()),
+            cwd: Some("/tmp/p".into()),
+            store_offset: base,
+            store_len: user_len,
+            assistant: None,
+            usage: None,
+        };
+        let asst_index = edda_index::IndexRecordV1 {
+            v: 1,
+            session_id: session_id.into(),
+            uuid: a,
+            parent_uuid: Some(u),
+            record_type: "assistant".into(),
+            ts: "2026-02-14T10:00:05Z".into(),
+            git_branch: Some("main".into()),
+            cwd: Some("/tmp/p".into()),
+            store_offset: base + user_len,
+            store_len: asst_len,
+            assistant: None,
+            usage: None,
+        };
+
+        let index_path = index_dir.join(format!("{session_id}.jsonl"));
+        edda_index::append_index(&index_path, &user_index).unwrap();
+        edda_index::append_index(&index_path, &asst_index).unwrap();
+        index_path
+    }
+
     #[test]
-    fn index_events_dedup_on_reindex() {
+    fn unchanged_session_file_is_skipped_without_reading_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        let index_path = write_session_fixture(project_dir, "s1", "1");
+
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let writer = index_writer(&index).unwrap();
+        let meta_conn = ensure_meta_db_memory().unwrap();
+
+        // Pretend a previous run already consumed the whole file.
+        let len = std::fs::metadata(&index_path).unwrap().len() as i64;
+        meta_conn
+            .execute(
+                "INSERT INTO index_watermark (project_id, session_id, last_offset) \
+                 VALUES (?1, ?2, ?3)",
+                params!["p1", "s1", len],
+            )
+            .unwrap();
+
+        let count = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(count, 0, "an unchanged file must be skipped");
+
+        // The decisive assertion: turns_meta is still EMPTY. This turn was never
+        // indexed, which is only possible if the file was never read — a path
+        // that read it would find the turn absent from turns_meta and index it.
+        // Distinguishes "skipped the read" from "read it, then deduped".
+        let n: i64 = meta_conn
+            .query_row("SELECT count(*) FROM turns_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "skipping must mean not reading, not read-then-dedup");
+    }
+
+    #[test]
+    fn indexing_a_session_records_its_consumed_offset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        let index_path = write_session_fixture(project_dir, "s1", "1");
+
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let writer = index_writer(&index).unwrap();
+        let meta_conn = ensure_meta_db_memory().unwrap();
+
+        let count = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(count, 1);
+
+        let len = std::fs::metadata(&index_path).unwrap().len() as i64;
+        let stored: i64 = meta_conn
+            .query_row(
+                "SELECT last_offset FROM index_watermark WHERE project_id = ?1 AND session_id = ?2",
+                params!["p1", "s1"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, len, "must record how much of the file it consumed");
+    }
+
+    #[test]
+    fn a_grown_session_file_is_reprocessed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        write_session_fixture(project_dir, "s1", "1");
+
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let writer = index_writer(&index).unwrap();
+        let meta_conn = ensure_meta_db_memory().unwrap();
+
+        assert_eq!(
+            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap(),
+            1
+        );
+        // Unchanged: skipped.
+        assert_eq!(
+            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap(),
+            0
+        );
+
+        // The live session grows — the early-out must not blind us to new turns.
+        write_session_fixture(project_dir, "s1", "2");
+        assert_eq!(
+            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap(),
+            1,
+            "a grown file must be reprocessed"
+        );
+    }
+
+    fn mk_test_event(id: &str) -> edda_core::Event {
+        edda_core::Event {
+            event_id: id.to_string(),
+            ts: "2026-07-15T12:00:00Z".to_string(),
+            event_type: "note".to_string(),
+            branch: "main".to_string(),
+            parent_hash: None,
+            hash: "h".to_string(),
+            payload: serde_json::json!({ "text": "hello world" }),
+            refs: Default::default(),
+            schema_version: 1,
+            digests: Vec::new(),
+            event_family: None,
+            event_level: None,
+        }
+    }
+
+    #[test]
+    fn index_events_since_is_idempotent_per_event() {
         let index = ensure_index_ram().unwrap();
         let schema = index.schema();
         let mut writer = index_writer(&index).unwrap();
 
-        let make_events = || {
-            Ok(vec![edda_core::Event {
-                event_id: "evt_dedup".to_string(),
-                ts: "2026-02-17T12:00:00Z".to_string(),
-                event_type: "note".to_string(),
-                branch: "main".to_string(),
-                parent_hash: None,
-                hash: "abc".to_string(),
-                payload: serde_json::json!({"text": "hello"}),
-                refs: Default::default(),
-                schema_version: 1,
-                digests: Vec::new(),
-                event_family: None,
-                event_level: None,
-            }])
-        };
+        let batch = vec![
+            (1i64, mk_test_event("evt_a")),
+            (2i64, mk_test_event("evt_b")),
+        ];
 
-        // First index
-        let count = index_events(&writer, &schema, "p1", make_events).unwrap();
+        let n = index_events_since(&writer, &schema, "p1", &batch).unwrap();
         writer.commit().unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(n, 2);
+
+        // Re-running the same batch is what happens after a crash between commit
+        // and the cursor write. It must replace, not duplicate.
+        index_events_since(&writer, &schema, "p1", &batch).unwrap();
+        writer.commit().unwrap();
 
         let reader = index.reader().unwrap();
-        let searcher = reader.searcher();
-        assert_eq!(searcher.num_docs(), 1);
-
-        // Second index — should delete old events then re-add, NOT duplicate
-        let count2 = index_events(&writer, &schema, "p1", make_events).unwrap();
-        writer.commit().unwrap();
-        assert_eq!(count2, 1);
-
-        // Reload reader to see merged segments
-        let reader2 = index.reader().unwrap();
-        let searcher2 = reader2.searcher();
+        reader.reload().unwrap();
         assert_eq!(
-            searcher2.num_docs(),
-            1,
-            "events should not be duplicated on re-index"
+            reader.searcher().num_docs(),
+            2,
+            "re-run must not duplicate docs"
         );
+    }
+
+    #[test]
+    fn index_events_since_appends_without_touching_existing() {
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+
+        index_events_since(&writer, &schema, "p1", &[(1i64, mk_test_event("evt_a"))]).unwrap();
+        writer.commit().unwrap();
+
+        // An incremental batch must not delete docs outside it — the whole point
+        // of dropping the old delete-all.
+        index_events_since(&writer, &schema, "p1", &[(2i64, mk_test_event("evt_b"))]).unwrap();
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(reader.searcher().num_docs(), 2);
     }
 
     #[test]
