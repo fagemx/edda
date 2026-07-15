@@ -9,6 +9,7 @@
 //! `edda-ledger` (the same inversion `index_events` already used).
 
 use crate::{indexer, schema};
+use anyhow::Context;
 use std::path::Path;
 
 /// What a sync did. `indexed_through` is the timestamp of the newest indexed
@@ -57,19 +58,29 @@ where
         // copy. The ledger is checked first because it is the definitive half and
         // this read only happens on the rare upgrade path.
         if events_after(0)?.is_empty() {
-            let existing = schema::open_index(&index_dir)
-                .and_then(|old| {
-                    let old_schema = old.schema();
-                    event_doc_count(&old, &old_schema).ok()
-                })
-                .unwrap_or(0);
-            if existing > 0 {
-                return Err(empty_ledger_refusal(
-                    project_id,
-                    existing,
-                    proj_dir,
-                    &search_dir,
-                ));
+            // An index that will not open has nothing to lose, so a missing one
+            // is fine to wipe. But one that opens and cannot be counted is the
+            // opposite: we would be deleting an unknown quantity. Assuming zero
+            // there fails open on the only guard against silent, unrecoverable
+            // loss — it would reproduce GH-418 through the guard instead of
+            // around it. So the count propagates rather than defaulting.
+            if let Some(old) = schema::open_index(&index_dir) {
+                let old_schema = old.schema();
+                let existing = event_doc_count(&old, &old_schema).with_context(|| {
+                    format!(
+                        "refusing to wipe project {project_id}'s outdated index: its \
+                         ledger reports no events and the index could not be counted, \
+                         so wiping it might destroy the only copy"
+                    )
+                })?;
+                if existing > 0 {
+                    return Err(empty_ledger_refusal(
+                        project_id,
+                        existing,
+                        proj_dir,
+                        &search_dir,
+                    ));
+                }
             }
         }
         std::fs::remove_dir_all(&index_dir)?;
