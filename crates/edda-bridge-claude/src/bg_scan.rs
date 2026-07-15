@@ -1179,6 +1179,12 @@ End of analysis."#;
     fn audit_log_appends() {
         let pid = "test_scan_audit";
         let _ = edda_store::ensure_dirs(pid);
+        // Start from a known state (GH-415), as bg_detect's copy of this test
+        // already does. Appending to a log in the real store while asserting an
+        // exact count means a run that panicked before its cleanup leaves rows
+        // for this one to count — which panics, skips cleanup, and leaves more.
+        // Once red on a machine, red forever.
+        let _ = fs::remove_file(audit_log_path(pid));
 
         let entry = AuditEntry {
             ts: "2026-03-12T10:00:00Z".to_string(),
