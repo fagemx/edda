@@ -60,8 +60,14 @@ fn build_transcript_callback(repo_root: &Path) -> Option<Box<TranscriptSearchFn>
     if !index_dir.exists() {
         return None;
     }
+    // GH-402: don't search a stale-schema index — its CJK results would be
+    // silently wrong. Skip transcript search and hint the rebuild instead.
+    if edda_search_fts::schema::index_is_outdated(&index_dir) {
+        eprintln!("(search index is out of date; run `edda search index` to include transcripts)");
+        return None;
+    }
 
-    let index = edda_search_fts::schema::ensure_index(&index_dir).ok()?;
+    let index = edda_search_fts::schema::open_index(&index_dir)?;
     let pid = project_id.clone();
 
     Some(Box::new(move |query: &str, limit: usize| {

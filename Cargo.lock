@@ -1046,6 +1046,7 @@ dependencies = [
  "edda-core",
  "edda-index",
  "edda-store",
+ "fs2",
  "rusqlite",
  "serde",
  "serde_json",

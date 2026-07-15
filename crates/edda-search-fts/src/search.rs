@@ -32,8 +32,12 @@ pub struct SearchOptions<'a> {
 ///
 /// Supports:
 /// - Fuzzy text search (default): tolerates typos with Levenshtein distance 1
+///   for ASCII; skipped for pure-CJK queries (bigram fuzzing is noise)
 /// - Exact match: `options.exact = true` disables fuzzy
-/// - Regex: query wrapped in `/pattern/` uses RegexQuery on body field
+/// - Regex: query wrapped in `/pattern/` uses RegexQuery on body terms
+///   (tokenized — so a multi-char CJK regex pattern won't match)
+/// - CJK (GH-402): a pure-CJK query ANDs its bigrams, so it finds the phrase
+///   even inside a longer run; CJK *alternatives* need an explicit `OR`
 /// - Field boosting: title matches ranked 5x higher than body
 /// - Filtering by doc_type, event_type, project_id, session_id
 pub fn search(
@@ -66,9 +70,23 @@ pub fn search(
             let mut parser = QueryParser::for_index(index, vec![f_title, f_body]);
             parser.set_field_boost(f_title, 5.0);
             parser.set_field_boost(f_body, 1.0);
-            if !options.exact {
+            let has_ascii_alnum = query_str.chars().any(|c| c.is_ascii_alphanumeric());
+            // GH-402: enable fuzzy only when the query has ASCII to correct.
+            // Levenshtein-1 over 2-char CJK bigrams matches a flood of unrelated
+            // bigrams (權威 ~ 權力), and bigrams already give exact-substring
+            // recall — so pure-CJK queries skip fuzzy, while a mixed query like
+            // "postgre 中文" keeps ASCII typo tolerance.
+            if !options.exact && has_ascii_alnum {
                 parser.set_field_fuzzy(f_title, true, 1, true);
                 parser.set_field_fuzzy(f_body, true, 1, true);
+            }
+            // GH-402: a pure-CJK query defaults to AND over its bigrams, so a
+            // long phrase requires all of them (權威事實 → 權威 AND 威事 AND
+            // 事實) instead of matching any doc that shares just one — this keeps
+            // the exact-substring hit from being outranked and pushed past the
+            // result limit by title-boosted partial matches. English keeps OR.
+            if !has_ascii_alnum {
+                parser.set_conjunction_by_default();
             }
             parser.parse_query(query_str)?
         };
@@ -407,6 +425,111 @@ mod tests {
             results.is_empty(),
             "exact mode should not use fuzzy matching"
         );
+    }
+
+    /// Insert one doc whose body contains a long contiguous CJK run.
+    fn insert_cjk_doc(index: &Index) {
+        let schema = index.schema();
+        let mut writer = index_writer(index).unwrap();
+        let f_doc_type = schema.get_field("doc_type").unwrap();
+        let f_doc_id = schema.get_field("doc_id").unwrap();
+        let f_body = schema.get_field("body").unwrap();
+        writer
+            .add_document(doc!(
+                f_doc_type => "event",
+                f_doc_id => "evt_cjk",
+                // "…projection launders machine inference into authoritative fact"
+                f_body => "外部評論指出投影把機器推論洗成權威事實",
+            ))
+            .unwrap();
+        writer.commit().unwrap();
+    }
+
+    #[test]
+    fn search_finds_cjk_substring_inside_longer_run() {
+        // GH-402: 權威事實 exists only INSIDE 把機器推論洗成權威事實 — with the
+        // default tokenizer the whole run is one token, so this returns 0.
+        let index = ensure_index_ram().unwrap();
+        insert_cjk_doc(&index);
+
+        let results = search(&index, "權威事實", &SearchOptions::default(), 10).unwrap();
+        assert!(
+            !results.is_empty(),
+            "a CJK phrase inside a longer run must be findable"
+        );
+        assert_eq!(results[0].doc_id, "evt_cjk");
+    }
+
+    #[test]
+    fn search_finds_cjk_six_char_substring() {
+        let index = ensure_index_ram().unwrap();
+        insert_cjk_doc(&index);
+        let results = search(&index, "洗成權威事實", &SearchOptions::default(), 10).unwrap();
+        assert!(!results.is_empty(), "6-char CJK substring must be findable");
+    }
+
+    #[test]
+    fn pure_cjk_query_requires_all_bigrams() {
+        // GH-402 precision: a pure-CJK phrase ANDs its bigrams, so a document
+        // that shares only one bigram must NOT match — only the full phrase does.
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+        let f_doc_type = schema.get_field("doc_type").unwrap();
+        let f_doc_id = schema.get_field("doc_id").unwrap();
+        let f_body = schema.get_field("body").unwrap();
+        writer
+            .add_document(doc!(f_doc_type => "event", f_doc_id => "full", f_body => "洗成權威事實"))
+            .unwrap();
+        // Shares only the 權威 bigram, not 威事 / 事實.
+        writer
+            .add_document(doc!(f_doc_type => "event", f_doc_id => "partial", f_body => "權威掃地"))
+            .unwrap();
+        writer.commit().unwrap();
+
+        let results = search(&index, "權威事實", &SearchOptions::default(), 10).unwrap();
+        assert_eq!(results.len(), 1, "only the full-phrase doc should match");
+        assert_eq!(results[0].doc_id, "full");
+    }
+
+    #[test]
+    fn cjk_acceptance_table() {
+        // Mirrors the GH-402 evidence table: one doc holding a long CJK run,
+        // punctuation-delimited CJK words, an ASCII identifier, and English.
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+        let f_doc_type = schema.get_field("doc_type").unwrap();
+        let f_doc_id = schema.get_field("doc_id").unwrap();
+        let f_title = schema.get_field("title").unwrap();
+        let f_body = schema.get_field("body").unwrap();
+        writer
+            .add_document(doc!(
+                f_doc_type => "event",
+                f_doc_id => "d1",
+                f_title => "watermark",
+                f_body => "外部評論指出投影把機器推論洗成權威事實。收據 (驗收) task rail ENV_LOCK",
+            ))
+            .unwrap();
+        writer.commit().unwrap();
+
+        let hit = |q: &str| {
+            !search(&index, q, &SearchOptions::default(), 10)
+                .unwrap()
+                .is_empty()
+        };
+        // English keeps working
+        assert!(hit("watermark"), "EN word");
+        assert!(hit("task rail"), "EN two terms");
+        // 2-char CJK (previously worked by luck)
+        assert!(hit("收據"), "2-char CJK");
+        assert!(hit("驗收"), "2-char CJK");
+        // >2-char CJK that only exists inside a longer run (the bug)
+        assert!(hit("權威事實"), "4-char inside run");
+        assert!(hit("機器推論"), "4-char inside run");
+        assert!(hit("洗成權威事實"), "6-char inside run");
+        // Mixed-script ASCII identifier stays matchable
+        assert!(hit("ENV_LOCK"), "ASCII identifier");
     }
 
     #[test]
