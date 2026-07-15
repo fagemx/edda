@@ -450,21 +450,6 @@ fn collect_active_decisions(cwd: &str) -> Option<String> {
     render_decisions_two_tier(&decisions, &ratified)
 }
 
-/// Short authorship tag for an unratified decision line (GH-401).
-fn authorship_tag(authority: &str) -> &'static str {
-    use edda_core::types::authority as a;
-    if authority.is_empty() || authority == a::UNKNOWN {
-        "unknown"
-    } else if edda_core::types::is_operator_authority(authority) {
-        // Claims operator authorship but is not ratified — still not-binding.
-        "human"
-    } else if authority == a::SYSTEM {
-        "system"
-    } else {
-        "agent"
-    }
-}
-
 /// Split active decisions into an operator-ratified (binding) tier and an
 /// unratified tier (GH-401). Binding status is decided solely by ratify
 /// events (via [`edda_ledger::view::is_decision_ratified`]) — never by the
@@ -492,7 +477,7 @@ fn render_decisions_two_tier(
         } else {
             unratified_lines.push(format!(
                 "- [{}] **{}** = {}{}",
-                authorship_tag(&d.authority),
+                edda_core::types::authorship_tag(&d.authority),
                 d.key,
                 d.value,
                 reason

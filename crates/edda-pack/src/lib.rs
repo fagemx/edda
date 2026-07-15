@@ -480,20 +480,6 @@ impl From<&DecisionView> for DecisionSummary {
     }
 }
 
-/// Short authorship tag for an unratified decision line (GH-401).
-fn authorship_tag(authority: &str) -> &'static str {
-    use edda_core::types::authority as a;
-    if authority.is_empty() || authority == a::UNKNOWN {
-        "unknown"
-    } else if edda_core::types::is_operator_authority(authority) {
-        "human"
-    } else if authority == a::SYSTEM {
-        "system"
-    } else {
-        "agent"
-    }
-}
-
 /// Build a decision pack from active decisions in the ledger.
 ///
 /// Queries active decisions (status IN active, experimental) on the given
@@ -625,7 +611,7 @@ fn render_decision_tier(pack: &DecisionPack, want_ratified: bool, header: &str) 
             } else {
                 format!(
                     "- [{}] **`{}={}`**",
-                    authorship_tag(&d.authority),
+                    edda_core::types::authorship_tag(&d.authority),
                     d.key,
                     d.value
                 )

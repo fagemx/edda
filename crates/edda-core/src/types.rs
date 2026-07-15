@@ -74,6 +74,23 @@ pub fn is_operator_authority(authority: &str) -> bool {
     authority == self::authority::OPERATOR || authority == self::authority::LEGACY_HUMAN
 }
 
+/// Short display tag for a decision's authorship (GH-401), used by the
+/// unratified rendering tiers. Absence of provenance (empty or [`authority::UNKNOWN`])
+/// reads as `"unknown"`; operator/legacy-human as `"human"`; otherwise
+/// `"system"` or `"agent"`. This is descriptive only — binding status comes
+/// from `decision_ratify` events, never this tag.
+pub fn authorship_tag(authority: &str) -> &'static str {
+    if authority.is_empty() || authority == self::authority::UNKNOWN {
+        "unknown"
+    } else if is_operator_authority(authority) {
+        "human"
+    } else if authority == self::authority::SYSTEM {
+        "system"
+    } else {
+        "agent"
+    }
+}
+
 /// Map an event_type string to its (family, level) classification.
 pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'static str>) {
     match event_type {

@@ -133,20 +133,6 @@ fn matches_any_path(file_path: &str, affected_paths: &[String]) -> bool {
     false
 }
 
-/// Short authorship tag for a decision-warning line (GH-401).
-fn authorship_tag(authority: &str) -> &'static str {
-    use edda_core::types::authority as a;
-    if authority.is_empty() || authority == a::UNKNOWN {
-        "unknown"
-    } else if edda_core::types::is_operator_authority(authority) {
-        "human"
-    } else if authority == a::SYSTEM {
-        "system"
-    } else {
-        "agent"
-    }
-}
-
 fn format_warning(matches: &[&DecisionView]) -> String {
     // GH-401: these are decisions that *claim* to affect this file, but only
     // operator-ratified ones are binding. This hot-path warning does not
@@ -165,7 +151,7 @@ fn format_warning(matches: &[&DecisionView]) -> String {
         };
         lines.push(format!(
             "  - [{}] `{}={}` [{}]{}",
-            authorship_tag(&d.authority),
+            edda_core::types::authorship_tag(&d.authority),
             d.key,
             d.value,
             d.status,
