@@ -125,13 +125,94 @@ fn extract_event_tags(event: &edda_core::Event) -> String {
         .unwrap_or_default()
 }
 
+/// SQLite writes held back until the Tantivy commit succeeds (GH-413).
+///
+/// `turns_meta` is the dedup source: once a turn is in it, every later run skips
+/// that turn. Writing it before the documents are committed means a crash in
+/// between marks turns as indexed that Tantivy never received — invisible to
+/// search forever, with no self-healing path. So nothing in here touches SQLite
+/// until the caller has committed the writer.
+///
+/// This is the ordering the events cursor already uses: `sync::sync` commits the
+/// writer, *then* advances `events_watermark`.
+#[derive(Debug, Default)]
+pub struct PendingMeta {
+    turns: Vec<TurnMetaRow>,
+    /// `(project_id, session_id, consumed byte length)`
+    offsets: Vec<(String, String, i64)>,
+}
+
+#[derive(Debug)]
+struct TurnMetaRow {
+    turn_id: String,
+    project_id: String,
+    session_id: String,
+    ts: String,
+    user_uuid: String,
+    assistant_uuid: String,
+    user_store_offset: i64,
+    user_store_len: i64,
+    assistant_store_offset: i64,
+    assistant_store_len: i64,
+}
+
+impl PendingMeta {
+    /// How many turns will be recorded once flushed.
+    pub fn turns(&self) -> usize {
+        self.turns.len()
+    }
+
+    /// Absorb another batch (used by `index_project` across sessions).
+    pub fn merge(&mut self, other: PendingMeta) {
+        self.turns.extend(other.turns);
+        self.offsets.extend(other.offsets);
+    }
+
+    /// Write everything in one transaction, returning the number of turns
+    /// recorded.
+    ///
+    /// Call this ONLY after the Tantivy writer has committed. Flushing early
+    /// reintroduces GH-413.
+    pub fn flush(self, conn: &Connection) -> anyhow::Result<usize> {
+        let tx = conn.unchecked_transaction()?;
+        for r in &self.turns {
+            tx.execute(
+                "INSERT INTO turns_meta (turn_id, project_id, session_id, ts, \
+                 user_uuid, assistant_uuid, \
+                 user_store_offset, user_store_len, \
+                 assistant_store_offset, assistant_store_len) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    r.turn_id,
+                    r.project_id,
+                    r.session_id,
+                    r.ts,
+                    r.user_uuid,
+                    r.assistant_uuid,
+                    r.user_store_offset,
+                    r.user_store_len,
+                    r.assistant_store_offset,
+                    r.assistant_store_len,
+                ],
+            )
+            .context("insert turns_meta")?;
+        }
+        for (project_id, session_id, offset) in &self.offsets {
+            crate::schema::write_session_offset(conn, project_id, session_id, *offset)?;
+        }
+        tx.commit()?;
+        Ok(self.turns.len())
+    }
+}
+
 /// Index a single session's transcript records into Tantivy + turns_meta.
 ///
 /// Reads index records from `<project_dir>/index/<session_id>.jsonl`,
 /// fetches raw transcript data from `<project_dir>/transcripts/<session_id>.jsonl`,
 /// and creates Tantivy documents + turns_meta entries.
 ///
-/// Returns the number of newly indexed turns.
+/// Returns the SQLite writes the caller must [`PendingMeta::flush`] *after*
+/// committing the Tantivy writer (GH-413).
 pub fn index_session(
     writer: &IndexWriter,
     schema: &Schema,
@@ -139,12 +220,12 @@ pub fn index_session(
     project_dir: &Path,
     project_id: &str,
     session_id: &str,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<PendingMeta> {
     let index_path = project_dir
         .join("index")
         .join(format!("{session_id}.jsonl"));
     if !index_path.exists() {
-        return Ok(0);
+        return Ok(PendingMeta::default());
     }
 
     // GH-403: skip a session whose index file has not grown since the last run.
@@ -159,7 +240,7 @@ pub fn index_session(
     let file_len = std::fs::metadata(&index_path)?.len() as i64;
     let consumed = crate::schema::read_session_offset(meta_conn, project_id, session_id)?;
     if consumed == file_len {
-        return Ok(0);
+        return Ok(PendingMeta::default());
     }
 
     let store_path = project_dir
@@ -169,7 +250,7 @@ pub fn index_session(
     // Read all index records
     let records = edda_index::read_index_tail(&index_path, 100_000, 256 * 1024 * 1024)?;
     if records.is_empty() {
-        return Ok(0);
+        return Ok(PendingMeta::default());
     }
 
     // Build lookup by uuid
@@ -194,8 +275,7 @@ pub fn index_session(
     let f_tags = schema.get_field("tags")?;
     let f_tokens = schema.get_field("tokens")?;
 
-    let tx = meta_conn.unchecked_transaction()?;
-    let mut count = 0;
+    let mut pending = PendingMeta::default();
 
     for asst_rec in &assistants {
         // Walk parent chain to find root user prompt
@@ -237,8 +317,10 @@ pub fn index_session(
 
         let turn_id = format!("{}:{}", user_rec.uuid, asst_rec.uuid);
 
-        // Check if already indexed (via turns_meta)
-        let exists: bool = tx
+        // Check if already indexed (via turns_meta). Reads only what previous
+        // runs flushed — this run's rows are still pending, which is correct:
+        // turn ids are unique, so nothing in this batch can dedup against itself.
+        let exists: bool = meta_conn
             .query_row(
                 "SELECT 1 FROM turns_meta WHERE turn_id = ?1",
                 params![turn_id],
@@ -303,58 +385,52 @@ pub fn index_session(
             f_tokens => tokens.as_str(),
         ))?;
 
-        // Insert into turns_meta (for show command byte offsets)
-        tx.execute(
-            "INSERT INTO turns_meta (turn_id, project_id, session_id, ts, \
-             user_uuid, assistant_uuid, \
-             user_store_offset, user_store_len, \
-             assistant_store_offset, assistant_store_len) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![
-                turn_id,
-                project_id,
-                session_id,
-                ts,
-                user_rec.uuid,
-                asst_rec.uuid,
-                user_rec.store_offset as i64,
-                user_rec.store_len as i64,
-                asst_rec.store_offset as i64,
-                asst_rec.store_len as i64,
-            ],
-        )
-        .context("insert turns_meta")?;
-
-        count += 1;
+        // Hold the turns_meta row (for show's byte offsets) until the caller has
+        // committed the documents above.
+        pending.turns.push(TurnMetaRow {
+            turn_id,
+            project_id: project_id.to_string(),
+            session_id: session_id.to_string(),
+            ts: ts.clone(),
+            user_uuid: user_rec.uuid.clone(),
+            assistant_uuid: asst_rec.uuid.clone(),
+            user_store_offset: user_rec.store_offset as i64,
+            user_store_len: user_rec.store_len as i64,
+            assistant_store_offset: asst_rec.store_offset as i64,
+            assistant_store_len: asst_rec.store_len as i64,
+        });
     }
 
-    // Record how much of the file we consumed, in the same transaction as the
-    // turns_meta rows it corresponds to. A rewritten (shrunk) file will not
-    // match on the next run and gets re-read, which is safe because turns_meta
-    // dedups by turn_id.
-    crate::schema::write_session_offset(meta_conn, project_id, session_id, file_len)?;
+    // Record how much of the file we consumed, alongside the turns_meta rows it
+    // corresponds to — both land in one transaction at flush time. A rewritten
+    // (shrunk) file will not match on the next run and gets re-read, which is
+    // safe because turns_meta dedups by turn_id.
+    pending
+        .offsets
+        .push((project_id.to_string(), session_id.to_string(), file_len));
 
-    tx.commit()?;
-    Ok(count)
+    Ok(pending)
 }
 
 /// Index all sessions for a project.
 ///
 /// Scans `<project_dir>/index/` for `*.jsonl` files and indexes each session.
-/// Returns total number of newly indexed turns.
+///
+/// Returns the SQLite writes the caller must [`PendingMeta::flush`] *after*
+/// committing the Tantivy writer (GH-413).
 pub fn index_project(
     writer: &IndexWriter,
     schema: &Schema,
     meta_conn: &Connection,
     project_dir: &Path,
     project_id: &str,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<PendingMeta> {
     let index_dir = project_dir.join("index");
     if !index_dir.exists() {
-        return Ok(0);
+        return Ok(PendingMeta::default());
     }
 
-    let mut total = 0;
+    let mut total = PendingMeta::default();
     for entry in std::fs::read_dir(&index_dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -375,7 +451,7 @@ pub fn index_project(
                 project_id,
                 &session_id,
             ) {
-                Ok(n) => total += n,
+                Ok(pending) => total.merge(pending),
                 Err(e) => {
                     tracing::warn!(%session_id, error = %e, "indexing session failed");
                 }
@@ -700,8 +776,9 @@ mod tests {
             )
             .unwrap();
 
-        let count = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
-        assert_eq!(count, 0, "an unchanged file must be skipped");
+        let pending = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(pending.turns(), 0, "an unchanged file must be skipped");
+        pending.flush(&meta_conn).unwrap();
 
         // The decisive assertion: turns_meta is still EMPTY. This turn was never
         // indexed, which is only possible if the file was never read — a path
@@ -711,6 +788,63 @@ mod tests {
             .query_row("SELECT count(*) FROM turns_meta", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "skipping must mean not reading, not read-then-dedup");
+    }
+
+    /// GH-413: turns must survive a crash between the SQLite commit and the
+    /// Tantivy commit.
+    ///
+    /// The crash is simulated the only way it actually happens: the writer is
+    /// dropped without committing, so Tantivy never receives the documents. If
+    /// SQLite already recorded the turn as indexed, the dedup skips it forever
+    /// and it is invisible to search with no self-healing path.
+    #[test]
+    fn crash_before_tantivy_commit_leaves_turns_reindexable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        write_session_fixture(project_dir, "s1", "1");
+
+        let index_dir = project_dir.join("search").join("tantivy");
+        let (index, _) = crate::schema::open_or_create_index(&index_dir).unwrap();
+        let tschema = index.schema();
+        let meta_conn =
+            crate::schema::ensure_meta_db(&project_dir.join("search").join("meta.sqlite")).unwrap();
+
+        // ── the crash ──
+        {
+            let writer = index_writer(&index).unwrap();
+            let _pending =
+                index_session(&writer, &tschema, &meta_conn, project_dir, "p1", "s1").unwrap();
+            // Dropped without commit and without flush: Tantivy has nothing, and
+            // nothing claims otherwise.
+        }
+
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            0,
+            "precondition: the crash must have lost the documents"
+        );
+
+        // ── the next run ──
+        let mut writer = index_writer(&index).unwrap();
+        let pending =
+            index_session(&writer, &tschema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        writer.commit().unwrap();
+        let n = pending.flush(&meta_conn).unwrap();
+
+        assert_eq!(
+            n, 1,
+            "a turn whose documents were never committed must be re-indexed, \
+             not skipped as already done"
+        );
+
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            1,
+            "the turn must be searchable after recovery"
+        );
     }
 
     #[test]
@@ -724,18 +858,23 @@ mod tests {
         let writer = index_writer(&index).unwrap();
         let meta_conn = ensure_meta_db_memory().unwrap();
 
-        let count = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
-        assert_eq!(count, 1);
+        let pending = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(pending.turns(), 1);
 
+        // The offset is only recorded once flushed — i.e. once the caller has
+        // committed the documents it describes.
         let len = std::fs::metadata(&index_path).unwrap().len() as i64;
-        let stored: i64 = meta_conn
-            .query_row(
-                "SELECT last_offset FROM index_watermark WHERE project_id = ?1 AND session_id = ?2",
-                params!["p1", "s1"],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(stored, len, "must record how much of the file it consumed");
+        assert_eq!(
+            crate::schema::read_session_offset(&meta_conn, "p1", "s1").unwrap(),
+            0,
+            "nothing may be recorded before the flush"
+        );
+        pending.flush(&meta_conn).unwrap();
+        assert_eq!(
+            crate::schema::read_session_offset(&meta_conn, "p1", "s1").unwrap(),
+            len,
+            "must record how much of the file it consumed"
+        );
     }
 
     #[test]
@@ -749,23 +888,20 @@ mod tests {
         let writer = index_writer(&index).unwrap();
         let meta_conn = ensure_meta_db_memory().unwrap();
 
-        assert_eq!(
-            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap(),
-            1
-        );
+        // Each flush stands for a run whose documents were committed.
+        let first = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(first.turns(), 1);
+        first.flush(&meta_conn).unwrap();
+
         // Unchanged: skipped.
-        assert_eq!(
-            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap(),
-            0
-        );
+        let second = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(second.turns(), 0);
+        second.flush(&meta_conn).unwrap();
 
         // The live session grows — the early-out must not blind us to new turns.
         write_session_fixture(project_dir, "s1", "2");
-        assert_eq!(
-            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap(),
-            1,
-            "a grown file must be reprocessed"
-        );
+        let third = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(third.turns(), 1, "a grown file must be reprocessed");
     }
 
     fn mk_test_event(id: &str) -> edda_core::Event {
@@ -848,7 +984,7 @@ mod tests {
             "p1",
             "nonexistent",
         );
-        assert_eq!(result.unwrap(), 0);
+        assert_eq!(result.unwrap().turns(), 0);
     }
 
     #[test]
@@ -946,9 +1082,10 @@ mod tests {
         let mut writer = index_writer(&index).unwrap();
         let meta_conn = ensure_meta_db_memory().unwrap();
 
-        let count = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
-        assert_eq!(count, 1);
+        let pending = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(pending.turns(), 1);
         writer.commit().unwrap();
+        assert_eq!(pending.flush(&meta_conn).unwrap(), 1);
 
         // Verify Tantivy has the document
         let reader = index.reader().unwrap();
@@ -966,7 +1103,7 @@ mod tests {
         assert_eq!(turn_id, "u1:a1");
 
         // Re-index is idempotent (dedup via turns_meta check)
-        let count2 = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
-        assert_eq!(count2, 0);
+        let again = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(again.turns(), 0);
     }
 }

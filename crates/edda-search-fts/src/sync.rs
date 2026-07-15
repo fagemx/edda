@@ -79,7 +79,10 @@ where
 
     // A rebuild must cover every session, otherwise sessions other than the
     // requested one vanish behind the fresh index.
-    let turns = match session_id {
+    //
+    // Nothing here touches SQLite: the turns_meta rows and session offsets come
+    // back pending and are flushed only after the commit below (GH-413).
+    let pending = match session_id {
         Some(sid) if !rebuilt => indexer::index_session(
             &writer,
             &tantivy_schema,
@@ -91,11 +94,15 @@ where
         _ => indexer::index_project(&writer, &tantivy_schema, &meta_conn, proj_dir, project_id)?,
     };
 
-    // Commit BEFORE advancing the cursor. A crash in between re-runs this batch,
-    // which index_events_since makes idempotent. The reverse order would mark
-    // events indexed that are not, hiding them forever.
+    // Commit BEFORE recording anything. A crash in between re-runs this batch:
+    // index_events_since makes the event re-add idempotent, and the turns are
+    // simply not marked done, so the next run picks them up. The reverse order
+    // would mark work done that Tantivy never received, hiding it forever.
     writer.commit()?;
     schema::write_index_version(&index_dir)?;
+
+    // Now that the documents are durable, it is safe to say so.
+    let turns = pending.flush(&meta_conn)?;
 
     let indexed_through = if let Some((rowid, ev)) = batch.last() {
         schema::write_events_cursor(&meta_conn, project_id, *rowid, Some(ev.ts.as_str()))?;
