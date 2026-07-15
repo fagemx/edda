@@ -73,6 +73,7 @@ pub fn run_cmd(cmd: SearchCmd, repo_root: &Path) -> anyhow::Result<()> {
         } => {
             let pid = project.as_deref().unwrap_or(&default_pid);
             query(
+                repo_root,
                 pid,
                 &q,
                 session.as_deref(),
@@ -91,8 +92,10 @@ pub fn run_cmd(cmd: SearchCmd, repo_root: &Path) -> anyhow::Result<()> {
 
 // ── Command Implementations ──
 
-/// Execute `edda search <query>` — full-text search over Tantivy index.
+/// Execute `edda search <query>` — full-text search over the Tantivy index.
+#[allow(clippy::too_many_arguments)]
 pub fn query(
+    repo_root: &Path,
     project_id: &str,
     query_str: &str,
     session_id: Option<&str>,
@@ -103,18 +106,26 @@ pub fn query(
 ) -> anyhow::Result<()> {
     let proj_dir = project_dir(project_id);
     let index_dir = proj_dir.join("search").join("tantivy");
-    if !index_dir.exists() {
-        eprintln!("No search index found. Run `edda search index` first.");
-        return Ok(());
-    }
-    // GH-402: refuse to serve an index built with an older tokenizer — its
-    // results would silently miss CJK matches. Tell the user to rebuild.
-    if schema::index_is_outdated(&index_dir) {
-        eprintln!(
-            "Search index is from an older schema (CJK tokenization changed). \
-             Run `edda search index` to rebuild."
+
+    // GH-403: an unusable index is not a dead end. Announce, then fix it — a
+    // silent 25s stall reads as a hang, and telling the user to go run another
+    // command is the complaint this issue exists to answer.
+    let missing = !index_dir.exists();
+    let outdated = schema::index_is_outdated(&index_dir);
+    if missing || outdated {
+        if missing {
+            println!("No search index — building now (one-time)…");
+        } else {
+            println!("Search index schema is outdated — rebuilding now (one-time)…");
+        }
+        let ledger = Ledger::open(repo_root)?;
+        let stats = sync::sync(&proj_dir, project_id, None, |after| {
+            ledger.events_after_rowid(after)
+        })?;
+        println!(
+            "Indexed {} event(s) + {} turn(s).\n",
+            stats.events, stats.turns
         );
-        return Ok(());
     }
 
     // Read-only open: answering a query must never wipe/recreate the index.
@@ -133,6 +144,7 @@ pub fn query(
 
     if results.is_empty() {
         println!("No results found for: {query_str}");
+        print_watermark(repo_root, &proj_dir, project_id);
         return Ok(());
     }
 
@@ -163,7 +175,33 @@ pub fn query(
         }
     }
 
+    print_watermark(repo_root, &proj_dir, project_id);
     Ok(())
+}
+
+/// Report how current the index is (GH-403), so silence is never mistaken for
+/// absence. Best-effort: a broken watermark must not fail a query that already
+/// produced results.
+fn print_watermark(repo_root: &Path, proj_dir: &Path, project_id: &str) {
+    let meta_path = proj_dir.join("search").join("meta.sqlite");
+    let Ok(conn) = schema::ensure_meta_db(&meta_path) else {
+        return;
+    };
+    let Ok(cursor) = schema::read_events_cursor(&conn, project_id) else {
+        return;
+    };
+    let Some(ts) = cursor.ts else {
+        return;
+    };
+    let newer = Ledger::open(repo_root)
+        .and_then(|l| l.events_after_rowid(cursor.rowid))
+        .map(|v| v.len())
+        .unwrap_or(0);
+    if newer > 0 {
+        println!("  (indexed through {ts}; {newer} newer event(s) not yet indexed)");
+    } else {
+        println!("  (indexed through {ts})");
+    }
 }
 
 /// Execute `edda search index` — build/update the Tantivy index for a project.
