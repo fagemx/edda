@@ -49,6 +49,29 @@ where
 
     // Schema upgrade: wipe so it is recreated fresh below.
     if schema::index_is_outdated(&index_dir) {
+        // GH-418: this wipe is destruction too, and the guard further down cannot
+        // see what it destroyed — afterwards the index is empty, so "would this
+        // empty a populated index?" trivially passes. The upgrade path is exactly
+        // where it matters: the index is thrown away *on purpose* to be rebuilt
+        // from the ledger, so if the ledger is gone the wipe destroys the only
+        // copy. The ledger is checked first because it is the definitive half and
+        // this read only happens on the rare upgrade path.
+        if events_after(0)?.is_empty() {
+            let existing = schema::open_index(&index_dir)
+                .and_then(|old| {
+                    let old_schema = old.schema();
+                    event_doc_count(&old, &old_schema).ok()
+                })
+                .unwrap_or(0);
+            if existing > 0 {
+                return Err(empty_ledger_refusal(
+                    project_id,
+                    existing,
+                    proj_dir,
+                    &search_dir,
+                ));
+            }
+        }
         std::fs::remove_dir_all(&index_dir)?;
     }
 
@@ -81,15 +104,12 @@ where
     if rebuilt && batch.is_empty() {
         let existing = event_doc_count(&index, &tantivy_schema)?;
         if existing > 0 {
-            anyhow::bail!(
-                "Refusing to rebuild project {project_id}: its ledger reports no \
-                 events, but the index holds {existing}. Events are append-only, so \
-                 this almost certainly means the ledger is missing rather than empty \
-                 — check {}/.edda/ledger.db. Rebuilding would empty the index. To \
-                 discard it deliberately, delete {}.",
-                proj_dir.display(),
-                search_dir.display()
-            );
+            return Err(empty_ledger_refusal(
+                project_id,
+                existing,
+                proj_dir,
+                &search_dir,
+            ));
         }
     }
 
@@ -148,6 +168,24 @@ where
         indexed_through,
         rebuilt,
     })
+}
+
+/// The refusal both destructive paths share (GH-418): the schema-upgrade wipe,
+/// and the rebuild's event purge.
+fn empty_ledger_refusal(
+    project_id: &str,
+    existing: usize,
+    proj_dir: &Path,
+    search_dir: &Path,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Refusing to rebuild project {project_id}: its ledger reports no events, but \
+         the index holds {existing}. Events are append-only, so this almost certainly \
+         means the ledger is missing rather than empty — check {}/.edda/ledger.db. \
+         Rebuilding would empty the index. To discard it deliberately, delete {}.",
+        proj_dir.display(),
+        search_dir.display()
+    )
 }
 
 /// How many event documents the index currently holds.
@@ -408,6 +446,44 @@ mod tests {
             reader.searcher().num_docs(),
             2,
             "the refusal must leave the index untouched"
+        );
+    }
+
+    /// GH-418, the other destructive step: a schema upgrade wipes the index dir
+    /// outright, and that happens BEFORE the emptiness guard. Once the wipe has
+    /// run, the guard counts zero event docs and waves the rebuild through — so
+    /// the check has to come before the wipe, not just before the delete.
+    ///
+    /// The upgrade path is exactly when this matters: the index has been thrown
+    /// away on purpose, to be rebuilt from the ledger. If the ledger is gone too,
+    /// the wipe destroyed the only copy.
+    #[test]
+    fn an_outdated_index_is_not_wiped_when_the_ledger_has_nothing_to_rebuild_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let led = FakeLedger::new(vec![(1, mk_event("evt_a", "2026-07-15T12:00:00Z"))]);
+        sync(tmp.path(), "p1", None, led.source()).unwrap();
+
+        // Make the on-disk index look like an older schema version.
+        let index_dir = tmp.path().join("search").join("tantivy");
+        std::fs::write(index_dir.join("edda_schema_version"), "1").unwrap();
+
+        // ...and the ledger.db vanished, so it opens as empty.
+        let vanished = FakeLedger::new(vec![]);
+        let err = sync(tmp.path(), "p1", None, vanished.source()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("Refusing to rebuild"),
+            "unhelpful error: {err}"
+        );
+
+        let index =
+            crate::schema::open_index(&index_dir).expect("the index dir must survive the refusal");
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            1,
+            "refusing after the wipe is not refusing"
         );
     }
 
