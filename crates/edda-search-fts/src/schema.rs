@@ -36,7 +36,9 @@ pub fn index_is_outdated(index_dir: &Path) -> bool {
 /// opened or created index so both indexing and `QueryParser` tokenize
 /// symmetrically (GH-402).
 pub fn register_tokenizers(index: &Index) {
-    index.tokenizers().register(CJK_TOKENIZER, CjkBigramTokenizer);
+    index
+        .tokenizers()
+        .register(CJK_TOKENIZER, CjkBigramTokenizer);
 }
 
 /// Build the Tantivy schema used for all search documents.
@@ -112,7 +114,10 @@ pub fn ensure_index(index_dir: &Path) -> anyhow::Result<Index> {
     std::fs::create_dir_all(index_dir)?;
     let index = Index::create_in_dir(index_dir, schema)?;
     register_tokenizers(&index);
-    write_index_version(index_dir)?;
+    // NB: the version marker is written by the indexer only AFTER a full index
+    // commit succeeds (see cmd_search::index) — never here. A freshly-created
+    // but not-yet-populated index has no marker, so it reads as outdated until
+    // the rebuild completes, making a crashed rebuild self-healing.
     Ok(index)
 }
 

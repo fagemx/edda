@@ -171,10 +171,10 @@ pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> an
     let index_dir = proj_dir.join("search").join("tantivy");
     let meta_db_path = proj_dir.join("search").join("meta.sqlite");
 
-    // GH-402: on a schema upgrade, wipe BOTH the tantivy index and the turns
-    // watermark (meta.sqlite) so every event and turn is re-tokenized. Leaving
-    // the watermark would skip already-indexed turns and mix old/new tokens.
-    if schema::index_is_outdated(&index_dir) {
+    // GH-402: a schema upgrade forces a from-scratch rebuild of BOTH the
+    // tantivy index and the turns watermark, so nothing is left half-tokenized.
+    let rebuilding = schema::index_is_outdated(&index_dir);
+    if rebuilding {
         let old = schema::read_index_version(&index_dir)
             .map(|v| v.to_string())
             .unwrap_or_else(|| "1".to_string());
@@ -182,37 +182,49 @@ pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> an
             "Search index schema outdated (v{old} → v{}); rebuilding from scratch.",
             schema::INDEX_VERSION
         );
-        let _ = std::fs::remove_dir_all(&index_dir);
-        let _ = std::fs::remove_file(&meta_db_path);
+        // Propagate removal errors: a locked index dir must fail loudly rather
+        // than silently rebuild against stale metadata.
+        if index_dir.exists() {
+            std::fs::remove_dir_all(&index_dir)?;
+        }
     }
 
     let index = schema::ensure_index(&index_dir)?;
     let tantivy_schema = index.schema();
     let mut writer = schema::index_writer(&index)?;
 
-    // Index ledger events
+    let meta_conn = schema::ensure_meta_db(&meta_db_path)?;
+    // Clear the watermark via SQL (not file deletion) so a locked/leftover
+    // meta.sqlite can't make index_session skip every turn during a rebuild.
+    if rebuilding {
+        meta_conn.execute_batch("DELETE FROM turns_meta; DELETE FROM index_watermark;")?;
+    }
+
+    // Index ledger events (index_events always deletes + re-adds all events).
     let ledger = Ledger::open(repo_root)?;
     let event_count = indexer::index_events(&writer, &tantivy_schema, project_id, || {
         ledger.iter_events()
     })?;
 
-    // Index transcript turns
-    let meta_db_path = proj_dir.join("search").join("meta.sqlite");
-    let meta_conn = schema::ensure_meta_db(&meta_db_path)?;
-    let turn_count = if let Some(sid) = session_id {
-        indexer::index_session(
+    // Index transcript turns. A schema rebuild must cover ALL sessions even if
+    // a single --session was requested, otherwise other sessions vanish behind
+    // the fresh version marker.
+    let turn_count = match session_id {
+        Some(sid) if !rebuilding => indexer::index_session(
             &writer,
             &tantivy_schema,
             &meta_conn,
             &proj_dir,
             project_id,
             sid,
-        )?
-    } else {
-        indexer::index_project(&writer, &tantivy_schema, &meta_conn, &proj_dir, project_id)?
+        )?,
+        _ => indexer::index_project(&writer, &tantivy_schema, &meta_conn, &proj_dir, project_id)?,
     };
 
     writer.commit()?;
+    // Mark the schema version only AFTER a successful full commit, so a crash
+    // mid-rebuild leaves no marker and the next run rebuilds again.
+    schema::write_index_version(&index_dir)?;
 
     println!("Indexed {event_count} event(s) + {turn_count} turn(s) for project {project_id}");
     Ok(())

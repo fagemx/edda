@@ -56,23 +56,24 @@ impl Tokenizer for CjkBigramTokenizer {
     }
 }
 
-/// Characters treated as CJK (ideographs, kana, hangul).
+/// Characters treated as CJK (ideographs, kana, hangul). Deliberately excludes
+/// CJK symbols/punctuation (U+3000–303F) so those act as run separators.
 fn is_cjk(c: char) -> bool {
     matches!(c as u32,
-        0x3400..=0x4DBF        // CJK Unified Ideographs Extension A
-        | 0x4E00..=0x9FFF      // CJK Unified Ideographs
-        | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
+        0x2E80..=0x2EFF        // CJK Radicals Supplement
+        | 0x2F00..=0x2FDF      // Kangxi Radicals
         | 0x3040..=0x30FF      // Hiragana + Katakana
+        | 0x31F0..=0x31FF      // Katakana Phonetic Extensions
+        | 0x3400..=0x4DBF      // CJK Unified Ideographs Extension A
+        | 0x4E00..=0x9FFF      // CJK Unified Ideographs
         | 0xAC00..=0xD7AF      // Hangul Syllables
+        | 0x1100..=0x11FF      // Hangul Jamo
+        | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
+        | 0xFF65..=0xFF9F      // Halfwidth Katakana
         | 0x2_0000..=0x2_A6DF  // CJK Unified Ideographs Extension B
+        | 0x2_A700..=0x2_EBEF  // CJK Unified Ideographs Extensions C–F
+        | 0x2_F800..=0x2_FA1F  // CJK Compatibility Ideographs Supplement
     )
-}
-
-/// Whether `text` contains any CJK character. Used by the query path to skip
-/// fuzzy matching for CJK queries (Levenshtein-1 on 2-char bigrams matches far
-/// too many unrelated bigrams to be useful).
-pub fn contains_cjk(text: &str) -> bool {
-    text.chars().any(is_cjk)
 }
 
 fn mk(offset_from: usize, offset_to: usize, position: usize, text: String) -> Token {

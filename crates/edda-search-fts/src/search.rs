@@ -66,11 +66,13 @@ pub fn search(
             let mut parser = QueryParser::for_index(index, vec![f_title, f_body]);
             parser.set_field_boost(f_title, 5.0);
             parser.set_field_boost(f_body, 1.0);
-            // GH-402: skip fuzzy for CJK queries. The CJK tokenizer emits
-            // 2-char bigrams, and Levenshtein-1 over those matches a flood of
-            // unrelated bigrams (權威 ~ 權力). Bigrams already give exact-substring
-            // recall, so fuzzy adds only noise. Keep fuzzy for ASCII typos.
-            if !options.exact && !crate::tokenizer::contains_cjk(query_str) {
+            // GH-402: enable fuzzy only when the query has ASCII to correct.
+            // Levenshtein-1 over 2-char CJK bigrams matches a flood of unrelated
+            // bigrams (權威 ~ 權力), and bigrams already give exact-substring
+            // recall — so pure-CJK queries skip fuzzy, while a mixed query like
+            // "postgre 中文" keeps ASCII typo tolerance.
+            let has_ascii_alnum = query_str.chars().any(|c| c.is_ascii_alphanumeric());
+            if !options.exact && has_ascii_alnum {
                 parser.set_field_fuzzy(f_title, true, 1, true);
                 parser.set_field_fuzzy(f_body, true, 1, true);
             }
