@@ -3,7 +3,7 @@ use edda_index::fetch_store_line;
 use edda_ledger::Ledger;
 use edda_search_fts::{schema, search, sync};
 use edda_store::project_dir;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── CLI Schema ──
 
@@ -112,26 +112,26 @@ pub fn query(
     // command is the complaint this issue exists to answer.
     let missing = !index_dir.exists();
     let outdated = schema::index_is_outdated(&index_dir);
-    // Only auto-build the project this repo actually resolves to. `--project`
-    // names a project independently of where we are standing, and repo_root's
-    // ledger is not that project's ledger — building from it would write these
-    // events into someone else's index. For a project that isn't here, the
-    // explicit message is the honest answer.
-    let is_local_project = project_id == resolve_project_id(repo_root);
-    if (missing || outdated) && !is_local_project {
-        eprintln!(
-            "No usable search index for project {project_id}. Run \
-             `edda search index --project {project_id}` from that project's repo."
-        );
-        return Ok(());
-    }
     if missing || outdated {
         if missing {
             println!("No search index — building now (one-time)…");
         } else {
             println!("Search index schema is outdated — rebuilding now (one-time)…");
         }
-        let ledger = Ledger::open(repo_root)?;
+        // Build from the ledger that actually backs this project, which may not
+        // be the repo we are standing in (GH-414). Degrade rather than hard-fail:
+        // a query that cannot work out where to build from should say so, not
+        // abort with an error.
+        let ledger_root = match ledger_root_for(repo_root, project_id, |pid| {
+            edda_store::registry::get_project(pid).map(|e| e.path)
+        }) {
+            Ok(root) => root,
+            Err(e) => {
+                eprintln!("{e}");
+                return Ok(());
+            }
+        };
+        let ledger = Ledger::open(&ledger_root)?;
         let stats = sync::sync(&proj_dir, project_id, None, |after| {
             ledger.events_after_rowid(after)
         })?;
@@ -229,6 +229,46 @@ fn print_watermark(repo_root: &Path, proj_dir: &Path, project_id: &str) {
     }
 }
 
+/// Decide whose ledger backs `project_id` (GH-414).
+///
+/// `--project` names a project independently of where the user is standing, so
+/// the two can diverge. Pairing this repo's ledger with another project's index
+/// writes these events into that project — silently, and reported as success.
+///
+/// The registry knows where each project lives, so a foreign project is resolved
+/// to its own repo rather than refused. `lookup` is injected (production passes
+/// `edda_store::get_project`) because resolving it for real reads the
+/// process-wide store root, which a test cannot redirect without corrupting its
+/// siblings.
+fn ledger_root_for(
+    repo_root: &Path,
+    project_id: &str,
+    lookup: impl FnOnce(&str) -> Option<String>,
+) -> anyhow::Result<PathBuf> {
+    if project_id == resolve_project_id(repo_root) {
+        return Ok(repo_root.to_path_buf());
+    }
+
+    let Some(path) = lookup(project_id) else {
+        anyhow::bail!(
+            "Project {project_id} is not in the registry, so there is no way to tell \
+             whose events it holds. Run `edda search index` from that project's repo."
+        );
+    };
+
+    // Same staleness rule the registry itself uses: a live repo has a `.edda/`.
+    // Falling back to repo_root here would be the bug this exists to fix.
+    let root = PathBuf::from(path);
+    if !root.join(".edda").is_dir() {
+        anyhow::bail!(
+            "Project {project_id} is registered at {} but that path no longer holds \
+             an edda ledger. Run `edda search index` from that project's repo.",
+            root.display()
+        );
+    }
+    Ok(root)
+}
+
 /// Execute `edda search index` — build/update the Tantivy index for a project.
 pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> anyhow::Result<()> {
     let proj_dir = project_dir(project_id);
@@ -236,7 +276,10 @@ pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> an
         anyhow::bail!("Project directory not found: {}", proj_dir.display());
     }
 
-    let ledger = Ledger::open(repo_root)?;
+    let ledger_root = ledger_root_for(repo_root, project_id, |pid| {
+        edda_store::registry::get_project(pid).map(|e| e.path)
+    })?;
+    let ledger = Ledger::open(&ledger_root)?;
     let stats = sync::sync(&proj_dir, project_id, session_id, |after| {
         ledger.events_after_rowid(after)
     })?;
@@ -356,4 +399,74 @@ fn extract_message_text(json: &serde_json::Value) -> String {
     }
 
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The registry must not even be consulted for the project we are standing
+    /// in — that is the overwhelmingly common case and it must not depend on
+    /// being registered.
+    #[test]
+    fn local_project_uses_this_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pid = resolve_project_id(root);
+
+        let got = ledger_root_for(root, &pid, |_| {
+            panic!("registry must not be consulted for the local project")
+        })
+        .unwrap();
+
+        assert_eq!(got, root);
+    }
+
+    /// GH-414: `--project X` names a project independently of where we stand, so
+    /// its events must come from ITS repo. Using this repo's ledger writes these
+    /// events into that project's index.
+    #[test]
+    fn foreign_project_uses_its_own_registered_repo() {
+        let here = tempfile::tempdir().unwrap();
+        let there = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(there.path().join(".edda")).unwrap();
+        let there_path = there.path().to_string_lossy().into_owned();
+
+        let got = ledger_root_for(here.path(), "other-pid", |_| Some(there_path.clone())).unwrap();
+
+        assert_eq!(
+            got,
+            there.path(),
+            "a foreign project must be indexed from its own repo, never ours"
+        );
+    }
+
+    #[test]
+    fn foreign_project_not_in_the_registry_is_refused() {
+        let here = tempfile::tempdir().unwrap();
+
+        let err = ledger_root_for(here.path(), "unknown-pid", |_| None).unwrap_err();
+
+        assert!(
+            err.to_string().contains("not in the registry"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    /// The registry is full of entries whose repos are gone (see #417). A stale
+    /// one must refuse, not fall back to whatever repo we happen to be in.
+    #[test]
+    fn foreign_project_whose_repo_is_gone_is_refused() {
+        let here = tempfile::tempdir().unwrap();
+        let gone = tempfile::tempdir().unwrap();
+        let gone_path = gone.path().to_string_lossy().into_owned();
+        drop(gone);
+
+        let err = ledger_root_for(here.path(), "stale-pid", |_| Some(gone_path)).unwrap_err();
+
+        assert!(
+            err.to_string().contains("no longer holds"),
+            "unhelpful error: {err}"
+        );
+    }
 }
