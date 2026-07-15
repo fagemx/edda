@@ -14,6 +14,20 @@
 //! governs — not the pattern itself, which resolves to nothing. See
 //! [`probe_target`]. Literal paths are probed exactly as written.
 //!
+//! **What a glob can and cannot detect (GH-405).** Probing the directory means a
+//! glob-scoped decision detects entries being *added or removed*, but not a file
+//! inside being *edited* — a directory's mtime does not move when its contents
+//! are rewritten in place. So for globs the contract above is coarser than it
+//! reads: the most common way a decision goes stale is invisible.
+//!
+//! That is a deliberate trade, and it sits with this module's stated preference
+//! for false-negatives over false-positives: before, a glob resolved to nothing
+//! and every such decision was reported `missing`, which trains readers to
+//! ignore the hint and destroys it for the paths that really are stale. A hint
+//! that rarely fires beats one that always lies. Detecting edits properly means
+//! enumerating the glob's matches and taking their newest mtime, which needs an
+//! [`FsOracle`] that can walk a directory rather than only probe one path.
+//!
 //! Vocabulary alignment:
 //! - `fresh`: the probed path exists and its mtime is at or before the decision ts.
 //! - `stale_modified`: it exists but its mtime is strictly after decision ts.
