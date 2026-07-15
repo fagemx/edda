@@ -251,6 +251,42 @@ pub fn clear_index_watermark(conn: &Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How many bytes of a session's index file previous runs have consumed.
+/// Absent means zero — read the whole file.
+///
+/// Lives here, beside the DDL and the event cursor, so every `index_watermark` /
+/// `events_watermark` column name stays in one module. Split across modules,
+/// renaming a column breaks the other one at runtime rather than compile time.
+pub fn read_session_offset(
+    conn: &Connection,
+    project_id: &str,
+    session_id: &str,
+) -> anyhow::Result<i64> {
+    let v = conn
+        .query_row(
+            "SELECT last_offset FROM index_watermark WHERE project_id = ?1 AND session_id = ?2",
+            rusqlite::params![project_id, session_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(v.unwrap_or(0))
+}
+
+/// Mark a session's index file as consumed up to `offset` bytes.
+pub fn write_session_offset(
+    conn: &Connection,
+    project_id: &str,
+    session_id: &str,
+    offset: i64,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO index_watermark (project_id, session_id, last_offset) VALUES (?1, ?2, ?3)
+         ON CONFLICT(project_id, session_id) DO UPDATE SET last_offset = ?3",
+        rusqlite::params![project_id, session_id, offset],
+    )?;
+    Ok(())
+}
+
 /// Where the event index has reached: the ledger rowid of the last indexed
 /// event, plus its timestamp for staleness reporting (GH-403).
 #[derive(Debug, Clone, PartialEq)]

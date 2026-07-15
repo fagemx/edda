@@ -112,6 +112,19 @@ pub fn query(
     // command is the complaint this issue exists to answer.
     let missing = !index_dir.exists();
     let outdated = schema::index_is_outdated(&index_dir);
+    // Only auto-build the project this repo actually resolves to. `--project`
+    // names a project independently of where we are standing, and repo_root's
+    // ledger is not that project's ledger — building from it would write these
+    // events into someone else's index. For a project that isn't here, the
+    // explicit message is the honest answer.
+    let is_local_project = project_id == resolve_project_id(repo_root);
+    if (missing || outdated) && !is_local_project {
+        eprintln!(
+            "No usable search index for project {project_id}. Run \
+             `edda search index --project {project_id}` from that project's repo."
+        );
+        return Ok(());
+    }
     if missing || outdated {
         if missing {
             println!("No search index — building now (one-time)…");

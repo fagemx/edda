@@ -1,6 +1,6 @@
 use anyhow::Context;
 use edda_index::{fetch_store_line, IndexRecordV1};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
 use tantivy::schema::*;
@@ -157,7 +157,7 @@ pub fn index_session(
     // measured at ~25s for 100 sessions / 24MB, linear in session count. The
     // watermark stopped duplicate *writes*, never duplicate *reads*.
     let file_len = std::fs::metadata(&index_path)?.len() as i64;
-    let consumed = read_session_offset(meta_conn, project_id, session_id)?;
+    let consumed = crate::schema::read_session_offset(meta_conn, project_id, session_id)?;
     if consumed == file_len {
         return Ok(0);
     }
@@ -332,42 +332,10 @@ pub fn index_session(
     // turns_meta rows it corresponds to. A rewritten (shrunk) file will not
     // match on the next run and gets re-read, which is safe because turns_meta
     // dedups by turn_id.
-    write_session_offset(meta_conn, project_id, session_id, file_len)?;
+    crate::schema::write_session_offset(meta_conn, project_id, session_id, file_len)?;
 
     tx.commit()?;
     Ok(count)
-}
-
-/// How many bytes of a session's index file previous runs have consumed.
-/// Absent means zero — read the whole file.
-fn read_session_offset(
-    conn: &Connection,
-    project_id: &str,
-    session_id: &str,
-) -> anyhow::Result<i64> {
-    let v = conn
-        .query_row(
-            "SELECT last_offset FROM index_watermark WHERE project_id = ?1 AND session_id = ?2",
-            params![project_id, session_id],
-            |r| r.get::<_, i64>(0),
-        )
-        .optional()?;
-    Ok(v.unwrap_or(0))
-}
-
-/// Mark a session's index file as consumed up to `offset` bytes.
-fn write_session_offset(
-    conn: &Connection,
-    project_id: &str,
-    session_id: &str,
-    offset: i64,
-) -> anyhow::Result<()> {
-    conn.execute(
-        "INSERT INTO index_watermark (project_id, session_id, last_offset) VALUES (?1, ?2, ?3)
-         ON CONFLICT(project_id, session_id) DO UPDATE SET last_offset = ?3",
-        params![project_id, session_id, offset],
-    )?;
-    Ok(())
 }
 
 /// Index all sessions for a project.
