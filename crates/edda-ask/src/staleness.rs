@@ -277,15 +277,21 @@ mod tests {
     /// glob into a sibling repo that is present on this machine.
     #[test]
     fn an_absolute_glob_into_another_repo_that_exists_is_not_missing() {
+        // The pattern must match the platform. `Path::is_absolute` only counts a
+        // drive letter as absolute on Windows — on Unix `C:/x` is a *relative*
+        // path, so a hardcoded drive letter would quietly exercise the repo-root
+        // branch instead of the absolute one, testing nothing it claims to. CI
+        // caught this; a Windows-only run cannot.
+        #[cfg(windows)]
+        let (dir, pattern) = ("C:/ai_agent/edda/crates", "C:/ai_agent/edda/crates/*");
+        #[cfg(not(windows))]
+        let (dir, pattern) = ("/ai_agent/edda/crates", "/ai_agent/edda/crates/*");
+
         let fs = MockFs::new();
-        fs.set(
-            "C:/ai_agent/edda/crates",
-            true,
-            Some("2026-06-01T00:00:00Z"),
-        );
+        fs.set(dir, true, Some("2026-06-01T00:00:00Z"));
 
         let out = check_paths_staleness(
-            &["C:/ai_agent/edda/crates/*".to_string()],
+            &[pattern.to_string()],
             "2026-07-01T00:00:00Z",
             Some(Path::new("/some/other/repo")),
             &fs,
