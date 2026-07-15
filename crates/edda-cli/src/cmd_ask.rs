@@ -6,6 +6,7 @@ use edda_ledger::Ledger;
 use std::path::Path;
 
 /// `edda ask [query]` — query project decisions, history, and conversations.
+#[allow(clippy::too_many_arguments)]
 pub fn execute(
     repo_root: &Path,
     query: Option<&str>,
@@ -14,8 +15,8 @@ pub fn execute(
     all: bool,
     branch: Option<&str>,
     impact: bool,
+    fleet: bool,
 ) -> anyhow::Result<()> {
-    let ledger = Ledger::open(repo_root)?;
     let q = query.unwrap_or("");
 
     let opts = AskOptions {
@@ -25,6 +26,12 @@ pub fn execute(
         impact,
         ..Default::default()
     };
+
+    if fleet {
+        return execute_fleet(repo_root, q, &opts, json);
+    }
+
+    let ledger = Ledger::open(repo_root)?;
 
     // Build transcript search callback
     let transcript_cb = build_transcript_callback(repo_root);
@@ -45,6 +52,71 @@ pub fn execute(
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
         print!("{}", format_human(&result));
+    }
+
+    Ok(())
+}
+
+/// `edda ask --fleet` — the same question, asked of every project in scope.
+///
+/// Rendered as per-project sections rather than one merged, ranked list. That is
+/// deliberate: relevance scores are TF-IDF against a *corpus*, so a score from
+/// the foundry ledger and one from the edda ledger are not comparable, and
+/// interleaving them by rank would invent an ordering that means nothing.
+/// Sections also keep every hit unambiguously attributed to its home.
+fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> anyhow::Result<()> {
+    let scope = edda_store::registry::fleet_scope(repo_root);
+
+    let (hits, misses) = crate::fleet::fan_out(&scope, |entry| {
+        let root = Path::new(&entry.path);
+        let ledger = Ledger::open(root)?;
+        let cb = build_transcript_callback(root);
+        let cb_ref: Option<&TranscriptSearchFn> = cb.as_ref().map(|f| f.as_ref());
+        let mut result = ask(&ledger, q, opts, cb_ref)?;
+
+        let decisions_paths = affected_paths_for_hits(&ledger, &result.decisions);
+        annotate_hits(&mut result.decisions, &decisions_paths, Some(root));
+        let timeline_paths = affected_paths_for_hits(&ledger, &result.timeline);
+        annotate_hits(&mut result.timeline, &timeline_paths, Some(root));
+
+        Ok(vec![result])
+    });
+
+    if json {
+        let payload = serde_json::json!({
+            "fleet": hits.iter().map(|h| serde_json::json!({
+                "project": h.project,
+                "result": h.item,
+            })).collect::<Vec<_>>(),
+            "unreadable": misses.iter().map(|m| serde_json::json!({
+                "project": m.project,
+                "reason": m.reason,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    let mut answered = 0;
+    for hit in &hits {
+        let body = format_human(&hit.item);
+        if body.trim().is_empty() {
+            continue;
+        }
+        answered += 1;
+        println!("── [{}] ──────────────────────────", hit.project);
+        print!("{body}");
+    }
+
+    // Misses are printed as results, not swallowed: a fleet read that quietly
+    // skipped a repo would answer "nothing there" when the truth is "did not
+    // look", which is the failure this whole verb exists to remove.
+    for miss in &misses {
+        println!("  [{}] unreadable: {}", miss.project, miss.reason);
+    }
+
+    if answered == 0 && misses.is_empty() {
+        println!("No results across {} project(s) for: {q}", scope.len());
     }
 
     Ok(())

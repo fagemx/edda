@@ -207,6 +207,9 @@ enum Command {
         /// Show impact analysis for override safety
         #[arg(long)]
         impact: bool,
+        /// Ask every project in the fleet, not just this workspace
+        #[arg(long)]
+        fleet: bool,
     },
     /// Chronicle synthesis - cognitive zoom across sessions
     Recap {
@@ -1053,6 +1056,7 @@ fn main() -> anyhow::Result<()> {
             all,
             branch,
             impact,
+            fleet,
         } => cmd_ask::execute(
             &repo_root,
             query.as_deref(),
@@ -1061,6 +1065,7 @@ fn main() -> anyhow::Result<()> {
             all,
             branch.as_deref(),
             impact,
+            fleet,
         ),
         Command::Recap {
             query,
