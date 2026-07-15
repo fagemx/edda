@@ -449,6 +449,19 @@ mod tests {
     #[test]
     fn audit_log_appends() {
         let pid = "test_digest_audit";
+
+        // Start from a known state (GH-415). This test asserts an exact row
+        // count, and it appends to a log in the real store — so a previous run
+        // that panicked before reaching its cleanup leaves rows behind and this
+        // one counts them too. That failure is self-perpetuating: it panics
+        // again, skips cleanup again, and the log grows by two every attempt.
+        // Once red on a machine, red forever, with a message ("expected 2, got
+        // 3") describing the leftovers rather than the defect.
+        //
+        // Cleaning up first rather than only last is what makes it self-healing:
+        // the trailing cleanup still runs on the happy path, and this one
+        // recovers the unhappy one.
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
         let _ = edda_store::ensure_dirs(pid);
 
         let entry = AuditEntry {

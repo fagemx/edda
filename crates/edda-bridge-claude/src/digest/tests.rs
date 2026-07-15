@@ -653,6 +653,11 @@ fn digest_permanent_failure_after_3_retries() {
 #[test]
 fn digest_state_round_trip() {
     let project_id = "test_state_rt";
+    // Writes to the real per-user store and, unlike its neighbours, never
+    // cleaned up — so it left `projects/test_state_rt` on every developer
+    // machine that ever ran the suite (GH-415). Clearing first also makes it
+    // independent of whatever a previous run left behind.
+    let _ = std::fs::remove_dir_all(edda_store::project_dir(project_id));
     let _ = edda_store::ensure_dirs(project_id);
 
     let state = DigestState {
@@ -666,6 +671,9 @@ fn digest_state_round_trip() {
     save_digest_state(project_id, &state).unwrap();
 
     let loaded = load_digest_state(project_id);
+
+    let _ = std::fs::remove_dir_all(edda_store::project_dir(project_id));
+
     assert_eq!(loaded.session_id, "sess-123");
     assert_eq!(loaded.event_id, "evt_abc");
     assert_eq!(loaded.retry_count, 0);
