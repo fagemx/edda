@@ -265,6 +265,7 @@ mod tests {
 
     #[test]
     fn execute_list_handles_empty() {
+        let _store = crate::test_support::isolated_store();
         // Just verify no panic on a fresh project
         let pid = "test_cmd_scan_empty";
         let _ = edda_store::ensure_dirs(pid);

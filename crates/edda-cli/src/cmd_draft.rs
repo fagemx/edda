@@ -1446,6 +1446,7 @@ mod tests {
 
     #[test]
     fn list_json_empty_dir() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
         // No drafts — should produce no output (no panic)
@@ -1455,6 +1456,7 @@ mod tests {
 
     #[test]
     fn list_json_single_draft() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
 
@@ -1468,6 +1470,7 @@ mod tests {
 
     #[test]
     fn list_json_output_is_valid_jsonl() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
 
@@ -1525,6 +1528,7 @@ mod tests {
 
     #[test]
     fn list_json_multiple_drafts_sorted() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
 
@@ -1549,6 +1553,7 @@ mod tests {
 
     #[test]
     fn inbox_json_empty() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
         let result = inbox(tmp.path(), None, None, true);
@@ -1557,6 +1562,7 @@ mod tests {
 
     #[test]
     fn inbox_json_with_pending_stage() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
 
@@ -1574,6 +1580,7 @@ mod tests {
 
     #[test]
     fn inbox_json_skips_applied() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
 
@@ -1592,6 +1599,7 @@ mod tests {
 
     #[test]
     fn inbox_json_skips_approved_stages() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
 
@@ -1613,6 +1621,7 @@ mod tests {
 
     #[test]
     fn inbox_json_filter_by_actor() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
 
@@ -1635,6 +1644,7 @@ mod tests {
 
     #[test]
     fn inbox_json_filter_by_role() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
 
@@ -1657,6 +1667,7 @@ mod tests {
 
     #[test]
     fn inbox_json_output_fields() {
+        let _store = crate::test_support::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         init_workspace(tmp.path());
 

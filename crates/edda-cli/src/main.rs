@@ -44,6 +44,8 @@ mod cmd_tool_tier;
 mod cmd_user;
 mod cmd_watch;
 mod pipeline_templates;
+#[cfg(test)]
+mod test_support;
 #[cfg(feature = "tui")]
 mod tui;
 
