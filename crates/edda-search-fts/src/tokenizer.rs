@@ -66,13 +66,16 @@ fn is_cjk(c: char) -> bool {
         | 0x31F0..=0x31FF      // Katakana Phonetic Extensions
         | 0x3400..=0x4DBF      // CJK Unified Ideographs Extension A
         | 0x4E00..=0x9FFF      // CJK Unified Ideographs
+        | 0xA960..=0xA97F      // Hangul Jamo Extended-A
         | 0xAC00..=0xD7AF      // Hangul Syllables
         | 0x1100..=0x11FF      // Hangul Jamo
+        | 0xD7B0..=0xD7FF      // Hangul Jamo Extended-B
         | 0xF900..=0xFAFF      // CJK Compatibility Ideographs
         | 0xFF65..=0xFF9F      // Halfwidth Katakana
         | 0x2_0000..=0x2_A6DF  // CJK Unified Ideographs Extension B
-        | 0x2_A700..=0x2_EBEF  // CJK Unified Ideographs Extensions C–F
+        | 0x2_A700..=0x2_EE5F  // CJK Unified Ideographs Extensions C–I
         | 0x2_F800..=0x2_FA1F  // CJK Compatibility Ideographs Supplement
+        | 0x3_0000..=0x3_23AF  // CJK Unified Ideographs Extensions G–H
     )
 }
 

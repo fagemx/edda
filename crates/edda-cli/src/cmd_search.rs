@@ -20,7 +20,8 @@ pub enum SearchCmd {
     },
     /// Search for events and transcript turns
     Query {
-        /// Search query (supports fuzzy, "exact", /regex/)
+        /// Search query (fuzzy for ASCII; "exact"; /regex/ over indexed terms —
+        /// note: regex matches tokenized terms, so CJK regex only spans 2 chars)
         query: String,
         /// Project ID (defaults to current repo)
         #[arg(long)]
@@ -171,10 +172,17 @@ pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> an
     let index_dir = proj_dir.join("search").join("tantivy");
     let meta_db_path = proj_dir.join("search").join("meta.sqlite");
 
-    // GH-402: a schema upgrade forces a from-scratch rebuild of BOTH the
-    // tantivy index and the turns watermark, so nothing is left half-tokenized.
-    let rebuilding = schema::index_is_outdated(&index_dir);
-    if rebuilding {
+    // Serialize index operations so two concurrent `edda search index` runs
+    // can't wipe/rebuild the same tantivy dir at once (GH-402).
+    let ledger = Ledger::open(repo_root)?;
+    let _lock = edda_ledger::lock::WorkspaceLock::acquire(&ledger.paths)?;
+
+    // GH-402: a schema upgrade wipes the tantivy dir so it gets recreated
+    // fresh. `open_or_create_index` reports fresh creation for ALL cases (this
+    // wipe, a corrupt index, a never-existed dir, or a crash mid-wipe), which
+    // is what drives the watermark clear + full reindex below — so a crash
+    // between wipe and recreate can't leave stale turns_meta hiding turns.
+    if schema::index_is_outdated(&index_dir) {
         let old = schema::read_index_version(&index_dir)
             .map(|v| v.to_string())
             .unwrap_or_else(|| "1".to_string());
@@ -182,35 +190,31 @@ pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> an
             "Search index schema outdated (v{old} → v{}); rebuilding from scratch.",
             schema::INDEX_VERSION
         );
-        // Propagate removal errors: a locked index dir must fail loudly rather
-        // than silently rebuild against stale metadata.
-        if index_dir.exists() {
-            std::fs::remove_dir_all(&index_dir)?;
-        }
+        std::fs::remove_dir_all(&index_dir)?;
     }
 
-    let index = schema::ensure_index(&index_dir)?;
+    let (index, created_fresh) = schema::open_or_create_index(&index_dir)?;
     let tantivy_schema = index.schema();
     let mut writer = schema::index_writer(&index)?;
 
     let meta_conn = schema::ensure_meta_db(&meta_db_path)?;
-    // Clear the watermark via SQL (not file deletion) so a locked/leftover
-    // meta.sqlite can't make index_session skip every turn during a rebuild.
-    if rebuilding {
+    // Whenever the tantivy index is fresh/empty, clear the watermark via SQL
+    // (not file deletion — a locked meta.sqlite would survive) so every turn
+    // re-indexes instead of being skipped as "already indexed".
+    if created_fresh {
         meta_conn.execute_batch("DELETE FROM turns_meta; DELETE FROM index_watermark;")?;
     }
 
     // Index ledger events (index_events always deletes + re-adds all events).
-    let ledger = Ledger::open(repo_root)?;
     let event_count = indexer::index_events(&writer, &tantivy_schema, project_id, || {
         ledger.iter_events()
     })?;
 
-    // Index transcript turns. A schema rebuild must cover ALL sessions even if
-    // a single --session was requested, otherwise other sessions vanish behind
+    // Index transcript turns. A fresh index must cover ALL sessions even if a
+    // single --session was requested, otherwise other sessions vanish behind
     // the fresh version marker.
     let turn_count = match session_id {
-        Some(sid) if !rebuilding => indexer::index_session(
+        Some(sid) if !created_fresh => indexer::index_session(
             &writer,
             &tantivy_schema,
             &meta_conn,

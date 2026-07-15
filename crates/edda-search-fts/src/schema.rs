@@ -95,18 +95,26 @@ pub fn build_schema() -> Schema {
     builder.build()
 }
 
-/// Open or create a Tantivy index at the given directory.
-pub fn ensure_index(index_dir: &Path) -> anyhow::Result<Index> {
+/// Open an existing index, or create a fresh one. Returns `(index,
+/// created_fresh)` where `created_fresh` is `true` whenever a NEW empty index
+/// was created — because the dir never existed, was corrupt (wiped here), or
+/// was removed by a caller for a schema rebuild (or a crash mid-wipe). The
+/// caller MUST then clear the turns watermark so turns re-index against the
+/// empty tantivy index; otherwise `turns_meta` would skip them.
+///
+/// The version marker is NOT written here: the indexer writes it only after a
+/// full commit succeeds (see `cmd_search::index`), so an interrupted rebuild
+/// leaves no marker and self-heals on the next run.
+pub fn open_or_create_index(index_dir: &Path) -> anyhow::Result<(Index, bool)> {
     let schema = build_schema();
     if index_dir.exists() {
-        // Try to open existing index
         match Index::open_in_dir(index_dir) {
             Ok(index) => {
                 register_tokenizers(&index);
-                return Ok(index);
+                return Ok((index, false));
             }
             Err(_) => {
-                // Corrupted or incompatible — rebuild
+                // Corrupted or incompatible — wipe and recreate.
                 std::fs::remove_dir_all(index_dir)?;
             }
         }
@@ -114,11 +122,13 @@ pub fn ensure_index(index_dir: &Path) -> anyhow::Result<Index> {
     std::fs::create_dir_all(index_dir)?;
     let index = Index::create_in_dir(index_dir, schema)?;
     register_tokenizers(&index);
-    // NB: the version marker is written by the indexer only AFTER a full index
-    // commit succeeds (see cmd_search::index) — never here. A freshly-created
-    // but not-yet-populated index has no marker, so it reads as outdated until
-    // the rebuild completes, making a crashed rebuild self-healing.
-    Ok(index)
+    Ok((index, true))
+}
+
+/// Open or create a Tantivy index at the given directory (ignoring whether it
+/// was freshly created). Use [`open_or_create_index`] on the write path.
+pub fn ensure_index(index_dir: &Path) -> anyhow::Result<Index> {
+    Ok(open_or_create_index(index_dir)?.0)
 }
 
 /// Create an in-memory Tantivy index (for testing).
@@ -272,6 +282,38 @@ mod tests {
             let searcher = reader.searcher();
             assert_eq!(searcher.num_docs(), 1);
         }
+    }
+
+    #[test]
+    fn version_marker_and_fresh_flag_transitions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_dir = tmp.path().join("tantivy");
+
+        // No directory yet → nothing to rebuild.
+        assert!(!index_is_outdated(&index_dir));
+
+        // First create reports fresh; with no marker it reads as outdated.
+        let (_i1, fresh1) = open_or_create_index(&index_dir).unwrap();
+        assert!(fresh1, "a newly created index is fresh");
+        assert!(read_index_version(&index_dir).is_none());
+        assert!(index_is_outdated(&index_dir), "no marker → outdated");
+
+        // Marking it current clears outdated.
+        write_index_version(&index_dir).unwrap();
+        assert_eq!(read_index_version(&index_dir), Some(INDEX_VERSION));
+        assert!(!index_is_outdated(&index_dir));
+
+        // Reopening an existing valid index is NOT fresh.
+        let (_i2, fresh2) = open_or_create_index(&index_dir).unwrap();
+        assert!(!fresh2, "reopening an existing index is not fresh");
+
+        // Simulate a crash mid-wipe: the dir vanishes but a caller retries.
+        std::fs::remove_dir_all(&index_dir).unwrap();
+        let (_i3, fresh3) = open_or_create_index(&index_dir).unwrap();
+        assert!(
+            fresh3,
+            "recreating after a wipe is fresh → caller re-indexes"
+        );
     }
 
     #[test]

@@ -66,15 +66,23 @@ pub fn search(
             let mut parser = QueryParser::for_index(index, vec![f_title, f_body]);
             parser.set_field_boost(f_title, 5.0);
             parser.set_field_boost(f_body, 1.0);
+            let has_ascii_alnum = query_str.chars().any(|c| c.is_ascii_alphanumeric());
             // GH-402: enable fuzzy only when the query has ASCII to correct.
             // Levenshtein-1 over 2-char CJK bigrams matches a flood of unrelated
             // bigrams (權威 ~ 權力), and bigrams already give exact-substring
             // recall — so pure-CJK queries skip fuzzy, while a mixed query like
             // "postgre 中文" keeps ASCII typo tolerance.
-            let has_ascii_alnum = query_str.chars().any(|c| c.is_ascii_alphanumeric());
             if !options.exact && has_ascii_alnum {
                 parser.set_field_fuzzy(f_title, true, 1, true);
                 parser.set_field_fuzzy(f_body, true, 1, true);
+            }
+            // GH-402: a pure-CJK query defaults to AND over its bigrams, so a
+            // long phrase requires all of them (權威事實 → 權威 AND 威事 AND
+            // 事實) instead of matching any doc that shares just one — this keeps
+            // the exact-substring hit from being outranked and pushed past the
+            // result limit by title-boosted partial matches. English keeps OR.
+            if !has_ascii_alnum {
+                parser.set_conjunction_by_default();
             }
             parser.parse_query(query_str)?
         };
@@ -454,6 +462,30 @@ mod tests {
         insert_cjk_doc(&index);
         let results = search(&index, "洗成權威事實", &SearchOptions::default(), 10).unwrap();
         assert!(!results.is_empty(), "6-char CJK substring must be findable");
+    }
+
+    #[test]
+    fn pure_cjk_query_requires_all_bigrams() {
+        // GH-402 precision: a pure-CJK phrase ANDs its bigrams, so a document
+        // that shares only one bigram must NOT match — only the full phrase does.
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+        let f_doc_type = schema.get_field("doc_type").unwrap();
+        let f_doc_id = schema.get_field("doc_id").unwrap();
+        let f_body = schema.get_field("body").unwrap();
+        writer
+            .add_document(doc!(f_doc_type => "event", f_doc_id => "full", f_body => "洗成權威事實"))
+            .unwrap();
+        // Shares only the 權威 bigram, not 威事 / 事實.
+        writer
+            .add_document(doc!(f_doc_type => "event", f_doc_id => "partial", f_body => "權威掃地"))
+            .unwrap();
+        writer.commit().unwrap();
+
+        let results = search(&index, "權威事實", &SearchOptions::default(), 10).unwrap();
+        assert_eq!(results.len(), 1, "only the full-phrase doc should match");
+        assert_eq!(results[0].doc_id, "full");
     }
 
     #[test]
