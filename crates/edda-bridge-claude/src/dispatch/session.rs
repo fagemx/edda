@@ -357,6 +357,21 @@ pub(super) fn dispatch_session_end(
         bg_count += 1;
     }
 
+    // 2j. Background incremental search reindex (GH-403). Ungated by cooldown:
+    // with nothing new this is a cursor read and a no-op commit.
+    if crate::bg_index::should_run(project_id) {
+        let tx = bg_tx.clone();
+        let pid = project_id.to_string();
+        let cwd_owned = cwd.to_string();
+        std::thread::spawn(move || {
+            if let Err(e) = crate::bg_index::run_index(&pid, &cwd_owned) {
+                tracing::warn!(error = %e, "search reindex failed");
+            }
+            let _ = tx.send("bg_index");
+        });
+        bg_count += 1;
+    }
+
     // Drop the original sender so the channel closes when all threads finish.
     drop(bg_tx);
 
