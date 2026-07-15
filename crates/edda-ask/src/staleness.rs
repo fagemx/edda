@@ -46,6 +46,36 @@ pub struct DecisionStaleness {
     pub paths: Vec<PathStaleness>,
 }
 
+/// What to actually probe on disk for a recorded path pattern.
+///
+/// Scopes are recorded as globs — `edda claim --paths "crates/foo/*"` is the
+/// documented form — and a glob cannot be probed literally, because nothing is
+/// named `*`. Doing so reported every such decision as `Missing` regardless of
+/// the truth (GH-405), which trains readers to ignore the hint and so destroys
+/// it for genuinely stale paths.
+///
+/// The deepest wildcard-free ancestor is what the hint is really asserting:
+/// "the area this decision governs still exists". `crates/foo/*` probes
+/// `crates/foo`; `a/*/c.rs` probes `a`. A pattern with no wildcard is returned
+/// unchanged, so literal paths keep their exact previous behaviour — including
+/// per-file mtime.
+fn probe_target(pattern: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in pattern.components() {
+        let text = comp.as_os_str().to_string_lossy();
+        if text.contains('*') || text.contains('?') || text.contains('[') {
+            break;
+        }
+        out.push(comp);
+    }
+    // An all-wildcard pattern (`*`) leaves nothing to probe; keep it literal so
+    // it resolves against the repo root rather than silently becoming "".
+    if out.as_os_str().is_empty() {
+        return pattern.to_path_buf();
+    }
+    out
+}
+
 /// Filesystem oracle abstracts real fs so tests can be deterministic.
 pub trait FsOracle {
     /// Return (exists, mtime_rfc3339 when available).
@@ -84,8 +114,11 @@ pub fn check_paths_staleness<F: FsOracle>(
     let mut out = Vec::with_capacity(affected_paths.len());
     let mut any_stale = false;
     for rel in affected_paths {
+        // Reduce a glob to the directory it names before resolving; the reported
+        // path stays the pattern the decision actually recorded (GH-405).
+        let pattern = probe_target(Path::new(rel));
         let resolved: PathBuf = {
-            let p = Path::new(rel);
+            let p = pattern.as_path();
             if p.is_absolute() {
                 p.to_path_buf()
             } else {
@@ -191,6 +224,73 @@ mod tests {
         let fs = MockFs::new();
         let out = check_paths_staleness(&[], "2026-07-01T00:00:00Z", None, &fs);
         assert!(out.is_none());
+    }
+
+    /// GH-405: `edda claim --paths "crates/foo/*"` is the documented way to
+    /// record a decision's scope, so globs are the norm rather than an edge case.
+    /// Probing one literally can only ever fail — nothing is named `*` — so every
+    /// such decision carried a false `(Missing)`, which trains readers to ignore
+    /// the hint and kills it for genuinely stale paths.
+    #[test]
+    fn a_glob_is_checked_against_the_directory_it_names_not_literally() {
+        let fs = MockFs::new();
+        // The directory the glob names exists and predates the decision. Note
+        // nothing is registered for the literal "*" path — that is the point.
+        fs.set("/repo/crates/foo", true, Some("2026-06-01T00:00:00Z"));
+
+        let out = check_paths_staleness(
+            &["crates/foo/*".to_string()],
+            "2026-07-01T00:00:00Z",
+            Some(Path::new("/repo")),
+            &fs,
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.paths[0].status,
+            PathStatus::Fresh,
+            "a glob over an existing, untouched directory is not missing"
+        );
+        assert!(!out.is_stale);
+    }
+
+    /// The same defect, and the form the issue actually observed: an absolute
+    /// glob into a sibling repo that is present on this machine.
+    #[test]
+    fn an_absolute_glob_into_another_repo_that_exists_is_not_missing() {
+        let fs = MockFs::new();
+        fs.set(
+            "C:/ai_agent/edda/crates",
+            true,
+            Some("2026-06-01T00:00:00Z"),
+        );
+
+        let out = check_paths_staleness(
+            &["C:/ai_agent/edda/crates/*".to_string()],
+            "2026-07-01T00:00:00Z",
+            Some(Path::new("/some/other/repo")),
+            &fs,
+        )
+        .unwrap();
+
+        assert_eq!(out.paths[0].status, PathStatus::Fresh);
+    }
+
+    /// The signal must survive the fix: a real deletion still warns.
+    #[test]
+    fn a_glob_whose_directory_is_gone_still_reports_missing() {
+        let fs = MockFs::new(); // nothing exists
+
+        let out = check_paths_staleness(
+            &["crates/deleted/*".to_string()],
+            "2026-07-01T00:00:00Z",
+            Some(Path::new("/repo")),
+            &fs,
+        )
+        .unwrap();
+
+        assert_eq!(out.paths[0].status, PathStatus::Missing);
+        assert!(out.is_stale);
     }
 
     #[test]
