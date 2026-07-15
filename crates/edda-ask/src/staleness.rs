@@ -9,10 +9,15 @@
 //! query-time derivation, not a mutation. Best-effort: unreadable repo /
 //! missing file returns "unknown" rather than false-positive stale.
 //!
+//! Paths are recorded as globs (`edda claim --paths "crates/foo/*"`), so what
+//! gets probed is the deepest wildcard-free ancestor — the area the decision
+//! governs — not the pattern itself, which resolves to nothing. See
+//! [`probe_target`]. Literal paths are probed exactly as written.
+//!
 //! Vocabulary alignment:
-//! - `fresh`: the path exists and its mtime is at or before the decision ts.
-//! - `stale_modified`: file exists but its mtime is strictly after decision ts.
-//! - `missing`: path does not resolve on disk (repo-relative or absolute).
+//! - `fresh`: the probed path exists and its mtime is at or before the decision ts.
+//! - `stale_modified`: it exists but its mtime is strictly after decision ts.
+//! - `missing`: it does not resolve on disk (repo-relative or absolute).
 //! - `unknown`: repo root not supplied, or path attributes unreadable.
 
 use crate::DecisionHit;
