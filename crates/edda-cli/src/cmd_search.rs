@@ -272,9 +272,15 @@ fn ledger_root_for(
     // cursor as ahead and purge every event document the project has — reported
     // as a successful rebuild. Require the ledger itself.
     if !root.join(".edda").join("ledger.db").is_file() {
+        // Deliberately does NOT advise reindexing from that repo. Running there
+        // takes the local fast path above, which does not reach this check, and
+        // `Ledger::open` would invent an empty ledger — emptying the project's
+        // index instead of rebuilding it (#418). Refusing and then prescribing
+        // the same destruction by hand would be worse than not refusing at all.
         anyhow::bail!(
-            "Project {project_id} is registered at {} but that path holds no edda \
-             ledger. Run `edda search index` from that project's repo.",
+            "Project {project_id} is registered at {} but .edda/ledger.db is missing \
+             there, so there is no ledger to index from. The registry entry is stale, \
+             or that ledger was deleted.",
             root.display()
         );
     }
@@ -479,11 +485,23 @@ mod tests {
         std::fs::create_dir_all(there.path().join(".edda")).unwrap(); // no ledger.db
         let there_path = there.path().to_string_lossy().into_owned();
 
-        let err = ledger_root_for(here.path(), "orphan-pid", |_| Some(there_path)).unwrap_err();
+        let err = ledger_root_for(here.path(), "orphan-pid", |_| Some(there_path))
+            .unwrap_err()
+            .to_string();
 
         assert!(
-            err.to_string().contains("no edda ledger"),
+            err.contains("ledger.db is missing"),
             "unhelpful error: {err}"
+        );
+
+        // And it must not send the user around the guard it just applied.
+        // Reindexing from that repo takes the local fast path, which never
+        // reaches this check; Ledger::open would invent an empty ledger and the
+        // rebuild would empty the project's index (#418). Refusing and then
+        // prescribing the same destruction by hand is worse than not refusing.
+        assert!(
+            !err.contains("Run `edda search index`"),
+            "must not prescribe the destruction it just refused: {err}"
         );
     }
 
