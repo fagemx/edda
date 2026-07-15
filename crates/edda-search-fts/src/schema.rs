@@ -1,8 +1,38 @@
 use crate::tokenizer::{CjkBigramTokenizer, CJK_TOKENIZER};
+use fs2::FileExt;
 use rusqlite::Connection;
 use std::path::Path;
 use tantivy::schema::*;
 use tantivy::{Index, IndexWriter};
+
+/// Exclusive lock for a project's search index (GH-402), keyed by the index
+/// location itself — not the ledger — so two `edda search index` runs targeting
+/// the same `--project` serialize even from different working directories.
+/// Released on drop.
+pub struct IndexLock {
+    _file: std::fs::File,
+}
+
+impl IndexLock {
+    /// Acquire an exclusive, non-blocking lock on `<search_dir>/index.lock`.
+    pub fn acquire(search_dir: &Path) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(search_dir)?;
+        let lock_path = search_dir.join("index.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        file.try_lock_exclusive().map_err(|_| {
+            anyhow::anyhow!(
+                "search index is being rebuilt by another process ({})",
+                lock_path.display()
+            )
+        })?;
+        Ok(Self { _file: file })
+    }
+}
 
 /// On-disk index schema version (GH-402). Bump whenever the tokenizer or field
 /// layout changes so a stale index is rebuilt rather than mixing tokenizations.
@@ -129,6 +159,23 @@ pub fn open_or_create_index(index_dir: &Path) -> anyhow::Result<(Index, bool)> {
 /// was freshly created). Use [`open_or_create_index`] on the write path.
 pub fn ensure_index(index_dir: &Path) -> anyhow::Result<Index> {
     Ok(open_or_create_index(index_dir)?.0)
+}
+
+/// Open an EXISTING index read-only, without creating or wiping it. Returns
+/// `None` if the directory is missing or the index cannot be opened (corrupt).
+/// Read paths (query, ask) use this so answering a query never deletes the
+/// index (GH-402).
+pub fn open_index(index_dir: &Path) -> Option<Index> {
+    if !index_dir.exists() {
+        return None;
+    }
+    match Index::open_in_dir(index_dir) {
+        Ok(index) => {
+            register_tokenizers(&index);
+            Some(index)
+        }
+        Err(_) => None,
+    }
 }
 
 /// Create an in-memory Tantivy index (for testing).

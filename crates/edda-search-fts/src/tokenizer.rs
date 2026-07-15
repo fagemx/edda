@@ -63,6 +63,7 @@ fn is_cjk(c: char) -> bool {
         0x2E80..=0x2EFF        // CJK Radicals Supplement
         | 0x2F00..=0x2FDF      // Kangxi Radicals
         | 0x3040..=0x30FF      // Hiragana + Katakana
+        | 0x3130..=0x318F      // Hangul Compatibility Jamo
         | 0x31F0..=0x31FF      // Katakana Phonetic Extensions
         | 0x3400..=0x4DBF      // CJK Unified Ideographs Extension A
         | 0x4E00..=0x9FFF      // CJK Unified Ideographs

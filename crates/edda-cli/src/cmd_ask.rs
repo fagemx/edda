@@ -67,7 +67,7 @@ fn build_transcript_callback(repo_root: &Path) -> Option<Box<TranscriptSearchFn>
         return None;
     }
 
-    let index = edda_search_fts::schema::ensure_index(&index_dir).ok()?;
+    let index = edda_search_fts::schema::open_index(&index_dir)?;
     let pid = project_id.clone();
 
     Some(Box::new(move |query: &str, limit: usize| {

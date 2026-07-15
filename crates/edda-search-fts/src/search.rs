@@ -32,8 +32,12 @@ pub struct SearchOptions<'a> {
 ///
 /// Supports:
 /// - Fuzzy text search (default): tolerates typos with Levenshtein distance 1
+///   for ASCII; skipped for pure-CJK queries (bigram fuzzing is noise)
 /// - Exact match: `options.exact = true` disables fuzzy
-/// - Regex: query wrapped in `/pattern/` uses RegexQuery on body field
+/// - Regex: query wrapped in `/pattern/` uses RegexQuery on body terms
+///   (tokenized — so a multi-char CJK regex pattern won't match)
+/// - CJK (GH-402): a pure-CJK query ANDs its bigrams, so it finds the phrase
+///   even inside a longer run; CJK *alternatives* need an explicit `OR`
 /// - Field boosting: title matches ranked 5x higher than body
 /// - Filtering by doc_type, event_type, project_id, session_id
 pub fn search(

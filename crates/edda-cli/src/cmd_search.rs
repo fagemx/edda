@@ -117,7 +117,11 @@ pub fn query(
         return Ok(());
     }
 
-    let index = schema::ensure_index(&index_dir)?;
+    // Read-only open: answering a query must never wipe/recreate the index.
+    let Some(index) = schema::open_index(&index_dir) else {
+        eprintln!("Search index could not be opened. Run `edda search index` to rebuild.");
+        return Ok(());
+    };
     let opts = search::SearchOptions {
         project_id: Some(project_id),
         session_id,
@@ -173,9 +177,10 @@ pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> an
     let meta_db_path = proj_dir.join("search").join("meta.sqlite");
 
     // Serialize index operations so two concurrent `edda search index` runs
-    // can't wipe/rebuild the same tantivy dir at once (GH-402).
+    // can't wipe/rebuild the same tantivy dir at once (GH-402). Keyed by the
+    // index location, so it holds even across working directories / --project.
+    let _lock = schema::IndexLock::acquire(&proj_dir.join("search"))?;
     let ledger = Ledger::open(repo_root)?;
-    let _lock = edda_ledger::lock::WorkspaceLock::acquire(&ledger.paths)?;
 
     // GH-402: a schema upgrade wipes the tantivy dir so it gets recreated
     // fresh. `open_or_create_index` reports fresh creation for ALL cases (this
