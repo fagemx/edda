@@ -9,6 +9,7 @@
 //! `edda-ledger` (the same inversion `index_events` already used).
 
 use crate::{indexer, schema};
+use anyhow::Context;
 use std::path::Path;
 
 /// What a sync did. `indexed_through` is the timestamp of the newest indexed
@@ -49,6 +50,39 @@ where
 
     // Schema upgrade: wipe so it is recreated fresh below.
     if schema::index_is_outdated(&index_dir) {
+        // GH-418: this wipe is destruction too, and the guard further down cannot
+        // see what it destroyed — afterwards the index is empty, so "would this
+        // empty a populated index?" trivially passes. The upgrade path is exactly
+        // where it matters: the index is thrown away *on purpose* to be rebuilt
+        // from the ledger, so if the ledger is gone the wipe destroys the only
+        // copy. The ledger is checked first because it is the definitive half and
+        // this read only happens on the rare upgrade path.
+        if events_after(0)?.is_empty() {
+            // An index that will not open has nothing to lose, so a missing one
+            // is fine to wipe. But one that opens and cannot be counted is the
+            // opposite: we would be deleting an unknown quantity. Assuming zero
+            // there fails open on the only guard against silent, unrecoverable
+            // loss — it would reproduce GH-418 through the guard instead of
+            // around it. So the count propagates rather than defaulting.
+            if let Some(old) = schema::open_index(&index_dir) {
+                let old_schema = old.schema();
+                let existing = event_doc_count(&old, &old_schema).with_context(|| {
+                    format!(
+                        "refusing to wipe project {project_id}'s outdated index: its \
+                         ledger reports no events and the index could not be counted, \
+                         so wiping it might destroy the only copy"
+                    )
+                })?;
+                if existing > 0 {
+                    return Err(empty_ledger_refusal(
+                        project_id,
+                        existing,
+                        proj_dir,
+                        &search_dir,
+                    ));
+                }
+            }
+        }
         std::fs::remove_dir_all(&index_dir)?;
     }
 
@@ -67,10 +101,33 @@ where
     let cursor = schema::read_events_cursor(&meta_conn, project_id)?;
     let (batch, rebuilt) = resolve_batch(&events_after, &cursor)?;
 
+    // GH-418: refuse to let an empty ledger empty a populated index.
+    //
+    // `Ledger::open` creates an empty `ledger.db` when one is missing, so a
+    // deleted ledger is indistinguishable from a legitimately empty one. Events
+    // are append-only: a ledger that was populated and now reports nothing means
+    // the ledger is gone, not that its events were removed. Purging on that
+    // reading destroys the only surviving copy of the index, and reports it as a
+    // successful rebuild — silently, since at SessionEnd nobody reads the log.
+    //
+    // Checked BEFORE the delete: a refusal that fires after the documents are
+    // gone is not a refusal.
+    if rebuilt && batch.is_empty() {
+        let existing = event_doc_count(&index, &tantivy_schema)?;
+        if existing > 0 {
+            return Err(empty_ledger_refusal(
+                project_id,
+                existing,
+                proj_dir,
+                &search_dir,
+            ));
+        }
+    }
+
     // A rebuild must purge events the ledger no longer has. Re-adding the
-    // current ones is not enough: a truncated or replaced ledger would leave
-    // the old documents searchable forever, answering queries with events that
-    // no longer exist. (No-op when the index was just created fresh.)
+    // current ones is not enough: a replaced ledger would leave the old
+    // documents searchable forever, answering queries with events that no longer
+    // exist. (No-op when the index was just created fresh.)
     if rebuilt {
         indexer::delete_all_event_docs(&writer, &tantivy_schema)?;
     }
@@ -122,6 +179,46 @@ where
         indexed_through,
         rebuilt,
     })
+}
+
+/// The refusal both destructive paths share (GH-418): the schema-upgrade wipe,
+/// and the rebuild's event purge.
+fn empty_ledger_refusal(
+    project_id: &str,
+    existing: usize,
+    proj_dir: &Path,
+    search_dir: &Path,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Refusing to rebuild project {project_id}: its ledger reports no events, but \
+         the index holds {existing}. Events are append-only, so this almost certainly \
+         means the ledger is missing rather than empty — check {}/.edda/ledger.db. \
+         Rebuilding would empty the index. To discard it deliberately, delete {}.",
+        proj_dir.display(),
+        search_dir.display()
+    )
+}
+
+/// How many event documents the index currently holds.
+///
+/// Only `doc_type: "event"` — turns live in the same index and are not what a
+/// rebuild would purge.
+fn event_doc_count(
+    index: &tantivy::Index,
+    schema: &tantivy::schema::Schema,
+) -> anyhow::Result<usize> {
+    use tantivy::collector::Count;
+    use tantivy::query::TermQuery;
+    use tantivy::schema::IndexRecordOption;
+
+    let f_doc_type = schema.get_field("doc_type")?;
+    let reader = index.reader()?;
+    let searcher = reader.searcher();
+    let query = TermQuery::new(
+        tantivy::Term::from_field_text(f_doc_type, "event"),
+        IndexRecordOption::Basic,
+    );
+    Ok(searcher.search(&query, &Count)?)
 }
 
 /// Choose the events to index and report whether this is a full rebuild.
@@ -325,6 +422,82 @@ mod tests {
         assert_eq!(stats.events, 2, "the replacement's events must be indexed");
     }
 
+    /// GH-418: an empty ledger must not be allowed to empty a populated index.
+    ///
+    /// `Ledger::open` creates an empty `ledger.db` when one is missing, so a
+    /// deleted ledger looks exactly like a legitimately empty one. The rebuild
+    /// path would then delete every event document and report a successful
+    /// "rebuild" of nothing. Events are append-only, so a ledger that was
+    /// populated and is now empty means the ledger is gone, not that the events
+    /// were removed — trusting it destroys the only remaining copy of that index.
+    #[test]
+    fn an_empty_ledger_must_not_empty_a_populated_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let led = FakeLedger::new(vec![
+            (1, mk_event("evt_a", "2026-07-15T12:00:00Z")),
+            (2, mk_event("evt_b", "2026-07-15T12:01:00Z")),
+        ]);
+        sync(tmp.path(), "p1", None, led.source()).unwrap();
+
+        // The ledger.db vanished; what remains opens as empty.
+        let vanished = FakeLedger::new(vec![]);
+        let err = sync(tmp.path(), "p1", None, vanished.source()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("would empty"),
+            "unhelpful error: {err}"
+        );
+
+        // And the index must still be intact — refusing is worthless if the
+        // documents were already deleted before the check.
+        let index = crate::schema::open_index(&tmp.path().join("search").join("tantivy")).unwrap();
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            2,
+            "the refusal must leave the index untouched"
+        );
+    }
+
+    /// GH-418, the other destructive step: a schema upgrade wipes the index dir
+    /// outright, and that happens BEFORE the emptiness guard. Once the wipe has
+    /// run, the guard counts zero event docs and waves the rebuild through — so
+    /// the check has to come before the wipe, not just before the delete.
+    ///
+    /// The upgrade path is exactly when this matters: the index has been thrown
+    /// away on purpose, to be rebuilt from the ledger. If the ledger is gone too,
+    /// the wipe destroyed the only copy.
+    #[test]
+    fn an_outdated_index_is_not_wiped_when_the_ledger_has_nothing_to_rebuild_from() {
+        let tmp = tempfile::tempdir().unwrap();
+        let led = FakeLedger::new(vec![(1, mk_event("evt_a", "2026-07-15T12:00:00Z"))]);
+        sync(tmp.path(), "p1", None, led.source()).unwrap();
+
+        // Make the on-disk index look like an older schema version.
+        let index_dir = tmp.path().join("search").join("tantivy");
+        std::fs::write(index_dir.join("edda_schema_version"), "1").unwrap();
+
+        // ...and the ledger.db vanished, so it opens as empty.
+        let vanished = FakeLedger::new(vec![]);
+        let err = sync(tmp.path(), "p1", None, vanished.source()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("Refusing to rebuild"),
+            "unhelpful error: {err}"
+        );
+
+        let index =
+            crate::schema::open_index(&index_dir).expect("the index dir must survive the refusal");
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            1,
+            "refusing after the wipe is not refusing"
+        );
+    }
+
     #[test]
     fn rebuild_purges_events_the_ledger_no_longer_has() {
         let tmp = tempfile::tempdir().unwrap();
@@ -334,20 +507,29 @@ mod tests {
         ]);
         sync(tmp.path(), "p1", None, led.source()).unwrap();
 
-        // Ledger truncated. The removed bulk path purged orphans implicitly by
-        // deleting every event doc before re-adding; the incremental path must
-        // do it explicitly on rebuild, or these stay searchable forever.
-        let empty = FakeLedger::new(vec![]);
-        let stats = sync(tmp.path(), "p1", None, empty.source()).unwrap();
+        // Ledger replaced with different events. The removed bulk path purged
+        // orphans implicitly by deleting every event doc before re-adding; the
+        // incremental path must do it explicitly on rebuild, or evt_a/evt_b stay
+        // searchable forever.
+        //
+        // Uses a REPLACEMENT rather than an empty ledger on purpose: an empty one
+        // is now refused (GH-418), because it cannot be told apart from a deleted
+        // ledger.db. A replacement is also the stronger test — it pins that the
+        // old events go AND the new ones arrive.
+        let replaced = FakeLedger::new(vec![(1, mk_event("evt_z", "2026-07-15T20:00:00Z"))]);
+        let stats = sync(tmp.path(), "p1", None, replaced.source()).unwrap();
         assert!(stats.rebuilt);
 
+        assert_eq!(stats.events, 1);
+
+        // Exactly the replacement: evt_a and evt_b are gone, evt_z is there.
         let index = crate::schema::open_index(&tmp.path().join("search").join("tantivy")).unwrap();
         let reader = index.reader().unwrap();
         reader.reload().unwrap();
         assert_eq!(
             reader.searcher().num_docs(),
-            0,
-            "orphaned event docs must be purged on rebuild"
+            1,
+            "orphaned event docs must be purged on rebuild, and only the new one kept"
         );
     }
 
