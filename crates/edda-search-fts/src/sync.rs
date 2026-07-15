@@ -195,7 +195,10 @@ mod tests {
 
         let first = sync(tmp.path(), "p1", None, led.source()).unwrap();
         assert_eq!(first.events, 2);
-        assert_eq!(first.indexed_through.as_deref(), Some("2026-07-15T12:01:00Z"));
+        assert_eq!(
+            first.indexed_through.as_deref(),
+            Some("2026-07-15T12:01:00Z")
+        );
 
         let second = sync(tmp.path(), "p1", None, led.source()).unwrap();
         assert_eq!(second.events, 0, "unchanged ledger must not re-index");
@@ -210,7 +213,10 @@ mod tests {
     fn sync_indexes_only_new_events() {
         let tmp = tempfile::tempdir().unwrap();
         let led = FakeLedger::new(vec![(1, mk_event("evt_a", "2026-07-15T12:00:00Z"))]);
-        assert_eq!(sync(tmp.path(), "p1", None, led.source()).unwrap().events, 1);
+        assert_eq!(
+            sync(tmp.path(), "p1", None, led.source()).unwrap().events,
+            1
+        );
 
         let led2 = FakeLedger::new(vec![
             (1, mk_event("evt_a", "2026-07-15T12:00:00Z")),
@@ -237,7 +243,10 @@ mod tests {
 
         assert!(stats.rebuilt, "must detect the cursor is ahead");
         assert_eq!(stats.events, 1, "must re-index from scratch");
-        assert_eq!(stats.indexed_through.as_deref(), Some("2026-07-15T13:00:00Z"));
+        assert_eq!(
+            stats.indexed_through.as_deref(),
+            Some("2026-07-15T13:00:00Z")
+        );
     }
 
     #[test]

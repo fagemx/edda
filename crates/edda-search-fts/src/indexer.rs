@@ -618,8 +618,11 @@ mod tests {
             },
         ];
 
-        let batch: Vec<(i64, edda_core::Event)> =
-            events.into_iter().enumerate().map(|(i, e)| (i as i64 + 1, e)).collect();
+        let batch: Vec<(i64, edda_core::Event)> = events
+            .into_iter()
+            .enumerate()
+            .map(|(i, e)| (i as i64 + 1, e))
+            .collect();
         let count = index_events_since(&writer, &schema, "p1", &batch).unwrap();
         writer.commit().unwrap();
         assert_eq!(count, 2);
@@ -631,11 +634,7 @@ mod tests {
 
     /// Write a minimal one-turn session fixture (user + assistant), appending if
     /// the session already exists. Returns the session's index file path.
-    fn write_session_fixture(
-        project_dir: &Path,
-        session_id: &str,
-        n: &str,
-    ) -> std::path::PathBuf {
+    fn write_session_fixture(project_dir: &Path, session_id: &str, n: &str) -> std::path::PathBuf {
         let index_dir = project_dir.join("index");
         std::fs::create_dir_all(&index_dir).unwrap();
         let transcripts_dir = project_dir.join("transcripts");
@@ -811,7 +810,10 @@ mod tests {
         let schema = index.schema();
         let mut writer = index_writer(&index).unwrap();
 
-        let batch = vec![(1i64, mk_test_event("evt_a")), (2i64, mk_test_event("evt_b"))];
+        let batch = vec![
+            (1i64, mk_test_event("evt_a")),
+            (2i64, mk_test_event("evt_b")),
+        ];
 
         let n = index_events_since(&writer, &schema, "p1", &batch).unwrap();
         writer.commit().unwrap();
