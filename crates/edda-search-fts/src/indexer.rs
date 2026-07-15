@@ -32,9 +32,34 @@ where
     Ok(count)
 }
 
+/// Index a batch of `(rowid, Event)` pairs incrementally (GH-403).
+///
+/// Each event is replaced rather than blindly added: `delete_term` on its
+/// `doc_id` first, then re-add. That makes re-running a batch a no-op in effect,
+/// which is what allows the caller to commit before advancing its cursor — a
+/// crash in between simply re-runs this batch on the next pass.
+///
+/// Unlike the bulk path this deletes nothing outside the batch, so callers must
+/// pass only events the index has not seen.
+pub fn index_events_since(
+    writer: &IndexWriter,
+    schema: &Schema,
+    project_id: &str,
+    events: &[(i64, edda_core::Event)],
+) -> anyhow::Result<usize> {
+    let f_doc_id = schema.get_field("doc_id")?;
+    let mut count = 0;
+    for (_rowid, event) in events {
+        writer.delete_term(Term::from_field_text(f_doc_id, event.event_id.as_str()));
+        add_event_doc(writer, schema, project_id, event)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// Add a single ledger event as a Tantivy document.
 ///
-/// Used both by bulk `index_events` and by append-time indexing.
+/// Used by `index_events_since`; kept public for direct use in tests.
 pub fn add_event_doc(
     writer: &IndexWriter,
     schema: &Schema,
@@ -620,6 +645,68 @@ mod tests {
             1,
             "events should not be duplicated on re-index"
         );
+    }
+
+    fn mk_test_event(id: &str) -> edda_core::Event {
+        edda_core::Event {
+            event_id: id.to_string(),
+            ts: "2026-07-15T12:00:00Z".to_string(),
+            event_type: "note".to_string(),
+            branch: "main".to_string(),
+            parent_hash: None,
+            hash: "h".to_string(),
+            payload: serde_json::json!({ "text": "hello world" }),
+            refs: Default::default(),
+            schema_version: 1,
+            digests: Vec::new(),
+            event_family: None,
+            event_level: None,
+        }
+    }
+
+    #[test]
+    fn index_events_since_is_idempotent_per_event() {
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+
+        let batch = vec![(1i64, mk_test_event("evt_a")), (2i64, mk_test_event("evt_b"))];
+
+        let n = index_events_since(&writer, &schema, "p1", &batch).unwrap();
+        writer.commit().unwrap();
+        assert_eq!(n, 2);
+
+        // Re-running the same batch is what happens after a crash between commit
+        // and the cursor write. It must replace, not duplicate.
+        index_events_since(&writer, &schema, "p1", &batch).unwrap();
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(
+            reader.searcher().num_docs(),
+            2,
+            "re-run must not duplicate docs"
+        );
+    }
+
+    #[test]
+    fn index_events_since_appends_without_touching_existing() {
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let mut writer = index_writer(&index).unwrap();
+
+        index_events_since(&writer, &schema, "p1", &[(1i64, mk_test_event("evt_a"))]).unwrap();
+        writer.commit().unwrap();
+
+        // An incremental batch must not delete docs outside it — the whole point
+        // of dropping the old delete-all.
+        index_events_since(&writer, &schema, "p1", &[(2i64, mk_test_event("evt_b"))]).unwrap();
+        writer.commit().unwrap();
+
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        assert_eq!(reader.searcher().num_docs(), 2);
     }
 
     #[test]
