@@ -256,13 +256,36 @@ fn ledger_root_for(
         );
     };
 
-    // Same staleness rule the registry itself uses: a live repo has a `.edda/`.
-    // Falling back to repo_root here would be the bug this exists to fix.
     let root = PathBuf::from(path);
-    if !root.join(".edda").is_dir() {
+    if !root.exists() {
         anyhow::bail!(
             "Project {project_id} is registered at {} but that path no longer holds \
              an edda ledger. Run `edda search index` from that project's repo.",
+            root.display()
+        );
+    }
+
+    // The registry's staleness rule is only "the path still has a `.edda/`", which
+    // is too weak to resolve a ledger from: `Ledger::open` checks the directory
+    // and then CREATES an empty ledger.db if none is there. An orphan `.edda/`
+    // would hand us an empty ledger, and an empty ledger makes `sync` treat the
+    // cursor as ahead and purge every event document the project has — reported
+    // as a successful rebuild. Require the ledger itself.
+    if !root.join(".edda").join("ledger.db").is_file() {
+        anyhow::bail!(
+            "Project {project_id} is registered at {} but that path holds no edda \
+             ledger. Run `edda search index` from that project's repo.",
+            root.display()
+        );
+    }
+
+    // Verify the registry's claim rather than trusting it. It is demonstrably
+    // unreliable (#417), and acting on a wrong path here is precisely the bug
+    // being fixed — just sourced from bad data instead of bad logic.
+    if resolve_project_id(&root) != project_id {
+        anyhow::bail!(
+            "Registry says project {project_id} lives at {}, but that repo does not \
+             hold project {project_id}. The registry entry is stale or wrong.",
             root.display()
         );
     }
@@ -430,14 +453,57 @@ mod tests {
         let here = tempfile::tempdir().unwrap();
         let there = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(there.path().join(".edda")).unwrap();
+        std::fs::write(there.path().join(".edda").join("ledger.db"), b"").unwrap();
         let there_path = there.path().to_string_lossy().into_owned();
+        // The id the registry would really have stored for that repo.
+        let there_pid = resolve_project_id(there.path());
 
-        let got = ledger_root_for(here.path(), "other-pid", |_| Some(there_path.clone())).unwrap();
+        let got = ledger_root_for(here.path(), &there_pid, |_| Some(there_path.clone())).unwrap();
 
         assert_eq!(
             got,
             there.path(),
             "a foreign project must be indexed from its own repo, never ours"
+        );
+    }
+
+    /// `.edda/` presence is the registry's staleness rule, but it is too weak to
+    /// resolve a ledger: `Ledger::open` only checks the directory and then
+    /// CREATES an empty `ledger.db` if none exists. An empty ledger makes `sync`
+    /// treat the cursor as ahead and purge every event document the project has —
+    /// reported as a successful rebuild. An orphan `.edda/` must refuse.
+    #[test]
+    fn foreign_project_with_an_orphan_edda_dir_is_refused() {
+        let here = tempfile::tempdir().unwrap();
+        let there = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(there.path().join(".edda")).unwrap(); // no ledger.db
+        let there_path = there.path().to_string_lossy().into_owned();
+
+        let err = ledger_root_for(here.path(), "orphan-pid", |_| Some(there_path)).unwrap_err();
+
+        assert!(
+            err.to_string().contains("no edda ledger"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    /// The registry is demonstrably unreliable (#417: 1628 of 1644 entries dead),
+    /// so its claim is verified rather than trusted: the repo it names must
+    /// actually be the project that was asked for.
+    #[test]
+    fn registry_entry_naming_a_different_project_is_refused() {
+        let here = tempfile::tempdir().unwrap();
+        let there = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(there.path().join(".edda")).unwrap();
+        std::fs::write(there.path().join(".edda").join("ledger.db"), b"").unwrap();
+        let there_path = there.path().to_string_lossy().into_owned();
+
+        // `there` does not hash to "wrong-pid"; the registry is lying.
+        let err = ledger_root_for(here.path(), "wrong-pid", |_| Some(there_path)).unwrap_err();
+
+        assert!(
+            err.to_string().contains("does not hold project"),
+            "unhelpful error: {err}"
         );
     }
 
