@@ -8,6 +8,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  # Trim debug info in CI: keeps readable backtraces (function name + line) but
+  # skips the heavy PDB generation and linking that dominate Windows build time.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
   fmt:
@@ -39,9 +43,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            args: --workspace
+          - os: macos-latest
+            args: --workspace
+          # Windows is non-blocking (continue-on-error) and its build/link is
+          # ~5x slower, so it runs only the platform-divergent crates
+          # (filesystem paths, file locks, process spawn, mmap) instead of all
+          # 23. Linux/macOS keep full-workspace coverage.
+          - os: windows-latest
+            args: >-
+              -p edda-store
+              -p edda-ledger
+              -p edda-search-fts
+              -p edda-bridge-claude
+              -p edda
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace
+      - run: cargo test ${{ matrix.args }}
