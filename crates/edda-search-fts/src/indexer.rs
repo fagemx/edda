@@ -1,6 +1,6 @@
 use anyhow::Context;
 use edda_index::{fetch_store_line, IndexRecordV1};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
 use tantivy::schema::*;
@@ -131,6 +131,21 @@ pub fn index_session(
         .join("index")
         .join(format!("{session_id}.jsonl"));
     if !index_path.exists() {
+        return Ok(0);
+    }
+
+    // GH-403: skip a session whose index file has not grown since the last run.
+    //
+    // Everything below — reading every record, building the uuid map, walking
+    // each assistant's parent chain, and fetching + parsing its transcript line
+    // off disk — runs BEFORE the per-turn `turns_meta` check that decides the
+    // turn is already indexed. So without this early-out a no-op reindex does
+    // the entire read and parse of every session, then throws it all away:
+    // measured at ~25s for 100 sessions / 24MB, linear in session count. The
+    // watermark stopped duplicate *writes*, never duplicate *reads*.
+    let file_len = std::fs::metadata(&index_path)?.len() as i64;
+    let consumed = read_session_offset(meta_conn, project_id, session_id)?;
+    if consumed == file_len {
         return Ok(0);
     }
 
@@ -300,8 +315,46 @@ pub fn index_session(
         count += 1;
     }
 
+    // Record how much of the file we consumed, in the same transaction as the
+    // turns_meta rows it corresponds to. A rewritten (shrunk) file will not
+    // match on the next run and gets re-read, which is safe because turns_meta
+    // dedups by turn_id.
+    write_session_offset(meta_conn, project_id, session_id, file_len)?;
+
     tx.commit()?;
     Ok(count)
+}
+
+/// How many bytes of a session's index file previous runs have consumed.
+/// Absent means zero — read the whole file.
+fn read_session_offset(
+    conn: &Connection,
+    project_id: &str,
+    session_id: &str,
+) -> anyhow::Result<i64> {
+    let v = conn
+        .query_row(
+            "SELECT last_offset FROM index_watermark WHERE project_id = ?1 AND session_id = ?2",
+            params![project_id, session_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(v.unwrap_or(0))
+}
+
+/// Mark a session's index file as consumed up to `offset` bytes.
+fn write_session_offset(
+    conn: &Connection,
+    project_id: &str,
+    session_id: &str,
+    offset: i64,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO index_watermark (project_id, session_id, last_offset) VALUES (?1, ?2, ?3)
+         ON CONFLICT(project_id, session_id) DO UPDATE SET last_offset = ?3",
+        params![project_id, session_id, offset],
+    )?;
+    Ok(())
 }
 
 /// Index all sessions for a project.
@@ -574,6 +627,165 @@ mod tests {
         let reader = index.reader().unwrap();
         let searcher = reader.searcher();
         assert_eq!(searcher.num_docs(), 2);
+    }
+
+    /// Write a minimal one-turn session fixture (user + assistant), appending if
+    /// the session already exists. Returns the session's index file path.
+    fn write_session_fixture(
+        project_dir: &Path,
+        session_id: &str,
+        n: &str,
+    ) -> std::path::PathBuf {
+        let index_dir = project_dir.join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let transcripts_dir = project_dir.join("transcripts");
+        std::fs::create_dir_all(&transcripts_dir).unwrap();
+
+        let u = format!("u{n}");
+        let a = format!("a{n}");
+        let user_record = serde_json::json!({
+            "type": "user", "uuid": u, "timestamp": "2026-02-14T10:00:00Z",
+            "message": { "content": "how do I search?" }
+        });
+        let assistant_record = serde_json::json!({
+            "type": "assistant", "uuid": a, "parentUuid": u,
+            "timestamp": "2026-02-14T10:00:05Z",
+            "message": { "content": [{"type": "text", "text": "use tantivy"}] }
+        });
+
+        let store_path = transcripts_dir.join(format!("{session_id}.jsonl"));
+        let user_line = serde_json::to_string(&user_record).unwrap();
+        let asst_line = serde_json::to_string(&assistant_record).unwrap();
+        let user_len = user_line.len() as u64 + 1;
+        let asst_len = asst_line.len() as u64 + 1;
+
+        let base = std::fs::metadata(&store_path).map(|m| m.len()).unwrap_or(0);
+        let mut content = std::fs::read_to_string(&store_path).unwrap_or_default();
+        content.push_str(&format!("{user_line}\n{asst_line}\n"));
+        std::fs::write(&store_path, content).unwrap();
+
+        let user_index = edda_index::IndexRecordV1 {
+            v: 1,
+            session_id: session_id.into(),
+            uuid: u.clone(),
+            parent_uuid: None,
+            record_type: "user".into(),
+            ts: "2026-02-14T10:00:00Z".into(),
+            git_branch: Some("main".into()),
+            cwd: Some("/tmp/p".into()),
+            store_offset: base,
+            store_len: user_len,
+            assistant: None,
+            usage: None,
+        };
+        let asst_index = edda_index::IndexRecordV1 {
+            v: 1,
+            session_id: session_id.into(),
+            uuid: a,
+            parent_uuid: Some(u),
+            record_type: "assistant".into(),
+            ts: "2026-02-14T10:00:05Z".into(),
+            git_branch: Some("main".into()),
+            cwd: Some("/tmp/p".into()),
+            store_offset: base + user_len,
+            store_len: asst_len,
+            assistant: None,
+            usage: None,
+        };
+
+        let index_path = index_dir.join(format!("{session_id}.jsonl"));
+        edda_index::append_index(&index_path, &user_index).unwrap();
+        edda_index::append_index(&index_path, &asst_index).unwrap();
+        index_path
+    }
+
+    #[test]
+    fn unchanged_session_file_is_skipped_without_reading_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        let index_path = write_session_fixture(project_dir, "s1", "1");
+
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let writer = index_writer(&index).unwrap();
+        let meta_conn = ensure_meta_db_memory().unwrap();
+
+        // Pretend a previous run already consumed the whole file.
+        let len = std::fs::metadata(&index_path).unwrap().len() as i64;
+        meta_conn
+            .execute(
+                "INSERT INTO index_watermark (project_id, session_id, last_offset) \
+                 VALUES (?1, ?2, ?3)",
+                params!["p1", "s1", len],
+            )
+            .unwrap();
+
+        let count = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(count, 0, "an unchanged file must be skipped");
+
+        // The decisive assertion: turns_meta is still EMPTY. This turn was never
+        // indexed, which is only possible if the file was never read — a path
+        // that read it would find the turn absent from turns_meta and index it.
+        // Distinguishes "skipped the read" from "read it, then deduped".
+        let n: i64 = meta_conn
+            .query_row("SELECT count(*) FROM turns_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "skipping must mean not reading, not read-then-dedup");
+    }
+
+    #[test]
+    fn indexing_a_session_records_its_consumed_offset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        let index_path = write_session_fixture(project_dir, "s1", "1");
+
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let writer = index_writer(&index).unwrap();
+        let meta_conn = ensure_meta_db_memory().unwrap();
+
+        let count = index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap();
+        assert_eq!(count, 1);
+
+        let len = std::fs::metadata(&index_path).unwrap().len() as i64;
+        let stored: i64 = meta_conn
+            .query_row(
+                "SELECT last_offset FROM index_watermark WHERE project_id = ?1 AND session_id = ?2",
+                params!["p1", "s1"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, len, "must record how much of the file it consumed");
+    }
+
+    #[test]
+    fn a_grown_session_file_is_reprocessed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path();
+        write_session_fixture(project_dir, "s1", "1");
+
+        let index = ensure_index_ram().unwrap();
+        let schema = index.schema();
+        let writer = index_writer(&index).unwrap();
+        let meta_conn = ensure_meta_db_memory().unwrap();
+
+        assert_eq!(
+            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap(),
+            1
+        );
+        // Unchanged: skipped.
+        assert_eq!(
+            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap(),
+            0
+        );
+
+        // The live session grows — the early-out must not blind us to new turns.
+        write_session_fixture(project_dir, "s1", "2");
+        assert_eq!(
+            index_session(&writer, &schema, &meta_conn, project_dir, "p1", "s1").unwrap(),
+            1,
+            "a grown file must be reprocessed"
+        );
     }
 
     fn mk_test_event(id: &str) -> edda_core::Event {
