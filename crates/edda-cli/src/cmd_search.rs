@@ -1,7 +1,7 @@
 use clap::Subcommand;
 use edda_index::fetch_store_line;
 use edda_ledger::Ledger;
-use edda_search_fts::{indexer, schema, search};
+use edda_search_fts::{schema, search, sync};
 use edda_store::project_dir;
 use std::path::Path;
 
@@ -166,76 +166,25 @@ pub fn query(
     Ok(())
 }
 
-/// Execute `edda search index` — build/update Tantivy index for a project.
+/// Execute `edda search index` — build/update the Tantivy index for a project.
 pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> anyhow::Result<()> {
     let proj_dir = project_dir(project_id);
     if !proj_dir.exists() {
         anyhow::bail!("Project directory not found: {}", proj_dir.display());
     }
 
-    let index_dir = proj_dir.join("search").join("tantivy");
-    let meta_db_path = proj_dir.join("search").join("meta.sqlite");
-
-    // Serialize index operations so two concurrent `edda search index` runs
-    // can't wipe/rebuild the same tantivy dir at once (GH-402). Keyed by the
-    // index location, so it holds even across working directories / --project.
-    let _lock = schema::IndexLock::acquire(&proj_dir.join("search"))?;
     let ledger = Ledger::open(repo_root)?;
-
-    // GH-402: a schema upgrade wipes the tantivy dir so it gets recreated
-    // fresh. `open_or_create_index` reports fresh creation for ALL cases (this
-    // wipe, a corrupt index, a never-existed dir, or a crash mid-wipe), which
-    // is what drives the watermark clear + full reindex below — so a crash
-    // between wipe and recreate can't leave stale turns_meta hiding turns.
-    if schema::index_is_outdated(&index_dir) {
-        let old = schema::read_index_version(&index_dir)
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "1".to_string());
-        println!(
-            "Search index schema outdated (v{old} → v{}); rebuilding from scratch.",
-            schema::INDEX_VERSION
-        );
-        std::fs::remove_dir_all(&index_dir)?;
-    }
-
-    let (index, created_fresh) = schema::open_or_create_index(&index_dir)?;
-    let tantivy_schema = index.schema();
-    let mut writer = schema::index_writer(&index)?;
-
-    let meta_conn = schema::ensure_meta_db(&meta_db_path)?;
-    // Whenever the tantivy index is fresh/empty, clear the watermark via SQL
-    // (not file deletion — a locked meta.sqlite would survive) so every turn
-    // re-indexes instead of being skipped as "already indexed".
-    if created_fresh {
-        schema::clear_index_watermark(&meta_conn)?;
-    }
-
-    // Index ledger events (index_events always deletes + re-adds all events).
-    let event_count = indexer::index_events(&writer, &tantivy_schema, project_id, || {
-        ledger.iter_events()
+    let stats = sync::sync(&proj_dir, project_id, session_id, |after| {
+        ledger.events_after_rowid(after)
     })?;
 
-    // Index transcript turns. A fresh index must cover ALL sessions even if a
-    // single --session was requested, otherwise other sessions vanish behind
-    // the fresh version marker.
-    let turn_count = match session_id {
-        Some(sid) if !created_fresh => indexer::index_session(
-            &writer,
-            &tantivy_schema,
-            &meta_conn,
-            &proj_dir,
-            project_id,
-            sid,
-        )?,
-        _ => indexer::index_project(&writer, &tantivy_schema, &meta_conn, &proj_dir, project_id)?,
-    };
-
-    writer.commit()?;
-    // Mark the schema version only AFTER a successful full commit, so a crash
-    // mid-rebuild leaves no marker and the next run rebuilds again.
-    schema::write_index_version(&index_dir)?;
-
-    println!("Indexed {event_count} event(s) + {turn_count} turn(s) for project {project_id}");
+    if stats.rebuilt {
+        println!("Rebuilt index from scratch.");
+    }
+    println!(
+        "Indexed {} event(s) + {} turn(s) for project {project_id}",
+        stats.events, stats.turns
+    );
     Ok(())
 }
 
