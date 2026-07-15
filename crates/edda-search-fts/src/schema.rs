@@ -231,6 +231,15 @@ pub fn ensure_meta_db(db_path: &Path) -> anyhow::Result<Connection> {
     Ok(conn)
 }
 
+/// Clear the turns watermark and per-turn index metadata so a full rebuild
+/// re-indexes every turn instead of skipping ones marked "already indexed".
+/// Lives here (beside `ensure_meta_db`) so the meta-DB table names stay in one
+/// crate rather than being duplicated by callers (GH-402).
+pub fn clear_index_watermark(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch("DELETE FROM turns_meta; DELETE FROM index_watermark;")?;
+    Ok(())
+}
+
 /// Open an in-memory SQLite database with turns_meta schema (for testing).
 pub fn ensure_meta_db_memory() -> anyhow::Result<Connection> {
     let conn = Connection::open_in_memory()?;

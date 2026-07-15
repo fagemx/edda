@@ -207,7 +207,7 @@ pub fn index(repo_root: &Path, project_id: &str, session_id: Option<&str>) -> an
     // (not file deletion — a locked meta.sqlite would survive) so every turn
     // re-indexes instead of being skipped as "already indexed".
     if created_fresh {
-        meta_conn.execute_batch("DELETE FROM turns_meta; DELETE FROM index_watermark;")?;
+        schema::clear_index_watermark(&meta_conn)?;
     }
 
     // Index ledger events (index_events always deletes + re-adds all events).
