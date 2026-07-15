@@ -194,6 +194,7 @@ mod tests {
 
     #[test]
     fn init_detects_claude_and_installs_hooks() {
+        let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
         std::fs::create_dir_all(tmp.join(".claude")).unwrap();
 
@@ -226,6 +227,7 @@ mod tests {
 
     #[test]
     fn init_no_hooks_skips_bridge() {
+        let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
         std::fs::create_dir_all(tmp.join(".claude")).unwrap();
 
@@ -244,6 +246,7 @@ mod tests {
 
     #[test]
     fn init_without_claude_dir_no_error() {
+        let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
 
         execute(&tmp, false, false).unwrap();
@@ -258,6 +261,7 @@ mod tests {
 
     #[test]
     fn reinit_also_installs_hooks() {
+        let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
 
         // First init — no .claude/ dir
@@ -280,6 +284,7 @@ mod tests {
 
     #[test]
     fn init_scaffolds_coord_skills() {
+        let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
         std::fs::create_dir_all(tmp.join(".claude")).unwrap();
 
@@ -309,6 +314,7 @@ mod tests {
 
     #[test]
     fn init_skips_existing_skills() {
+        let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
         let skill_dir = tmp.join(".claude").join("skills").join("coord-sync");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -328,6 +334,7 @@ mod tests {
 
     #[test]
     fn init_force_skills_overwrites() {
+        let _store = crate::test_support::isolated_store();
         let tmp = temp_dir();
         let skill_dir = tmp.join(".claude").join("skills").join("coord-sync");
         std::fs::create_dir_all(&skill_dir).unwrap();

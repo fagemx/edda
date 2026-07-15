@@ -1497,6 +1497,7 @@ mod tests {
 
     #[test]
     fn decide_writes_binding_to_coordination_log() {
+        let _store = crate::test_support::isolated_store();
         let _env = env_guard();
         let (tmp, _ledger) = setup_workspace();
         let pid = edda_store::project_id(&tmp);
@@ -1541,6 +1542,7 @@ mod tests {
 
     #[test]
     fn decide_writes_structured_ledger_event() {
+        let _store = crate::test_support::isolated_store();
         let _env = env_guard();
         let (tmp, ledger) = setup_workspace();
         let pid = edda_store::project_id(&tmp);
@@ -1588,6 +1590,7 @@ mod tests {
 
     #[test]
     fn ratify_records_separate_event_and_makes_decision_binding() {
+        let _store = crate::test_support::isolated_store();
         let _env = env_guard();
         let (tmp, ledger) = setup_workspace();
         let pid = edda_store::project_id(&tmp);
@@ -1639,6 +1642,7 @@ mod tests {
 
     #[test]
     fn ratify_unknown_key_errors() {
+        let _store = crate::test_support::isolated_store();
         let _env = env_guard();
         let (tmp, _ledger) = setup_workspace();
         let pid = edda_store::project_id(&tmp);
@@ -1656,6 +1660,7 @@ mod tests {
 
     #[test]
     fn decide_supersedes_prior_decision_same_key() {
+        let _store = crate::test_support::isolated_store();
         let _env = env_guard();
         let (tmp, ledger) = setup_workspace();
         let pid = edda_store::project_id(&tmp);
@@ -1702,6 +1707,7 @@ mod tests {
 
     #[test]
     fn resolve_session_id_tiers() {
+        let _store = crate::test_support::isolated_store();
         let _env = env_guard();
         let pid = "test_resolve_sid_tiers";
         let _ = edda_store::ensure_dirs(pid);
@@ -1822,6 +1828,7 @@ mod tests {
 
     #[test]
     fn render_coordination_solo_no_bindings() {
+        let _store = crate::test_support::isolated_store();
         let pid = "test_render_coord_solo";
         let _ = edda_store::ensure_dirs(pid);
         let result = edda_bridge_claude::render::coordination(pid, "solo-session");
@@ -1835,6 +1842,7 @@ mod tests {
 
     #[test]
     fn render_pack_no_pack_file() {
+        let _store = crate::test_support::isolated_store();
         let pid = "test_render_pack_empty";
         let _ = edda_store::ensure_dirs(pid);
         let result = edda_bridge_claude::render::pack(pid);
@@ -1844,6 +1852,7 @@ mod tests {
 
     #[test]
     fn heartbeat_write_touch_remove_lifecycle() {
+        let _store = crate::test_support::isolated_store();
         let pid = "test_hb_lifecycle";
         let sid = "sess-lifecycle-1";
         let _ = edda_store::ensure_dirs(pid);
