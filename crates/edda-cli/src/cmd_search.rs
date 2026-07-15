@@ -195,6 +195,14 @@ pub fn query(
 /// Report how current the index is (GH-403), so silence is never mistaken for
 /// absence. Best-effort: a broken watermark must not fail a query that already
 /// produced results.
+///
+/// `indexed through` is read from the project's own meta.sqlite and is therefore
+/// correct for any project. The "newer events" count is not: it can only be
+/// computed against a ledger, and the only ledger we have is `repo_root`'s. For
+/// a `--project` that is not this repo, that count would compare an unrelated
+/// project's cursor against these events — a fabricated number. Since the point
+/// of this line is honesty about staleness, a confidently wrong count is worse
+/// than none, so it is omitted rather than guessed.
 fn print_watermark(repo_root: &Path, proj_dir: &Path, project_id: &str) {
     let meta_path = proj_dir.join("search").join("meta.sqlite");
     let Ok(conn) = schema::ensure_meta_db(&meta_path) else {
@@ -206,6 +214,10 @@ fn print_watermark(repo_root: &Path, proj_dir: &Path, project_id: &str) {
     let Some(ts) = cursor.ts else {
         return;
     };
+    if project_id != resolve_project_id(repo_root) {
+        println!("  (indexed through {ts})");
+        return;
+    }
     let newer = Ledger::open(repo_root)
         .and_then(|l| l.events_after_rowid(cursor.rowid))
         .map(|v| v.len())
