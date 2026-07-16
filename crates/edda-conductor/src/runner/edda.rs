@@ -148,27 +148,39 @@ mod tests {
     /// per `cargo test -p edda-conductor`, forever, on the machine of whoever
     /// ran the tests.
     ///
-    /// Asserts the guard rather than the absence: reading the real registry to
-    /// prove we did not touch it would depend on the developer's own machine
-    /// having one, and would pass for the wrong reason on a machine that has
-    /// none.
+    /// Drives `ensure_init` itself and checks where its child landed. An
+    /// earlier version of this test called the isolation helper directly and
+    /// asserted it worked — which it always did, with or without `ensure_init`
+    /// wired to it, so deleting the fix left the test green. Guarding the fix
+    /// means going through the function the fix is in.
     #[test]
-    fn ensure_init_cannot_reach_the_operators_real_store() {
-        let _guard = isolate_store_for_this_process();
-        let root = std::env::var("EDDA_STORE_ROOT").expect("isolation must be in force");
-        assert!(
-            !root.is_empty(),
-            "an empty EDDA_STORE_ROOT resolves back to the real store"
-        );
+    fn ensure_init_sends_its_child_to_a_throwaway_store() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_init(dir.path());
 
-        // Asserted against the OS temp dir rather than against `store_root()`:
-        // that function *returns* EDDA_STORE_ROOT when set, so asking it here
-        // would compare the temp store with itself and pass for the wrong
-        // reason. A store under the OS temp dir is a store the operator's
-        // registry is not in.
+        // Best-effort by design: with no `edda` on PATH nothing spawns, and
+        // there is no child to have misdirected. CI has no edda installed; the
+        // developer's machine does, and that is where the damage lands.
+        if !dir.path().join(".edda").exists() {
+            return;
+        }
+
+        let root = std::env::var("EDDA_STORE_ROOT")
+            .expect("ensure_init must isolate the store before it spawns anything");
+
+        // Checked against the OS temp dir, not against `store_root()`: that
+        // function *returns* EDDA_STORE_ROOT when set, so asking it here would
+        // compare the temp store with itself and pass for the wrong reason.
         assert!(
             Path::new(&root).starts_with(std::env::temp_dir()),
             "the child must write to a throwaway store, got: {root}"
+        );
+        // `edda init` writes `registry.json` under whatever store root it
+        // resolves. Finding it here is what proves the child registered into
+        // the throwaway rather than into the operator's own.
+        assert!(
+            Path::new(&root).join("registry.json").exists(),
+            "the child registered somewhere other than the throwaway store: {root}"
         );
     }
 
