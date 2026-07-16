@@ -160,6 +160,12 @@ pub enum BridgeClaudeCmd {
     },
     /// Render hot pack (recent turns summary, reads last-built pack)
     RenderPack,
+    /// Render the Fleet section — sibling projects' rulings and waiting work
+    RenderFleet {
+        /// Max chars budget
+        #[arg(long, default_value = "800")]
+        budget: usize,
+    },
     /// Render active plan excerpt
     RenderPlan,
     /// Write session heartbeat for peer discovery
@@ -317,6 +323,7 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
                 render_coordination(repo_root, session.as_deref())
             }
             BridgeClaudeCmd::RenderPack => render_pack(repo_root),
+            BridgeClaudeCmd::RenderFleet { budget } => render_fleet(repo_root, budget),
             BridgeClaudeCmd::RenderPlan => render_plan(repo_root),
             BridgeClaudeCmd::HeartbeatWrite { label, session } => {
                 heartbeat_write(repo_root, &label, session.as_deref())
@@ -1083,6 +1090,19 @@ pub fn render_coordination(repo_root: &Path, cli_session: Option<&str>) -> anyho
     match edda_bridge_claude::render::coordination(&project_id, &session_id) {
         Some(s) => println!("{s}"),
         None => println!("(no coordination context)"),
+    }
+    Ok(())
+}
+
+/// `edda bridge claude render-fleet`
+///
+/// The same section the SessionStart pack embeds. It exists as a verb because a
+/// section only reachable through a hook is a section nobody can look at —
+/// including whoever has to work out why it said what it said.
+pub fn render_fleet(repo_root: &Path, budget: usize) -> anyhow::Result<()> {
+    match edda_bridge_claude::render::fleet(&repo_root.to_string_lossy(), budget) {
+        Some(s) => println!("{s}"),
+        None => println!("(no siblings with rulings or waiting work)"),
     }
     Ok(())
 }

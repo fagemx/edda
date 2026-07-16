@@ -833,6 +833,22 @@ pub(super) fn dispatch_session_start(
         tail.push_str(&format!("\n\n{coord}"));
     }
 
+    // What the sibling projects ruled and what they have waiting (GH-408).
+    //
+    // Last, and hard-capped: it is the least important thing in the pack, so it
+    // is the first to give way. Renders nothing at all for a solo project or a
+    // quiet fleet. Costs ~40ms measured across four projects — the fan-out reads
+    // siblings' ledgers directly, and process startup dwarfs it.
+    {
+        let fleet_budget: usize = std::env::var("EDDA_FLEET_BUDGET_CHARS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(800);
+        if let Some(fleet) = crate::peers::fleet_section(std::path::Path::new(cwd), fleet_budget) {
+            tail.push_str(&format!("\n\n{fleet}"));
+        }
+    }
+
     // Seed peer count so UserPromptSubmit knows the baseline and doesn't
     // re-inject the full protocol on the first prompt after SessionStart (#11).
     let peers = crate::peers::discover_active_peers(project_id, session_id);
