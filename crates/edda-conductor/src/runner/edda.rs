@@ -9,10 +9,27 @@ use std::process::Command;
 
 /// Ensure `.edda/` ledger exists in the working directory.
 /// No-op if already initialized or if `edda` is not available.
+///
+/// This shells out to the *installed* `edda`, and `edda init` registers its cwd
+/// in the operator's global project registry. That is right in production and
+/// wrong under test: the runner's tests each hand this a fresh
+/// `tempfile::tempdir()`, so every test run filed another dead temp path in the
+/// real registry — 13 per `cargo test -p edda-conductor`, which is GH-417.
+///
+/// The tests are isolated at this seam rather than in each test body: there is
+/// one call site and thirteen callers today, so guarding the callers would be
+/// thirteen chances for the fourteenth to forget. `EDDA_STORE_ROOT` points the
+/// child at a throwaway store — the whole path still runs, it just cannot reach
+/// the operator's registry. Whole-process isolation is safe here, which it
+/// usually is not: the variable is process-wide, but no test in this crate wants
+/// the real store.
 pub fn ensure_init(cwd: &Path) {
     if cwd.join(".edda").exists() {
         return;
     }
+    #[cfg(test)]
+    let _isolation = tests::isolate_store_for_this_process();
+
     let _ = Command::new("edda")
         .arg("init")
         .current_dir(cwd)
@@ -97,6 +114,63 @@ pub fn record_phase_failed(cwd: &Path, phase_id: &str, error: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Point every `edda` child this test binary spawns at a throwaway store.
+    ///
+    /// Returns a guard the caller holds for the duration of the spawn. The store
+    /// itself is created once and leaked: it must outlive every test in the
+    /// process, and tests run in parallel threads, so there is no later moment
+    /// at which dropping it would be safe. It is an OS temp dir — the OS
+    /// reclaims it.
+    ///
+    /// The lock is what makes this correct rather than merely usual:
+    /// `set_var` is process-wide, so a concurrent test that reads
+    /// `EDDA_STORE_ROOT` mid-write would see a torn value. Everything here wants
+    /// the same store, so serialising the spawns costs nothing worth having.
+    pub(super) fn isolate_store_for_this_process() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, Once, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        static SET: Once = Once::new();
+
+        SET.call_once(|| {
+            let store = tempfile::tempdir().expect("temp store for edda-conductor tests");
+            std::env::set_var("EDDA_STORE_ROOT", store.path());
+            std::mem::forget(store);
+        });
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// GH-417: the runner shells out to the installed `edda`, and `edda init`
+    /// registers its cwd. Under test that cwd is a `tempfile::tempdir()`, so
+    /// every run filed another dead path in the operator's real registry — 13
+    /// per `cargo test -p edda-conductor`, forever, on the machine of whoever
+    /// ran the tests.
+    ///
+    /// Asserts the guard rather than the absence: reading the real registry to
+    /// prove we did not touch it would depend on the developer's own machine
+    /// having one, and would pass for the wrong reason on a machine that has
+    /// none.
+    #[test]
+    fn ensure_init_cannot_reach_the_operators_real_store() {
+        let _guard = isolate_store_for_this_process();
+        let root = std::env::var("EDDA_STORE_ROOT").expect("isolation must be in force");
+        assert!(
+            !root.is_empty(),
+            "an empty EDDA_STORE_ROOT resolves back to the real store"
+        );
+
+        // Asserted against the OS temp dir rather than against `store_root()`:
+        // that function *returns* EDDA_STORE_ROOT when set, so asking it here
+        // would compare the temp store with itself and pass for the wrong
+        // reason. A store under the OS temp dir is a store the operator's
+        // registry is not in.
+        assert!(
+            Path::new(&root).starts_with(std::env::temp_dir()),
+            "the child must write to a throwaway store, got: {root}"
+        );
+    }
 
     #[test]
     fn get_context_returns_empty_on_missing_edda_dir() {
