@@ -76,6 +76,9 @@ pub enum TaskCmd {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// List tasks from every project in the fleet, not just this workspace
+        #[arg(long)]
+        fleet: bool,
     },
     /// Show one task in full (user verb)
     Show {
@@ -288,6 +291,128 @@ fn do_fail(repo_root: &Path, id: u64, reason: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One task's row, shared by the local and fleet boards so they cannot drift
+/// into two dialects of the same list.
+fn task_row(v: &TaskView) -> String {
+    let mut extras: Vec<String> = Vec::new();
+    if let Some(a) = &v.assignee {
+        extras.push(format!("assignee: {a}"));
+    }
+    if !v.after.is_empty() {
+        let deps: Vec<String> = v.after.iter().map(|d| format!("#{d}")).collect();
+        extras.push(format!("after: {}", deps.join(",")));
+    }
+    if v.attempts > 0 {
+        extras.push(format!("attempts: {}", v.attempts));
+    }
+    let extra = if extras.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", extras.join(", "))
+    };
+    format!("#{} [{}] {}{}", v.task_id, v.status, v.title, extra)
+}
+
+/// Render `task list --fleet` — the operator's morning board across every
+/// project (GH-407, acceptance 2).
+fn list_fleet(
+    repo_root: &Path,
+    assignee: Option<&str>,
+    status: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let scope = edda_store::registry::fleet_scope(repo_root);
+    let (hits, misses) = do_list_fleet(&scope, assignee, status);
+
+    if json {
+        // Deliberately a different shape from the local `[TaskView]`, for two
+        // reasons a script cannot recover from otherwise: task ids restart at 1
+        // per repo, so a flat array would silently merge unrelated tasks under
+        // one id; and a project that could not be read has to be visible as
+        // itself, or the consumer reads "nothing ready" where the truth is
+        // "never looked".
+        let projects: Vec<_> = group_by_project(&hits)
+            .into_iter()
+            .map(|(project, tasks)| serde_json::json!({ "project": project, "tasks": tasks }))
+            .collect();
+        let unavailable: Vec<_> = misses
+            .iter()
+            .map(|m| serde_json::json!({ "project": m.project, "reason": m.reason }))
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &serde_json::json!({ "projects": projects, "unavailable": unavailable })
+            )?
+        );
+        return Ok(());
+    }
+
+    let mut total = 0;
+    for (project, tasks) in group_by_project(&hits) {
+        if tasks.is_empty() {
+            continue;
+        }
+        println!("── [{project}] ──────────────────────────");
+        for v in &tasks {
+            total += 1;
+            println!("  {}", task_row(v));
+        }
+        println!();
+    }
+
+    for miss in &misses {
+        println!("  [{}] {}", miss.project, miss.reason);
+    }
+
+    if total == 0 && misses.is_empty() {
+        let filter = match (assignee, status) {
+            (Some(a), Some(s)) => format!(" (assignee: {a}, status: {s})"),
+            (Some(a), None) => format!(" (assignee: {a})"),
+            (None, Some(s)) => format!(" (status: {s})"),
+            (None, None) => String::new(),
+        };
+        println!(
+            "No tasks on the rail across {} project(s){filter}.",
+            scope.len()
+        );
+    }
+    Ok(())
+}
+
+/// Collect a fan-out's tasks back into per-project groups, preserving the order
+/// projects were visited in.
+fn group_by_project(hits: &[crate::fleet::FleetHit<TaskView>]) -> Vec<(String, Vec<&TaskView>)> {
+    let mut out: Vec<(String, Vec<&TaskView>)> = Vec::new();
+    for hit in hits {
+        match out.iter_mut().find(|(p, _)| *p == hit.project) {
+            Some((_, items)) => items.push(&hit.item),
+            None => out.push((hit.project.clone(), vec![&hit.item])),
+        }
+    }
+    out
+}
+
+/// `task list --fleet` — the same list, read from every project's own ledger
+/// (GH-407).
+///
+/// The scope is passed in rather than looked up so this stays testable against
+/// temporary workspaces: `fleet_scope` reads the global registry, which is
+/// process-wide state, and a test that had to touch it could not run beside its
+/// neighbours.
+fn do_list_fleet(
+    scope: &[edda_store::registry::ProjectEntry],
+    assignee: Option<&str>,
+    status: Option<&str>,
+) -> (
+    Vec<crate::fleet::FleetHit<TaskView>>,
+    Vec<crate::fleet::FleetMiss>,
+) {
+    crate::fleet::fan_out(scope, |entry| {
+        do_list(Path::new(&entry.path), assignee, status)
+    })
+}
+
 fn do_list(
     repo_root: &Path,
     assignee: Option<&str>,
@@ -385,7 +510,11 @@ pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
             assignee,
             status,
             json,
+            fleet,
         } => {
+            if fleet {
+                return list_fleet(repo_root, assignee.as_deref(), status.as_deref(), json);
+            }
             let views = do_list(repo_root, assignee.as_deref(), status.as_deref())?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&views)?);
@@ -397,23 +526,7 @@ pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
                 return Ok(());
             }
             for v in &views {
-                let mut extras: Vec<String> = Vec::new();
-                if let Some(a) = &v.assignee {
-                    extras.push(format!("assignee: {a}"));
-                }
-                if !v.after.is_empty() {
-                    let deps: Vec<String> = v.after.iter().map(|d| format!("#{d}")).collect();
-                    extras.push(format!("after: {}", deps.join(",")));
-                }
-                if v.attempts > 0 {
-                    extras.push(format!("attempts: {}", v.attempts));
-                }
-                let extra = if extras.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", extras.join(", "))
-                };
-                println!("#{} [{}] {}{}", v.task_id, v.status, v.title, extra);
+                println!("{}", task_row(v));
             }
             Ok(())
         }
@@ -466,6 +579,77 @@ pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fleet_entry(name: &str, path: &std::path::Path) -> edda_store::registry::ProjectEntry {
+        edda_store::registry::ProjectEntry {
+            project_id: format!("pid-{name}"),
+            path: path.to_string_lossy().into_owned(),
+            name: name.to_string(),
+            registered_at: "2026-07-16T00:00:00Z".to_string(),
+            last_seen: "2026-07-16T00:00:00Z".to_string(),
+            group: None,
+        }
+    }
+
+    /// Task ids restart at 1 in every repo, so a fleet board that did not say
+    /// where each task came from would show two unrelated "task #1" as if they
+    /// were one row of the same list. The project tag is what makes a merged
+    /// board readable at all — not decoration on top of it.
+    #[test]
+    fn fleet_list_tags_each_task_with_the_project_it_came_from() {
+        let a = temp_ws("fleet_a");
+        let b = temp_ws("fleet_b");
+        do_new(&a, &args("ship the thing", &[])).unwrap();
+        do_new(&b, &args("write the docs", &[])).unwrap();
+
+        let scope = vec![fleet_entry("edda", &a), fleet_entry("dazun", &b)];
+        let (hits, misses) = do_list_fleet(&scope, None, None);
+
+        assert!(misses.is_empty(), "both repos are live: {misses:?}");
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].project, "edda");
+        assert_eq!(hits[0].item.title, "ship the thing");
+        assert_eq!(hits[1].project, "dazun");
+        assert_eq!(hits[1].item.title, "write the docs");
+        assert_eq!(
+            hits[0].item.task_id, hits[1].item.task_id,
+            "both are task #1 in their own repo — the tag is the only thing telling them apart"
+        );
+    }
+
+    /// A filter must reach every project, not just the one being stood in.
+    #[test]
+    fn fleet_list_applies_the_status_filter_in_each_project() {
+        let a = temp_ws("fleet_ready_a");
+        let b = temp_ws("fleet_ready_b");
+        do_new(&a, &args("ready here", &[])).unwrap();
+        do_new(&b, &args("will be running", &[])).unwrap();
+        do_start(&b, 1, 3600).unwrap();
+
+        let scope = vec![fleet_entry("edda", &a), fleet_entry("dazun", &b)];
+        let (hits, _) = do_list_fleet(&scope, None, Some("ready"));
+
+        assert_eq!(hits.len(), 1, "only the un-started task is ready");
+        assert_eq!(hits[0].project, "edda");
+        assert_eq!(hits[0].item.title, "ready here");
+    }
+
+    /// A project whose ledger cannot be read is a reported miss, never a quiet
+    /// omission: "did not look" must not render as "nothing ready there".
+    #[test]
+    fn fleet_list_reports_an_unreadable_project_instead_of_dropping_it() {
+        let a = temp_ws("fleet_live");
+        do_new(&a, &args("ship the thing", &[])).unwrap();
+        let gone = std::env::temp_dir().join(format!("edda_never_here_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&gone);
+
+        let scope = vec![fleet_entry("edda", &a), fleet_entry("dazun", &gone)];
+        let (hits, misses) = do_list_fleet(&scope, None, None);
+
+        assert_eq!(hits.len(), 1, "the live repo still answers");
+        assert_eq!(misses.len(), 1, "the absent one is accounted for");
+        assert_eq!(misses[0].project, "dazun");
+    }
 
     fn temp_ws(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("edda_cmdtask_{name}_{}", std::process::id()));
