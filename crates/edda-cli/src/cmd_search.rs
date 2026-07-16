@@ -38,7 +38,7 @@ pub enum SearchCmd {
         /// Exact match (disable fuzzy)
         #[arg(long)]
         exact: bool,
-        /// Maximum results (default: 20)
+        /// Maximum results, per project when --fleet (default: 20)
         #[arg(long, default_value_t = 20)]
         limit: usize,
         /// Search every project in the fleet, not just this workspace
