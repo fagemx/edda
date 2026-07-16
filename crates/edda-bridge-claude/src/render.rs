@@ -82,6 +82,18 @@ pub fn writeback() -> String {
 
 // ── Workspace Context ──
 
+/// The Fleet section: what sibling projects ruled, and what waits there
+/// (GH-408).
+///
+/// Returns `None` for a solo project or a quiet fleet — the pack says nothing
+/// rather than heading an empty list.
+pub fn fleet(cwd: &str, budget: usize) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    crate::peers::fleet_section(Path::new(cwd), budget)
+}
+
 /// Workspace context rendered from the `.edda/` ledger in `cwd`.
 ///
 /// Returns `None` if no workspace exists at `cwd`.
