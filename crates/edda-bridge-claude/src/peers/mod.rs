@@ -223,6 +223,7 @@ mod discovery;
 mod heartbeat;
 mod helpers;
 mod render_coord;
+mod render_fleet;
 
 // Re-export public items to preserve API
 pub(crate) use autoclaim::{maybe_auto_claim, maybe_auto_claim_file, remove_autoclaim_state};
@@ -241,6 +242,7 @@ pub use helpers::format_age;
 pub(crate) use helpers::{format_peer_suffix, pending_requests_for_session};
 pub(crate) use render_coord::{render_coord_diff, render_peer_updates_with};
 pub use render_coord::{render_coordination_protocol, render_coordination_protocol_with};
+pub use render_fleet::fleet_section;
 
 #[cfg(test)]
 #[path = "tests.rs"]
