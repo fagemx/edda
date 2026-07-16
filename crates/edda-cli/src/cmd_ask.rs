@@ -50,11 +50,40 @@ pub fn execute(
 
     if json {
         println!("{}", serde_json::to_string_pretty(&result)?);
-    } else {
-        print!("{}", format_human(&result));
+        return Ok(());
     }
 
+    let body = format_human(&result);
+    if body.trim().is_empty() {
+        // Printing nothing at all was the worst form of the silent miss: it did
+        // not even claim absence, it just ended. A workspace with no decisions
+        // yet — a sibling repo, a fresh clone — is exactly where the fleet's
+        // answer lives, and exactly where the old behaviour said least.
+        println!("No results for: {q}");
+        if let Some(hint) = fleet_hint_for_ask(repo_root, q, &opts) {
+            println!("{hint}");
+        }
+        return Ok(());
+    }
+    print!("{body}");
+
     Ok(())
+}
+
+/// Ask the rest of the fleet whether a local miss is really absence (GH-407,
+/// acceptance 4).
+fn fleet_hint_for_ask(repo_root: &Path, q: &str, opts: &AskOptions) -> Option<String> {
+    if q.trim().is_empty() {
+        return None; // no question was asked; there is nothing to look for elsewhere
+    }
+    let scope = edda_store::registry::fleet_scope(repo_root);
+    let home = edda_store::project_id(repo_root);
+    crate::fleet::elsewhere_hint(&scope, &home, "result", |entry| {
+        let root = Path::new(&entry.path);
+        let ledger = Ledger::open(root)?;
+        let result = ask(&ledger, q, opts, None)?;
+        Ok(result.decisions.len() + result.timeline.len())
+    })
 }
 
 /// `edda ask --fleet` — the same question, asked of every project in scope.

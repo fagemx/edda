@@ -195,6 +195,38 @@ fn query_fleet(
     Ok(())
 }
 
+/// Ask the rest of the fleet whether a local miss is really absence (GH-407,
+/// acceptance 4).
+///
+/// Never builds an index to answer this: a project without one reports that it
+/// could not be checked, which is true and costs nothing, whereas a ~25s build
+/// (GH-403) triggered by someone else's miss would be a trap.
+fn fleet_hint_for_query(
+    repo_root: &Path,
+    project_id: &str,
+    query_str: &str,
+    opts: &search::SearchOptions<'_>,
+    limit: usize,
+) -> Option<String> {
+    let scope = edda_store::registry::fleet_scope(repo_root);
+    crate::fleet::elsewhere_hint(&scope, project_id, "result", |entry| {
+        let index_dir = project_dir(&entry.project_id)
+            .join("search")
+            .join("tantivy");
+        if !index_dir.exists() || schema::index_is_outdated(&index_dir) {
+            anyhow::bail!("no usable index");
+        }
+        let Some(index) = schema::open_index(&index_dir) else {
+            anyhow::bail!("index could not be opened");
+        };
+        let per_project = search::SearchOptions {
+            project_id: Some(&entry.project_id),
+            ..*opts
+        };
+        Ok(search::search(&index, query_str, &per_project, limit)?.len())
+    })
+}
+
 /// Execute `edda search <query>` — full-text search over the Tantivy index.
 #[allow(clippy::too_many_arguments)]
 pub fn query(
@@ -266,6 +298,9 @@ pub fn query(
 
     if results.is_empty() {
         println!("No results found for: {query_str}");
+        if let Some(hint) = fleet_hint_for_query(repo_root, project_id, query_str, &opts, limit) {
+            println!("{hint}");
+        }
         print_watermark(repo_root, &proj_dir, project_id);
         return Ok(());
     }

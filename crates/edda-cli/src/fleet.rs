@@ -126,6 +126,68 @@ pub fn empty_summary(what: &str, tail: &str, scope_len: usize, misses: &[FleetMi
     }
 }
 
+/// Ask the rest of the fleet before a local read reports absence (GH-407,
+/// acceptance 4).
+///
+/// This is the point of the issue rather than a flourish on it. Every read verb
+/// sees one workspace, so `No results` has always meant "not in this repo" while
+/// reading as "nowhere" — and the knowledge is genuinely split across repos, so
+/// the reading is routinely wrong. A bare miss may only stay bare once the fleet
+/// has been asked and had nothing to add.
+///
+/// Returns `None` in exactly that case: the caller's own message is then true,
+/// and the hint exists to correct a lie, not to decorate a fact.
+///
+/// The home project is skipped — it is the one that just missed, and probing it
+/// again would report its own silence back as news. A project that cannot be
+/// probed is named rather than counted as empty, for the same reason its
+/// `--fleet` miss is: not looking is not the same as finding nothing.
+///
+/// The scope is injected rather than looked up so this stays testable without
+/// the global registry, which is process-wide state.
+pub fn elsewhere_hint<F>(
+    scope: &[ProjectEntry],
+    home_project_id: &str,
+    what: &str,
+    count_in: F,
+) -> Option<String>
+where
+    F: Fn(&ProjectEntry) -> anyhow::Result<usize>,
+{
+    let mut found: Vec<String> = Vec::new();
+    let mut unchecked: Vec<String> = Vec::new();
+
+    for entry in scope {
+        if entry.project_id == home_project_id {
+            continue;
+        }
+        if !Path::new(&entry.path).join(".edda").is_dir() {
+            continue; // absent repos are not news on a local miss
+        }
+        match count_in(entry) {
+            Ok(0) => {}
+            Ok(n) => found.push(format!("{n} {what}(s) in [{}]", entry.name)),
+            Err(_) => unchecked.push(format!("[{}]", entry.name)),
+        }
+    }
+
+    if found.is_empty() && unchecked.is_empty() {
+        return None;
+    }
+
+    let mut parts = String::new();
+    if !found.is_empty() {
+        parts.push_str(&found.join(", "));
+    }
+    if !unchecked.is_empty() {
+        if !parts.is_empty() {
+            parts.push_str("; ");
+        }
+        parts.push_str(&format!("{} could not be checked", unchecked.join(", ")));
+    }
+    Some(format!("  {parts} — rerun with --fleet"))
+}
+
 /// The `--json` body of a fleet read: what answered, and what did not.
 ///
 /// The keys live here rather than at each call site because they are the part
@@ -273,6 +335,109 @@ mod tests {
         assert_eq!(grouped[0].1, vec![&"a", &"c"], "non-adjacent hits regroup");
         assert_eq!(grouped[1].0, "dazun");
         assert_eq!(grouped[1].1, vec![&"b"]);
+    }
+
+    /// The point of the whole issue: a workspace that found nothing must not
+    /// imply the fleet found nothing. Without this, "not here" and "nowhere"
+    /// are the same sentence.
+    #[test]
+    fn a_local_miss_names_the_projects_that_do_have_hits() {
+        let (a, b, c) = (live_repo(), live_repo(), live_repo());
+        let scope = vec![
+            entry("edda", &a.path().to_string_lossy()),
+            entry("foundry", &b.path().to_string_lossy()),
+            entry("dazun", &c.path().to_string_lossy()),
+        ];
+
+        let hint = elsewhere_hint(&scope, "pid-edda", "result", |e| {
+            Ok(match e.name.as_str() {
+                "foundry" => 3,
+                _ => 1,
+            })
+        })
+        .expect("hits elsewhere must be reported");
+
+        assert!(hint.contains("3 result(s) in [foundry]"), "{hint}");
+        assert!(hint.contains("1 result(s) in [dazun]"), "{hint}");
+        assert!(hint.contains("--fleet"), "must say how to see them: {hint}");
+    }
+
+    /// The home project is the one that just missed. Probing it again would
+    /// report its own silence back as news.
+    #[test]
+    fn the_workspace_that_already_missed_is_not_probed_again() {
+        let (a, b) = (live_repo(), live_repo());
+        let scope = vec![
+            entry("edda", &a.path().to_string_lossy()),
+            entry("foundry", &b.path().to_string_lossy()),
+        ];
+
+        let hint = elsewhere_hint(&scope, "pid-edda", "result", |e| {
+            assert_ne!(e.name, "edda", "the home project must not be re-asked");
+            Ok(2)
+        })
+        .expect("foundry has hits");
+
+        assert!(hint.contains("[foundry]"), "{hint}");
+        assert!(!hint.contains("[edda]"), "{hint}");
+    }
+
+    /// When the fleet really is empty, the bare message is true and must stay
+    /// bare — the hint corrects a lie, it does not decorate a fact.
+    #[test]
+    fn nothing_is_added_when_the_fleet_has_nothing_either() {
+        let (a, b) = (live_repo(), live_repo());
+        let scope = vec![
+            entry("edda", &a.path().to_string_lossy()),
+            entry("foundry", &b.path().to_string_lossy()),
+        ];
+
+        assert_eq!(
+            elsewhere_hint(&scope, "pid-edda", "result", |_| Ok(0)),
+            None
+        );
+    }
+
+    /// A project that exists but could not answer is not evidence of absence.
+    #[test]
+    fn a_project_that_could_not_be_probed_is_said_so_not_counted_as_empty() {
+        let (a, b) = (live_repo(), live_repo());
+        let scope = vec![
+            entry("edda", &a.path().to_string_lossy()),
+            entry("foundry", &b.path().to_string_lossy()),
+        ];
+
+        let hint = elsewhere_hint(&scope, "pid-edda", "result", |_| {
+            anyhow::bail!("index not built")
+        })
+        .expect("an unprobed project must not render as an empty one");
+
+        assert!(hint.contains("[foundry]"), "{hint}");
+        assert!(hint.contains("could not be checked"), "{hint}");
+    }
+
+    /// A repo that is not on this machine cannot be probed and is not news: the
+    /// operator knows what they have checked out, `--fleet` reports it anyway,
+    /// and "rerun with --fleet" would not make it appear. Silence here is the
+    /// one case that is not a lie.
+    #[test]
+    fn a_repo_absent_from_this_machine_is_left_out_of_the_hint() {
+        let a = live_repo();
+        let gone = live_repo();
+        let gone_path = gone.path().to_string_lossy().into_owned();
+        drop(gone);
+
+        let scope = vec![
+            entry("edda", &a.path().to_string_lossy()),
+            entry("dazun", &gone_path),
+        ];
+
+        assert_eq!(
+            elsewhere_hint(&scope, "pid-edda", "result", |_| panic!(
+                "an absent repo must not be probed"
+            )),
+            None
+        );
     }
 
     /// The line that had it backwards. A fleet read that found nothing must
