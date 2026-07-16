@@ -35,9 +35,13 @@ impl IndexLock {
 }
 
 /// On-disk index schema version (GH-402). Bump whenever the tokenizer or field
-/// layout changes so a stale index is rebuilt rather than mixing tokenizations.
+/// layout changes so a stale index is rebuilt rather than mixing tokenizations
+/// — and also when *what text a document indexes* changes, since already-indexed
+/// documents keep their old body until a rebuild.
 /// v2: CJK bigram tokenizer on all full-text fields.
-pub const INDEX_VERSION: u32 = 2;
+/// v3: task.* events index their receipt/reason/title/brief instead of nothing
+///     (GH-404) — existing indexes hold empty task bodies until this rebuilds.
+pub const INDEX_VERSION: u32 = 3;
 
 fn version_file(index_dir: &Path) -> std::path::PathBuf {
     index_dir.join("edda_schema_version")
