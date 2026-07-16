@@ -166,6 +166,32 @@ pub fn list_group_members(repo_root: &Path) -> Vec<ProjectEntry> {
         .collect()
 }
 
+/// The projects a fleet read covers (GH-407): the cwd project's group when it
+/// has one, otherwise every registered project.
+///
+/// Differs from [`list_group_members`] in two ways that matter to a reader:
+///
+/// - **Home is included.** A fleet read reports its own workspace's hits tagged
+///   like any other; excluding it would silently omit the one repo the user is
+///   actually standing in.
+/// - **Absent repos are kept.** A project whose path is no longer on this
+///   machine stays in scope so the caller can say so per-project. Filtering it
+///   here would make the fan-out quietly incomplete, which is the same
+///   silent-omission failure the fleet read exists to remove.
+pub fn fleet_scope(repo_root: &Path) -> Vec<ProjectEntry> {
+    let pid = project_id(repo_root);
+    let reg = load_registry();
+    let group = reg.projects.get(&pid).and_then(|e| e.group.clone());
+    match group {
+        Some(g) => reg
+            .projects
+            .into_values()
+            .filter(|e| e.group.as_deref() == Some(g.as_str()))
+            .collect(),
+        None => reg.projects.into_values().collect(),
+    }
+}
+
 /// List all groups and their member projects.
 pub fn list_groups() -> std::collections::BTreeMap<String, Vec<ProjectEntry>> {
     let reg = load_registry();
@@ -298,6 +324,79 @@ mod tests {
             std::fs::create_dir_all(tmp3.path().join(".edda")).unwrap();
             register_project(tmp3.path()).unwrap();
             assert!(list_group_members(tmp3.path()).is_empty());
+        });
+    }
+
+    /// GH-407: what a `--fleet` read covers.
+    #[test]
+    fn fleet_scope_is_every_project_when_no_group_and_includes_home() {
+        with_isolated_store(|| {
+            let home = tempfile::tempdir().unwrap();
+            let other = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(home.path().join(".edda")).unwrap();
+            std::fs::create_dir_all(other.path().join(".edda")).unwrap();
+            register_project(home.path()).unwrap();
+            register_project(other.path()).unwrap();
+
+            let scope = fleet_scope(home.path());
+
+            // Home is included, unlike list_group_members: a fleet read reports
+            // its own hits tagged like anyone else's, or the output silently
+            // omits the workspace the user is standing in.
+            assert_eq!(scope.len(), 2, "no group = the whole registry");
+            assert!(scope
+                .iter()
+                .any(|e| e.project_id == project_id(home.path())));
+        });
+    }
+
+    #[test]
+    fn fleet_scope_narrows_to_the_group_when_one_is_set() {
+        with_isolated_store(|| {
+            let home = tempfile::tempdir().unwrap();
+            let peer = tempfile::tempdir().unwrap();
+            let outsider = tempfile::tempdir().unwrap();
+            for d in [&home, &peer, &outsider] {
+                std::fs::create_dir_all(d.path().join(".edda")).unwrap();
+                register_project(d.path()).unwrap();
+            }
+            set_project_group(home.path(), Some("fleet")).unwrap();
+            set_project_group(peer.path(), Some("fleet")).unwrap();
+
+            let scope = fleet_scope(home.path());
+
+            assert_eq!(scope.len(), 2, "the group, home included");
+            assert!(
+                !scope
+                    .iter()
+                    .any(|e| e.project_id == project_id(outsider.path())),
+                "a project outside the group is not in scope"
+            );
+        });
+    }
+
+    /// A repo that is not on this machine must reach the caller so it can be
+    /// reported per-project. Dropping it here would make the fan-out silently
+    /// incomplete — the same failure mode GH-407 exists to remove.
+    #[test]
+    fn fleet_scope_keeps_projects_whose_repo_is_gone() {
+        with_isolated_store(|| {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(home.path().join(".edda")).unwrap();
+            register_project(home.path()).unwrap();
+
+            let gone = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(gone.path().join(".edda")).unwrap();
+            register_project(gone.path()).unwrap();
+            let gone_pid = project_id(gone.path());
+            drop(gone); // the repo disappears from this machine
+
+            let scope = fleet_scope(home.path());
+
+            assert!(
+                scope.iter().any(|e| e.project_id == gone_pid),
+                "an absent repo must be visible to the caller, not filtered away"
+            );
         });
     }
 
