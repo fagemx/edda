@@ -105,6 +105,60 @@ fn extract_event_title_body(event: &edda_core::Event) -> (String, String) {
         return (title.to_string(), body.to_string());
     }
 
+    // task_intake: a task ingested from an external source — a GitHub issue,
+    // via `edda intake`. Named with an underscore, so it is *not* part of the
+    // `task.` family below and needs its own arm; miss it and the issue a task
+    // came from — its title and intent, the richest text any task event carries
+    // — is unsearchable (GH-404).
+    if event.event_type == "task_intake" {
+        let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let arr = |k: &str| {
+            payload
+                .get(k)
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default()
+        };
+        let body = format!("{} {} {}", s("intent"), arr("labels"), arr("constraints"));
+        return (s("title").to_string(), body.trim().to_string());
+    }
+
+    // Task events: the searchable payload is the receipt / reason / title, and
+    // none of it lives in a `text` field — so without this branch every task
+    // event indexed empty and the receipt (the fleet's record of what shipped)
+    // was unreachable via search (GH-404).
+    if let Some(kind) = event.event_type.strip_prefix("task.") {
+        let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let id_tag = payload
+            .get("task_id")
+            .and_then(|v| v.as_u64())
+            .map(|n| format!(" #{n}"))
+            .unwrap_or_default();
+        let (title, body) = match kind {
+            "done" => {
+                let mut body = s("receipt").to_string();
+                // Evidence paths are part of "verified how" — the artifacts a
+                // reader may search by ("which task produced dist/foo").
+                if let Some(ev) = payload.get("evidence_paths").and_then(|v| v.as_array()) {
+                    for p in ev.iter().filter_map(|x| x.as_str()) {
+                        body.push(' ');
+                        body.push_str(p);
+                    }
+                }
+                (format!("task{id_tag} done"), body)
+            }
+            "failed" => (format!("task{id_tag} failed"), s("reason").to_string()),
+            "created" => (s("title").to_string(), s("brief_ref").to_string()),
+            _ => (format!("task{id_tag} {kind}"), String::new()),
+        };
+        return (title, body);
+    }
+
     // Generic: title empty, body = text field
     let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
     (String::new(), text.to_string())
@@ -1059,6 +1113,95 @@ mod tests {
             event_family: None,
             event_level: None,
         }
+    }
+
+    /// A task's searchable text — the receipt for `done`, the reason for
+    /// `failed`, the title and brief for `created` — must reach the indexed
+    /// body. It was being dropped: none of these events carries a `text` field,
+    /// so the generic branch indexed them empty, and `search query "<a receipt
+    /// token>"` found nothing. The receipt is the fleet's answer to "what
+    /// shipped, verified how" (GH-404).
+    #[test]
+    fn task_events_expose_their_text_to_the_index() {
+        let done = edda_core::event::new_task_done_event(
+            "main",
+            None,
+            3,
+            "ENV_LOCK guard added; 110/601 green",
+            &[],
+        )
+        .unwrap();
+        let (t, b) = extract_event_title_body(&done);
+        assert!(
+            format!("{t} {b}").contains("ENV_LOCK"),
+            "task.done receipt must be indexed, got title={t:?} body={b:?}"
+        );
+
+        let failed = edda_core::event::new_task_failed_event(
+            "main",
+            None,
+            4,
+            "flaky under windows contention",
+        )
+        .unwrap();
+        let (t, b) = extract_event_title_body(&failed);
+        assert!(
+            format!("{t} {b}").contains("flaky under windows"),
+            "task.failed reason must be indexed, got {t:?} {b:?}"
+        );
+
+        let created =
+            edda_core::event::new_task_created_event(&edda_core::event::TaskCreatedParams {
+                branch: "main",
+                parent_hash: None,
+                task_id: 5,
+                title: "wire the retrieval snippets",
+                assignee: None,
+                agent_kind: None,
+                after: &[],
+                plan_id: None,
+                work_unit_ref: None,
+                brief_ref: Some("docs/plan/x.md"),
+                idempotency_key: None,
+            })
+            .unwrap();
+        let (t, b) = extract_event_title_body(&created);
+        let joined = format!("{t} {b}");
+        assert!(
+            joined.contains("retrieval snippets"),
+            "task.created title must be indexed: {joined:?}"
+        );
+        assert!(
+            joined.contains("docs/plan/x.md"),
+            "task.created brief_ref must be indexed: {joined:?}"
+        );
+
+        // task_intake is named with an underscore, not a dot, so a `task.`
+        // prefix check silently skips it — yet it carries the richest text of
+        // any task event (a GitHub issue's title and intent). It must index too.
+        let intake = edda_core::event::new_task_intake_event(&edda_core::event::TaskIntakeParams {
+            branch: "main".to_string(),
+            parent_hash: None,
+            source: "github".to_string(),
+            source_id: "404".to_string(),
+            source_url: "https://example/issues/404".to_string(),
+            title: "retrieval coverage and UX".to_string(),
+            intent: "make task receipts searchable".to_string(),
+            labels: vec!["P1".to_string()],
+            priority: "high".to_string(),
+            constraints: vec!["no scoring engine".to_string()],
+        })
+        .unwrap();
+        let (t, b) = extract_event_title_body(&intake);
+        let joined = format!("{t} {b}");
+        assert!(
+            joined.contains("retrieval coverage"),
+            "task_intake title must be indexed: {joined:?}"
+        );
+        assert!(
+            joined.contains("make task receipts searchable"),
+            "task_intake intent must be indexed: {joined:?}"
+        );
     }
 
     #[test]
