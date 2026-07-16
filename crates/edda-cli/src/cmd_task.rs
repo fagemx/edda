@@ -355,7 +355,7 @@ fn list_fleet(
 
     crate::fleet::print_misses(&misses);
 
-    if total == 0 && misses.is_empty() {
+    if total == 0 {
         let filter = match (assignee, status) {
             (Some(a), Some(s)) => format!(" (assignee: {a}, status: {s})"),
             (Some(a), None) => format!(" (assignee: {a})"),
@@ -363,8 +363,8 @@ fn list_fleet(
             (None, None) => String::new(),
         };
         println!(
-            "No tasks on the rail across {} project(s){filter}.",
-            scope.len()
+            "{}.",
+            crate::fleet::empty_summary("tasks on the rail", &filter, scope.len(), &misses)
         );
     }
     Ok(())

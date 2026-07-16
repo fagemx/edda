@@ -99,6 +99,33 @@ pub fn print_misses(misses: &[FleetMiss]) {
     }
 }
 
+/// The line a fleet read prints when it found nothing.
+///
+/// It exists because the obvious guard — `if empty && misses.is_empty()` — has
+/// the logic backwards, and all three verbs shipped with it. Suppressing the
+/// summary when something failed removes the sentence precisely when the reader
+/// most needs it: with a miss printed and no summary, "the other projects had
+/// nothing" and "the other projects were never looked at" produce identical
+/// output, which is the silence this whole verb exists to break.
+///
+/// So the count is never `scope.len()`. It is what actually answered, and the
+/// shortfall is stated rather than left for the reader to subtract.
+///
+/// `what` names the thing not found ("results", "tasks on the rail"); `tail`
+/// carries the caller's qualifier (" for: {query}") and is placed before the
+/// shortfall clause so the sentence still reads in order.
+pub fn empty_summary(what: &str, tail: &str, scope_len: usize, misses: &[FleetMiss]) -> String {
+    let answered = scope_len.saturating_sub(misses.len());
+    if misses.is_empty() {
+        format!("No {what} across {answered} project(s){tail}")
+    } else {
+        format!(
+            "No {what} in the {answered} project(s) that answered{tail}; {} could not be read (above)",
+            misses.len()
+        )
+    }
+}
+
 /// The `--json` body of a fleet read: what answered, and what did not.
 ///
 /// The keys live here rather than at each call site because they are the part
@@ -246,6 +273,35 @@ mod tests {
         assert_eq!(grouped[0].1, vec![&"a", &"c"], "non-adjacent hits regroup");
         assert_eq!(grouped[1].0, "dazun");
         assert_eq!(grouped[1].1, vec![&"b"]);
+    }
+
+    /// The line that had it backwards. A fleet read that found nothing must
+    /// say what it *did* cover, and it may never count a project it never
+    /// reached — otherwise "nothing there" and "did not look" render the same,
+    /// which is the failure the whole verb exists to remove.
+    #[test]
+    fn an_empty_fleet_read_never_counts_projects_it_could_not_reach() {
+        let plain = empty_summary("results", " for: q", 4, &[]);
+        assert_eq!(plain, "No results across 4 project(s) for: q");
+
+        let misses = vec![FleetMiss {
+            project: "yushan".to_string(),
+            reason: "index not built".to_string(),
+        }];
+        let partial = empty_summary("results", " for: q", 4, &misses);
+
+        assert!(
+            partial.contains("3 project(s) that answered"),
+            "must report the 3 it actually covered: {partial}"
+        );
+        assert!(
+            !partial.contains("across 4"),
+            "must not claim all 4 were covered when 1 never answered: {partial}"
+        );
+        assert!(
+            partial.contains("1 could not be read"),
+            "the shortfall must be accounted for, not implied: {partial}"
+        );
     }
 
     /// Pins the key names themselves. They are the whole point of the helper —

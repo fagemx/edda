@@ -108,8 +108,11 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
     // look", which is the failure this whole verb exists to remove.
     crate::fleet::print_misses(&misses);
 
-    if answered == 0 && misses.is_empty() {
-        println!("No results across {} project(s) for: {q}", scope.len());
+    if answered == 0 {
+        println!(
+            "{}",
+            crate::fleet::empty_summary("results", &format!(" for: {q}"), scope.len(), &misses)
+        );
     }
 
     Ok(())

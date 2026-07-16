@@ -180,10 +180,15 @@ fn query_fleet(
     // render as "nothing there".
     crate::fleet::print_misses(&misses);
 
-    if total == 0 && misses.is_empty() {
+    if total == 0 {
         println!(
-            "No results across {} project(s) for: {query_str}",
-            scope.len()
+            "{}",
+            crate::fleet::empty_summary(
+                "results",
+                &format!(" for: {query_str}"),
+                scope.len(),
+                &misses
+            )
         );
     }
 
