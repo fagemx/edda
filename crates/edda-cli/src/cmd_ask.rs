@@ -78,6 +78,7 @@ fn hit_count(r: &edda_ask::AskResult) -> usize {
         + r.related_commits.len()
         + r.related_notes.len()
         + r.conversations.len()
+        + r.tasks.len()
         + r.dependents.len()
 }
 
@@ -243,6 +244,7 @@ mod tests {
             related_commits: Vec::new(),
             related_notes: Vec::new(),
             conversations: Vec::new(),
+            tasks: Vec::new(),
             dependents: Vec::new(),
             override_risk: None,
         };
@@ -279,6 +281,7 @@ mod tests {
             related_commits: Vec::new(),
             related_notes: Vec::new(),
             conversations: Vec::new(),
+            tasks: Vec::new(),
             dependents: Vec::new(),
             override_risk: None,
         };

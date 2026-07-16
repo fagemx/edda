@@ -57,10 +57,27 @@ pub struct AskResult {
     pub related_commits: Vec<CommitHit>,
     pub related_notes: Vec<NoteHit>,
     pub conversations: Vec<ConversationHit>,
+    /// Tasks whose title/receipt/reason match the query — the rail's answer to
+    /// "what shipped about X, verified how" (GH-404).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tasks: Vec<TaskHit>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub dependents: Vec<DependentHit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_risk: Option<OverrideRisk>,
+}
+
+/// A task matched by `ask`. The receipt is the point — it is where a finished
+/// task records what it did and how it was verified.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskHit {
+    pub task_id: u64,
+    pub title: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub evidence_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -354,6 +371,43 @@ pub fn ask(
         _ => vec![],
     };
 
+    // Tasks whose text matches the query. What a reader is after is "what
+    // shipped about X, verified how", so a task matches when the query appears
+    // in its title, receipt, or failure reason — the receipt being the point.
+    // Newest first, since a rail answer is usually a recent one (GH-404).
+    //
+    // Deliberately not branch-filtered, unlike decisions above: the task rail is
+    // a workspace-global queue, not a per-branch record, so `--branch` narrowing
+    // the decisions but not the tasks is the intended asymmetry.
+    let tasks: Vec<TaskHit> = if q.is_empty() {
+        vec![]
+    } else {
+        let needle = q.to_lowercase();
+        let mut views = ledger.task_views()?;
+        views.sort_by_key(|t| std::cmp::Reverse(t.task_id)); // newest first
+        views
+            .into_iter()
+            .filter(|t| {
+                let hay = format!(
+                    "{} {} {}",
+                    t.title,
+                    t.receipt.as_deref().unwrap_or(""),
+                    t.failure_reason.as_deref().unwrap_or("")
+                )
+                .to_lowercase();
+                hay.contains(&needle)
+            })
+            .take(opts.limit)
+            .map(|t| TaskHit {
+                task_id: t.task_id,
+                title: t.title,
+                status: t.status.to_string(),
+                receipt: t.receipt,
+                evidence_paths: t.evidence_paths,
+            })
+            .collect()
+    };
+
     let input_type_str = match &input_type {
         InputType::ExactKey(_) => "exact_key",
         InputType::Domain(_) => "domain",
@@ -380,6 +434,7 @@ pub fn ask(
         related_commits,
         related_notes,
         conversations,
+        tasks,
         dependents,
         override_risk,
     })
@@ -788,6 +843,25 @@ pub fn format_human(result: &AskResult) -> String {
         }
     }
 
+    if !result.tasks.is_empty() {
+        out.push_str("── Tasks ──────────────────────────────\n");
+        for t in &result.tasks {
+            out.push_str(&format!("  #{} [{}] {}\n", t.task_id, t.status, t.title));
+            if let Some(r) = &t.receipt {
+                let excerpt = if r.len() > 120 {
+                    format!("{}...", &r[..r.floor_char_boundary(117)])
+                } else {
+                    r.clone()
+                };
+                out.push_str(&format!("     receipt: {excerpt}\n"));
+            }
+            if !t.evidence_paths.is_empty() {
+                out.push_str(&format!("     evidence: {}\n", t.evidence_paths.join(", ")));
+            }
+            out.push('\n');
+        }
+    }
+
     if !result.dependents.is_empty() {
         out.push_str("── Dependents ─────────────────────────\n");
         for d in &result.dependents {
@@ -911,6 +985,85 @@ mod tests {
         init_branches_json(&paths, "main").unwrap();
         let ledger = TestLedger(Ledger::open(&tmp).unwrap());
         (tmp, ledger)
+    }
+
+    /// A finished task's receipt is the fleet's answer to "what shipped about X,
+    /// verified how" — and before GH-404 `ask` had no Tasks section at all, so
+    /// it never surfaced. Matching on the receipt is the point: that is where
+    /// the verification lives.
+    #[test]
+    fn ask_surfaces_a_task_whose_receipt_matches_the_query() {
+        let (_tmp, ledger) = setup();
+
+        let created =
+            edda_core::event::new_task_created_event(&edda_core::event::TaskCreatedParams {
+                branch: "main",
+                parent_hash: None,
+                task_id: 7,
+                title: "run the onboarding drill",
+                assignee: None,
+                agent_kind: None,
+                after: &[],
+                plan_id: None,
+                work_unit_ref: None,
+                brief_ref: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        ledger.append_event(&created).unwrap();
+        let done = edda_core::event::new_task_done_event(
+            "main",
+            None,
+            7,
+            "drill passed: 9/9 green, artifact in dist/drill.json",
+            &["dist/drill.json".to_string()],
+        )
+        .unwrap();
+        ledger.append_event(&done).unwrap();
+
+        // A second task that does NOT mention "drill". Without it, the test
+        // could not tell a working filter from one that returns every task —
+        // with a single task, "the match is present" and "everything is
+        // present" are the same assertion.
+        let other =
+            edda_core::event::new_task_created_event(&edda_core::event::TaskCreatedParams {
+                branch: "main",
+                parent_hash: None,
+                task_id: 8,
+                title: "write the changelog",
+                assignee: None,
+                agent_kind: None,
+                after: &[],
+                plan_id: None,
+                work_unit_ref: None,
+                brief_ref: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        ledger.append_event(&other).unwrap();
+
+        let opts = AskOptions {
+            limit: 10,
+            ..Default::default()
+        };
+        let result = ask(&ledger, "drill", &opts, None).unwrap();
+
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "only the drill task matches — the changelog task must be filtered out: {:?}",
+            result.tasks
+        );
+        let hit = &result.tasks[0];
+        assert_eq!(hit.task_id, 7);
+        assert!(hit.title.contains("drill"), "title: {}", hit.title);
+        assert_eq!(hit.status, "done");
+        assert!(
+            hit.receipt.as_deref().unwrap_or("").contains("9/9 green"),
+            "the receipt is the point: {:?}",
+            hit.receipt
+        );
+        assert_eq!(hit.evidence_paths, vec!["dist/drill.json".to_string()]);
     }
 
     fn make_decision(
@@ -1299,6 +1452,7 @@ mod tests {
             }],
             related_notes: vec![],
             conversations: vec![],
+            tasks: vec![],
             dependents: vec![],
             override_risk: None,
         };
@@ -1357,6 +1511,7 @@ mod tests {
                 branch: "main".into(),
             }],
             conversations: vec![],
+            tasks: vec![],
             dependents: vec![],
             override_risk: None,
         };
@@ -1380,6 +1535,7 @@ mod tests {
             related_commits: vec![],
             related_notes: vec![],
             conversations: vec![],
+            tasks: vec![],
             dependents: vec![],
             override_risk: None,
         };
@@ -1688,6 +1844,7 @@ mod tests {
             related_commits: vec![],
             related_notes: vec![],
             conversations: vec![],
+            tasks: vec![],
             dependents: vec![
                 DependentHit {
                     key: "db.schema".into(),
