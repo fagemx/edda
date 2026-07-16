@@ -67,6 +67,11 @@ pub fn execute(params: &LogParams<'_>) -> anyhow::Result<()> {
 
     if matched.is_empty() {
         println!("No events match the filter.");
+        if !params.json {
+            if let Some(hint) = fleet_hint_for_filter(params) {
+                println!("{hint}");
+            }
+        }
         return Ok(());
     }
 
@@ -82,6 +87,20 @@ pub fn execute(params: &LogParams<'_>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Ask the rest of the fleet whether a local miss is really absence (GH-407,
+/// acceptance 4).
+fn fleet_hint_for_filter(params: &LogParams<'_>) -> Option<String> {
+    let scope = edda_store::registry::fleet_scope(params.repo_root);
+    let home = edda_store::project_id(params.repo_root);
+    crate::fleet::elsewhere_hint(&scope, &home, "event", |entry| {
+        Ok(collect_matching(&LogParams {
+            repo_root: Path::new(&entry.path),
+            ..*params
+        })?
+        .len())
+    })
 }
 
 /// `edda log --fleet` — the same log, read from every project's own ledger

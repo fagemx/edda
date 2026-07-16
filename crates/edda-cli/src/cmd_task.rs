@@ -313,6 +313,20 @@ fn task_row(v: &TaskView) -> String {
     format!("#{} [{}] {}{}", v.task_id, v.status, v.title, extra)
 }
 
+/// Ask the rest of the fleet whether an empty local rail is really an empty
+/// rail (GH-407, acceptance 4).
+fn fleet_hint_for_list(
+    repo_root: &Path,
+    assignee: Option<&str>,
+    status: Option<&str>,
+) -> Option<String> {
+    let scope = edda_store::registry::fleet_scope(repo_root);
+    let home = edda_store::project_id(repo_root);
+    crate::fleet::elsewhere_hint(&scope, &home, "task", |entry| {
+        Ok(do_list(Path::new(&entry.path), assignee, status)?.len())
+    })
+}
+
 /// Render `task list --fleet` — the operator's morning board across every
 /// project (GH-407, acceptance 2).
 fn list_fleet(
@@ -499,6 +513,11 @@ pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
             }
             if views.is_empty() {
                 println!("No tasks on the rail.");
+                if let Some(hint) =
+                    fleet_hint_for_list(repo_root, assignee.as_deref(), status.as_deref())
+                {
+                    println!("{hint}");
+                }
                 println!("Create one: edda task new \"title\" --assignee <label>");
                 return Ok(());
             }
