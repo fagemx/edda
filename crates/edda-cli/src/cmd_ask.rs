@@ -53,19 +53,15 @@ pub fn execute(
         return Ok(());
     }
 
-    let body = format_human(&result);
-    if body.trim().is_empty() {
-        // Printing nothing at all was the worst form of the silent miss: it did
-        // not even claim absence, it just ended. A workspace with no decisions
-        // yet — a sibling repo, a fresh clone — is exactly where the fleet's
-        // answer lives, and exactly where the old behaviour said least.
-        println!("No results for: {q}");
+    // Emptiness is counted, not detected from the rendering: `format_human`
+    // prints its own "No results found." for an empty result, so asking whether
+    // the render is blank is a question that is never answered yes.
+    print!("{}", format_human(&result));
+    if hit_count(&result) == 0 {
         if let Some(hint) = fleet_hint_for_ask(repo_root, q, &opts) {
             println!("{hint}");
         }
-        return Ok(());
     }
-    print!("{body}");
 
     Ok(())
 }
@@ -141,15 +137,18 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
         return Ok(());
     }
 
+    // Counted, not detected from the rendering: `format_human` prints its own
+    // "No results found." for an empty result, so a blank-body test never fires
+    // and every project — including the silent ones — got a section header and a
+    // line saying it had nothing.
     let mut answered = 0;
     for hit in &hits {
-        let body = format_human(&hit.item);
-        if body.trim().is_empty() {
+        if hit_count(&hit.item) == 0 {
             continue;
         }
         answered += 1;
         println!("── [{}] ──────────────────────────", hit.project);
-        print!("{body}");
+        print!("{}", format_human(&hit.item));
     }
 
     // Misses are printed as results, not swallowed: a fleet read that quietly
@@ -259,6 +258,36 @@ mod tests {
             hit_count(&r),
             1,
             "a note-only hit must not probe as absence"
+        );
+    }
+
+    /// The contract three branches were built on, and none of them checked.
+    ///
+    /// `format_human` prints its own "No results found." for an empty result, so
+    /// `body.trim().is_empty()` is a question that is never answered yes. That
+    /// one wrong assumption shipped three dead branches across three PRs — the
+    /// local hint, `--fleet`'s empty-project skip, and `--fleet`'s empty summary
+    /// — each of which read correctly and never ran. Emptiness is counted here,
+    /// never inferred from the rendering.
+    #[test]
+    fn an_empty_result_still_renders_text_so_emptiness_must_be_counted() {
+        let empty = edda_ask::AskResult {
+            query: "q".to_string(),
+            input_type: "keyword".to_string(),
+            decisions: Vec::new(),
+            timeline: Vec::new(),
+            related_commits: Vec::new(),
+            related_notes: Vec::new(),
+            conversations: Vec::new(),
+            dependents: Vec::new(),
+            override_risk: None,
+        };
+
+        assert_eq!(hit_count(&empty), 0, "nothing was found");
+        assert!(
+            !format_human(&empty).trim().is_empty(),
+            "the render is NOT blank — it says 'No results found.' — so any \
+             branch gated on a blank body is dead code"
         );
     }
 }
