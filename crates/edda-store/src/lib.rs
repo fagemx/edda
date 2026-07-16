@@ -1,3 +1,4 @@
+pub mod fleet;
 pub mod registry;
 pub mod skill_registry;
 pub mod user_config;
