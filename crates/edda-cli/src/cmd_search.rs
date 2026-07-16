@@ -42,7 +42,13 @@ pub enum SearchCmd {
         #[arg(long, default_value_t = 20)]
         limit: usize,
         /// Search every project in the fleet, not just this workspace
-        #[arg(long)]
+        ///
+        /// Contradicts `--project`, which names exactly one. Rejected at parse
+        /// time rather than resolved by precedence: either choice would be a
+        /// guess about which flag was meant, and answering a question the user
+        /// did not ask — quietly — is the failure this whole verb exists to
+        /// remove (GH-407).
+        #[arg(long, conflicts_with = "project")]
         fleet: bool,
     },
     /// Show full content of a specific turn
@@ -548,6 +554,34 @@ fn extract_message_text(json: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `--project` and `--fleet` are contradictory, so one has to lose. Losing
+    /// silently is the trap: the reader asked about one project, got sixteen,
+    /// and was told nothing — a read verb answering a question nobody asked,
+    /// which is the failure GH-407 exists to remove. Rejecting at parse time
+    /// says so before any project is touched.
+    ///
+    /// Worth a test because `conflicts_with` takes an arg id as a *string*: a
+    /// typo, or a later rename of the `project` field, silently stops enforcing
+    /// and the bug returns exactly as quietly as it arrived.
+    #[test]
+    fn project_and_fleet_are_rejected_rather_than_one_silently_winning() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct W {
+            #[command(subcommand)]
+            cmd: SearchCmd,
+        }
+
+        let err = W::try_parse_from(["edda", "query", "x", "--project", "abc", "--fleet"])
+            .err()
+            .expect("asking for one project and every project at once must not be accepted");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        // …and neither flag alone is disturbed.
+        assert!(W::try_parse_from(["edda", "query", "x", "--fleet"]).is_ok());
+        assert!(W::try_parse_from(["edda", "query", "x", "--project", "abc"]).is_ok());
+    }
 
     /// The registry must not even be consulted for the project we are standing
     /// in — that is the overwhelmingly common case and it must not depend on
