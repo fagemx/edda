@@ -48,16 +48,25 @@ jobs:
             args: --workspace
           - os: macos-latest
             args: --workspace
-          # Windows is non-blocking (continue-on-error) and its build/link is
-          # ~5x slower, so it runs only the platform-divergent crates
-          # (filesystem paths, file locks, process spawn, mmap) instead of all
-          # 23. Linux/macOS keep full-workspace coverage.
+          # Windows build/link is ~5x slower, so it runs only the crates whose
+          # behaviour actually diverges by platform instead of all 23.
+          # Linux/macOS keep full-workspace coverage.
+          #
+          # Each crate below earns its place against a concrete criterion; the
+          # list is derived from these, not curated, so it cannot silently drift
+          # from the rule (it did — GH-433 caught edda-conductor and
+          # edda-transcript missing while the comment named their criteria):
+          #   process spawn (Command::new):  edda, edda-bridge-claude, edda-conductor
+          #   file locks (fs2):              edda-store, edda-ledger, edda-search-fts, edda-transcript
+          #   mmap (tantivy):                edda-search-fts
           - os: windows-latest
             args: >-
               -p edda-store
               -p edda-ledger
               -p edda-search-fts
+              -p edda-transcript
               -p edda-bridge-claude
+              -p edda-conductor
               -p edda
     steps:
       - uses: actions/checkout@v4
