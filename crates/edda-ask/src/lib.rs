@@ -384,7 +384,7 @@ pub fn ask(
     } else {
         let needle = q.to_lowercase();
         let mut views = ledger.task_views()?;
-        views.sort_by(|a, b| b.task_id.cmp(&a.task_id));
+        views.sort_by_key(|t| std::cmp::Reverse(t.task_id)); // newest first
         views
             .into_iter()
             .filter(|t| {
