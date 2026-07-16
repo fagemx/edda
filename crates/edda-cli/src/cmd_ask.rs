@@ -83,13 +83,11 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
     });
 
     if json {
-        let payload = serde_json::json!({
-            "projects": hits.iter().map(|h| serde_json::json!({
-                "project": h.project,
-                "result": h.item,
-            })).collect::<Vec<_>>(),
-            "unavailable": crate::fleet::misses_json(&misses),
-        });
+        let projects = hits
+            .iter()
+            .map(|h| serde_json::json!({ "project": h.project, "result": h.item }))
+            .collect();
+        let payload = crate::fleet::json_envelope(projects, &misses);
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }

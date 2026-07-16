@@ -99,17 +99,29 @@ pub fn print_misses(misses: &[FleetMiss]) {
     }
 }
 
-/// The same misses for `--json`, under the one key every fleet verb uses.
+/// The `--json` body of a fleet read: what answered, and what did not.
 ///
-/// Having one spelling matters more than which spelling won: a script reading
-/// two fleet verbs should not have to learn that one calls this `unreadable`
-/// and the other `unavailable`. `unavailable` is the word that covers both
-/// misses `fan_out` actually produces — absent *and* errored.
-pub fn misses_json(misses: &[FleetMiss]) -> Vec<serde_json::Value> {
-    misses
-        .iter()
-        .map(|m| serde_json::json!({ "project": m.project, "reason": m.reason }))
-        .collect()
+/// The keys live here rather than at each call site because they are the part
+/// that actually diverged — `ask` said `unreadable` while `task` said
+/// `unavailable` for the identical array. A helper that returned only the
+/// values would leave the next verb free to invent a third spelling, which is
+/// the divergence this is meant to end.
+///
+/// Having one spelling matters more than which spelling won. `unavailable` is
+/// the word that covers both misses `fan_out` actually produces — absent *and*
+/// errored; `unreadable` only covers the second, and would contradict the
+/// commonest reason of all, "repo not on this machine".
+///
+/// `projects` is pre-built by the caller: every verb tags its rows the same
+/// way, but what hangs off each project is the verb's own business.
+pub fn json_envelope(projects: Vec<serde_json::Value>, misses: &[FleetMiss]) -> serde_json::Value {
+    serde_json::json!({
+        "projects": projects,
+        "unavailable": misses
+            .iter()
+            .map(|m| serde_json::json!({ "project": m.project, "reason": m.reason }))
+            .collect::<Vec<_>>(),
+    })
 }
 
 #[cfg(test)]
@@ -236,24 +248,29 @@ mod tests {
         assert_eq!(grouped[1].1, vec![&"b"]);
     }
 
-    /// The reason is already a complete phrase, so nothing may be prepended to
-    /// it: `fan_out`'s most common miss is an absent repo, and a fixed
-    /// "unreadable:" prefix would contradict the sentence it introduces.
+    /// Pins the key names themselves. They are the whole point of the helper —
+    /// a verb free to spell this `unreadable` is the divergence that made it
+    /// necessary — so a rename must not be able to pass quietly.
     #[test]
-    fn a_miss_renders_as_project_and_reason_with_nothing_invented() {
+    fn the_json_envelope_names_what_answered_and_what_did_not() {
         let misses = vec![FleetMiss {
             project: "dazun".to_string(),
             reason: "repo not on this machine (D:\\gone)".to_string(),
         }];
 
-        let json = misses_json(&misses);
+        let env = json_envelope(vec![serde_json::json!({ "project": "edda" })], &misses);
 
-        assert_eq!(json.len(), 1);
-        assert_eq!(json[0]["project"], "dazun");
-        assert_eq!(json[0]["reason"], "repo not on this machine (D:\\gone)");
+        assert_eq!(env["projects"][0]["project"], "edda");
+        assert_eq!(env["unavailable"][0]["project"], "dazun");
+        // Verbatim: `fan_out`'s reasons are complete phrases, and the absent
+        // repo is the case a fixed "unreadable:" prefix used to contradict.
+        assert_eq!(
+            env["unavailable"][0]["reason"],
+            "repo not on this machine (D:\\gone)"
+        );
         assert!(
-            json[0].get("unreadable").is_none(),
-            "the shape carries the reason, not a verdict about it"
+            env.get("unreadable").is_none() && env.get("fleet").is_none(),
+            "the retired spellings must not come back: {env}"
         );
     }
 }

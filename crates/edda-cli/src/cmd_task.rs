@@ -331,17 +331,12 @@ fn list_fleet(
         // one id; and a project that could not be read has to be visible as
         // itself, or the consumer reads "nothing ready" where the truth is
         // "never looked".
-        let projects: Vec<_> = crate::fleet::group_by_project(&hits)
+        let projects = crate::fleet::group_by_project(&hits)
             .into_iter()
             .map(|(project, tasks)| serde_json::json!({ "project": project, "tasks": tasks }))
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "projects": projects,
-                "unavailable": crate::fleet::misses_json(&misses),
-            }))?
-        );
+        let payload = crate::fleet::json_envelope(projects, &misses);
+        println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
 
