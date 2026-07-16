@@ -149,6 +149,9 @@ pub fn render_fleet_section(
     }
 
     let mut out = String::from("## Fleet (sibling projects)\n");
+
+    // Queue counts first: the shortest line any sibling can contribute, and the
+    // one an operator scans for.
     for b in briefs {
         if b.ready_tasks > 0 {
             out.push_str(&format!(
@@ -156,8 +159,23 @@ pub fn render_fleet_section(
                 b.project, b.ready_tasks
             ));
         }
-        for d in &b.decisions {
-            out.push_str(&format!("- [{}] {d}\n", b.project));
+    }
+
+    // Then rulings by rank rather than by project — everyone's first before
+    // anyone's second.
+    //
+    // Rendering project-by-project made the budget cut fall entirely on whoever
+    // came last, and registry order is stable, so the same sibling would be
+    // invisible every session with nothing but "(truncated)" to hint at it. A
+    // budget may cost detail; it may not cost a whole project, or "C said
+    // nothing" and "C was cut" become the same output — GH-407's silent-empty
+    // failure, arriving through the budget instead of through a query.
+    let deepest = briefs.iter().map(|b| b.decisions.len()).max().unwrap_or(0);
+    for rank in 0..deepest {
+        for b in briefs {
+            if let Some(d) = b.decisions.get(rank) {
+                out.push_str(&format!("- [{}] {d}\n", b.project));
+            }
         }
     }
     // A sibling that could not be read is one short line, never an omission:
@@ -298,6 +316,44 @@ mod tests {
         assert_eq!(misses.len(), 1);
         let out = render_fleet_section(&briefs, &misses, 4096).expect("a gap is worth saying");
         assert!(out.contains("[dazun] unavailable:"), "{out}");
+    }
+
+    /// A budget may cost detail; it may not cost a whole project.
+    ///
+    /// Rendering sibling-by-sibling made the cut fall on whoever was last in
+    /// registry order — and registry order is stable, so the same project would
+    /// be invisible every session, with `(fleet truncated by budget)` the only
+    /// hint and no way to tell "C said nothing" from "C was cut". That is the
+    /// silent-empty failure of GH-407 arriving through the budget instead of
+    /// through a query.
+    #[test]
+    fn a_budget_cut_costs_detail_but_never_a_whole_project() {
+        let briefs = vec![
+            brief("foundry", &["a.one=1 — first", "a.two=2 — second"], 0),
+            brief("dazun", &["b.one=1 — first", "b.two=2 — second"], 0),
+            brief("yushan", &["c.one=1 — first", "c.two=2 — second"], 0),
+        ];
+
+        // Room for the header and four-ish lines — not enough for all six.
+        let out = render_fleet_section(&briefs, &[], 190).expect("three siblings spoke");
+        assert!(
+            out.contains("truncated"),
+            "the budget must bite here:\n{out}"
+        );
+
+        // The invariant, stated positionally so it holds at any budget: every
+        // project's first ruling comes before anyone's second, so whatever the
+        // cut takes, it takes seconds.
+        let first_second = out.find("=2 —").unwrap_or(out.len());
+        for p in ["foundry", "dazun", "yushan"] {
+            let at = out.find(&format!("[{p}]")).unwrap_or_else(|| {
+                panic!("every project that spoke must be named, {p} is missing:\n{out}")
+            });
+            assert!(
+                at < first_second,
+                "{p} must be named before any project's second ruling:\n{out}"
+            );
+        }
     }
 
     /// The section is the least important thing in the pack, so it must be the
