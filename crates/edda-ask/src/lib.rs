@@ -375,6 +375,10 @@ pub fn ask(
     // shipped about X, verified how", so a task matches when the query appears
     // in its title, receipt, or failure reason — the receipt being the point.
     // Newest first, since a rail answer is usually a recent one (GH-404).
+    //
+    // Deliberately not branch-filtered, unlike decisions above: the task rail is
+    // a workspace-global queue, not a per-branch record, so `--branch` narrowing
+    // the decisions but not the tasks is the intended asymmetry.
     let tasks: Vec<TaskHit> = if q.is_empty() {
         vec![]
     } else {
@@ -1017,17 +1021,41 @@ mod tests {
         .unwrap();
         ledger.append_event(&done).unwrap();
 
+        // A second task that does NOT mention "drill". Without it, the test
+        // could not tell a working filter from one that returns every task —
+        // with a single task, "the match is present" and "everything is
+        // present" are the same assertion.
+        let other =
+            edda_core::event::new_task_created_event(&edda_core::event::TaskCreatedParams {
+                branch: "main",
+                parent_hash: None,
+                task_id: 8,
+                title: "write the changelog",
+                assignee: None,
+                agent_kind: None,
+                after: &[],
+                plan_id: None,
+                work_unit_ref: None,
+                brief_ref: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        ledger.append_event(&other).unwrap();
+
         let opts = AskOptions {
             limit: 10,
             ..Default::default()
         };
         let result = ask(&ledger, "drill", &opts, None).unwrap();
 
-        let hit = result
-            .tasks
-            .iter()
-            .find(|t| t.task_id == 7)
-            .expect("a task whose title and receipt say 'drill' must appear");
+        assert_eq!(
+            result.tasks.len(),
+            1,
+            "only the drill task matches — the changelog task must be filtered out: {:?}",
+            result.tasks
+        );
+        let hit = &result.tasks[0];
+        assert_eq!(hit.task_id, 7);
         assert!(hit.title.contains("drill"), "title: {}", hit.title);
         assert_eq!(hit.status, "done");
         assert!(
