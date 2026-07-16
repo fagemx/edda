@@ -70,8 +70,27 @@ pub fn execute(
     Ok(())
 }
 
+/// Everything `format_human` would render as a hit.
+///
+/// The count has to span every collection, not the obvious two: a project whose
+/// only hit is a commit or a transcript turn must not probe as empty, or the
+/// hint reports absence where `--fleet` finds answers — the very failure this
+/// hint exists to remove, one level down.
+fn hit_count(r: &edda_ask::AskResult) -> usize {
+    r.decisions.len()
+        + r.timeline.len()
+        + r.related_commits.len()
+        + r.related_notes.len()
+        + r.conversations.len()
+        + r.dependents.len()
+}
+
 /// Ask the rest of the fleet whether a local miss is really absence (GH-407,
 /// acceptance 4).
+///
+/// Probes exactly as `execute_fleet` reads, transcript callback included. A line
+/// that says "rerun with --fleet" is a promise about what that command will
+/// show, so anything the probe declines to look at is a promise it cannot keep.
 fn fleet_hint_for_ask(repo_root: &Path, q: &str, opts: &AskOptions) -> Option<String> {
     if q.trim().is_empty() {
         return None; // no question was asked; there is nothing to look for elsewhere
@@ -81,8 +100,9 @@ fn fleet_hint_for_ask(repo_root: &Path, q: &str, opts: &AskOptions) -> Option<St
     crate::fleet::elsewhere_hint(&scope, &home, "result", |entry| {
         let root = Path::new(&entry.path);
         let ledger = Ledger::open(root)?;
-        let result = ask(&ledger, q, opts, None)?;
-        Ok(result.decisions.len() + result.timeline.len())
+        let cb = build_transcript_callback(root, Some(&entry.name));
+        let cb_ref: Option<&TranscriptSearchFn> = cb.as_ref().map(|f| f.as_ref());
+        Ok(hit_count(&ask(&ledger, q, opts, cb_ref)?))
     })
 }
 
@@ -203,4 +223,42 @@ fn build_transcript_callback(
             })
             .collect()
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The probe decides whether the fleet gets mentioned at all, so it has to
+    /// count every kind of hit `format_human` renders. Counting only the obvious
+    /// two made a project whose hit was a note or a transcript turn probe as
+    /// empty, which reports absence where `--fleet` finds answers — the exact
+    /// failure the hint exists to remove, one level down.
+    #[test]
+    fn a_hit_of_any_kind_counts_not_just_decisions_and_timeline() {
+        let mut r = edda_ask::AskResult {
+            query: "q".to_string(),
+            input_type: "keyword".to_string(),
+            decisions: Vec::new(),
+            timeline: Vec::new(),
+            related_commits: Vec::new(),
+            related_notes: Vec::new(),
+            conversations: Vec::new(),
+            dependents: Vec::new(),
+            override_risk: None,
+        };
+        assert_eq!(hit_count(&r), 0, "an empty result is empty");
+
+        r.related_notes.push(edda_ask::NoteHit {
+            event_id: "evt_1".to_string(),
+            ts: "2026-07-16T00:00:00Z".to_string(),
+            text: "the answer is here".to_string(),
+            branch: "main".to_string(),
+        });
+        assert_eq!(
+            hit_count(&r),
+            1,
+            "a note-only hit must not probe as absence"
+        );
+    }
 }
