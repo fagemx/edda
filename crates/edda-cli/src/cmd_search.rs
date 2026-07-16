@@ -41,6 +41,9 @@ pub enum SearchCmd {
         /// Maximum results (default: 20)
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Search every project in the fleet, not just this workspace
+        #[arg(long)]
+        fleet: bool,
     },
     /// Show full content of a specific turn
     Show {
@@ -70,6 +73,7 @@ pub fn run_cmd(cmd: SearchCmd, repo_root: &Path) -> anyhow::Result<()> {
             event_type,
             exact,
             limit,
+            fleet,
         } => {
             let pid = project.as_deref().unwrap_or(&default_pid);
             query(
@@ -81,6 +85,7 @@ pub fn run_cmd(cmd: SearchCmd, repo_root: &Path) -> anyhow::Result<()> {
                 event_type.as_deref(),
                 exact,
                 limit,
+                fleet,
             )
         }
         SearchCmd::Show { turn, project } => {
@@ -91,6 +96,110 @@ pub fn run_cmd(cmd: SearchCmd, repo_root: &Path) -> anyhow::Result<()> {
 }
 
 // ── Command Implementations ──
+
+/// `edda search query --fleet` — the same search, run against every project's
+/// own index (GH-407).
+///
+/// Never builds. A cold build costs ~25s (GH-403), and doing that for each of N
+/// projects because someone asked a question would be a trap — so a project
+/// without a usable index reports why, per project, and the others still answer.
+/// That reporting is not extra machinery: `fan_out` turns each error into an
+/// attributed line, which is exactly the notice acceptance 3 asks for.
+#[allow(clippy::too_many_arguments)]
+fn query_fleet(
+    repo_root: &Path,
+    query_str: &str,
+    session_id: Option<&str>,
+    doc_type: Option<&str>,
+    event_type: Option<&str>,
+    exact: bool,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let scope = edda_store::registry::fleet_scope(repo_root);
+
+    let (hits, misses) = crate::fleet::fan_out(&scope, |entry| {
+        let index_dir = project_dir(&entry.project_id)
+            .join("search")
+            .join("tantivy");
+        if !index_dir.exists() {
+            anyhow::bail!(
+                "index not built — run `edda search index --project {}`",
+                entry.project_id
+            );
+        }
+        if schema::index_is_outdated(&index_dir) {
+            anyhow::bail!(
+                "index schema is outdated — run `edda search index --project {}`",
+                entry.project_id
+            );
+        }
+        let Some(index) = schema::open_index(&index_dir) else {
+            anyhow::bail!(
+                "index could not be opened — run `edda search index --project {}` to rebuild",
+                entry.project_id
+            );
+        };
+        let opts = search::SearchOptions {
+            project_id: Some(&entry.project_id),
+            session_id,
+            doc_type,
+            event_type,
+            exact,
+        };
+        search::search(&index, query_str, &opts, limit)
+    });
+
+    let mut total = 0;
+    for (project, results) in group_by_project(&hits) {
+        if results.is_empty() {
+            continue;
+        }
+        println!("── [{project}] ──────────────────────────");
+        for r in &results {
+            total += 1;
+            let label = if r.doc_type == "event" {
+                format!("[{}]", r.event_type)
+            } else {
+                "[turn]".to_string()
+            };
+            println!("  {} {} ts={}", label, r.doc_id, r.ts);
+            if !r.snippet.is_empty() {
+                println!("     {}", r.snippet.replace('\n', " "));
+            }
+        }
+        println!();
+    }
+
+    // Per-project failures are results, never omissions: "did not look" must not
+    // render as "nothing there".
+    for miss in &misses {
+        println!("  [{}] {}", miss.project, miss.reason);
+    }
+
+    if total == 0 && misses.is_empty() {
+        println!(
+            "No results across {} project(s) for: {query_str}",
+            scope.len()
+        );
+    }
+
+    Ok(())
+}
+
+/// Collect a fan-out's hits back into per-project groups, preserving the order
+/// projects were visited in.
+fn group_by_project(
+    hits: &[crate::fleet::FleetHit<search::SearchResult>],
+) -> Vec<(String, Vec<&search::SearchResult>)> {
+    let mut out: Vec<(String, Vec<&search::SearchResult>)> = Vec::new();
+    for hit in hits {
+        match out.iter_mut().find(|(p, _)| *p == hit.project) {
+            Some((_, items)) => items.push(&hit.item),
+            None => out.push((hit.project.clone(), vec![&hit.item])),
+        }
+    }
+    out
+}
 
 /// Execute `edda search <query>` — full-text search over the Tantivy index.
 #[allow(clippy::too_many_arguments)]
@@ -103,7 +212,13 @@ pub fn query(
     event_type: Option<&str>,
     exact: bool,
     limit: usize,
+    fleet: bool,
 ) -> anyhow::Result<()> {
+    if fleet {
+        return query_fleet(
+            repo_root, query_str, session_id, doc_type, event_type, exact, limit,
+        );
+    }
     let proj_dir = project_dir(project_id);
     let index_dir = proj_dir.join("search").join("tantivy");
 
