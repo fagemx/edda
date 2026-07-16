@@ -95,10 +95,56 @@ fn probe_target(pattern: &Path) -> PathBuf {
     out
 }
 
+/// Whether a recorded path is a glob (has a wildcard) rather than a literal
+/// file. Same characters `probe_target` splits on, so the two agree on what
+/// "glob" means.
+fn is_glob(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?') || pattern.contains('[')
+}
+
+/// The later of two optional rfc3339 timestamps. Unparseable values are ignored
+/// rather than treated as newest, keeping the module's false-negative bias: a
+/// timestamp we cannot read must not manufacture staleness.
+fn newer_of(a: Option<String>, b: Option<String>) -> Option<String> {
+    let parse = |s: &str| OffsetDateTime::parse(s, &Rfc3339).ok();
+    match (a, b) {
+        (Some(x), Some(y)) => match (parse(&x), parse(&y)) {
+            (Some(dx), Some(dy)) => Some(if dy > dx { y } else { x }),
+            (Some(_), None) => Some(x),
+            (None, Some(_)) => Some(y),
+            (None, None) => Some(x),
+        },
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
+
+/// Most entries scanned when finding the newest mtime under a glob's directory.
+///
+/// This runs per glob-scoped decision per `edda ask`, on the interactive path,
+/// so the walk is bounded: a directory with more entries than this reports the
+/// newest among the first `MAX_GLOB_ENTRIES` it yields. Normal source
+/// directories are far smaller, so the cap only ever bites a pathological tree —
+/// where a bounded, possibly-incomplete answer beats a slow `ask`.
+const MAX_GLOB_ENTRIES: usize = 512;
+
 /// Filesystem oracle abstracts real fs so tests can be deterministic.
 pub trait FsOracle {
     /// Return (exists, mtime_rfc3339 when available).
     fn probe(&self, path: &Path) -> (bool, Option<String>);
+
+    /// Newest mtime (rfc3339) among the direct entries of `dir`, or `None` if it
+    /// is not a readable directory.
+    ///
+    /// This is what lets a glob detect an *edit*: a directory's own mtime moves
+    /// when entries are added or removed, but not when a file inside is rewritten
+    /// in place — so the freshest child, not the directory, is the signal
+    /// (GH-424). Direct entries only (one level); see [`check_paths_staleness`]
+    /// for how `**` subtree scopes are handled.
+    fn newest_mtime_under(&self, _dir: &Path) -> Option<String> {
+        None
+    }
 }
 
 pub struct StdFs;
@@ -114,6 +160,20 @@ impl FsOracle for StdFs {
         let ts = OffsetDateTime::from(modified);
         let rendered = ts.format(&Rfc3339).ok();
         (true, rendered)
+    }
+
+    fn newest_mtime_under(&self, dir: &Path) -> Option<String> {
+        let rd = std::fs::read_dir(dir).ok()?;
+        let mut newest: Option<OffsetDateTime> = None;
+        for entry in rd.flatten().take(MAX_GLOB_ENTRIES) {
+            let Ok(meta) = entry.metadata() else { continue };
+            let Ok(modified) = meta.modified() else {
+                continue;
+            };
+            let ts = OffsetDateTime::from(modified);
+            newest = Some(newest.map_or(ts, |n| n.max(ts)));
+        }
+        newest.and_then(|t| t.format(&Rfc3339).ok())
     }
 }
 
@@ -155,16 +215,29 @@ pub fn check_paths_staleness<F: FsOracle>(
             }
         };
 
-        let (exists, touched_at) = fs.probe(&resolved);
+        let (exists, dir_mtime) = fs.probe(&resolved);
         if !exists {
             any_stale = true;
             out.push(PathStaleness {
                 path: rel.clone(),
                 status: PathStatus::Missing,
-                touched_at,
+                touched_at: dir_mtime,
             });
             continue;
         }
+
+        // A glob's directory-mtime moves on add/remove but not on an in-place
+        // edit, so the freshest *entry* is the real signal — take the newer of
+        // the directory and its newest child (GH-424). A literal path names one
+        // file and uses its own mtime, untouched. Only direct children are
+        // walked, so a `**` subtree scope still misses edits nested deeper than
+        // one level; that is a narrower promise than `**` implies, but a fully
+        // kept one for the common `*` case, and it never lies.
+        let touched_at = if is_glob(rel) {
+            newer_of(dir_mtime, fs.newest_mtime_under(&resolved))
+        } else {
+            dir_mtime
+        };
 
         let status = match (&touched_at, &decision_dt) {
             (Some(t), Some(dt)) => match OffsetDateTime::parse(t, &Rfc3339) {
@@ -214,17 +287,27 @@ mod tests {
     struct MockFs {
         // path key → (exists, mtime rfc3339)
         entries: RefCell<HashMap<String, (bool, Option<String>)>>,
+        // dir key → newest child mtime rfc3339 (drives newest_mtime_under)
+        newest: RefCell<HashMap<String, Option<String>>>,
     }
     impl MockFs {
         fn new() -> Self {
             Self {
                 entries: RefCell::new(HashMap::new()),
+                newest: RefCell::new(HashMap::new()),
             }
         }
         fn set(&self, path: &str, exists: bool, mtime: Option<&str>) {
             self.entries
                 .borrow_mut()
                 .insert(path.to_string(), (exists, mtime.map(String::from)));
+        }
+        /// Record the newest mtime among a directory's children, as if a file
+        /// inside it had been edited at that time.
+        fn set_newest_under(&self, dir: &str, mtime: Option<&str>) {
+            self.newest
+                .borrow_mut()
+                .insert(dir.to_string(), mtime.map(String::from));
         }
     }
     impl FsOracle for MockFs {
@@ -235,6 +318,10 @@ mod tests {
                 .get(&key)
                 .cloned()
                 .unwrap_or((false, None))
+        }
+        fn newest_mtime_under(&self, dir: &Path) -> Option<String> {
+            let key = dir.to_string_lossy().replace('\\', "/");
+            self.newest.borrow().get(&key).cloned().flatten()
         }
     }
 
@@ -250,6 +337,90 @@ mod tests {
     /// Probing one literally can only ever fail — nothing is named `*` — so every
     /// such decision carried a false `(Missing)`, which trains readers to ignore
     /// the hint and kills it for genuinely stale paths.
+    /// The point of GH-424: a file *edited* inside a glob scope, after the
+    /// decision, must report `StaleModified` — even though the directory's own
+    /// mtime did not move, because an in-place rewrite does not touch a dir's
+    /// mtime. Before this, the directory looked untouched and the edit was
+    /// invisible.
+    #[test]
+    fn a_glob_detects_a_file_edited_inside_it() {
+        let fs = MockFs::new();
+        // The directory exists and its own mtime PREDATES the decision — no
+        // entries were added or removed, so a directory-mtime check alone would
+        // call this Fresh.
+        fs.set("/repo/crates/foo", true, Some("2026-07-01T00:00:00Z"));
+        // But a file inside was rewritten AFTER the decision.
+        fs.set_newest_under("/repo/crates/foo", Some("2026-07-10T00:00:00Z"));
+
+        let out = check_paths_staleness(
+            &["crates/foo/*".to_string()],
+            "2026-07-05T00:00:00Z", // decision recorded between the two
+            Some(Path::new("/repo")),
+            &fs,
+        )
+        .unwrap();
+
+        assert!(
+            out.is_stale,
+            "an edit inside the glob, after the decision, must be stale: {out:?}"
+        );
+        assert_eq!(out.paths[0].status, PathStatus::StaleModified);
+    }
+
+    /// The MockFs tests prove the staleness *logic*; this proves `StdFs`
+    /// actually reads a real directory — a `read_dir` that returned nothing
+    /// would leave the whole feature inert while every MockFs test stayed green.
+    /// Asserts presence, not an exact time, so there is no clock race.
+    #[test]
+    fn stdfs_newest_mtime_reads_a_real_directory() {
+        let dir = std::env::temp_dir().join(format!("edda_glob_stdfs_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.rs"), b"x").unwrap();
+
+        let fs = StdFs;
+        assert!(
+            fs.newest_mtime_under(&dir).is_some(),
+            "a real directory with an entry must yield a newest mtime"
+        );
+        assert!(
+            fs.newest_mtime_under(&dir.join("missing")).is_none(),
+            "a path that is not a readable directory yields None"
+        );
+        assert!(
+            fs.newest_mtime_under(&dir.join("a.rs")).is_none(),
+            "a plain file is not a directory to walk"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A literal path (no wildcard) must not enumerate — it names one file, and
+    /// its own mtime is the whole answer. Guards against the glob path leaking
+    /// into the literal case.
+    #[test]
+    fn a_literal_path_uses_its_own_mtime_not_its_siblings() {
+        let fs = MockFs::new();
+        // The named file is old; a sibling in the same dir is new. A literal
+        // scope must report Fresh — the sibling is not in scope.
+        fs.set("/repo/src/main.rs", true, Some("2026-07-01T00:00:00Z"));
+        fs.set_newest_under("/repo/src", Some("2026-07-10T00:00:00Z"));
+
+        let out = check_paths_staleness(
+            &["src/main.rs".to_string()],
+            "2026-07-05T00:00:00Z",
+            Some(Path::new("/repo")),
+            &fs,
+        )
+        .unwrap();
+
+        assert_eq!(
+            out.paths[0].status,
+            PathStatus::Fresh,
+            "a literal path must ignore its siblings' edits: {out:?}"
+        );
+    }
+
     #[test]
     fn a_glob_is_checked_against_the_directory_it_names_not_literally() {
         let fs = MockFs::new();
