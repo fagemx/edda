@@ -331,25 +331,22 @@ fn list_fleet(
         // one id; and a project that could not be read has to be visible as
         // itself, or the consumer reads "nothing ready" where the truth is
         // "never looked".
-        let projects: Vec<_> = group_by_project(&hits)
+        let projects: Vec<_> = crate::fleet::group_by_project(&hits)
             .into_iter()
             .map(|(project, tasks)| serde_json::json!({ "project": project, "tasks": tasks }))
             .collect();
-        let unavailable: Vec<_> = misses
-            .iter()
-            .map(|m| serde_json::json!({ "project": m.project, "reason": m.reason }))
-            .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(
-                &serde_json::json!({ "projects": projects, "unavailable": unavailable })
-            )?
+            serde_json::to_string_pretty(&serde_json::json!({
+                "projects": projects,
+                "unavailable": crate::fleet::misses_json(&misses),
+            }))?
         );
         return Ok(());
     }
 
     let mut total = 0;
-    for (project, tasks) in group_by_project(&hits) {
+    for (project, tasks) in crate::fleet::group_by_project(&hits) {
         if tasks.is_empty() {
             continue;
         }
@@ -361,9 +358,7 @@ fn list_fleet(
         println!();
     }
 
-    for miss in &misses {
-        println!("  [{}] {}", miss.project, miss.reason);
-    }
+    crate::fleet::print_misses(&misses);
 
     if total == 0 && misses.is_empty() {
         let filter = match (assignee, status) {
@@ -378,19 +373,6 @@ fn list_fleet(
         );
     }
     Ok(())
-}
-
-/// Collect a fan-out's tasks back into per-project groups, preserving the order
-/// projects were visited in.
-fn group_by_project(hits: &[crate::fleet::FleetHit<TaskView>]) -> Vec<(String, Vec<&TaskView>)> {
-    let mut out: Vec<(String, Vec<&TaskView>)> = Vec::new();
-    for hit in hits {
-        match out.iter_mut().find(|(p, _)| *p == hit.project) {
-            Some((_, items)) => items.push(&hit.item),
-            None => out.push((hit.project.clone(), vec![&hit.item])),
-        }
-    }
-    out
 }
 
 /// `task list --fleet` — the same list, read from every project's own ledger

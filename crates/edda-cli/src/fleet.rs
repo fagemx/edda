@@ -70,6 +70,48 @@ where
     (hits, misses)
 }
 
+/// Collect a fan-out's hits back into per-project groups, preserving the order
+/// projects were visited in.
+///
+/// Generic because nothing in it is verb-specific: it is `fan_out`'s output
+/// reshaped, and every verb that fans out needs exactly this. It lives beside
+/// `fan_out` so the next one does not grow a third private copy.
+pub fn group_by_project<T>(hits: &[FleetHit<T>]) -> Vec<(String, Vec<&T>)> {
+    let mut out: Vec<(String, Vec<&T>)> = Vec::new();
+    for hit in hits {
+        match out.iter_mut().find(|(p, _)| *p == hit.project) {
+            Some((_, items)) => items.push(&hit.item),
+            None => out.push((hit.project.clone(), vec![&hit.item])),
+        }
+    }
+    out
+}
+
+/// Report the projects that did not answer, in the one form every fleet verb
+/// uses.
+///
+/// No prefix: `fan_out`'s reasons are already complete phrases, and a fixed
+/// prefix would contradict half of them — the most common miss is "repo not on
+/// this machine", which is absent, not unreadable.
+pub fn print_misses(misses: &[FleetMiss]) {
+    for miss in misses {
+        println!("  [{}] {}", miss.project, miss.reason);
+    }
+}
+
+/// The same misses for `--json`, under the one key every fleet verb uses.
+///
+/// Having one spelling matters more than which spelling won: a script reading
+/// two fleet verbs should not have to learn that one calls this `unreadable`
+/// and the other `unavailable`. `unavailable` is the word that covers both
+/// misses `fan_out` actually produces — absent *and* errored.
+pub fn misses_json(misses: &[FleetMiss]) -> Vec<serde_json::Value> {
+    misses
+        .iter()
+        .map(|m| serde_json::json!({ "project": m.project, "reason": m.reason }))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +206,54 @@ mod tests {
         let (hits, misses) = fan_out(&[], |_| Ok(vec!["never"]));
         assert!(hits.is_empty());
         assert!(misses.is_empty());
+    }
+
+    /// Grouping preserves visit order, so a fleet read renders in registry
+    /// order rather than whatever a hash map felt like.
+    #[test]
+    fn grouping_keeps_each_project_together_in_the_order_visited() {
+        let hits = vec![
+            FleetHit {
+                project: "edda".to_string(),
+                item: "a",
+            },
+            FleetHit {
+                project: "dazun".to_string(),
+                item: "b",
+            },
+            FleetHit {
+                project: "edda".to_string(),
+                item: "c",
+            },
+        ];
+
+        let grouped = group_by_project(&hits);
+
+        assert_eq!(grouped.len(), 2, "two projects, not three rows");
+        assert_eq!(grouped[0].0, "edda");
+        assert_eq!(grouped[0].1, vec![&"a", &"c"], "non-adjacent hits regroup");
+        assert_eq!(grouped[1].0, "dazun");
+        assert_eq!(grouped[1].1, vec![&"b"]);
+    }
+
+    /// The reason is already a complete phrase, so nothing may be prepended to
+    /// it: `fan_out`'s most common miss is an absent repo, and a fixed
+    /// "unreadable:" prefix would contradict the sentence it introduces.
+    #[test]
+    fn a_miss_renders_as_project_and_reason_with_nothing_invented() {
+        let misses = vec![FleetMiss {
+            project: "dazun".to_string(),
+            reason: "repo not on this machine (D:\\gone)".to_string(),
+        }];
+
+        let json = misses_json(&misses);
+
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["project"], "dazun");
+        assert_eq!(json[0]["reason"], "repo not on this machine (D:\\gone)");
+        assert!(
+            json[0].get("unreadable").is_none(),
+            "the shape carries the reason, not a verdict about it"
+        );
     }
 }

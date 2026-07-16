@@ -156,7 +156,7 @@ fn query_fleet(
     });
 
     let mut total = 0;
-    for (project, results) in group_by_project(&hits) {
+    for (project, results) in crate::fleet::group_by_project(&hits) {
         if results.is_empty() {
             continue;
         }
@@ -178,9 +178,7 @@ fn query_fleet(
 
     // Per-project failures are results, never omissions: "did not look" must not
     // render as "nothing there".
-    for miss in &misses {
-        println!("  [{}] {}", miss.project, miss.reason);
-    }
+    crate::fleet::print_misses(&misses);
 
     if total == 0 && misses.is_empty() {
         println!(
@@ -190,21 +188,6 @@ fn query_fleet(
     }
 
     Ok(())
-}
-
-/// Collect a fan-out's hits back into per-project groups, preserving the order
-/// projects were visited in.
-fn group_by_project(
-    hits: &[crate::fleet::FleetHit<search::SearchResult>],
-) -> Vec<(String, Vec<&search::SearchResult>)> {
-    let mut out: Vec<(String, Vec<&search::SearchResult>)> = Vec::new();
-    for hit in hits {
-        match out.iter_mut().find(|(p, _)| *p == hit.project) {
-            Some((_, items)) => items.push(&hit.item),
-            None => out.push((hit.project.clone(), vec![&hit.item])),
-        }
-    }
-    out
 }
 
 /// Execute `edda search <query>` — full-text search over the Tantivy index.

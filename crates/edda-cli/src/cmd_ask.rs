@@ -84,14 +84,11 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
 
     if json {
         let payload = serde_json::json!({
-            "fleet": hits.iter().map(|h| serde_json::json!({
+            "projects": hits.iter().map(|h| serde_json::json!({
                 "project": h.project,
                 "result": h.item,
             })).collect::<Vec<_>>(),
-            "unreadable": misses.iter().map(|m| serde_json::json!({
-                "project": m.project,
-                "reason": m.reason,
-            })).collect::<Vec<_>>(),
+            "unavailable": crate::fleet::misses_json(&misses),
         });
         println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
@@ -111,9 +108,7 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
     // Misses are printed as results, not swallowed: a fleet read that quietly
     // skipped a repo would answer "nothing there" when the truth is "did not
     // look", which is the failure this whole verb exists to remove.
-    for miss in &misses {
-        println!("  [{}] unreadable: {}", miss.project, miss.reason);
-    }
+    crate::fleet::print_misses(&misses);
 
     if answered == 0 && misses.is_empty() {
         println!("No results across {} project(s) for: {q}", scope.len());
