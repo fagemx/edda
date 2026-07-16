@@ -2,6 +2,7 @@ use edda_core::Event;
 use edda_ledger::Ledger;
 use std::path::Path;
 
+#[derive(Clone, Copy)]
 pub struct LogParams<'a> {
     pub repo_root: &'a Path,
     pub event_type: Option<&'a str>,
@@ -14,14 +15,19 @@ pub struct LogParams<'a> {
     pub tool: Option<&'a str>,
     pub limit: usize,
     pub json: bool,
+    /// Read every project in scope instead of just this workspace (GH-407).
+    pub fleet: bool,
 }
 
-pub fn execute(params: &LogParams<'_>) -> anyhow::Result<()> {
+/// One workspace's answer: the events matching `params`, newest first, capped.
+///
+/// Split out of `execute` so the fleet path can ask the same question of a
+/// different repo without also inheriting the printing.
+fn collect_matching(params: &LogParams<'_>) -> anyhow::Result<Vec<Event>> {
     let ledger = Ledger::open(params.repo_root)?;
-    let events = ledger.iter_events()?;
-
-    let mut matched: Vec<&Event> = events
-        .iter()
+    let mut matched: Vec<Event> = ledger
+        .iter_events()?
+        .into_iter()
         .rev() // newest first
         .filter(|e| matches_filter(e, params))
         .collect();
@@ -29,6 +35,35 @@ pub fn execute(params: &LogParams<'_>) -> anyhow::Result<()> {
     if params.limit > 0 {
         matched.truncate(params.limit);
     }
+    Ok(matched)
+}
+
+/// Ask every project in scope the same question, tagging each event with the
+/// project whose ledger it came from.
+///
+/// `--limit` caps each project's answer rather than the merged total, matching
+/// `search query --fleet`: a fan-out is N independent reads, and the flag has
+/// to mean one thing across verbs.
+fn collect_fleet(
+    scope: &[edda_store::registry::ProjectEntry],
+    params: &LogParams<'_>,
+) -> (
+    Vec<crate::fleet::FleetHit<Event>>,
+    Vec<crate::fleet::FleetMiss>,
+) {
+    crate::fleet::fan_out(scope, |entry| {
+        collect_matching(&LogParams {
+            repo_root: Path::new(&entry.path),
+            ..*params
+        })
+    })
+}
+
+pub fn execute(params: &LogParams<'_>) -> anyhow::Result<()> {
+    if params.fleet {
+        return execute_fleet(params);
+    }
+    let matched = collect_matching(params)?;
 
     if matched.is_empty() {
         println!("No events match the filter.");
@@ -46,6 +81,52 @@ pub fn execute(params: &LogParams<'_>) -> anyhow::Result<()> {
         println!("\n({} events shown)", matched.len());
     }
 
+    Ok(())
+}
+
+/// `edda log --fleet` — the same log, read from every project's own ledger
+/// (GH-407).
+fn execute_fleet(params: &LogParams<'_>) -> anyhow::Result<()> {
+    let scope = edda_store::registry::fleet_scope(params.repo_root);
+    let (hits, misses) = collect_fleet(&scope, params);
+
+    if params.json {
+        // The envelope, not `--json`'s bare JSONL: a fleet read has to put the
+        // projects it could not reach somewhere a script will see them, and a
+        // trailing object appended to a stream of lines is exactly the kind of
+        // thing a consumer skips.
+        let projects = crate::fleet::group_by_project(&hits)
+            .into_iter()
+            .map(|(project, events)| serde_json::json!({ "project": project, "events": events }))
+            .collect();
+        let payload = crate::fleet::json_envelope(projects, &misses);
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    let mut total = 0;
+    for (project, events) in crate::fleet::group_by_project(&hits) {
+        if events.is_empty() {
+            continue;
+        }
+        println!("── [{project}] ──────────────────────────");
+        for e in &events {
+            total += 1;
+            print_event_line(e);
+        }
+        println!();
+    }
+
+    crate::fleet::print_misses(&misses);
+
+    if total == 0 {
+        println!(
+            "{}",
+            crate::fleet::empty_summary("events match the filter", "", scope.len(), &misses)
+        );
+    } else {
+        println!("({total} events shown)");
+    }
     Ok(())
 }
 
@@ -439,6 +520,113 @@ fn format_tags(event: &Event) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_ws(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("edda_cmdlog_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Ledger::ensure_initialized(&dir).unwrap();
+        dir
+    }
+
+    fn fleet_entry(name: &str, path: &Path) -> edda_store::registry::ProjectEntry {
+        edda_store::registry::ProjectEntry {
+            project_id: format!("pid-{name}"),
+            path: path.to_string_lossy().into_owned(),
+            name: name.to_string(),
+            registered_at: "2026-07-16T00:00:00Z".to_string(),
+            last_seen: "2026-07-16T00:00:00Z".to_string(),
+            group: None,
+        }
+    }
+
+    fn params_for(root: &Path) -> LogParams<'_> {
+        LogParams {
+            repo_root: root,
+            event_type: None,
+            family: None,
+            tag: None,
+            keyword: None,
+            after: None,
+            before: None,
+            branch: None,
+            tool: None,
+            limit: 50,
+            json: false,
+            fleet: false,
+        }
+    }
+
+    /// The fan-out reads each project's own ledger, and every event carries the
+    /// project it came from — the same promise the other three fleet verbs make.
+    #[test]
+    fn fleet_log_tags_each_event_with_the_project_it_came_from() {
+        let a = temp_ws("fleet_a");
+        let b = temp_ws("fleet_b");
+        crate::cmd_note::execute(&a, "note from edda", "agent", &[]).unwrap();
+        crate::cmd_note::execute(&b, "note from dazun", "agent", &[]).unwrap();
+
+        let scope = vec![fleet_entry("edda", &a), fleet_entry("dazun", &b)];
+        let (hits, misses) = collect_fleet(&scope, &params_for(&a));
+
+        assert!(misses.is_empty(), "both repos are live: {misses:?}");
+        let tagged: Vec<(&str, bool)> = hits
+            .iter()
+            .map(|h| {
+                (
+                    h.project.as_str(),
+                    format_event_detail(&h.item).contains("dazun"),
+                )
+            })
+            .collect();
+        assert!(
+            tagged.contains(&("edda", false)),
+            "edda's note is tagged edda: {tagged:?}"
+        );
+        assert!(
+            tagged.contains(&("dazun", true)),
+            "dazun's note is tagged dazun: {tagged:?}"
+        );
+    }
+
+    /// `--limit` bounds each project's answer, not the merged total. That is
+    /// the fan-out model — N independent reads — and it is what `search
+    /// --fleet` already does, so the flag means one thing across verbs.
+    #[test]
+    fn fleet_log_applies_the_limit_to_each_project_separately() {
+        let a = temp_ws("fleet_lim_a");
+        let b = temp_ws("fleet_lim_b");
+        for i in 0..3 {
+            crate::cmd_note::execute(&a, &format!("a{i}"), "agent", &[]).unwrap();
+            crate::cmd_note::execute(&b, &format!("b{i}"), "agent", &[]).unwrap();
+        }
+
+        let scope = vec![fleet_entry("edda", &a), fleet_entry("dazun", &b)];
+        let mut p = params_for(&a);
+        p.limit = 2;
+        let (hits, _) = collect_fleet(&scope, &p);
+
+        let from_a = hits.iter().filter(|h| h.project == "edda").count();
+        let from_b = hits.iter().filter(|h| h.project == "dazun").count();
+        assert_eq!(from_a, 2, "each project is capped at the limit");
+        assert_eq!(from_b, 2);
+    }
+
+    /// A project that cannot be read is reported, never skipped.
+    #[test]
+    fn fleet_log_reports_an_unreadable_project_instead_of_dropping_it() {
+        let a = temp_ws("fleet_live");
+        crate::cmd_note::execute(&a, "still here", "agent", &[]).unwrap();
+        let gone = std::env::temp_dir().join(format!("edda_log_never_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&gone);
+
+        let scope = vec![fleet_entry("edda", &a), fleet_entry("dazun", &gone)];
+        let (hits, misses) = collect_fleet(&scope, &params_for(&a));
+
+        assert!(!hits.is_empty(), "the live repo still answers");
+        assert_eq!(misses.len(), 1);
+        assert_eq!(misses[0].project, "dazun");
+    }
 
     #[test]
     fn test_format_token_count() {

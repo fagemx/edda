@@ -292,12 +292,15 @@ enum Command {
         /// Filter session digests by tool name (e.g. Edit, Read, Bash)
         #[arg(long)]
         tool: Option<String>,
-        /// Maximum number of events to show (0 = unlimited)
+        /// Maximum number of events to show, per project when --fleet (0 = unlimited)
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        /// Output as JSON lines (one event per line)
+        /// Output as JSON lines (one event per line; an envelope under --fleet)
         #[arg(long)]
         json: bool,
+        /// Read every project in the fleet, not just this workspace
+        #[arg(long)]
+        fleet: bool,
     },
     /// Output context snapshot as Markdown
     Context {
@@ -1116,6 +1119,7 @@ fn main() -> anyhow::Result<()> {
             tool,
             limit,
             json,
+            fleet,
         } => cmd_log::execute(&cmd_log::LogParams {
             repo_root: &repo_root,
             event_type: event_type.as_deref(),
@@ -1128,6 +1132,7 @@ fn main() -> anyhow::Result<()> {
             tool: tool.as_deref(),
             limit,
             json,
+            fleet,
         }),
         Command::Context { branch, depth } => {
             cmd_context::execute(&repo_root, branch.as_deref(), depth)
