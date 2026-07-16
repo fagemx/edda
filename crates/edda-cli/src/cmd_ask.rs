@@ -34,7 +34,7 @@ pub fn execute(
     let ledger = Ledger::open(repo_root)?;
 
     // Build transcript search callback
-    let transcript_cb = build_transcript_callback(repo_root);
+    let transcript_cb = build_transcript_callback(repo_root, None);
     let transcript_ref: Option<&edda_ask::TranscriptSearchFn> =
         transcript_cb.as_ref().map(|f| f.as_ref());
 
@@ -70,7 +70,7 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
     let (hits, misses) = crate::fleet::fan_out(&scope, |entry| {
         let root = Path::new(&entry.path);
         let ledger = Ledger::open(root)?;
-        let cb = build_transcript_callback(root);
+        let cb = build_transcript_callback(root, Some(&entry.name));
         let cb_ref: Option<&TranscriptSearchFn> = cb.as_ref().map(|f| f.as_ref());
         let mut result = ask(&ledger, q, opts, cb_ref)?;
 
@@ -123,7 +123,16 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
 }
 
 /// Build a transcript search callback using Tantivy, if index exists.
-fn build_transcript_callback(repo_root: &Path) -> Option<Box<TranscriptSearchFn>> {
+///
+/// `label` names the project when fanning out. It must be `Some` for every
+/// fleet call: the notice below was written for a single workspace, where "the
+/// index" is unambiguous — fanned out over 16 projects an unattributed line says
+/// nothing about which one is stale, repeats once per project, and prescribes a
+/// remedy that (post-GH-414) needs the very project id it failed to mention.
+fn build_transcript_callback(
+    repo_root: &Path,
+    label: Option<&str>,
+) -> Option<Box<TranscriptSearchFn>> {
     let project_id = edda_store::project_id(repo_root);
     let index_dir = edda_store::project_dir(&project_id)
         .join("search")
@@ -135,7 +144,15 @@ fn build_transcript_callback(repo_root: &Path) -> Option<Box<TranscriptSearchFn>
     // GH-402: don't search a stale-schema index — its CJK results would be
     // silently wrong. Skip transcript search and hint the rebuild instead.
     if edda_search_fts::schema::index_is_outdated(&index_dir) {
-        eprintln!("(search index is out of date; run `edda search index` to include transcripts)");
+        match label {
+            Some(name) => eprintln!(
+                "  [{name}] search index is out of date; \
+                 run `edda search index --project {project_id}` to include its transcripts"
+            ),
+            None => eprintln!(
+                "(search index is out of date; run `edda search index` to include transcripts)"
+            ),
+        }
         return None;
     }
 
