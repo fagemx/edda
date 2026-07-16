@@ -105,6 +105,29 @@ fn extract_event_title_body(event: &edda_core::Event) -> (String, String) {
         return (title.to_string(), body.to_string());
     }
 
+    // task_intake: a task ingested from an external source — a GitHub issue,
+    // via `edda intake`. Named with an underscore, so it is *not* part of the
+    // `task.` family below and needs its own arm; miss it and the issue a task
+    // came from — its title and intent, the richest text any task event carries
+    // — is unsearchable (GH-404).
+    if event.event_type == "task_intake" {
+        let s = |k: &str| payload.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let arr = |k: &str| {
+            payload
+                .get(k)
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default()
+        };
+        let body = format!("{} {} {}", s("intent"), arr("labels"), arr("constraints"));
+        return (s("title").to_string(), body.trim().to_string());
+    }
+
     // Task events: the searchable payload is the receipt / reason / title, and
     // none of it lives in a `text` field — so without this branch every task
     // event indexed empty and the receipt (the fleet's record of what shipped)
@@ -1151,6 +1174,33 @@ mod tests {
         assert!(
             joined.contains("docs/plan/x.md"),
             "task.created brief_ref must be indexed: {joined:?}"
+        );
+
+        // task_intake is named with an underscore, not a dot, so a `task.`
+        // prefix check silently skips it — yet it carries the richest text of
+        // any task event (a GitHub issue's title and intent). It must index too.
+        let intake = edda_core::event::new_task_intake_event(&edda_core::event::TaskIntakeParams {
+            branch: "main".to_string(),
+            parent_hash: None,
+            source: "github".to_string(),
+            source_id: "404".to_string(),
+            source_url: "https://example/issues/404".to_string(),
+            title: "retrieval coverage and UX".to_string(),
+            intent: "make task receipts searchable".to_string(),
+            labels: vec!["P1".to_string()],
+            priority: "high".to_string(),
+            constraints: vec!["no scoring engine".to_string()],
+        })
+        .unwrap();
+        let (t, b) = extract_event_title_body(&intake);
+        let joined = format!("{t} {b}");
+        assert!(
+            joined.contains("retrieval coverage"),
+            "task_intake title must be indexed: {joined:?}"
+        );
+        assert!(
+            joined.contains("make task receipts searchable"),
+            "task_intake intent must be indexed: {joined:?}"
         );
     }
 
