@@ -70,6 +70,87 @@ where
     (hits, misses)
 }
 
+/// Collect a fan-out's hits back into per-project groups, preserving the order
+/// projects were visited in.
+///
+/// Generic because nothing in it is verb-specific: it is `fan_out`'s output
+/// reshaped, and every verb that fans out needs exactly this. It lives beside
+/// `fan_out` so the next one does not grow a third private copy.
+pub fn group_by_project<T>(hits: &[FleetHit<T>]) -> Vec<(String, Vec<&T>)> {
+    let mut out: Vec<(String, Vec<&T>)> = Vec::new();
+    for hit in hits {
+        match out.iter_mut().find(|(p, _)| *p == hit.project) {
+            Some((_, items)) => items.push(&hit.item),
+            None => out.push((hit.project.clone(), vec![&hit.item])),
+        }
+    }
+    out
+}
+
+/// Report the projects that did not answer, in the one form every fleet verb
+/// uses.
+///
+/// No prefix: `fan_out`'s reasons are already complete phrases, and a fixed
+/// prefix would contradict half of them — the most common miss is "repo not on
+/// this machine", which is absent, not unreadable.
+pub fn print_misses(misses: &[FleetMiss]) {
+    for miss in misses {
+        println!("  [{}] {}", miss.project, miss.reason);
+    }
+}
+
+/// The line a fleet read prints when it found nothing.
+///
+/// It exists because the obvious guard — `if empty && misses.is_empty()` — has
+/// the logic backwards, and all three verbs shipped with it. Suppressing the
+/// summary when something failed removes the sentence precisely when the reader
+/// most needs it: with a miss printed and no summary, "the other projects had
+/// nothing" and "the other projects were never looked at" produce identical
+/// output, which is the silence this whole verb exists to break.
+///
+/// So the count is never `scope.len()`. It is what actually answered, and the
+/// shortfall is stated rather than left for the reader to subtract.
+///
+/// `what` names the thing not found ("results", "tasks on the rail"); `tail`
+/// carries the caller's qualifier (" for: {query}") and is placed before the
+/// shortfall clause so the sentence still reads in order.
+pub fn empty_summary(what: &str, tail: &str, scope_len: usize, misses: &[FleetMiss]) -> String {
+    let answered = scope_len.saturating_sub(misses.len());
+    if misses.is_empty() {
+        format!("No {what} across {answered} project(s){tail}")
+    } else {
+        format!(
+            "No {what} in the {answered} project(s) that answered{tail}; {} could not be read (above)",
+            misses.len()
+        )
+    }
+}
+
+/// The `--json` body of a fleet read: what answered, and what did not.
+///
+/// The keys live here rather than at each call site because they are the part
+/// that actually diverged — `ask` said `unreadable` while `task` said
+/// `unavailable` for the identical array. A helper that returned only the
+/// values would leave the next verb free to invent a third spelling, which is
+/// the divergence this is meant to end.
+///
+/// Having one spelling matters more than which spelling won. `unavailable` is
+/// the word that covers both misses `fan_out` actually produces — absent *and*
+/// errored; `unreadable` only covers the second, and would contradict the
+/// commonest reason of all, "repo not on this machine".
+///
+/// `projects` is pre-built by the caller: every verb tags its rows the same
+/// way, but what hangs off each project is the verb's own business.
+pub fn json_envelope(projects: Vec<serde_json::Value>, misses: &[FleetMiss]) -> serde_json::Value {
+    serde_json::json!({
+        "projects": projects,
+        "unavailable": misses
+            .iter()
+            .map(|m| serde_json::json!({ "project": m.project, "reason": m.reason }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +245,88 @@ mod tests {
         let (hits, misses) = fan_out(&[], |_| Ok(vec!["never"]));
         assert!(hits.is_empty());
         assert!(misses.is_empty());
+    }
+
+    /// Grouping preserves visit order, so a fleet read renders in registry
+    /// order rather than whatever a hash map felt like.
+    #[test]
+    fn grouping_keeps_each_project_together_in_the_order_visited() {
+        let hits = vec![
+            FleetHit {
+                project: "edda".to_string(),
+                item: "a",
+            },
+            FleetHit {
+                project: "dazun".to_string(),
+                item: "b",
+            },
+            FleetHit {
+                project: "edda".to_string(),
+                item: "c",
+            },
+        ];
+
+        let grouped = group_by_project(&hits);
+
+        assert_eq!(grouped.len(), 2, "two projects, not three rows");
+        assert_eq!(grouped[0].0, "edda");
+        assert_eq!(grouped[0].1, vec![&"a", &"c"], "non-adjacent hits regroup");
+        assert_eq!(grouped[1].0, "dazun");
+        assert_eq!(grouped[1].1, vec![&"b"]);
+    }
+
+    /// The line that had it backwards. A fleet read that found nothing must
+    /// say what it *did* cover, and it may never count a project it never
+    /// reached — otherwise "nothing there" and "did not look" render the same,
+    /// which is the failure the whole verb exists to remove.
+    #[test]
+    fn an_empty_fleet_read_never_counts_projects_it_could_not_reach() {
+        let plain = empty_summary("results", " for: q", 4, &[]);
+        assert_eq!(plain, "No results across 4 project(s) for: q");
+
+        let misses = vec![FleetMiss {
+            project: "yushan".to_string(),
+            reason: "index not built".to_string(),
+        }];
+        let partial = empty_summary("results", " for: q", 4, &misses);
+
+        assert!(
+            partial.contains("3 project(s) that answered"),
+            "must report the 3 it actually covered: {partial}"
+        );
+        assert!(
+            !partial.contains("across 4"),
+            "must not claim all 4 were covered when 1 never answered: {partial}"
+        );
+        assert!(
+            partial.contains("1 could not be read"),
+            "the shortfall must be accounted for, not implied: {partial}"
+        );
+    }
+
+    /// Pins the key names themselves. They are the whole point of the helper —
+    /// a verb free to spell this `unreadable` is the divergence that made it
+    /// necessary — so a rename must not be able to pass quietly.
+    #[test]
+    fn the_json_envelope_names_what_answered_and_what_did_not() {
+        let misses = vec![FleetMiss {
+            project: "dazun".to_string(),
+            reason: "repo not on this machine (D:\\gone)".to_string(),
+        }];
+
+        let env = json_envelope(vec![serde_json::json!({ "project": "edda" })], &misses);
+
+        assert_eq!(env["projects"][0]["project"], "edda");
+        assert_eq!(env["unavailable"][0]["project"], "dazun");
+        // Verbatim: `fan_out`'s reasons are complete phrases, and the absent
+        // repo is the case a fixed "unreadable:" prefix used to contradict.
+        assert_eq!(
+            env["unavailable"][0]["reason"],
+            "repo not on this machine (D:\\gone)"
+        );
+        assert!(
+            env.get("unreadable").is_none() && env.get("fleet").is_none(),
+            "the retired spellings must not come back: {env}"
+        );
     }
 }
