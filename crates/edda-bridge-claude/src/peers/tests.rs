@@ -1330,6 +1330,170 @@ fn auto_claim_updates_on_scope_change() {
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
+// ── #444: the branch fallback is a presence signal, not a scope claim ──
+
+/// Create a git repo in a temp dir sitting on `branch` with one commit,
+/// so `detect_git_branch_in` can resolve HEAD.
+fn git_repo_on_branch(branch: &str) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    for args in [
+        vec!["init"],
+        vec!["config", "user.email", "test@test.com"],
+        vec!["config", "user.name", "Test"],
+        vec!["commit", "--allow-empty", "-m", "init"],
+        vec!["checkout", "-b", branch],
+    ] {
+        let _ = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(tmp.path())
+            .output();
+    }
+    tmp
+}
+
+#[test]
+fn auto_claim_writes_no_claim_for_a_fresh_session() {
+    let pid = "test_autoclaim_branch_fallback";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    let repo = git_repo_on_branch("fallback-branch");
+    // Fresh session: no file edits yet, so there is no scope to claim. This used
+    // to claim `(branch, ["**/*"])`, which blocked every peer under enforcement.
+    maybe_auto_claim(
+        pid,
+        "s1",
+        &SessionSignals::default(),
+        repo.path().to_str().unwrap(),
+    );
+
+    let board = compute_board_state(pid);
+    assert!(
+        board.claims.is_empty(),
+        "a session that edited nothing must claim nothing, got {:?}",
+        board.claims
+    );
+
+    remove_autoclaim_state(pid, "s1");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn auto_claim_starts_claiming_once_files_are_edited() {
+    let pid = "test_autoclaim_fallback_upgrade";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    let repo = git_repo_on_branch("fallback-upgrade");
+    let cwd = repo.path().to_str().unwrap();
+
+    maybe_auto_claim(pid, "s1", &SessionSignals::default(), cwd);
+
+    let signals = SessionSignals {
+        files_modified: vec![FileEditCount {
+            path: "crates/edda-store/src/lib.rs".into(),
+            count: 3,
+        }],
+        ..Default::default()
+    };
+    maybe_auto_claim(pid, "s1", &signals, cwd);
+
+    let board = compute_board_state(pid);
+    let claim = board.claims.iter().find(|c| c.session_id == "s1").unwrap();
+    assert_eq!(claim.label, "edda-store");
+    assert_eq!(claim.paths, vec!["crates/edda-store/*"]);
+
+    remove_autoclaim_state(pid, "s1");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn heartbeat_label_falls_back_to_git_branch_for_a_fresh_session() {
+    let pid = "test_hb_branch_label";
+    let _ = edda_store::ensure_dirs(pid);
+
+    let repo = git_repo_on_branch("presence-branch");
+    // No edits → `auto_label` is empty, so the branch carries the identity.
+    write_heartbeat(
+        pid,
+        "s1",
+        &SessionSignals::default(),
+        None,
+        repo.path().to_str().unwrap(),
+    );
+
+    let hb = read_heartbeat(pid, "s1").expect("heartbeat written");
+    assert_eq!(
+        hb.label, "presence-branch",
+        "fresh session must stay identifiable in `edda watch` without a claim"
+    );
+
+    remove_heartbeat(pid, "s1");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn fresh_session_receives_requests_addressed_to_its_branch() {
+    let pid = "test_hb_branch_request";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    let repo = git_repo_on_branch("request-branch");
+    let cwd = repo.path().to_str().unwrap();
+
+    // Peer, and a fresh session that has claimed nothing.
+    write_heartbeat(pid, "s-peer", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s-fresh", &SessionSignals::default(), None, cwd);
+    maybe_auto_claim(pid, "s-fresh", &SessionSignals::default(), cwd);
+
+    write_request(
+        pid,
+        "s-peer",
+        "auth",
+        "request-branch",
+        "rebase before you push",
+    );
+
+    let pending = pending_requests_for_session(pid, "s-fresh");
+    assert_eq!(
+        pending.len(),
+        1,
+        "branch-addressed request must reach a session with no claim, got {pending:?}"
+    );
+    assert_eq!(pending[0].message, "rebase before you push");
+
+    remove_heartbeat(pid, "s-peer");
+    remove_heartbeat(pid, "s-fresh");
+    remove_autoclaim_state(pid, "s-fresh");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn two_fresh_sessions_on_one_branch_do_not_block_each_other() {
+    let pid = "test_two_fresh_no_block";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    let repo = git_repo_on_branch("shared-branch");
+    let cwd = repo.path().to_str().unwrap();
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), None, cwd);
+    write_heartbeat(pid, "s2", &SessionSignals::default(), None, cwd);
+    maybe_auto_claim(pid, "s1", &SessionSignals::default(), cwd);
+    maybe_auto_claim(pid, "s2", &SessionSignals::default(), cwd);
+
+    // Both are visible to each other, and neither has claimed any path — the
+    // mutual deadlock in #444 came from both claiming `**/*`.
+    assert_eq!(discover_active_peers(pid, "s1").len(), 1);
+    assert!(compute_board_state(pid).claims.is_empty());
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    remove_autoclaim_state(pid, "s1");
+    remove_autoclaim_state(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
 #[test]
 fn auto_claim_cleanup_removes_state_file() {
     let pid = "test_autoclaim_cleanup";

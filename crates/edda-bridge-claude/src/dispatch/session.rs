@@ -262,7 +262,6 @@ pub(super) fn dispatch_session_end(
     session_id: &str,
     transcript_path: &str,
     cwd: &str,
-    peers_active: bool,
 ) -> anyhow::Result<HookResult> {
     // 1. Final ingest so signals are up-to-date
     ingest_and_build_pack(project_id, session_id, transcript_path, cwd);
@@ -414,7 +413,7 @@ pub(super) fn dispatch_session_end(
     notify_session_end(project_id, cwd, session_id);
 
     // 3. Clean up session-scoped state files
-    cleanup_session_state(project_id, session_id, peers_active);
+    cleanup_session_state(project_id, session_id);
 
     // 4. Collect warnings (pending tasks)
     if let Some(warning) = collect_session_end_warnings(project_id) {
@@ -623,7 +622,7 @@ pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
 }
 
 /// Remove session-scoped state files that are no longer needed.
-pub(super) fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool) {
+pub(super) fn cleanup_session_state(project_id: &str, session_id: &str) {
     let state_dir = edda_store::project_dir(project_id).join("state");
     // Dedup hash (Step 2)
     let _ = fs::remove_file(state_dir.join(format!("inject_hash.{session_id}")));
@@ -650,9 +649,12 @@ pub(super) fn cleanup_session_state(project_id: &str, session_id: &str, peers_ac
     crate::peers::cleanup_subagent_heartbeats(project_id, session_id);
     // Peer heartbeat + unclaim (L2 — keep remove_heartbeat unconditional as idempotent cleanup)
     crate::peers::remove_heartbeat(project_id, session_id);
-    if peers_active {
-        crate::peers::write_unclaim(project_id, session_id);
-    }
+    // Unconditional, for the same reason remove_heartbeat is: an Unclaim with no
+    // matching claim is a no-op in the fold, and compaction drops both halves.
+    // Gating this on active peers orphaned every solo session's claim in
+    // coordination.jsonl — compaction preserves claims, so `edda gc` never
+    // reclaimed them and the board fold carried them forever (#445).
+    crate::peers::write_unclaim(project_id, session_id);
     // NOTE: The following state files are intentionally NOT deleted here — they
     // persist across sessions to provide continuity context at the next SessionStart:
     //   - active_tasks.json  → L1 narrative shows previous session's final task state

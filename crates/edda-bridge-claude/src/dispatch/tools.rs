@@ -236,6 +236,15 @@ pub(super) fn check_offlimits(
         if !active_sids.contains(claim.session_id.as_str()) {
             continue;
         }
+        // Skip repo-wide claims (#444). A claim on everything can't express a
+        // coordination boundary — enforcing it blocks every peer write, which
+        // reads as "enforcement is broken". Pre-#444 logs still carry `**/*`
+        // branch-fallback auto-claims, and those sessions keep heartbeating
+        // after an upgrade, so the guard is load-bearing beyond the fallback fix.
+        // Such claims still render in the protocol and on the board, advisory-only.
+        if claim.paths.iter().any(|p| p == "**/*") {
+            continue;
+        }
 
         for glob_pattern in &claim.paths {
             if let Ok(glob) = Glob::new(glob_pattern) {

@@ -29,10 +29,24 @@ pub(crate) fn write_heartbeat(
         .map(|h| h.started_at)
         .unwrap_or_else(|| now.clone());
 
+    let branch = detect_git_branch_in(cwd);
+
     let derived_label = label
         .map(|s| s.to_string())
         .or_else(env_label)
-        .unwrap_or_else(|| auto_label(signals, Some(cwd)));
+        .unwrap_or_else(|| {
+            let auto = auto_label(signals, Some(cwd));
+            if auto.is_empty() {
+                // Fresh session: no edits yet, so `auto_label` is empty. Fall back
+                // to the git branch so the peer stays identifiable in `edda watch`
+                // and can still receive `edda request` (#128). This is a presence
+                // signal on the heartbeat — never a scope claim, which is what
+                // used to block every peer under enforce_offlimits (#444).
+                branch.clone().unwrap_or_default()
+            } else {
+                auto
+            }
+        });
 
     let heartbeat = SessionHeartbeat {
         session_id: session_id.to_string(),
@@ -55,7 +69,7 @@ pub(crate) fn write_heartbeat(
             .take(3)
             .map(|c| format!("{} {}", &c.hash[..7.min(c.hash.len())], c.message))
             .collect(),
-        branch: detect_git_branch_in(cwd),
+        branch,
         current_phase: crate::agent_phase::read_phase_state(project_id, session_id)
             .map(|ps| ps.phase.to_string()),
         parent_session_id: None,
