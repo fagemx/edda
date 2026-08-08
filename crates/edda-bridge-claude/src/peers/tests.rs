@@ -2855,3 +2855,80 @@ fn render_pathless_claim_says_what_is_missing() {
     remove_heartbeat(pid, "s2");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
+
+/// A timestamp `secs` in the past, in the same format `now_rfc3339` produces.
+/// Lets a test place events at known distances without touching the clock or
+/// any env var.
+fn ts_secs_ago(secs: i64) -> String {
+    (time::OffsetDateTime::now_utc() - time::Duration::seconds(secs))
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("RFC3339 formatting")
+}
+
+/// Append a Request exactly as pre-GH-442 edda wrote it: no `id` field.
+fn append_legacy_request(pid: &str, ts: &str, from_label: &str, to_label: &str, message: &str) {
+    let event = CoordEvent {
+        ts: ts.to_string(),
+        session_id: "s2".to_string(),
+        event_type: CoordEventType::Request,
+        payload: serde_json::json!({
+            "from_label": from_label,
+            "to_label": to_label,
+            "message": message,
+        }),
+    };
+    append_coord_event(pid, &event);
+}
+
+/// Append a RequestAck exactly as pre-GH-442 edda wrote it: `from_label` only.
+fn append_legacy_ack(pid: &str, ts: &str, acker_session: &str, from_label: &str) {
+    let event = CoordEvent {
+        ts: ts.to_string(),
+        session_id: acker_session.to_string(),
+        event_type: CoordEventType::RequestAck,
+        payload: serde_json::json!({ "from_label": from_label }),
+    };
+    append_coord_event(pid, &event);
+}
+
+#[test]
+fn legacy_ackless_id_log_survives_compaction_without_swallowing_later_requests() {
+    let pid = "test_gh442_legacy_compaction";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    // A log written entirely by the pre-fix binary: no request ids, no
+    // request_ids on the ack. Only the timestamps separate the messages.
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    append_legacy_request(pid, &ts_secs_ago(30), "billing", "auth", "legacy request A");
+    append_legacy_ack(pid, &ts_secs_ago(20), "s1", "billing");
+    append_legacy_request(pid, &ts_secs_ago(10), "billing", "auth", "legacy request B");
+
+    let expect_only_b = |stage: &str| {
+        let pending = pending_requests_for_session(pid, "s1");
+        assert_eq!(
+            pending.len(),
+            1,
+            "{stage}: the ack predates B, so only A is retired, got: {pending:?}"
+        );
+        assert_eq!(pending[0].message, "legacy request B", "{stage}");
+    };
+    expect_only_b("before compaction");
+
+    // Compaction rewrites every event through the current serializer. A legacy
+    // ack comes back with an empty `request_ids`, which must keep it on the
+    // timestamp-bounded path rather than promoting it to "acks nothing" or
+    // demoting it to "acks everything from this peer".
+    let lines = compute_board_state_for_compaction(pid);
+    fs::write(coordination_path(pid), format!("{}\n", lines.join("\n"))).unwrap();
+    expect_only_b("after compaction");
+
+    let board = compute_board_state(pid);
+    assert_eq!(board.request_acks.len(), 1, "the ack survives compaction");
+    assert!(
+        board.request_acks[0].request_ids.is_empty(),
+        "a legacy ack must not gain fabricated ids during compaction"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
