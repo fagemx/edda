@@ -622,6 +622,14 @@ pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
     );
 }
 
+/// True if the coordination board still folds a claim for this session.
+fn session_holds_claim(project_id: &str, session_id: &str) -> bool {
+    crate::peers::compute_board_state(project_id)
+        .claims
+        .iter()
+        .any(|c| c.session_id == session_id)
+}
+
 /// Remove session-scoped state files that are no longer needed.
 pub(super) fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool) {
     let state_dir = edda_store::project_dir(project_id).join("state");
@@ -650,7 +658,13 @@ pub(super) fn cleanup_session_state(project_id: &str, session_id: &str, peers_ac
     crate::peers::cleanup_subagent_heartbeats(project_id, session_id);
     // Peer heartbeat + unclaim (L2 — keep remove_heartbeat unconditional as idempotent cleanup)
     crate::peers::remove_heartbeat(project_id, session_id);
-    if peers_active {
+    // Release the claim whenever this session still holds one. Gating on
+    // `peers_active` alone orphaned every solo session's claim in
+    // coordination.jsonl: compaction preserves claims, so `edda gc` never
+    // reclaimed them and the board fold carried them forever (#445).
+    // `peers_active` stays as the cheap path — with peers around, the claim
+    // write is the norm, so skip the board read.
+    if peers_active || session_holds_claim(project_id, session_id) {
         crate::peers::write_unclaim(project_id, session_id);
     }
     // NOTE: The following state files are intentionally NOT deleted here — they

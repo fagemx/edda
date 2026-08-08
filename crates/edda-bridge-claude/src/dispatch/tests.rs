@@ -1358,10 +1358,10 @@ fn solo_to_multi_session_transition() {
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
-// ── Issue #148 Gap 7: SessionEnd unclaim gating ──
+// ── Issue #148 Gap 7 / #445: SessionEnd unclaim gating ──
 
 #[test]
-fn session_end_unclaim_only_with_active_peers() {
+fn session_end_writes_unclaim_for_every_claimed_session() {
     let pid = "test_se_unclaim_gate";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -1376,10 +1376,10 @@ fn session_end_unclaim_only_with_active_peers() {
     crate::peers::write_claim(pid, "s1", "auth", &["src/auth.rs".into()]);
     crate::peers::write_claim(pid, "s2", "billing", &["src/bill.rs".into()]);
 
-    // SessionEnd with peers_active=false — should NOT write unclaim
+    // #445: a session that ends solo still has to release its claim, otherwise the
+    // claim stays in coordination.jsonl forever (compaction preserves all claims).
     let _ = dispatch_session_end(pid, "s1", "", cwd.to_str().unwrap(), false);
 
-    // Read coordination.jsonl and check no unclaim for s1
     let coord_path = edda_store::project_dir(pid)
         .join("state")
         .join("coordination.jsonl");
@@ -1388,7 +1388,17 @@ fn session_end_unclaim_only_with_active_peers() {
         .lines()
         .filter(|l| l.contains("\"unclaim\"") && l.contains("s1"))
         .count();
-    assert_eq!(unclaim_count, 0, "no unclaim when peers_active=false");
+    assert_eq!(
+        unclaim_count, 1,
+        "solo session must still release its claim"
+    );
+    assert!(
+        !crate::peers::compute_board_state(pid)
+            .claims
+            .iter()
+            .any(|c| c.session_id == "s1"),
+        "claim must be gone from the board fold, not orphaned"
+    );
 
     // Write fresh claim for s3 and end with peers_active=true — SHOULD write unclaim
     crate::peers::write_claim(pid, "s3", "infra", &["infra/main.tf".into()]);
@@ -1406,6 +1416,27 @@ fn session_end_unclaim_only_with_active_peers() {
     drop(_eg);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn session_end_skips_unclaim_when_nothing_was_claimed() {
+    let pid = "test_se_unclaim_noise";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Solo session that never claimed anything: releasing nothing is pure log noise.
+    cleanup_session_state(pid, "s-noclaim", false);
+
+    let coord_path = edda_store::project_dir(pid)
+        .join("state")
+        .join("coordination.jsonl");
+    let content = fs::read_to_string(&coord_path).unwrap_or_default();
+    assert!(
+        !content.contains("\"unclaim\""),
+        "no claim to release → no unclaim event, got: {content}"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
 #[test]
@@ -2478,6 +2509,28 @@ fn offlimits_skips_stale_claims() {
     assert!(
         result.is_none(),
         "should not block on claims from stale/missing peers"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn offlimits_ignores_repo_wide_peer_claim() {
+    let pid = "test-offlimits-repo-wide";
+    let sid = "s-self-wide";
+    let peer_sid = "s-peer-wide";
+    let _ = edda_store::ensure_dirs(pid);
+
+    // #444: legacy branch-fallback auto-claims (and any deliberate repo-wide claim)
+    // would otherwise hard-block every Edit/Write from every peer.
+    crate::peers::write_heartbeat_minimal(pid, peer_sid, "main", ".");
+    crate::peers::write_claim(pid, peer_sid, "main", &["**/*".into()]);
+    write_peer_count(pid, sid, 1);
+
+    let result = check_offlimits(pid, sid, "crates/edda-store/src/lib.rs");
+    assert!(
+        result.is_none(),
+        "a repo-wide claim must not gate peer writes, got {result:?}"
     );
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));

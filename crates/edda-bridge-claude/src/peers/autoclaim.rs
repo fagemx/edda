@@ -143,10 +143,15 @@ pub(crate) fn maybe_auto_claim(
     let (label, paths) = match derive_scope_from_files(&signals.files_modified, Some(cwd)) {
         Some(v) => v,
         None => {
-            // No file edits yet (fresh session) — use git branch as fallback label
-            // so the peer is visible in `edda watch` immediately (#128)
+            // No file edits yet (fresh session) — use the git branch as a fallback
+            // label so the peer is visible in `edda watch` immediately (#128).
+            //
+            // This records *presence*, not scope: the session hasn't touched
+            // anything yet, so it claims no paths. Claiming `**/*` here matched
+            // every file under `enforce_offlimits` and hard-blocked every peer's
+            // Edit/Write for as long as the fresh session's heartbeat lived (#444).
             match detect_git_branch_in(cwd) {
-                Some(branch) => (branch, vec!["**/*".to_string()]),
+                Some(branch) => (branch, Vec::new()),
                 None => return,
             }
         }
