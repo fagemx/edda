@@ -165,6 +165,9 @@ enum Command {
         /// Session ID (auto-inferred from active heartbeats if omitted)
         #[arg(long)]
         session: Option<String>,
+        /// Send even when no active session answers to the target label
+        #[arg(long)]
+        force: bool,
     },
     /// Acknowledge a pending request from another session
     #[command(name = "request-ack")]
@@ -721,6 +724,9 @@ enum BridgeClaudeCmd {
         /// Session ID (auto-inferred from active heartbeats if omitted)
         #[arg(long)]
         session: Option<String>,
+        /// Send even when no active session answers to the target label
+        #[arg(long)]
+        force: bool,
     },
     /// Render write-back protocol (static teaching text)
     RenderWriteback,
@@ -1034,7 +1040,8 @@ fn main() -> anyhow::Result<()> {
             to,
             message,
             session,
-        } => cmd_bridge::request(&repo_root, &to, &message, session.as_deref()),
+            force,
+        } => cmd_bridge::request(&repo_root, &to, &message, session.as_deref(), force),
         Command::RequestAck { from, session } => {
             cmd_bridge::request_ack(&repo_root, &from, session.as_deref())
         }

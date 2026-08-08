@@ -97,7 +97,19 @@ Agents can send requests to each other:
 edda request "billing" "Please expose the invoice total as a public method"
 ```
 
-The target agent sees the request at its next prompt.
+The target agent sees the request at its next prompt. If no active session
+answers to `billing`, the send fails rather than silently going nowhere — pass
+`--force` to queue it for a peer that has not started yet.
+
+The request keeps appearing until the receiving agent acknowledges it:
+
+```bash
+edda request-ack "auth"
+```
+
+That ack covers the messages outstanding at that moment, so a later request
+from the same peer is delivered normally. Requests left unacked for 7 days
+expire and are reported as dead letters.
 
 ## Monitoring
 

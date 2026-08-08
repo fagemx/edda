@@ -283,17 +283,24 @@ fn full_lifecycle_multi_session() {
     assert!(proto.contains("4")); // 3 peers + self = 4 agents
     assert!(proto.contains("JWT RS256"));
 
-    // s2 sees peer updates (lightweight) — check BEFORE render_coordination_protocol
-    // because render_coordination_protocol auto-acks displayed requests.
+    // s2 sees peer updates (lightweight)
     let updates = render_peer_updates(pid, "s2").unwrap();
     assert!(updates.contains("Peers"));
     assert!(updates.contains("Export BillingPlan"));
 
-    // Verify s2 sees the request at SessionStart (auto-acks it)
+    // Verify s2 sees the request at SessionStart. Rendering does not ack it
+    // (GH-442) — the request survives until s2 explicitly acknowledges.
     let proto_s2 = render_coordination_protocol(pid, "s2", ".").unwrap();
     assert!(proto_s2.contains("Export BillingPlan type"));
+    assert!(
+        render_peer_updates(pid, "s2")
+            .unwrap()
+            .contains("Export BillingPlan"),
+        "rendering is delivery, not acknowledgement — request must still show"
+    );
 
-    // After auto-ack, peer updates should no longer show the request
+    // After an explicit ack, peer updates should no longer show the request
+    write_request_ack(pid, "s2", "api");
     let updates_after = render_peer_updates(pid, "s2").unwrap();
     assert!(
         !updates_after.contains("Export BillingPlan"),
@@ -2591,5 +2598,189 @@ fn teammate_idle_writes_coord_event_and_updates_phase() {
     // Cleanup
     remove_heartbeat(pid, teammate_sid);
     let _ = fs::remove_file(coordination_path(pid));
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+// ── GH-442 / GH-443: per-message ack identity, target validation, TTL ──
+
+/// Append a raw Request event with a caller-chosen timestamp, bypassing
+/// `write_request`. Used to age a request past the TTL horizon.
+fn append_request_at(pid: &str, ts: &str, from_session: &str, from_label: &str, to_label: &str) {
+    let event = CoordEvent {
+        ts: ts.to_string(),
+        session_id: from_session.to_string(),
+        event_type: CoordEventType::Request,
+        payload: serde_json::json!({
+            "id": format!("req-{ts}"),
+            "from_label": from_label,
+            "to_label": to_label,
+            "message": "aged request",
+        }),
+    };
+    append_coord_event(pid, &event);
+}
+
+#[test]
+fn second_request_from_same_peer_survives_first_ack() {
+    let pid = "test_gh442_second_request";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    write_request(pid, "s2", "billing", "auth", "request A");
+    write_request_ack(pid, "s1", "billing");
+
+    // Same peer sends a second, distinct request after the first was acked.
+    write_request(pid, "s2", "billing", "auth", "request B");
+
+    let pending = pending_requests_for_session(pid, "s1");
+    assert_eq!(
+        pending.len(),
+        1,
+        "only the unacked second request should be pending, got: {pending:?}"
+    );
+    assert_eq!(pending[0].message, "request B");
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn render_does_not_auto_ack_requests() {
+    let pid = "test_gh442_no_auto_ack";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    write_request(pid, "s2", "billing", "auth", "Need AuthToken export");
+
+    let rendered = render_coordination_protocol(pid, "s1", ".").unwrap_or_default();
+    assert!(
+        rendered.contains("Need AuthToken export"),
+        "request should render: {rendered}"
+    );
+
+    // Rendering is delivery, not acknowledgement: the request stays pending
+    // until an explicit `edda request-ack`.
+    let pending = pending_requests_for_session(pid, "s1");
+    assert_eq!(
+        pending.len(),
+        1,
+        "rendering must not auto-ack — request should still be pending"
+    );
+
+    write_request_ack(pid, "s1", "billing");
+    assert!(
+        pending_requests_for_session(pid, "s1").is_empty(),
+        "explicit ack should clear the request"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn resolve_request_targets_matches_only_live_labels() {
+    let pid = "test_gh443_resolve_targets";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+
+    assert_eq!(
+        resolve_request_targets(pid, "auth"),
+        vec!["s1".to_string()],
+        "an active session holding the label should resolve"
+    );
+    assert!(
+        resolve_request_targets(pid, "aut").is_empty(),
+        "a typo'd label must resolve to nobody"
+    );
+
+    remove_heartbeat(pid, "s1");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn resolve_request_targets_reports_ambiguous_labels() {
+    let pid = "test_gh443_ambiguous_targets";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"), ".");
+
+    let mut targets = resolve_request_targets(pid, "auth");
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec!["s1".to_string(), "s2".to_string()],
+        "duplicate labels must both surface so the sender can be warned"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn expired_requests_are_not_pending_and_are_compacted_away() {
+    let pid = "test_gh443_request_ttl";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    append_request_at(pid, "2020-01-01T00:00:00Z", "s2", "ghost", "auth");
+    write_request(pid, "s2", "billing", "auth", "fresh request");
+
+    let pending = pending_requests_for_session(pid, "s1");
+    assert_eq!(
+        pending.len(),
+        1,
+        "the aged dead letter must not be delivered, got: {pending:?}"
+    );
+    assert_eq!(pending[0].message, "fresh request");
+
+    let lines = compute_board_state_for_compaction(pid);
+    assert!(
+        !lines.iter().any(|l| l.contains("aged request")),
+        "compaction must drop expired requests instead of preserving them forever"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("fresh request")),
+        "compaction must keep live requests"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn render_surfaces_expired_requests_as_warning() {
+    let pid = "test_gh443_expired_warning";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    append_request_at(pid, "2020-01-01T00:00:00Z", "s2", "ghost", "auth");
+
+    let peers = discover_active_peers(pid, "s1");
+    let board = compute_board_state(pid);
+    let rendered = render_coordination_protocol_with(&peers, &board, pid, "s1").unwrap_or_default();
+    assert!(
+        rendered.contains("Expired requests"),
+        "expired unacked requests should be surfaced, not silently hidden: {rendered}"
+    );
+    assert!(
+        !rendered.contains("aged request"),
+        "expired request bodies should not be rendered as live requests: {rendered}"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }

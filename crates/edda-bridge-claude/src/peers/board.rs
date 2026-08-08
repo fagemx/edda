@@ -1,9 +1,11 @@
 use std::fs;
 
+use super::helpers::parse_rfc3339_to_epoch;
 use super::{
-    coordination_path, BindingEntry, BoardState, ClaimEntry, CoordEvent, CoordEventType,
-    RequestAckEntry, RequestEntry, SubagentCompletedEntry,
+    coordination_path, request_ttl_secs, BindingEntry, BoardState, ClaimEntry, CoordEvent,
+    CoordEventType, RequestAckEntry, RequestEntry, SubagentCompletedEntry,
 };
+use crate::parse::now_rfc3339;
 
 // ── Board State Computation ──
 
@@ -73,7 +75,14 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
                     .to_string();
                 let to_label = event.payload["to_label"].as_str().unwrap_or("").to_string();
                 let message = event.payload["message"].as_str().unwrap_or("").to_string();
+                // Pre-GH-442 requests have no id; synthesize a stable one from
+                // the fields that already identify the event on disk.
+                let id = event.payload["id"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("legacy:{}:{}", event.session_id, event.ts));
                 requests.push(RequestEntry {
+                    id,
                     from_session: event.session_id,
                     from_label,
                     to_label,
@@ -86,9 +95,18 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
                     .as_str()
                     .unwrap_or("")
                     .to_string();
+                let request_ids: Vec<String> = event.payload["request_ids"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 request_acks.push(RequestAckEntry {
                     acker_session: event.session_id,
                     from_label,
+                    request_ids,
                     ts: event.ts,
                 });
             }
@@ -158,6 +176,74 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
     }
 }
 
+// ── Request Delivery Rules ──
+
+/// Current wall clock as epoch seconds, on the same coarse scale the peers
+/// module uses for every other event timestamp.
+fn now_epoch() -> u64 {
+    parse_rfc3339_to_epoch(&now_rfc3339()).unwrap_or(0)
+}
+
+/// True when `session_id` has acknowledged this specific request.
+///
+/// Acks name the request ids they cover (GH-442), so acking one message from a
+/// peer no longer suppresses that peer's later messages. Legacy acks carry no
+/// ids; they fall back to label matching bounded by timestamp, so they can only
+/// suppress requests that already existed when the ack was written.
+fn is_acked(board: &BoardState, request: &RequestEntry, session_id: &str) -> bool {
+    board.request_acks.iter().any(|a| {
+        if a.acker_session != session_id {
+            return false;
+        }
+        if a.request_ids.is_empty() {
+            a.from_label == request.from_label
+                && parse_rfc3339_to_epoch(&a.ts).unwrap_or(0)
+                    >= parse_rfc3339_to_epoch(&request.ts).unwrap_or(0)
+        } else {
+            a.request_ids.iter().any(|id| id == &request.id)
+        }
+    })
+}
+
+/// True when an unacked request has aged past the dead-letter horizon.
+/// An unparseable timestamp never expires — losing a message is worse than
+/// keeping a stale one.
+fn is_expired(request: &RequestEntry, now: u64, ttl: u64) -> bool {
+    match parse_rfc3339_to_epoch(&request.ts) {
+        Some(ts) => now.saturating_sub(ts) > ttl,
+        None => false,
+    }
+}
+
+/// Split the unacked requests addressed to `my_label` into `(live, expired)`.
+///
+/// The single place delivery is decided: every renderer and the pending-request
+/// nudge go through here, so they cannot drift apart on what counts as acked.
+pub fn partition_requests_for_session<'a>(
+    board: &'a BoardState,
+    session_id: &str,
+    my_label: &str,
+) -> (Vec<&'a RequestEntry>, Vec<&'a RequestEntry>) {
+    if my_label.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    let now = now_epoch();
+    let ttl = request_ttl_secs();
+    let mut live = Vec::new();
+    let mut expired = Vec::new();
+    for r in board.requests.iter().filter(|r| r.to_label == my_label) {
+        if is_acked(board, r, session_id) {
+            continue;
+        }
+        if is_expired(r, now, ttl) {
+            expired.push(r);
+        } else {
+            live.push(r);
+        }
+    }
+    (live, expired)
+}
+
 /// Compact coordination.jsonl: compute current state and return as JSONL lines.
 /// Used by GC to shrink the append-only log.
 pub fn compute_board_state_for_compaction(project_id: &str) -> Vec<String> {
@@ -195,12 +281,20 @@ pub fn compute_board_state_for_compaction(project_id: &str) -> Vec<String> {
         }
     }
 
-    for request in &board.requests {
+    // Requests and acks past the dead-letter horizon are dropped rather than
+    // carried forward forever (GH-443). An ack is never older than the request
+    // it answers, so TTL-ing both on the same horizon cannot resurrect a
+    // request by outliving its ack.
+    let now = now_epoch();
+    let ttl = request_ttl_secs();
+
+    for request in board.requests.iter().filter(|r| !is_expired(r, now, ttl)) {
         let event = CoordEvent {
             ts: request.ts.clone(),
             session_id: request.from_session.clone(),
             event_type: CoordEventType::Request,
             payload: serde_json::json!({
+                "id": request.id,
                 "from_label": request.from_label,
                 "to_label": request.to_label,
                 "message": request.message,
@@ -211,13 +305,18 @@ pub fn compute_board_state_for_compaction(project_id: &str) -> Vec<String> {
         }
     }
 
-    for ack in &board.request_acks {
+    for ack in board.request_acks.iter().filter(|a| {
+        parse_rfc3339_to_epoch(&a.ts)
+            .map(|ts| now.saturating_sub(ts) <= ttl)
+            .unwrap_or(true)
+    }) {
         let event = CoordEvent {
             ts: ack.ts.clone(),
             session_id: ack.acker_session.clone(),
             event_type: CoordEventType::RequestAck,
             payload: serde_json::json!({
                 "from_label": ack.from_label,
+                "request_ids": ack.request_ids,
             }),
         };
         if let Ok(line) = serde_json::to_string(&event) {

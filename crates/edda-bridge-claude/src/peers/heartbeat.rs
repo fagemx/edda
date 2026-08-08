@@ -4,11 +4,11 @@ use std::io::Write;
 use crate::parse::now_rfc3339;
 use crate::signals::SessionSignals;
 
-use super::board::compute_board_state;
-use super::helpers::auto_label;
+use super::board::{compute_board_state, partition_requests_for_session};
+use super::helpers::{auto_label, parse_rfc3339_to_epoch, session_label_from_board};
 use super::{
-    coordination_path, detect_git_branch_in, env_label, heartbeat_path, BindingConflict,
-    CoordEvent, CoordEventType, SessionHeartbeat,
+    coordination_path, detect_git_branch_in, env_label, heartbeat_path, stale_secs,
+    BindingConflict, CoordEvent, CoordEventType, SessionHeartbeat,
 };
 
 // ── Heartbeat Write/Read ──
@@ -273,36 +273,122 @@ pub fn write_binding(project_id: &str, session_id: &str, label: &str, key: &str,
     append_coord_event(project_id, &event);
 }
 
-/// Write a cross-agent request event.
+/// Write a cross-agent request event. Returns the request id.
+///
+/// Every request carries its own id so an ack can name the message it answers
+/// rather than the peer that sent it (GH-442).
 pub fn write_request(
     project_id: &str,
     session_id: &str,
     from_label: &str,
     to_label: &str,
     message: &str,
-) {
+) -> String {
+    let id = ulid::Ulid::new().to_string();
     let event = CoordEvent {
         ts: now_rfc3339(),
         session_id: session_id.to_string(),
         event_type: CoordEventType::Request,
         payload: serde_json::json!({
+            "id": id,
             "from_label": from_label,
             "to_label": to_label,
             "message": message,
         }),
     };
     append_coord_event(project_id, &event);
+    id
 }
 
 /// Write a request acknowledgement event.
+///
+/// Resolves which of `from_label`'s messages are actually outstanding for this
+/// session and records their ids, so the ack retires exactly those messages and
+/// nothing that arrives afterwards.
 pub fn write_request_ack(project_id: &str, session_id: &str, from_label: &str) {
+    let board = compute_board_state(project_id);
+    let my_label = session_label_from_board(&board, project_id, session_id);
+    let (live, _expired) = partition_requests_for_session(&board, session_id, &my_label);
+    let request_ids: Vec<String> = live
+        .iter()
+        .filter(|r| r.from_label == from_label)
+        .map(|r| r.id.clone())
+        .collect();
+
     let event = CoordEvent {
         ts: now_rfc3339(),
         session_id: session_id.to_string(),
         event_type: CoordEventType::RequestAck,
-        payload: serde_json::json!({ "from_label": from_label }),
+        // No resolvable pending message (unidentified session, or an ack for
+        // something already retired): fall back to a label-scoped ack, which
+        // board state bounds by timestamp so it cannot swallow future messages.
+        payload: serde_json::json!({
+            "from_label": from_label,
+            "request_ids": request_ids,
+        }),
     };
     append_coord_event(project_id, &event);
+}
+
+/// Resolve a request target label to the active sessions that would receive it.
+///
+/// Returns the session ids of every non-stale session whose claim label or
+/// heartbeat label matches. Zero means the message is a dead letter — usually a
+/// typo; more than one means the label is ambiguous and the message will land in
+/// several inboxes (GH-443).
+pub fn resolve_request_targets(project_id: &str, to_label: &str) -> Vec<String> {
+    if to_label.is_empty() {
+        return Vec::new();
+    }
+    let state_dir = edda_store::project_dir(project_id).join("state");
+    let entries = match fs::read_dir(&state_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let board = compute_board_state(project_id);
+    let stale_threshold = stale_secs();
+    let now = parse_rfc3339_to_epoch(&now_rfc3339()).unwrap_or(0);
+
+    let mut targets = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("session.") || !name.ends_with(".json") {
+            continue;
+        }
+        let hb: SessionHeartbeat = match fs::read_to_string(entry.path())
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+        {
+            Some(h) => h,
+            None => continue,
+        };
+
+        // Sub-agents can't touch their heartbeat while running; match the
+        // extended threshold peer discovery already uses for them.
+        let effective_threshold = if hb.parent_session_id.is_some() {
+            stale_threshold * 15
+        } else {
+            stale_threshold
+        };
+        let age = now.saturating_sub(parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0));
+        if age > effective_threshold {
+            continue;
+        }
+
+        // Claim wins over heartbeat, matching how a session resolves the label
+        // it answers to — otherwise a claimed session looks reachable under a
+        // stale heartbeat label it no longer reads.
+        let effective_label = board
+            .claims
+            .iter()
+            .find(|c| c.session_id == hb.session_id)
+            .map(|c| c.label.as_str())
+            .unwrap_or(hb.label.as_str());
+        if effective_label == to_label {
+            targets.push(hb.session_id);
+        }
+    }
+    targets
 }
 
 /// Data describing a completed sub-agent's work output.

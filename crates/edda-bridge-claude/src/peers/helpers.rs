@@ -1,38 +1,34 @@
-use super::board::compute_board_state;
+use super::board::{compute_board_state, partition_requests_for_session};
 use super::heartbeat::read_heartbeat;
-use super::RequestEntry;
+use super::{BoardState, RequestEntry};
 use crate::signals::SessionSignals;
+
+/// Resolve a session's coordination label: an explicit claim wins, the
+/// heartbeat label is the fallback, `""` means unidentified.
+pub fn session_label_from_board(board: &BoardState, project_id: &str, session_id: &str) -> String {
+    board
+        .claims
+        .iter()
+        .find(|c| c.session_id == session_id)
+        .map(|c| c.label.clone())
+        .or_else(|| read_heartbeat(project_id, session_id).map(|hb| hb.label))
+        .unwrap_or_default()
+}
+
+/// Same as [`session_label_from_board`] for callers that have no board yet.
+pub fn resolve_session_label(project_id: &str, session_id: &str) -> String {
+    let board = compute_board_state(project_id);
+    session_label_from_board(&board, project_id, session_id)
+}
 
 pub(crate) fn pending_requests_for_session(
     project_id: &str,
     session_id: &str,
 ) -> Vec<RequestEntry> {
     let board = compute_board_state(project_id);
-
-    // Resolve my label from claim or heartbeat
-    let my_label: String = board
-        .claims
-        .iter()
-        .find(|c| c.session_id == session_id)
-        .map(|c| c.label.clone())
-        .or_else(|| read_heartbeat(project_id, session_id).map(|hb| hb.label))
-        .unwrap_or_default();
-
-    if my_label.is_empty() {
-        return Vec::new();
-    }
-
-    board
-        .requests
-        .into_iter()
-        .filter(|r| r.to_label == my_label)
-        .filter(|r| {
-            !board
-                .request_acks
-                .iter()
-                .any(|a| a.from_label == r.from_label && a.acker_session == session_id)
-        })
-        .collect()
+    let my_label = session_label_from_board(&board, project_id, session_id);
+    let (live, _expired) = partition_requests_for_session(&board, session_id, &my_label);
+    live.into_iter().cloned().collect()
 }
 
 // ── Helpers ──

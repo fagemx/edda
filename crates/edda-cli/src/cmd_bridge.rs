@@ -143,6 +143,9 @@ pub enum BridgeClaudeCmd {
         /// Session ID (auto-inferred from active heartbeats if omitted)
         #[arg(long)]
         session: Option<String>,
+        /// Send even when no active session answers to the target label
+        #[arg(long)]
+        force: bool,
     },
     /// Render write-back protocol (static teaching text)
     RenderWriteback,
@@ -316,7 +319,8 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
                 to,
                 message,
                 session,
-            } => request(repo_root, &to, &message, session.as_deref()),
+                force,
+            } => request(repo_root, &to, &message, session.as_deref(), force),
             BridgeClaudeCmd::RenderWriteback => render_writeback(),
             BridgeClaudeCmd::RenderWorkspace { budget } => render_workspace(repo_root, budget),
             BridgeClaudeCmd::RenderCoordination { session } => {
@@ -889,18 +893,61 @@ pub fn ratify(
 }
 
 /// `edda bridge claude request <to> <message>` — send cross-agent request
+///
+/// The target is a free-string label, so a typo used to be indistinguishable
+/// from a delivered message (GH-443). Resolve it against live sessions first:
+/// nobody listening is an error unless `--force`, and an ambiguous label is a
+/// warning, because the message really will land in several inboxes.
 pub fn request(
     repo_root: &Path,
     to: &str,
     message: &str,
     cli_session: Option<&str>,
+    force: bool,
 ) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
     let (session_id, from_label) = resolve_session_id(cli_session, &project_id, "cli");
 
+    let targets = edda_bridge_claude::peers::resolve_request_targets(&project_id, to);
+    if targets.is_empty() && !force {
+        let active = active_labels(&project_id);
+        let known = if active.is_empty() {
+            "no sessions are currently active".to_string()
+        } else {
+            format!("active labels: {}", active.join(", "))
+        };
+        anyhow::bail!(
+            "no active session answers to '{to}' — {known}\n\
+             check the label, or pass --force to queue the request for a peer that has not started yet"
+        );
+    }
+    if targets.len() > 1 {
+        eprintln!(
+            "warning: '{to}' matches {} active sessions — every one of them will see this request",
+            targets.len()
+        );
+    }
+
     edda_bridge_claude::peers::write_request(&project_id, &session_id, &from_label, to, message);
-    println!("Request sent to [{to}]: \"{message}\"");
+    if targets.is_empty() {
+        println!("Request queued for [{to}] (no active session): \"{message}\"");
+    } else {
+        println!("Request sent to [{to}]: \"{message}\"");
+    }
     Ok(())
+}
+
+/// Labels of every currently active session, for "did you mean" diagnostics.
+fn active_labels(project_id: &str) -> Vec<String> {
+    let stale = edda_bridge_claude::peers::stale_secs();
+    let mut labels: Vec<String> = edda_bridge_claude::peers::discover_all_sessions(project_id)
+        .into_iter()
+        .filter(|p| p.age_secs <= stale && !p.label.is_empty())
+        .map(|p| p.label)
+        .collect();
+    labels.sort();
+    labels.dedup();
+    labels
 }
 
 /// `edda request-ack <from>` — acknowledge a pending request
@@ -1967,5 +2014,44 @@ mod tests {
         std::env::set_var("EDDA_HOOK_TIMEOUT_MS", "5000");
         assert_eq!(hook_timeout_ms(), 5000);
         std::env::remove_var("EDDA_HOOK_TIMEOUT_MS");
+    }
+
+    // ── Request target validation (GH-443) ──
+
+    #[test]
+    fn request_to_unknown_label_is_rejected_unless_forced() {
+        let _store = crate::test_support::isolated_store();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "s-auth", "auth", ".");
+
+        let err = request(repo.path(), "aut", "hi", Some("s-cli"), false)
+            .expect_err("a typo'd label must not silently succeed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no active session answers to 'aut'"),
+            "error should name the unreachable label: {msg}"
+        );
+        assert!(
+            msg.contains("auth"),
+            "error should list the labels that do exist: {msg}"
+        );
+
+        // --force is the escape hatch for a peer that has not started yet.
+        request(repo.path(), "aut", "hi", Some("s-cli"), true).expect("--force should send anyway");
+        // A live label needs no escape hatch.
+        request(repo.path(), "auth", "hi", Some("s-cli"), false).expect("live label should send");
+
+        let board = edda_bridge_claude::peers::compute_board_state(&pid);
+        assert_eq!(board.requests.len(), 2, "both sent requests are recorded");
+        assert!(
+            !board.requests[0].id.is_empty(),
+            "every request carries an id"
+        );
+        assert_ne!(
+            board.requests[0].id, board.requests[1].id,
+            "ids must be distinct per message"
+        );
     }
 }

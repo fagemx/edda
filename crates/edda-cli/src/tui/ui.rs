@@ -270,11 +270,15 @@ fn render_requests(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .requests
         .iter()
         .map(|r| {
-            let is_acked = app
-                .board
-                .request_acks
-                .iter()
-                .any(|a| a.from_label == r.from_label);
+            // Match the ack to this specific message, not merely to its sender —
+            // otherwise every later request from a peer inherits the first ack.
+            let is_acked = app.board.request_acks.iter().any(|a| {
+                if a.request_ids.is_empty() {
+                    a.from_label == r.from_label && a.ts >= r.ts
+                } else {
+                    a.request_ids.iter().any(|id| id == &r.id)
+                }
+            });
             let msg = truncate_str(&r.message, 40);
             let line = if is_acked {
                 format!(" [ack] {} → {}: {msg}", r.from_label, r.to_label)

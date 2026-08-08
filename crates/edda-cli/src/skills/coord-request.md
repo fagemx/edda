@@ -68,9 +68,26 @@ Examples:
 - `edda request "billing" "[need]: Export BillingPlan type from your crate so I can reference it"`
 - `edda request "api" "[info]: Added new error variant ApiError::RateLimit — you may want to handle it"`
 
+If the send fails with "no active session answers to ...", the label is wrong —
+check `edda peers` for the live labels. Only pass `--force` when you are
+deliberately queuing for a peer that has not started yet.
+
 ### Step 5: Verify
 
 Run `edda peers` again to confirm your requests appear in the board state.
+
+### Answering requests addressed to you
+
+Requests you receive stay pending until you acknowledge them — being shown the
+message does not clear it, and the sender has no other signal that it landed.
+Once you have acted on a peer's request:
+
+```bash
+edda request-ack "<their-label>"
+```
+
+This retires only what is outstanding now, so a later message from that same
+peer still reaches you.
 
 ## Output Format
 

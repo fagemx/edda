@@ -223,10 +223,32 @@ edda request <TO> <MESSAGE> [OPTIONS]
 | `TO` | Target session label |
 | `MESSAGE` | Request message |
 | `--session ID` | Session ID (auto-inferred) |
+| `--force` | Send even when no active session answers to `TO` |
 
 ```bash
 edda request "billing" "Please expose invoice total as a public method"
 ```
+
+`TO` is resolved against active sessions before the request is recorded. A
+label nobody answers to is an error — usually a typo — and `--force` queues it
+anyway for a peer that has not started yet. A label held by more than one
+session is a warning: all of them will see the message.
+
+Unacked requests expire after 7 days (`EDDA_REQUEST_TTL_SECS`), after which
+they are reported as expired and dropped by the next `edda gc`.
+
+### `edda request-ack`
+
+Acknowledge requests from a peer.
+
+```bash
+edda request-ack <FROM>
+```
+
+Rendering a request into an agent's context is delivery, not acknowledgement:
+the request keeps appearing until it is acked here, and the ack covers only the
+messages outstanding at that moment — later ones from the same peer still
+arrive.
 
 ### `edda watch`
 
