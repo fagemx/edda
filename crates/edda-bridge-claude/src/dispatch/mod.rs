@@ -95,47 +95,6 @@ pub(crate) fn render_write_back_protocol(_cwd: &str) -> Option<String> {
     Some(render::writeback())
 }
 
-// ── L2 Solo Gate ──
-
-/// Check if any non-stale peer session heartbeats exist (excluding current session).
-/// Used to skip all L2 I/O when running solo.
-fn has_active_peers(project_id: &str, session_id: &str) -> bool {
-    let state_dir = edda_store::project_dir(project_id).join("state");
-    let stale_threshold: u64 = std::env::var("EDDA_PEER_STALE_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(120);
-    let entries = match fs::read_dir(&state_dir) {
-        Ok(e) => e,
-        Err(_) => return false,
-    };
-    let now = std::time::SystemTime::now();
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with("session.") || !name.ends_with(".json") {
-            continue;
-        }
-        let sid = name
-            .strip_prefix("session.")
-            .and_then(|s| s.strip_suffix(".json"))
-            .unwrap_or("");
-        if sid.is_empty() || sid == session_id {
-            continue;
-        }
-        // Check file modification time as a lightweight staleness check
-        // (avoids parsing JSON — just stat the file)
-        if let Ok(meta) = entry.metadata() {
-            if let Ok(modified) = meta.modified() {
-                let age = now.duration_since(modified).unwrap_or_default();
-                if age.as_secs() <= stale_threshold {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 // ── Hook dispatch ──
 
 /// Main hook entrypoint: parse stdin, dispatch by hook_event_name.
@@ -235,16 +194,10 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
             Ok(HookResult::empty())
         }
         "SessionEnd" => {
-            // Solo gate: only used to skip coordination log writes (write_unclaim).
-            // Computed here (not at top) so non-SessionEnd hooks avoid the dir scan (#83).
-            let peers_active = !session_id.is_empty() && has_active_peers(&project_id, &session_id);
-            dispatch_session_end(
-                &project_id,
-                &session_id,
-                &transcript_path,
-                &cwd,
-                peers_active,
-            )
+            // The solo gate used to live here, to skip the write_unclaim on
+            // coordination.jsonl. It orphaned claims instead (#445) — cleanup is
+            // now unconditional, so the peer scan is gone with it.
+            dispatch_session_end(&project_id, &session_id, &transcript_path, &cwd)
         }
         "SubagentStart" => {
             // Inject peer context BEFORE writing heartbeat so the sub-agent

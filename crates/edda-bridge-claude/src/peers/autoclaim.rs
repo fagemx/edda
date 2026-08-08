@@ -5,7 +5,7 @@ use crate::signals::{FileEditCount, SessionSignals};
 
 use super::board::compute_board_state;
 use super::heartbeat::write_claim;
-use super::{autoclaim_state_path, detect_git_branch_in, AutoClaimState};
+use super::{autoclaim_state_path, AutoClaimState};
 
 // ── Auto-Claim ──
 
@@ -139,22 +139,16 @@ pub(crate) fn maybe_auto_claim(
         return;
     }
 
-    // 2. Derive scope from edited files, fallback to git branch
-    let (label, paths) = match derive_scope_from_files(&signals.files_modified, Some(cwd)) {
-        Some(v) => v,
-        None => {
-            // No file edits yet (fresh session) — use the git branch as a fallback
-            // label so the peer is visible in `edda watch` immediately (#128).
-            //
-            // This records *presence*, not scope: the session hasn't touched
-            // anything yet, so it claims no paths. Claiming `**/*` here matched
-            // every file under `enforce_offlimits` and hard-blocked every peer's
-            // Edit/Write for as long as the fresh session's heartbeat lived (#444).
-            match detect_git_branch_in(cwd) {
-                Some(branch) => (branch, Vec::new()),
-                None => return,
-            }
-        }
+    // 2. Derive scope from edited files.
+    //
+    // A fresh session with no edits has no scope to claim, so it claims nothing.
+    // This used to fall back to `(branch, ["**/*"])` for `edda watch` visibility
+    // (#128), but that glob matched every file: under `enforce_offlimits` one
+    // idle session hard-blocked every peer's Edit/Write (#444). Branch presence
+    // now rides on the heartbeat label instead (`write_heartbeat`), which is
+    // where `edda watch` and request delivery already look.
+    let Some((label, paths)) = derive_scope_from_files(&signals.files_modified, Some(cwd)) else {
+        return;
     };
 
     // 3. Dedup: skip if scope unchanged from last auto-claim

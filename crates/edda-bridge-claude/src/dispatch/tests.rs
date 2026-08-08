@@ -2,11 +2,10 @@ use std::fs;
 
 // Imports from dispatch/mod.rs
 use super::{
-    apply_context_budget, context_budget, has_active_peers, hook_entrypoint_from_stdin,
-    increment_counter, is_same_as_last_inject, mark_nudge_sent, read_counter,
-    render_workspace_section, render_write_back_protocol, set_compact_pending,
-    take_compact_pending, wrap_context_boundary, write_inject_hash, write_peer_count, HookResult,
-    EDDA_BOUNDARY_END, EDDA_BOUNDARY_START,
+    apply_context_budget, context_budget, hook_entrypoint_from_stdin, increment_counter,
+    is_same_as_last_inject, mark_nudge_sent, read_counter, render_workspace_section,
+    render_write_back_protocol, set_compact_pending, take_compact_pending, wrap_context_boundary,
+    write_inject_hash, write_peer_count, HookResult, EDDA_BOUNDARY_END, EDDA_BOUNDARY_START,
 };
 // Imports from sub-modules
 use super::events::{
@@ -646,7 +645,7 @@ fn session_end_cleans_state() {
     fs::write(state_dir.join(format!("inject_hash.{sid}")), "abcd").unwrap();
     fs::write(state_dir.join("compact_pending"), "1").unwrap();
 
-    cleanup_session_state(pid, sid, false);
+    cleanup_session_state(pid, sid);
 
     assert!(
         !state_dir.join(format!("inject_hash.{sid}")).exists(),
@@ -987,7 +986,7 @@ fn session_end_cleans_nudge_state() {
     let state_dir = edda_store::project_dir(pid).join("state");
     assert!(state_dir.join(format!("nudge_ts.{sid}")).exists());
 
-    cleanup_session_state(pid, sid, false);
+    cleanup_session_state(pid, sid);
 
     assert!(!state_dir.join(format!("nudge_ts.{sid}")).exists());
 
@@ -1106,7 +1105,7 @@ fn session_end_cleans_recall_counters() {
     assert!(state_dir.join(format!("nudge_count.{sid}")).exists());
     assert!(state_dir.join(format!("decide_count.{sid}")).exists());
 
-    cleanup_session_state(pid, sid, false);
+    cleanup_session_state(pid, sid);
 
     assert!(!state_dir.join(format!("nudge_count.{sid}")).exists());
     assert!(!state_dir.join(format!("decide_count.{sid}")).exists());
@@ -1165,36 +1164,42 @@ fn session_end_cleans_signal_count() {
     let state_dir = edda_store::project_dir(pid).join("state");
     assert!(state_dir.join(format!("signal_count.{sid}")).exists());
 
-    cleanup_session_state(pid, sid, false);
+    cleanup_session_state(pid, sid);
 
     assert!(!state_dir.join(format!("signal_count.{sid}")).exists());
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
+/// True if any non-stale peer heartbeat exists (excluding `session_id`).
+///
+/// The dispatch layer used to carry its own mtime-based copy of this
+/// (`has_active_peers`), read only by the SessionEnd solo gate that #445
+/// removed. The peers layer owns liveness now; these tests assert the same
+/// behaviour against it.
+fn any_active_peer(project_id: &str, session_id: &str) -> bool {
+    !crate::peers::discover_active_peers(project_id, session_id).is_empty()
+}
+
 #[test]
-fn has_active_peers_false_when_solo() {
+fn no_active_peers_when_solo() {
     let pid = "test_dispatch_solo_gate";
     let _ = edda_store::ensure_dirs(pid);
     // No heartbeat files → no peers
-    assert!(!has_active_peers(pid, "my-session"));
+    assert!(!any_active_peer(pid, "my-session"));
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
 #[test]
-fn has_active_peers_true_when_peer_exists() {
+fn active_peer_seen_when_peer_heartbeat_exists() {
     let pid = "test_dispatch_peer_gate";
     let _ = edda_store::ensure_dirs(pid);
-    let state_dir = edda_store::project_dir(pid).join("state");
-    let _ = fs::create_dir_all(&state_dir);
 
-    // Create a fresh peer heartbeat file
-    let peer_path = state_dir.join("session.peer-session.json");
-    fs::write(&peer_path, r#"{"session_id":"peer-session"}"#).unwrap();
+    crate::peers::write_heartbeat_minimal(pid, "peer-session", "peer", ".");
 
-    assert!(has_active_peers(pid, "my-session"));
+    assert!(any_active_peer(pid, "my-session"));
     // Own session should be excluded
-    assert!(!has_active_peers(pid, "peer-session"));
+    assert!(!any_active_peer(pid, "peer-session"));
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
@@ -1330,30 +1335,31 @@ fn solo_to_multi_session_transition() {
     let _ = fs::create_dir_all(&state_dir);
 
     // Phase 1: Only own heartbeat → solo (no active peers)
-    let own_hb = state_dir.join("session.s1.json");
-    fs::write(&own_hb, r#"{"session_id":"s1"}"#).unwrap();
+    crate::peers::write_heartbeat_minimal(pid, "s1", "mine", ".");
     assert!(
-        !has_active_peers(pid, "s1"),
+        !any_active_peer(pid, "s1"),
         "should be solo with only own heartbeat"
     );
 
     // Phase 2: Peer appears → multi-session
-    let peer_hb = state_dir.join("session.s2.json");
-    fs::write(&peer_hb, r#"{"session_id":"s2"}"#).unwrap();
+    crate::peers::write_heartbeat_minimal(pid, "s2", "peer", ".");
     assert!(
-        has_active_peers(pid, "s1"),
+        any_active_peer(pid, "s1"),
         "should detect peer after heartbeat written"
     );
 
-    // Phase 3: Peer goes stale → back to solo
-    // Sleep to ensure file mtime is in the past, then set threshold to 0
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    crate::with_env_guard(&[("EDDA_PEER_STALE_SECS", Some("0"))], || {
-        assert!(
-            !has_active_peers(pid, "s1"),
-            "peer should be stale after threshold=0 with old mtime"
-        );
-    });
+    // Phase 3: Peer goes stale → back to solo.
+    // Age the peer's heartbeat directly instead of sleeping and overriding
+    // EDDA_PEER_STALE_SECS — env mutation is what makes this suite flake (#447).
+    let peer_hb = state_dir.join("session.s2.json");
+    let mut hb: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&peer_hb).unwrap()).unwrap();
+    hb["last_heartbeat"] = serde_json::json!("2020-01-01T00:00:00+00:00");
+    fs::write(&peer_hb, serde_json::to_string(&hb).unwrap()).unwrap();
+    assert!(
+        !any_active_peer(pid, "s1"),
+        "peer with an ancient heartbeat should read as stale"
+    );
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
@@ -1378,7 +1384,7 @@ fn session_end_writes_unclaim_for_every_claimed_session() {
 
     // #445: a session that ends solo still has to release its claim, otherwise the
     // claim stays in coordination.jsonl forever (compaction preserves all claims).
-    let _ = dispatch_session_end(pid, "s1", "", cwd.to_str().unwrap(), false);
+    let _ = dispatch_session_end(pid, "s1", "", cwd.to_str().unwrap());
 
     let coord_path = edda_store::project_dir(pid)
         .join("state")
@@ -1400,16 +1406,17 @@ fn session_end_writes_unclaim_for_every_claimed_session() {
         "claim must be gone from the board fold, not orphaned"
     );
 
-    // Write fresh claim for s3 and end with peers_active=true — SHOULD write unclaim
+    // Same with a peer alive (s2 still holds its claim) — unchanged behaviour.
     crate::peers::write_claim(pid, "s3", "infra", &["infra/main.tf".into()]);
-    let _ = dispatch_session_end(pid, "s3", "", cwd.to_str().unwrap(), true);
+    crate::peers::write_heartbeat_minimal(pid, "s2", "billing", ".");
+    let _ = dispatch_session_end(pid, "s3", "", cwd.to_str().unwrap());
 
     let content2 = fs::read_to_string(&coord_path).unwrap_or_default();
     let unclaim_s3 = content2
         .lines()
         .filter(|l| l.contains("\"unclaim\"") && l.contains("s3"))
         .count();
-    assert!(unclaim_s3 > 0, "should have unclaim when peers_active=true");
+    assert!(unclaim_s3 > 0, "should have unclaim with a peer alive too");
 
     std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     std::env::remove_var("EDDA_PLANS_DIR");
@@ -1419,21 +1426,43 @@ fn session_end_writes_unclaim_for_every_claimed_session() {
 }
 
 #[test]
-fn session_end_skips_unclaim_when_nothing_was_claimed() {
-    let pid = "test_se_unclaim_noise";
+fn unclaim_without_a_claim_is_a_fold_noop() {
+    let pid = "test_se_unclaim_noop";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
 
-    // Solo session that never claimed anything: releasing nothing is pure log noise.
-    cleanup_session_state(pid, "s-noclaim", false);
+    // A peer's claim must survive an unrelated session releasing nothing.
+    crate::peers::write_claim(pid, "s-peer", "billing", &["src/bill.rs".into()]);
+    cleanup_session_state(pid, "s-noclaim");
 
-    let coord_path = edda_store::project_dir(pid)
-        .join("state")
-        .join("coordination.jsonl");
-    let content = fs::read_to_string(&coord_path).unwrap_or_default();
+    let board = crate::peers::compute_board_state(pid);
+    assert_eq!(board.claims.len(), 1, "unclaim must not disturb the fold");
+    assert_eq!(board.claims[0].session_id, "s-peer");
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn compaction_drops_released_claims_and_never_emits_unclaim() {
+    let pid = "test_se_unclaim_compaction";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Solo session claims, then ends: claim + unclaim both sit in the log.
+    crate::peers::write_claim(pid, "s-solo", "auth", &["src/auth.rs".into()]);
+    cleanup_session_state(pid, "s-solo");
+
+    // #445 relies on compaction self-healing: `edda gc` rewrites the log from the
+    // folded state, which carries neither the released claim nor its unclaim, so
+    // the pair costs nothing long-term. Verified, not assumed.
+    let lines = crate::peers::compute_board_state_for_compaction(pid);
     assert!(
-        !content.contains("\"unclaim\""),
-        "no claim to release → no unclaim event, got: {content}"
+        !lines.iter().any(|l| l.contains("\"unclaim\"")),
+        "compaction must not re-emit unclaim events, got: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|l| l.contains("s-solo")),
+        "released claim must not survive compaction, got: {lines:?}"
     );
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1467,7 +1496,7 @@ fn session_end_reads_counters_before_cleanup() {
     assert!(state_dir.join(format!("signal_count.{sid}")).exists());
 
     // SessionEnd should read counters then clean them up
-    let result = dispatch_session_end(pid, sid, "", cwd.to_str().unwrap(), false);
+    let result = dispatch_session_end(pid, sid, "", cwd.to_str().unwrap());
     assert!(result.is_ok(), "session_end should not error");
 
     // Counter files should be cleaned up
@@ -1634,7 +1663,7 @@ fn peer_count_cleaned_on_session_end() {
     fs::write(state_dir.join(format!("peer_count.{sid}")), "2").unwrap();
     assert!(state_dir.join(format!("peer_count.{sid}")).exists());
 
-    cleanup_session_state(pid, sid, false);
+    cleanup_session_state(pid, sid);
 
     assert!(
         !state_dir.join(format!("peer_count.{sid}")).exists(),
@@ -2253,7 +2282,7 @@ fn subagent_orphan_cleanup_on_session_end() {
     crate::peers::write_subagent_heartbeat(pid, "sub-2", "parent-sess", "sub:Plan", ".");
 
     // Run cleanup (what SessionEnd does)
-    cleanup_session_state(pid, "parent-sess", false);
+    cleanup_session_state(pid, "parent-sess");
 
     // All sub-agent heartbeats should be cleaned up
     assert!(
@@ -2849,7 +2878,7 @@ fn session_end_bg_threads_joined_zero_threads() {
     // Use a short join timeout to catch hangs quickly
     std::env::set_var("EDDA_BG_JOIN_TIMEOUT_SECS", "1");
 
-    let result = dispatch_session_end(pid, "s1", "", cwd.path().to_str().unwrap(), false);
+    let result = dispatch_session_end(pid, "s1", "", cwd.path().to_str().unwrap());
     assert!(
         result.is_ok(),
         "dispatch_session_end should succeed with zero bg threads"
