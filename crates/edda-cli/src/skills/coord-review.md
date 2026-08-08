@@ -30,12 +30,20 @@ Flag any significant change that lacks a recorded decision.
 
 ### Step 2: Check Unresolved Requests
 
-Run `edda peers` to see the board state including requests.
+Note the tooling boundary first: `edda peers` lists sessions only — it does
+not show requests. Requests addressed to **your** label render via
+`edda coord` (including an `Expired requests` warning line for unacked
+messages past the dead-letter horizon). There is currently no non-interactive
+command that lists the whole board's requests across all labels — the
+`edda watch` TUI panel is the only full view (a machine-readable board dump
+is proposed in GH-446).
 
-List all requests that have NOT been acknowledged:
-- Who sent them and when
-- What they are asking for
-- Whether the target agent is still active
+So review what is reachable:
+- Run `edda coord` — list unacked requests addressed to you, and treat any
+  `Expired requests` line as a WARN (someone's message aged out unanswered)
+- For requests you sent, the send-time validation already confirmed a live
+  target; unacked-by-them is not queryable today — note it as a limitation
+  in the report if it matters for this review
 
 Flag requests that are blocking work.
 
