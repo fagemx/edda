@@ -74,7 +74,25 @@ deliberately queuing for a peer that has not started yet.
 
 ### Step 5: Verify
 
-Run `edda peers` again to confirm your requests appear in the board state.
+The send command itself is the verification: a label no active session answers
+to is an error (with the live labels listed), and a label held by several
+sessions prints a warning naming how many will see it. A clean exit with
+`Request sent to [<label>]` means the request is on the board. Do NOT check
+`edda peers` for it — that command lists sessions, not requests.
+
+### Registered letter, not doorbell
+
+`edda request` is a registered letter addressed to a **role**: it is durable,
+acknowledged, and survives the peer dying — a replacement session holding the
+same label receives it on arrival. What it can never do is **wake** anyone:
+delivery happens at the peer's next hook event, and an idle session has no
+next hook event.
+
+If your host has cross-session messaging (a way to send a message that starts
+the peer's next turn), ring after sending: fixate first (`edda request`), then
+send a short host message that only points at it ("coordination request
+pending — run `edda coord`"). Letter first, bell second — the letter is the
+truth, the bell is latency.
 
 ### Answering requests addressed to you
 

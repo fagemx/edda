@@ -64,7 +64,15 @@ Include:
 
 ### Step 5: Scope Release
 
-Unclaim happens automatically on session end via the SessionEnd hook. If you need to release scope early before ending the session, note that the unclaim will fire when the session closes.
+Where the Claude Code hooks are wired, unclaim happens automatically on
+session end via the SessionEnd hook — nothing to do.
+
+Where they are not (claims made from a bare CLI, CI, or a host without the
+bridge hooks), the claim outlives the session: there is currently no
+`edda unclaim` verb to release it by hand (GH-455). In that case, say so in
+your handoff summary — peers reading the board should know the claim is dead
+even though it still folds. Enforcement stays safe either way: every consumer
+joins claims against live heartbeats.
 
 ## Output Format
 
