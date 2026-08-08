@@ -111,16 +111,17 @@ That ack covers the messages outstanding at that moment, so a later request
 from the same peer is delivered normally. Requests left unacked for 7 days
 expire and are reported as dead letters.
 
-## Fleet discipline
+## Coordination discipline
 
 Edda's primitives — heartbeats, claims, requests — are carriers, and every
 carrier here is unreliable by design: requests deliver at the peer's next hook
 event, host cross-session messages deliver at turn boundaries, sessions die,
 and the log replays whatever was never released. Running several sessions on
 real work needs a discipline **on top of** the carriers. This one is distilled
-from a live multi-session run on this repository (the fleet that landed
-GH-442 through GH-445); every rule below exists because its absence cost that
-fleet a concrete incident.
+from a live multi-session run on this repository (the session formation that
+landed GH-442 through GH-445); every rule below exists because its absence
+cost that formation a concrete incident. The `coord-orchestrate` skill
+(installed by `edda init`) is the executable form of this section.
 
 ### Three layers, never mixed
 
@@ -172,9 +173,10 @@ harmless by pinning everything normative:
 - **Code-touching instructions carry intent + basis SHA + a drift branch**
   ("if your HEAD differs, satisfy the intent and reply with your SHA").
   Transit delay makes "current state" language false by construction.
-- **Fleet board.** The controller writes one state line at every transition
-  (per lane: SHA, frozen?, review status) — `edda note --tag fleet-board`.
-  Whoever wakes up confused reads the board, not the chat history.
+- **Coordination board.** The controller writes one state line at every
+  transition (per lane: SHA, frozen?, review status) — e.g.
+  `edda note --tag fleet-board`. Whoever wakes up confused reads the board,
+  not the chat history.
 
 ### What is edda's and what is not
 
@@ -183,7 +185,13 @@ issue comments; the doorbell can be `edda request` or the host's
 cross-session messaging; the rules survive substituting either. What edda
 adds over a bare issue tracker: local zero-network coordination, hash-chained
 auditability, task receipts that unlock successors (`edda task done
---receipt`), and cross-repo fleet queries.
+--receipt`), and cross-repo group queries.
+
+One boundary worth stating: a worker's `--receipt` is **execution evidence**
+— proof of what was done and how it was verified. It is not acceptance. The
+formation (controller and verifier included) produces delivery candidates
+and evidence; sign-off belongs to whoever holds merge authority outside it,
+unless that authority was explicitly delegated.
 
 ## Monitoring
 

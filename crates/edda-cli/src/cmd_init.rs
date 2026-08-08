@@ -11,6 +11,10 @@ const SKILLS: &[(&str, &str)] = &[
     ("coord-handoff", include_str!("skills/coord-handoff.md")),
     ("coord-request", include_str!("skills/coord-request.md")),
     ("coord-review", include_str!("skills/coord-review.md")),
+    (
+        "coord-orchestrate",
+        include_str!("skills/coord-orchestrate.md"),
+    ),
 ];
 
 pub fn execute(repo_root: &Path, no_hooks: bool, force_skills: bool) -> anyhow::Result<()> {
