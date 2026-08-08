@@ -111,6 +111,80 @@ That ack covers the messages outstanding at that moment, so a later request
 from the same peer is delivered normally. Requests left unacked for 7 days
 expire and are reported as dead letters.
 
+## Fleet discipline
+
+Edda's primitives — heartbeats, claims, requests — are carriers, and every
+carrier here is unreliable by design: requests deliver at the peer's next hook
+event, host cross-session messages deliver at turn boundaries, sessions die,
+and the log replays whatever was never released. Running several sessions on
+real work needs a discipline **on top of** the carriers. This one is distilled
+from a live multi-session run on this repository (the fleet that landed
+GH-442 through GH-445); every rule below exists because its absence cost that
+fleet a concrete incident.
+
+### Three layers, never mixed
+
+| Layer | Carrier | Property |
+|-------|---------|----------|
+| Truth | ledger: `edda task` / `edda decide` / issue comments | survives any session's death |
+| Doorbell | `edda request`, host cross-session messaging | instant-ish, may drop — never the only copy |
+| Isolation | one git worktree per work bundle | conflicts impossible, not merely discouraged |
+
+The core rule: **messages may drop; state may not.** Every load-bearing fact
+travels dual-track — fixate it in the truth layer first, then ring the
+doorbell. A fact that exists only in a message dies with the session that
+received it.
+
+### Formation
+
+One **controller** (assigns, adjudicates, reviews — never reads
+implementation diffs mid-flight), one **read-only verifier**, N **workers**
+in separate worktrees. The verifier starts *before* any code is written:
+baseline gates on main, flake hunt, per-issue review criteria, and a sweep
+for two test poisons — tests asserting the exact behavior being removed
+(invert and rename, never delete) and single-case tests that pass whether or
+not the bug is fixed. In the source run, that pre-work audit caught a
+parallel-execution flake workers would have blamed themselves for, three
+false-green tests, and a planned fix that would have silently killed request
+delivery.
+
+### Normative traffic rules
+
+Messages cross during any busy stretch. Don't try to prevent it — make it
+harmless by pinning everything normative:
+
+- **Nothing normative travels in a message.** Rulings live in the truth layer
+  with monotonic ids (`d-001, d-002, …`); a message is only a pointer
+  ("d-007 posted on #NN"). Numbering is the ordering, so arrival order stops
+  mattering.
+- **Supersession duty.** Changing or accepting a deviation from a prior
+  ruling requires a `SUPERSEDES d-NNN` entry in the same durable place the
+  old ruling lives, before any doorbell. An acceptance that exists only in a
+  PR comment or a message is not in force.
+- **Receiver tie-break.** Obey the highest `d-NNN` in the truth layer, not
+  the latest message; on conflict, reply with your current state instead of
+  executing. Never discard pushed work unless the ruling names the exact
+  commit being discarded.
+- **Reviews pin a SHA, never a PR number.** The branch freezes from
+  assignment to verdict; any push voids the verdict. Claims in reports are
+  tagged ran-vs-read — a test count from the harness you executed is
+  evidence; a test described in someone's message is not.
+- **Code-touching instructions carry intent + basis SHA + a drift branch**
+  ("if your HEAD differs, satisfy the intent and reply with your SHA").
+  Transit delay makes "current state" language false by construction.
+- **Fleet board.** The controller writes one state line at every transition
+  (per lane: SHA, frozen?, review status) — `edda note --tag fleet-board`.
+  Whoever wakes up confused reads the board, not the chat history.
+
+### What is edda's and what is not
+
+The discipline is carrier-neutral. The truth layer can be edda or plain
+issue comments; the doorbell can be `edda request` or the host's
+cross-session messaging; the rules survive substituting either. What edda
+adds over a bare issue tracker: local zero-network coordination, hash-chained
+auditability, task receipts that unlock successors (`edda task done
+--receipt`), and cross-repo fleet queries.
+
 ## Monitoring
 
 ```bash
