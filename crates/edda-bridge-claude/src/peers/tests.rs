@@ -283,17 +283,24 @@ fn full_lifecycle_multi_session() {
     assert!(proto.contains("4")); // 3 peers + self = 4 agents
     assert!(proto.contains("JWT RS256"));
 
-    // s2 sees peer updates (lightweight) — check BEFORE render_coordination_protocol
-    // because render_coordination_protocol auto-acks displayed requests.
+    // s2 sees peer updates (lightweight)
     let updates = render_peer_updates(pid, "s2").unwrap();
     assert!(updates.contains("Peers"));
     assert!(updates.contains("Export BillingPlan"));
 
-    // Verify s2 sees the request at SessionStart (auto-acks it)
+    // Verify s2 sees the request at SessionStart. Rendering does not ack it
+    // (GH-442) — the request survives until s2 explicitly acknowledges.
     let proto_s2 = render_coordination_protocol(pid, "s2", ".").unwrap();
     assert!(proto_s2.contains("Export BillingPlan type"));
+    assert!(
+        render_peer_updates(pid, "s2")
+            .unwrap()
+            .contains("Export BillingPlan"),
+        "rendering is delivery, not acknowledgement — request must still show"
+    );
 
-    // After auto-ack, peer updates should no longer show the request
+    // After an explicit ack, peer updates should no longer show the request
+    write_request_ack(pid, "s2", "api");
     let updates_after = render_peer_updates(pid, "s2").unwrap();
     assert!(
         !updates_after.contains("Export BillingPlan"),
@@ -2097,22 +2104,38 @@ fn compaction_preserves_request_acks() {
         "acked request should not be pending"
     );
 
+    // The same peer sends a second message after the first was acked. A single
+    // request/ack pair cannot tell per-label from per-message matching, so the
+    // round-trip below has to carry two.
+    write_request(pid, "s2", "billing", "auth", "Export InvoiceTotal");
+
     // Compact
     let lines = compute_board_state_for_compaction(pid);
-    assert_eq!(lines.len(), 3, "claim + request + ack = 3 lines");
+    assert_eq!(
+        lines.len(),
+        4,
+        "claim + 2 requests + ack = 4 lines, got: {lines:?}"
+    );
 
     // Write compacted back
     let path = coordination_path(pid);
     let content = lines.join("\n");
     fs::write(&path, format!("{content}\n")).unwrap();
 
-    // After compaction: ack should still exist
+    // After compaction: ack should still exist, and the unacked set must be
+    // unchanged. Compaction re-serializes from board state, so an identity
+    // field missing there is silently stripped and this bug comes back.
     let board_after = compute_board_state(pid);
     assert_eq!(board_after.request_acks.len(), 1);
     let pending_after = pending_requests_for_session(pid, "s1");
-    assert!(
-        pending_after.is_empty(),
-        "acked request should still not be pending after compaction"
+    assert_eq!(
+        pending_after.len(),
+        1,
+        "compaction must preserve which message was acked, got: {pending_after:?}"
+    );
+    assert_eq!(
+        pending_after[0].message, "Export InvoiceTotal",
+        "the acked message stays acked; the later one stays pending"
     );
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -2531,6 +2554,21 @@ fn render_coordination_filters_acked_requests() {
         "acked request should be filtered out: {text}"
     );
 
+    // The same peer sends a second message. One request/ack pair renders the
+    // same either way, so only this second message proves the ack was matched
+    // per message rather than per sender.
+    write_request(pid, "s2", "billing", "auth", "Also export RefreshToken");
+    let board = compute_board_state(pid);
+    let text = render_coordination_protocol_with(&peers, &board, pid, "s1").unwrap();
+    assert!(
+        text.contains("Also export RefreshToken"),
+        "a later request from an already-acked peer must still render: {text}"
+    );
+    assert!(
+        !text.contains("Need AuthToken export"),
+        "the acked message must stay acked: {text}"
+    );
+
     remove_heartbeat(pid, "s1");
     remove_heartbeat(pid, "s2");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -2568,6 +2606,18 @@ fn peer_updates_filters_acked_requests() {
     assert!(
         !text.contains("Export BillingPlan"),
         "acked request should be filtered from peer updates: {text}"
+    );
+
+    // Second message from the same peer — the case a per-label ack swallows.
+    write_request(pid, "s2", "billing", "auth", "Export BillingCycle");
+    let text = render_peer_updates(pid, "s1").unwrap();
+    assert!(
+        text.contains("Export BillingCycle"),
+        "a later request from an already-acked peer must still surface: {text}"
+    );
+    assert!(
+        !text.contains("Export BillingPlan"),
+        "the acked message must stay acked: {text}"
     );
 
     remove_heartbeat(pid, "s1");
@@ -2755,5 +2805,294 @@ fn teammate_idle_writes_coord_event_and_updates_phase() {
     // Cleanup
     remove_heartbeat(pid, teammate_sid);
     let _ = fs::remove_file(coordination_path(pid));
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+// ── GH-442 / GH-443: per-message ack identity, target validation, TTL ──
+
+/// Append a raw Request event with a caller-chosen timestamp, bypassing
+/// `write_request`. Used to age a request past the TTL horizon.
+fn append_request_at(pid: &str, ts: &str, from_session: &str, from_label: &str, to_label: &str) {
+    let event = CoordEvent {
+        ts: ts.to_string(),
+        session_id: from_session.to_string(),
+        event_type: CoordEventType::Request,
+        payload: serde_json::json!({
+            "id": format!("req-{ts}"),
+            "from_label": from_label,
+            "to_label": to_label,
+            "message": "aged request",
+        }),
+    };
+    append_coord_event(pid, &event);
+}
+
+#[test]
+fn second_request_from_same_peer_survives_first_ack() {
+    let pid = "test_gh442_second_request";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    write_request(pid, "s2", "billing", "auth", "request A");
+    write_request_ack(pid, "s1", "billing");
+
+    // Same peer sends a second, distinct request after the first was acked.
+    write_request(pid, "s2", "billing", "auth", "request B");
+
+    let pending = pending_requests_for_session(pid, "s1");
+    assert_eq!(
+        pending.len(),
+        1,
+        "only the unacked second request should be pending, got: {pending:?}"
+    );
+    assert_eq!(pending[0].message, "request B");
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn render_does_not_auto_ack_requests() {
+    let pid = "test_gh442_no_auto_ack";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    write_request(pid, "s2", "billing", "auth", "Need AuthToken export");
+
+    let rendered = render_coordination_protocol(pid, "s1", ".").unwrap_or_default();
+    assert!(
+        rendered.contains("Need AuthToken export"),
+        "request should render: {rendered}"
+    );
+
+    // Rendering is delivery, not acknowledgement: the request stays pending
+    // until an explicit `edda request-ack`.
+    let pending = pending_requests_for_session(pid, "s1");
+    assert_eq!(
+        pending.len(),
+        1,
+        "rendering must not auto-ack — request should still be pending"
+    );
+
+    write_request_ack(pid, "s1", "billing");
+    assert!(
+        pending_requests_for_session(pid, "s1").is_empty(),
+        "explicit ack should clear the request"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn resolve_request_targets_matches_only_live_labels() {
+    let pid = "test_gh443_resolve_targets";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+
+    assert_eq!(
+        resolve_request_targets(pid, "auth"),
+        vec!["s1".to_string()],
+        "an active session holding the label should resolve"
+    );
+    assert!(
+        resolve_request_targets(pid, "aut").is_empty(),
+        "a typo'd label must resolve to nobody"
+    );
+
+    remove_heartbeat(pid, "s1");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn resolve_request_targets_reports_ambiguous_labels() {
+    let pid = "test_gh443_ambiguous_targets";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("auth"), ".");
+
+    let mut targets = resolve_request_targets(pid, "auth");
+    targets.sort();
+    assert_eq!(
+        targets,
+        vec!["s1".to_string(), "s2".to_string()],
+        "duplicate labels must both surface so the sender can be warned"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn expired_requests_are_not_pending_and_are_compacted_away() {
+    let pid = "test_gh443_request_ttl";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    append_request_at(pid, "2020-01-01T00:00:00Z", "s2", "ghost", "auth");
+    write_request(pid, "s2", "billing", "auth", "fresh request");
+
+    let pending = pending_requests_for_session(pid, "s1");
+    assert_eq!(
+        pending.len(),
+        1,
+        "the aged dead letter must not be delivered, got: {pending:?}"
+    );
+    assert_eq!(pending[0].message, "fresh request");
+
+    let lines = compute_board_state_for_compaction(pid);
+    assert!(
+        !lines.iter().any(|l| l.contains("aged request")),
+        "compaction must drop expired requests instead of preserving them forever"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("fresh request")),
+        "compaction must keep live requests"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn render_surfaces_expired_requests_as_warning() {
+    let pid = "test_gh443_expired_warning";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    append_request_at(pid, "2020-01-01T00:00:00Z", "s2", "ghost", "auth");
+
+    let peers = discover_active_peers(pid, "s1");
+    let board = compute_board_state(pid);
+    let rendered = render_coordination_protocol_with(&peers, &board, pid, "s1").unwrap_or_default();
+    assert!(
+        rendered.contains("WARN") && rendered.contains("expired request"),
+        "expired unacked requests should be surfaced as a warning, not silently hidden: {rendered}"
+    );
+    assert!(
+        !rendered.contains("aged request"),
+        "expired request bodies should not be rendered as live requests: {rendered}"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn render_pathless_claim_says_what_is_missing() {
+    let pid = "test_pathless_claim_render";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("main"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
+    // A presence-only claim: label, no paths (GH-444/445 branch fallback).
+    write_claim(pid, "s1", "main", &[]);
+
+    let peers = discover_active_peers(pid, "s1");
+    let board = compute_board_state(pid);
+    let rendered = render_coordination_protocol_with(&peers, &board, pid, "s1").unwrap_or_default();
+    assert!(
+        !rendered.contains("**main** ()"),
+        "an empty path list must not render as a broken-looking empty scope: {rendered}"
+    );
+    assert!(
+        rendered.contains("no paths claimed yet"),
+        "a pathless claim should say what is missing: {rendered}"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+/// A timestamp `secs` in the past, in the same format `now_rfc3339` produces.
+/// Lets a test place events at known distances without touching the clock or
+/// any env var.
+fn ts_secs_ago(secs: i64) -> String {
+    (time::OffsetDateTime::now_utc() - time::Duration::seconds(secs))
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("RFC3339 formatting")
+}
+
+/// Append a Request exactly as pre-GH-442 edda wrote it: no `id` field.
+fn append_legacy_request(pid: &str, ts: &str, from_label: &str, to_label: &str, message: &str) {
+    let event = CoordEvent {
+        ts: ts.to_string(),
+        session_id: "s2".to_string(),
+        event_type: CoordEventType::Request,
+        payload: serde_json::json!({
+            "from_label": from_label,
+            "to_label": to_label,
+            "message": message,
+        }),
+    };
+    append_coord_event(pid, &event);
+}
+
+/// Append a RequestAck exactly as pre-GH-442 edda wrote it: `from_label` only.
+fn append_legacy_ack(pid: &str, ts: &str, acker_session: &str, from_label: &str) {
+    let event = CoordEvent {
+        ts: ts.to_string(),
+        session_id: acker_session.to_string(),
+        event_type: CoordEventType::RequestAck,
+        payload: serde_json::json!({ "from_label": from_label }),
+    };
+    append_coord_event(pid, &event);
+}
+
+#[test]
+fn legacy_ackless_id_log_survives_compaction_without_swallowing_later_requests() {
+    let pid = "test_gh442_legacy_compaction";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    // A log written entirely by the pre-fix binary: no request ids, no
+    // request_ids on the ack. Only the timestamps separate the messages.
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    append_legacy_request(pid, &ts_secs_ago(30), "billing", "auth", "legacy request A");
+    append_legacy_ack(pid, &ts_secs_ago(20), "s1", "billing");
+    append_legacy_request(pid, &ts_secs_ago(10), "billing", "auth", "legacy request B");
+
+    let expect_only_b = |stage: &str| {
+        let pending = pending_requests_for_session(pid, "s1");
+        assert_eq!(
+            pending.len(),
+            1,
+            "{stage}: the ack predates B, so only A is retired, got: {pending:?}"
+        );
+        assert_eq!(pending[0].message, "legacy request B", "{stage}");
+    };
+    expect_only_b("before compaction");
+
+    // Compaction rewrites every event through the current serializer. A legacy
+    // ack comes back with an empty `request_ids`, which must keep it on the
+    // timestamp-bounded path rather than promoting it to "acks nothing" or
+    // demoting it to "acks everything from this peer".
+    let lines = compute_board_state_for_compaction(pid);
+    fs::write(coordination_path(pid), format!("{}\n", lines.join("\n"))).unwrap();
+    expect_only_b("after compaction");
+
+    let board = compute_board_state(pid);
+    assert_eq!(board.request_acks.len(), 1, "the ack survives compaction");
+    assert!(
+        board.request_acks[0].request_ids.is_empty(),
+        "a legacy ack must not gain fabricated ids during compaction"
+    );
+
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }

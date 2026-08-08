@@ -1,10 +1,12 @@
 use crate::signals::FileEditCount;
 
 use super::autoclaim::derive_scope_from_files;
-use super::board::compute_board_state;
+use super::board::{compute_board_state, partition_requests_for_session};
 use super::discovery::discover_active_peers;
 use super::heartbeat::read_heartbeat;
-use super::helpers::{self, format_age, format_peer_suffix, truncate_to_budget};
+use super::helpers::{
+    self, format_age, format_peer_suffix, session_label_from_board, truncate_to_budget,
+};
 use super::{
     protocol_budget, BoardState, PeerSummary, RequestEntry, SessionHeartbeat, PEER_UPDATES_BUDGET,
 };
@@ -16,6 +18,12 @@ use super::{
 /// - Multi-session: full protocol (peers, claims, bindings, commits, requests).
 /// - Solo with bindings: "## Binding Decisions" section only.
 /// - Solo without bindings: returns None.
+///
+/// Rendering is delivery, not acknowledgement (GH-442). This used to auto-ack
+/// everything it rendered, which meant a compacted context, a crashed turn, or
+/// a model that simply skipped the block all counted as "handled" — and the
+/// sender could not tell the difference. Requests now stay pending until an
+/// explicit `edda request-ack` or the dead-letter horizon.
 pub fn render_coordination_protocol(
     project_id: &str,
     session_id: &str,
@@ -23,43 +31,7 @@ pub fn render_coordination_protocol(
 ) -> Option<String> {
     let peers = discover_active_peers(project_id, session_id);
     let board = compute_board_state(project_id);
-
-    // Resolve my label to identify which requests are "to me"
-    let my_label: String = board
-        .claims
-        .iter()
-        .find(|c| c.session_id == session_id)
-        .map(|c| c.label.clone())
-        .or_else(|| read_heartbeat(project_id, session_id).map(|hb| hb.label))
-        .unwrap_or_default();
-
-    // Collect unacked requests addressed to me (before rendering)
-    let unacked_from_labels: Vec<String> = if !my_label.is_empty() {
-        board
-            .requests
-            .iter()
-            .filter(|r| r.to_label == my_label)
-            .filter(|r| {
-                !board
-                    .request_acks
-                    .iter()
-                    .any(|a| a.from_label == r.from_label && a.acker_session == session_id)
-            })
-            .map(|r| r.from_label.clone())
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let result = render_coordination_protocol_with(&peers, &board, project_id, session_id);
-
-    // Auto-ack: the agent has now "seen" these requests at SessionStart.
-    // Write ack events so they won't appear in subsequent renders.
-    for from_label in &unacked_from_labels {
-        super::heartbeat::write_request_ack(project_id, session_id, from_label);
-    }
-
-    result
+    render_coordination_protocol_with(&peers, &board, project_id, session_id)
 }
 
 /// Generate a suggested `edda claim` command based on available session context.
@@ -118,6 +90,17 @@ pub(super) fn suggest_claim_command(label: &str, heartbeat: &Option<SessionHeart
     }
 }
 
+/// Distinct sender labels in first-seen order, for compact summary lines.
+fn distinct_senders(requests: &[&RequestEntry]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for r in requests {
+        if !seen.iter().any(|s| s == &r.from_label) {
+            seen.push(r.from_label.clone());
+        }
+    }
+    seen
+}
+
 /// Render full coordination protocol using pre-computed peers and board state.
 ///
 /// "Pre-computed" refers to `peers` and `board` only — heartbeat writes and
@@ -171,11 +154,20 @@ pub fn render_coordination_protocol_with(
 
     // My scope + L2 command instructions
     if let Some(claim) = my_claim {
-        lines.push(format!(
-            "Your scope: **{}** ({})",
-            claim.label,
-            claim.paths.join(", ")
-        ));
+        // A claim with no paths is a presence signal, not a scope. Rendering it
+        // as `Your scope: **main** ()` reads as a bug; say what is missing.
+        if claim.paths.is_empty() {
+            lines.push(format!(
+                "Your scope: **{}** (no paths claimed yet — `edda claim \"{}\" --paths \"src/...\"`)",
+                claim.label, claim.label
+            ));
+        } else {
+            lines.push(format!(
+                "Your scope: **{}** ({})",
+                claim.label,
+                claim.paths.join(", ")
+            ));
+        }
     } else {
         // No claim yet — provide actionable nudge with specific suggestion
         let suggested = suggest_claim_command(my_label, &my_heartbeat);
@@ -258,24 +250,27 @@ pub fn render_coordination_protocol_with(
         }
     }
 
-    // Requests to me (using resolved my_label from claim or heartbeat fallback)
-    // Filter out already-acked requests so stale entries don't accumulate.
-    let my_requests: Vec<&RequestEntry> = board
-        .requests
-        .iter()
-        .filter(|r| r.to_label == my_label && !my_label.is_empty())
-        .filter(|r| {
-            !board
-                .request_acks
-                .iter()
-                .any(|a| a.from_label == r.from_label && a.acker_session == session_id)
-        })
-        .collect();
+    // Requests to me (using resolved my_label from claim or heartbeat fallback).
+    let (my_requests, expired_requests) =
+        partition_requests_for_session(board, session_id, my_label);
     if !my_requests.is_empty() {
         lines.push("### Requests to you".to_string());
         for r in my_requests.iter().take(3) {
             lines.push(format!("- Agent {}: \"{}\"", r.from_label, r.message));
         }
+        // The ack is the only signal the sender gets that this was handled.
+        lines.push("Ack when handled: `edda request-ack \"<peer-label>\"`".to_string());
+    }
+
+    // Dead letters: aged out unacked. Surfaced rather than silently dropped so
+    // a label that nobody answers is visible to whoever is looking (GH-443).
+    if !expired_requests.is_empty() {
+        let senders = distinct_senders(&expired_requests);
+        lines.push(format!(
+            "### WARN: {} expired request(s) — unacked past the horizon, from {}",
+            expired_requests.len(),
+            senders.join(", ")
+        ));
     }
 
     let result = lines.join("\n");
@@ -369,27 +364,8 @@ pub(crate) fn render_peer_updates_with(
     }
 
     // Requests to current session (claim label → heartbeat label fallback)
-    let my_claim = board.claims.iter().find(|c| c.session_id == session_id);
-    let my_heartbeat = read_heartbeat(project_id, session_id);
-    let my_label: &str = if let Some(claim) = my_claim {
-        claim.label.as_str()
-    } else if let Some(ref hb) = my_heartbeat {
-        hb.label.as_str()
-    } else {
-        ""
-    };
-    // Filter out acked requests so stale entries don't appear in peer updates.
-    let my_requests: Vec<&RequestEntry> = board
-        .requests
-        .iter()
-        .filter(|r| r.to_label == my_label && !my_label.is_empty())
-        .filter(|r| {
-            !board
-                .request_acks
-                .iter()
-                .any(|a| a.from_label == r.from_label && a.acker_session == session_id)
-        })
-        .collect();
+    let my_label = session_label_from_board(board, project_id, session_id);
+    let (my_requests, _expired) = partition_requests_for_session(board, session_id, &my_label);
     if !my_requests.is_empty() {
         for r in my_requests.iter().take(2) {
             lines.push(format!(

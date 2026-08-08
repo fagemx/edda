@@ -14,6 +14,19 @@ pub fn stale_secs() -> u64 {
         .unwrap_or(120)
 }
 
+/// Dead-letter horizon: unacked requests older than this are expired.
+///
+/// Requests are addressed by label, and a label can go away — the session
+/// ended, the scope was renamed, the sender typo'd it. Without a horizon those
+/// requests sit in `coordination.jsonl` forever: invisible to every renderer,
+/// preserved by every compaction. Default 7 days.
+pub fn request_ttl_secs() -> u64 {
+    std::env::var("EDDA_REQUEST_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7 * 24 * 60 * 60)
+}
+
 /// Maximum chars for the coordination protocol section.
 fn protocol_budget() -> usize {
     std::env::var("EDDA_PEERS_BUDGET_CHARS")
@@ -116,6 +129,10 @@ pub struct BindingEntry {
 /// A cross-agent request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestEntry {
+    /// Stable per-message identity, so an ack can name the message it answers.
+    /// Requests written before GH-442 carry no id on disk and are given a
+    /// synthetic `legacy:{session}:{ts}` one on read.
+    pub id: String,
     pub from_session: String,
     pub from_label: String,
     pub to_label: String,
@@ -128,6 +145,10 @@ pub struct RequestEntry {
 pub struct RequestAckEntry {
     pub acker_session: String,
     pub from_label: String,
+    /// Ids of the requests this ack covers. Empty for legacy acks written
+    /// before GH-442, which fall back to `from_label` + timestamp matching.
+    #[serde(default)]
+    pub request_ids: Vec<String>,
     pub ts: String,
 }
 
@@ -227,7 +248,9 @@ mod render_fleet;
 
 // Re-export public items to preserve API
 pub(crate) use autoclaim::{maybe_auto_claim, maybe_auto_claim_file, remove_autoclaim_state};
-pub use board::{compute_board_state, compute_board_state_for_compaction};
+pub use board::{
+    compute_board_state, compute_board_state_for_compaction, partition_requests_for_session,
+};
 pub use discovery::{discover_active_peers, discover_all_sessions, infer_session_id};
 pub(crate) use heartbeat::{
     cleanup_subagent_heartbeats, ensure_heartbeat_exists, read_heartbeat, resolve_teammate_session,
@@ -235,11 +258,13 @@ pub(crate) use heartbeat::{
     write_subagent_heartbeat, write_task_completed, write_teammate_idle, SubagentReport,
 };
 pub use heartbeat::{
-    find_binding_conflict, remove_heartbeat, touch_heartbeat, write_binding, write_claim,
-    write_heartbeat_minimal, write_request, write_request_ack, write_unclaim,
+    find_binding_conflict, remove_heartbeat, resolve_request_targets, touch_heartbeat,
+    write_binding, write_claim, write_heartbeat_minimal, write_request, write_request_ack,
+    write_unclaim,
 };
 pub use helpers::format_age;
 pub(crate) use helpers::{format_peer_suffix, pending_requests_for_session};
+pub use helpers::{resolve_session_label, session_label_from_board};
 pub(crate) use render_coord::{render_coord_diff, render_peer_updates_with};
 pub use render_coord::{render_coordination_protocol, render_coordination_protocol_with};
 pub use render_fleet::fleet_section;
