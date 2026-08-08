@@ -154,11 +154,20 @@ pub fn render_coordination_protocol_with(
 
     // My scope + L2 command instructions
     if let Some(claim) = my_claim {
-        lines.push(format!(
-            "Your scope: **{}** ({})",
-            claim.label,
-            claim.paths.join(", ")
-        ));
+        // A claim with no paths is a presence signal, not a scope. Rendering it
+        // as `Your scope: **main** ()` reads as a bug; say what is missing.
+        if claim.paths.is_empty() {
+            lines.push(format!(
+                "Your scope: **{}** (no paths claimed yet — `edda claim \"{}\" --paths \"src/...\"`)",
+                claim.label, claim.label
+            ));
+        } else {
+            lines.push(format!(
+                "Your scope: **{}** ({})",
+                claim.label,
+                claim.paths.join(", ")
+            ));
+        }
     } else {
         // No claim yet — provide actionable nudge with specific suggestion
         let suggested = suggest_claim_command(my_label, &my_heartbeat);
@@ -258,7 +267,7 @@ pub fn render_coordination_protocol_with(
     if !expired_requests.is_empty() {
         let senders = distinct_senders(&expired_requests);
         lines.push(format!(
-            "### Expired requests (unacked, aged out): {} from {}",
+            "### WARN: {} expired request(s) — unacked past the horizon, from {}",
             expired_requests.len(),
             senders.join(", ")
         ));

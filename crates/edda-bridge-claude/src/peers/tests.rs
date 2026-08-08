@@ -1940,22 +1940,38 @@ fn compaction_preserves_request_acks() {
         "acked request should not be pending"
     );
 
+    // The same peer sends a second message after the first was acked. A single
+    // request/ack pair cannot tell per-label from per-message matching, so the
+    // round-trip below has to carry two.
+    write_request(pid, "s2", "billing", "auth", "Export InvoiceTotal");
+
     // Compact
     let lines = compute_board_state_for_compaction(pid);
-    assert_eq!(lines.len(), 3, "claim + request + ack = 3 lines");
+    assert_eq!(
+        lines.len(),
+        4,
+        "claim + 2 requests + ack = 4 lines, got: {lines:?}"
+    );
 
     // Write compacted back
     let path = coordination_path(pid);
     let content = lines.join("\n");
     fs::write(&path, format!("{content}\n")).unwrap();
 
-    // After compaction: ack should still exist
+    // After compaction: ack should still exist, and the unacked set must be
+    // unchanged. Compaction re-serializes from board state, so an identity
+    // field missing there is silently stripped and this bug comes back.
     let board_after = compute_board_state(pid);
     assert_eq!(board_after.request_acks.len(), 1);
     let pending_after = pending_requests_for_session(pid, "s1");
-    assert!(
-        pending_after.is_empty(),
-        "acked request should still not be pending after compaction"
+    assert_eq!(
+        pending_after.len(),
+        1,
+        "compaction must preserve which message was acked, got: {pending_after:?}"
+    );
+    assert_eq!(
+        pending_after[0].message, "Export InvoiceTotal",
+        "the acked message stays acked; the later one stays pending"
     );
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -2374,6 +2390,21 @@ fn render_coordination_filters_acked_requests() {
         "acked request should be filtered out: {text}"
     );
 
+    // The same peer sends a second message. One request/ack pair renders the
+    // same either way, so only this second message proves the ack was matched
+    // per message rather than per sender.
+    write_request(pid, "s2", "billing", "auth", "Also export RefreshToken");
+    let board = compute_board_state(pid);
+    let text = render_coordination_protocol_with(&peers, &board, pid, "s1").unwrap();
+    assert!(
+        text.contains("Also export RefreshToken"),
+        "a later request from an already-acked peer must still render: {text}"
+    );
+    assert!(
+        !text.contains("Need AuthToken export"),
+        "the acked message must stay acked: {text}"
+    );
+
     remove_heartbeat(pid, "s1");
     remove_heartbeat(pid, "s2");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -2411,6 +2442,18 @@ fn peer_updates_filters_acked_requests() {
     assert!(
         !text.contains("Export BillingPlan"),
         "acked request should be filtered from peer updates: {text}"
+    );
+
+    // Second message from the same peer — the case a per-label ack swallows.
+    write_request(pid, "s2", "billing", "auth", "Export BillingCycle");
+    let text = render_peer_updates(pid, "s1").unwrap();
+    assert!(
+        text.contains("Export BillingCycle"),
+        "a later request from an already-acked peer must still surface: {text}"
+    );
+    assert!(
+        !text.contains("Export BillingPlan"),
+        "the acked message must stay acked: {text}"
     );
 
     remove_heartbeat(pid, "s1");
@@ -2772,12 +2815,40 @@ fn render_surfaces_expired_requests_as_warning() {
     let board = compute_board_state(pid);
     let rendered = render_coordination_protocol_with(&peers, &board, pid, "s1").unwrap_or_default();
     assert!(
-        rendered.contains("Expired requests"),
-        "expired unacked requests should be surfaced, not silently hidden: {rendered}"
+        rendered.contains("WARN") && rendered.contains("expired request"),
+        "expired unacked requests should be surfaced as a warning, not silently hidden: {rendered}"
     );
     assert!(
         !rendered.contains("aged request"),
         "expired request bodies should not be rendered as live requests: {rendered}"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn render_pathless_claim_says_what_is_missing() {
+    let pid = "test_pathless_claim_render";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("main"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
+    // A presence-only claim: label, no paths (GH-444/445 branch fallback).
+    write_claim(pid, "s1", "main", &[]);
+
+    let peers = discover_active_peers(pid, "s1");
+    let board = compute_board_state(pid);
+    let rendered = render_coordination_protocol_with(&peers, &board, pid, "s1").unwrap_or_default();
+    assert!(
+        !rendered.contains("**main** ()"),
+        "an empty path list must not render as a broken-looking empty scope: {rendered}"
+    );
+    assert!(
+        rendered.contains("no paths claimed yet"),
+        "a pathless claim should say what is missing: {rendered}"
     );
 
     remove_heartbeat(pid, "s1");

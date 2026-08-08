@@ -273,11 +273,20 @@ fn render_requests(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             // Match the ack to this specific message, not merely to its sender —
             // otherwise every later request from a peer inherits the first ack.
             let is_acked = app.board.request_acks.iter().any(|a| {
-                if a.request_ids.is_empty() {
-                    a.from_label == r.from_label && a.ts >= r.ts
-                } else {
-                    a.request_ids.iter().any(|id| id == &r.id)
+                if !a.request_ids.is_empty() {
+                    return a.request_ids.iter().any(|id| id == &r.id);
                 }
+                // Legacy ack, no ids. Sender and timestamp alone are not enough:
+                // an ack written by some third session for its own mail from the
+                // same peer would show a phantom [ack] here. Require the acker to
+                // actually be the addressee.
+                a.from_label == r.from_label
+                    && a.ts >= r.ts
+                    && app
+                        .board
+                        .claims
+                        .iter()
+                        .any(|c| c.session_id == a.acker_session && c.label == r.to_label)
             });
             let msg = truncate_str(&r.message, 40);
             let line = if is_acked {
