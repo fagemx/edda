@@ -269,13 +269,11 @@ fn dispatch_session_end(project_id: &str, envelope: &CodexEnvelope) -> anyhow::R
         let _ =
             edda_bridge_claude::digest::digest_session_manual(project_id, session_id, cwd, true);
     }
-    let peers_active = !session_id.is_empty()
-        && !edda_bridge_claude::peers::discover_active_peers(project_id, session_id).is_empty();
-    cleanup_session_state(project_id, session_id, peers_active);
+    cleanup_session_state(project_id, session_id);
     Ok(ok())
 }
 
-fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool) {
+fn cleanup_session_state(project_id: &str, session_id: &str) {
     let state_dir = edda_store::project_dir(project_id).join("state");
     let _ = std::fs::remove_file(state_dir.join(format!("inject_hash.{session_id}")));
     let _ = std::fs::remove_file(state_dir.join(format!("nudge_ts.{session_id}")));
@@ -284,9 +282,7 @@ fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool)
     let _ = std::fs::remove_file(state_dir.join(format!("signal_count.{session_id}")));
     let _ = std::fs::remove_file(state_dir.join("compact_pending"));
     edda_bridge_claude::peers::remove_heartbeat(project_id, session_id);
-    if peers_active {
-        edda_bridge_claude::peers::write_unclaim(project_id, session_id);
-    }
+    edda_bridge_claude::peers::write_unclaim(project_id, session_id);
 }
 
 #[cfg(test)]
@@ -373,5 +369,21 @@ mod tests {
         let r = hook_entrypoint_from_stdin(&stdin).unwrap();
         let v: serde_json::Value = serde_json::from_str(r.stdout.as_ref().unwrap()).unwrap();
         assert_eq!(v["continue"], true);
+    }
+
+    #[test]
+    fn session_end_releases_solo_claim() {
+        let pid = "test_codex_solo_unclaim";
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+        edda_store::ensure_dirs(pid).unwrap();
+        edda_bridge_claude::peers::write_claim(pid, "solo", "auth", &["src/auth.rs".into()]);
+
+        cleanup_session_state(pid, "solo");
+
+        assert!(edda_bridge_claude::peers::compute_board_state(pid)
+            .claims
+            .iter()
+            .all(|claim| claim.session_id != "solo"));
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }

@@ -319,23 +319,14 @@ fn dispatch_session_end(
             edda_bridge_claude::digest::digest_session_manual(project_id, session_id, cwd, true);
     }
 
-    // Check if peers were active (for unclaim)
-    let peers_active = !session_id.is_empty() && has_active_peers(project_id, session_id);
-
     // Cleanup session-scoped state files
-    cleanup_session_state(project_id, session_id, peers_active);
+    cleanup_session_state(project_id, session_id);
 
     Ok(ok_json())
 }
 
-/// Check if any non-stale peer session heartbeats exist (excluding current).
-fn has_active_peers(project_id: &str, session_id: &str) -> bool {
-    let peers = edda_bridge_claude::peers::discover_active_peers(project_id, session_id);
-    !peers.is_empty()
-}
-
 /// Remove session-scoped state files.
-fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool) {
+fn cleanup_session_state(project_id: &str, session_id: &str) {
     let state_dir = edda_store::project_dir(project_id).join("state");
     let _ = fs::remove_file(state_dir.join(format!("inject_hash.{session_id}")));
     let _ = fs::remove_file(state_dir.join(format!("nudge_ts.{session_id}")));
@@ -344,11 +335,10 @@ fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool)
     let _ = fs::remove_file(state_dir.join(format!("signal_count.{session_id}")));
     let _ = fs::remove_file(state_dir.join("compact_pending"));
 
-    // Peer heartbeat + unclaim
+    // Peer heartbeat + unclaim. Unclaim is idempotent when no claim exists,
+    // and must also run for solo sessions so their claim cannot be orphaned.
     edda_bridge_claude::peers::remove_heartbeat(project_id, session_id);
-    if peers_active {
-        edda_bridge_claude::peers::write_unclaim(project_id, session_id);
-    }
+    edda_bridge_claude::peers::write_unclaim(project_id, session_id);
 }
 
 // ── Auto-digest ──
@@ -972,5 +962,21 @@ mod tests {
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
         std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
+    }
+
+    #[test]
+    fn session_end_releases_solo_claim() {
+        let pid = "test_openclaw_solo_unclaim";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        edda_store::ensure_dirs(pid).unwrap();
+        edda_bridge_claude::peers::write_claim(pid, "solo", "auth", &["src/auth.rs".into()]);
+
+        cleanup_session_state(pid, "solo");
+
+        assert!(edda_bridge_claude::peers::compute_board_state(pid)
+            .claims
+            .iter()
+            .all(|claim| claim.session_id != "solo"));
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }
