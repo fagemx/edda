@@ -283,84 +283,192 @@ fn parse_assistant_content(asst_json: &serde_json::Value) -> (Vec<String>, Vec<T
 
 // ── Pack rendering ──
 
-/// Render turns into a markdown pack string with budget truncation.
-pub fn render_pack(turns: &[Turn], metadata: &PackMetadata, budget_chars: usize) -> String {
-    let budget = if budget_chars == 0 {
+/// The stable section order for neutral memory-pack items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PackSection {
+    Goals,
+    BindingDecisions,
+    UnratifiedDecisions,
+    OpenCheckpoints,
+    Constraints,
+    Coordination,
+    FileStateDeltas,
+    RecentTurns,
+}
+
+impl PackSection {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Goals => "Goals",
+            Self::BindingDecisions => "Binding Decisions",
+            Self::UnratifiedDecisions => "Unratified Decisions",
+            Self::OpenCheckpoints => "Open Checkpoints",
+            Self::Constraints => "Constraints",
+            Self::Coordination => "Coordination",
+            Self::FileStateDeltas => "File-State Deltas",
+            Self::RecentTurns => "Recent Turns (deterministic)",
+        }
+    }
+}
+
+/// A complete, neutral item in a memory pack.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackItem {
+    pub section: PackSection,
+    pub key: String,
+    pub body: String,
+    pub salience: u64,
+}
+
+fn pack_budget(budget_chars: usize) -> usize {
+    if budget_chars == 0 {
         std::env::var("EDDA_PACK_BUDGET_CHARS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(DEFAULT_PACK_BUDGET_CHARS)
     } else {
         budget_chars
-    };
-
-    let mut out = String::new();
-    out.push_str("# edda memory pack (hot)\n\n");
-    out.push_str(&format!("- project_id: {}\n", metadata.project_id));
-    out.push_str(&format!("- session_id: {}\n", metadata.session_id));
-    out.push_str(&format!("- git_branch: {}\n", metadata.git_branch));
-    out.push_str(&format!("- turns: {}\n\n", turns.len()));
-    out.push_str("## Recent Turns (deterministic)\n\n");
-
-    // Render turns, newest first, truncate from oldest if over budget
-    for (i, turn) in turns.iter().enumerate() {
-        let mut section = String::new();
-        let user_preview = truncate_str(&turn.user_text, 200);
-        section.push_str(&format!("### Turn {} (newest first)\n", i + 1));
-        section.push_str(&format!("- User: {user_preview}\n"));
-
-        for tu in &turn.tool_uses {
-            let cmd_str = tu
-                .command
-                .as_deref()
-                .map(|c| format!(" `{}`", truncate_str(c, 80)))
-                .unwrap_or_default();
-            let desc_str = tu
-                .description
-                .as_deref()
-                .map(|d| format!(" ({})", truncate_str(d, 60)))
-                .unwrap_or_default();
-            let file_str = tu
-                .file_path
-                .as_deref()
-                .map(|f| format!(" file={f}"))
-                .unwrap_or_default();
-            section.push_str(&format!(
-                "  - ToolUse: {}{}{}{}\n",
-                tu.name, cmd_str, desc_str, file_str
-            ));
-        }
-
-        for text in &turn.assistant_texts {
-            let preview = truncate_str(text, 300);
-            section.push_str(&format!("  - Assistant: {preview}\n"));
-        }
-        section.push('\n');
-
-        if out.len() + section.len() > budget {
-            out.push_str(&format!(
-                "... ({} more turns truncated by budget)\n",
-                turns.len() - i
-            ));
-            break;
-        }
-        out.push_str(&section);
     }
+}
 
+fn render_pack_header(metadata: &PackMetadata, dropped_items: usize) -> String {
+    format!(
+        "# edda memory pack (hot)\n\n- project_id: {}\n- session_id: {}\n- git_branch: {}\n- turns: {}\n- dropped_items: {}\n\n",
+        metadata.project_id,
+        metadata.session_id,
+        metadata.git_branch,
+        metadata.turn_count,
+        dropped_items,
+    )
+}
+
+fn render_selected_items(
+    metadata: &PackMetadata,
+    items: &[PackItem],
+    selected: &[usize],
+    dropped_items: usize,
+) -> String {
+    let mut ordered = selected.to_vec();
+    ordered.sort_by(|a, b| {
+        items[*a]
+            .section
+            .cmp(&items[*b].section)
+            .then_with(|| items[*a].key.cmp(&items[*b].key))
+            .then_with(|| a.cmp(b))
+    });
+
+    let mut out = render_pack_header(metadata, dropped_items);
+    let mut section = None;
+    for index in ordered {
+        let item = &items[index];
+        if section != Some(item.section) {
+            out.push_str(&format!("## {}\n\n", item.section.title()));
+            section = Some(item.section);
+        }
+        out.push_str(&format!("### {}\n", item.key));
+        out.push_str(&item.body);
+        if !item.body.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
     out
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.replace('\n', " ")
-    } else {
-        // Find the last char boundary at or before `max` bytes
-        let mut end = max;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
+fn select_items(
+    metadata: &PackMetadata,
+    items: &[PackItem],
+    budget: usize,
+    dropped_items: usize,
+) -> Vec<usize> {
+    let mut ranked: Vec<usize> = (0..items.len()).collect();
+    ranked.sort_by(|a, b| {
+        items[*b]
+            .salience
+            .cmp(&items[*a].salience)
+            .then_with(|| items[*a].section.cmp(&items[*b].section))
+            .then_with(|| items[*a].key.cmp(&items[*b].key))
+            .then_with(|| a.cmp(b))
+    });
+
+    let mut selected = Vec::new();
+    for index in ranked {
+        selected.push(index);
+        if render_selected_items(metadata, items, &selected, dropped_items).len() > budget {
+            selected.pop();
         }
-        format!("{}...", s[..end].replace('\n', " "))
     }
+    selected
+}
+
+/// Render neutral items in deterministic section and salience order.
+///
+/// Items are selected by salience, with stable tie-breakers, and are either
+/// included in full or omitted. The dropped count is part of the pack header.
+pub fn render_ordered_pack(
+    items: &[PackItem],
+    metadata: &PackMetadata,
+    budget_chars: usize,
+) -> String {
+    let budget = pack_budget(budget_chars);
+    let mut dropped_items = items.len();
+    let mut selected = Vec::new();
+
+    // The count is in the header, so a digit-boundary change can affect fit.
+    for _ in 0..4 {
+        selected = select_items(metadata, items, budget, dropped_items);
+        let next_dropped = items.len() - selected.len();
+        if next_dropped == dropped_items {
+            break;
+        }
+        dropped_items = next_dropped;
+    }
+
+    render_selected_items(metadata, items, &selected, items.len() - selected.len())
+}
+
+fn render_turn_body(turn: &Turn) -> String {
+    let mut body = format!("- User: {}\n", turn.user_text);
+    for tu in &turn.tool_uses {
+        let cmd_str = tu
+            .command
+            .as_deref()
+            .map(|c| format!(" `{c}`"))
+            .unwrap_or_default();
+        let desc_str = tu
+            .description
+            .as_deref()
+            .map(|d| format!(" ({d})"))
+            .unwrap_or_default();
+        let file_str = tu
+            .file_path
+            .as_deref()
+            .map(|f| format!(" file={f}"))
+            .unwrap_or_default();
+        body.push_str(&format!(
+            "  - ToolUse: {}{}{}{}\n",
+            tu.name, cmd_str, desc_str, file_str
+        ));
+    }
+    for text in &turn.assistant_texts {
+        body.push_str(&format!("  - Assistant: {text}\n"));
+    }
+    body
+}
+
+/// Render turns into a hot pack without truncating any turn item.
+pub fn render_pack(turns: &[Turn], metadata: &PackMetadata, budget_chars: usize) -> String {
+    let items: Vec<PackItem> = turns
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| PackItem {
+            section: PackSection::RecentTurns,
+            key: format!("Turn {} (newest first)", index + 1),
+            body: render_turn_body(turn),
+            salience: (turns.len() - index) as u64,
+        })
+        .collect();
+    render_ordered_pack(&items, metadata, budget_chars)
 }
 
 /// Write hot.md and hot.meta.json to the packs directory.
@@ -664,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn render_pack_budget_truncation() {
+    fn render_pack_drops_whole_items_at_budget() {
         let turns: Vec<Turn> = (0..20)
             .map(|i| Turn {
                 user_uuid: format!("u{i}"),
@@ -686,8 +794,9 @@ mod tests {
         };
 
         let md = render_pack(&turns, &meta, 500);
-        assert!(md.contains("truncated by budget"));
-        assert!(md.len() <= 600); // some slack for the truncation message
+        assert!(md.contains("- dropped_items: "));
+        assert!(!md.contains("truncated by budget"));
+        assert!(md.len() <= 500);
     }
 
     #[test]
