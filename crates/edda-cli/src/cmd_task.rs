@@ -176,6 +176,7 @@ fn do_new(repo_root: &Path, args: &NewTaskArgs<'_>) -> anyhow::Result<NewOutcome
 
     let views = ledger.task_views()?;
     let status = find_view(&views, task_id)?.status;
+    drop(_lock);
     if let Some(assignee) = args.assignee {
         let notify_config = edda_notify::NotifyConfig::load(&ledger.paths);
         if !notify_config.channels.is_empty() {
@@ -589,9 +590,12 @@ pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn webhook_capture() -> (
+    fn webhook_capture(
+        ws: &std::path::Path,
+    ) -> (
         String,
         std::sync::mpsc::Receiver<String>,
+        std::sync::mpsc::Receiver<bool>,
         std::thread::JoinHandle<()>,
     ) {
         use std::io::{Read, Write};
@@ -600,8 +604,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (tx, rx) = std::sync::mpsc::channel();
+        let (lock_tx, lock_rx) = std::sync::mpsc::channel();
+        let ws = ws.to_path_buf();
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            lock_tx
+                .send(WorkspaceLock::acquire(&edda_ledger::EddaPaths::discover(&ws)).is_ok())
+                .unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_millis(100)))
                 .unwrap();
@@ -613,7 +622,7 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .unwrap();
         });
-        (url, rx, handle)
+        (url, rx, lock_rx, handle)
     }
 
     fn enable_webhook(ws: &std::path::Path, url: &str) {
@@ -738,10 +747,16 @@ mod tests {
     #[test]
     fn new_emits_task_assigned_notification() {
         let ws = temp_ws("notify_task_assigned");
-        let (url, rx, server) = webhook_capture();
+        let (url, rx, lock_rx, server) = webhook_capture(&ws);
         enable_webhook(&ws, &url);
 
         let outcome = do_new(&ws, &args("ship the thing", &[])).unwrap();
+        assert!(
+            lock_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("webhook server should probe the workspace lock"),
+            "task creation must release the workspace lock before notification I/O"
+        );
         let body = rx
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("task creation should dispatch a notification");
