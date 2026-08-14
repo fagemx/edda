@@ -69,22 +69,36 @@ pub fn validate_readable_payload(payload: &serde_json::Value) -> anyhow::Result<
     }
 
     fn is_pointer_hash_reference(value: &serde_json::Value) -> bool {
-        let Some(object) = value.as_object() else {
-            return false;
-        };
-        let has_pointer = ["pointer", "trace_pointer", "uri"].iter().any(|key| {
-            object
-                .get(*key)
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-        });
-        let has_hash = ["hash", "content_hash", "sha256"].iter().any(|key| {
-            object
-                .get(*key)
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|value| !value.is_empty())
-        });
-        has_pointer && has_hash
+        fn has_pointer_hash(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+            let has_pointer = ["pointer", "trace_pointer", "uri"].iter().any(|key| {
+                object
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            });
+            let has_hash = ["hash", "content_hash", "sha256"].iter().any(|key| {
+                object
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            });
+            has_pointer && has_hash
+        }
+
+        match value {
+            serde_json::Value::Object(object) => has_pointer_hash(object),
+            serde_json::Value::String(text) => {
+                let trimmed = text.trim_start();
+                if !matches!(trimmed.as_bytes().first(), Some(b'{' | b'[')) {
+                    return false;
+                }
+                serde_json::from_str::<serde_json::Value>(trimmed)
+                    .ok()
+                    .and_then(|parsed| parsed.as_object().map(has_pointer_hash))
+                    .unwrap_or(false)
+            }
+            _ => false,
+        }
     }
 
     fn visit(value: &serde_json::Value, path: &str) -> anyhow::Result<()> {
@@ -107,6 +121,16 @@ pub fn validate_readable_payload(payload: &serde_json::Value) -> anyhow::Result<
             serde_json::Value::Array(values) => {
                 for (index, child) in values.iter().enumerate() {
                     visit(child, &format!("{path}[{index}]"))?;
+                }
+            }
+            serde_json::Value::String(text) => {
+                let trimmed = text.trim_start();
+                if matches!(trimmed.as_bytes().first(), Some(b'{' | b'[')) {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        if parsed.is_object() || parsed.is_array() {
+                            visit(&parsed, path)?;
+                        }
+                    }
                 }
             }
             _ => {}

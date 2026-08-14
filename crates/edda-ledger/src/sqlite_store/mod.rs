@@ -1580,6 +1580,69 @@ mod tests {
     }
 
     #[test]
+    fn append_rejects_json_reasoning_in_provenance_note() {
+        let (dir, store) = tmp_db();
+        let mut event = new_note_event("main", None, "vendor", "readable summary", &[]).unwrap();
+        event.refs.provenance.push(Provenance {
+            target: "evt_fake_target".to_string(),
+            rel: "reviews".to_string(),
+            note: Some(
+                serde_json::json!({
+                    "thinking": {
+                        "encrypted_content": "fake-reasoning-payload"
+                    }
+                })
+                .to_string(),
+            ),
+        });
+        edda_core::event::finalize_event(&mut event).unwrap();
+
+        let result = store.append_event_strict(&event);
+        assert!(
+            result.is_err(),
+            "JSON-encoded vendor reasoning must not cross the readable-ledger boundary"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_accepts_serialized_pointer_hash_reasoning_reference() {
+        let (dir, store) = tmp_db();
+        let mut event = new_note_event("main", None, "vendor", "readable summary", &[]).unwrap();
+        event.payload["reasoning"] = serde_json::json!(serde_json::json!({
+            "pointer": "vendor://fake/reasoning/1",
+            "content_hash": "sha256:fake-hash"
+        })
+        .to_string());
+        edda_core::event::finalize_event(&mut event).unwrap();
+
+        assert!(store.append_event_strict(&event).is_ok());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_accepts_ordinary_readable_summary_text() {
+        let (dir, store) = tmp_db();
+        let event = new_note_event(
+            "main",
+            None,
+            "vendor",
+            "The agent is thinking about cache invalidation.",
+            &[],
+        )
+        .unwrap();
+
+        assert!(store.append_event_strict(&event).is_ok());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn append_rejects_broken_parent_hash() {
         let (dir, store) = tmp_db();
         let e1 = new_note_event("main", None, "system", "first", &[]).unwrap();
