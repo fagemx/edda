@@ -364,7 +364,9 @@ pub fn ask(
         ledger.find_related_commits(opts.branch.as_deref(), q, &decision_event_ids, opts.limit)?;
     let related_commits = to_commit_hits(&commit_events, &decision_event_ids, q, opts.limit);
     let note_events = ledger.find_related_notes(opts.branch.as_deref(), q, opts.limit)?;
-    let related_notes = to_note_hits(&note_events, opts.limit);
+    let mut related_notes = find_checkpoint_notes(ledger, q, opts)?;
+    related_notes.extend(to_note_hits(&note_events, opts.limit));
+    related_notes.truncate(opts.limit);
 
     let conversations = match transcript_search {
         Some(search_fn) if !q.is_empty() => search_fn(q, opts.limit),
@@ -925,6 +927,66 @@ fn to_decision_hit(row: &DecisionView) -> DecisionHit {
     }
 }
 
+fn find_checkpoint_notes(
+    ledger: &Ledger,
+    query: &str,
+    opts: &AskOptions,
+) -> anyhow::Result<Vec<NoteHit>> {
+    let query = query.trim().to_lowercase();
+    let terms: Vec<&str> = query
+        .split(" or ")
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .collect();
+
+    let mut events = ledger.iter_events_by_type("checkpoint")?;
+    events.reverse();
+    Ok(events
+        .into_iter()
+        .filter(|event| {
+            opts.branch
+                .as_deref()
+                .is_none_or(|branch| branch == event.branch)
+        })
+        .filter(|event| {
+            opts.after
+                .as_deref()
+                .is_none_or(|after| event.ts.as_str() >= after)
+                && opts
+                    .before
+                    .as_deref()
+                    .is_none_or(|before| event.ts.as_str() <= before)
+        })
+        .filter_map(|event| {
+            let payload: edda_core::event::CheckpointPayload =
+                serde_json::from_value(event.payload.clone()).ok()?;
+            let searchable = serde_json::to_string(&payload).ok()?.to_lowercase();
+            if !terms.is_empty() && !terms.iter().any(|term| searchable.contains(term)) {
+                return None;
+            }
+            let rejected = payload
+                .rejected
+                .iter()
+                .map(|item| format!("{} — {}", item.hypothesis, item.reason))
+                .collect::<Vec<_>>();
+            let text = format!(
+                "checkpoint: hypotheses=[{}]; rejected=[{}]; open=[{}]; next={}",
+                payload.hypotheses.join(" | "),
+                rejected.join(" | "),
+                payload.open.join(" | "),
+                payload.next,
+            );
+            Some(NoteHit {
+                event_id: event.event_id,
+                text,
+                ts: event.ts,
+                branch: event.branch,
+            })
+        })
+        .take(opts.limit)
+        .collect())
+}
+
 /// Return the affected_paths carried by each decision in `result.decisions`,
 /// looked up from the ledger by event_id. Position-aligned with the input;
 /// missing/unreadable rows return empty Vec (best-effort).
@@ -948,7 +1010,9 @@ pub fn affected_paths_for_hits(ledger: &Ledger, hits: &[DecisionHit]) -> Vec<Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use edda_core::event::{finalize_event, new_note_event};
+    use edda_core::event::{
+        finalize_event, new_checkpoint_event, new_note_event, CheckpointPayload, RejectedHypothesis,
+    };
     use edda_core::Provenance;
     use edda_ledger::ledger::{init_branches_json, init_head, init_workspace};
     use edda_ledger::paths::EddaPaths;
@@ -1064,6 +1128,32 @@ mod tests {
             hit.receipt
         );
         assert_eq!(hit.evidence_paths, vec!["dist/drill.json".to_string()]);
+    }
+
+    #[test]
+    fn ask_recalls_checkpoint_judgment_state() {
+        let (_tmp, ledger) = setup();
+        let checkpoint = CheckpointPayload {
+            hypotheses: vec!["cache invalidation is the cause".to_string()],
+            rejected: vec![RejectedHypothesis {
+                hypothesis: "database corruption".to_string(),
+                reason: "integrity check passes".to_string(),
+            }],
+            open: vec!["confirm the next rebuild".to_string()],
+            next: "run the rebuild check".to_string(),
+        };
+        let event = new_checkpoint_event("main", None, "agent", &checkpoint).unwrap();
+        ledger.append_event(&event).unwrap();
+
+        let result = ask(&ledger, "rebuild", &AskOptions::default(), None).unwrap();
+
+        assert_eq!(result.related_notes.len(), 1);
+        assert!(result.related_notes[0]
+            .text
+            .contains("next=run the rebuild check"));
+        assert!(result.related_notes[0]
+            .text
+            .contains("integrity check passes"));
     }
 
     fn make_decision(

@@ -117,6 +117,57 @@ pub fn validate_readable_payload(payload: &serde_json::Value) -> anyhow::Result<
     visit(payload, "")
 }
 
+/// A rejected hypothesis and the short, readable reason it was rejected.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RejectedHypothesis {
+    pub hypothesis: String,
+    pub reason: String,
+}
+
+/// Vendor-neutral judgment state that can be resumed by another engine.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CheckpointPayload {
+    pub hypotheses: Vec<String>,
+    pub rejected: Vec<RejectedHypothesis>,
+    pub open: Vec<String>,
+    pub next: String,
+}
+
+/// Create a portable reasoning checkpoint without recording vendor-native traces.
+pub fn new_checkpoint_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    role: &str,
+    checkpoint: &CheckpointPayload,
+) -> anyhow::Result<Event> {
+    let payload = serde_json::json!({
+        "role": role,
+        "tags": ["checkpoint"],
+        "hypotheses": checkpoint.hypotheses,
+        "rejected": checkpoint.rejected,
+        "open": checkpoint.open,
+        "next": checkpoint.next,
+    });
+
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: "checkpoint".to_string(),
+        branch: branch.to_string(),
+        parent_hash: parent_hash.map(|s| s.to_string()),
+        hash: String::new(),
+        payload,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event)?;
+    Ok(event)
+}
+
 /// Create a new `note` event.
 pub fn new_note_event(
     branch: &str,
@@ -1081,6 +1132,33 @@ mod tests {
         assert_eq!(event.digests[0].alg, "sha256");
         assert_eq!(event.digests[0].canon, CANON_EDDA_V1);
         assert_eq!(event.digests[0].value, event.hash);
+    }
+
+    #[test]
+    fn checkpoint_event_has_vendor_neutral_judgment_state() {
+        let payload = CheckpointPayload {
+            hypotheses: vec!["cache invalidation is the cause".to_string()],
+            rejected: vec![RejectedHypothesis {
+                hypothesis: "database corruption".to_string(),
+                reason: "integrity check passes".to_string(),
+            }],
+            open: vec!["confirm the next rebuild".to_string()],
+            next: "run the rebuild check".to_string(),
+        };
+
+        let event = new_checkpoint_event("main", None, "agent", &payload).unwrap();
+
+        assert_eq!(event.event_type, "checkpoint");
+        assert_eq!(event.event_family.as_deref(), Some("signal"));
+        assert_eq!(
+            event.payload["hypotheses"][0],
+            "cache invalidation is the cause"
+        );
+        assert_eq!(
+            event.payload["rejected"][0]["reason"],
+            "integrity check passes"
+        );
+        assert_eq!(event.payload["next"], "run the rebuild check");
     }
 
     #[test]

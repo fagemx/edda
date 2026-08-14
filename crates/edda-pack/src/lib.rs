@@ -320,6 +320,57 @@ pub struct PackItem {
     pub salience: u64,
 }
 
+/// Convert checkpoint events into neutral hot-pack items.
+pub fn checkpoint_items(events: &[edda_core::Event]) -> Vec<PackItem> {
+    events
+        .iter()
+        .rev()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            let payload: edda_core::event::CheckpointPayload =
+                serde_json::from_value(event.payload.clone()).ok()?;
+            let rejected = payload
+                .rejected
+                .iter()
+                .map(|item| format!("{} — {}", item.hypothesis, item.reason))
+                .collect::<Vec<_>>();
+            let body = format!(
+                "- hypotheses: {}\n- rejected: {}\n- open: {}\n- next: {}\n",
+                payload.hypotheses.join(" | "),
+                rejected.join(" | "),
+                payload.open.join(" | "),
+                payload.next,
+            );
+            Some(PackItem {
+                section: PackSection::OpenCheckpoints,
+                key: format!("Checkpoint {}", event.event_id),
+                body,
+                salience: 90 + (events.len() - index) as u64,
+            })
+        })
+        .collect()
+}
+
+fn latest_registered_checkpoint_items(project_id: &str) -> Vec<PackItem> {
+    let Some(project) = edda_store::registry::get_project(project_id) else {
+        return Vec::new();
+    };
+    let Ok(ledger) = edda_ledger::Ledger::open(project.path) else {
+        return Vec::new();
+    };
+    let Ok(branch) = ledger.head_branch() else {
+        return Vec::new();
+    };
+    let Ok(events) = ledger.iter_events_by_type("checkpoint") else {
+        return Vec::new();
+    };
+    let events: Vec<_> = events
+        .into_iter()
+        .filter(|event| event.branch == branch)
+        .collect();
+    checkpoint_items(&events).into_iter().take(1).collect()
+}
+
 fn pack_budget(budget_chars: usize) -> usize {
     if budget_chars == 0 {
         std::env::var("EDDA_PACK_BUDGET_CHARS")
@@ -458,7 +509,7 @@ fn render_turn_body(turn: &Turn) -> String {
 
 /// Render turns into a hot pack without truncating any turn item.
 pub fn render_pack(turns: &[Turn], metadata: &PackMetadata, budget_chars: usize) -> String {
-    let items: Vec<PackItem> = turns
+    let mut items: Vec<PackItem> = turns
         .iter()
         .enumerate()
         .map(|(index, turn)| PackItem {
@@ -468,6 +519,7 @@ pub fn render_pack(turns: &[Turn], metadata: &PackMetadata, budget_chars: usize)
             salience: (turns.len() - index) as u64,
         })
         .collect();
+    items.extend(latest_registered_checkpoint_items(&metadata.project_id));
     render_ordered_pack(&items, metadata, budget_chars)
 }
 
@@ -769,6 +821,36 @@ mod tests {
         assert!(md.contains("How do I sort a list?"));
         assert!(md.contains("ToolUse: Bash"));
         assert!(md.contains("Use the sort() method."));
+    }
+
+    #[test]
+    fn checkpoint_items_join_the_hot_pack_schema() {
+        let checkpoint = edda_core::event::CheckpointPayload {
+            hypotheses: vec!["cache invalidation is the cause".to_string()],
+            rejected: vec![edda_core::event::RejectedHypothesis {
+                hypothesis: "database corruption".to_string(),
+                reason: "integrity check passes".to_string(),
+            }],
+            open: vec!["confirm the next rebuild".to_string()],
+            next: "run the rebuild check".to_string(),
+        };
+        let event =
+            edda_core::event::new_checkpoint_event("main", None, "agent", &checkpoint).unwrap();
+        let items = checkpoint_items(&[event]);
+        let meta = PackMetadata {
+            project_id: "abc".into(),
+            session_id: "s1".into(),
+            git_branch: "main".into(),
+            turn_count: 0,
+            budget_chars: 12000,
+        };
+
+        let md = render_ordered_pack(&items, &meta, 12000);
+
+        assert!(md.contains("## Open Checkpoints"));
+        assert!(md.contains("cache invalidation is the cause"));
+        assert!(md.contains("integrity check passes"));
+        assert!(md.contains("run the rebuild check"));
     }
 
     #[test]

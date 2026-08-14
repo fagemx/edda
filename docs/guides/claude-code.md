@@ -50,6 +50,11 @@ Example of what the agent receives:
 - auth.strategy: JWT (cli)
 ```
 
+Reasoning checkpoints are durable, vendor-neutral ledger records. Record one with
+`edda checkpoint --hypothesis "..." --rejected "hypothesis|reason" --open "..." --next "..."`.
+The hot pack includes the latest checkpoint under `Open Checkpoints`; budget
+degradation drops complete sections and reports the omitted-item count.
+
 View the full context snapshot at any time:
 
 ```bash

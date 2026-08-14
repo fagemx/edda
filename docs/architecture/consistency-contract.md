@@ -24,6 +24,9 @@ scoping, and durability guarantees.
   acquire an exclusive `WorkspaceLock` via `.edda/LOCK` (non-blocking
   `fs2::try_lock_exclusive`). Bridge hooks retry with
   `EDDA_BRIDGE_LOCK_TIMEOUT_MS` (default 2 s).
+- **Checkpoint payload**: `hypotheses`, `rejected` (hypothesis plus one-line
+  reason), `open`, and `next`. These are readable, vendor-neutral judgment state;
+  native reasoning traces are not checkpoint fields.
 - **Entity types**: `note`, `cmd`, `commit`, `merge`, `branch_create`,
   `branch_switch`, `rebuild`, `task_intake`, `agent_phase_change`, `approval`,
   `approval_request`, `approval_policy_match`, `review_bundle`, `pr`,

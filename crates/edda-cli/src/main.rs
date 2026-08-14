@@ -5,6 +5,7 @@ mod cmd_branch;
 mod cmd_bridge;
 mod cmd_brief;
 mod cmd_bundle;
+mod cmd_checkpoint;
 mod cmd_commit;
 mod cmd_conduct;
 mod cmd_config;
@@ -86,6 +87,11 @@ enum Command {
         /// Tags for the note (repeatable)
         #[arg(long = "tag")]
         tags: Vec<String>,
+    },
+    /// Record a vendor-neutral reasoning checkpoint
+    Checkpoint {
+        #[command(flatten)]
+        args: cmd_checkpoint::CheckpointArgs,
     },
     /// Record a decision — agent-authored, unratified until `edda ratify` (shortcut for `bridge claude decide`)
     Decide {
@@ -998,6 +1004,7 @@ fn main() -> anyhow::Result<()> {
         } => cmd_init::execute(&repo_root, no_hooks, force_skills),
         Command::Actor { cmd } => cmd_actor::run(cmd, &repo_root),
         Command::Note { text, role, tags } => cmd_note::execute(&repo_root, &text, &role, &tags),
+        Command::Checkpoint { args } => cmd_checkpoint::execute(&repo_root, args),
         Command::Decide {
             decision,
             reason,
