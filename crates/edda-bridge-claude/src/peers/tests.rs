@@ -3111,9 +3111,75 @@ fn legacy_ackless_id_log_survives_compaction_without_swallowing_later_requests()
     let board = compute_board_state(pid);
     assert_eq!(board.request_acks.len(), 1, "the ack survives compaction");
     assert!(
-        board.request_acks[0].request_ids.is_empty(),
+        board.request_acks[0].request_ids.is_none(),
         "a legacy ack must not gain fabricated ids during compaction"
     );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn explicit_empty_ack_ids_retire_nothing() {
+    let pid = "test_gh454_empty_ack_ids";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    let request_ts = ts_secs_ago(1);
+    append_legacy_request(
+        pid,
+        &request_ts,
+        "billing",
+        "auth",
+        "request with explicit empty ack",
+    );
+    let ack_ts = ts_secs_ago(0);
+    append_coord_event(
+        pid,
+        &CoordEvent {
+            ts: ack_ts,
+            session_id: "s1".into(),
+            event_type: CoordEventType::RequestAck,
+            payload: serde_json::json!({"from_label": "billing", "request_ids": []}),
+        },
+    );
+
+    let pending = pending_requests_for_session(pid, "s1");
+    assert_eq!(pending.len(), 1, "an explicit empty id list must ack nothing");
+    assert_eq!(pending[0].message, "request with explicit empty ack");
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn legacy_ack_comparison_keeps_subsecond_order() {
+    let pid = "test_gh454_subsecond_ack";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
+    let now = time::OffsetDateTime::now_utc();
+    let request_ts = now
+        .replace_nanosecond(900_000_000)
+        .unwrap()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let ack_ts = now
+        .replace_nanosecond(100_000_000)
+        .unwrap()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    append_legacy_request(
+        pid,
+        &request_ts,
+        "billing",
+        "auth",
+        "later request",
+    );
+    append_legacy_ack(pid, &ack_ts, "s1", "billing");
+
+    let pending = pending_requests_for_session(pid, "s1");
+    assert_eq!(pending.len(), 1, "an earlier same-second ack must not retire a later request");
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }

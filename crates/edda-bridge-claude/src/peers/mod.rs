@@ -145,10 +145,11 @@ pub struct RequestEntry {
 pub struct RequestAckEntry {
     pub acker_session: String,
     pub from_label: String,
-    /// Ids of the requests this ack covers. Empty for legacy acks written
-    /// before GH-442, which fall back to `from_label` + timestamp matching.
+    /// Ids of the requests this ack covers. `None` is the legacy shape,
+    /// which falls back to `from_label` + timestamp matching; `Some([])` is
+    /// a new ack that retires nothing.
     #[serde(default)]
-    pub request_ids: Vec<String>,
+    pub request_ids: Option<Vec<String>>,
     pub ts: String,
 }
 
@@ -250,6 +251,7 @@ mod render_fleet;
 pub(crate) use autoclaim::{maybe_auto_claim, maybe_auto_claim_file, remove_autoclaim_state};
 pub use board::{
     compute_board_state, compute_board_state_for_compaction, partition_requests_for_session,
+    request_is_expired,
 };
 pub use discovery::{discover_active_peers, discover_all_sessions, infer_session_id};
 pub(crate) use heartbeat::{
@@ -264,7 +266,7 @@ pub use heartbeat::{
 };
 pub use helpers::format_age;
 pub(crate) use helpers::{format_peer_suffix, pending_requests_for_session};
-pub use helpers::{resolve_session_label, session_label_from_board};
+pub use helpers::{resolve_session_label, session_label_from_board, timestamp_at_or_after};
 pub(crate) use render_coord::{render_coord_diff, render_peer_updates_with};
 pub use render_coord::{render_coordination_protocol, render_coordination_protocol_with};
 pub use render_fleet::fleet_section;

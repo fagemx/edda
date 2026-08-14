@@ -1,6 +1,6 @@
 use std::fs;
 
-use super::helpers::parse_rfc3339_to_epoch;
+use super::helpers::{parse_rfc3339_to_epoch, timestamp_at_or_after};
 use super::{
     coordination_path, request_ttl_secs, BindingEntry, BoardState, ClaimEntry, CoordEvent,
     CoordEventType, RequestAckEntry, RequestEntry, SubagentCompletedEntry,
@@ -95,14 +95,16 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
                     .as_str()
                     .unwrap_or("")
                     .to_string();
-                let request_ids: Vec<String> = event.payload["request_ids"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                let request_ids = event.payload.get("request_ids").map(|value| {
+                    value
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                });
                 request_acks.push(RequestAckEntry {
                     acker_session: event.session_id,
                     from_label,
@@ -195,12 +197,12 @@ fn is_acked(board: &BoardState, request: &RequestEntry, session_id: &str) -> boo
         if a.acker_session != session_id {
             return false;
         }
-        if a.request_ids.is_empty() {
-            a.from_label == request.from_label
-                && parse_rfc3339_to_epoch(&a.ts).unwrap_or(0)
-                    >= parse_rfc3339_to_epoch(&request.ts).unwrap_or(0)
-        } else {
-            a.request_ids.iter().any(|id| id == &request.id)
+        match &a.request_ids {
+            None => {
+                a.from_label == request.from_label
+                    && timestamp_at_or_after(&a.ts, &request.ts)
+            }
+            Some(request_ids) => request_ids.iter().any(|id| id == &request.id),
         }
     })
 }
@@ -213,6 +215,11 @@ fn is_expired(request: &RequestEntry, now: u64, ttl: u64) -> bool {
         Some(ts) => now.saturating_sub(ts) > ttl,
         None => false,
     }
+}
+
+/// Whether a request is past the dead-letter horizon right now.
+pub fn request_is_expired(request: &RequestEntry) -> bool {
+    is_expired(request, now_epoch(), request_ttl_secs())
 }
 
 /// Split the unacked requests addressed to `my_label` into `(live, expired)`.
@@ -310,14 +317,17 @@ pub fn compute_board_state_for_compaction(project_id: &str) -> Vec<String> {
             .map(|ts| now.saturating_sub(ts) <= ttl)
             .unwrap_or(true)
     }) {
+        let mut payload = serde_json::json!({
+            "from_label": ack.from_label,
+        });
+        if let Some(request_ids) = &ack.request_ids {
+            payload["request_ids"] = serde_json::json!(request_ids);
+        }
         let event = CoordEvent {
             ts: ack.ts.clone(),
             session_id: ack.acker_session.clone(),
             event_type: CoordEventType::RequestAck,
-            payload: serde_json::json!({
-                "from_label": ack.from_label,
-                "request_ids": ack.request_ids,
-            }),
+            payload,
         };
         if let Ok(line) = serde_json::to_string(&event) {
             lines.push(line);
