@@ -56,6 +56,67 @@ pub fn finalize_event(event: &mut Event) -> anyhow::Result<()> {
     finalize(event)
 }
 
+/// Reject vendor-native reasoning payloads at the readable ledger boundary.
+///
+/// A readable summary may be recorded as ordinary event text. If an audit
+/// trail must point at native reasoning, the event may carry a reference with
+/// both a pointer and a content hash; the native payload itself never enters
+/// the ledger.
+pub fn validate_readable_payload(payload: &serde_json::Value) -> anyhow::Result<()> {
+    fn is_reasoning_key(key: &str) -> bool {
+        let key = key.to_ascii_lowercase();
+        key.contains("reasoning") || key.contains("thinking") || key == "encrypted_content"
+    }
+
+    fn is_pointer_hash_reference(value: &serde_json::Value) -> bool {
+        let Some(object) = value.as_object() else {
+            return false;
+        };
+        let has_pointer = ["pointer", "trace_pointer", "uri"].iter().any(|key| {
+            object
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        });
+        let has_hash = ["hash", "content_hash", "sha256"].iter().any(|key| {
+            object
+                .get(*key)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| !value.is_empty())
+        });
+        has_pointer && has_hash
+    }
+
+    fn visit(value: &serde_json::Value, path: &str) -> anyhow::Result<()> {
+        match value {
+            serde_json::Value::Object(object) => {
+                for (key, child) in object {
+                    let child_path = if path.is_empty() {
+                        key.to_string()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    if is_reasoning_key(key) && !is_pointer_hash_reference(child) {
+                        anyhow::bail!(
+                            "raw vendor reasoning is not permitted at {child_path}; store a readable summary or a pointer plus content hash"
+                        );
+                    }
+                    visit(child, &child_path)?;
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for (index, child) in values.iter().enumerate() {
+                    visit(child, &format!("{path}[{index}]"))?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    visit(payload, "")
+}
+
 /// Create a new `note` event.
 pub fn new_note_event(
     branch: &str,

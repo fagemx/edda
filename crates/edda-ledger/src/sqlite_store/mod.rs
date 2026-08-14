@@ -132,6 +132,34 @@ mod tests {
     }
 
     #[test]
+    fn append_rejects_raw_vendor_reasoning_payload() {
+        let (dir, store) = tmp_db();
+        let mut event = new_note_event("main", None, "vendor", "summary", &[]).unwrap();
+        event.payload["reasoning"] = serde_json::json!({
+            "provider": "fake-vendor",
+            "encrypted_content": "fake-reasoning-payload"
+        });
+
+        let result = store.append_event(&event);
+        assert!(
+            result.is_err(),
+            "raw vendor reasoning must not cross the readable-ledger boundary"
+        );
+
+        event.payload["reasoning"] = serde_json::json!({
+            "pointer": "vendor://fake/reasoning/1",
+            "content_hash": "sha256:fake-hash"
+        });
+        assert!(
+            store.append_event(&event).is_ok(),
+            "a pointer plus content hash is readable ledger metadata"
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn event_round_trip() {
         let (dir, store) = tmp_db();
         let e1 = new_note_event("main", None, "system", "first note", &["test".into()]).unwrap();
