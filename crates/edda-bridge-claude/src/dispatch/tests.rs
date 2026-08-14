@@ -1031,6 +1031,7 @@ fn write_back_protocol_contains_examples() {
 
 #[test]
 fn counter_increment_and_read() {
+    let _env = env_guard();
     let pid = "test_counter_ops";
     let sid = "sess-counter-1";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1191,6 +1192,7 @@ fn any_active_peer(project_id: &str, session_id: &str) -> bool {
 
 #[test]
 fn no_active_peers_when_solo() {
+    let _env = env_guard();
     let pid = "test_dispatch_solo_gate";
     let _ = edda_store::ensure_dirs(pid);
     // No heartbeat files → no peers
@@ -1200,6 +1202,7 @@ fn no_active_peers_when_solo() {
 
 #[test]
 fn active_peer_seen_when_peer_heartbeat_exists() {
+    let _env = env_guard();
     let pid = "test_dispatch_peer_gate";
     let _ = edda_store::ensure_dirs(pid);
 
