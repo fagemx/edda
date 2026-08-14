@@ -3020,6 +3020,27 @@ fn render_pathless_claim_says_what_is_missing() {
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
+#[test]
+fn render_repo_wide_claim_explains_advisory_enforcement() {
+    let pid = "test_repo_wide_claim_render";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("main"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
+    write_claim(pid, "s1", "main", &["**/*".into()]);
+
+    let rendered = render_coordination_protocol(pid, "s1", ".").unwrap_or_default();
+    assert!(
+        rendered.contains("repo-wide claims are advisory"),
+        "repo-wide claim should explain its enforcement status: {rendered}"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
 /// A timestamp `secs` in the past, in the same format `now_rfc3339` produces.
 /// Lets a test place events at known distances without touching the clock or
 /// any env var.
