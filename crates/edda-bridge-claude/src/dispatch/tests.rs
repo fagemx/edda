@@ -162,6 +162,7 @@ fn pre_tool_use_with_patterns() {
 
 #[test]
 fn compact_pending_flag_lifecycle() {
+    let _env = env_guard();
     // Use a unique fake project id to avoid collisions with real state
     let pid = "test_compact_pending_00";
     let _ = edda_store::ensure_dirs(pid);
@@ -432,6 +433,7 @@ fn active_plan_truncates_to_budget() {
 
 #[test]
 fn session_start_includes_signals() {
+    let _env = env_guard();
     let pid = "test_session_start_signals";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -459,6 +461,7 @@ fn session_start_includes_signals() {
     let pack_dir = edda_store::project_dir(pid).join("packs");
     let _ = fs::create_dir_all(&pack_dir);
     let _ = fs::write(pack_dir.join("hot.md"), "# edda memory pack (hot)\n");
+    drop(_env);
 
     crate::with_env_guard(
         &[("EDDA_PLANS_DIR", Some("/nonexistent/plans/dir"))],
@@ -495,11 +498,13 @@ fn session_start_includes_signals() {
         },
     );
 
+    let _env = env_guard();
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
 #[test]
 fn session_start_no_signals_no_extra_sections() {
+    let _env = env_guard();
     let pid = "test_session_start_no_signals";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -507,6 +512,7 @@ fn session_start_no_signals_no_extra_sections() {
     let pack_dir = edda_store::project_dir(pid).join("packs");
     let _ = fs::create_dir_all(&pack_dir);
     let _ = fs::write(pack_dir.join("hot.md"), "# edda memory pack (hot)\n");
+    drop(_env);
 
     crate::with_env_guard(
         &[("EDDA_PLANS_DIR", Some("/nonexistent/plans/dir"))],
@@ -535,6 +541,7 @@ fn session_start_no_signals_no_extra_sections() {
         },
     );
 
+    let _env = env_guard();
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
@@ -598,6 +605,7 @@ fn hook_result_from_option_none() {
 
 #[test]
 fn dedup_skips_identical_context() {
+    let _env = env_guard();
     let pid = "test_dedup_skip";
     let sid = "sess-dedup-1";
     let _ = edda_store::ensure_dirs(pid);
@@ -613,6 +621,7 @@ fn dedup_skips_identical_context() {
 
 #[test]
 fn dedup_injects_changed_context() {
+    let _env = env_guard();
     let pid = "test_dedup_changed";
     let sid = "sess-dedup-2";
     let _ = edda_store::ensure_dirs(pid);
@@ -627,6 +636,7 @@ fn dedup_injects_changed_context() {
 
 #[test]
 fn dedup_first_call_always_injects() {
+    let _env = env_guard();
     let pid = "test_dedup_first";
     let sid = "sess-dedup-3";
     let _ = edda_store::ensure_dirs(pid);
@@ -642,6 +652,7 @@ fn dedup_first_call_always_injects() {
 
 #[test]
 fn session_end_cleans_state() {
+    let _env = env_guard();
     let pid = "test_session_end_clean";
     let sid = "sess-end-1";
     let _ = edda_store::ensure_dirs(pid);
@@ -668,6 +679,7 @@ fn session_end_cleans_state() {
 
 #[test]
 fn session_end_warns_pending_tasks() {
+    let _env = env_guard();
     let pid = "test_session_end_warn";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -699,6 +711,7 @@ fn session_end_warns_pending_tasks() {
 
 #[test]
 fn session_end_no_warning_when_all_completed() {
+    let _env = env_guard();
     let pid = "test_session_end_no_warn";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -733,12 +746,14 @@ fn wrap_context_boundary_adds_markers() {
 
 #[test]
 fn session_start_output_has_boundary_markers() {
+    let _env = env_guard();
     let pid = "test_boundary_session_start";
     let _ = edda_store::ensure_dirs(pid);
 
     let pack_dir = edda_store::project_dir(pid).join("packs");
     let _ = fs::create_dir_all(&pack_dir);
     let _ = fs::write(pack_dir.join("hot.md"), "# edda memory pack (hot)\n");
+    drop(_env);
 
     crate::with_env_guard(
         &[("EDDA_PLANS_DIR", Some("/nonexistent/plans/dir"))],
@@ -761,6 +776,7 @@ fn session_start_output_has_boundary_markers() {
         },
     );
 
+    let _env = env_guard();
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
@@ -874,6 +890,7 @@ fn empty_tail_preserves_existing_behavior() {
 
 #[test]
 fn post_tool_use_commit_triggers_nudge() {
+    let _env = env_guard();
     let pid = "test_nudge_commit";
     let sid = "sess-nudge-1";
     let _ = edda_store::ensure_dirs(pid);
@@ -905,6 +922,7 @@ fn post_tool_use_commit_triggers_nudge() {
 
 #[test]
 fn post_tool_use_after_decide_cooldown_still_applies() {
+    let _env = env_guard();
     let pid = "test_nudge_suppressed";
     let sid = "sess-nudge-2";
     let _ = edda_store::ensure_dirs(pid);
@@ -932,6 +950,7 @@ fn post_tool_use_after_decide_cooldown_still_applies() {
 
 #[test]
 fn post_tool_use_cooldown_suppresses() {
+    let _env = env_guard();
     let pid = "test_nudge_cooldown";
     let sid = "sess-nudge-3";
     let _ = edda_store::ensure_dirs(pid);
@@ -960,6 +979,7 @@ fn post_tool_use_cooldown_suppresses() {
 
 #[test]
 fn post_tool_use_self_record_increments_decide_count() {
+    let _env = env_guard();
     let pid = "test_nudge_selfrecord";
     let sid = "sess-nudge-4";
     let _ = edda_store::ensure_dirs(pid);
@@ -984,6 +1004,7 @@ fn post_tool_use_self_record_increments_decide_count() {
 
 #[test]
 fn session_end_cleans_nudge_state() {
+    let _env = env_guard();
     let pid = "test_nudge_cleanup";
     let sid = "sess-nudge-5";
     let _ = edda_store::ensure_dirs(pid);
@@ -1051,6 +1072,7 @@ fn counter_increment_and_read() {
 
 #[test]
 fn post_tool_use_increments_nudge_counter() {
+    let _env = env_guard();
     let pid = "test_nudge_counter";
     let sid = "sess-nudge-cnt-1";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1086,6 +1108,7 @@ fn post_tool_use_increments_nudge_counter() {
 
 #[test]
 fn post_tool_use_increments_decide_counter() {
+    let _env = env_guard();
     let pid = "test_decide_counter";
     let sid = "sess-decide-cnt-1";
     let _ = edda_store::ensure_dirs(pid);
@@ -1102,6 +1125,7 @@ fn post_tool_use_increments_decide_counter() {
 
 #[test]
 fn session_end_cleans_recall_counters() {
+    let _env = env_guard();
     let pid = "test_counter_cleanup";
     let sid = "sess-counter-clean";
     let _ = edda_store::ensure_dirs(pid);
@@ -1124,6 +1148,7 @@ fn session_end_cleans_recall_counters() {
 
 #[test]
 fn signal_count_incremented_for_all_signals() {
+    let _env = env_guard();
     let pid = "test_signal_count_all";
     let sid = "sess-sig-cnt";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1163,6 +1188,7 @@ fn signal_count_incremented_for_all_signals() {
 
 #[test]
 fn session_end_cleans_signal_count() {
+    let _env = env_guard();
     let pid = "test_signal_count_cleanup";
     let sid = "sess-sig-clean";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1338,6 +1364,7 @@ fn solo_session_still_sees_bindings_via_prompt_submit() {
 
 #[test]
 fn solo_to_multi_session_transition() {
+    let _env = env_guard();
     let pid = "test_solo_multi_trans";
     // Clean slate to avoid interference from other tests
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1438,6 +1465,7 @@ fn session_end_writes_unclaim_for_every_claimed_session() {
 
 #[test]
 fn unclaim_without_a_claim_is_a_fold_noop() {
+    let _env = env_guard();
     let pid = "test_se_unclaim_noop";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -1455,6 +1483,7 @@ fn unclaim_without_a_claim_is_a_fold_noop() {
 
 #[test]
 fn compaction_drops_released_claims_and_never_emits_unclaim() {
+    let _env = env_guard();
     let pid = "test_se_unclaim_compaction";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -1665,6 +1694,7 @@ fn solo_session_writes_zero_peer_count() {
 
 #[test]
 fn peer_count_cleaned_on_session_end() {
+    let _env = env_guard();
     let pid = "test_peer_count_clean";
     let _ = edda_store::ensure_dirs(pid);
     let state_dir = edda_store::project_dir(pid).join("state");
@@ -1775,6 +1805,7 @@ fn try_write_commit_event_skips_when_empty_cwd() {
 
 #[test]
 fn post_tool_use_edit_triggers_auto_claim() {
+    let _env = env_guard();
     let pid = "test_post_edit_autoclaim";
     let sid = "sess-autoclaim-1";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1798,6 +1829,7 @@ fn post_tool_use_edit_triggers_auto_claim() {
 
 #[test]
 fn post_tool_use_write_triggers_auto_claim() {
+    let _env = env_guard();
     let pid = "test_post_write_autoclaim";
     let sid = "sess-autoclaim-2";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1820,6 +1852,7 @@ fn post_tool_use_write_triggers_auto_claim() {
 
 #[test]
 fn post_tool_use_bash_does_not_auto_claim() {
+    let _env = env_guard();
     let pid = "test_post_bash_no_autoclaim";
     let sid = "sess-autoclaim-3";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1842,6 +1875,7 @@ fn post_tool_use_bash_does_not_auto_claim() {
 
 #[test]
 fn pre_tool_use_request_nudge_cooldown() {
+    let _env = env_guard();
     let pid = "test_pre_req_nudge_cd";
     let sid = "sess-req-nudge-1";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1875,6 +1909,7 @@ fn pre_tool_use_request_nudge_cooldown() {
 
 #[test]
 fn pre_tool_use_no_pending_no_nudge() {
+    let _env = env_guard();
     let pid = "test_pre_no_pending";
     let sid = "sess-req-nudge-2";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1890,6 +1925,7 @@ fn pre_tool_use_no_pending_no_nudge() {
 
 #[test]
 fn pre_tool_use_solo_skips_counter_io() {
+    let _env = env_guard();
     let pid = "test_pre_solo_skip";
     let sid = "sess-req-nudge-3";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1941,6 +1977,7 @@ fn write_test_heartbeat(pid: &str, sid: &str, branch: Option<&str>) {
 
 #[test]
 fn branch_guard_match_allows() {
+    let _env = env_guard();
     let pid = "test_branch_guard_match";
     let sid = "s1";
     // Write heartbeat with current branch so it matches
@@ -1967,6 +2004,7 @@ fn branch_guard_match_allows() {
 
 #[test]
 fn branch_guard_mismatch_blocks() {
+    let _env = env_guard();
     let pid = "test_branch_guard_mismatch";
     let sid = "s1";
     // Write heartbeat with a branch that won't match
@@ -1998,6 +2036,7 @@ fn branch_guard_mismatch_blocks() {
 
 #[test]
 fn branch_guard_no_heartbeat_allows() {
+    let _env = env_guard();
     let pid = "test_branch_guard_no_hb";
     let sid = "s_no_hb";
     let _ = edda_store::ensure_dirs(pid);
@@ -2022,6 +2061,7 @@ fn branch_guard_no_heartbeat_allows() {
 
 #[test]
 fn branch_guard_amend_allows() {
+    let _env = env_guard();
     let pid = "test_branch_guard_amend";
     let sid = "s1";
     write_test_heartbeat(pid, sid, Some("nonexistent-branch-xyz"));
@@ -2048,6 +2088,7 @@ fn branch_guard_amend_allows() {
 
 #[test]
 fn branch_guard_non_commit_allows() {
+    let _env = env_guard();
     let pid = "test_branch_guard_non_commit";
     let sid = "s1";
     write_test_heartbeat(pid, sid, Some("nonexistent-branch-xyz"));
@@ -2071,6 +2112,7 @@ fn branch_guard_non_commit_allows() {
 
 #[test]
 fn branch_guard_no_claimed_branch_allows() {
+    let _env = env_guard();
     // Heartbeat exists but branch is None — should allow (no claim to enforce)
     let pid = "test_branch_guard_no_claim";
     let sid = "s1";
@@ -2095,6 +2137,7 @@ fn branch_guard_no_claimed_branch_allows() {
 
 #[test]
 fn subagent_start_creates_heartbeat() {
+    let _env = env_guard();
     let pid = "test_subagent_start";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -2111,6 +2154,7 @@ fn subagent_start_creates_heartbeat() {
 
 #[test]
 fn subagent_stop_removes_heartbeat() {
+    let _env = env_guard();
     let pid = "test_subagent_stop";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -2131,6 +2175,7 @@ fn subagent_stop_removes_heartbeat() {
 
 #[test]
 fn subagent_stop_writes_summary_and_removes_heartbeat() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().to_path_buf();
     fs::create_dir(workspace.join(".git")).unwrap();
@@ -2234,6 +2279,7 @@ fn subagent_stop_writes_summary_and_removes_heartbeat() {
 
 #[test]
 fn subagent_stop_fallback_summary_when_transcript_missing() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().to_path_buf();
     fs::create_dir(workspace.join(".git")).unwrap();
@@ -2284,6 +2330,7 @@ fn subagent_stop_fallback_summary_when_transcript_missing() {
 
 #[test]
 fn subagent_orphan_cleanup_on_session_end() {
+    let _env = env_guard();
     let pid = "test_subagent_orphan";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -2314,6 +2361,7 @@ fn subagent_orphan_cleanup_on_session_end() {
 
 #[test]
 fn subagent_start_no_agent_id_is_noop() {
+    let _env = env_guard();
     let pid = "test_subagent_no_id";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -2457,6 +2505,7 @@ fn task_completed_skips_when_task_id_empty() {
 
 #[test]
 fn offlimits_disabled_by_default() {
+    let _env = env_guard();
     let pid = "test-offlimits-disabled";
     let sid = "s-self";
     let _ = edda_store::ensure_dirs(pid);
@@ -2500,6 +2549,7 @@ fn offlimits_blocks_peer_claimed_file() {
 
 #[test]
 fn offlimits_allows_own_claimed_file() {
+    let _env = env_guard();
     let pid = "test-offlimits-self";
     let sid = "s-self-own";
     let _ = edda_store::ensure_dirs(pid);
@@ -2517,6 +2567,7 @@ fn offlimits_allows_own_claimed_file() {
 
 #[test]
 fn offlimits_allows_unclaimed_file() {
+    let _env = env_guard();
     let pid = "test-offlimits-unclaimed";
     let sid = "s-self-unclaimed";
     let peer_sid = "s-peer-unclaimed";
@@ -2538,6 +2589,7 @@ fn offlimits_allows_unclaimed_file() {
 
 #[test]
 fn offlimits_skips_stale_claims() {
+    let _env = env_guard();
     let pid = "test-offlimits-stale";
     let sid = "s-self-stale";
     let stale_sid = "s-stale-peer";
@@ -2563,6 +2615,7 @@ fn offlimits_skips_stale_claims() {
 
 #[test]
 fn offlimits_ignores_repo_wide_peer_claim() {
+    let _env = env_guard();
     let pid = "test-offlimits-repo-wide";
     let sid = "s-self-wide";
     let peer_sid = "s-peer-wide";
