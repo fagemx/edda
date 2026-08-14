@@ -3041,6 +3041,26 @@ fn render_repo_wide_claim_explains_advisory_enforcement() {
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
+#[test]
+fn render_protocol_teaches_host_doorbell() {
+    let pid = "test_host_doorbell_render";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_heartbeat(pid, "s1", &SessionSignals::default(), Some("auth"), ".");
+    write_heartbeat(pid, "s2", &SessionSignals::default(), Some("billing"), ".");
+
+    let rendered = render_coordination_protocol(pid, "s2", ".").unwrap_or_default();
+    assert!(
+        rendered.contains("host's cross-session messaging"),
+        "coordination protocol should explain the host wake path: {rendered}"
+    );
+
+    remove_heartbeat(pid, "s1");
+    remove_heartbeat(pid, "s2");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
 /// A timestamp `secs` in the past, in the same format `now_rfc3339` produces.
 /// Lets a test place events at known distances without touching the clock or
 /// any env var.
@@ -3145,7 +3165,11 @@ fn explicit_empty_ack_ids_retire_nothing() {
     );
 
     let pending = pending_requests_for_session(pid, "s1");
-    assert_eq!(pending.len(), 1, "an explicit empty id list must ack nothing");
+    assert_eq!(
+        pending.len(),
+        1,
+        "an explicit empty id list must ack nothing"
+    );
     assert_eq!(pending[0].message, "request with explicit empty ack");
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -3169,17 +3193,15 @@ fn legacy_ack_comparison_keeps_subsecond_order() {
         .unwrap()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap();
-    append_legacy_request(
-        pid,
-        &request_ts,
-        "billing",
-        "auth",
-        "later request",
-    );
+    append_legacy_request(pid, &request_ts, "billing", "auth", "later request");
     append_legacy_ack(pid, &ack_ts, "s1", "billing");
 
     let pending = pending_requests_for_session(pid, "s1");
-    assert_eq!(pending.len(), 1, "an earlier same-second ack must not retire a later request");
+    assert_eq!(
+        pending.len(),
+        1,
+        "an earlier same-second ack must not retire a later request"
+    );
 
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }

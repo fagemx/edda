@@ -245,6 +245,7 @@ mod tests {
             session_id: "test123".into(),
             label: label.into(),
             age_secs,
+            last_heartbeat: "2026-01-01T00:00:00Z".into(),
             focus_files: vec![],
             task_subjects: vec![],
             files_modified_count: 0,

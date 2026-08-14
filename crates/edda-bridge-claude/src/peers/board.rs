@@ -198,10 +198,7 @@ fn is_acked(board: &BoardState, request: &RequestEntry, session_id: &str) -> boo
             return false;
         }
         match &a.request_ids {
-            None => {
-                a.from_label == request.from_label
-                    && timestamp_at_or_after(&a.ts, &request.ts)
-            }
+            None => a.from_label == request.from_label && timestamp_at_or_after(&a.ts, &request.ts),
             Some(request_ids) => request_ids.iter().any(|id| id == &request.id),
         }
     })

@@ -177,11 +177,12 @@ pub struct BoardState {
 }
 
 /// Summary of a peer session for rendering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PeerSummary {
     pub session_id: String,
     pub label: String,
     pub age_secs: u64,
+    pub last_heartbeat: String,
     pub focus_files: Vec<String>,
     pub task_subjects: Vec<String>,
     pub files_modified_count: usize,
