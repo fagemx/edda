@@ -978,6 +978,18 @@ pub fn request(
     }
 
     edda_bridge_claude::peers::write_request(&project_id, &session_id, &from_label, to, message);
+    let notify_config =
+        edda_notify::NotifyConfig::load(&edda_ledger::EddaPaths::discover(repo_root));
+    if !notify_config.channels.is_empty() {
+        edda_notify::dispatch(
+            &notify_config,
+            &edda_notify::NotifyEvent::RequestPending {
+                from_label: from_label.clone(),
+                to_label: to.to_string(),
+                message: message.to_string(),
+            },
+        );
+    }
     if targets.is_empty() {
         println!("Request queued for [{to}] (no active session): \"{message}\"");
     } else {
@@ -1550,6 +1562,49 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    fn webhook_capture() -> (
+        String,
+        std::sync::mpsc::Receiver<String>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                .unwrap();
+            let mut request = Vec::new();
+            let _ = stream.read_to_end(&mut request);
+            tx.send(String::from_utf8_lossy(&request).into_owned())
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        (url, rx, handle)
+    }
+
+    fn enable_webhook(repo: &std::path::Path, url: &str) {
+        std::fs::create_dir_all(repo.join(".edda")).unwrap();
+        std::fs::write(
+            repo.join(".edda/config.json"),
+            serde_json::json!({
+                "notify_channels": [{
+                    "type": "webhook",
+                    "url": url,
+                    "events": ["request_pending"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// Serialize tests that mutate process-global env vars
@@ -2110,6 +2165,32 @@ mod tests {
             board.requests[0].id, board.requests[1].id,
             "ids must be distinct per message"
         );
+    }
+
+    #[test]
+    fn request_emits_request_pending_notification() {
+        let _store = crate::test_support::isolated_store();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "s-auth", "auth", ".");
+        let (url, rx, server) = webhook_capture();
+        enable_webhook(repo.path(), &url);
+
+        request(repo.path(), "billing", "need invoice type", None, true)
+            .expect("forced request should succeed");
+        let body = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("request creation should dispatch a notification");
+        server.join().unwrap();
+
+        assert!(
+            body.contains("\"event_type\":\"request_pending\""),
+            "{body}"
+        );
+        assert!(body.contains("\"from_label\":\"auth\""), "{body}");
+        assert!(body.contains("\"to_label\":\"billing\""), "{body}");
+        assert!(body.contains("\"message\":\"need invoice type\""), "{body}");
     }
 
     #[test]
