@@ -229,17 +229,25 @@ mod tests {
     use super::*;
     /// Run a closure with `EDDA_STORE_ROOT` pointing to an isolated tempdir.
     fn with_isolated_store(f: impl FnOnce()) {
-        let _guard = crate::ENV_STORE_LOCK.lock().unwrap();
+        let _guard = crate::ENV_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let store = tempfile::tempdir().unwrap();
         std::env::set_var("EDDA_STORE_ROOT", store.path());
         f();
         std::env::remove_var("EDDA_STORE_ROOT");
     }
 
+    fn temp_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir(repo.path().join(".git")).unwrap();
+        repo
+    }
+
     #[test]
     fn register_and_list_roundtrip() {
         with_isolated_store(|| {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = temp_repo();
             std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
 
             register_project(tmp.path()).unwrap();
@@ -253,7 +261,7 @@ mod tests {
     #[test]
     fn register_is_idempotent() {
         with_isolated_store(|| {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = temp_repo();
             std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
 
             register_project(tmp.path()).unwrap();
@@ -273,7 +281,7 @@ mod tests {
     #[test]
     fn unregister_removes_entry() {
         with_isolated_store(|| {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = temp_repo();
             let pid = project_id(tmp.path());
 
             register_project(tmp.path()).unwrap();
@@ -287,7 +295,7 @@ mod tests {
     #[test]
     fn set_and_get_group() {
         with_isolated_store(|| {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = temp_repo();
             std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
             register_project(tmp.path()).unwrap();
 
@@ -304,8 +312,8 @@ mod tests {
     #[test]
     fn list_group_members_returns_peers() {
         with_isolated_store(|| {
-            let tmp1 = tempfile::tempdir().unwrap();
-            let tmp2 = tempfile::tempdir().unwrap();
+            let tmp1 = temp_repo();
+            let tmp2 = temp_repo();
             std::fs::create_dir_all(tmp1.path().join(".edda")).unwrap();
             std::fs::create_dir_all(tmp2.path().join(".edda")).unwrap();
 
@@ -320,7 +328,7 @@ mod tests {
             assert_eq!(members[0].project_id, project_id(tmp2.path()));
 
             // No group = no members
-            let tmp3 = tempfile::tempdir().unwrap();
+            let tmp3 = temp_repo();
             std::fs::create_dir_all(tmp3.path().join(".edda")).unwrap();
             register_project(tmp3.path()).unwrap();
             assert!(list_group_members(tmp3.path()).is_empty());
@@ -331,8 +339,8 @@ mod tests {
     #[test]
     fn fleet_scope_is_every_project_when_no_group_and_includes_home() {
         with_isolated_store(|| {
-            let home = tempfile::tempdir().unwrap();
-            let other = tempfile::tempdir().unwrap();
+            let home = temp_repo();
+            let other = temp_repo();
             std::fs::create_dir_all(home.path().join(".edda")).unwrap();
             std::fs::create_dir_all(other.path().join(".edda")).unwrap();
             register_project(home.path()).unwrap();
@@ -353,9 +361,9 @@ mod tests {
     #[test]
     fn fleet_scope_narrows_to_the_group_when_one_is_set() {
         with_isolated_store(|| {
-            let home = tempfile::tempdir().unwrap();
-            let peer = tempfile::tempdir().unwrap();
-            let outsider = tempfile::tempdir().unwrap();
+            let home = temp_repo();
+            let peer = temp_repo();
+            let outsider = temp_repo();
             for d in [&home, &peer, &outsider] {
                 std::fs::create_dir_all(d.path().join(".edda")).unwrap();
                 register_project(d.path()).unwrap();
@@ -381,11 +389,11 @@ mod tests {
     #[test]
     fn fleet_scope_keeps_projects_whose_repo_is_gone() {
         with_isolated_store(|| {
-            let home = tempfile::tempdir().unwrap();
+            let home = temp_repo();
             std::fs::create_dir_all(home.path().join(".edda")).unwrap();
             register_project(home.path()).unwrap();
 
-            let gone = tempfile::tempdir().unwrap();
+            let gone = temp_repo();
             std::fs::create_dir_all(gone.path().join(".edda")).unwrap();
             register_project(gone.path()).unwrap();
             let gone_pid = project_id(gone.path());
@@ -403,8 +411,8 @@ mod tests {
     #[test]
     fn list_groups_returns_all() {
         with_isolated_store(|| {
-            let tmp1 = tempfile::tempdir().unwrap();
-            let tmp2 = tempfile::tempdir().unwrap();
+            let tmp1 = temp_repo();
+            let tmp2 = temp_repo();
             std::fs::create_dir_all(tmp1.path().join(".edda")).unwrap();
             std::fs::create_dir_all(tmp2.path().join(".edda")).unwrap();
 
@@ -434,7 +442,7 @@ mod tests {
     #[test]
     fn validate_detects_stale() {
         with_isolated_store(|| {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = temp_repo();
             std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
             register_project(tmp.path()).unwrap();
 
