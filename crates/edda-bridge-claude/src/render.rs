@@ -32,18 +32,146 @@ pub fn context_budget(cwd: &str) -> usize {
         .unwrap_or(DEFAULT_MAX_CONTEXT_CHARS)
 }
 
-/// Truncate content to fit within the char budget, preserving UTF-8 boundaries.
+/// Drop complete context sections/items to fit within the char budget.
 pub fn apply_budget(content: &str, budget: usize) -> String {
     if content.len() <= budget {
         return content.to_string();
     }
-    let cut = content.len().min(budget.saturating_sub(50));
-    let safe = content.floor_char_boundary(cut);
-    format!(
-        "{}\n\n... (truncated to {} char budget)",
-        &content[..safe],
-        budget
+
+    let items = split_budget_items(content);
+    if items.len() == 1 && items[0].title.is_none() {
+        return format!(
+            "[edda: dropped_items=1; truncated as one whole item; no partial content; {budget} char budget]\n"
+        );
+    }
+
+    let mut dropped_items = items.len();
+    let mut selected = Vec::new();
+    for _ in 0..4 {
+        selected = select_budget_items(&items, budget, dropped_items);
+        let next_dropped = items.len().saturating_sub(selected.len());
+        if next_dropped == dropped_items {
+            break;
+        }
+        dropped_items = next_dropped;
+    }
+
+    render_budget_items(
+        &items,
+        &selected,
+        items.len().saturating_sub(selected.len()),
     )
+}
+
+#[derive(Debug)]
+struct BudgetItem {
+    title: Option<String>,
+    text: String,
+    salience: usize,
+    index: usize,
+}
+
+fn split_budget_items(content: &str) -> Vec<BudgetItem> {
+    let mut boundaries = Vec::new();
+    let mut offset = 0;
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if let Some(title) = trimmed.strip_prefix("## ") {
+            boundaries.push((offset, Some(title.trim().to_string())));
+        }
+        offset += line.len();
+    }
+
+    if boundaries.is_empty() {
+        return vec![BudgetItem {
+            title: None,
+            text: content.to_string(),
+            salience: 0,
+            index: 0,
+        }];
+    }
+
+    if boundaries[0].0 > 0 {
+        boundaries.insert(0, (0, None));
+    }
+
+    boundaries
+        .iter()
+        .enumerate()
+        .map(|(index, (start, title))| {
+            let end = boundaries
+                .get(index + 1)
+                .map(|(offset, _)| *offset)
+                .unwrap_or(content.len());
+            let title = title.clone();
+            BudgetItem {
+                salience: title.as_deref().map(section_salience).unwrap_or(95),
+                title,
+                text: content[*start..end].to_string(),
+                index,
+            }
+        })
+        .collect()
+}
+
+fn section_salience(title: &str) -> usize {
+    let title = title.to_ascii_lowercase();
+    if title.contains("goal") || title.contains("binding") {
+        100
+    } else if title.contains("ratified")
+        || title.contains("checkpoint")
+        || title.contains("constraint")
+    {
+        90
+    } else if title.contains("workspace") {
+        80
+    } else if title.contains("recent") {
+        60
+    } else if title.contains("doctrine") {
+        40
+    } else if title.contains("coordination") {
+        10
+    } else {
+        20
+    }
+}
+
+fn dropped_summary(dropped_items: usize) -> String {
+    format!("\n[edda: dropped_items={dropped_items} whole sections/items]\n")
+}
+
+fn render_budget_items(items: &[BudgetItem], selected: &[usize], dropped_items: usize) -> String {
+    let mut selected = selected.to_vec();
+    selected.sort_by_key(|index| items[*index].index);
+
+    let mut out = String::new();
+    for index in selected {
+        out.push_str(&items[index].text);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push_str(&dropped_summary(dropped_items));
+    out
+}
+
+fn select_budget_items(items: &[BudgetItem], budget: usize, dropped_items: usize) -> Vec<usize> {
+    let mut ranked: Vec<usize> = (0..items.len()).collect();
+    ranked.sort_by(|a, b| {
+        items[*b]
+            .salience
+            .cmp(&items[*a].salience)
+            .then_with(|| items[*a].index.cmp(&items[*b].index))
+    });
+
+    let mut selected = Vec::new();
+    for index in ranked {
+        selected.push(index);
+        if render_budget_items(items, &selected, dropped_items).len() > budget {
+            selected.pop();
+        }
+    }
+    selected
 }
 
 // ── Write-Back Protocol ──
@@ -257,11 +385,31 @@ mod tests {
     }
 
     #[test]
-    fn apply_budget_truncates_long_content() {
+    fn apply_budget_drops_long_content_as_one_item() {
         let content = "x".repeat(10000);
         let result = apply_budget(&content, 500);
-        assert!(result.len() <= 550);
-        assert!(result.contains("truncated"));
+        assert!(result.len() <= 500);
+        assert!(result.contains("dropped_items=1"));
+        assert!(!result.contains(&"x".repeat(100)));
+        assert!(!result.contains("truncated to 500"));
+    }
+
+    #[test]
+    fn apply_budget_keeps_schema_salient_section_and_drops_complete_items_deterministically() {
+        let content = concat!(
+            "## Coordination\nCOORDINATION_DROP_012345678901234567890123456789\n\n",
+            "## Goals\nGOAL_KEEP\n"
+        );
+
+        let first = apply_budget(content, 65);
+        let second = apply_budget(content, 65);
+
+        assert_eq!(first, second, "same input must produce the same output");
+        assert!(first.contains("## Goals"));
+        assert!(first.contains("GOAL_KEEP"));
+        assert!(!first.contains("## Coordination"));
+        assert!(!first.contains("COORDINATION_DROP"));
+        assert!(first.contains("dropped_items=1"));
     }
 
     #[test]
