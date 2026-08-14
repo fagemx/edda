@@ -11,10 +11,60 @@ use super::*;
 use std::io::Write;
 use std::sync::{MutexGuard, PoisonError};
 
-fn env_guard() -> MutexGuard<'static, ()> {
-    crate::ENV_LOCK
+struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous_store_root: Option<std::ffi::OsString>,
+    _store_root: tempfile::TempDir,
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match self.previous_store_root.take() {
+            Some(root) => std::env::set_var("EDDA_STORE_ROOT", root),
+            None => std::env::remove_var("EDDA_STORE_ROOT"),
+        }
+    }
+}
+
+impl EnvGuard {
+    fn new(lock: MutexGuard<'static, ()>) -> Self {
+        let previous_store_root = std::env::var_os("EDDA_STORE_ROOT");
+        let store_root = tempfile::tempdir().unwrap();
+        std::env::set_var("EDDA_STORE_ROOT", store_root.path());
+        Self {
+            _lock: lock,
+            previous_store_root,
+            _store_root: store_root,
+        }
+    }
+}
+
+fn env_guard() -> EnvGuard {
+    let lock = crate::ENV_LOCK
         .lock()
-        .unwrap_or_else(PoisonError::into_inner)
+        .unwrap_or_else(PoisonError::into_inner);
+    EnvGuard::new(lock)
+}
+
+#[test]
+fn env_guard_isolates_store_root_and_restores_on_drop() {
+    let lock = crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let before = std::env::var_os("EDDA_STORE_ROOT");
+    let guard = EnvGuard::new(lock);
+    let inside = std::env::var_os("EDDA_STORE_ROOT");
+    assert_ne!(inside, before, "fixture needs a private store root");
+    drop(guard);
+
+    let _lock = crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    assert_eq!(
+        std::env::var_os("EDDA_STORE_ROOT"),
+        before,
+        "fixture must restore the caller environment"
+    );
 }
 
 fn write_session_ledger(dir: &Path, lines: &[serde_json::Value]) -> std::path::PathBuf {

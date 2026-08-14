@@ -1216,6 +1216,7 @@ fn active_peer_seen_when_peer_heartbeat_exists() {
 
 #[test]
 fn cross_session_binding_visible_via_user_prompt_submit() {
+    let _env = env_guard();
     let pid = "test_xsess_bind_vis";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -1231,7 +1232,6 @@ fn cross_session_binding_visible_via_user_prompt_submit() {
     // Session A (s1) writes a binding
     crate::peers::write_binding(pid, "s1", "auth", "db.engine", "postgres");
 
-    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
     // Session B (s2) dispatches UserPromptSubmit — should see the binding
@@ -1256,7 +1256,7 @@ fn cross_session_binding_visible_via_user_prompt_submit() {
 
     std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     std::env::remove_var("EDDA_PLANS_DIR");
-    drop(_eg);
+    drop(_env);
     crate::peers::remove_heartbeat(pid, "s1");
     crate::peers::remove_heartbeat(pid, "s2");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -1265,6 +1265,7 @@ fn cross_session_binding_visible_via_user_prompt_submit() {
 
 #[test]
 fn user_prompt_submit_dedup_skips_identical_state() {
+    let _env = env_guard();
     let pid = "test_ups_dedup";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -1275,7 +1276,6 @@ fn user_prompt_submit_dedup_skips_identical_state() {
     // Write a binding so there's something to inject
     crate::peers::write_binding(pid, "s1", "auth", "cache.backend", "redis");
 
-    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
     // First call — should produce output
@@ -1291,7 +1291,7 @@ fn user_prompt_submit_dedup_skips_identical_state() {
 
     std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     std::env::remove_var("EDDA_PLANS_DIR");
-    drop(_eg);
+    drop(_env);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -1300,6 +1300,7 @@ fn user_prompt_submit_dedup_skips_identical_state() {
 
 #[test]
 fn solo_session_still_sees_bindings_via_prompt_submit() {
+    let _env = env_guard();
     let pid = "test_solo_bind_vis";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -1310,7 +1311,6 @@ fn solo_session_still_sees_bindings_via_prompt_submit() {
     // Write binding — no heartbeats (solo mode)
     crate::peers::write_binding(pid, "solo-s", "solo", "api.style", "GraphQL");
 
-    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
     let result = dispatch_user_prompt_submit(pid, "solo-s", "", cwd.to_str().unwrap()).unwrap();
@@ -1326,7 +1326,7 @@ fn solo_session_still_sees_bindings_via_prompt_submit() {
 
     std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     std::env::remove_var("EDDA_PLANS_DIR");
-    drop(_eg);
+    drop(_env);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -1376,10 +1376,10 @@ fn solo_to_multi_session_transition() {
 
 #[test]
 fn session_end_writes_unclaim_for_every_claimed_session() {
+    let _env = env_guard();
     let pid = "test_se_unclaim_gate";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
-    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
@@ -1428,7 +1428,7 @@ fn session_end_writes_unclaim_for_every_claimed_session() {
 
     std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     std::env::remove_var("EDDA_PLANS_DIR");
-    drop(_eg);
+    drop(_env);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -1478,11 +1478,11 @@ fn compaction_drops_released_claims_and_never_emits_unclaim() {
 
 #[test]
 fn session_end_reads_counters_before_cleanup() {
+    let _env = env_guard();
     let pid = "test_se_counters";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
     let sid = "counter-sess";
-    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
@@ -1523,7 +1523,7 @@ fn session_end_reads_counters_before_cleanup() {
 
     std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     std::env::remove_var("EDDA_PLANS_DIR");
-    drop(_eg);
+    drop(_env);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -1532,10 +1532,10 @@ fn session_end_reads_counters_before_cleanup() {
 
 #[test]
 fn late_peer_detection_injects_full_protocol() {
+    let _env = env_guard();
     let pid = "test_late_peer_full";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
-    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
@@ -1574,7 +1574,7 @@ fn late_peer_detection_injects_full_protocol() {
 
     std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     std::env::remove_var("EDDA_PLANS_DIR");
-    drop(_eg);
+    drop(_env);
     crate::peers::remove_heartbeat(pid, "peer-a");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
@@ -1582,10 +1582,10 @@ fn late_peer_detection_injects_full_protocol() {
 
 #[test]
 fn subsequent_prompts_use_lightweight_updates() {
+    let _env = env_guard();
     let pid = "test_late_peer_subsequent";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
-    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
@@ -1618,7 +1618,7 @@ fn subsequent_prompts_use_lightweight_updates() {
 
     std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     std::env::remove_var("EDDA_PLANS_DIR");
-    drop(_eg);
+    drop(_env);
     crate::peers::remove_heartbeat(pid, "peer-b");
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
@@ -1626,10 +1626,10 @@ fn subsequent_prompts_use_lightweight_updates() {
 
 #[test]
 fn solo_session_writes_zero_peer_count() {
+    let _env = env_guard();
     let pid = "test_late_peer_solo";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
-    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_BRIDGE_AUTO_DIGEST", "0");
     std::env::set_var("EDDA_PLANS_DIR", "/nonexistent");
 
@@ -1655,7 +1655,7 @@ fn solo_session_writes_zero_peer_count() {
 
     std::env::remove_var("EDDA_BRIDGE_AUTO_DIGEST");
     std::env::remove_var("EDDA_PLANS_DIR");
-    drop(_eg);
+    drop(_env);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = fs::remove_dir_all(&cwd);
 }
@@ -2468,6 +2468,7 @@ fn offlimits_disabled_by_default() {
 
 #[test]
 fn offlimits_blocks_peer_claimed_file() {
+    let _env = env_guard();
     let pid = "test-offlimits-blocks";
     let sid = "s-self-blocks";
     let peer_sid = "s-peer-blocks";
@@ -2581,6 +2582,7 @@ fn offlimits_ignores_repo_wide_peer_claim() {
 
 #[test]
 fn offlimits_env_var_enables_enforcement() {
+    let _env = env_guard();
     let pid = "test-offlimits-env";
     let sid = "s-self-env";
     let peer_sid = "s-peer-env";
@@ -2592,7 +2594,6 @@ fn offlimits_env_var_enables_enforcement() {
     write_peer_count(pid, sid, 1);
 
     // Enable enforcement via env var
-    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_ENFORCE_OFFLIMITS", "1");
 
     let raw = serde_json::json!({
@@ -2626,12 +2627,13 @@ fn offlimits_env_var_enables_enforcement() {
     );
 
     std::env::remove_var("EDDA_ENFORCE_OFFLIMITS");
-    drop(_eg);
+    drop(_env);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
 #[test]
 fn offlimits_skips_non_edit_tools() {
+    let _env = env_guard();
     let pid = "test-offlimits-bash";
     let sid = "s-self-bash";
     let peer_sid = "s-peer-bash";
@@ -2643,7 +2645,6 @@ fn offlimits_skips_non_edit_tools() {
     write_peer_count(pid, sid, 1);
 
     // Enable enforcement
-    let _eg = crate::ENV_LOCK.lock().unwrap();
     std::env::set_var("EDDA_ENFORCE_OFFLIMITS", "1");
     std::env::set_var("EDDA_CLAUDE_AUTO_APPROVE", "1");
 
@@ -2667,7 +2668,7 @@ fn offlimits_skips_non_edit_tools() {
 
     std::env::remove_var("EDDA_ENFORCE_OFFLIMITS");
     std::env::remove_var("EDDA_CLAUDE_AUTO_APPROVE");
-    drop(_eg);
+    drop(_env);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
