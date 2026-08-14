@@ -1,4 +1,11 @@
 use std::fs;
+use std::sync::{MutexGuard, PoisonError};
+
+fn env_guard() -> MutexGuard<'static, ()> {
+    crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
 
 // Imports from dispatch/mod.rs
 use super::{
@@ -1045,6 +1052,7 @@ fn counter_increment_and_read() {
 fn post_tool_use_increments_nudge_counter() {
     let pid = "test_nudge_counter";
     let sid = "sess-nudge-cnt-1";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
 
     // First commit → nudge emitted → counter = 1
@@ -2122,6 +2130,7 @@ fn subagent_stop_removes_heartbeat() {
 fn subagent_stop_writes_summary_and_removes_heartbeat() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().to_path_buf();
+    fs::create_dir(workspace.join(".git")).unwrap();
     let paths = edda_ledger::EddaPaths::discover(&workspace);
     edda_ledger::ledger::init_workspace(&paths).unwrap();
     edda_ledger::ledger::init_head(&paths, "main").unwrap();
@@ -2224,6 +2233,7 @@ fn subagent_stop_writes_summary_and_removes_heartbeat() {
 fn subagent_stop_fallback_summary_when_transcript_missing() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().to_path_buf();
+    fs::create_dir(workspace.join(".git")).unwrap();
     let paths = edda_ledger::EddaPaths::discover(&workspace);
     edda_ledger::ledger::init_workspace(&paths).unwrap();
     edda_ledger::ledger::init_head(&paths, "main").unwrap();
@@ -2361,8 +2371,10 @@ fn is_karvi_project_detection() {
 
 #[test]
 fn task_completed_writes_coordination_event() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().to_path_buf();
+    fs::create_dir(workspace.join(".git")).unwrap();
     let paths = edda_ledger::EddaPaths::discover(&workspace);
     edda_ledger::ledger::init_workspace(&paths).unwrap();
     edda_ledger::ledger::init_head(&paths, "main").unwrap();
@@ -2407,8 +2419,10 @@ fn task_completed_writes_coordination_event() {
 
 #[test]
 fn task_completed_skips_when_task_id_empty() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().to_path_buf();
+    fs::create_dir(workspace.join(".git")).unwrap();
 
     let project_id = resolve_project_id(workspace.to_str().unwrap());
     let _ = edda_store::ensure_dirs(&project_id);
@@ -2862,6 +2876,7 @@ fn read_project_state_empty_tasks() {
 
 #[test]
 fn session_end_bg_threads_joined_zero_threads() {
+    let _env = env_guard();
     // Regression test: when no background threads are spawned (no API key),
     // the channel-based join must complete immediately without hanging.
     let pid = "test_se_bg_join_zero";
