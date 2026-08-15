@@ -628,8 +628,11 @@ mod tests {
     /// events into that project's index.
     #[test]
     fn foreign_project_uses_its_own_registered_repo() {
+        let _store = crate::test_support::isolated_store();
         let here = tempfile::tempdir().unwrap();
         let there = tempfile::tempdir().unwrap();
+        std::fs::create_dir(here.path().join(".git")).unwrap();
+        std::fs::create_dir(there.path().join(".git")).unwrap();
         std::fs::create_dir_all(there.path().join(".edda")).unwrap();
         std::fs::write(there.path().join(".edda").join("ledger.db"), b"").unwrap();
         let there_path = there.path().to_string_lossy().into_owned();

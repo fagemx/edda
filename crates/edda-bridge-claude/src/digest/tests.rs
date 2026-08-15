@@ -9,6 +9,63 @@ use super::render::*;
 use super::*;
 
 use std::io::Write;
+use std::sync::{MutexGuard, PoisonError};
+
+struct EnvGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous_store_root: Option<std::ffi::OsString>,
+    _store_root: tempfile::TempDir,
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match self.previous_store_root.take() {
+            Some(root) => std::env::set_var("EDDA_STORE_ROOT", root),
+            None => std::env::remove_var("EDDA_STORE_ROOT"),
+        }
+    }
+}
+
+impl EnvGuard {
+    fn new(lock: MutexGuard<'static, ()>) -> Self {
+        let previous_store_root = std::env::var_os("EDDA_STORE_ROOT");
+        let store_root = tempfile::tempdir().unwrap();
+        std::env::set_var("EDDA_STORE_ROOT", store_root.path());
+        Self {
+            _lock: lock,
+            previous_store_root,
+            _store_root: store_root,
+        }
+    }
+}
+
+fn env_guard() -> EnvGuard {
+    let lock = crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    EnvGuard::new(lock)
+}
+
+#[test]
+fn env_guard_isolates_store_root_and_restores_on_drop() {
+    let lock = crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let before = std::env::var_os("EDDA_STORE_ROOT");
+    let guard = EnvGuard::new(lock);
+    let inside = std::env::var_os("EDDA_STORE_ROOT");
+    assert_ne!(inside, before, "fixture needs a private store root");
+    drop(guard);
+
+    let _lock = crate::ENV_LOCK
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    assert_eq!(
+        std::env::var_os("EDDA_STORE_ROOT"),
+        before,
+        "fixture must restore the caller environment"
+    );
+}
 
 fn write_session_ledger(dir: &Path, lines: &[serde_json::Value]) -> std::path::PathBuf {
     let path = dir.join("test_session.jsonl");
@@ -418,6 +475,7 @@ fn digest_hash_chain_ready() {
 fn setup_digest_workspace(tmp: &Path) -> (std::path::PathBuf, String) {
     // Create workspace
     let workspace = tmp.join("repo");
+    std::fs::create_dir_all(workspace.join(".git")).unwrap();
     let paths = edda_ledger::EddaPaths::discover(&workspace);
     edda_ledger::ledger::init_workspace(&paths).unwrap();
     edda_ledger::ledger::init_head(&paths, "main").unwrap();
@@ -442,6 +500,7 @@ fn write_store_session_ledger(project_id: &str, session_id: &str, lines: &[serde
 
 #[test]
 fn digest_writes_to_workspace_ledger() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -476,6 +535,7 @@ fn digest_writes_to_workspace_ledger() {
 
 #[test]
 fn digest_maintains_hash_chain() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -512,6 +572,7 @@ fn digest_maintains_hash_chain() {
 
 #[test]
 fn digest_skips_already_digested() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -544,6 +605,7 @@ fn digest_skips_already_digested() {
 
 #[test]
 fn digest_no_reduplicate_across_sessions() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -586,6 +648,7 @@ fn digest_no_reduplicate_across_sessions() {
 
 #[test]
 fn digest_no_workspace_records_failure() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     // No workspace created — just a store
     let project_id = "fake_project_no_workspace";
@@ -618,6 +681,7 @@ fn digest_no_workspace_records_failure() {
 
 #[test]
 fn digest_permanent_failure_after_3_retries() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let project_id = "fake_project_perm_fail";
     let _ = edda_store::ensure_dirs(project_id);
@@ -652,6 +716,7 @@ fn digest_permanent_failure_after_3_retries() {
 
 #[test]
 fn digest_state_round_trip() {
+    let _env = env_guard();
     let project_id = "test_state_rt";
     // Writes to the real per-user store and, unlike its neighbours, never
     // cleaned up — so it left `projects/test_state_rt` on every developer
@@ -787,6 +852,7 @@ fn extract_exit_code_from_error_field() {
 
 #[test]
 fn digest_writes_cmd_milestones_to_workspace() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -835,6 +901,7 @@ fn digest_writes_cmd_milestones_to_workspace() {
 
 #[test]
 fn digest_skips_cmd_milestones_when_disabled() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -873,6 +940,7 @@ fn digest_skips_cmd_milestones_when_disabled() {
 
 #[test]
 fn manual_digest_specific_session() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -906,6 +974,7 @@ fn manual_digest_specific_session() {
 
 #[test]
 fn prev_digest_roundtrip() {
+    let _env = env_guard();
     let pid = "test_prev_digest_rt";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -947,6 +1016,7 @@ fn prev_digest_roundtrip() {
 
 #[test]
 fn prev_digest_empty_tasks() {
+    let _env = env_guard();
     let pid = "test_prev_digest_empty";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -971,6 +1041,7 @@ fn prev_digest_empty_tasks() {
 
 #[test]
 fn prev_digest_with_decisions_and_notes() {
+    let _env = env_guard();
     let pid = "test_prev_digest_dn";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -1002,6 +1073,7 @@ fn prev_digest_with_decisions_and_notes() {
 
 #[test]
 fn prev_digest_backward_compat() {
+    let _env = env_guard();
     let pid = "test_prev_digest_compat";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -1130,6 +1202,7 @@ fn collect_session_ledger_extras_no_workspace() {
 
 #[test]
 fn digest_skips_empty_session() {
+    let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -1219,6 +1292,7 @@ fn digest_event_empty_notes_backward_compat() {
 
 #[test]
 fn prev_digest_has_recall_fields() {
+    let _env = env_guard();
     let pid = "test_prev_digest_recall";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -1442,6 +1516,7 @@ fn passive_harvest_empty_deps_no_events() {
 
 #[test]
 fn prev_digest_has_signal_count() {
+    let _env = env_guard();
     let pid = "test_prev_digest_signal";
     let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -1464,6 +1539,7 @@ fn prev_digest_has_signal_count() {
 
 #[test]
 fn prev_digest_has_tool_breakdown() {
+    let _env = env_guard();
     let pid = "test_prev_digest_tool_bd";
     let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);

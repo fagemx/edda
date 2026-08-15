@@ -20,6 +20,22 @@ static SECRET_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| 
             Regex::new(r"\b(glpat-[a-zA-Z0-9\-]{20,})").expect("static regex"),
             "[REDACTED_GITLAB_TOKEN]",
         ),
+        // Slack bot/user tokens: xoxb-, xoxp-
+        (
+            Regex::new(r"\b(xox[bp]-[a-zA-Z0-9-]{10,})").expect("static regex"),
+            "[REDACTED_SLACK_TOKEN]",
+        ),
+        // Stripe live publishable/secret keys
+        (
+            Regex::new(r"\b(sk_live_[a-zA-Z0-9]{10,}|pk_live_[a-zA-Z0-9]{10,})")
+                .expect("static regex"),
+            "[REDACTED_STRIPE_KEY]",
+        ),
+        // npm access tokens
+        (
+            Regex::new(r"\b(npm_[a-zA-Z0-9_-]{10,})").expect("static regex"),
+            "[REDACTED_NPM_TOKEN]",
+        ),
         // AWS access key IDs: AKIA followed by 16 uppercase alphanumeric
         (
             Regex::new(r"\b(AKIA[A-Z0-9]{16})\b").expect("static regex"),
@@ -197,5 +213,15 @@ mod tests {
         let output = redact_secrets(input);
         assert!(!output.contains("sk-aaaa"));
         assert!(!output.contains("ghp_CCCC"));
+    }
+
+    #[test]
+    fn redact_slack_stripe_and_npm_tokens() {
+        let input = "xoxb-1234567890-1234567890-fakevalue npm_fake_token_1234567890 sk_live_fakevalue1234567890 pk_live_fakevalue1234567890";
+        let output = redact_secrets(input);
+        assert!(!output.contains("xoxb-"));
+        assert!(!output.contains("npm_"));
+        assert!(!output.contains("sk_live_"));
+        assert!(!output.contains("pk_live_"));
     }
 }
