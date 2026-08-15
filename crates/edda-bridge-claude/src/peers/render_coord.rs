@@ -168,6 +168,9 @@ pub fn render_coordination_protocol_with(
                 claim.paths.join(", ")
             ));
         }
+        if claim.paths.iter().any(|path| path == "**/*") {
+            lines.push("repo-wide claims are advisory — enforcement skips them".to_string());
+        }
     } else {
         // No claim yet — provide actionable nudge with specific suggestion
         let suggested = suggest_claim_command(my_label, &my_heartbeat);
@@ -176,6 +179,10 @@ pub fn render_coordination_protocol_with(
         ));
     }
     lines.push("Message a peer: `edda request \"peer-label\" \"your message\"`".to_string());
+    lines.push(
+        "To wake a peer now, use your host's cross-session messaging (target session id from `edda peers --json`)."
+            .to_string(),
+    );
 
     // Peer activity (tasks + focus files)
     let active_peers: Vec<&PeerSummary> = peers

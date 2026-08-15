@@ -101,6 +101,16 @@ pub enum NotifyEvent {
         count: usize,
         detail: String,
     },
+    RequestPending {
+        from_label: String,
+        to_label: String,
+        message: String,
+    },
+    TaskAssigned {
+        task_id: u64,
+        title: String,
+        assignee: String,
+    },
 }
 
 impl NotifyEvent {
@@ -110,6 +120,8 @@ impl NotifyEvent {
             NotifyEvent::PhaseChange { .. } => "phase_change",
             NotifyEvent::SessionEnd { .. } => "session_end",
             NotifyEvent::Anomaly { .. } => "anomaly",
+            NotifyEvent::RequestPending { .. } => "request_pending",
+            NotifyEvent::TaskAssigned { .. } => "task_assigned",
         }
     }
 
@@ -156,6 +168,24 @@ impl NotifyEvent {
                 "signal_type": signal_type,
                 "count": count,
                 "detail": detail,
+            }),
+            NotifyEvent::RequestPending {
+                from_label,
+                to_label,
+                message,
+            } => serde_json::json!({
+                "from_label": from_label,
+                "to_label": to_label,
+                "message": message,
+            }),
+            NotifyEvent::TaskAssigned {
+                task_id,
+                title,
+                assignee,
+            } => serde_json::json!({
+                "task_id": task_id,
+                "title": title,
+                "assignee": assignee,
             }),
         }
     }
@@ -272,6 +302,24 @@ fn format_ntfy(event: &NotifyEvent) -> (String, String, String) {
             detail.clone(),
             "urgent".to_string(),
         ),
+        NotifyEvent::RequestPending {
+            from_label,
+            to_label,
+            message,
+        } => (
+            format!("Request for {to_label} from {from_label}"),
+            message.clone(),
+            "high".to_string(),
+        ),
+        NotifyEvent::TaskAssigned {
+            task_id,
+            title,
+            assignee,
+        } => (
+            format!("Task assigned: {title}"),
+            format!("#{task_id} assigned to {assignee}"),
+            "default".to_string(),
+        ),
     }
 }
 
@@ -358,6 +406,26 @@ fn format_telegram(event: &NotifyEvent) -> String {
             let d = escape_html(detail);
             format!("<b>Anomaly detected</b>\n{st} x{count}\n{d}")
         }
+        NotifyEvent::RequestPending {
+            from_label,
+            to_label,
+            message,
+        } => format!(
+            "<b>Request pending</b>\n{} → {}\n{}",
+            escape_html(from_label),
+            escape_html(to_label),
+            escape_html(message)
+        ),
+        NotifyEvent::TaskAssigned {
+            task_id,
+            title,
+            assignee,
+        } => format!(
+            "<b>Task assigned</b>\n#{} {}\n{}",
+            task_id,
+            escape_html(title),
+            escape_html(assignee)
+        ),
     }
 }
 
@@ -429,6 +497,25 @@ mod tests {
             issue: None,
         };
         assert!(!ch.matches(&phase));
+    }
+
+    #[test]
+    fn coordination_events_have_stable_names_and_payloads() {
+        let request = NotifyEvent::RequestPending {
+            from_label: "auth".into(),
+            to_label: "billing".into(),
+            message: "need invoice type".into(),
+        };
+        assert_eq!(request.event_name(), "request_pending");
+        assert_eq!(request.to_json()["to_label"], "billing");
+
+        let task = NotifyEvent::TaskAssigned {
+            task_id: 11,
+            title: "Fix coordination".into(),
+            assignee: "coord-worker".into(),
+        };
+        assert_eq!(task.event_name(), "task_assigned");
+        assert_eq!(task.to_json()["task_id"], 11);
     }
 
     #[test]

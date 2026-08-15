@@ -156,6 +156,12 @@ enum Command {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Release this session's coordination scope
+    Unclaim {
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Send a request to another session (shortcut for `bridge claude request`)
     Request {
         /// Target session label
@@ -179,7 +185,11 @@ enum Command {
         session: Option<String>,
     },
     /// Show active peer sessions (shortcut for `bridge claude peers`)
-    Peers,
+    Peers {
+        /// Output sessions, claims, requests, and acknowledgements as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show coordination state (shortcut for `bridge claude render-coordination`)
     Coord {
         /// Session ID (auto-inferred from active heartbeats if omitted)
@@ -1036,6 +1046,7 @@ fn main() -> anyhow::Result<()> {
             paths,
             session,
         } => cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref()),
+        Command::Unclaim { session } => cmd_bridge::unclaim(&repo_root, session.as_deref()),
         Command::Request {
             to,
             message,
@@ -1045,7 +1056,7 @@ fn main() -> anyhow::Result<()> {
         Command::RequestAck { from, session } => {
             cmd_bridge::request_ack(&repo_root, &from, session.as_deref())
         }
-        Command::Peers => cmd_bridge::peers(&repo_root),
+        Command::Peers { json } => cmd_bridge::peers(&repo_root, json),
         Command::Coord { session } => {
             cmd_bridge::render_coordination(&repo_root, session.as_deref())
         }

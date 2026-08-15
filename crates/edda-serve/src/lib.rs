@@ -1454,6 +1454,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scope_check_empty_paths_claim_is_permissive() {
+        let _lock = STORE_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store_dir = tmp.path().join("store");
+        setup_workspace(tmp.path());
+
+        let pid = setup_claim(&store_dir, "sess-empty-paths", "auth", &[]);
+        let app = router(tmp.path());
+        let body = serde_json::json!({
+            "project_id": pid,
+            "session_id": "sess-empty-paths",
+            "files": ["anything.rs"]
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/scope/check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["no_claim"], false);
+        assert_eq!(json["all_allowed"], true);
+        assert_eq!(json["results"][0]["allowed"], true);
+    }
+
+    #[tokio::test]
     async fn scope_check_wildcard_claim() {
         let _lock = STORE_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();

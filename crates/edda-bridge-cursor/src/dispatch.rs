@@ -110,13 +110,11 @@ fn dispatch_session_end(project_id: &str, envelope: &CursorEnvelope) -> anyhow::
             true,
         );
     }
-    let peers_active = !session_id.is_empty()
-        && !edda_bridge_claude::peers::discover_active_peers(project_id, session_id).is_empty();
-    cleanup_session_state(project_id, session_id, peers_active);
+    cleanup_session_state(project_id, session_id);
     Ok(empty_json())
 }
 
-fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool) {
+fn cleanup_session_state(project_id: &str, session_id: &str) {
     let state_dir = edda_store::project_dir(project_id).join("state");
     for name in [
         "inject_hash",
@@ -132,9 +130,7 @@ fn cleanup_session_state(project_id: &str, session_id: &str, peers_active: bool)
     let _ = std::fs::remove_file(state_dir.join(format!("phase.{session_id}.json")));
     let _ = std::fs::remove_file(state_dir.join("compact_pending"));
     edda_bridge_claude::peers::remove_heartbeat(project_id, session_id);
-    if peers_active {
-        edda_bridge_claude::peers::write_unclaim(project_id, session_id);
-    }
+    edda_bridge_claude::peers::write_unclaim(project_id, session_id);
 }
 
 fn dispatch_post_tool_use(
@@ -486,5 +482,21 @@ mod tests {
         .to_string();
         hook_entrypoint_from_stdin(&stop).unwrap();
         assert!(!heartbeat.exists());
+    }
+
+    #[test]
+    fn session_end_releases_solo_claim() {
+        let pid = "test_cursor_solo_unclaim";
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+        edda_store::ensure_dirs(pid).unwrap();
+        edda_bridge_claude::peers::write_claim(pid, "solo", "auth", &["src/auth.rs".into()]);
+
+        cleanup_session_state(pid, "solo");
+
+        assert!(edda_bridge_claude::peers::compute_board_state(pid)
+            .claims
+            .iter()
+            .all(|claim| claim.session_id != "solo"));
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }
 }

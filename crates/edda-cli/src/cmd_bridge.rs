@@ -102,7 +102,11 @@ pub enum BridgeClaudeCmd {
         all: bool,
     },
     /// Show active peer sessions for current project
-    Peers,
+    Peers {
+        /// Output sessions, claims, requests, and acknowledgements as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Claim a scope for coordination (e.g. "auth", "billing")
     Claim {
         /// Short label for this session's scope
@@ -110,6 +114,12 @@ pub enum BridgeClaudeCmd {
         /// File path patterns this scope covers (e.g. "src/auth/*")
         #[arg(long)]
         paths: Vec<String>,
+        /// Session ID (auto-inferred from active heartbeats if omitted)
+        #[arg(long)]
+        session: Option<String>,
+    },
+    /// Release this session's coordination scope
+    Unclaim {
         /// Session ID (auto-inferred from active heartbeats if omitted)
         #[arg(long)]
         session: Option<String>,
@@ -292,12 +302,13 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
             BridgeClaudeCmd::Install { no_claude_md } => install(repo_root, no_claude_md),
             BridgeClaudeCmd::Uninstall => uninstall(repo_root),
             BridgeClaudeCmd::Digest { session, all } => digest(repo_root, session.as_deref(), all),
-            BridgeClaudeCmd::Peers => peers(repo_root),
+            BridgeClaudeCmd::Peers { json } => peers(repo_root, json),
             BridgeClaudeCmd::Claim {
                 label,
                 paths,
                 session,
             } => claim(repo_root, &label, &paths, session.as_deref()),
+            BridgeClaudeCmd::Unclaim { session } => unclaim(repo_root, session.as_deref()),
             BridgeClaudeCmd::Decide {
                 decision,
                 reason,
@@ -540,9 +551,38 @@ pub fn doctor(repo_root: &Path) -> anyhow::Result<()> {
     edda_bridge_claude::doctor(repo_root)
 }
 
+/// JSON board snapshot for `edda peers --json`.
+fn peers_json(project_id: &str) -> serde_json::Value {
+    let stale_threshold = edda_bridge_claude::peers::stale_secs();
+    let sessions: Vec<serde_json::Value> =
+        edda_bridge_claude::peers::discover_all_sessions(project_id)
+            .into_iter()
+            .map(|peer| {
+                let stale = peer.age_secs > stale_threshold;
+                let mut value = serde_json::to_value(&peer).unwrap_or_default();
+                value["stale"] = serde_json::json!(stale);
+                value
+            })
+            .collect();
+    let board = edda_bridge_claude::peers::compute_board_state(project_id);
+    serde_json::json!({
+        "sessions": sessions,
+        "claims": board.claims,
+        "requests": board.requests,
+        "acks": board.request_acks,
+    })
+}
+
 /// `edda bridge claude peers` — show active peer sessions
-pub fn peers(repo_root: &Path) -> anyhow::Result<()> {
+pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&peers_json(&project_id))?
+        );
+        return Ok(());
+    }
     let sessions = edda_bridge_claude::peers::discover_all_sessions(&project_id);
 
     if sessions.is_empty() {
@@ -632,6 +672,15 @@ pub fn claim(
         println!("  paths: {}", paths.join(", "));
     }
     println!("  session: {session_id}");
+    Ok(())
+}
+
+/// `edda unclaim [--session <id>]` — release a coordination scope.
+pub fn unclaim(repo_root: &Path, cli_session: Option<&str>) -> anyhow::Result<()> {
+    let project_id = edda_store::project_id(repo_root);
+    let (session_id, _label) = resolve_session_id(cli_session, &project_id, "cli");
+    edda_bridge_claude::peers::write_unclaim(&project_id, &session_id);
+    println!("Unclaimed scope for session: {session_id}");
     Ok(())
 }
 
@@ -929,10 +978,30 @@ pub fn request(
     }
 
     edda_bridge_claude::peers::write_request(&project_id, &session_id, &from_label, to, message);
+    let notify_config =
+        edda_notify::NotifyConfig::load(&edda_ledger::EddaPaths::discover(repo_root));
+    if !notify_config.channels.is_empty() {
+        edda_notify::dispatch(
+            &notify_config,
+            &edda_notify::NotifyEvent::RequestPending {
+                from_label: from_label.clone(),
+                to_label: to.to_string(),
+                message: message.to_string(),
+            },
+        );
+    }
     if targets.is_empty() {
         println!("Request queued for [{to}] (no active session): \"{message}\"");
     } else {
         println!("Request sent to [{to}]: \"{message}\"");
+    }
+    if targets.is_empty() {
+        println!("The peer will see it at their next prompt.");
+    } else {
+        println!(
+            "To wake them now, use your host's cross-session messaging (target session: {}).",
+            targets.join(", ")
+        );
     }
     Ok(())
 }
@@ -1492,6 +1561,49 @@ pub fn doctor_cursor() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn webhook_capture() -> (
+        String,
+        std::sync::mpsc::Receiver<String>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+                .unwrap();
+            let mut request = Vec::new();
+            let _ = stream.read_to_end(&mut request);
+            tx.send(String::from_utf8_lossy(&request).into_owned())
+                .unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+        });
+        (url, rx, handle)
+    }
+
+    fn enable_webhook(repo: &std::path::Path, url: &str) {
+        std::fs::create_dir_all(repo.join(".edda")).unwrap();
+        std::fs::write(
+            repo.join(".edda/config.json"),
+            serde_json::json!({
+                "notify_channels": [{
+                    "type": "webhook",
+                    "url": url,
+                    "events": ["request_pending"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -2053,5 +2165,64 @@ mod tests {
             board.requests[0].id, board.requests[1].id,
             "ids must be distinct per message"
         );
+    }
+
+    #[test]
+    fn request_emits_request_pending_notification() {
+        let _store = crate::test_support::isolated_store();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "s-auth", "auth", ".");
+        let (url, rx, server) = webhook_capture();
+        enable_webhook(repo.path(), &url);
+
+        request(repo.path(), "billing", "need invoice type", None, true)
+            .expect("forced request should succeed");
+        let body = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("request creation should dispatch a notification");
+        server.join().unwrap();
+
+        assert!(
+            body.contains("\"event_type\":\"request_pending\""),
+            "{body}"
+        );
+        assert!(body.contains("\"from_label\":\"auth\""), "{body}");
+        assert!(body.contains("\"to_label\":\"billing\""), "{body}");
+        assert!(body.contains("\"message\":\"need invoice type\""), "{body}");
+    }
+
+    #[test]
+    fn unclaim_releases_the_explicit_session_scope() {
+        let _store = crate::test_support::isolated_store();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        edda_bridge_claude::peers::write_claim(&pid, "s1", "auth", &["src/auth.rs".into()]);
+
+        unclaim(repo.path(), Some("s1")).expect("unclaim should write a release event");
+
+        assert!(edda_bridge_claude::peers::compute_board_state(&pid)
+            .claims
+            .is_empty());
+    }
+
+    #[test]
+    fn peers_json_includes_sessions_and_full_board() {
+        let _store = crate::test_support::isolated_store();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "s1", "auth", ".");
+        edda_bridge_claude::peers::write_claim(&pid, "s1", "auth", &["src/auth.rs".into()]);
+        edda_bridge_claude::peers::write_request(&pid, "s2", "billing", "auth", "need auth");
+        edda_bridge_claude::peers::write_request_ack(&pid, "s1", "billing");
+
+        let json = peers_json(&pid);
+        assert_eq!(json["sessions"][0]["session_id"], "s1");
+        assert_eq!(json["claims"][0]["label"], "auth");
+        assert_eq!(json["requests"][0]["message"], "need auth");
+        assert_eq!(json["acks"][0]["from_label"], "billing");
     }
 }

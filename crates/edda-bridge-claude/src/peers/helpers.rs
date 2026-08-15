@@ -139,6 +139,14 @@ pub fn format_age(secs: u64) -> String {
     }
 }
 
+/// Compare RFC3339 timestamps without discarding fractional seconds.
+pub fn timestamp_at_or_after(lhs: &str, rhs: &str) -> bool {
+    let format = &time::format_description::well_known::Rfc3339;
+    let lhs = time::OffsetDateTime::parse(lhs.trim(), format).ok();
+    let rhs = time::OffsetDateTime::parse(rhs.trim(), format).ok();
+    lhs.zip(rhs).is_some_and(|(lhs, rhs)| lhs >= rhs)
+}
+
 /// Truncate content to budget, cutting at last newline before budget.
 pub(super) fn truncate_to_budget(content: &str, budget: usize) -> String {
     if content.len() <= budget {

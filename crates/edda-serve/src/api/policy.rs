@@ -67,6 +67,26 @@ async fn post_scope_check(
                 results,
             }))
         }
+        Some(claim) if claim.paths.is_empty() => {
+            // A pathless claim is a presence signal, not a deny-all scope.
+            // Keep no_claim=false so callers can distinguish it from no claim.
+            let results = body
+                .files
+                .iter()
+                .map(|f| ScopeCheckResult {
+                    path: f.clone(),
+                    allowed: true,
+                })
+                .collect();
+            Ok(Json(ScopeCheckResponse {
+                session_id: body.session_id,
+                label: claim.label.clone(),
+                scope: vec![],
+                no_claim: false,
+                all_allowed: true,
+                results,
+            }))
+        }
         Some(claim) => {
             // Build glob set from claim patterns
             let mut builder = globset::GlobSetBuilder::new();

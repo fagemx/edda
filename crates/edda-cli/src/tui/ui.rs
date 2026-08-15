@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use edda_bridge_claude::peers::BindingEntry;
+use edda_bridge_claude::peers::{request_is_expired, timestamp_at_or_after, BindingEntry};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -273,28 +273,38 @@ fn render_requests(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             // Match the ack to this specific message, not merely to its sender —
             // otherwise every later request from a peer inherits the first ack.
             let is_acked = app.board.request_acks.iter().any(|a| {
-                if !a.request_ids.is_empty() {
-                    return a.request_ids.iter().any(|id| id == &r.id);
+                if let Some(request_ids) = &a.request_ids {
+                    return request_ids.iter().any(|id| id == &r.id);
                 }
                 // Legacy ack, no ids. Sender and timestamp alone are not enough:
                 // an ack written by some third session for its own mail from the
                 // same peer would show a phantom [ack] here. Require the acker to
                 // actually be the addressee.
+                let acker_label = app
+                    .board
+                    .claims
+                    .iter()
+                    .find(|c| c.session_id == a.acker_session)
+                    .map(|c| c.label.as_str())
+                    .or_else(|| {
+                        app.peers
+                            .iter()
+                            .find(|p| p.session_id == a.acker_session)
+                            .map(|p| p.label.as_str())
+                    });
                 a.from_label == r.from_label
-                    && a.ts >= r.ts
-                    && app
-                        .board
-                        .claims
-                        .iter()
-                        .any(|c| c.session_id == a.acker_session && c.label == r.to_label)
+                    && timestamp_at_or_after(&a.ts, &r.ts)
+                    && acker_label == Some(r.to_label.as_str())
             });
+            let is_expired = !is_acked && request_is_expired(r);
             let msg = truncate_str(&r.message, 40);
-            let line = if is_acked {
-                format!(" [ack] {} → {}: {msg}", r.from_label, r.to_label)
-            } else {
+            let marker = request_marker(is_acked, is_expired);
+            let line = if marker.is_empty() {
                 format!(" {} → {}: {msg}", r.from_label, r.to_label)
+            } else {
+                format!(" {marker} {} → {}: {msg}", r.from_label, r.to_label)
             };
-            let style = if is_acked {
+            let style = if is_acked || is_expired {
                 Style::default().fg(Color::DarkGray)
             } else {
                 Style::default()
@@ -305,6 +315,16 @@ fn render_requests(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let block = Block::default().title(" Requests ").borders(Borders::TOP);
     let list = List::new(items).block(block);
     f.render_widget(list, area);
+}
+
+fn request_marker(is_acked: bool, is_expired: bool) -> &'static str {
+    if is_acked {
+        "[ack]"
+    } else if is_expired {
+        "[expired]"
+    } else {
+        ""
+    }
 }
 
 fn render_status_bar(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -802,5 +822,12 @@ mod tests {
         assert!(!is_internal_domain("api"));
         assert!(!is_internal_domain("coordination"));
         assert!(!is_internal_domain("runtime"));
+    }
+
+    #[test]
+    fn request_marker_distinguishes_expired_from_pending() {
+        assert_eq!(request_marker(false, true), "[expired]");
+        assert_eq!(request_marker(false, false), "");
+        assert_eq!(request_marker(true, false), "[ack]");
     }
 }
