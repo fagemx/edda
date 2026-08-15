@@ -56,6 +56,142 @@ pub fn finalize_event(event: &mut Event) -> anyhow::Result<()> {
     finalize(event)
 }
 
+/// Reject vendor-native reasoning payloads at the readable ledger boundary.
+///
+/// A readable summary may be recorded as ordinary event text. If an audit
+/// trail must point at native reasoning, the event may carry a reference with
+/// both a pointer and a content hash; the native payload itself never enters
+/// the ledger.
+pub fn validate_readable_payload(payload: &serde_json::Value) -> anyhow::Result<()> {
+    fn is_reasoning_key(key: &str) -> bool {
+        let key = key.to_ascii_lowercase();
+        key.contains("reasoning") || key.contains("thinking") || key == "encrypted_content"
+    }
+
+    fn is_pointer_hash_reference(value: &serde_json::Value) -> bool {
+        fn has_pointer_hash(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+            let has_pointer = ["pointer", "trace_pointer", "uri"].iter().any(|key| {
+                object
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            });
+            let has_hash = ["hash", "content_hash", "sha256"].iter().any(|key| {
+                object
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.is_empty())
+            });
+            has_pointer && has_hash
+        }
+
+        match value {
+            serde_json::Value::Object(object) => has_pointer_hash(object),
+            serde_json::Value::String(text) => {
+                let trimmed = text.trim_start();
+                if !matches!(trimmed.as_bytes().first(), Some(b'{' | b'[')) {
+                    return false;
+                }
+                serde_json::from_str::<serde_json::Value>(trimmed)
+                    .ok()
+                    .and_then(|parsed| parsed.as_object().map(has_pointer_hash))
+                    .unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+
+    fn visit(value: &serde_json::Value, path: &str) -> anyhow::Result<()> {
+        match value {
+            serde_json::Value::Object(object) => {
+                for (key, child) in object {
+                    let child_path = if path.is_empty() {
+                        key.to_string()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    if is_reasoning_key(key) && !is_pointer_hash_reference(child) {
+                        anyhow::bail!(
+                            "raw vendor reasoning is not permitted at {child_path}; store a readable summary or a pointer plus content hash"
+                        );
+                    }
+                    visit(child, &child_path)?;
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for (index, child) in values.iter().enumerate() {
+                    visit(child, &format!("{path}[{index}]"))?;
+                }
+            }
+            serde_json::Value::String(text) => {
+                let trimmed = text.trim_start();
+                if matches!(trimmed.as_bytes().first(), Some(b'{' | b'[')) {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        if parsed.is_object() || parsed.is_array() {
+                            visit(&parsed, path)?;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    visit(payload, "")
+}
+
+/// A rejected hypothesis and the short, readable reason it was rejected.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RejectedHypothesis {
+    pub hypothesis: String,
+    pub reason: String,
+}
+
+/// Vendor-neutral judgment state that can be resumed by another engine.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct CheckpointPayload {
+    pub hypotheses: Vec<String>,
+    pub rejected: Vec<RejectedHypothesis>,
+    pub open: Vec<String>,
+    pub next: String,
+}
+
+/// Create a portable reasoning checkpoint without recording vendor-native traces.
+pub fn new_checkpoint_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    role: &str,
+    checkpoint: &CheckpointPayload,
+) -> anyhow::Result<Event> {
+    let payload = serde_json::json!({
+        "role": role,
+        "tags": ["checkpoint"],
+        "hypotheses": checkpoint.hypotheses,
+        "rejected": checkpoint.rejected,
+        "open": checkpoint.open,
+        "next": checkpoint.next,
+    });
+
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: "checkpoint".to_string(),
+        branch: branch.to_string(),
+        parent_hash: parent_hash.map(|s| s.to_string()),
+        hash: String::new(),
+        payload,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
+
+    finalize(&mut event)?;
+    Ok(event)
+}
+
 /// Create a new `note` event.
 pub fn new_note_event(
     branch: &str,
@@ -1020,6 +1156,33 @@ mod tests {
         assert_eq!(event.digests[0].alg, "sha256");
         assert_eq!(event.digests[0].canon, CANON_EDDA_V1);
         assert_eq!(event.digests[0].value, event.hash);
+    }
+
+    #[test]
+    fn checkpoint_event_has_vendor_neutral_judgment_state() {
+        let payload = CheckpointPayload {
+            hypotheses: vec!["cache invalidation is the cause".to_string()],
+            rejected: vec![RejectedHypothesis {
+                hypothesis: "database corruption".to_string(),
+                reason: "integrity check passes".to_string(),
+            }],
+            open: vec!["confirm the next rebuild".to_string()],
+            next: "run the rebuild check".to_string(),
+        };
+
+        let event = new_checkpoint_event("main", None, "agent", &payload).unwrap();
+
+        assert_eq!(event.event_type, "checkpoint");
+        assert_eq!(event.event_family.as_deref(), Some("signal"));
+        assert_eq!(
+            event.payload["hypotheses"][0],
+            "cache invalidation is the cause"
+        );
+        assert_eq!(
+            event.payload["rejected"][0]["reason"],
+            "integrity check passes"
+        );
+        assert_eq!(event.payload["next"], "run the rebuild check");
     }
 
     #[test]

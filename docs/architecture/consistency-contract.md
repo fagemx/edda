@@ -24,10 +24,13 @@ scoping, and durability guarantees.
   acquire an exclusive `WorkspaceLock` via `.edda/LOCK` (non-blocking
   `fs2::try_lock_exclusive`). Bridge hooks retry with
   `EDDA_BRIDGE_LOCK_TIMEOUT_MS` (default 2 s).
+- **Checkpoint payload**: `hypotheses`, `rejected` (hypothesis plus one-line
+  reason), `open`, and `next`. These are readable, vendor-neutral judgment state;
+  native reasoning traces are not checkpoint fields.
 - **Entity types**: `note`, `cmd`, `commit`, `merge`, `branch_create`,
   `branch_switch`, `rebuild`, `task_intake`, `agent_phase_change`, `approval`,
   `approval_request`, `approval_policy_match`, `review_bundle`, `pr`,
-  `execution_event`
+  `execution_event`, `checkpoint`
 
 ### Coordination Store (`~/.edda/projects/{pid}/state/`)
 
@@ -67,6 +70,7 @@ scoping, and durability guarantees.
 | Approval / Review bundle | Ledger | Durable, hash-chained | Immediate | Rebuild from event log |
 | PR outcome | Ledger | Durable, hash-chained | Immediate | Re-ingest |
 | Execution event | Ledger | Durable, hash-chained | Immediate | Re-ingest from transcript |
+| Checkpoint | Ledger | Durable, hash-chained | Immediate | Rebuild from event log |
 | Branch metadata | Ledger (refs) | Durable | Immediate | — |
 | Heartbeat | Coordination | Ephemeral (session-scoped) | Up to 120 s stale | Stale heartbeats pruned; recreated on next hook |
 | Scope claim | Coordination | Ephemeral (session-scoped) | Re-derived on read | Compacted by GC; unclaimed on `SessionEnd` |
@@ -158,14 +162,17 @@ and future issues.
 | INV-05 | Decision source of truth is the ledger, not the coordination binding. | Coordination binding is a real-time notification, not authoritative. |
 | INV-06 | Coordination state may reference entities not yet in the ledger. | Eventual consistency — consumers must handle missing refs gracefully. |
 | INV-07 | Conductor state is workspace-local and independent of coordination. | Plan execution does not depend on peer state. |
+| INV-08 | Ledger appends MUST reject vendor-native reasoning payloads. Readable summaries are allowed; native traces may only be referenced by pointer plus content hash. | Keeps the ledger readable, auditable, and portable across vendors. |
 
 ## Contributor Guide: Adding New State
 
 When adding a new stateful feature, use this decision tree:
 
-1. **Is this a permanent project record?** (decision, note, commit, approval)
+1. **Is this a permanent project record?** (decision, note, checkpoint, commit, approval)
    - Write to the **Ledger** via `edda_ledger::Ledger::append_event()`.
    - Must be hash-chained (use `edda_core::event::new_*_event()` constructors).
+   - Record readable, vendor-neutral text only. Never append raw vendor reasoning;
+     an audit pointer is allowed only when paired with its content hash.
 
 2. **Is this real-time coordination between concurrent sessions?** (claim, binding,
    request, heartbeat)

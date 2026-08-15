@@ -159,6 +159,52 @@ fn extract_event_title_body(event: &edda_core::Event) -> (String, String) {
         return (title, body);
     }
 
+    if event.event_type == "checkpoint" {
+        let strings = |key: &str| {
+            payload
+                .get(key)
+                .and_then(|value| value.as_array())
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                })
+                .unwrap_or_default()
+        };
+        let rejected = payload
+            .get("rejected")
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| {
+                        Some(format!(
+                            "{} — {}",
+                            value.get("hypothesis")?.as_str()?,
+                            value.get("reason")?.as_str()?
+                        ))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ")
+            })
+            .unwrap_or_default();
+        let next = payload
+            .get("next")
+            .and_then(|value| value.as_str())
+            .unwrap_or("");
+        return (
+            "checkpoint".to_string(),
+            format!(
+                "hypotheses: {}; rejected: {}; open: {}; next: {next}",
+                strings("hypotheses"),
+                rejected,
+                strings("open"),
+            ),
+        );
+    }
+
     // Generic: title empty, body = text field
     let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("");
     (String::new(), text.to_string())
@@ -1202,6 +1248,27 @@ mod tests {
             joined.contains("make task receipts searchable"),
             "task_intake intent must be indexed: {joined:?}"
         );
+    }
+
+    #[test]
+    fn checkpoint_judgment_state_is_searchable() {
+        let checkpoint = edda_core::event::CheckpointPayload {
+            hypotheses: vec!["cache invalidation is the cause".to_string()],
+            rejected: vec![edda_core::event::RejectedHypothesis {
+                hypothesis: "database corruption".to_string(),
+                reason: "integrity check passes".to_string(),
+            }],
+            open: vec!["confirm the next rebuild".to_string()],
+            next: "run the rebuild check".to_string(),
+        };
+        let event =
+            edda_core::event::new_checkpoint_event("main", None, "agent", &checkpoint).unwrap();
+
+        let (title, body) = extract_event_title_body(&event);
+        let searchable = format!("{title} {body}");
+        assert!(searchable.contains("cache invalidation is the cause"));
+        assert!(searchable.contains("integrity check passes"));
+        assert!(searchable.contains("run the rebuild check"));
     }
 
     #[test]

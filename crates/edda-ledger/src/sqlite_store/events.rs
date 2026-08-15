@@ -21,6 +21,9 @@ fn validate_event_hash(event: &Event) -> anyhow::Result<()> {
 }
 
 pub(super) fn validate_event_for_append(conn: &Connection, event: &Event) -> anyhow::Result<()> {
+    let event_value = serde_json::to_value(event)?;
+    edda_core::event::validate_readable_payload(&event_value)?;
+
     let current_tail: Option<String> = conn
         .query_row(
             "SELECT hash FROM events ORDER BY rowid DESC LIMIT 1",
