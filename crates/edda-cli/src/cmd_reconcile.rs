@@ -7,6 +7,7 @@ use edda_core::event::{
 use edda_ledger::lock::WorkspaceLock;
 use edda_ledger::tasks::{TaskStatus, TaskView};
 use edda_ledger::{Ledger, TaskLease};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -89,6 +90,213 @@ impl ReconcileConfig {
     fn test_defaults() -> Self {
         Self::defaults()
     }
+}
+
+const SCHEDULER_MANIFEST_MAX_BYTES: u64 = 16 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct SchedulerLaunchManifestV1 {
+    schema_version: u8,
+    project_id: String,
+    repo: PathBuf,
+    codex_bin: PathBuf,
+    max_workers: usize,
+    max_attempts: u32,
+    lease_ttl_s: u64,
+}
+
+struct PreparedSchedulerManifest {
+    manifest: SchedulerLaunchManifestV1,
+    bytes: Vec<u8>,
+    digest: String,
+    path: PathBuf,
+}
+
+struct LoadedSchedulerManifest {
+    manifest: SchedulerLaunchManifestV1,
+    repo: PathBuf,
+    config: ReconcileConfig,
+}
+
+fn scheduler_manifest_directory(store: &Path, must_exist: bool) -> anyhow::Result<PathBuf> {
+    let store = std::path::absolute(store)
+        .with_context(|| format!("resolve Edda store root {}", store.display()))?;
+    let value = store.to_str().context("Edda store root is not Unicode")?;
+    anyhow::ensure!(
+        !value.contains(['\0', '"']),
+        "Edda store root contains an unsupported character"
+    );
+    let store = if store.exists() {
+        anyhow::ensure!(store.is_dir(), "Edda store root must be a directory");
+        store
+            .canonicalize()
+            .with_context(|| format!("canonicalize Edda store root {}", store.display()))?
+    } else {
+        anyhow::ensure!(!must_exist, "Edda store root does not exist");
+        store
+    };
+    let launch = store.join("scheduler-launch");
+    if launch.exists() {
+        anyhow::ensure!(
+            launch.canonicalize()? == launch,
+            "scheduler manifest directory escapes the Edda store root"
+        );
+    }
+    let directory = launch.join("v1");
+    if directory.exists() {
+        anyhow::ensure!(
+            directory.canonicalize()? == directory,
+            "scheduler manifest directory escapes the Edda store root"
+        );
+    } else {
+        anyhow::ensure!(!must_exist, "scheduler manifest directory does not exist");
+    }
+    Ok(directory)
+}
+
+fn scheduler_manifest_digest(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn validate_scheduler_manifest(
+    manifest: SchedulerLaunchManifestV1,
+) -> anyhow::Result<LoadedSchedulerManifest> {
+    anyhow::ensure!(
+        manifest.schema_version == 1,
+        "unknown scheduler manifest version"
+    );
+    let repo = canonical_main_repo(&manifest.repo)?;
+    anyhow::ensure!(
+        repo == manifest.repo,
+        "scheduler manifest repository is not canonical"
+    );
+    anyhow::ensure!(
+        manifest.project_id == edda_store::project_id_for_root(&repo),
+        "scheduler manifest project id does not match repository"
+    );
+    let codex_bin = canonical_direct_codex_executable(&manifest.codex_bin, None)?;
+    anyhow::ensure!(
+        codex_bin == manifest.codex_bin,
+        "scheduler manifest Codex executable is not canonical"
+    );
+    let config = ReconcileConfig {
+        max_workers: manifest.max_workers,
+        max_attempts: manifest.max_attempts,
+        lease_ttl_s: manifest.lease_ttl_s,
+        codex_bin,
+    };
+    Ok(LoadedSchedulerManifest {
+        manifest,
+        repo,
+        config,
+    })
+}
+
+fn prepare_scheduler_manifest(
+    store: &Path,
+    repo: &Path,
+    config: &ReconcileConfig,
+) -> anyhow::Result<PreparedSchedulerManifest> {
+    let repo = canonical_main_repo(repo)?;
+    let codex_bin = canonical_direct_codex_executable(&config.codex_bin, None)?;
+    let manifest = SchedulerLaunchManifestV1 {
+        schema_version: 1,
+        project_id: edda_store::project_id_for_root(&repo),
+        repo,
+        codex_bin,
+        max_workers: config.max_workers,
+        max_attempts: config.max_attempts,
+        lease_ttl_s: config.lease_ttl_s,
+    };
+    let bytes = serde_json::to_vec(&manifest)?;
+    let digest = scheduler_manifest_digest(&bytes);
+    let path = scheduler_manifest_directory(store, false)?.join(format!("{digest}.json"));
+    Ok(PreparedSchedulerManifest {
+        manifest,
+        bytes,
+        digest,
+        path,
+    })
+}
+
+fn load_scheduler_manifest(path: &Path) -> anyhow::Result<LoadedSchedulerManifest> {
+    anyhow::ensure!(
+        path.is_absolute(),
+        "scheduler manifest path must be absolute"
+    );
+    let value = path
+        .to_str()
+        .context("scheduler manifest path is not Unicode")?;
+    anyhow::ensure!(
+        !value.contains(['\0', '"']),
+        "scheduler manifest path contains an unsupported character"
+    );
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("scheduler manifest filename is not Unicode")?;
+    let expected_digest = filename
+        .strip_suffix(".json")
+        .context("scheduler manifest filename must end in .json")?;
+    anyhow::ensure!(
+        expected_digest.len() == 64
+            && expected_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "scheduler manifest filename must contain a 64-character lowercase SHA-256 digest"
+    );
+
+    let trusted_directory = scheduler_manifest_directory(&edda_store::store_root(), true)?;
+    let source_metadata = path
+        .symlink_metadata()
+        .with_context(|| format!("inspect scheduler manifest {}", path.display()))?;
+    anyhow::ensure!(
+        source_metadata.file_type().is_file(),
+        "scheduler manifest must be a regular file"
+    );
+    anyhow::ensure!(
+        source_metadata.len() <= SCHEDULER_MANIFEST_MAX_BYTES,
+        "scheduler manifest exceeds 16 KiB"
+    );
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("canonicalize scheduler manifest {}", path.display()))?;
+    let parent = path
+        .parent()
+        .context("scheduler manifest has no parent")?
+        .canonicalize()
+        .context("canonicalize scheduler manifest parent")?;
+    anyhow::ensure!(
+        parent == trusted_directory && canonical.parent() == Some(trusted_directory.as_path()),
+        "scheduler manifest is outside the trusted Edda store directory"
+    );
+    let metadata = canonical.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "scheduler manifest must be a regular file"
+    );
+    anyhow::ensure!(
+        metadata.len() <= SCHEDULER_MANIFEST_MAX_BYTES,
+        "scheduler manifest exceeds 16 KiB"
+    );
+    let bytes = std::fs::read(&canonical)
+        .with_context(|| format!("read scheduler manifest {}", canonical.display()))?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= SCHEDULER_MANIFEST_MAX_BYTES,
+        "scheduler manifest exceeds 16 KiB"
+    );
+    let manifest: SchedulerLaunchManifestV1 =
+        serde_json::from_slice(&bytes).context("parse scheduler launch manifest")?;
+    anyhow::ensure!(
+        serde_json::to_vec(&manifest)? == bytes,
+        "scheduler manifest JSON is not canonical"
+    );
+    anyhow::ensure!(
+        scheduler_manifest_digest(&bytes) == expected_digest,
+        "scheduler manifest digest does not match filename"
+    );
+    validate_scheduler_manifest(manifest)
 }
 
 #[derive(Clone)]
@@ -256,7 +464,6 @@ fn windows_path_is_absolute(path: &Path) -> anyhow::Result<bool> {
     Ok(unc_rooted(&value[2..]))
 }
 
-#[cfg(any(windows, test))]
 fn validate_canonical_direct_codex_target(canonical: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(
         canonical.is_absolute()
@@ -271,7 +478,6 @@ fn validate_canonical_direct_codex_target(canonical: &Path) -> anyhow::Result<()
     Ok(())
 }
 
-#[cfg(any(windows, test))]
 fn canonical_direct_codex_executable(
     command: &Path,
     search_path: Option<&std::ffi::OsStr>,
@@ -1430,6 +1636,212 @@ mod tests {
             lease_ttl_s: 300,
             codex_bin: PathBuf::from(codex_bin),
         }
+    }
+
+    struct SchedulerManifestFixture {
+        _store_guard: crate::test_support::IsolatedStore,
+        _root: tempfile::TempDir,
+        store: PathBuf,
+        repo: PathBuf,
+        codex: PathBuf,
+        config: ReconcileConfig,
+    }
+
+    fn scheduler_manifest_fixture() -> anyhow::Result<SchedulerManifestFixture> {
+        let store_guard = crate::test_support::isolated_store();
+        let store = edda_store::store_root();
+        let root = tempfile::tempdir()?;
+        let repo = root.path().join("repo");
+        std::fs::create_dir(&repo)?;
+        Ledger::ensure_initialized(&repo)?;
+        let repo = repo.canonicalize()?;
+        let codex = root.path().join("codex.exe");
+        std::fs::write(&codex, b"MZ")?;
+        let codex = codex.canonicalize()?;
+        let config = ReconcileConfig {
+            max_workers: 3,
+            max_attempts: 4,
+            lease_ttl_s: 300,
+            codex_bin: codex.clone(),
+        };
+        Ok(SchedulerManifestFixture {
+            _store_guard: store_guard,
+            _root: root,
+            store,
+            repo,
+            codex,
+            config,
+        })
+    }
+
+    fn write_scheduler_manifest_candidate(store: &Path, bytes: &[u8]) -> anyhow::Result<PathBuf> {
+        use sha2::Digest;
+
+        let digest = hex::encode(sha2::Sha256::digest(bytes));
+        let path = store
+            .join("scheduler-launch")
+            .join("v1")
+            .join(format!("{digest}.json"));
+        edda_store::write_atomic(&path, bytes)?;
+        Ok(path)
+    }
+
+    #[test]
+    fn scheduler_manifest_is_canonical_content_addressed_and_strict() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let first = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        let second = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+
+        assert_eq!(first.bytes, second.bytes);
+        assert_eq!(first.path, second.path);
+        assert!(first.path.ends_with(format!("{}.json", first.digest)));
+        assert!(!first.bytes.ends_with(b"\n"));
+        assert_eq!(first.manifest.schema_version, 1);
+        assert_eq!(
+            first.manifest.project_id,
+            edda_store::project_id_for_root(&fixture.repo)
+        );
+        edda_store::write_atomic(&first.path, &first.bytes)?;
+        let loaded = load_scheduler_manifest(&first.path)?;
+        assert_eq!(loaded.manifest, first.manifest);
+        assert_eq!(loaded.repo, fixture.repo);
+        assert_eq!(loaded.config.codex_bin, fixture.codex);
+        assert_eq!(loaded.config.max_workers, fixture.config.max_workers);
+        assert_eq!(loaded.config.max_attempts, fixture.config.max_attempts);
+        assert_eq!(loaded.config.lease_ttl_s, fixture.config.lease_ttl_s);
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_changed_config_changes_digest() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let first = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        let mut changed = fixture.config.clone();
+        changed.max_workers += 1;
+        let second = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &changed)?;
+
+        assert_ne!(first.bytes, second.bytes);
+        assert_ne!(first.digest, second.digest);
+        assert_ne!(first.path, second.path);
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_rejects_unknown_duplicate_and_noncanonical_json() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+
+        let mut unknown_field: serde_json::Value = serde_json::from_slice(&prepared.bytes)?;
+        unknown_field
+            .as_object_mut()
+            .expect("manifest object")
+            .insert("extra".into(), true.into());
+        let path = write_scheduler_manifest_candidate(
+            &fixture.store,
+            &serde_json::to_vec(&unknown_field)?,
+        )?;
+        assert!(load_scheduler_manifest(&path).is_err());
+
+        let mut unknown_version = prepared.manifest.clone();
+        unknown_version.schema_version = 2;
+        let path = write_scheduler_manifest_candidate(
+            &fixture.store,
+            &serde_json::to_vec(&unknown_version)?,
+        )?;
+        assert!(load_scheduler_manifest(&path).is_err());
+
+        let canonical = String::from_utf8(prepared.bytes.clone())?;
+        let duplicate = canonical.replacen('{', r#"{"schema_version":1,"#, 1);
+        let path = write_scheduler_manifest_candidate(&fixture.store, duplicate.as_bytes())?;
+        assert!(load_scheduler_manifest(&path).is_err());
+
+        let mut noncanonical = prepared.bytes;
+        noncanonical.push(b'\n');
+        let path = write_scheduler_manifest_candidate(&fixture.store, &noncanonical)?;
+        assert!(load_scheduler_manifest(&path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_rejects_oversize_and_digest_mismatch() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+
+        let oversized = vec![b' '; 16 * 1024 + 1];
+        let path = write_scheduler_manifest_candidate(&fixture.store, &oversized)?;
+        assert!(load_scheduler_manifest(&path).is_err());
+
+        let mismatch = prepared
+            .path
+            .with_file_name(format!("{}.json", "0".repeat(64)));
+        edda_store::write_atomic(&mismatch, &prepared.bytes)?;
+        assert!(load_scheduler_manifest(&mismatch).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_revalidates_project_repo_and_codex() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        assert!(prepare_scheduler_manifest(
+            &fixture.store,
+            &fixture.repo.join("missing"),
+            &fixture.config
+        )
+        .is_err());
+        let mut invalid_codex = fixture.config.clone();
+        invalid_codex.codex_bin = fixture.repo.join("codex.cmd");
+        assert!(prepare_scheduler_manifest(&fixture.store, &fixture.repo, &invalid_codex).is_err());
+
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        let mut wrong_project = prepared.manifest.clone();
+        wrong_project.project_id = "0".repeat(32);
+        let path = write_scheduler_manifest_candidate(
+            &fixture.store,
+            &serde_json::to_vec(&wrong_project)?,
+        )?;
+        assert!(load_scheduler_manifest(&path).is_err());
+
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+        std::fs::remove_file(&fixture.codex)?;
+        assert!(load_scheduler_manifest(&prepared.path).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_rejects_store_root_and_reparse_escape() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        let outside = fixture._root.path().join("outside");
+        let escaped = outside.join(format!("{}.json", prepared.digest));
+        edda_store::write_atomic(&escaped, &prepared.bytes)?;
+        assert!(load_scheduler_manifest(&escaped).is_err());
+
+        let launch = fixture.store.join("scheduler-launch");
+        let reparse_target = fixture._root.path().join("reparse-target");
+        std::fs::create_dir(&reparse_target)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&reparse_target, &launch)?;
+        #[cfg(windows)]
+        if let Err(error) = std::os::windows::fs::symlink_dir(&reparse_target, &launch) {
+            anyhow::ensure!(
+                error.raw_os_error() == Some(1314),
+                "create scheduler manifest directory symlink: {error}"
+            );
+            let output = Command::new("cmd.exe")
+                .args(["/D", "/C", "mklink", "/J"])
+                .arg(&launch)
+                .arg(&reparse_target)
+                .output()?;
+            anyhow::ensure!(
+                output.status.success(),
+                "create scheduler manifest directory junction: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(
+            prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config).is_err()
+        );
+        Ok(())
     }
 
     #[test]
