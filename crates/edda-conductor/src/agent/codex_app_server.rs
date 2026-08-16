@@ -90,9 +90,8 @@ impl CodexAppServer {
         let mut guard = KillOnCancel::new(child);
         write_json_line(stdin, &request).await?;
 
-        let mut response_seen = false;
-        let mut pending_outcome = None;
-        let mut turn = TurnAccumulator::new(thread_id);
+        let mut pending_notifications = Vec::new();
+        let mut turn = None;
         loop {
             let Some(line) = stdout
                 .next_line()
@@ -104,21 +103,27 @@ impl CodexAppServer {
             let message = parse_message(&line)?;
 
             if let Some(result) = matching_response(&message, id) {
-                turn_id_from_result(&result?)?;
-                response_seen = true;
-                if let Some(outcome) = pending_outcome.take() {
-                    guard.disarm();
-                    return Ok(outcome);
+                let result = result?;
+                let turn_id = turn_id_from_result(&result)?;
+                let mut accumulator = TurnAccumulator::new(thread_id, turn_id);
+                for notification in pending_notifications.drain(..) {
+                    if let Some(outcome) = accumulator.observe(&notification)? {
+                        guard.disarm();
+                        return Ok(outcome);
+                    }
                 }
+                turn = Some(accumulator);
                 continue;
             }
 
-            if let Some(outcome) = turn.observe(&message)? {
-                if response_seen {
+            reject_server_request(&message)?;
+            if let Some(accumulator) = &mut turn {
+                if let Some(outcome) = accumulator.observe(&message)? {
                     guard.disarm();
                     return Ok(outcome);
                 }
-                pending_outcome = Some(outcome);
+            } else {
+                pending_notifications.push(message);
             }
         }
     }
@@ -146,6 +151,7 @@ impl CodexAppServer {
                 guard.disarm();
                 return Ok(result);
             }
+            reject_server_request(&message)?;
         }
     }
 
@@ -245,6 +251,15 @@ fn matching_response(message: &Value, id: u64) -> Option<Result<Value>> {
     )
 }
 
+fn reject_server_request(message: &Value) -> Result<()> {
+    if message.get("id").is_some() {
+        if let Some(method) = message.get("method").and_then(Value::as_str) {
+            bail!("unsupported Codex App Server request: {method}");
+        }
+    }
+    Ok(())
+}
+
 fn thread_id_from_result(result: &Value) -> Result<&str> {
     result
         .pointer("/thread/id")
@@ -263,13 +278,15 @@ fn turn_id_from_result(result: &Value) -> Result<&str> {
 
 struct TurnAccumulator<'a> {
     thread_id: &'a str,
+    turn_id: String,
     final_text: Option<String>,
 }
 
 impl<'a> TurnAccumulator<'a> {
-    fn new(thread_id: &'a str) -> Self {
+    fn new(thread_id: &'a str, turn_id: &str) -> Self {
         Self {
             thread_id,
+            turn_id: turn_id.to_owned(),
             final_text: None,
         }
     }
@@ -285,6 +302,9 @@ impl<'a> TurnAccumulator<'a> {
 
         match method {
             "item/agentMessage/delta" => {
+                if params.get("turnId").and_then(Value::as_str) != Some(self.turn_id.as_str()) {
+                    return Ok(None);
+                }
                 let delta = params
                     .get("delta")
                     .and_then(Value::as_str)
@@ -296,6 +316,9 @@ impl<'a> TurnAccumulator<'a> {
             "item/completed"
                 if params.pointer("/item/type").and_then(Value::as_str) == Some("agentMessage") =>
             {
+                if params.get("turnId").and_then(Value::as_str) != Some(self.turn_id.as_str()) {
+                    return Ok(None);
+                }
                 self.final_text = Some(
                     params
                         .pointer("/item/text")
@@ -305,6 +328,10 @@ impl<'a> TurnAccumulator<'a> {
                 );
             }
             "turn/completed" => {
+                if params.pointer("/turn/id").and_then(Value::as_str) != Some(self.turn_id.as_str())
+                {
+                    return Ok(None);
+                }
                 let status = params
                     .pointer("/turn/status")
                     .and_then(Value::as_str)
@@ -342,8 +369,9 @@ fn response_for_id<'a>(lines: impl IntoIterator<Item = &'a str>, id: u64) -> Res
 fn turn_outcome_from_lines<'a>(
     lines: impl IntoIterator<Item = &'a str>,
     thread_id: &str,
+    turn_id: &str,
 ) -> Result<CodexTurnOutcome> {
-    let mut turn = TurnAccumulator::new(thread_id);
+    let mut turn = TurnAccumulator::new(thread_id, turn_id);
     for line in lines {
         if let Some(outcome) = turn.observe(&parse_message(line)?)? {
             return Ok(outcome);
@@ -360,6 +388,7 @@ mod tests {
     fn correlates_response_ids_while_skipping_notifications() -> anyhow::Result<()> {
         let lines = [
             r#"{"method":"thread/started","params":{"thread":{"id":"t-1"}}}"#,
+            r#"{"id":1,"result":{"ignored":true}}"#,
             r#"{"id":2,"result":{"thread":{"id":"t-1"}}}"#,
         ];
 
@@ -385,6 +414,28 @@ mod tests {
         .expect_err("JSON-RPC error should fail");
 
         assert!(error.to_string().contains("bad params"));
+    }
+
+    #[test]
+    fn reports_unexpected_eof() {
+        let error = response_for_id([], 2).expect_err("EOF should fail");
+        let turn_error = turn_outcome_from_lines([], "t-1", "turn-1")
+            .expect_err("terminal turn EOF should fail");
+
+        assert!(error.to_string().contains("unexpected EOF"));
+        assert!(turn_error.to_string().contains("unexpected EOF"));
+    }
+
+    #[test]
+    fn rejects_permission_requests_without_approving() -> anyhow::Result<()> {
+        let message = parse_message(
+            r#"{"id":"approval-1","method":"item/commandExecution/requestApproval","params":{}}"#,
+        )?;
+
+        let error = reject_server_request(&message).expect_err("permission request should fail");
+
+        assert!(error.to_string().contains("requestApproval"));
+        Ok(())
     }
 
     #[test]
@@ -432,15 +483,70 @@ mod tests {
     #[test]
     fn terminal_turn_returns_last_assistant_text() -> anyhow::Result<()> {
         let lines = [
+            r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"other-turn","item":{"id":"other","type":"agentMessage","text":"wrong answer"}}}"#,
+            r#"{"method":"turn/completed","params":{"threadId":"t-1","turn":{"id":"other-turn","status":"completed","items":[]}}}"#,
             r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"a-1","type":"agentMessage","text":"draft"}}}"#,
             r#"{"method":"item/completed","params":{"threadId":"t-1","turnId":"turn-1","item":{"id":"a-2","type":"agentMessage","text":"final answer"}}}"#,
             r#"{"method":"turn/completed","params":{"threadId":"t-1","turn":{"id":"turn-1","status":"completed","items":[]}}}"#,
         ];
 
-        let outcome = turn_outcome_from_lines(lines.iter().copied(), "t-1")?;
+        let outcome = turn_outcome_from_lines(lines.iter().copied(), "t-1", "turn-1")?;
 
         assert_eq!(outcome.thread_id, "t-1");
         assert_eq!(outcome.final_text.as_deref(), Some("final answer"));
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_child() {
+        if std::env::var_os("EDDA_CODEX_CANCELLATION_CHILD").is_some() {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_kills_child() -> anyhow::Result<()> {
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .arg("agent::codex_app_server::tests::cancellation_child")
+            .arg("--exact")
+            .env("EDDA_CODEX_CANCELLATION_CHILD", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command.spawn()?;
+
+        drop(KillOnCancel::new(&mut child));
+
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await
+            .context("cancelled child did not exit")??;
+        assert!(!status.success());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reports_non_zero_child_exit() -> anyhow::Result<()> {
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/C", "exit", "7"]);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 7"]);
+            command
+        };
+        let mut child = command.spawn()?;
+        child.wait().await?;
+        let mut guard = KillOnCancel::new(&mut child);
+
+        let error = guard.eof_error();
+        guard.disarm();
+
+        assert!(error.to_string().contains("non-zero status"));
         Ok(())
     }
 
