@@ -325,8 +325,23 @@ pub fn load_rules() -> Vec<ThresholdRule> {
 
 // ── Storage Helpers ──
 
-fn patches_dir(project_id: &str) -> PathBuf {
+#[cfg(test)]
+thread_local! {
+    static TEST_STORE_ROOT: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn controls_project_dir(project_id: &str) -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = TEST_STORE_ROOT.with(|root| root.borrow().clone()) {
+        return root.join("projects").join(project_id);
+    }
+
     edda_store::project_dir(project_id)
+}
+
+fn patches_dir(project_id: &str) -> PathBuf {
+    controls_project_dir(project_id)
         .join("state")
         .join("controls_patches")
 }
@@ -336,7 +351,7 @@ fn patch_path(project_id: &str, patch_id: &str) -> PathBuf {
 }
 
 fn audit_log_path(project_id: &str) -> PathBuf {
-    edda_store::project_dir(project_id)
+    controls_project_dir(project_id)
         .join("state")
         .join("controls_patch_audit.jsonl")
 }
@@ -398,6 +413,50 @@ mod tests {
     use super::*;
     use edda_aggregate::quality::{ModelQuality, QualityReport};
 
+    struct StoreGuard {
+        _store_root: tempfile::TempDir,
+    }
+
+    impl Drop for StoreGuard {
+        fn drop(&mut self) {
+            TEST_STORE_ROOT.with(|root| {
+                root.replace(None);
+            });
+        }
+    }
+
+    impl StoreGuard {
+        fn new() -> Self {
+            let store_root = tempfile::tempdir().unwrap();
+            TEST_STORE_ROOT.with(|root| {
+                assert!(
+                    root.borrow().is_none(),
+                    "test store guard must not be nested"
+                );
+                root.replace(Some(store_root.path().to_path_buf()));
+            });
+            Self {
+                _store_root: store_root,
+            }
+        }
+    }
+
+    fn store_guard() -> StoreGuard {
+        StoreGuard::new()
+    }
+
+    #[test]
+    fn store_guard_isolates_storage_without_mutating_process_env() {
+        let before_env = std::env::var_os("EDDA_STORE_ROOT");
+        let default_path = edda_store::project_dir("test_controls_guard");
+        let guard = store_guard();
+        let isolated_path = controls_project_dir("test_controls_guard");
+        assert_ne!(isolated_path, default_path, "fixture needs a private store");
+        assert_eq!(std::env::var_os("EDDA_STORE_ROOT"), before_env);
+        drop(guard);
+        assert_eq!(controls_project_dir("test_controls_guard"), default_path);
+    }
+
     fn make_report(success_rate: f64, total_steps: u64, cost: f64) -> QualityReport {
         QualityReport {
             models: vec![ModelQuality {
@@ -457,6 +516,7 @@ mod tests {
 
     #[test]
     fn suggest_returns_patch_when_triggered() {
+        let _store = store_guard();
         let report = make_report(0.30, 20, 2.0);
         let rules = default_rules();
         let result = suggest_controls_patch("test_suggest_some", &report, &rules, None).unwrap();
@@ -469,8 +529,8 @@ mod tests {
 
     #[test]
     fn crud_roundtrip() {
+        let _store = store_guard();
         let pid = "test_controls_crud";
-        let _ = edda_store::ensure_dirs(pid);
 
         let patch = ControlsPatch {
             patch_id: "cpatch_crud1".to_string(),
@@ -493,15 +553,12 @@ mod tests {
 
         let pending = list_patches(pid, Some(&PatchStatus::Pending)).unwrap();
         assert_eq!(pending.len(), 1);
-
-        // Cleanup
-        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 
     #[test]
     fn approve_and_dismiss_transitions() {
+        let _store = store_guard();
         let pid = "test_controls_transitions";
-        let _ = edda_store::ensure_dirs(pid);
 
         // Approve path
         let p1 = ControlsPatch {
@@ -545,15 +602,12 @@ mod tests {
 
         // Cannot dismiss again
         assert!(dismiss_patch(pid, "cpatch_trans2", None).is_err());
-
-        // Cleanup
-        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 
     #[test]
     fn mark_applied_requires_approved() {
+        let _store = store_guard();
         let pid = "test_controls_applied";
-        let _ = edda_store::ensure_dirs(pid);
 
         let p1 = ControlsPatch {
             patch_id: "cpatch_app1".to_string(),
@@ -576,15 +630,12 @@ mod tests {
         let applied = mark_applied(pid, "cpatch_app1").unwrap();
         assert_eq!(applied.status, PatchStatus::Applied);
         assert!(applied.applied_at.is_some());
-
-        // Cleanup
-        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 
     #[test]
     fn audit_log_records_actions() {
+        let _store = store_guard();
         let pid = "test_controls_audit";
-        let _ = edda_store::ensure_dirs(pid);
 
         let patch = ControlsPatch {
             patch_id: "cpatch_audit1".to_string(),
@@ -606,9 +657,6 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("created"));
         assert!(lines[1].contains("approved"));
-
-        // Cleanup
-        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }
 
     #[test]

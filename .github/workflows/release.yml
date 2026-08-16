@@ -22,8 +22,26 @@ jobs:
       - name: Get tag
         id: tag
         run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+      - name: Prepare release notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          release_notes="$(awk -v heading="## [$version]" '
+            { sub(/\r$/, "") }
+            index($0, heading) == 1 { capture = 1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md)"
+          if [ -z "$release_notes" ]; then
+            echo "::error::CHANGELOG.md has no section for $version"
+            exit 1
+          fi
+          printf '%s\n' "$release_notes" > "$RUNNER_TEMP/release-notes.md"
       - name: Create draft release
-        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+        run: >-
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag
+          --title "$GITHUB_REF_NAME" --generate-notes
+          --notes "$(cat "$RUNNER_TEMP/release-notes.md")"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

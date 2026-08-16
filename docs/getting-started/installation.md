@@ -26,11 +26,11 @@ Available targets:
 
 | Platform | Target |
 |----------|--------|
-| Linux x86_64 | `edda-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `edda-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS x86_64 | `edda-x86_64-apple-darwin.tar.gz` |
-| macOS ARM64 | `edda-aarch64-apple-darwin.tar.gz` |
-| Windows x86_64 | `edda-x86_64-pc-windows-msvc.zip` |
+| Linux x86_64 | `edda-v<VERSION>-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux ARM64 | `edda-v<VERSION>-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `edda-v<VERSION>-x86_64-apple-darwin.tar.gz` |
+| macOS ARM64 | `edda-v<VERSION>-aarch64-apple-darwin.tar.gz` |
+| Windows x86_64 | `edda-v<VERSION>-x86_64-pc-windows-msvc.zip` |
 
 Each archive contains the `edda` binary, and a SHA256 checksum sidecar file.
 

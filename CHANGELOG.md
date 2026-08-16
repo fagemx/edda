@@ -7,15 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-16
+
 ### Added
 
 - **Decision provenance** (`edda ratify`) — decisions are now *recorded ≠ ratified*. Every `edda decide` is tagged `authority=agent` (or `system`), never operator; the background decision extractor is tagged `agent` too, and any write that omits authority projects as `unknown` (never the old `human` default). Operator authority is conferred only by a separate, append-only `decision_ratify` event via `edda ratify <key> [--by] [--note]`, so the hash chain can no longer launder machine inference into authoritative fact. The SessionStart decision pack now splits into **Ratified Decisions** (binding) and **Unratified Decisions** (recorded, not binding), with authorship tags; the coordination view and the `coord-sync`/`coord-review` skills were reworded to stop calling broadcasts "binding". Ratified-state is derived from event insertion order (rowid), never stored, and keyed per decision event (a re-decided key must be re-ratified; branch- and import-safe). `--by` is recorded for audit but self-asserted (identity enforcement is a policy-layer concern). Spec: [GH-401](https://github.com/fagemx/edda/issues/401). Existing decisions render as unratified until ratified — a deliberate clean sweep, not a regression. Existing installs: re-run `edda init --force` once to refresh the reworded coordination skills (this overwrites local edits to the `coord-*` skill files)
 - **Task rail P1** (`edda task`) — hash-chained `task.*` event family, derived status/readiness projection (never stored), CLI verbs `new/start/done/fail/list/show` (done requires a receipt and reports which successors became ready), Stop-hook nudge for newly-ready assigned tasks, and task-rail verbs taught in the write-back protocol. Spec: `docs/plan/task-rail/TASK_RAIL_V1.md` §3–§7; acceptance drill: `docs/plan/task-rail/P1_DRILL_2026-07-14.md`. Existing installs: re-run `edda init` (or `edda bridge claude install`) once to register the new `Stop` hook
+- **Portable reasoning checkpoints** (`edda checkpoint`) — vendor-neutral hypothesis, rejection, open-question, and next-action records are hash-chained, searchable through `edda ask`, and included in deterministic hot packs with section-aware budget degradation
+- **Fleet-wide reads** — `edda ask --fleet`, `edda search query --fleet`, `edda log --fleet`, and `edda task list --fleet` fan out across the configured project scope, tag results by project, and report unreachable projects instead of silently treating them as empty; hot packs can also surface sibling-project rulings and queues
+- **Incremental full-text indexing** — turn and event cursors avoid full rescans, SessionEnd hooks keep the index current, task receipts are searchable, and the CJK bigram tokenizer supports queries longer than two characters
+- **Coordination operations** — the installed `coord-orchestrate` skill and multi-agent discipline guide are joined by hardened peer lifecycle, task-board, notification, TUI, and policy surfaces across supported bridges
+- **Richer `edda ask` output** — active task receipts now appear alongside decisions, notes, and related history
+
+### Changed
+
+- Windows Clippy and platform-sensitive tests are now blocking CI; the derived Windows crate set includes conductor and transcript coverage while trimming debug information to keep linking practical
 
 ### Fixed
 
 - `edda bundle create` and `edda pair new/revoke/revoke-all` appended chain events without the workspace lock — a concurrent locked writer could interleave and fork the hash chain (two events claiming the same parent). Now serialized like every other writer
 - Latent env-var race between `resolve_session_id_tiers` and the `decide()` tests under the parallel test runner (serialized with `ENV_LOCK`, same pattern as edda-bridge-claude)
+- Search index safety: an empty ledger no longer erases a populated index, cross-project indexing uses the registered project's own repository, and metadata cursors advance only after the Tantivy commit succeeds
+- Coordination requests now acknowledge individual messages, validate and expire targets, avoid treating repo-wide claims as editable scopes, and clean orphaned claims on lifecycle boundaries
+- Glob-scoped decision staleness checks now inspect the directory and its matching files, so in-place edits are detected instead of treating the glob as a literal path
+- Bridge secret redaction and test-store isolation were expanded to prevent sensitive output leakage and writes into an operator's real registry during tests
+- `controls_suggest` fixtures now use a thread-local temporary store without mutating `EDDA_STORE_ROOT`, eliminating Windows test races without touching persistent user data
+- `install.sh` now sends latest-release progress to stderr so its default version lookup captures only the tag and builds a valid asset URL
 
 ## [0.2.1] - 2026-07-13
 

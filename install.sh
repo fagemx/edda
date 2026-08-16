@@ -126,7 +126,7 @@ resolve_version() {
         return
     fi
 
-    say "Fetching latest release..."
+    say "Fetching latest release..." >&2
     _api_url="https://api.github.com/repos/${REPO}/releases/latest"
     _response="$(download_to_stdout "$_api_url")" || err "failed to fetch latest release from GitHub API"
 
