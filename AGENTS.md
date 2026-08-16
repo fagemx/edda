@@ -16,8 +16,10 @@ and multi-agent coordination.
 - Review immutable full SHAs; any push invalidates the prior verdict.
 - On GitHub PRs, publish numbered SHA-pinned review rounds. Requested changes
   require an implementer point-by-point response and a new review round; merge
-  requires a final current-head LGTM comment with P0/P1 counts and ran gates.
-  Internal verifier reports do not replace the PR-visible loop.
+  requires a final current-head LGTM comment with P0=0, P1=0 and ran gates.
+  Internal verifier reports do not replace the PR-visible loop. For local-only
+  delivery, record the same fields in the strongest durable local carrier; do
+  not invent a PR.
 - Worker receipts are execution evidence, not acceptance. Merge only with
   explicit operator authority.
 

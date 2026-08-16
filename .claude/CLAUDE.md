@@ -232,3 +232,6 @@ Before merging any GitHub PR, the PR itself must show the complete loop:
 
 Internal verifier reports, task receipts, and CI do not replace PR comments.
 Merge still requires explicit operator authority.
+
+For local-only delivery, record the same round/response/verdict fields in the
+strongest durable local carrier; do not invent a PR.

@@ -41,9 +41,10 @@ holds merge authority outside the formation, unless explicitly delegated.
    bundle. Specs live in issues, never only in messages.
 3. **Brief workers** — self-contained (they have zero context): issues to
    read, worktree + branch command, `edda claim` label and paths, files
-   owned/forbidden, quality gates verbatim, done = PR (never merge) +
-   `edda task done --receipt` . Include the receiver tie-break verbatim
-   (see Traffic rules).
+   owned/forbidden, quality gates verbatim, done = GitHub PR when available,
+   otherwise a frozen local branch plus durable review carrier (never invent a
+   PR); never merge + `edda task done --receipt`. Include the receiver tie-break
+   verbatim (see Traffic rules).
 4. **Brief the verifier — read-only, starts BEFORE code:** baseline gates on
    main; flake hunt; observable-behavior criteria per issue; sweep for two
    test poisons — tests asserting the behavior being removed (invert and
@@ -55,11 +56,14 @@ holds merge authority outside the formation, unless explicitly delegated.
 6. **Track without interrupting:** workers' done-bells + background poll on
    `edda task list` / PR state + read-only peeks. "Queued" means busy — fine.
 7. **Close:** receipt on the rail → your review + verifier's adversarial
-   review, independently → publish `Code Review: Round N` on the PR pinned to
-   the full SHA. `Changes Requested` requires the implementer's point-by-point
-   `Review Response: Round N`, a new frozen SHA, and another review round.
-   Publish final current-head LGTM with P0/P1 counts and ran gates → the merge
-   authority integrates. Internal reports do not replace the PR-visible loop.
+   review, independently → for GitHub delivery, publish `Code Review: Round N`
+   on the PR pinned to the full SHA. `Changes Requested` requires the
+   implementer's point-by-point `Review Response: Round N`, a new frozen SHA,
+   and another review round. Publish final current-head LGTM with P0=0, P1=0
+   and ran gates → the merge authority integrates. For local-only delivery,
+   record the same round/response/verdict fields in the strongest durable local
+   carrier; do not invent a PR. Internal reports do not replace the durable
+   visible loop.
 
 ## Traffic rules (messages WILL cross)
 
