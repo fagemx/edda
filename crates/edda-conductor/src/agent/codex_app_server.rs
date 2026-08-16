@@ -22,8 +22,12 @@ pub struct CodexTurnOutcome {
 impl CodexAppServer {
     pub async fn spawn(bin: &Path) -> Result<Self> {
         let mut command = Command::new(bin);
+        command.arg("app-server");
+        Self::spawn_command(command).await
+    }
+
+    async fn spawn_command(mut command: Command) -> Result<Self> {
         command
-            .arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
@@ -71,10 +75,24 @@ impl CodexAppServer {
             None => ("thread/start", json!({ "cwd": cwd.to_string_lossy() })),
         };
         let result = self.request(method, params).await?;
-        thread_id_from_result(&result).map(str::to_owned)
+        match thread_id_from_result(&result) {
+            Ok(thread_id) => Ok(thread_id.to_owned()),
+            Err(error) => {
+                self.terminate().await;
+                Err(error)
+            }
+        }
     }
 
     pub async fn run_turn(&mut self, thread_id: &str, prompt: &str) -> Result<CodexTurnOutcome> {
+        let result = self.run_turn_inner(thread_id, prompt).await;
+        if result.is_err() {
+            self.terminate().await;
+        }
+        result
+    }
+
+    async fn run_turn_inner(&mut self, thread_id: &str, prompt: &str) -> Result<CodexTurnOutcome> {
         let id = self.take_id();
         let request = request_value(
             id,
@@ -129,6 +147,14 @@ impl CodexAppServer {
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+        let result = self.request_inner(method, params).await;
+        if result.is_err() {
+            self.terminate().await;
+        }
+        result
+    }
+
+    async fn request_inner(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.take_id();
         let request = request_value(id, method, params);
         let child = &mut self.child;
@@ -156,11 +182,24 @@ impl CodexAppServer {
     }
 
     async fn notify(&mut self, method: &str) -> Result<()> {
+        let result = self.notify_inner(method).await;
+        if result.is_err() {
+            self.terminate().await;
+        }
+        result
+    }
+
+    async fn notify_inner(&mut self, method: &str) -> Result<()> {
         let notification = json!({ "jsonrpc": "2.0", "method": method });
         let mut guard = KillOnCancel::new(&mut self.child);
         write_json_line(&mut self.stdin, &notification).await?;
         guard.disarm();
         Ok(())
+    }
+
+    async fn terminate(&mut self) {
+        let _ = self.child.kill().await;
+        let _ = self.child.wait().await;
     }
 
     fn take_id(&mut self) -> u64 {
@@ -384,6 +423,144 @@ fn turn_outcome_from_lines<'a>(
 mod tests {
     use super::*;
 
+    #[derive(Clone, Copy)]
+    enum FakeScenario {
+        MissingThreadId,
+        EmptyThreadId,
+        RunTurnInterleaving,
+        RunTurnError,
+        Idle,
+    }
+
+    fn fake_app_server(scenario: FakeScenario) -> anyhow::Result<(tempfile::TempDir, Command)> {
+        let dir = tempfile::tempdir()?;
+
+        #[cfg(windows)]
+        {
+            let script = dir.path().join("fake-app-server.ps1");
+            std::fs::write(&script, powershell_fake_script(scenario))?;
+            let mut command = Command::new("powershell.exe");
+            command.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ]);
+            command.arg(script);
+            Ok((dir, command))
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let launcher = dir.path().join("fake-app-server");
+            std::fs::write(&launcher, shell_fake_script(scenario))?;
+            let mut permissions = std::fs::metadata(&launcher)?.permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&launcher, permissions)?;
+            Ok((dir, Command::new(launcher)))
+        }
+    }
+
+    async fn spawn_fake_app_server(
+        scenario: FakeScenario,
+    ) -> anyhow::Result<(tempfile::TempDir, CodexAppServer)> {
+        let (dir, command) = fake_app_server(scenario)?;
+        let server = CodexAppServer::spawn_command(command).await?;
+        Ok((dir, server))
+    }
+
+    #[cfg(windows)]
+    fn powershell_fake_script(scenario: FakeScenario) -> String {
+        let body = match scenario {
+            FakeScenario::MissingThreadId => {
+                "Read-Line\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{}}}'\nStart-Sleep -Seconds 60"
+            }
+            FakeScenario::EmptyThreadId => {
+                "Read-Line\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"\"}}}'\nStart-Sleep -Seconds 60"
+            }
+            FakeScenario::RunTurnInterleaving => {
+                "Read-Line\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nRead-Line\nWrite-Line '{\"id\":99,\"result\":{\"ignored\":true}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"other-thread\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"wrong thread\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"other-thread\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"target final\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nWrite-Line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nStart-Sleep -Seconds 60"
+            }
+            FakeScenario::RunTurnError => {
+                "Read-Line\nWrite-Line '{\"id\":2,\"error\":{\"code\":-32602,\"message\":\"bad turn\"}}'\nStart-Sleep -Seconds 60"
+            }
+            FakeScenario::Idle => "Start-Sleep -Seconds 60",
+        };
+        format!(
+            "$ErrorActionPreference = 'Stop'\nfunction Read-Line {{ if ($null -eq [Console]::In.ReadLine()) {{ exit 0 }} }}\nfunction Write-Line([string]$line) {{ [Console]::Out.WriteLine($line); [Console]::Out.Flush() }}\nRead-Line\nWrite-Line '{{\"id\":1,\"result\":{{}}}}'\nRead-Line\n{body}\n"
+        )
+    }
+
+    #[cfg(unix)]
+    fn shell_fake_script(scenario: FakeScenario) -> String {
+        let body = match scenario {
+            FakeScenario::MissingThreadId => {
+                "read_line\nwrite_line '{\"id\":2,\"result\":{\"thread\":{}}}'\nsleep 60"
+            }
+            FakeScenario::EmptyThreadId => {
+                "read_line\nwrite_line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"\"}}}'\nsleep 60"
+            }
+            FakeScenario::RunTurnInterleaving => {
+                "read_line\nwrite_line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nread_line\nwrite_line '{\"id\":99,\"result\":{\"ignored\":true}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"other-thread\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"wrong thread\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"other-thread\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"target final\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nwrite_line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nsleep 60"
+            }
+            FakeScenario::RunTurnError => {
+                "read_line\nwrite_line '{\"id\":2,\"error\":{\"code\":-32602,\"message\":\"bad turn\"}}'\nsleep 60"
+            }
+            FakeScenario::Idle => "sleep 60",
+        };
+        format!(
+            "#!/bin/sh\nread_line() {{ IFS= read -r _ || exit 0; }}\nwrite_line() {{ printf '%s\\n' \"$1\"; }}\nread_line\nwrite_line '{{\"id\":1,\"result\":{{}}}}'\nread_line\n{body}\n"
+        )
+    }
+
+    async fn wait_for_pid_exit(pid: u32) -> anyhow::Result<()> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            while process_exists(pid) {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .context("fake app-server PID did not disappear")
+    }
+
+    async fn wait_for_child_exit(child: &mut Child) -> anyhow::Result<()> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if child.try_wait()?.is_some() {
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .context("fake app-server child did not exit")?
+    }
+
+    fn process_exists(pid: u32) -> bool {
+        #[cfg(windows)]
+        {
+            std::process::Command::new("tasklist.exe")
+                .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+                .output()
+                .is_ok_and(|output| {
+                    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+                })
+        }
+        #[cfg(unix)]
+        {
+            std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        }
+    }
+
     #[test]
     fn correlates_response_ids_while_skipping_notifications() -> anyhow::Result<()> {
         let lines = [
@@ -494,6 +671,99 @@ mod tests {
 
         assert_eq!(outcome.thread_id, "t-1");
         assert_eq!(outcome.final_text.as_deref(), Some("final answer"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn start_missing_thread_id_terminates_and_reaps_child() -> anyhow::Result<()> {
+        let (_fake, mut server) = spawn_fake_app_server(FakeScenario::MissingThreadId).await?;
+        let pid = server.child.id().context("fake app-server has no PID")?;
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.open_thread(Path::new("."), None),
+        )
+        .await
+        .context("thread/start did not finish")?
+        .expect_err("missing thread id should fail");
+
+        assert!(error.to_string().contains("no thread id"));
+        assert!(server.child.try_wait()?.is_some(), "child was not reaped");
+        wait_for_pid_exit(pid).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resume_empty_thread_id_terminates_and_reaps_child() -> anyhow::Result<()> {
+        let (_fake, mut server) = spawn_fake_app_server(FakeScenario::EmptyThreadId).await?;
+        let pid = server.child.id().context("fake app-server has no PID")?;
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            server.open_thread(Path::new("."), Some("persisted-thread")),
+        )
+        .await
+        .context("thread/resume did not finish")?
+        .expect_err("empty thread id should fail");
+
+        assert!(error.to_string().contains("no thread id"));
+        assert!(server.child.try_wait()?.is_some(), "child was not reaped");
+        wait_for_pid_exit(pid).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_turn_buffers_target_notifications_until_matching_response() -> anyhow::Result<()> {
+        let (_fake, mut server) = spawn_fake_app_server(FakeScenario::RunTurnInterleaving).await?;
+        let thread_id = server.open_thread(Path::new("."), None).await?;
+
+        let outcome = server.run_turn(&thread_id, "do the task").await?;
+
+        assert_eq!(outcome.thread_id, "t-1");
+        assert_eq!(outcome.final_text.as_deref(), Some("target final"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn run_turn_error_terminates_and_reaps_child() -> anyhow::Result<()> {
+        let (_fake, mut server) = spawn_fake_app_server(FakeScenario::RunTurnError).await?;
+        let pid = server.child.id().context("fake app-server has no PID")?;
+
+        let error = server
+            .run_turn("t-1", "bad turn")
+            .await
+            .expect_err("JSON-RPC error should fail");
+
+        assert!(error.to_string().contains("bad turn"));
+        assert!(server.child.try_wait()?.is_some(), "child was not reaped");
+        wait_for_pid_exit(pid).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_concrete_client_makes_child_pid_disappear() -> anyhow::Result<()> {
+        let (_fake, server) = spawn_fake_app_server(FakeScenario::Idle).await?;
+        let pid = server.child.id().context("fake app-server has no PID")?;
+
+        drop(server);
+
+        wait_for_pid_exit(pid).await
+    }
+
+    #[tokio::test]
+    async fn cancelling_concrete_method_makes_child_pid_disappear() -> anyhow::Result<()> {
+        let (_fake, mut server) = spawn_fake_app_server(FakeScenario::Idle).await?;
+        let pid = server.child.id().context("fake app-server has no PID")?;
+
+        let timed_out = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            server.run_turn("t-1", "wait forever"),
+        )
+        .await;
+
+        assert!(timed_out.is_err(), "fake method unexpectedly completed");
+        wait_for_child_exit(&mut server.child).await?;
+        wait_for_pid_exit(pid).await?;
         Ok(())
     }
 
