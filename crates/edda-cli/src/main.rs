@@ -31,6 +31,7 @@ mod cmd_propose;
 mod cmd_prs;
 mod cmd_rebuild;
 mod cmd_recap;
+mod cmd_reconcile;
 mod cmd_rules;
 mod cmd_run;
 mod cmd_scan;
@@ -150,6 +151,11 @@ enum Command {
     Task {
         #[command(subcommand)]
         cmd: cmd_task::TaskCmd,
+    },
+    /// Recover and dispatch unfinished task attempts
+    Reconcile {
+        #[command(flatten)]
+        args: cmd_reconcile::ReconcileArgs,
     },
     /// Claim a scope for coordination (shortcut for `bridge claude claim`)
     Claim {
@@ -1048,6 +1054,7 @@ fn main() -> anyhow::Result<()> {
         Command::Group { cmd } => cmd_group::execute(cmd, &repo_root),
         Command::Sync { from, dry_run } => cmd_sync::execute(&repo_root, from.as_deref(), dry_run),
         Command::Task { cmd } => cmd_task::execute(cmd, &repo_root),
+        Command::Reconcile { args } => cmd_reconcile::run(&repo_root, args),
         Command::Claim {
             label,
             paths,
