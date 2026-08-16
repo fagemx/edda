@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static DOORBELL_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static DOORBELL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-#[cfg(test)]
+#[cfg(all(test, windows))]
 static FAKE_CODEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 thread_local! {
@@ -250,15 +250,17 @@ fn plan_actions(
                     attempt: view.attempts + 1,
                 });
             }
-            TaskStatus::Failed if view.attempts < max_attempts && slots > 0 => {
-                if !conflicts(&view.scope_paths, &occupied) {
-                    slots -= 1;
-                    occupied.push(occupied_scope(&view.scope_paths));
-                    actions.push(ReconcileAction::Start {
-                        task_id: view.task_id,
-                        attempt: view.attempts + 1,
-                    });
-                }
+            TaskStatus::Failed
+                if view.attempts < max_attempts
+                    && slots > 0
+                    && !conflicts(&view.scope_paths, &occupied) =>
+            {
+                slots -= 1;
+                occupied.push(occupied_scope(&view.scope_paths));
+                actions.push(ReconcileAction::Start {
+                    task_id: view.task_id,
+                    attempt: view.attempts + 1,
+                });
             }
             _ => {}
         }
@@ -991,6 +993,10 @@ mod tests {
     use edda_ledger::tasks::{TaskStatus, TaskView};
     use edda_ledger::TaskLease;
 
+    fn test_lock(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
+        lock.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
     fn task(id: u64, status: TaskStatus, scope: &[&str]) -> TaskView {
         TaskView {
             task_id: id,
@@ -1571,7 +1577,7 @@ mod tests {
             &resolved,
         )?;
 
-        assert_eq!(resolved, repo);
+        assert_eq!(resolved.canonicalize()?, repo.canonicalize()?);
         assert!(!worktree.join(".edda").exists());
         assert_eq!(ledger.task_views()?[0].status, TaskStatus::Done);
         Ok(())
@@ -1757,7 +1763,7 @@ mod tests {
     #[test]
     fn owned_finalization_records_reason_deletes_only_its_lease_and_rings_once(
     ) -> anyhow::Result<()> {
-        let _doorbell = DOORBELL_LOCK.lock().expect("doorbell test lock");
+        let _doorbell = test_lock(&DOORBELL_LOCK);
         let dir = tempfile::tempdir()?;
         let repo = dir.path();
         edda_ledger::Ledger::ensure_initialized(repo)?;
@@ -1786,7 +1792,7 @@ mod tests {
 
     #[test]
     fn runner_spawn_failure_is_compensated_without_a_live_lease() -> anyhow::Result<()> {
-        let _doorbell = DOORBELL_LOCK.lock().expect("doorbell test lock");
+        let _doorbell = test_lock(&DOORBELL_LOCK);
         let dir = tempfile::tempdir()?;
         let repo = dir.path();
         edda_ledger::Ledger::ensure_initialized(repo)?;
@@ -1816,7 +1822,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn first_spawn_failure_does_not_prevent_later_plan_launch() -> anyhow::Result<()> {
-        let _doorbell = DOORBELL_LOCK.lock().expect("doorbell test lock");
+        let _doorbell = test_lock(&DOORBELL_LOCK);
         let dir = tempfile::tempdir()?;
         let repo = dir.path();
         edda_ledger::Ledger::ensure_initialized(repo)?;
@@ -1871,8 +1877,8 @@ mod tests {
     #[test]
     fn fake_runner_records_session_in_main_ledger_before_turn_and_fails_without_receipt(
     ) -> anyhow::Result<()> {
-        let _fake = FAKE_CODEX_LOCK.lock().expect("fake Codex test lock");
-        let _doorbell = DOORBELL_LOCK.lock().expect("doorbell test lock");
+        let _fake = test_lock(&FAKE_CODEX_LOCK);
+        let _doorbell = test_lock(&DOORBELL_LOCK);
         let dir = tempfile::tempdir()?;
         let repo = dir.path().join("repo");
         std::fs::create_dir(&repo)?;
@@ -1906,8 +1912,10 @@ mod tests {
         run_task(&repo, 1, 1, &config, true)?;
 
         assert_eq!(
-            edda_ledger::EddaPaths::find_root(&worktree),
-            Some(repo.clone())
+            edda_ledger::EddaPaths::find_root(&worktree)
+                .expect("original ledger root")
+                .canonicalize()?,
+            repo.canonicalize()?
         );
         assert!(!worktree.join(".edda").exists());
         let events = ledger.task_events()?;
@@ -1935,7 +1943,7 @@ mod tests {
     #[test]
     fn periodic_renewal_stops_old_runner_before_failure_after_lease_replacement(
     ) -> anyhow::Result<()> {
-        let _fake = FAKE_CODEX_LOCK.lock().expect("fake Codex test lock");
+        let _fake = test_lock(&FAKE_CODEX_LOCK);
         let dir = tempfile::tempdir()?;
         let repo = dir.path().join("repo");
         std::fs::create_dir(&repo)?;
@@ -2007,7 +2015,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn fake_runner_resumes_the_current_attempt_session_before_turn() -> anyhow::Result<()> {
-        let _fake = FAKE_CODEX_LOCK.lock().expect("fake Codex test lock");
+        let _fake = test_lock(&FAKE_CODEX_LOCK);
         let dir = tempfile::tempdir()?;
         let repo = dir.path().join("repo");
         std::fs::create_dir(&repo)?;
@@ -2033,8 +2041,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn fake_permission_request_is_rejected_then_finalized_once() -> anyhow::Result<()> {
-        let _fake = FAKE_CODEX_LOCK.lock().expect("fake Codex test lock");
-        let _doorbell = DOORBELL_LOCK.lock().expect("doorbell test lock");
+        let _fake = test_lock(&FAKE_CODEX_LOCK);
+        let _doorbell = test_lock(&DOORBELL_LOCK);
         let dir = tempfile::tempdir()?;
         let repo = dir.path().join("repo");
         std::fs::create_dir(&repo)?;
