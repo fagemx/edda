@@ -1033,6 +1033,37 @@ mod tests {
         lock.lock().unwrap_or_else(|poison| poison.into_inner())
     }
 
+    #[cfg(windows)]
+    fn allow_fake_turn_after_durable_session(
+        repo: std::path::PathBuf,
+        task_id: u64,
+        attempt: u32,
+        challenge: std::path::PathBuf,
+        allow: std::path::PathBuf,
+        deny: std::path::PathBuf,
+    ) -> std::thread::JoinHandle<anyhow::Result<()>> {
+        std::thread::spawn(move || {
+            for _ in 0..200 {
+                if challenge.exists() {
+                    let view = Ledger::open(&repo)?
+                        .task_views()?
+                        .into_iter()
+                        .find(|view| view.task_id == task_id);
+                    let valid = view.is_some_and(|view| {
+                        view.session_agent_kind.as_deref() == Some("codex")
+                            && view.session_attempt == Some(attempt)
+                            && view.session_id.as_deref() == Some("fake-thread")
+                    });
+                    std::fs::write(if valid { allow } else { deny }, "gate")?;
+                    anyhow::ensure!(valid, "fake observed turn before durable current session");
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            anyhow::bail!("fake never challenged turn gate")
+        })
+    }
+
     fn task(id: u64, status: TaskStatus, scope: &[&str]) -> TaskView {
         TaskView {
             task_id: id,
@@ -2014,8 +2045,21 @@ mod tests {
         let mut config = ReconcileConfig::test_defaults();
         config.codex_bin = fake;
 
+        let challenge = dir.path().join("turn.challenge");
+        let allow = dir.path().join("turn.allow");
+        let deny = dir.path().join("turn.deny");
+        std::env::set_var("EDDA_FAKE_CHALLENGE", &challenge);
+        std::env::set_var("EDDA_FAKE_ALLOW", &allow);
+        std::env::set_var("EDDA_FAKE_DENY", &deny);
+        let observer =
+            allow_fake_turn_after_durable_session(repo.clone(), 1, 1, challenge, allow, deny);
+
         DOORBELL_COUNT.store(0, Ordering::SeqCst);
         run_task(&repo, 1, 1, &config, true)?;
+        observer.join().expect("observer thread")?;
+        std::env::remove_var("EDDA_FAKE_CHALLENGE");
+        std::env::remove_var("EDDA_FAKE_ALLOW");
+        std::env::remove_var("EDDA_FAKE_DENY");
 
         assert_eq!(
             edda_ledger::EddaPaths::find_root(&worktree)
@@ -2148,7 +2192,20 @@ mod tests {
         let mut config = ReconcileConfig::test_defaults();
         config.codex_bin = fake;
 
+        let challenge = dir.path().join("resume.challenge");
+        let allow = dir.path().join("resume.allow");
+        let deny = dir.path().join("resume.deny");
+        std::env::set_var("EDDA_FAKE_CHALLENGE", &challenge);
+        std::env::set_var("EDDA_FAKE_ALLOW", &allow);
+        std::env::set_var("EDDA_FAKE_DENY", &deny);
+        let observer =
+            allow_fake_turn_after_durable_session(repo.clone(), 2, 1, challenge, allow, deny);
+
         run_task(&repo, 2, 1, &config, false)?;
+        observer.join().expect("observer thread")?;
+        std::env::remove_var("EDDA_FAKE_CHALLENGE");
+        std::env::remove_var("EDDA_FAKE_ALLOW");
+        std::env::remove_var("EDDA_FAKE_DENY");
 
         let requests = std::fs::read_to_string(dir.path().join("fake-codex.log"))?;
         assert!(requests.contains("\"method\":\"thread/resume\""));
@@ -2206,6 +2263,15 @@ Read-Line
 Read-Line
 Write-Line '{"id":2,"result":{"thread":{"id":"fake-thread"}}}'
 Read-Line
+if ($env:EDDA_FAKE_CHALLENGE) {
+  New-Item -ItemType File -Force -Path $env:EDDA_FAKE_CHALLENGE | Out-Null
+  for ($i = 0; $i -lt 200; $i++) {
+    if (Test-Path $env:EDDA_FAKE_ALLOW) { break }
+    if (Test-Path $env:EDDA_FAKE_DENY) { exit 7 }
+    Start-Sleep -Milliseconds 10
+  }
+  if (-not (Test-Path $env:EDDA_FAKE_ALLOW)) { exit 7 }
+}
 Start-Sleep -Seconds DELAY
 EVENTS
 Write-Line '{"id":3,"result":{"turn":{"id":"fake-turn"}}}'
