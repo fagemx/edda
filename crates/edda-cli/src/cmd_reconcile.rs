@@ -108,8 +108,12 @@ pub fn run(repo_root: &Path, args: ReconcileArgs) -> anyhow::Result<()> {
         Some(repo) => canonical_main_repo(repo)?,
         None => repo_root.to_path_buf(),
     };
-    if args.install_scheduler || args.uninstall_scheduler {
-        return scheduler_lifecycle(&repo_root, args.install_scheduler);
+    if args.install_scheduler {
+        let config = ReconcileConfig::from_args(&args);
+        return scheduler_lifecycle(&repo_root, Some(&config));
+    }
+    if args.uninstall_scheduler {
+        return scheduler_lifecycle(&repo_root, None);
     }
     let config = ReconcileConfig::from_args(&args);
     if let Some(task_id) = args.run_task {
@@ -186,7 +190,6 @@ struct WindowsSchedulerSpec {
     task_name: String,
     create_args: Vec<String>,
     query_args: Vec<String>,
-    delete_args: Vec<String>,
 }
 
 fn canonical_main_repo(repo: &Path) -> anyhow::Result<PathBuf> {
@@ -254,10 +257,81 @@ fn windows_path_is_absolute(path: &Path) -> anyhow::Result<bool> {
 }
 
 #[cfg(any(windows, test))]
+fn canonical_direct_codex_executable(
+    command: &Path,
+    search_path: Option<&std::ffi::OsStr>,
+) -> anyhow::Result<PathBuf> {
+    let has_parent = command
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty());
+    let path = search_path
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("PATH"));
+    let candidates = if command.is_absolute() || has_parent {
+        vec![command.to_path_buf()]
+    } else {
+        path.as_deref()
+            .map(std::env::split_paths)
+            .into_iter()
+            .flatten()
+            .map(|directory| directory.join(command))
+            .collect()
+    };
+
+    for candidate in candidates {
+        let candidate = match candidate
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            None => candidate.with_extension("exe"),
+            Some(extension) if extension.eq_ignore_ascii_case("exe") => candidate,
+            Some(_) => continue,
+        };
+        if !candidate.is_file() {
+            continue;
+        }
+        let canonical = candidate
+            .canonicalize()
+            .with_context(|| format!("canonicalize Codex executable {}", candidate.display()))?;
+        if canonical.is_file() {
+            return Ok(canonical);
+        }
+    }
+    anyhow::bail!(
+        "Codex executable {} must resolve to an absolute native .exe file",
+        command.display()
+    )
+}
+
+#[cfg(any(windows, test))]
+fn windows_scheduler_task_name(project_id: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        project_id.len() == 32
+            && project_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "project id must be 32 lowercase hexadecimal characters"
+    );
+    Ok(format!("Edda-Reconcile-{project_id}"))
+}
+
+#[cfg(any(windows, test))]
+fn windows_scheduler_management_args(
+    project_id: &str,
+) -> anyhow::Result<(String, Vec<String>, Vec<String>)> {
+    let task_name = windows_scheduler_task_name(project_id)?;
+    let strings = |items: &[&str]| items.iter().map(|item| (*item).into()).collect();
+    let query_args = strings(&["/Query", "/TN", &task_name, "/XML", "/HRESULT"]);
+    let delete_args = strings(&["/Delete", "/TN", &task_name, "/F", "/HRESULT"]);
+    Ok((task_name, query_args, delete_args))
+}
+
+#[cfg(any(windows, test))]
 fn windows_scheduler_spec(
     exe: &Path,
     repo: &Path,
     project_id: &str,
+    config: &ReconcileConfig,
 ) -> anyhow::Result<WindowsSchedulerSpec> {
     anyhow::ensure!(
         windows_path_is_absolute(exe)?,
@@ -268,17 +342,18 @@ fn windows_scheduler_spec(
         "scheduler repository must be absolute"
     );
     anyhow::ensure!(
-        project_id.len() == 32
-            && project_id
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "project id must be 32 lowercase hexadecimal characters"
+        windows_path_is_absolute(&config.codex_bin)?,
+        "scheduler Codex executable must be absolute"
     );
-    let task_name = format!("Edda-Reconcile-{project_id}");
+    let (task_name, query_args, _) = windows_scheduler_management_args(project_id)?;
     let task_run = format!(
-        "{} reconcile --repo {}",
+        "{} reconcile --repo {} --max-workers {} --max-attempts {} --lease-ttl-s {} --codex-bin {}",
         quote_windows_argument(exe)?,
-        quote_windows_argument(repo)?
+        quote_windows_argument(repo)?,
+        config.max_workers,
+        config.max_attempts,
+        config.lease_ttl_s,
+        quote_windows_argument(&config.codex_bin)?
     );
     let strings = |items: &[&str]| items.iter().map(|item| (*item).into()).collect();
     Ok(WindowsSchedulerSpec {
@@ -286,8 +361,7 @@ fn windows_scheduler_spec(
             "/Create", "/SC", "MINUTE", "/MO", "1", "/TN", &task_name, "/TR", &task_run, "/RL",
             "LIMITED", "/F", "/HRESULT",
         ]),
-        query_args: strings(&["/Query", "/TN", &task_name, "/XML", "/HRESULT"]),
-        delete_args: strings(&["/Delete", "/TN", &task_name, "/F", "/HRESULT"]),
+        query_args,
         task_name,
     })
 }
@@ -338,19 +412,25 @@ fn run_schtasks(args: &[String]) -> anyhow::Result<SchedulerOutput> {
     })
 }
 
-fn scheduler_lifecycle(repo: &Path, install: bool) -> anyhow::Result<()> {
+fn scheduler_lifecycle(
+    repo: &Path,
+    install_config: Option<&ReconcileConfig>,
+) -> anyhow::Result<()> {
     #[cfg(not(windows))]
     {
-        let _ = (repo, install);
+        let _ = (repo, install_config);
         anyhow::bail!("Windows Task Scheduler is supported only on Windows")
     }
     #[cfg(windows)]
     {
         let repo = canonical_main_repo(repo)?;
-        let executable = std::env::current_exe()?.canonicalize()?;
-        let spec =
-            windows_scheduler_spec(&executable, &repo, &edda_store::project_id_for_root(&repo))?;
-        if install {
+        let project_id = edda_store::project_id_for_root(&repo);
+        let (task_name, query_args, delete_args) = windows_scheduler_management_args(&project_id)?;
+        if let Some(config) = install_config {
+            let executable = std::env::current_exe()?.canonicalize()?;
+            let mut config = config.clone();
+            config.codex_bin = canonical_direct_codex_executable(&config.codex_bin, None)?;
+            let spec = windows_scheduler_spec(&executable, &repo, &project_id, &config)?;
             let created = run_schtasks(&spec.create_args)
                 .with_context(|| format!("scheduler Create failed for task {}", spec.task_name))?;
             anyhow::ensure!(
@@ -375,38 +455,38 @@ fn scheduler_lifecycle(repo: &Path, install: bool) -> anyhow::Result<()> {
             return Ok(());
         }
 
-        let before = run_schtasks(&spec.query_args)
-            .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?;
+        let before = run_schtasks(&query_args)
+            .with_context(|| format!("scheduler Query failed for task {task_name}"))?;
         if classify_scheduler_query(&before)
-            .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?
+            .with_context(|| format!("scheduler Query failed for task {task_name}"))?
             == SchedulerTaskState::Missing
         {
             println!(
                 "scheduler task {} already absent for {}",
-                spec.task_name,
+                task_name,
                 repo.display()
             );
             return Ok(());
         }
-        let deleted = run_schtasks(&spec.delete_args)
-            .with_context(|| format!("scheduler Delete failed for task {}", spec.task_name))?;
+        let deleted = run_schtasks(&delete_args)
+            .with_context(|| format!("scheduler Delete failed for task {task_name}"))?;
         anyhow::ensure!(
             deleted.code == 0 || deleted.code == MISSING_TASK_HRESULT,
             "scheduler Delete failed for {}: {}",
-            spec.task_name,
+            task_name,
             deleted.description()
         );
-        let after = run_schtasks(&spec.query_args)
-            .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?;
+        let after = run_schtasks(&query_args)
+            .with_context(|| format!("scheduler Query failed for task {task_name}"))?;
         require_scheduler_state(
             &after,
             SchedulerTaskState::Missing,
             "post-Delete Query",
-            &spec.task_name,
+            &task_name,
         )?;
         println!(
             "uninstalled scheduler task {} for {}",
-            spec.task_name,
+            task_name,
             repo.display()
         );
         Ok(())
@@ -1329,6 +1409,15 @@ mod tests {
         lock.lock().unwrap_or_else(|poison| poison.into_inner())
     }
 
+    fn scheduler_config(codex_bin: &str) -> ReconcileConfig {
+        ReconcileConfig {
+            max_workers: 3,
+            max_attempts: 3,
+            lease_ttl_s: 300,
+            codex_bin: PathBuf::from(codex_bin),
+        }
+    }
+
     #[test]
     fn scheduler_cli_parses_reentry_and_rejects_conflicting_modes() {
         let parsed = SchedulerCli::try_parse_from([
@@ -1358,14 +1447,76 @@ mod tests {
             "1"
         ])
         .is_err());
+
+        let reentry = SchedulerCli::try_parse_from([
+            "test",
+            "--repo",
+            r"C:\ai projects\sample",
+            "--max-workers",
+            "2",
+            "--max-attempts",
+            "5",
+            "--lease-ttl-s",
+            "17",
+            "--codex-bin",
+            r"C:\Program Files\Codex\codex.exe",
+        ])
+        .expect("rendered scheduler re-entry arguments");
+        let config = ReconcileConfig::from_args(&reentry.args);
+        assert_eq!(config.max_workers, 2);
+        assert_eq!(config.max_attempts, 5);
+        assert_eq!(config.lease_ttl_s, 17);
+        assert_eq!(
+            config.codex_bin,
+            PathBuf::from(r"C:\Program Files\Codex\codex.exe")
+        );
+    }
+
+    #[test]
+    fn scheduler_codex_config_prefers_cli_then_environment() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = test_lock(&ENV_LOCK);
+        let previous = std::env::var_os("EDDA_CODEX_BIN");
+        std::env::set_var("EDDA_CODEX_BIN", r"C:\environment\codex.exe");
+
+        let explicit = SchedulerCli::try_parse_from([
+            "test",
+            "--install-scheduler",
+            "--codex-bin",
+            r"C:\explicit\codex.exe",
+        ])
+        .expect("explicit Codex path");
+        assert_eq!(
+            ReconcileConfig::from_args(&explicit.args).codex_bin,
+            PathBuf::from(r"C:\explicit\codex.exe")
+        );
+
+        let inherited = SchedulerCli::try_parse_from(["test", "--install-scheduler"])
+            .expect("environment Codex path");
+        assert_eq!(
+            ReconcileConfig::from_args(&inherited.args).codex_bin,
+            PathBuf::from(r"C:\environment\codex.exe")
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("EDDA_CODEX_BIN", value),
+            None => std::env::remove_var("EDDA_CODEX_BIN"),
+        }
     }
 
     #[test]
     fn scheduler_renderer_emits_exact_project_scoped_argv() -> anyhow::Result<()> {
+        let config = ReconcileConfig {
+            max_workers: 2,
+            max_attempts: 5,
+            lease_ttl_s: 17,
+            codex_bin: PathBuf::from(r"C:\Program Files\Codex\codex.exe"),
+        };
         let spec = windows_scheduler_spec(
             Path::new(r"C:\Program Files\edda\edda.exe"),
             Path::new(r"C:\ai projects\sample"),
             "0123456789abcdef0123456789abcdef",
+            &config,
         )?;
 
         assert_eq!(
@@ -1374,7 +1525,7 @@ mod tests {
         );
         assert_eq!(
             spec.create_args[8],
-            r#""C:\Program Files\edda\edda.exe" reconcile --repo "C:\ai projects\sample""#
+            r#""C:\Program Files\edda\edda.exe" reconcile --repo "C:\ai projects\sample" --max-workers 2 --max-attempts 5 --lease-ttl-s 17 --codex-bin "C:\Program Files\Codex\codex.exe""#
         );
         assert_eq!(
             spec.create_args,
@@ -1387,7 +1538,7 @@ mod tests {
                 "/TN",
                 "Edda-Reconcile-0123456789abcdef0123456789abcdef",
                 "/TR",
-                r#""C:\Program Files\edda\edda.exe" reconcile --repo "C:\ai projects\sample""#,
+                r#""C:\Program Files\edda\edda.exe" reconcile --repo "C:\ai projects\sample" --max-workers 2 --max-attempts 5 --lease-ttl-s 17 --codex-bin "C:\Program Files\Codex\codex.exe""#,
                 "/RL",
                 "LIMITED",
                 "/F",
@@ -1404,8 +1555,94 @@ mod tests {
                 "/HRESULT",
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_renderer_is_stable_and_quotes_terminal_backslashes() -> anyhow::Result<()> {
+        let id = "0123456789abcdef0123456789abcdef";
+        let config = ReconcileConfig {
+            max_workers: 3,
+            max_attempts: 3,
+            lease_ttl_s: 300,
+            codex_bin: PathBuf::from(r"C:\Codex\codex.exe"),
+        };
+        let first = windows_scheduler_spec(
+            Path::new(r"C:\edda\edda.exe"),
+            Path::new(r"C:\repo\"),
+            id,
+            &config,
+        )?;
+        let second = windows_scheduler_spec(
+            Path::new(r"C:\edda\edda.exe"),
+            Path::new(r"C:\repo\"),
+            id,
+            &config,
+        )?;
+
+        assert_eq!(first.create_args, second.create_args);
         assert_eq!(
-            spec.delete_args,
+            first.create_args[8],
+            r#""C:\edda\edda.exe" reconcile --repo "C:\repo\\" --max-workers 3 --max-attempts 3 --lease-ttl-s 300 --codex-bin "C:\Codex\codex.exe""#
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_codex_resolver_requires_a_canonical_direct_exe() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let native = dir.path().join("codex.exe");
+        std::fs::write(&native, b"MZ")?;
+        let shim = dir.path().join("codex.cmd");
+        std::fs::write(&shim, b"@echo off")?;
+        let search_path = std::env::join_paths([dir.path()])?;
+
+        assert_eq!(
+            canonical_direct_codex_executable(Path::new("codex"), Some(&search_path))?,
+            native.canonicalize()?
+        );
+        assert_eq!(
+            canonical_direct_codex_executable(&native, None)?,
+            native.canonicalize()?
+        );
+        assert!(canonical_direct_codex_executable(&shim, None).is_err());
+        assert!(
+            canonical_direct_codex_executable(Path::new("missing-codex"), Some(&search_path))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scheduler_codex_resolver_finds_this_hosts_native_codex_exe() -> anyhow::Result<()> {
+        let resolved = canonical_direct_codex_executable(Path::new("codex"), None)?;
+        assert!(resolved.is_absolute());
+        assert!(resolved.is_file());
+        assert!(resolved
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe")));
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_uninstall_target_does_not_require_a_codex_executable() -> anyhow::Result<()> {
+        let (task_name, query_args, delete_args) =
+            windows_scheduler_management_args("0123456789abcdef0123456789abcdef")?;
+        assert_eq!(task_name, "Edda-Reconcile-0123456789abcdef0123456789abcdef");
+        assert_eq!(
+            query_args,
+            [
+                "/Query",
+                "/TN",
+                "Edda-Reconcile-0123456789abcdef0123456789abcdef",
+                "/XML",
+                "/HRESULT",
+            ]
+        );
+        assert_eq!(
+            delete_args,
             [
                 "/Delete",
                 "/TN",
@@ -1413,22 +1650,6 @@ mod tests {
                 "/F",
                 "/HRESULT",
             ]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn scheduler_renderer_is_stable_and_quotes_terminal_backslashes() -> anyhow::Result<()> {
-        let id = "0123456789abcdef0123456789abcdef";
-        let first =
-            windows_scheduler_spec(Path::new(r"C:\edda\edda.exe"), Path::new(r"C:\repo\"), id)?;
-        let second =
-            windows_scheduler_spec(Path::new(r"C:\edda\edda.exe"), Path::new(r"C:\repo\"), id)?;
-
-        assert_eq!(first.create_args, second.create_args);
-        assert_eq!(
-            first.create_args[8],
-            r#""C:\edda\edda.exe" reconcile --repo "C:\repo\\""#
         );
         Ok(())
     }
@@ -1461,29 +1682,41 @@ mod tests {
     fn scheduler_renderer_rejects_ambiguous_inputs() {
         let executable = Path::new(r"C:\edda\edda.exe");
         let repository = Path::new(r"C:\repo");
+        let config = scheduler_config(r"C:\Codex\codex.exe");
         for id in [
             "0123456789abcdef0123456789abcde",
             "0123456789ABCDEF0123456789ABCDEF",
             "0123456789abcdef0123456789abcde*",
         ] {
-            assert!(windows_scheduler_spec(executable, repository, id).is_err());
+            assert!(windows_scheduler_spec(executable, repository, id, &config).is_err());
         }
         assert!(windows_scheduler_spec(
             executable,
             Path::new("C:\\repo\"quoted"),
-            "0123456789abcdef0123456789abcdef"
+            "0123456789abcdef0123456789abcdef",
+            &config
         )
         .is_err());
         assert!(windows_scheduler_spec(
             Path::new("edda.exe"),
             repository,
-            "0123456789abcdef0123456789abcdef"
+            "0123456789abcdef0123456789abcdef",
+            &config
         )
         .is_err());
         assert!(windows_scheduler_spec(
             executable,
             Path::new("repo"),
-            "0123456789abcdef0123456789abcdef"
+            "0123456789abcdef0123456789abcdef",
+            &config
+        )
+        .is_err());
+        let relative_codex = scheduler_config("codex.exe");
+        assert!(windows_scheduler_spec(
+            executable,
+            repository,
+            "0123456789abcdef0123456789abcdef",
+            &relative_codex
         )
         .is_err());
     }
@@ -1497,7 +1730,8 @@ mod tests {
         assert!(windows_scheduler_spec(
             Path::new(r"C:\edda\edda.exe"),
             Path::new(&invalid),
-            "0123456789abcdef0123456789abcdef"
+            "0123456789abcdef0123456789abcdef",
+            &scheduler_config(r"C:\Codex\codex.exe")
         )
         .is_err());
     }
@@ -1558,7 +1792,8 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn scheduler_lifecycle_is_explicitly_unsupported_off_windows() {
-        let error = scheduler_lifecycle(Path::new("/tmp/repo"), true)
+        let config = scheduler_config("/tmp/codex.exe");
+        let error = scheduler_lifecycle(Path::new("/tmp/repo"), Some(&config))
             .expect_err("non-Windows scheduler must fail")
             .to_string();
         assert!(error.contains("supported only on Windows"));
