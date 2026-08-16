@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::AtomicU64;
 
+#[cfg(any(windows, test))]
+use std::borrow::Cow;
+
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -506,6 +509,7 @@ enum ManifestCleanupDecision {
 #[cfg(any(windows, test))]
 struct SchedulerOutput {
     code: u32,
+    stdout_raw: Vec<u8>,
     stdout: String,
     stderr: String,
     stdout_bytes: usize,
@@ -527,23 +531,96 @@ impl SchedulerOutput {
         stdout_bytes: usize,
         stderr_bytes: usize,
     ) -> Self {
+        Self::for_test_bytes_with_lengths(
+            code,
+            stdout.as_bytes(),
+            stderr.as_bytes(),
+            stdout_bytes,
+            stderr_bytes,
+        )
+    }
+
+    #[cfg(test)]
+    fn for_test_bytes(code: u32, stdout: &[u8], stderr: &[u8]) -> Self {
+        Self::for_test_bytes_with_lengths(code, stdout, stderr, stdout.len(), stderr.len())
+    }
+
+    #[cfg(test)]
+    fn for_test_bytes_with_stdout_len(
+        code: u32,
+        stdout: &[u8],
+        stderr: &[u8],
+        stdout_bytes: usize,
+    ) -> Self {
+        Self::for_test_bytes_with_lengths(code, stdout, stderr, stdout_bytes, stderr.len())
+    }
+
+    #[cfg(test)]
+    fn for_test_bytes_with_lengths(
+        code: u32,
+        stdout: &[u8],
+        stderr: &[u8],
+        stdout_bytes: usize,
+        stderr_bytes: usize,
+    ) -> Self {
+        let stdout_raw = stdout[..stdout.len().min(SCHEDULER_OUTPUT_LIMIT)].to_vec();
         Self {
             code,
-            stdout: stdout.into(),
-            stderr: stderr.into(),
+            stdout: String::from_utf8_lossy(&stdout_raw).into_owned(),
+            stdout_raw,
+            stderr: String::from_utf8_lossy(&stderr[..stderr.len().min(SCHEDULER_OUTPUT_LIMIT)])
+                .into_owned(),
             stdout_bytes,
             stderr_bytes,
         }
     }
 
-    fn xml(&self) -> anyhow::Result<&str> {
+    fn xml(&self) -> anyhow::Result<Cow<'_, str>> {
         anyhow::ensure!(
             self.stdout_bytes <= SCHEDULER_OUTPUT_LIMIT,
             "scheduler Query XML is {} bytes; maximum bounded output is {}",
             self.stdout_bytes,
             SCHEDULER_OUTPUT_LIMIT
         );
-        Ok(&self.stdout)
+        let bytes = self.stdout_raw.as_slice();
+        anyhow::ensure!(
+            !bytes.starts_with(&[0x00, 0x00, 0xfe, 0xff])
+                && !bytes.starts_with(&[0xff, 0xfe, 0x00, 0x00]),
+            "scheduler Query XML uses an unsupported UTF-32 encoding"
+        );
+        let decode_utf16 = |encoded: &[u8], little_endian: bool| -> anyhow::Result<String> {
+            anyhow::ensure!(
+                encoded.len().is_multiple_of(2),
+                "scheduler Query XML contains odd-length UTF-16"
+            );
+            let units = encoded
+                .chunks_exact(2)
+                .map(|bytes| {
+                    if little_endian {
+                        u16::from_le_bytes([bytes[0], bytes[1]])
+                    } else {
+                        u16::from_be_bytes([bytes[0], bytes[1]])
+                    }
+                })
+                .collect::<Vec<_>>();
+            String::from_utf16(&units).context("scheduler Query XML contains malformed UTF-16")
+        };
+        if let Some(encoded) = bytes.strip_prefix(&[0xff, 0xfe]) {
+            return Ok(Cow::Owned(decode_utf16(encoded, true)?));
+        }
+        if let Some(encoded) = bytes.strip_prefix(&[0xfe, 0xff]) {
+            return Ok(Cow::Owned(decode_utf16(encoded, false)?));
+        }
+        if bytes.starts_with(&[0x3c, 0x00, 0x3f, 0x00]) {
+            return Ok(Cow::Owned(decode_utf16(bytes, true)?));
+        }
+        if bytes.starts_with(&[0x00, 0x3c, 0x00, 0x3f]) {
+            return Ok(Cow::Owned(decode_utf16(bytes, false)?));
+        }
+        let utf8 = bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(bytes);
+        Ok(Cow::Borrowed(
+            std::str::from_utf8(utf8).context("scheduler Query XML is not valid UTF-8")?,
+        ))
     }
 
     fn description(&self) -> String {
@@ -881,7 +958,8 @@ fn manifest_cleanup_decision(
         SchedulerTaskState::Missing => return Ok(ManifestCleanupDecision::RemoveNewArtifact),
         SchedulerTaskState::Present => {}
     }
-    let actions = scheduler_exec_values(query.xml()?)?;
+    let xml = query.xml()?;
+    let actions = scheduler_exec_values(xml.as_ref())?;
     let executable = executable
         .to_str()
         .context("scheduler executable is not Unicode")?;
@@ -997,13 +1075,14 @@ fn run_schtasks(args: &[String]) -> anyhow::Result<SchedulerOutput> {
         .status
         .code()
         .context("schtasks.exe terminated by signal")?;
-    let bounded = |bytes: &[u8]| {
-        String::from_utf8_lossy(&bytes[..bytes.len().min(SCHEDULER_OUTPUT_LIMIT)]).into_owned()
-    };
+    let bounded = |bytes: &[u8]| bytes[..bytes.len().min(SCHEDULER_OUTPUT_LIMIT)].to_vec();
+    let stdout_raw = bounded(&output.stdout);
+    let stderr_raw = bounded(&output.stderr);
     Ok(SchedulerOutput {
         code: signed_code as u32,
-        stdout: bounded(&output.stdout),
-        stderr: bounded(&output.stderr),
+        stdout: String::from_utf8_lossy(&stdout_raw).into_owned(),
+        stdout_raw,
+        stderr: String::from_utf8_lossy(&stderr_raw).into_owned(),
         stdout_bytes: output.stdout.len(),
         stderr_bytes: output.stderr.len(),
     })
@@ -1054,7 +1133,7 @@ fn scheduler_lifecycle(
                 )?;
                 anyhow::ensure!(
                     scheduler_query_references_manifest(
-                        queried.xml()?,
+                        queried.xml()?.as_ref(),
                         &executable,
                         &manifest.path,
                     )?,
@@ -2070,6 +2149,26 @@ mod tests {
         PathBuf::from(format!(r"C:\{}.json", "x".repeat(target - fixed)))
     }
 
+    fn scheduler_xml_utf16_bytes(xml: &str, little_endian: bool, bom: bool) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        if bom {
+            bytes.extend_from_slice(if little_endian {
+                &[0xff, 0xfe]
+            } else {
+                &[0xfe, 0xff]
+            });
+        }
+        for unit in xml.encode_utf16() {
+            let encoded = if little_endian {
+                unit.to_le_bytes()
+            } else {
+                unit.to_be_bytes()
+            };
+            bytes.extend_from_slice(&encoded);
+        }
+        bytes
+    }
+
     struct SchedulerManifestFixture {
         _store_guard: crate::test_support::IsolatedStore,
         _root: tempfile::TempDir,
@@ -3019,6 +3118,73 @@ mod tests {
             ),
         )
         .is_err());
+    }
+
+    #[test]
+    fn scheduler_query_decodes_raw_utf16_xml_with_non_ascii_paths() -> anyhow::Result<()> {
+        let executable = Path::new(r"C:\工具\Edda\edda.exe");
+        let manifest = Path::new(
+            r"C:\儲存\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+        );
+        let xml = r#"<?xml version="1.0" encoding="UTF-16"?><Task><Actions><Exec><Command>C:\工具\Edda\edda.exe</Command><Arguments>reconcile --scheduler-manifest &quot;C:\儲存\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json&quot;</Arguments></Exec></Actions></Task>"#;
+
+        let utf8_xml = xml.replace("UTF-16", "UTF-8");
+        for bytes in [
+            utf8_xml.as_bytes().to_vec(),
+            [b"\xef\xbb\xbf", utf8_xml.as_bytes()].concat(),
+        ] {
+            let output = SchedulerOutput::for_test_bytes(0, &bytes, b"");
+            let decoded = output.xml()?;
+            assert!(scheduler_query_references_manifest(
+                decoded.as_ref(),
+                executable,
+                manifest,
+            )?);
+        }
+        for (little_endian, bom) in [(true, true), (false, true), (true, false), (false, false)] {
+            let bytes = scheduler_xml_utf16_bytes(xml, little_endian, bom);
+            let output = SchedulerOutput::for_test_bytes(0, &bytes, b"");
+            let decoded = output.xml()?;
+            assert!(scheduler_query_references_manifest(
+                decoded.as_ref(),
+                executable,
+                manifest,
+            )?);
+            assert_eq!(
+                manifest_cleanup_decision(&output, executable, manifest)?,
+                ManifestCleanupDecision::Retain
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_query_rejects_malformed_raw_xml_but_keeps_diagnostics_lossy() {
+        for bytes in [
+            vec![0xff, 0xfe, b'<'],
+            vec![0xff, 0xfe, 0x00, 0xd8],
+            vec![0x00, 0x00, 0xfe, 0xff],
+            vec![0x80, 0x81],
+        ] {
+            assert!(SchedulerOutput::for_test_bytes(0, &bytes, b"")
+                .xml()
+                .is_err());
+        }
+
+        let overflow = SchedulerOutput::for_test_bytes_with_stdout_len(
+            0,
+            b"<Task />",
+            b"",
+            SCHEDULER_OUTPUT_LIMIT + 1,
+        );
+        assert!(overflow.xml().is_err());
+
+        let localized = SchedulerOutput::for_test_bytes(MISSING_TASK_HRESULT, b"", &[0xff]);
+        assert_eq!(
+            classify_scheduler_query(&localized).expect("non-XML diagnostics stay lossy"),
+            SchedulerTaskState::Missing
+        );
+        assert!(localized.description().contains('\u{fffd}'));
     }
 
     #[test]
