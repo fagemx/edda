@@ -792,6 +792,16 @@ fn decode_scheduler_xml_value(value: &str) -> anyhow::Result<String> {
 }
 
 #[cfg(any(windows, test))]
+fn contains_scheduler_exec_candidate(xml: &str) -> bool {
+    xml.match_indices("<Exec").any(|(start, _)| {
+        matches!(
+            xml.as_bytes().get(start + "<Exec".len()),
+            None | Some(b'>' | b'/') | Some(b' ' | b'\t' | b'\r' | b'\n')
+        )
+    })
+}
+
+#[cfg(any(windows, test))]
 fn scheduler_exec_values(xml: &str) -> anyhow::Result<Vec<(String, String)>> {
     anyhow::ensure!(
         xml.len() <= SCHEDULER_OUTPUT_LIMIT,
@@ -818,7 +828,8 @@ fn scheduler_exec_values(xml: &str) -> anyhow::Result<Vec<(String, String)>> {
     let mut remaining = xml;
     while let Some(start) = remaining.find("<Exec>") {
         anyhow::ensure!(
-            !remaining[..start].contains("<Exec") && !remaining[..start].contains("</Exec>"),
+            !contains_scheduler_exec_candidate(&remaining[..start])
+                && !remaining[..start].contains("</Exec>"),
             "scheduler Query XML contains a malformed Exec action"
         );
         remaining = &remaining[start + "<Exec>".len()..];
@@ -827,14 +838,14 @@ fn scheduler_exec_values(xml: &str) -> anyhow::Result<Vec<(String, String)>> {
             .context("scheduler Query XML contains an unterminated Exec action")?;
         let action = &remaining[..end];
         anyhow::ensure!(
-            !action.contains("<Exec"),
+            !contains_scheduler_exec_candidate(action),
             "scheduler Query XML contains a nested Exec action"
         );
         actions.push((element(action, "Command")?, element(action, "Arguments")?));
         remaining = &remaining[end + "</Exec>".len()..];
     }
     anyhow::ensure!(
-        !remaining.contains("<Exec") && !remaining.contains("</Exec>"),
+        !contains_scheduler_exec_candidate(remaining) && !remaining.contains("</Exec>"),
         "scheduler Query XML contains a malformed Exec action"
     );
     Ok(actions)
@@ -2256,6 +2267,39 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_query_ignores_execution_time_limit_setting() -> anyhow::Result<()> {
+        let executable = Path::new(r"C:\Program Files\Edda\edda.exe");
+        let manifest = Path::new(
+            r"C:\Store\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+        );
+        let xml = r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Settings>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Program Files\Edda\edda.exe</Command>
+      <Arguments>reconcile --scheduler-manifest &quot;C:\Store\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json&quot;</Arguments>
+    </Exec>
+  </Actions>
+</Task>"#;
+
+        assert!(scheduler_query_references_manifest(
+            xml, executable, manifest
+        )?);
+        assert_eq!(
+            manifest_cleanup_decision(
+                &SchedulerOutput::for_test(0, xml, ""),
+                executable,
+                manifest,
+            )?,
+            ManifestCleanupDecision::Retain
+        );
+        Ok(())
+    }
+
+    #[test]
     fn scheduler_query_scans_every_exec_before_deciding() {
         let executable = Path::new(r"C:\edda\edda.exe");
         let expected = Path::new(
@@ -2268,6 +2312,11 @@ mod tests {
             expected_xml.trim_end_matches("<Exec><Command>truncated")
         );
         assert!(scheduler_query_references_manifest(&cut_open, executable, expected).is_err());
+        let self_closing = format!(
+            "{}<Exec/>",
+            expected_xml.trim_end_matches("<Exec><Command>truncated")
+        );
+        assert!(scheduler_query_references_manifest(&self_closing, executable, expected).is_err());
 
         let different_xml = expected_xml.replace(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
