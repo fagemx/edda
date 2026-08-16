@@ -47,6 +47,7 @@ fn scheduler_manifest_is_canonical_content_addressed_and_strict() -> anyhow::Res
     assert_eq!(first.bytes, second.bytes);
     assert_eq!(first.path, second.path);
     assert!(first.path.ends_with(format!("{}.json", first.digest)));
+    edda_store::write_atomic(&first.path, &first.bytes)?;
     assert_eq!(load_scheduler_manifest(&first.path)?.manifest, first.manifest);
     Ok(())
 }
@@ -198,7 +199,7 @@ fn scheduler_install_failure_never_overwrites_prior_manifest() -> anyhow::Result
     let new = prepared_manifest_with_attempts(5)?;
     assert_ne!(old.path, new.path);
     assert_eq!(
-        manifest_cleanup_decision(&missing_scheduler_output(), &new.path)?,
+        manifest_cleanup_decision(&missing_scheduler_output(), &scheduler_exe(), &new.path)?,
         ManifestCleanupDecision::RemoveNewArtifact
     );
     assert_eq!(std::fs::read(&old.path)?, old.bytes);
@@ -235,6 +236,7 @@ fn scheduler_query_references_manifest(
 
 fn manifest_cleanup_decision(
     query: &SchedulerOutput,
+    executable: &Path,
     expected_manifest: &Path,
 ) -> anyhow::Result<ManifestCleanupDecision>;
 ```
