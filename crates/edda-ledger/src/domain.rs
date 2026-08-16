@@ -173,7 +173,7 @@ pub struct ImportParams<'a> {
     pub village_id: Option<&'a str>,
 }
 
-/// A task brief row.
+/// Mutable lease held by one task execution attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskLease {
     pub task_id: u64,
