@@ -53,6 +53,22 @@ pub struct ReconcileArgs {
     run_task: Option<u64>,
     #[arg(long, hide = true)]
     attempt: Option<u32>,
+    #[arg(
+        long,
+        hide = true,
+        conflicts_with_all = [
+            "install_scheduler",
+            "uninstall_scheduler",
+            "repo",
+            "codex_bin",
+            "run_task",
+            "attempt",
+            "max_workers",
+            "max_attempts",
+            "lease_ttl_s"
+        ]
+    )]
+    scheduler_manifest: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -92,11 +108,8 @@ impl ReconcileConfig {
     }
 }
 
-// Task 2 removes these temporary allowances when it wires the private Task 1 surface.
-#[allow(dead_code)]
 const SCHEDULER_MANIFEST_MAX_BYTES: u64 = 16 * 1024;
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct SchedulerLaunchManifestV1 {
@@ -109,22 +122,25 @@ struct SchedulerLaunchManifestV1 {
     lease_ttl_s: u64,
 }
 
-#[allow(dead_code)]
 struct PreparedSchedulerManifest {
+    // Task 3 consumes these fields when it publishes immutable manifests.
+    #[allow(dead_code)]
     manifest: SchedulerLaunchManifestV1,
+    #[allow(dead_code)]
     bytes: Vec<u8>,
+    #[allow(dead_code)]
     digest: String,
     path: PathBuf,
 }
 
-#[allow(dead_code)]
 struct LoadedSchedulerManifest {
+    // Task 3 consumes the payload when verifying existing artifacts.
+    #[allow(dead_code)]
     manifest: SchedulerLaunchManifestV1,
     repo: PathBuf,
     config: ReconcileConfig,
 }
 
-#[allow(dead_code)]
 fn scheduler_manifest_directory(store: &Path, must_exist: bool) -> anyhow::Result<PathBuf> {
     let store = std::path::absolute(store)
         .with_context(|| format!("resolve Edda store root {}", store.display()))?;
@@ -161,12 +177,10 @@ fn scheduler_manifest_directory(store: &Path, must_exist: bool) -> anyhow::Resul
     Ok(directory)
 }
 
-#[allow(dead_code)]
 fn scheduler_manifest_digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-#[allow(dead_code)]
 fn validate_scheduler_manifest(
     manifest: SchedulerLaunchManifestV1,
 ) -> anyhow::Result<LoadedSchedulerManifest> {
@@ -201,7 +215,6 @@ fn validate_scheduler_manifest(
     })
 }
 
-#[allow(dead_code)]
 fn prepare_scheduler_manifest(
     store: &Path,
     repo: &Path,
@@ -229,7 +242,6 @@ fn prepare_scheduler_manifest(
     })
 }
 
-#[allow(dead_code)]
 fn load_scheduler_manifest(path: &Path) -> anyhow::Result<LoadedSchedulerManifest> {
     anyhow::ensure!(
         path.is_absolute(),
@@ -322,9 +334,17 @@ struct PersistOutcome {
 }
 
 pub fn run(repo_root: &Path, args: ReconcileArgs) -> anyhow::Result<()> {
-    let repo_root = match args.repo.as_deref() {
-        Some(repo) => canonical_main_repo(repo)?,
-        None => repo_root.to_path_buf(),
+    let scheduler_manifest = args
+        .scheduler_manifest
+        .as_deref()
+        .map(load_scheduler_manifest)
+        .transpose()?;
+    let repo_root = match scheduler_manifest.as_ref() {
+        Some(loaded) => loaded.repo.clone(),
+        None => match args.repo.as_deref() {
+            Some(repo) => canonical_main_repo(repo)?,
+            None => repo_root.to_path_buf(),
+        },
     };
     if args.install_scheduler {
         let config = ReconcileConfig::from_args(&args);
@@ -333,7 +353,9 @@ pub fn run(repo_root: &Path, args: ReconcileArgs) -> anyhow::Result<()> {
     if args.uninstall_scheduler {
         return scheduler_lifecycle(&repo_root, None);
     }
-    let config = ReconcileConfig::from_args(&args);
+    let config = scheduler_manifest
+        .map(|loaded| loaded.config)
+        .unwrap_or_else(|| ReconcileConfig::from_args(&args));
     if let Some(task_id) = args.run_task {
         let attempt = args
             .attempt
@@ -557,34 +579,40 @@ fn windows_scheduler_management_args(
 }
 
 #[cfg(any(windows, test))]
-fn windows_scheduler_spec(
+fn render_scheduler_task_run(
     exe: &Path,
-    repo: &Path,
-    project_id: &str,
-    config: &ReconcileConfig,
-) -> anyhow::Result<WindowsSchedulerSpec> {
+    manifest_path: &Path,
+    task_name: &str,
+) -> anyhow::Result<String> {
     anyhow::ensure!(
         windows_path_is_absolute(exe)?,
         "scheduler executable must be absolute"
     );
     anyhow::ensure!(
-        windows_path_is_absolute(repo)?,
-        "scheduler repository must be absolute"
+        windows_path_is_absolute(manifest_path)?,
+        "scheduler manifest path must be absolute"
     );
-    anyhow::ensure!(
-        windows_path_is_absolute(&config.codex_bin)?,
-        "scheduler Codex executable must be absolute"
-    );
-    let (task_name, query_args, _) = windows_scheduler_management_args(project_id)?;
     let task_run = format!(
-        "{} reconcile --repo {} --max-workers {} --max-attempts {} --lease-ttl-s {} --codex-bin {}",
+        "{} reconcile --scheduler-manifest {}",
         quote_windows_argument(exe)?,
-        quote_windows_argument(repo)?,
-        config.max_workers,
-        config.max_attempts,
-        config.lease_ttl_s,
-        quote_windows_argument(&config.codex_bin)?
+        quote_windows_argument(manifest_path)?,
     );
+    let units = task_run.encode_utf16().count();
+    anyhow::ensure!(
+        units <= 261,
+        "scheduler task {task_name} /TR is {units} UTF-16 code units; maximum is 261"
+    );
+    Ok(task_run)
+}
+
+#[cfg(any(windows, test))]
+fn windows_scheduler_spec(
+    exe: &Path,
+    manifest_path: &Path,
+    project_id: &str,
+) -> anyhow::Result<WindowsSchedulerSpec> {
+    let (task_name, query_args, _) = windows_scheduler_management_args(project_id)?;
+    let task_run = render_scheduler_task_run(exe, manifest_path, &task_name)?;
     let strings = |items: &[&str]| items.iter().map(|item| (*item).into()).collect();
     Ok(WindowsSchedulerSpec {
         create_args: strings(&[
@@ -660,7 +688,8 @@ fn scheduler_lifecycle(
             let executable = std::env::current_exe()?.canonicalize()?;
             let mut config = config.clone();
             config.codex_bin = canonical_direct_codex_executable(&config.codex_bin, None)?;
-            let spec = windows_scheduler_spec(&executable, &repo, &project_id, &config)?;
+            let manifest = prepare_scheduler_manifest(&edda_store::store_root(), &repo, &config)?;
+            let spec = windows_scheduler_spec(&executable, &manifest.path, &project_id)?;
             let created = run_schtasks(&spec.create_args)
                 .with_context(|| format!("scheduler Create failed for task {}", spec.task_name))?;
             anyhow::ensure!(
@@ -1639,6 +1668,7 @@ mod tests {
         lock.lock().unwrap_or_else(|poison| poison.into_inner())
     }
 
+    #[cfg(not(windows))]
     fn scheduler_config(codex_bin: &str) -> ReconcileConfig {
         ReconcileConfig {
             max_workers: 3,
@@ -1646,6 +1676,13 @@ mod tests {
             lease_ttl_s: 300,
             codex_bin: PathBuf::from(codex_bin),
         }
+    }
+
+    fn manifest_path_for_task_run_utf16_len(target: usize) -> PathBuf {
+        let fixed = r#""C:\e.exe" reconcile --scheduler-manifest "C:\.json""#
+            .encode_utf16()
+            .count();
+        PathBuf::from(format!(r"C:\{}.json", "x".repeat(target - fixed)))
     }
 
     struct SchedulerManifestFixture {
@@ -1860,7 +1897,9 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_cli_parses_reentry_and_rejects_conflicting_modes() {
+    fn scheduler_cli_parses_manifest_reentry_and_rejects_conflicting_modes() {
+        use clap::CommandFactory;
+
         let parsed = SchedulerCli::try_parse_from([
             "test",
             "--repo",
@@ -1889,28 +1928,33 @@ mod tests {
         ])
         .is_err());
 
-        let reentry = SchedulerCli::try_parse_from([
-            "test",
-            "--repo",
-            r"C:\ai projects\sample",
-            "--max-workers",
-            "2",
-            "--max-attempts",
-            "5",
-            "--lease-ttl-s",
-            "17",
-            "--codex-bin",
-            r"C:\Program Files\Codex\codex.exe",
-        ])
-        .expect("rendered scheduler re-entry arguments");
-        let config = ReconcileConfig::from_args(&reentry.args);
-        assert_eq!(config.max_workers, 2);
-        assert_eq!(config.max_attempts, 5);
-        assert_eq!(config.lease_ttl_s, 17);
+        let manifest = r"C:\store\scheduler-launch\v1\0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.json";
+        let reentry = SchedulerCli::try_parse_from(["test", "--scheduler-manifest", manifest])
+            .expect("manifest scheduler re-entry arguments");
         assert_eq!(
-            config.codex_bin,
-            PathBuf::from(r"C:\Program Files\Codex\codex.exe")
+            reentry.args.scheduler_manifest.as_deref(),
+            Some(Path::new(manifest))
         );
+        assert!(!SchedulerCli::command()
+            .render_long_help()
+            .to_string()
+            .contains("--scheduler-manifest"));
+
+        for conflict in [
+            &["--install-scheduler"][..],
+            &["--uninstall-scheduler"][..],
+            &["--repo", r"C:\repo"][..],
+            &["--codex-bin", r"C:\codex.exe"][..],
+            &["--run-task", "7"][..],
+            &["--attempt", "1"][..],
+            &["--max-workers", "2"][..],
+            &["--max-attempts", "5"][..],
+            &["--lease-ttl-s", "17"][..],
+        ] {
+            let mut args = vec!["test", "--scheduler-manifest", manifest];
+            args.extend_from_slice(conflict);
+            assert!(SchedulerCli::try_parse_from(args).is_err(), "{conflict:?}");
+        }
     }
 
     #[test]
@@ -1947,17 +1991,13 @@ mod tests {
 
     #[test]
     fn scheduler_renderer_emits_exact_project_scoped_argv() -> anyhow::Result<()> {
-        let config = ReconcileConfig {
-            max_workers: 2,
-            max_attempts: 5,
-            lease_ttl_s: 17,
-            codex_bin: PathBuf::from(r"C:\Program Files\Codex\codex.exe"),
-        };
+        let manifest = Path::new(
+            r"C:\Users\alice\AppData\Roaming\edda\scheduler-launch\v1\0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.json",
+        );
         let spec = windows_scheduler_spec(
             Path::new(r"C:\Program Files\edda\edda.exe"),
-            Path::new(r"C:\ai projects\sample"),
+            manifest,
             "0123456789abcdef0123456789abcdef",
-            &config,
         )?;
 
         assert_eq!(
@@ -1966,7 +2006,7 @@ mod tests {
         );
         assert_eq!(
             spec.create_args[8],
-            r#""C:\Program Files\edda\edda.exe" reconcile --repo "C:\ai projects\sample" --max-workers 2 --max-attempts 5 --lease-ttl-s 17 --codex-bin "C:\Program Files\Codex\codex.exe""#
+            r#""C:\Program Files\edda\edda.exe" reconcile --scheduler-manifest "C:\Users\alice\AppData\Roaming\edda\scheduler-launch\v1\0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.json""#
         );
         assert_eq!(
             spec.create_args,
@@ -1979,7 +2019,7 @@ mod tests {
                 "/TN",
                 "Edda-Reconcile-0123456789abcdef0123456789abcdef",
                 "/TR",
-                r#""C:\Program Files\edda\edda.exe" reconcile --repo "C:\ai projects\sample" --max-workers 2 --max-attempts 5 --lease-ttl-s 17 --codex-bin "C:\Program Files\Codex\codex.exe""#,
+                r#""C:\Program Files\edda\edda.exe" reconcile --scheduler-manifest "C:\Users\alice\AppData\Roaming\edda\scheduler-launch\v1\0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.json""#,
                 "/RL",
                 "LIMITED",
                 "/F",
@@ -2002,31 +2042,78 @@ mod tests {
     #[test]
     fn scheduler_renderer_is_stable_and_quotes_terminal_backslashes() -> anyhow::Result<()> {
         let id = "0123456789abcdef0123456789abcdef";
-        let config = ReconcileConfig {
-            max_workers: 3,
-            max_attempts: 3,
-            lease_ttl_s: 300,
-            codex_bin: PathBuf::from(r"C:\Codex\codex.exe"),
-        };
         let first = windows_scheduler_spec(
             Path::new(r"C:\edda\edda.exe"),
-            Path::new(r"C:\repo\"),
+            Path::new(r"C:\manifest\"),
             id,
-            &config,
         )?;
         let second = windows_scheduler_spec(
             Path::new(r"C:\edda\edda.exe"),
-            Path::new(r"C:\repo\"),
+            Path::new(r"C:\manifest\"),
             id,
-            &config,
         )?;
 
         assert_eq!(first.create_args, second.create_args);
         assert_eq!(
             first.create_args[8],
-            r#""C:\edda\edda.exe" reconcile --repo "C:\repo\\" --max-workers 3 --max-attempts 3 --lease-ttl-s 300 --codex-bin "C:\Codex\codex.exe""#
+            r#""C:\edda\edda.exe" reconcile --scheduler-manifest "C:\manifest\\""#
         );
         Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_renderer_fits_the_preserved_356_unit_fixture() -> anyhow::Result<()> {
+        let executable =
+            Path::new(r"\\?\C:\ai_agent\edda-target-gh466-drill-20260816T163456Z\debug\edda.exe");
+        let repository = r"\\?\C:\ai_agent\edda-drills\20260816T163456Z\repo";
+        let codex = r"\\?\C:\Users\synvoke\AppData\Roaming\npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe";
+        let old = format!(
+            "{} reconcile --repo \"{repository}\" --max-workers 1 --max-attempts 3 --lease-ttl-s 120 --codex-bin \"{codex}\"",
+            quote_windows_argument(executable)?,
+        );
+        assert_eq!(old.encode_utf16().count(), 356);
+
+        let manifest = Path::new(
+            r"\\?\C:\Users\synvoke\AppData\Roaming\edda\scheduler-launch\v1\0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.json",
+        );
+        let rendered = render_scheduler_task_run(
+            executable,
+            manifest,
+            "Edda-Reconcile-75ab49a9590f5e1105b928c63a3c0be5",
+        )?;
+        assert_eq!(rendered.encode_utf16().count(), 238);
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_renderer_enforces_utf16_limit() -> anyhow::Result<()> {
+        let task_name = "Edda-Reconcile-0123456789abcdef0123456789abcdef";
+        let accepted_path = manifest_path_for_task_run_utf16_len(261);
+        let accepted =
+            render_scheduler_task_run(Path::new(r"C:\e.exe"), &accepted_path, task_name)?;
+        assert_eq!(accepted.encode_utf16().count(), 261);
+
+        let rejected_path = manifest_path_for_task_run_utf16_len(262);
+        let error = render_scheduler_task_run(Path::new(r"C:\e.exe"), &rejected_path, task_name)
+            .expect_err("262 UTF-16 units must fail")
+            .to_string();
+        assert!(error.contains("262"));
+        assert!(error.contains("261"));
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_renderer_counts_surrogate_pairs_as_two_utf16_units() {
+        let task_name = "Edda-Reconcile-0123456789abcdef0123456789abcdef";
+        let ascii = manifest_path_for_task_run_utf16_len(261);
+        let with_pair = PathBuf::from(ascii.to_string_lossy().replacen('x', "😀", 1));
+        let unbounded = format!(
+            r#""C:\e.exe" reconcile --scheduler-manifest "{}""#,
+            with_pair.display()
+        );
+        assert_eq!(unbounded.chars().count(), 261);
+        assert_eq!(unbounded.encode_utf16().count(), 262);
+        assert!(render_scheduler_task_run(Path::new(r"C:\e.exe"), &with_pair, task_name).is_err());
     }
 
     #[test]
@@ -2141,42 +2228,30 @@ mod tests {
     #[test]
     fn scheduler_renderer_rejects_ambiguous_inputs() {
         let executable = Path::new(r"C:\edda\edda.exe");
-        let repository = Path::new(r"C:\repo");
-        let config = scheduler_config(r"C:\Codex\codex.exe");
+        let manifest = Path::new(r"C:\manifest.json");
         for id in [
             "0123456789abcdef0123456789abcde",
             "0123456789ABCDEF0123456789ABCDEF",
             "0123456789abcdef0123456789abcde*",
         ] {
-            assert!(windows_scheduler_spec(executable, repository, id, &config).is_err());
+            assert!(windows_scheduler_spec(executable, manifest, id).is_err());
         }
         assert!(windows_scheduler_spec(
             executable,
-            Path::new("C:\\repo\"quoted"),
+            Path::new("C:\\manifest\"quoted.json"),
             "0123456789abcdef0123456789abcdef",
-            &config
         )
         .is_err());
         assert!(windows_scheduler_spec(
             Path::new("edda.exe"),
-            repository,
+            manifest,
             "0123456789abcdef0123456789abcdef",
-            &config
         )
         .is_err());
         assert!(windows_scheduler_spec(
             executable,
-            Path::new("repo"),
+            Path::new("manifest.json"),
             "0123456789abcdef0123456789abcdef",
-            &config
-        )
-        .is_err());
-        let relative_codex = scheduler_config("codex.exe");
-        assert!(windows_scheduler_spec(
-            executable,
-            repository,
-            "0123456789abcdef0123456789abcdef",
-            &relative_codex
         )
         .is_err());
     }
@@ -2191,7 +2266,6 @@ mod tests {
             Path::new(r"C:\edda\edda.exe"),
             Path::new(&invalid),
             "0123456789abcdef0123456789abcdef",
-            &scheduler_config(r"C:\Codex\codex.exe")
         )
         .is_err());
     }
@@ -2295,32 +2369,33 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_repo_reentry_runs_against_the_explicit_repo_from_an_unrelated_root(
+    fn scheduler_manifest_reentry_runs_against_its_repo_from_an_unrelated_root(
     ) -> anyhow::Result<()> {
-        let dir = tempfile::tempdir()?;
-        let repo = dir.path().join("scheduled repo");
-        let unrelated = dir.path().join("unrelated cwd");
-        std::fs::create_dir(&repo)?;
+        let mut fixture = scheduler_manifest_fixture()?;
+        fixture.config.max_workers = 0;
+        fixture.config.max_attempts = 1;
+        let unrelated = fixture._root.path().join("unrelated cwd");
         std::fs::create_dir(&unrelated)?;
-        init_git(&repo)?;
-        Ledger::ensure_initialized(&repo)?;
-        let ledger = Ledger::open(&repo)?;
+        let ledger = Ledger::open(&fixture.repo)?;
         create_task(&ledger, 91, &["src/scheduled.rs".into()])?;
         append_started(&ledger, 91, 1, 1)?;
         ledger.upsert_task_lease(&lease(91, 1, "2026-08-16T00:00:00Z"))?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
 
         run(
             &unrelated,
             ReconcileArgs {
-                max_workers: 0,
-                max_attempts: 1,
+                max_workers: 3,
+                max_attempts: 3,
                 lease_ttl_s: 300,
                 codex_bin: None,
                 install_scheduler: false,
                 uninstall_scheduler: false,
-                repo: Some(repo.canonicalize()?),
+                repo: None,
                 run_task: None,
                 attempt: None,
+                scheduler_manifest: Some(prepared.path),
             },
         )?;
 
