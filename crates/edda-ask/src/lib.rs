@@ -1072,6 +1072,7 @@ mod tests {
                 work_unit_ref: None,
                 brief_ref: None,
                 idempotency_key: None,
+                scope_paths: &[],
             })
             .unwrap();
         ledger.append_event(&created).unwrap();
@@ -1102,6 +1103,7 @@ mod tests {
                 work_unit_ref: None,
                 brief_ref: None,
                 idempotency_key: None,
+                scope_paths: &[],
             })
             .unwrap();
         ledger.append_event(&other).unwrap();

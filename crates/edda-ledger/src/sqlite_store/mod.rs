@@ -9,6 +9,7 @@ mod entities;
 mod events;
 mod mappers;
 mod schema;
+mod task_leases;
 pub mod types;
 mod village;
 
@@ -108,7 +109,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("edda_sqlite_test_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let db_path = dir.join("ledger.db");
+        let db_path = dir.join(".edda").join("ledger.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
         let store = TestStore(SqliteStore::open_or_create(&db_path).unwrap());
         (dir, store)
     }
@@ -282,7 +284,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("edda_sqlite_wal_{}_{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let db_path = dir.join("ledger.db");
+        let db_path = dir.join(".edda").join("ledger.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
 
         {
             let store = SqliteStore::open_or_create(&db_path).unwrap();
@@ -386,7 +389,7 @@ mod tests {
         drop(store);
 
         let reopened = SqliteStore::open_or_create(&db_path).unwrap();
-        assert_eq!(reopened.schema_version().unwrap(), 12);
+        assert_eq!(reopened.schema_version().unwrap(), 13);
         drop(reopened);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -417,7 +420,7 @@ mod tests {
         drop(store);
 
         let reopened = SqliteStore::open_or_create(&db_path).unwrap();
-        assert_eq!(reopened.schema_version().unwrap(), 12);
+        assert_eq!(reopened.schema_version().unwrap(), 13);
         let sentinel: String = reopened
             .conn
             .query_row(
@@ -459,7 +462,7 @@ mod tests {
         drop(store);
 
         let reopened = SqliteStore::open_or_create(&db_path).unwrap();
-        assert_eq!(reopened.schema_version().unwrap(), 12);
+        assert_eq!(reopened.schema_version().unwrap(), 13);
         assert!(table_columns(&reopened.conn, "decisions")
             .unwrap()
             .contains("village_id"));
@@ -1094,7 +1097,17 @@ mod tests {
         assert!(tables.contains(&"device_tokens".to_string()));
         assert!(tables.contains(&"decide_snapshots".to_string()));
         assert!(tables.contains(&"suggestions".to_string()));
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert!(tables.contains(&"task_leases".to_string()));
+        let indexes: Vec<String> = store
+            .conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(indexes.contains(&"idx_task_leases_expires_at".to_string()));
+        assert_eq!(store.schema_version().unwrap(), 13);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2967,8 +2980,8 @@ mod tests {
     fn test_schema_v10_fresh_db() {
         let (dir, store) = tmp_db();
 
-        // Version should be 12 (V11 village_id, V12 suggestions)
-        assert_eq!(store.schema_version().unwrap(), 12);
+        // Version should be 13 (V11 village_id, V12 suggestions, V13 task leases)
+        assert_eq!(store.schema_version().unwrap(), 13);
 
         // Verify new columns exist by inserting a test row
         store
@@ -3014,6 +3027,138 @@ mod tests {
         assert_eq!(paths, "[\"src/**\"]");
 
         drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_lease_v12_migrates_and_round_trips() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("edda_sqlite_v13_mig_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join(".edda").join("ledger.db");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V2_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V3_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V4_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V5_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V6_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V7_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V8_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V9_SQL).unwrap();
+            conn.execute_batch("ALTER TABLE decisions ADD COLUMN status TEXT NOT NULL DEFAULT 'active'; ALTER TABLE decisions ADD COLUMN authority TEXT NOT NULL DEFAULT 'human'; ALTER TABLE decisions ADD COLUMN affected_paths TEXT NOT NULL DEFAULT '[]'; ALTER TABLE decisions ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'; ALTER TABLE decisions ADD COLUMN review_after TEXT; ALTER TABLE decisions ADD COLUMN reversibility TEXT NOT NULL DEFAULT 'medium'; UPDATE decisions SET status = CASE WHEN is_active = 1 THEN 'active' ELSE 'superseded' END; CREATE INDEX idx_decisions_status ON decisions(status); CREATE INDEX idx_decisions_status_domain ON decisions(status, domain); CREATE INDEX idx_decisions_affected_paths ON decisions(affected_paths) WHERE affected_paths != '[]'; ALTER TABLE decisions ADD COLUMN village_id TEXT; CREATE INDEX idx_decisions_village ON decisions(village_id) WHERE village_id IS NOT NULL; CREATE INDEX idx_decisions_village_status ON decisions(village_id, status) WHERE village_id IS NOT NULL;").unwrap();
+            conn.execute_batch(SCHEMA_V12_SQL).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '12')",
+                [],
+            )
+            .unwrap();
+            conn.execute("INSERT INTO events (event_id, ts, event_type, branch, hash, payload) VALUES ('evt_v12', '2026-08-16T10:00:00Z', 'note', 'main', 'h-v12', '{}')", []).unwrap();
+            conn.execute("INSERT INTO decisions (event_id, key, value, reason, domain, branch, is_active, scope, status, authority, affected_paths, tags, reversibility, village_id) VALUES ('evt_v12', 'v12.key', 'v12.value', 'kept', 'v12', 'main', TRUE, 'local', 'active', 'human', '[]', '[]', 'low', 'v12-village')", []).unwrap();
+            conn.execute("INSERT INTO suggestions (id, event_type, source_layer, summary, suggested_because, created_at) VALUES ('s_v12', 'note', 'test', 'kept', 'fixture', '2026-08-16T10:00:00Z')", []).unwrap();
+        }
+
+        let store = SqliteStore::open_or_create(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 13);
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT value FROM decisions WHERE key = 'v12.key'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "v12.value"
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT village_id FROM decisions WHERE key = 'v12.key'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "v12-village"
+        );
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT summary FROM suggestions WHERE id = 's_v12'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "kept"
+        );
+        let columns = table_columns(&store.conn, "task_leases").unwrap();
+        assert_eq!(columns.len(), 5);
+        assert!(columns.contains("task_id"));
+        assert!(store.conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_task_leases_expires_at'", [], |row| row.get::<_, i64>(0)).unwrap() == 1);
+        let lease = crate::TaskLease {
+            task_id: 7,
+            attempt: 2,
+            owner: "runner-7-2".into(),
+            expires_at: "2026-08-16T10:05:00Z".into(),
+            heartbeat_at: "2026-08-16T10:00:00Z".into(),
+        };
+        store.upsert_task_lease(&lease).unwrap();
+        assert_eq!(store.task_lease(7).unwrap(), Some(lease.clone()));
+        let replacement = crate::TaskLease {
+            attempt: 3,
+            owner: "runner-7-3".into(),
+            ..lease.clone()
+        };
+        store.upsert_task_lease(&replacement).unwrap();
+        assert!(!crate::Ledger::open(&dir)
+            .unwrap()
+            .renew_task_lease(7, 2, "stale-expiry", "stale-heartbeat")
+            .unwrap());
+        assert_eq!(store.task_lease(7).unwrap(), Some(replacement.clone()));
+        assert!(crate::Ledger::open(&dir)
+            .unwrap()
+            .renew_task_lease(7, 3, "new-expiry", "new-heartbeat")
+            .unwrap());
+        assert_eq!(
+            store.task_lease(7).unwrap(),
+            Some(crate::TaskLease {
+                expires_at: "new-expiry".into(),
+                heartbeat_at: "new-heartbeat".into(),
+                ..replacement.clone()
+            })
+        );
+        assert!(!store.delete_task_lease(7, 2).unwrap());
+        assert_eq!(
+            store.task_lease(7).unwrap(),
+            Some(crate::TaskLease {
+                expires_at: "new-expiry".into(),
+                heartbeat_at: "new-heartbeat".into(),
+                ..replacement
+            })
+        );
+        assert!(store.delete_task_lease(7, 3).unwrap());
+        assert_eq!(store.task_lease(7).unwrap(), None);
+        drop(store);
+        let reopened = SqliteStore::open_or_create(&db_path).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), 13);
+        assert_eq!(
+            reopened
+                .conn
+                .query_row(
+                    "SELECT value FROM decisions WHERE key = 'v12.key'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "v12.value"
+        );
+        drop(reopened);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3114,7 +3259,7 @@ mod tests {
 
         // Phase 2: Reopen — should auto-migrate to V12
         let store = SqliteStore::open_or_create(&db_path).unwrap();
-        assert_eq!(store.schema_version().unwrap(), 12);
+        assert_eq!(store.schema_version().unwrap(), 13);
 
         // Active decision should have status='active'
         let status: String = store

@@ -203,6 +203,40 @@ impl Ledger {
         Ok(crate::tasks::project_tasks(&self.task_events()?))
     }
 
+    /// Read the mutable lease for a task, if one exists.
+    pub fn task_lease(&self, task_id: u64) -> anyhow::Result<Option<crate::TaskLease>> {
+        self.sqlite
+            .task_lease(task_id)
+            .context("Ledger::task_lease")
+    }
+
+    /// Replace the mutable lease for a task.
+    pub fn upsert_task_lease(&self, lease: &crate::TaskLease) -> anyhow::Result<()> {
+        self.sqlite
+            .upsert_task_lease(lease)
+            .context("Ledger::upsert_task_lease")
+    }
+
+    /// Renew a lease only when the expected attempt still owns it.
+    pub fn renew_task_lease(
+        &self,
+        task_id: u64,
+        attempt: u32,
+        expires_at: &str,
+        heartbeat_at: &str,
+    ) -> anyhow::Result<bool> {
+        self.sqlite
+            .renew_task_lease(task_id, attempt, expires_at, heartbeat_at)
+            .context("Ledger::renew_task_lease")
+    }
+
+    /// Delete a task's lease only when the expected attempt still owns it.
+    pub fn delete_task_lease(&self, task_id: u64, attempt: u32) -> anyhow::Result<bool> {
+        self.sqlite
+            .delete_task_lease(task_id, attempt)
+            .context("Ledger::delete_task_lease")
+    }
+
     /// Get all events for a specific branch, filtered at the SQL level.
     pub fn iter_branch_events(&self, branch: &str) -> anyhow::Result<Vec<Event>> {
         self.sqlite

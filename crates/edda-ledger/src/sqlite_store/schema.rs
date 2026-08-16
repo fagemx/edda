@@ -213,6 +213,17 @@ CREATE TABLE IF NOT EXISTS suggestions (
 CREATE INDEX IF NOT EXISTS idx_suggestions_status ON suggestions(status);
 ";
 
+pub(super) const SCHEMA_V13_SQL: &str = "
+CREATE TABLE IF NOT EXISTS task_leases (
+    task_id       INTEGER PRIMARY KEY,
+    attempt       INTEGER NOT NULL,
+    owner         TEXT NOT NULL,
+    expires_at    TEXT NOT NULL,
+    heartbeat_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_leases_expires_at ON task_leases(expires_at);
+";
+
 impl SqliteStore {
     pub(super) fn apply_schema(&self) -> anyhow::Result<()> {
         // Always apply v1 base schema (idempotent via IF NOT EXISTS)
@@ -288,6 +299,11 @@ impl SqliteStore {
         let current = self.schema_version()?;
         if current < 12 {
             self.migrate_v11_to_v12()?;
+        }
+
+        let current = self.schema_version()?;
+        if current < 13 {
+            self.migrate_v12_to_v13()?;
         }
 
         // Post-migration verification: repair any columns that migrations
@@ -840,6 +856,12 @@ impl SqliteStore {
         self.conn.execute_batch(SCHEMA_V12_SQL)?;
         // No backfill needed — suggestions is a new table with no existing data.
         self.set_schema_version(12)?;
+        Ok(())
+    }
+
+    fn migrate_v12_to_v13(&self) -> anyhow::Result<()> {
+        self.conn.execute_batch(SCHEMA_V13_SQL)?;
+        self.set_schema_version(13)?;
         Ok(())
     }
 

@@ -986,6 +986,8 @@ pub struct TaskCreatedParams<'a> {
     pub brief_ref: Option<&'a str>,
     /// Dedupe key: a second `task new` with the same key must not create a twin.
     pub idempotency_key: Option<&'a str>,
+    /// Paths this task may write. Empty remains compatible with historical tasks.
+    pub scope_paths: &'a [String],
 }
 
 /// Build a finalized task.* event with the shared envelope fields.
@@ -1019,6 +1021,7 @@ pub fn new_task_created_event(p: &TaskCreatedParams<'_>) -> anyhow::Result<Event
         "task_id": p.task_id,
         "title": p.title,
         "after": p.after,
+        "scope_paths": p.scope_paths,
     });
     if let Some(v) = p.assignee {
         payload["assignee"] = serde_json::json!(v);
@@ -1075,6 +1078,28 @@ pub fn new_task_session_event(
         serde_json::json!({
             "task_id": task_id,
             "acp_session_id": acp_session_id,
+        }),
+    )
+}
+
+/// Create a new host-neutral `task.session` event.
+pub fn new_task_host_session_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    task_id: u64,
+    agent_kind: &str,
+    session_id: &str,
+    attempt: u32,
+) -> anyhow::Result<Event> {
+    build_task_event(
+        branch,
+        parent_hash,
+        "task.session",
+        serde_json::json!({
+            "task_id": task_id,
+            "agent_kind": agent_kind,
+            "session_id": session_id,
+            "attempt": attempt,
         }),
     )
 }
@@ -1962,6 +1987,7 @@ mod tests {
             work_unit_ref: Some("wu_2"),
             brief_ref: Some("briefs/wu2.md"),
             idempotency_key: Some("wu2-test-1"),
+            scope_paths: &[],
         })
         .unwrap();
         assert_eq!(event.event_type, "task.created");
@@ -1995,6 +2021,7 @@ mod tests {
             work_unit_ref: None,
             brief_ref: None,
             idempotency_key: None,
+            scope_paths: &[],
         })
         .unwrap();
         assert_eq!(event.payload["task_id"], 1);
@@ -2021,6 +2048,7 @@ mod tests {
             work_unit_ref: None,
             brief_ref: None,
             idempotency_key: None,
+            scope_paths: &[],
         })
         .unwrap();
         assert_eq!(event.event_family.as_deref(), Some("signal"));
@@ -2046,6 +2074,16 @@ mod tests {
         assert_eq!(event.payload["acp_session_id"], "sess-acp-42");
         assert_eq!(event.event_family.as_deref(), Some("signal"));
         assert_eq!(event.event_level.as_deref(), Some("trace"));
+    }
+
+    #[test]
+    fn task_host_session_event_fields() {
+        let event = new_task_host_session_event("main", None, 7, "codex", "thread-123", 2).unwrap();
+        assert_eq!(event.event_type, "task.session");
+        assert_eq!(event.payload["task_id"], 7);
+        assert_eq!(event.payload["agent_kind"], "codex");
+        assert_eq!(event.payload["session_id"], "thread-123");
+        assert_eq!(event.payload["attempt"], 2);
     }
 
     #[test]
