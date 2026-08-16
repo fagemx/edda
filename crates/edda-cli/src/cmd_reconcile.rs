@@ -1040,11 +1040,89 @@ fn remove_unreferenced_scheduler_manifest(path: &Path) -> String {
 }
 
 #[cfg(any(windows, test))]
+fn scheduler_actions_xml(xml: &str) -> anyhow::Result<&str> {
+    anyhow::ensure!(
+        xml.len() <= SCHEDULER_OUTPUT_LIMIT,
+        "scheduler Query XML exceeds the bounded output limit"
+    );
+    let xml = xml.trim();
+    let task_start = xml
+        .find("<Task")
+        .context("scheduler Query XML has no Task root")?;
+    let prefix = xml[..task_start].trim();
+    anyhow::ensure!(
+        prefix.is_empty() || (prefix.starts_with("<?xml") && prefix.ends_with("?>")),
+        "scheduler Query XML has content before the Task root"
+    );
+    anyhow::ensure!(
+        matches!(
+            xml.as_bytes().get(task_start + "<Task".len()),
+            Some(b'>') | Some(b' ' | b'\t' | b'\r' | b'\n')
+        ),
+        "scheduler Query XML has a malformed Task root"
+    );
+    let task_open_end = xml[task_start..]
+        .find('>')
+        .map(|end| task_start + end)
+        .context("scheduler Query XML has an unterminated Task root")?;
+    anyhow::ensure!(
+        !xml[task_start..=task_open_end].trim_end().ends_with("/>"),
+        "scheduler Query XML has a self-closing Task root"
+    );
+    let task_close = xml
+        .strip_suffix("</Task>")
+        .context("scheduler Query XML has an incomplete Task root")?;
+    let task_body = &task_close[task_open_end + 1..];
+    anyhow::ensure!(
+        !task_body.contains("<Task") && !task_body.contains("</Task>"),
+        "scheduler Query XML has nested or duplicate Task roots"
+    );
+
+    let actions_start = task_body
+        .find("<Actions")
+        .context("scheduler Query XML has no Actions container")?;
+    anyhow::ensure!(
+        matches!(
+            task_body.as_bytes().get(actions_start + "<Actions".len()),
+            Some(b'>') | Some(b' ' | b'\t' | b'\r' | b'\n')
+        ),
+        "scheduler Query XML has a malformed Actions container"
+    );
+    let actions_open_end = task_body[actions_start..]
+        .find('>')
+        .map(|end| actions_start + end)
+        .context("scheduler Query XML has an unterminated Actions container")?;
+    anyhow::ensure!(
+        !task_body[actions_start..=actions_open_end]
+            .trim_end()
+            .ends_with("/>"),
+        "scheduler Query XML has a self-closing Actions container"
+    );
+    let after_open = &task_body[actions_open_end + 1..];
+    let actions_close = after_open
+        .find("</Actions>")
+        .context("scheduler Query XML has an incomplete Actions container")?;
+    anyhow::ensure!(
+        !task_body[..actions_start].contains("</Actions>")
+            && !after_open[..actions_close].contains("<Actions")
+            && !after_open[actions_close + "</Actions>".len()..].contains("<Actions")
+            && !after_open[actions_close + "</Actions>".len()..].contains("</Actions>"),
+        "scheduler Query XML has nested or duplicate Actions containers"
+    );
+    Ok(&after_open[..actions_close])
+}
+
+#[cfg(any(windows, test))]
 fn recover_scheduler_manifest_candidate(
     xml: &str,
     executable: &Path,
 ) -> anyhow::Result<Option<PathBuf>> {
-    let actions = scheduler_exec_values(xml)?;
+    let actions_xml = scheduler_actions_xml(xml)?;
+    let actions = scheduler_exec_values(actions_xml)?;
+    anyhow::ensure!(
+        scheduler_exec_values(xml)? == actions,
+        "scheduler Query XML has an Exec action outside its Actions container"
+    );
     let [(command, arguments)] = actions.as_slice() else {
         return Ok(None);
     };
@@ -1074,6 +1152,99 @@ fn recover_scheduler_manifest_candidate(
 }
 
 #[cfg(any(windows, test))]
+fn claim_and_remove_scheduler_manifest_under_lock(
+    path: &Path,
+    quarantine: &Path,
+    expected_bytes: &[u8],
+    repo: &Path,
+    project_id: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        path.parent() == quarantine.parent(),
+        "scheduler manifest quarantine must be in the same directory"
+    );
+    anyhow::ensure!(
+        !quarantine.exists(),
+        "scheduler manifest quarantine already exists"
+    );
+    std::fs::rename(path, quarantine).with_context(|| {
+        format!(
+            "atomically claim scheduler manifest {} as {}",
+            path.display(),
+            quarantine.display()
+        )
+    })?;
+
+    let revalidation = (|| -> anyhow::Result<()> {
+        let trusted_directory = scheduler_manifest_directory(&edda_store::store_root(), true)?;
+        let source_metadata = quarantine.symlink_metadata().with_context(|| {
+            format!(
+                "inspect scheduler manifest quarantine {}",
+                quarantine.display()
+            )
+        })?;
+        anyhow::ensure!(
+            source_metadata.file_type().is_file(),
+            "scheduler manifest quarantine must be a regular file"
+        );
+        anyhow::ensure!(
+            source_metadata.len() <= SCHEDULER_MANIFEST_MAX_BYTES,
+            "scheduler manifest quarantine exceeds 16 KiB"
+        );
+        let canonical = quarantine.canonicalize().with_context(|| {
+            format!(
+                "canonicalize scheduler manifest quarantine {}",
+                quarantine.display()
+            )
+        })?;
+        let parent = quarantine
+            .parent()
+            .context("scheduler manifest quarantine has no parent")?
+            .canonicalize()
+            .context("canonicalize scheduler manifest quarantine parent")?;
+        anyhow::ensure!(
+            parent == trusted_directory && canonical.parent() == Some(trusted_directory.as_path()),
+            "scheduler manifest quarantine is outside the trusted Edda store directory"
+        );
+        let bytes = std::fs::read(&canonical).with_context(|| {
+            format!("read scheduler manifest quarantine {}", canonical.display())
+        })?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= SCHEDULER_MANIFEST_MAX_BYTES,
+            "scheduler manifest quarantine exceeds 16 KiB"
+        );
+        anyhow::ensure!(
+            bytes == expected_bytes,
+            "scheduler manifest entry changed before the atomic quarantine claim"
+        );
+        let manifest: SchedulerLaunchManifestV1 = serde_json::from_slice(&bytes)
+            .context("parse quarantined scheduler launch manifest")?;
+        anyhow::ensure!(
+            serde_json::to_vec(&manifest)? == bytes,
+            "scheduler manifest quarantine JSON is not canonical"
+        );
+        let loaded = validate_scheduler_manifest(manifest)?;
+        anyhow::ensure!(
+            loaded.repo == repo && loaded.manifest.project_id == project_id,
+            "scheduler manifest quarantine does not belong to the exact task project"
+        );
+        Ok(())
+    })();
+    if let Err(error) = revalidation {
+        anyhow::bail!(
+            "retain quarantine {} because the claimed scheduler manifest failed revalidation: {error:#}",
+            quarantine.display()
+        );
+    }
+    std::fs::remove_file(quarantine).with_context(|| {
+        format!(
+            "retain quarantine {} because exact-file removal failed",
+            quarantine.display()
+        )
+    })
+}
+
+#[cfg(any(windows, test))]
 fn remove_trusted_scheduler_manifest(path: &Path, repo: &Path, project_id: &str) -> String {
     let removal = (|| -> anyhow::Result<()> {
         let store = edda_store::store_root();
@@ -1091,8 +1262,25 @@ fn remove_trusted_scheduler_manifest(path: &Path, repo: &Path, project_id: &str)
             loaded.repo == repo && loaded.manifest.project_id == project_id,
             "scheduler manifest does not belong to the exact task project"
         );
-        std::fs::remove_file(path)
-            .with_context(|| format!("remove trusted scheduler manifest {}", path.display()))
+        let expected_bytes = serde_json::to_vec(&loaded.manifest)?;
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("scheduler manifest filename is not Unicode")?;
+        let sequence =
+            SCHEDULER_MANIFEST_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let quarantine = directory.join(format!(
+            ".{filename}.{}.{}.uninstall-quarantine",
+            std::process::id(),
+            sequence
+        ));
+        claim_and_remove_scheduler_manifest_under_lock(
+            path,
+            &quarantine,
+            &expected_bytes,
+            repo,
+            project_id,
+        )
     })();
     match removal {
         Ok(()) => format!(
@@ -3147,6 +3335,35 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_manifest_quarantine_revalidates_the_claimed_entry_before_removal(
+    ) -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+        let loaded = load_scheduler_manifest(&prepared.path)?;
+        let expected_bytes = serde_json::to_vec(&loaded.manifest)?;
+        let project_id = edda_store::project_id_for_root(&fixture.repo);
+        let quarantine = prepared.path.with_file_name("swap-test.quarantine");
+        std::fs::write(&prepared.path, b"replacement")?;
+
+        let error = claim_and_remove_scheduler_manifest_under_lock(
+            &prepared.path,
+            &quarantine,
+            &expected_bytes,
+            &fixture.repo,
+            &project_id,
+        )
+        .expect_err("a replacement must be retained after the atomic claim")
+        .to_string();
+
+        assert!(!prepared.path.exists());
+        assert!(quarantine.exists());
+        assert_eq!(std::fs::read(&quarantine)?, b"replacement");
+        assert!(error.contains("retain quarantine"));
+        Ok(())
+    }
+
+    #[test]
     fn scheduler_uninstall_malformed_query_retains_artifacts_but_removes_task() -> anyhow::Result<()>
     {
         let fixture = scheduler_manifest_fixture()?;
@@ -3168,6 +3385,42 @@ mod tests {
 
         assert_eq!(calls, 3);
         assert!(prepared.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_uninstall_truncated_outer_xml_retains_manifest_but_removes_task(
+    ) -> anyhow::Result<()> {
+        for ending in ["", "</Actions>", "</Task>"] {
+            let fixture = scheduler_manifest_fixture()?;
+            let prepared =
+                prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+            edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+            let complete = scheduler_manifest_xml(&fixture.codex, &prepared.path)?;
+            let body = complete
+                .strip_suffix("</Actions></Task>")
+                .context("test scheduler XML suffix")?;
+            let xml = format!("{body}{ending}");
+            let project_id = edda_store::project_id_for_root(&fixture.repo);
+            let mut outputs = [
+                SchedulerOutput::for_test(0, &xml, ""),
+                SchedulerOutput::for_test(0, "", ""),
+                SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing"),
+            ]
+            .into_iter();
+            let mut calls = 0;
+
+            uninstall_scheduler_task_with(&fixture.repo, &fixture.codex, &project_id, |_| {
+                calls += 1;
+                outputs.next().context("unexpected scheduler call")
+            })?;
+
+            assert_eq!(calls, 3);
+            assert!(
+                prepared.path.exists(),
+                "ending {ending:?} authorized cleanup"
+            );
+        }
         Ok(())
     }
 
