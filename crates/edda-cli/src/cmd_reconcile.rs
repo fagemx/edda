@@ -1361,7 +1361,7 @@ fn recover_scheduler_manifest_candidate(
         return Ok(None);
     };
     let candidate = PathBuf::from(value);
-    if !candidate.is_absolute()
+    if !windows_path_is_absolute(&candidate)?
         || format!(
             "reconcile --scheduler-manifest {}",
             quote_windows_argument(&candidate)?
