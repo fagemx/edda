@@ -25,6 +25,8 @@ static SCHEDULER_MANIFEST_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DOORBELL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(all(test, windows))]
 static FAKE_CODEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(all(test, windows))]
+const FAKE_CODEX_STARTUP_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
 thread_local! {
     static FAIL_NEXT_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -4183,7 +4185,8 @@ mod tests {
         deny: std::path::PathBuf,
     ) -> std::thread::JoinHandle<anyhow::Result<()>> {
         std::thread::spawn(move || {
-            for _ in 0..200 {
+            let deadline = std::time::Instant::now() + FAKE_CODEX_STARTUP_BUDGET;
+            while std::time::Instant::now() < deadline {
                 if challenge.exists() {
                     let view = Ledger::open(&repo)?
                         .task_views()?
@@ -5269,7 +5272,8 @@ mod tests {
         let runner =
             std::thread::spawn(move || run_task(&runner_repo, 1, 1, &runner_config, false));
 
-        for _ in 0..100 {
+        let session_deadline = std::time::Instant::now() + FAKE_CODEX_STARTUP_BUDGET;
+        while std::time::Instant::now() < session_deadline {
             if ledger
                 .task_events()?
                 .iter()
@@ -5318,7 +5322,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn fake_runner_resumes_the_current_attempt_session_before_turn() -> anyhow::Result<()> {
+    fn fake_runner_resumes_current_attempt_after_slow_startup_before_turn() -> anyhow::Result<()> {
         let _fake = test_lock(&FAKE_CODEX_LOCK);
         let dir = tempfile::tempdir()?;
         let repo = dir.path().join("repo");
@@ -5342,6 +5346,8 @@ mod tests {
         std::env::set_var("EDDA_FAKE_DENY", &deny);
         let observer =
             allow_fake_turn_after_durable_session(repo.clone(), 2, 1, challenge, allow, deny);
+
+        std::thread::sleep(std::time::Duration::from_millis(2_100));
 
         let run_result = run_task(&repo, 2, 1, &config, false);
         let observer_result = observer.join();
@@ -5409,7 +5415,8 @@ Write-Line '{"id":2,"result":{"thread":{"id":"fake-thread"}}}'
 Read-Line
 if ($env:EDDA_FAKE_CHALLENGE) {
   New-Item -ItemType File -Force -Path $env:EDDA_FAKE_CHALLENGE | Out-Null
-  for ($i = 0; $i -lt 200; $i++) {
+  $startupDeadline = [System.DateTime]::UtcNow.AddMilliseconds(STARTUP_BUDGET_MS)
+  while ([System.DateTime]::UtcNow -lt $startupDeadline) {
     if (Test-Path $env:EDDA_FAKE_ALLOW) { break }
     if (Test-Path $env:EDDA_FAKE_DENY) { exit 7 }
     Start-Sleep -Milliseconds 10
@@ -5421,6 +5428,10 @@ EVENTS
 Write-Line '{"id":3,"result":{"turn":{"id":"fake-turn"}}}'
 "#
             .replace("DELAY", &delay_s.to_string())
+            .replace(
+                "STARTUP_BUDGET_MS",
+                &FAKE_CODEX_STARTUP_BUDGET.as_millis().to_string(),
+            )
             .replace("LOGFILE", &log.to_string_lossy().replace("'", "''"))
             .replace(
                 "EVENTS",
