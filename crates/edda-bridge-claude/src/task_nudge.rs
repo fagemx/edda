@@ -234,6 +234,7 @@ mod tests {
                     work_unit_ref: None,
                     brief_ref: None,
                     idempotency_key: None,
+                    scope_paths: &[],
                 })
                 .unwrap();
             ledger.append_event(&ev).unwrap();
@@ -299,6 +300,7 @@ mod tests {
                     work_unit_ref: None,
                     brief_ref: None,
                     idempotency_key: None,
+                    scope_paths: &[],
                 })
                 .unwrap();
             ledger.append_event(&ev).unwrap();

@@ -9,6 +9,7 @@ mod entities;
 mod events;
 mod mappers;
 mod schema;
+mod task_leases;
 pub mod types;
 mod village;
 
@@ -3013,6 +3014,58 @@ mod tests {
             .unwrap();
         assert_eq!(paths, "[\"src/**\"]");
 
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn task_lease_v12_migrates_and_round_trips() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir =
+            std::env::temp_dir().join(format!("edda_sqlite_v13_mig_{}_{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ledger.db");
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V2_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V3_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V4_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V5_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V6_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V7_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V8_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V9_SQL).unwrap();
+            conn.execute_batch(SCHEMA_V12_SQL).unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', '12')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open_or_create(&db_path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), 13);
+        let lease = crate::TaskLease {
+            task_id: 7,
+            attempt: 2,
+            owner: "runner-7-2".into(),
+            expires_at: "2026-08-16T10:05:00Z".into(),
+            heartbeat_at: "2026-08-16T10:00:00Z".into(),
+        };
+        store.upsert_task_lease(&lease).unwrap();
+        assert_eq!(store.task_lease(7).unwrap(), Some(lease.clone()));
+        let replacement = crate::TaskLease {
+            attempt: 3,
+            owner: "runner-7-3".into(),
+            ..lease.clone()
+        };
+        store.upsert_task_lease(&replacement).unwrap();
+        assert!(!store.delete_task_lease(7, 2).unwrap());
+        assert_eq!(store.task_lease(7).unwrap(), Some(replacement));
+        assert!(store.delete_task_lease(7, 3).unwrap());
+        assert_eq!(store.task_lease(7).unwrap(), None);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

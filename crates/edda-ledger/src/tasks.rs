@@ -53,6 +53,7 @@ pub struct TaskView {
     pub assignee: Option<String>,
     pub agent_kind: Option<String>,
     pub after: Vec<u64>,
+    pub scope_paths: Vec<String>,
     pub plan_id: Option<String>,
     pub work_unit_ref: Option<String>,
     pub brief_ref: Option<String>,
@@ -64,6 +65,10 @@ pub struct TaskView {
     pub evidence_paths: Vec<String>,
     /// Last recorded ACP session id (resume key).
     pub acp_session_id: Option<String>,
+    /// Last host-neutral runtime session id (or the historical ACP session id).
+    pub session_id: Option<String>,
+    pub session_agent_kind: Option<String>,
+    pub session_attempt: Option<u32>,
     /// Last `task.failed` reason, kept across requeue for operator context.
     pub failure_reason: Option<String>,
     pub created_ts: String,
@@ -97,6 +102,15 @@ pub fn project_tasks(events: &[Event]) -> Vec<TaskView> {
                     .and_then(|v| v.as_array())
                     .map(|a| a.iter().filter_map(|x| x.as_u64()).collect())
                     .unwrap_or_default();
+                let scope_paths = p
+                    .get("scope_paths")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 map.insert(
                     task_id,
                     TaskView {
@@ -105,6 +119,7 @@ pub fn project_tasks(events: &[Event]) -> Vec<TaskView> {
                         assignee: opt_str(p, "assignee"),
                         agent_kind: opt_str(p, "agent_kind"),
                         after,
+                        scope_paths,
                         plan_id: opt_str(p, "plan_id"),
                         work_unit_ref: opt_str(p, "work_unit_ref"),
                         brief_ref: opt_str(p, "brief_ref"),
@@ -115,6 +130,9 @@ pub fn project_tasks(events: &[Event]) -> Vec<TaskView> {
                         receipt: None,
                         evidence_paths: Vec::new(),
                         acp_session_id: None,
+                        session_id: None,
+                        session_agent_kind: None,
+                        session_attempt: None,
                         failure_reason: None,
                         created_ts: event.ts.clone(),
                         updated_ts: event.ts.clone(),
@@ -133,7 +151,17 @@ pub fn project_tasks(events: &[Event]) -> Vec<TaskView> {
             }
             "task.session" => {
                 if let Some(v) = map.get_mut(&task_id) {
-                    v.acp_session_id = opt_str(&event.payload, "acp_session_id");
+                    if let Some(acp_session_id) = opt_str(&event.payload, "acp_session_id") {
+                        v.acp_session_id = Some(acp_session_id);
+                    }
+                    v.session_id =
+                        opt_str(&event.payload, "session_id").or_else(|| v.acp_session_id.clone());
+                    v.session_agent_kind = opt_str(&event.payload, "agent_kind");
+                    v.session_attempt = event
+                        .payload
+                        .get("attempt")
+                        .and_then(|value| value.as_u64())
+                        .and_then(|attempt| u32::try_from(attempt).ok());
                     v.updated_ts = event.ts.clone();
                 }
             }
@@ -218,7 +246,8 @@ mod tests {
     use super::*;
     use edda_core::event::{
         new_task_created_event, new_task_done_event, new_task_failed_event,
-        new_task_requeued_event, new_task_session_event, new_task_started_event, TaskCreatedParams,
+        new_task_host_session_event, new_task_requeued_event, new_task_session_event,
+        new_task_started_event, TaskCreatedParams,
     };
 
     fn created(task_id: u64, title: &str, after: &[u64]) -> Event {
@@ -234,6 +263,7 @@ mod tests {
             work_unit_ref: None,
             brief_ref: None,
             idempotency_key: None,
+            scope_paths: &[],
         })
         .unwrap()
     }
@@ -251,6 +281,7 @@ mod tests {
             work_unit_ref: None,
             brief_ref: None,
             idempotency_key: Some(key),
+            scope_paths: &[],
         })
         .unwrap()
     }
@@ -432,6 +463,41 @@ mod tests {
             view(&views, 1).acp_session_id.as_deref(),
             Some("sess-acp-42")
         );
+    }
+
+    #[test]
+    fn task_session_projects_new_fields_and_old_acp_session_id() {
+        let events = vec![
+            created(1, "build", &[]),
+            new_task_session_event("main", None, 1, "acp-old").unwrap(),
+            new_task_host_session_event("main", None, 1, "codex", "thread-123", 2).unwrap(),
+        ];
+        let view = project_tasks(&events).remove(0);
+        assert_eq!(view.session_id.as_deref(), Some("thread-123"));
+        assert_eq!(view.session_agent_kind.as_deref(), Some("codex"));
+        assert_eq!(view.session_attempt, Some(2));
+
+        let old = project_tasks(&[
+            created(1, "build", &[]),
+            new_task_session_event("main", None, 1, "acp-old").unwrap(),
+        ])
+        .remove(0);
+        assert_eq!(old.session_id.as_deref(), Some("acp-old"));
+    }
+
+    #[test]
+    fn historical_task_created_defaults_scope_paths_to_empty() {
+        let mut historical = created(1, "build", &[]);
+        historical
+            .payload
+            .as_object_mut()
+            .unwrap()
+            .remove("scope_paths");
+        edda_core::event::finalize_event(&mut historical).unwrap();
+        assert!(project_tasks(&[historical])
+            .remove(0)
+            .scope_paths
+            .is_empty());
     }
 
     #[test]
