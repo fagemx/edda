@@ -29,6 +29,9 @@ pub enum TaskCmd {
         /// Task id that must be done first (repeatable)
         #[arg(long)]
         after: Vec<u64>,
+        /// Paths this task may write (repeatable)
+        #[arg(long = "path")]
+        scope_paths: Vec<String>,
         /// Plan this task belongs to
         #[arg(long)]
         plan: Option<String>,
@@ -99,6 +102,7 @@ pub struct NewTaskArgs<'a> {
     pub work_unit: Option<&'a str>,
     pub brief: Option<&'a str>,
     pub idempotency_key: Option<&'a str>,
+    pub scope_paths: &'a [String],
 }
 
 #[derive(Debug)]
@@ -170,6 +174,7 @@ fn do_new(repo_root: &Path, args: &NewTaskArgs<'_>) -> anyhow::Result<NewOutcome
         work_unit_ref: args.work_unit,
         brief_ref: args.brief,
         idempotency_key: args.idempotency_key,
+        scope_paths: args.scope_paths,
     })?;
     ledger.append_event(&event)?;
     let _ = edda_derive::rebuild_branch(&ledger, &branch);
@@ -448,6 +453,7 @@ pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
             assignee,
             agent_kind,
             after,
+            scope_paths,
             plan,
             work_unit,
             brief,
@@ -464,6 +470,7 @@ pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
                     work_unit: work_unit.as_deref(),
                     brief: brief.as_deref(),
                     idempotency_key: idempotency_key.as_deref(),
+                    scope_paths: &scope_paths,
                 },
             )?;
             if outcome.deduped {
@@ -729,6 +736,7 @@ mod tests {
             work_unit: None,
             brief: None,
             idempotency_key: None,
+            scope_paths: &[],
         }
     }
 
@@ -741,6 +749,22 @@ mod tests {
         assert_eq!(b.task_id, 2);
         assert_eq!(a.status, TaskStatus::Ready);
         assert_eq!(b.status, TaskStatus::Blocked);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn task_new_scope_paths_are_preserved() {
+        let ws = temp_ws("scope");
+        let scope_paths = vec!["crates/edda-core/**".to_string(), "docs/**".to_string()];
+        do_new(
+            &ws,
+            &NewTaskArgs {
+                scope_paths: &scope_paths,
+                ..args("scoped", &[])
+            },
+        )
+        .unwrap();
+        assert_eq!(do_show(&ws, 1).unwrap().scope_paths, scope_paths);
         let _ = std::fs::remove_dir_all(&ws);
     }
 

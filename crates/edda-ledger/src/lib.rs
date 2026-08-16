@@ -20,7 +20,7 @@ pub use blob_store::{
 pub use domain::{
     BundleRow, ChainEntryView, DayCount, DecideSnapshotRow, DependencyEdge, DetectedPattern,
     DeviceTokenRow, DomainCount, ExecutionLinked, ImportParams, OutcomeMetrics,
-    PatternDetectionResult, PatternType, SuggestionRow, TaskBriefRow, VillageStats,
+    PatternDetectionResult, PatternType, SuggestionRow, TaskBriefRow, TaskLease, VillageStats,
     VillageStatsPeriod,
 };
 pub use ledger::Ledger;

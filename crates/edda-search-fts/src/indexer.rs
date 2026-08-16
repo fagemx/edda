@@ -1209,6 +1209,7 @@ mod tests {
                 work_unit_ref: None,
                 brief_ref: Some("docs/plan/x.md"),
                 idempotency_key: None,
+                scope_paths: &[],
             })
             .unwrap();
         let (t, b) = extract_event_title_body(&created);

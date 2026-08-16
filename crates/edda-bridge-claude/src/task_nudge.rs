@@ -151,6 +151,7 @@ mod tests {
             assignee: assignee.map(String::from),
             agent_kind: None,
             after: Vec::new(),
+            scope_paths: Vec::new(),
             plan_id: None,
             work_unit_ref: None,
             brief_ref: None,
@@ -160,6 +161,9 @@ mod tests {
             receipt: None,
             evidence_paths: Vec::new(),
             acp_session_id: None,
+            session_id: None,
+            session_agent_kind: None,
+            session_attempt: None,
             failure_reason: None,
             created_ts: "2026-07-14T00:00:00Z".into(),
             updated_ts: "2026-07-14T00:00:00Z".into(),
@@ -234,6 +238,7 @@ mod tests {
                     work_unit_ref: None,
                     brief_ref: None,
                     idempotency_key: None,
+                    scope_paths: &[],
                 })
                 .unwrap();
             ledger.append_event(&ev).unwrap();
@@ -299,6 +304,7 @@ mod tests {
                     work_unit_ref: None,
                     brief_ref: None,
                     idempotency_key: None,
+                    scope_paths: &[],
                 })
                 .unwrap();
             ledger.append_event(&ev).unwrap();
