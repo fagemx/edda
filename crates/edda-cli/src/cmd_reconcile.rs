@@ -92,8 +92,11 @@ impl ReconcileConfig {
     }
 }
 
+// Task 2 removes these temporary allowances when it wires the private Task 1 surface.
+#[allow(dead_code)]
 const SCHEDULER_MANIFEST_MAX_BYTES: u64 = 16 * 1024;
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct SchedulerLaunchManifestV1 {
@@ -106,6 +109,7 @@ struct SchedulerLaunchManifestV1 {
     lease_ttl_s: u64,
 }
 
+#[allow(dead_code)]
 struct PreparedSchedulerManifest {
     manifest: SchedulerLaunchManifestV1,
     bytes: Vec<u8>,
@@ -113,12 +117,14 @@ struct PreparedSchedulerManifest {
     path: PathBuf,
 }
 
+#[allow(dead_code)]
 struct LoadedSchedulerManifest {
     manifest: SchedulerLaunchManifestV1,
     repo: PathBuf,
     config: ReconcileConfig,
 }
 
+#[allow(dead_code)]
 fn scheduler_manifest_directory(store: &Path, must_exist: bool) -> anyhow::Result<PathBuf> {
     let store = std::path::absolute(store)
         .with_context(|| format!("resolve Edda store root {}", store.display()))?;
@@ -155,10 +161,12 @@ fn scheduler_manifest_directory(store: &Path, must_exist: bool) -> anyhow::Resul
     Ok(directory)
 }
 
+#[allow(dead_code)]
 fn scheduler_manifest_digest(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+#[allow(dead_code)]
 fn validate_scheduler_manifest(
     manifest: SchedulerLaunchManifestV1,
 ) -> anyhow::Result<LoadedSchedulerManifest> {
@@ -193,6 +201,7 @@ fn validate_scheduler_manifest(
     })
 }
 
+#[allow(dead_code)]
 fn prepare_scheduler_manifest(
     store: &Path,
     repo: &Path,
@@ -220,6 +229,7 @@ fn prepare_scheduler_manifest(
     })
 }
 
+#[allow(dead_code)]
 fn load_scheduler_manifest(path: &Path) -> anyhow::Result<LoadedSchedulerManifest> {
     anyhow::ensure!(
         path.is_absolute(),
@@ -1809,13 +1819,18 @@ mod tests {
 
     #[test]
     fn scheduler_manifest_rejects_store_root_and_reparse_escape() -> anyhow::Result<()> {
-        let fixture = scheduler_manifest_fixture()?;
-        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
-        let outside = fixture._root.path().join("outside");
-        let escaped = outside.join(format!("{}.json", prepared.digest));
-        edda_store::write_atomic(&escaped, &prepared.bytes)?;
-        assert!(load_scheduler_manifest(&escaped).is_err());
+        {
+            let fixture = scheduler_manifest_fixture()?;
+            let prepared =
+                prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+            std::fs::create_dir_all(fixture.store.join("scheduler-launch").join("v1"))?;
+            let outside = fixture._root.path().join("outside");
+            let escaped = outside.join(format!("{}.json", prepared.digest));
+            edda_store::write_atomic(&escaped, &prepared.bytes)?;
+            assert!(load_scheduler_manifest(&escaped).is_err());
+        }
 
+        let fixture = scheduler_manifest_fixture()?;
         let launch = fixture.store.join("scheduler-launch");
         let reparse_target = fixture._root.path().join("reparse-target");
         std::fs::create_dir(&reparse_target)?;
