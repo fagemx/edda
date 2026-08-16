@@ -41,6 +41,9 @@ conversation context.
 - Highest durable `d-NNN` ruling wins; changes say `SUPERSEDES d-NNN`.
 - Reviewer/verifier does not fix the artifact it judges.
 - Review verdicts bind one full SHA; any push voids the verdict.
+- A GitHub PR carries its visible review-fix loop: numbered SHA-pinned review,
+  implementer response to every requested change, and final current-head LGTM.
+  An internal verifier report does not replace these PR comments.
 - Worker receipts prove execution, not acceptance or merge authority.
 - Session death is recoverable from the board, task rail, claims, and Git.
 
@@ -59,4 +62,4 @@ Publish and keep current:
 2. review charter and finding queue;
 3. dependency graph and bundle ownership;
 4. fleet board with task, owner, branch, full SHA, state, review, and next step;
-5. acceptance matrix and final merge recommendation.
+5. acceptance matrix, PR review-loop state, and final merge recommendation.

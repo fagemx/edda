@@ -280,11 +280,27 @@ For each candidate:
 2. Controller checks scope and issue acceptance coverage.
 3. Independent verifier reviews that SHA and reruns required gates.
 4. Any push voids the verdict and triggers a delta review from the new SHA.
-5. Controller builds a final matrix: issue/criterion, evidence, reviewed SHA,
-   CI/local gate, remaining risk.
-6. Merge only when the current reviewed SHA is green and merge authority is
-   explicit. Preserve required order and recheck state immediately before each
-   merge.
+5. When the delivery artifact is a GitHub PR, publish the review on the PR;
+   internal reports and chat are supporting evidence, not a substitute:
+   - `## Code Review: Round N` with reviewed full SHA, P0/P1 findings, testing
+     verdict, and `Changes Requested` or `LGTM`;
+   - after `Changes Requested`, the implementer publishes
+     `## Review Response: Round N`, answering every finding with disposition,
+     changed paths/tests, ran evidence, and the new full SHA;
+   - the reviewer starts Round N+1 on that new frozen SHA. Repeat until the PR
+     has a final current-head `LGTM` comment stating P0=0, P1=0 and exact gates.
+6. Controller reads `headRefOid`, PR comments/reviews, and CI immediately before
+   merge. A final comment for an older SHA, an unanswered finding, or an
+   internal-only verdict keeps the candidate blocked.
+7. Controller builds a final matrix: issue/criterion, evidence, reviewed SHA,
+   CI/local gate, PR round/response/final-verdict links, and remaining risk.
+8. Merge only when the current reviewed SHA is green, the visible review loop
+   is closed, and merge authority is explicit. Preserve required order and
+   recheck state immediately before each merge.
+
+Use the same round/response/verdict fields in the strongest durable review
+carrier for local-only delivery. Do not invent a PR requirement when no PR
+exists.
 
 The formation produces delivery candidates and execution evidence. Acceptance
 and merge remain outside it unless the operator explicitly delegates them.
@@ -344,4 +360,6 @@ actual file overlap. More sessions do not make A1 → A2 parallel.
 | “The user said keep going, so nearby work is allowed.” | Persistence does not broaden scope or external-write authority. |
 | “The latest message is newest truth.” | Highest durable `d-NNN` wins; messages are doorbells. |
 | “The PR barely changed after approval.” | Any push changes the artifact and voids the SHA-bound verdict. |
+| “The verifier report is enough; PR comments are clerical.” | A GitHub PR is the durable collaboration surface. Publish every review round, response, and final current-head verdict there. |
+| “The final LGTM implies earlier findings were handled.” | Changes Requested requires an implementer point-by-point response before re-review. |
 | “Receipt says tests pass, so merge.” | Receipt is worker evidence; verifier reruns and merge authority accepts. |

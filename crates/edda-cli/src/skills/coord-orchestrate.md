@@ -55,7 +55,11 @@ holds merge authority outside the formation, unless explicitly delegated.
 6. **Track without interrupting:** workers' done-bells + background poll on
    `edda task list` / PR state + read-only peeks. "Queued" means busy — fine.
 7. **Close:** receipt on the rail → your review + verifier's adversarial
-   review, independently → the merge authority integrates.
+   review, independently → publish `Code Review: Round N` on the PR pinned to
+   the full SHA. `Changes Requested` requires the implementer's point-by-point
+   `Review Response: Round N`, a new frozen SHA, and another review round.
+   Publish final current-head LGTM with P0/P1 counts and ran gates → the merge
+   authority integrates. Internal reports do not replace the PR-visible loop.
 
 ## Traffic rules (messages WILL cross)
 
@@ -93,6 +97,8 @@ letters at the peers' natural cadence. Bell-only → ring, ledger as backstop.
 | Truth only in messages | fixate to ledger/issue, then doorbell |
 | Accepting a deviation without revoking the old ruling | SUPERSEDES in the same place, then bell |
 | Review assigned to a PR, not a SHA | pin + freeze + void-on-push |
+| Verifier accepted only in chat/report | publish the numbered SHA-pinned review round on the PR |
+| Requested changes fixed without a response | implementer replies point-by-point, then reviewer opens the next round |
 | Worker obeys latest message over ledger | tie-break: highest d-NNN wins, reply don't execute |
 | Controller reads worker diffs mid-flight | compressed signals only until review time |
 | Verifier fixes things | read-only, always |

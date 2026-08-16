@@ -205,3 +205,30 @@ edda note "completed X; decided Y; next: Z" --tag session
 ```
 
 <!-- edda:decision-tracking -->
+
+<!-- edda:coordination -->
+## Multi-Agent Coordination (edda)
+
+When edda detects multiple agents, it injects peer information into your context.
+
+**You MUST follow these rules:**
+- **Check Off-limits** before editing any file — if a file is listed under "Off-limits", do NOT edit it
+- **Claim your scope** at session start: `edda claim "label" --paths "src/scope/*"`
+- **Request before crossing boundaries**: `edda request "peer-label" "your message"`
+- **Respect binding decisions** — they apply to all sessions
+
+Ignoring these rules causes merge conflicts and duplicated work.
+
+### PR review-fix loop
+
+Before merging any GitHub PR, the PR itself must show the complete loop:
+
+1. `Code Review: Round N` pinned to the reviewed full SHA, with P0/P1 findings,
+   testing verdict, and `Changes Requested` or `LGTM`.
+2. Every `Changes Requested` round has an implementer `Review Response: Round
+   N` that answers each finding, names the new full SHA, and reports ran gates.
+3. Every push invalidates the prior verdict and requires another review round.
+4. The final comment is current-head `LGTM`, P0=0, P1=0, with exact gates.
+
+Internal verifier reports, task receipts, and CI do not replace PR comments.
+Merge still requires explicit operator authority.
