@@ -1040,6 +1040,127 @@ fn remove_unreferenced_scheduler_manifest(path: &Path) -> String {
 }
 
 #[cfg(any(windows, test))]
+fn recover_scheduler_manifest_candidate(
+    xml: &str,
+    executable: &Path,
+) -> anyhow::Result<Option<PathBuf>> {
+    let actions = scheduler_exec_values(xml)?;
+    let [(command, arguments)] = actions.as_slice() else {
+        return Ok(None);
+    };
+    if command
+        != executable
+            .to_str()
+            .context("scheduler executable is not Unicode")?
+    {
+        return Ok(None);
+    }
+    let Some(value) = arguments
+        .strip_prefix("reconcile --scheduler-manifest \"")
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return Ok(None);
+    };
+    let candidate = PathBuf::from(value);
+    if !candidate.is_absolute()
+        || format!(
+            "reconcile --scheduler-manifest {}",
+            quote_windows_argument(&candidate)?
+        ) != *arguments
+    {
+        return Ok(None);
+    }
+    Ok(Some(candidate))
+}
+
+#[cfg(any(windows, test))]
+fn remove_trusted_scheduler_manifest(path: &Path, repo: &Path, project_id: &str) -> String {
+    let removal = (|| -> anyhow::Result<()> {
+        let store = edda_store::store_root();
+        let directory = scheduler_manifest_directory(&store, true)?;
+        let launch_directory = directory
+            .parent()
+            .context("scheduler manifest path has no launch directory")?;
+        let _lock = edda_store::lock_file(&launch_directory.join("manifest.lock"))?;
+        anyhow::ensure!(
+            scheduler_manifest_directory(&store, true)? == directory,
+            "scheduler manifest directory changed during uninstall"
+        );
+        let loaded = load_scheduler_manifest(path)?;
+        anyhow::ensure!(
+            loaded.repo == repo && loaded.manifest.project_id == project_id,
+            "scheduler manifest does not belong to the exact task project"
+        );
+        std::fs::remove_file(path)
+            .with_context(|| format!("remove trusted scheduler manifest {}", path.display()))
+    })();
+    match removal {
+        Ok(()) => format!(
+            "removed trusted scheduler manifest after exact-task absence proof: {}",
+            path.display()
+        ),
+        Err(error) => format!(
+            "scheduler manifest retained because exact-file validation or removal failed for {}: {error:#}",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(any(windows, test))]
+fn uninstall_scheduler_task_with(
+    repo: &Path,
+    executable: &Path,
+    project_id: &str,
+    mut run: impl FnMut(&[String]) -> anyhow::Result<SchedulerOutput>,
+) -> anyhow::Result<String> {
+    let (task_name, query_args, delete_args) = windows_scheduler_management_args(project_id)?;
+    let before =
+        run(&query_args).with_context(|| format!("scheduler Query failed for task {task_name}"))?;
+    if classify_scheduler_query(&before)
+        .with_context(|| format!("scheduler Query failed for task {task_name}"))?
+        == SchedulerTaskState::Missing
+    {
+        return Ok(format!(
+            "scheduler task {} already absent for {}",
+            task_name,
+            repo.display()
+        ));
+    }
+    let candidate = before
+        .xml()
+        .and_then(|xml| recover_scheduler_manifest_candidate(xml.as_ref(), executable));
+    let deleted = run(&delete_args)
+        .with_context(|| format!("scheduler Delete failed for task {task_name}"))?;
+    anyhow::ensure!(
+        deleted.code == 0 || deleted.code == MISSING_TASK_HRESULT,
+        "scheduler Delete failed for {}: {}",
+        task_name,
+        deleted.description()
+    );
+    let after =
+        run(&query_args).with_context(|| format!("scheduler Query failed for task {task_name}"))?;
+    require_scheduler_state(
+        &after,
+        SchedulerTaskState::Missing,
+        "post-Delete Query",
+        &task_name,
+    )?;
+    let cleanup = match candidate {
+        Ok(Some(path)) => remove_trusted_scheduler_manifest(&path, repo, project_id),
+        Ok(None) => "scheduler manifest retained because the exact task did not prove one strict direct manifest command".into(),
+        Err(error) => format!(
+            "scheduler manifest retained because the pre-Delete Query was not trustworthy: {error:#}"
+        ),
+    };
+    Ok(format!(
+        "uninstalled scheduler task {} for {}; {}",
+        task_name,
+        repo.display(),
+        cleanup
+    ))
+}
+
+#[cfg(any(windows, test))]
 fn classify_scheduler_query(output: &SchedulerOutput) -> anyhow::Result<SchedulerTaskState> {
     match output.code {
         0 => Ok(SchedulerTaskState::Present),
@@ -1101,7 +1222,6 @@ fn scheduler_lifecycle(
     {
         let repo = canonical_main_repo(repo)?;
         let project_id = edda_store::project_id_for_root(&repo);
-        let (task_name, query_args, delete_args) = windows_scheduler_management_args(&project_id)?;
         if let Some(config) = install_config {
             let executable = std::env::current_exe()?.canonicalize()?;
             let mut config = config.clone();
@@ -1178,39 +1298,10 @@ fn scheduler_lifecycle(
             return Ok(());
         }
 
-        let before = run_schtasks(&query_args)
-            .with_context(|| format!("scheduler Query failed for task {task_name}"))?;
-        if classify_scheduler_query(&before)
-            .with_context(|| format!("scheduler Query failed for task {task_name}"))?
-            == SchedulerTaskState::Missing
-        {
-            println!(
-                "scheduler task {} already absent for {}",
-                task_name,
-                repo.display()
-            );
-            return Ok(());
-        }
-        let deleted = run_schtasks(&delete_args)
-            .with_context(|| format!("scheduler Delete failed for task {task_name}"))?;
-        anyhow::ensure!(
-            deleted.code == 0 || deleted.code == MISSING_TASK_HRESULT,
-            "scheduler Delete failed for {}: {}",
-            task_name,
-            deleted.description()
-        );
-        let after = run_schtasks(&query_args)
-            .with_context(|| format!("scheduler Query failed for task {task_name}"))?;
-        require_scheduler_state(
-            &after,
-            SchedulerTaskState::Missing,
-            "post-Delete Query",
-            &task_name,
-        )?;
+        let executable = std::env::current_exe()?.canonicalize()?;
         println!(
-            "uninstalled scheduler task {} for {}",
-            task_name,
-            repo.display()
+            "{}",
+            uninstall_scheduler_task_with(&repo, &executable, &project_id, run_schtasks)?
         );
         Ok(())
     }
@@ -3002,6 +3093,205 @@ mod tests {
                 "/HRESULT",
             ]
         );
+        Ok(())
+    }
+
+    fn scheduler_manifest_xml(executable: &Path, manifest: &Path) -> anyhow::Result<String> {
+        let escape = |value: &str| {
+            value
+                .replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;")
+                .replace('"', "&quot;")
+                .replace('\'', "&apos;")
+        };
+        Ok(format!(
+            "<Task><Actions><Exec><Command>{}</Command><Arguments>{}</Arguments></Exec></Actions></Task>",
+            escape(executable.to_str().context("test executable path")?),
+            escape(&format!(
+                "reconcile --scheduler-manifest {}",
+                quote_windows_argument(manifest)?
+            )),
+        ))
+    }
+
+    #[test]
+    fn scheduler_uninstall_removes_only_a_trusted_exact_manifest_after_absence(
+    ) -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+        let project_id = edda_store::project_id_for_root(&fixture.repo);
+        let (_, query_args, delete_args) = windows_scheduler_management_args(&project_id)?;
+        let xml = scheduler_manifest_xml(&fixture.codex, &prepared.path)?;
+        let outputs = [
+            SchedulerOutput::for_test(0, &xml, ""),
+            SchedulerOutput::for_test(0, "", ""),
+            SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing"),
+        ];
+        let mut calls = Vec::new();
+        let mut outputs = outputs.into_iter();
+
+        uninstall_scheduler_task_with(&fixture.repo, &fixture.codex, &project_id, |args| {
+            assert!(
+                prepared.path.exists(),
+                "artifact removed before absence proof"
+            );
+            calls.push(args.to_vec());
+            outputs.next().context("unexpected scheduler call")
+        })?;
+
+        assert_eq!(calls, [query_args.clone(), delete_args, query_args]);
+        assert!(!prepared.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_uninstall_malformed_query_retains_artifacts_but_removes_task() -> anyhow::Result<()>
+    {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+        let project_id = edda_store::project_id_for_root(&fixture.repo);
+        let mut outputs = [
+            SchedulerOutput::for_test(0, "<Task><Exec", ""),
+            SchedulerOutput::for_test(0, "", ""),
+            SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing"),
+        ]
+        .into_iter();
+        let mut calls = 0;
+
+        uninstall_scheduler_task_with(&fixture.repo, &fixture.codex, &project_id, |_| {
+            calls += 1;
+            outputs.next().context("unexpected scheduler call")
+        })?;
+
+        assert_eq!(calls, 3);
+        assert!(prepared.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_uninstall_untrusted_manifest_does_not_block_task_removal() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+        let mut wrong_project = prepared.manifest.clone();
+        wrong_project.project_id = "0".repeat(32);
+        let untrusted = write_scheduler_manifest_candidate(
+            &fixture.store,
+            &serde_json::to_vec(&wrong_project)?,
+        )?;
+        let xml = scheduler_manifest_xml(&fixture.codex, &untrusted)?;
+        let project_id = edda_store::project_id_for_root(&fixture.repo);
+        let mut outputs = [
+            SchedulerOutput::for_test(0, &xml, ""),
+            SchedulerOutput::for_test(0, "", ""),
+            SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing"),
+        ]
+        .into_iter();
+        let mut calls = 0;
+
+        uninstall_scheduler_task_with(&fixture.repo, &fixture.codex, &project_id, |_| {
+            calls += 1;
+            outputs.next().context("unexpected scheduler call")
+        })?;
+
+        assert_eq!(calls, 3);
+        assert!(untrusted.exists());
+        assert!(prepared.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_uninstall_never_sweeps_unproven_artifacts() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+        let project_id = edda_store::project_id_for_root(&fixture.repo);
+        let (_, query_args, _) = windows_scheduler_management_args(&project_id)?;
+        let mut calls = Vec::new();
+
+        uninstall_scheduler_task_with(&fixture.repo, &fixture.codex, &project_id, |args| {
+            calls.push(args.to_vec());
+            Ok(SchedulerOutput::for_test(
+                MISSING_TASK_HRESULT,
+                "",
+                "missing",
+            ))
+        })?;
+
+        assert_eq!(calls, [query_args]);
+        assert!(prepared.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_uninstall_missing_codex_retains_manifest_without_blocking_task_removal(
+    ) -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+        let xml = scheduler_manifest_xml(&fixture.codex, &prepared.path)?;
+        std::fs::remove_file(&fixture.codex)?;
+        let project_id = edda_store::project_id_for_root(&fixture.repo);
+        let mut outputs = [
+            SchedulerOutput::for_test(0, &xml, ""),
+            SchedulerOutput::for_test(0, "", ""),
+            SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing"),
+        ]
+        .into_iter();
+
+        uninstall_scheduler_task_with(&fixture.repo, &fixture.codex, &project_id, |_| {
+            outputs.next().context("unexpected scheduler call")
+        })?;
+
+        assert!(prepared.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_uninstall_delete_race_accepts_only_missing_hresult() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let project_id = edda_store::project_id_for_root(&fixture.repo);
+        let xml = "<Task><Actions /></Task>";
+        for (delete_code, succeeds) in [(MISSING_TASK_HRESULT, true), (0x8007_0005, false)] {
+            let mut outputs = [
+                SchedulerOutput::for_test(0, xml, ""),
+                SchedulerOutput::for_test(delete_code, "", "delete detail"),
+                SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing"),
+            ]
+            .into_iter();
+            let result =
+                uninstall_scheduler_task_with(&fixture.repo, &fixture.codex, &project_id, |_| {
+                    outputs.next().context("unexpected scheduler call")
+                });
+            assert_eq!(result.is_ok(), succeeds, "delete code 0x{delete_code:08x}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_uninstall_post_delete_uncertainty_retains_manifest() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+        let project_id = edda_store::project_id_for_root(&fixture.repo);
+        let xml = scheduler_manifest_xml(&fixture.codex, &prepared.path)?;
+        let mut outputs = [
+            SchedulerOutput::for_test(0, &xml, ""),
+            SchedulerOutput::for_test(0, "", ""),
+            SchedulerOutput::for_test(0, &xml, "still present"),
+        ]
+        .into_iter();
+
+        assert!(
+            uninstall_scheduler_task_with(&fixture.repo, &fixture.codex, &project_id, |_| outputs
+                .next()
+                .context("unexpected scheduler call"),)
+            .is_err()
+        );
+        assert!(prepared.path.exists());
         Ok(())
     }
 
