@@ -23,6 +23,7 @@ static FAKE_CODEX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 thread_local! {
     static FAIL_NEXT_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FAIL_NEXT_LEASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_TASK_ID: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 #[derive(Args)]
@@ -85,6 +86,11 @@ struct RunnerPlan {
     worktree: PathBuf,
 }
 
+struct PersistOutcome {
+    plans: Vec<RunnerPlan>,
+    errors: Vec<String>,
+}
+
 pub fn run(repo_root: &Path, args: ReconcileArgs) -> anyhow::Result<()> {
     let config = ReconcileConfig::from_args(&args);
     if let Some(task_id) = args.run_task {
@@ -96,10 +102,12 @@ pub fn run(repo_root: &Path, args: ReconcileArgs) -> anyhow::Result<()> {
     if args.attempt.is_some() {
         anyhow::bail!("--attempt is valid only with hidden --run-task");
     }
-    let plans = persist_reconciliation(repo_root, &config)?;
+    let persisted = persist_reconciliation(repo_root, &config)?;
+    let plans = persisted.plans;
     let executable = std::env::current_exe()?;
     let executables = vec![executable; plans.len()];
-    let (launched, errors) = launch_plans_with(repo_root, plans, &config, &executables);
+    let (launched, mut errors) = launch_plans_with(repo_root, plans, &config, &executables);
+    errors.extend(persisted.errors);
     for plan in launched {
         notify_started(repo_root, &plan.task);
         println!(
@@ -293,24 +301,31 @@ fn paths_overlap(left: &str, right: &str) -> bool {
     let Some(right) = static_prefix(right) else {
         return true;
     };
-    left == right
+    left.value == right.value
         || left
-            .strip_prefix(&right)
+            .value
+            .strip_prefix(&right.value)
             .is_some_and(|rest| rest.starts_with('/'))
         || right
-            .strip_prefix(&left)
+            .value
+            .strip_prefix(&left.value)
             .is_some_and(|rest| rest.starts_with('/'))
+        || (left.glob && right.value.starts_with(&left.value))
+        || (right.glob && left.value.starts_with(&right.value))
 }
 
-fn static_prefix(path: &str) -> Option<String> {
+struct StaticPrefix {
+    value: String,
+    glob: bool,
+}
+
+fn static_prefix(path: &str) -> Option<StaticPrefix> {
     let normalized_path = path.replace('\\', "/");
     let mut parts = Vec::new();
     for part in normalized_path.split('/') {
         match part {
             "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
+            ".." => return None,
             _ => parts.push(part),
         }
     }
@@ -319,13 +334,16 @@ fn static_prefix(path: &str) -> Option<String> {
         .find(['*', '?', '[', '{'])
         .unwrap_or(normalized.len());
     let prefix = normalized[..end].trim_end_matches('/');
-    (!prefix.is_empty()).then_some(prefix.to_string())
+    (!prefix.is_empty()).then_some(StaticPrefix {
+        value: prefix.to_string(),
+        glob: end < normalized.len(),
+    })
 }
 
 fn persist_reconciliation(
     repo_root: &Path,
     config: &ReconcileConfig,
-) -> anyhow::Result<Vec<RunnerPlan>> {
+) -> anyhow::Result<PersistOutcome> {
     let ledger = Ledger::open(repo_root)?;
     let lock = acquire_workspace_lock(&ledger.paths)?;
     let views = ledger.task_views()?;
@@ -371,82 +389,93 @@ fn persist_reconciliation(
         .collect::<anyhow::Result<Vec<_>>>()?;
     let changed = !actions.is_empty();
     let mut plans = Vec::new();
+    let mut errors = Vec::new();
 
     for action in actions {
-        match action {
-            ReconcileAction::Start { task_id, attempt } => {
-                let (_, task, _, worktree) = prepared
-                    .iter()
-                    .find(|(id, _, prepared_attempt, _)| {
-                        *id == task_id && *prepared_attempt == attempt
+        let result = (|| -> anyhow::Result<Option<RunnerPlan>> {
+            Ok(match action {
+                ReconcileAction::Start { task_id, attempt } => {
+                    let (_, task, _, worktree) = prepared
+                        .iter()
+                        .find(|(id, _, prepared_attempt, _)| {
+                            *id == task_id && *prepared_attempt == attempt
+                        })
+                        .context("prepared reconciliation task disappeared")?
+                        .clone();
+                    if task.status == TaskStatus::Failed {
+                        append_requeued(&ledger, task_id, attempt)?;
+                    }
+                    replace_lease(&ledger, task_id, attempt, config.lease_ttl_s)?;
+                    if let Err(error) =
+                        append_started(&ledger, task_id, attempt, config.lease_ttl_s)
+                    {
+                        let _ = ledger.delete_task_lease(task_id, attempt);
+                        return Err(error);
+                    }
+                    Some(RunnerPlan {
+                        task,
+                        attempt,
+                        worktree,
                     })
-                    .context("prepared reconciliation task disappeared")?
-                    .clone();
-                if task.status == TaskStatus::Failed {
-                    append_requeued(&ledger, task_id, attempt)?;
                 }
-                replace_lease(&ledger, task_id, attempt, config.lease_ttl_s)?;
-                if let Err(error) = append_started(&ledger, task_id, attempt, config.lease_ttl_s) {
-                    let _ = ledger.delete_task_lease(task_id, attempt);
-                    return Err(error);
-                }
-                plans.push(RunnerPlan {
-                    task,
+                ReconcileAction::Resume {
+                    task_id,
                     attempt,
-                    worktree,
-                });
-            }
-            ReconcileAction::Resume {
-                task_id,
-                attempt,
-                session_id,
-            } => {
-                let (_, task, _, worktree) = prepared
-                    .iter()
-                    .find(|(id, _, prepared_attempt, _)| {
-                        *id == task_id && *prepared_attempt == attempt
+                    session_id,
+                } => {
+                    let (_, task, _, worktree) = prepared
+                        .iter()
+                        .find(|(id, _, prepared_attempt, _)| {
+                            *id == task_id && *prepared_attempt == attempt
+                        })
+                        .context("prepared reconciliation task disappeared")?
+                        .clone();
+                    replace_lease(&ledger, task_id, attempt, config.lease_ttl_s)?;
+                    let _ = session_id;
+                    Some(RunnerPlan {
+                        task,
+                        attempt,
+                        worktree,
                     })
-                    .context("prepared reconciliation task disappeared")?
-                    .clone();
-                replace_lease(&ledger, task_id, attempt, config.lease_ttl_s)?;
-                let _ = session_id;
-                plans.push(RunnerPlan {
-                    task,
-                    attempt,
-                    worktree,
-                });
-            }
-            ReconcileAction::Requeue {
-                task_id,
-                next_attempt,
-                ..
-            } => {
-                let (_, task, _, worktree) = prepared
-                    .iter()
-                    .find(|(id, _, prepared_attempt, _)| {
-                        *id == task_id && *prepared_attempt == next_attempt
-                    })
-                    .context("prepared reconciliation task disappeared")?
-                    .clone();
-                append_requeued(&ledger, task_id, next_attempt)?;
-                replace_lease(&ledger, task_id, next_attempt, config.lease_ttl_s)?;
-                if let Err(error) =
-                    append_started(&ledger, task_id, next_attempt, config.lease_ttl_s)
-                {
-                    let _ = ledger.delete_task_lease(task_id, next_attempt);
-                    return Err(error);
                 }
-                plans.push(RunnerPlan {
-                    task,
-                    attempt: next_attempt,
-                    worktree,
-                });
-            }
-            ReconcileAction::Fail { task_id, reason } => {
-                append_failed(&ledger, task_id, &reason)?;
-                let attempt = task_view(&views, task_id)?.attempts;
-                let _ = ledger.delete_task_lease(task_id, attempt)?;
-            }
+                ReconcileAction::Requeue {
+                    task_id,
+                    next_attempt,
+                    ..
+                } => {
+                    let (_, task, _, worktree) = prepared
+                        .iter()
+                        .find(|(id, _, prepared_attempt, _)| {
+                            *id == task_id && *prepared_attempt == next_attempt
+                        })
+                        .context("prepared reconciliation task disappeared")?
+                        .clone();
+                    append_requeued(&ledger, task_id, next_attempt)?;
+                    replace_lease(&ledger, task_id, next_attempt, config.lease_ttl_s)?;
+                    if let Err(error) =
+                        append_started(&ledger, task_id, next_attempt, config.lease_ttl_s)
+                    {
+                        let _ = ledger.delete_task_lease(task_id, next_attempt);
+                        return Err(error);
+                    }
+                    Some(RunnerPlan {
+                        task,
+                        attempt: next_attempt,
+                        worktree,
+                    })
+                }
+                ReconcileAction::Fail { task_id, reason } => {
+                    append_failed(&ledger, task_id, &reason)?;
+                    let attempt = task_view(&views, task_id)?.attempts;
+                    let _ = ledger.delete_task_lease(task_id, attempt)?;
+                    None
+                }
+            })
+        })();
+        match result {
+            Ok(Some(plan)) => plans.push(plan),
+            Ok(None) => {}
+            Err(error) => errors.push(format!("task action persistence failed: {error:#}")),
         }
     }
     if changed {
@@ -454,7 +483,7 @@ fn persist_reconciliation(
         let _ = edda_derive::rebuild_branch(&ledger, &branch);
     }
     drop(lock);
-    Ok(plans)
+    Ok(PersistOutcome { plans, errors })
 }
 
 fn acquire_workspace_lock(paths: &edda_ledger::EddaPaths) -> anyhow::Result<WorkspaceLock> {
@@ -478,7 +507,9 @@ fn task_view(views: &[TaskView], task_id: u64) -> anyhow::Result<&TaskView> {
 
 fn append_started(ledger: &Ledger, task_id: u64, attempt: u32, ttl_s: u64) -> anyhow::Result<()> {
     #[cfg(test)]
-    if FAIL_NEXT_STARTED.with(|flag| flag.replace(false)) {
+    if FAIL_TASK_ID.with(|target| target.get().is_none_or(|target| target == task_id))
+        && FAIL_NEXT_STARTED.with(|flag| flag.replace(false))
+    {
         anyhow::bail!("injected task.started append failure");
     }
     let branch = ledger.head_branch()?;
@@ -516,7 +547,9 @@ fn append_failed(ledger: &Ledger, task_id: u64, reason: &str) -> anyhow::Result<
 
 fn replace_lease(ledger: &Ledger, task_id: u64, attempt: u32, ttl_s: u64) -> anyhow::Result<()> {
     #[cfg(test)]
-    if FAIL_NEXT_LEASE.with(|flag| flag.replace(false)) {
+    if FAIL_TASK_ID.with(|target| target.get().is_none_or(|target| target == task_id))
+        && FAIL_NEXT_LEASE.with(|flag| flag.replace(false))
+    {
         anyhow::bail!("injected lease replacement failure");
     }
     let heartbeat_at = clock_now();
@@ -725,6 +758,9 @@ fn run_task(
 ) -> anyhow::Result<()> {
     let ledger = Ledger::open(repo_root)?;
     if !renew_lease(&ledger, task_id, attempt, config.lease_ttl_s)? {
+        if ring_doorbell {
+            launch_runner_doorbell(repo_root, config)?;
+        }
         return Ok(());
     }
     let result = (|| -> anyhow::Result<()> {
@@ -1300,6 +1336,9 @@ mod tests {
             "src/./auth/../auth/*.rs",
             "src/auth/login.rs"
         ));
+        assert!(paths_overlap("src/foo*", "src/foobar.rs"));
+        assert!(paths_overlap("src/auth?", "src/authX"));
+        assert!(paths_overlap("../outside", "src/billing.rs"));
         assert!(!paths_overlap("src/auth.rs", "src/billing.rs"));
         assert!(paths_overlap("*", "src/billing.rs"));
     }
@@ -1366,8 +1405,8 @@ mod tests {
         let first = persist_reconciliation(&repo, &ReconcileConfig::test_defaults())?;
         let second = persist_reconciliation(&repo, &ReconcileConfig::test_defaults())?;
 
-        assert_eq!(first.len(), 1);
-        assert!(second.is_empty());
+        assert_eq!(first.plans.len(), 1);
+        assert!(second.plans.is_empty());
         let events = ledger.task_events()?;
         assert_eq!(
             events
@@ -1397,12 +1436,58 @@ mod tests {
                 FAIL_NEXT_LEASE.with(|flag| flag.set(true));
             }
 
-            assert!(persist_reconciliation(&repo, &ReconcileConfig::test_defaults()).is_err());
+            let outcome = persist_reconciliation(&repo, &ReconcileConfig::test_defaults())?;
+            assert!(outcome.plans.is_empty());
+            assert_eq!(outcome.errors.len(), 1);
             assert!(ledger.task_lease(1)?.is_none());
             assert!(ledger
                 .task_events()?
                 .iter()
                 .all(|event| event.event_type != "task.started"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn middle_persistence_fault_returns_first_and_later_launchable_plans() -> anyhow::Result<()> {
+        for fail_started in [false, true] {
+            let dir = tempfile::tempdir()?;
+            let repo = dir.path().join("repo");
+            std::fs::create_dir(&repo)?;
+            init_git(&repo)?;
+            edda_ledger::Ledger::ensure_initialized(&repo)?;
+            let ledger = edda_ledger::Ledger::open(&repo)?;
+            for id in 1..=3 {
+                create_task(&ledger, id, &[format!("src/{id}.rs")])?;
+            }
+            FAIL_TASK_ID.with(|target| target.set(Some(2)));
+            if fail_started {
+                FAIL_NEXT_STARTED.with(|flag| flag.set(true));
+            } else {
+                FAIL_NEXT_LEASE.with(|flag| flag.set(true));
+            }
+            let outcome = persist_reconciliation(
+                &repo,
+                &ReconcileConfig {
+                    max_workers: 3,
+                    ..ReconcileConfig::test_defaults()
+                },
+            )?;
+            FAIL_TASK_ID.with(|target| target.set(None));
+
+            assert_eq!(outcome.errors.len(), 1);
+            assert_eq!(
+                outcome
+                    .plans
+                    .iter()
+                    .map(|plan| plan.task.task_id)
+                    .collect::<Vec<_>>(),
+                vec![1, 3]
+            );
+            assert!(ledger.task_lease(2)?.is_none());
+            assert!(ledger.task_events()?.iter().all(|event| !(event.event_type
+                == "task.started"
+                && event.payload["task_id"] == 2)));
         }
         Ok(())
     }
@@ -1615,7 +1700,7 @@ mod tests {
                 std::thread::spawn(move || {
                     gate.wait();
                     persist_reconciliation(&repo, &ReconcileConfig::test_defaults())
-                        .map(|plans| plans.len())
+                        .map(|outcome| outcome.plans.len())
                 })
             })
             .collect();
@@ -1757,6 +1842,27 @@ mod tests {
             .task_events()?
             .iter()
             .all(|event| event.event_type != "task.failed"));
+        Ok(())
+    }
+
+    #[test]
+    fn initially_stale_runner_rings_doorbell_without_mutating_replacement() -> anyhow::Result<()> {
+        let _doorbell = test_lock(&DOORBELL_LOCK);
+        let dir = tempfile::tempdir()?;
+        let repo = dir.path();
+        edda_ledger::Ledger::ensure_initialized(repo)?;
+        let ledger = edda_ledger::Ledger::open(repo)?;
+        create_task(&ledger, 12, &["src/stale.rs".into()])?;
+        ledger.upsert_task_lease(&lease(12, 2, "2026-08-16T02:00:00Z"))?;
+        DOORBELL_COUNT.store(0, Ordering::SeqCst);
+
+        run_task(repo, 12, 1, &ReconcileConfig::test_defaults(), true)?;
+
+        assert_eq!(ledger.task_lease(12)?.expect("replacement").attempt, 2);
+        assert_eq!(DOORBELL_COUNT.load(Ordering::SeqCst), 1);
+        assert!(ledger.task_events()?.iter().all(|event| {
+            event.event_type != "task.session" && event.event_type != "task.failed"
+        }));
         Ok(())
     }
 
@@ -1991,9 +2097,21 @@ mod tests {
             .task_events()?
             .iter()
             .any(|event| event.event_type == "task.session"));
-        assert_ne!(
-            ledger.task_lease(1)?.expect("renewed lease").heartbeat_at,
-            "2026-08-16T00:00:00Z"
+        let after_session = ledger.task_lease(1)?.expect("session lease");
+        let mut saw_periodic_renewal = false;
+        for _ in 0..100 {
+            let current = ledger.task_lease(1)?.expect("current lease");
+            if current.heartbeat_at != after_session.heartbeat_at
+                || current.expires_at != after_session.expires_at
+            {
+                saw_periodic_renewal = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            saw_periodic_renewal,
+            "runner crossed a periodic renewal interval"
         );
         ledger.upsert_task_lease(&TaskLease {
             task_id: 1,
