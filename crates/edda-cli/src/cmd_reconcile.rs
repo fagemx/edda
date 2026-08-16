@@ -148,15 +148,7 @@ fn scheduler_manifest_directory(store: &Path, must_exist: bool) -> anyhow::Resul
         !value.contains(['\0', '"']),
         "Edda store root contains an unsupported character"
     );
-    let store = if store.exists() {
-        anyhow::ensure!(store.is_dir(), "Edda store root must be a directory");
-        store
-            .canonicalize()
-            .with_context(|| format!("canonicalize Edda store root {}", store.display()))?
-    } else {
-        anyhow::ensure!(!must_exist, "Edda store root does not exist");
-        store
-    };
+    let store = prospective_canonical_store_root(&store, must_exist)?;
     let launch = store.join("scheduler-launch");
     if launch.exists() {
         anyhow::ensure!(
@@ -174,6 +166,34 @@ fn scheduler_manifest_directory(store: &Path, must_exist: bool) -> anyhow::Resul
         anyhow::ensure!(!must_exist, "scheduler manifest directory does not exist");
     }
     Ok(directory)
+}
+
+fn prospective_canonical_store_root(store: &Path, must_exist: bool) -> anyhow::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = store;
+    while !existing.exists() {
+        missing.push(
+            existing
+                .file_name()
+                .context("Edda store root has no existing ancestor")?
+                .to_os_string(),
+        );
+        existing = existing
+            .parent()
+            .context("Edda store root has no existing ancestor")?;
+    }
+    anyhow::ensure!(existing.is_dir(), "Edda store root must be a directory");
+    anyhow::ensure!(
+        !must_exist || missing.is_empty(),
+        "Edda store root does not exist"
+    );
+    let mut canonical = existing
+        .canonicalize()
+        .with_context(|| format!("canonicalize Edda store root {}", existing.display()))?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(canonical)
 }
 
 fn scheduler_manifest_digest(bytes: &[u8]) -> String {
@@ -2585,6 +2605,32 @@ mod tests {
         lock.lock().unwrap_or_else(|poison| poison.into_inner())
     }
 
+    static CODEX_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct CodexBinEnvGuard {
+        previous: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Drop for CodexBinEnvGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("EDDA_CODEX_BIN", value),
+                None => std::env::remove_var("EDDA_CODEX_BIN"),
+            }
+        }
+    }
+
+    fn codex_bin_env_guard(value: &str) -> CodexBinEnvGuard {
+        let lock = test_lock(&CODEX_BIN_ENV_LOCK);
+        let previous = std::env::var_os("EDDA_CODEX_BIN");
+        std::env::set_var("EDDA_CODEX_BIN", value);
+        CodexBinEnvGuard {
+            previous,
+            _lock: lock,
+        }
+    }
+
     #[cfg(not(windows))]
     fn scheduler_config(codex_bin: &str) -> ReconcileConfig {
         ReconcileConfig {
@@ -2722,6 +2768,26 @@ mod tests {
         std::fs::write(&prepared.path, b"different")?;
         assert!(publish_scheduler_manifest(&prepared).is_err());
         assert_eq!(std::fs::read(&prepared.path)?, b"different");
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_first_publish_from_absent_store_root_is_loadable() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        std::fs::remove_dir_all(&fixture.store)?;
+        assert!(!fixture.store.exists());
+
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        assert!(publish_scheduler_manifest(&prepared)?);
+        assert_eq!(
+            prepared.path.parent(),
+            Some(scheduler_manifest_directory(&fixture.store, true)?.as_path())
+        );
+        assert_eq!(
+            load_scheduler_manifest(&prepared.path)?.manifest,
+            prepared.manifest
+        );
+        assert!(!publish_scheduler_manifest(&prepared)?);
         Ok(())
     }
 
@@ -3220,10 +3286,7 @@ mod tests {
 
     #[test]
     fn scheduler_codex_config_prefers_cli_then_environment() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = test_lock(&ENV_LOCK);
-        let previous = std::env::var_os("EDDA_CODEX_BIN");
-        std::env::set_var("EDDA_CODEX_BIN", r"C:\environment\codex.exe");
+        let _environment = codex_bin_env_guard(r"C:\environment\codex.exe");
 
         let explicit = SchedulerCli::try_parse_from([
             "test",
@@ -3243,11 +3306,18 @@ mod tests {
             ReconcileConfig::from_args(&inherited.args).codex_bin,
             PathBuf::from(r"C:\environment\codex.exe")
         );
+    }
 
-        match previous {
-            Some(value) => std::env::set_var("EDDA_CODEX_BIN", value),
-            None => std::env::remove_var("EDDA_CODEX_BIN"),
-        }
+    #[test]
+    fn scheduler_codex_environment_guard_restores_after_unwind() {
+        let previous = std::env::var_os("EDDA_CODEX_BIN");
+        let result = std::panic::catch_unwind(|| {
+            let _environment = codex_bin_env_guard(r"C:\environment\codex.exe");
+            panic!("test unwind");
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::env::var_os("EDDA_CODEX_BIN"), previous);
     }
 
     #[test]

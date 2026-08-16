@@ -288,9 +288,10 @@ directly under the current user with `LIMITED`; it does not use `SYSTEM`,
 Each project uses the exact name `Edda-Reconcile-<32-lowercase-hex-project-id>`.
 Install uses `/F`, so repeating it replaces only that name. Uninstall queries
 and deletes only that exact name and is idempotent; it never terminates a
-running reconciler or worker. The scheduled command contains absolute,
-canonical executable and main-repository paths, so linked worktrees share one
-task and execution does not depend on the scheduler's working directory.
+running reconciler or worker. The compact scheduled command contains canonical
+Edda and manifest paths; the repository path lives in the validated manifest,
+so linked worktrees share one task and execution does not depend on the
+scheduler's working directory.
 
 Scheduler lifecycle is Windows-only. A local exact-name missing-task HRESULT
 lifecycle run reported the expected signed and hexadecimal result codes, but
