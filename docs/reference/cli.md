@@ -292,9 +292,10 @@ running reconciler or worker. The scheduled command contains absolute,
 canonical executable and main-repository paths, so linked worktrees share one
 task and execution does not depend on the scheduler's working directory.
 
-Scheduler lifecycle is Windows-only. The controller-loss release drills and
-the locally observed missing-task HRESULT are recorded in
-[`P2_DRILL_2026-08-16.md`](../plan/task-rail/P2_DRILL_2026-08-16.md).
+Scheduler lifecycle is Windows-only. The still-pending controller-loss drills
+and local missing-task HRESULT proof contract are tracked in
+[`P2_DRILL_2026-08-16.md`](../plan/task-rail/P2_DRILL_2026-08-16.md); they remain
+`BLOCKED` until the required reviewed implementation gate.
 
 ---
 

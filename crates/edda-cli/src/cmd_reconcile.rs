@@ -194,10 +194,11 @@ fn canonical_main_repo(repo: &Path) -> anyhow::Result<PathBuf> {
     let repo = repo
         .canonicalize()
         .with_context(|| format!("canonicalize repository {}", repo.display()))?;
-    edda_core::git::resolve_git_root(&repo)
-        .unwrap_or(repo)
+    anyhow::ensure!(repo.is_dir(), "--repo must name a directory");
+    edda_ledger::EddaPaths::find_root(&repo)
+        .context("--repo must name an initialized Edda workspace")?
         .canonicalize()
-        .context("canonicalize main repository")
+        .context("canonicalize Edda workspace root")
 }
 
 #[cfg(any(windows, test))]
@@ -216,13 +217,56 @@ fn quote_windows_argument(path: &Path) -> anyhow::Result<String> {
 }
 
 #[cfg(any(windows, test))]
+fn windows_path_is_absolute(path: &Path) -> anyhow::Result<bool> {
+    let value = path.to_str().context("scheduler path is not Unicode")?;
+    let bytes = value.as_bytes();
+    let separator = |byte| matches!(byte, b'\\' | b'/');
+    let drive_rooted = |candidate: &[u8]| {
+        candidate.len() >= 3
+            && candidate[0].is_ascii_alphabetic()
+            && candidate[1] == b':'
+            && separator(candidate[2])
+    };
+    let unc_rooted = |candidate: &str| {
+        let mut parts = candidate.split(['\\', '/']);
+        parts.next().is_some_and(|part| !part.is_empty())
+            && parts.next().is_some_and(|part| !part.is_empty())
+    };
+
+    if drive_rooted(bytes) {
+        return Ok(true);
+    }
+    if bytes.len() < 2 || !separator(bytes[0]) || !separator(bytes[1]) {
+        return Ok(false);
+    }
+    if bytes.len() >= 4 && bytes[2] == b'?' && separator(bytes[3]) {
+        let rest = &value[4..];
+        if drive_rooted(rest.as_bytes()) {
+            return Ok(true);
+        }
+        let rest_bytes = rest.as_bytes();
+        return Ok(rest_bytes.len() >= 4
+            && rest_bytes[..3].eq_ignore_ascii_case(b"UNC")
+            && separator(rest_bytes[3])
+            && unc_rooted(&rest[4..]));
+    }
+    Ok(unc_rooted(&value[2..]))
+}
+
+#[cfg(any(windows, test))]
 fn windows_scheduler_spec(
     exe: &Path,
     repo: &Path,
     project_id: &str,
 ) -> anyhow::Result<WindowsSchedulerSpec> {
-    anyhow::ensure!(exe.is_absolute(), "scheduler executable must be absolute");
-    anyhow::ensure!(repo.is_absolute(), "scheduler repository must be absolute");
+    anyhow::ensure!(
+        windows_path_is_absolute(exe)?,
+        "scheduler executable must be absolute"
+    );
+    anyhow::ensure!(
+        windows_path_is_absolute(repo)?,
+        "scheduler repository must be absolute"
+    );
     anyhow::ensure!(
         project_id.len() == 32
             && project_id
@@ -257,6 +301,23 @@ fn classify_scheduler_query(output: &SchedulerOutput) -> anyhow::Result<Schedule
     }
 }
 
+#[cfg(any(windows, test))]
+fn require_scheduler_state(
+    output: &SchedulerOutput,
+    expected: SchedulerTaskState,
+    operation: &str,
+    task_name: &str,
+) -> anyhow::Result<()> {
+    let actual = classify_scheduler_query(output)
+        .with_context(|| format!("scheduler {operation} failed for task {task_name}"))?;
+    anyhow::ensure!(
+        actual == expected,
+        "scheduler {operation} expected {expected:?} for task {task_name}, got {actual:?}: {}",
+        output.description()
+    );
+    Ok(())
+}
+
 #[cfg(windows)]
 fn run_schtasks(args: &[String]) -> anyhow::Result<SchedulerOutput> {
     let output = Command::new("schtasks.exe")
@@ -287,7 +348,8 @@ fn scheduler_lifecycle(repo: &Path, install: bool) -> anyhow::Result<()> {
     {
         let repo = canonical_main_repo(repo)?;
         let executable = std::env::current_exe()?.canonicalize()?;
-        let spec = windows_scheduler_spec(&executable, &repo, &edda_store::project_id(&repo))?;
+        let spec =
+            windows_scheduler_spec(&executable, &repo, &edda_store::project_id_for_root(&repo))?;
         if install {
             let created = run_schtasks(&spec.create_args)
                 .with_context(|| format!("scheduler Create failed for task {}", spec.task_name))?;
@@ -299,14 +361,12 @@ fn scheduler_lifecycle(repo: &Path, install: bool) -> anyhow::Result<()> {
             );
             let queried = run_schtasks(&spec.query_args)
                 .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?;
-            anyhow::ensure!(
-                classify_scheduler_query(&queried).with_context(|| format!(
-                    "scheduler Query failed for task {}",
-                    spec.task_name
-                ))? == SchedulerTaskState::Present,
-                "scheduler task {} missing after Create",
-                spec.task_name
-            );
+            require_scheduler_state(
+                &queried,
+                SchedulerTaskState::Present,
+                "post-Create Query",
+                &spec.task_name,
+            )?;
             println!(
                 "installed scheduler task {} for {}",
                 spec.task_name,
@@ -338,13 +398,12 @@ fn scheduler_lifecycle(repo: &Path, install: bool) -> anyhow::Result<()> {
         );
         let after = run_schtasks(&spec.query_args)
             .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?;
-        anyhow::ensure!(
-            classify_scheduler_query(&after)
-                .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?
-                == SchedulerTaskState::Missing,
-            "scheduler task {} remains after Delete",
-            spec.task_name
-        );
+        require_scheduler_state(
+            &after,
+            SchedulerTaskState::Missing,
+            "post-Delete Query",
+            &spec.task_name,
+        )?;
         println!(
             "uninstalled scheduler task {} for {}",
             spec.task_name,
@@ -1375,6 +1434,30 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_windows_absolute_paths_are_host_neutral() -> anyhow::Result<()> {
+        for path in [
+            r"C:\edda\edda.exe",
+            "C:/edda/edda.exe",
+            r"\\server\share\edda.exe",
+            r"\\?\C:\edda\edda.exe",
+            r"\\?\UNC\server\share\edda.exe",
+        ] {
+            assert!(windows_path_is_absolute(Path::new(path))?, "{path}");
+        }
+        for path in [
+            "edda.exe",
+            r"C:edda.exe",
+            r"\edda.exe",
+            r"\\server",
+            r"\\?\C:edda.exe",
+            r"\\?\UNC\server",
+        ] {
+            assert!(!windows_path_is_absolute(Path::new(path))?, "{path}");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn scheduler_renderer_rejects_ambiguous_inputs() {
         let executable = Path::new(r"C:\edda\edda.exe");
         let repository = Path::new(r"C:\repo");
@@ -1440,6 +1523,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scheduler_expected_state_mismatch_preserves_bounded_process_output() {
+        let task_name = "Edda-Reconcile-0123456789abcdef0123456789abcdef";
+        let missing = SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing detail");
+        let install_error = require_scheduler_state(
+            &missing,
+            SchedulerTaskState::Present,
+            "post-Create Query",
+            task_name,
+        )
+        .expect_err("Create verification must reject missing")
+        .to_string();
+        assert!(install_error.contains("post-Create Query"));
+        assert!(install_error.contains(task_name));
+        assert!(install_error.contains("0x80070002"));
+        assert!(install_error.contains("missing detail"));
+
+        let present = SchedulerOutput::for_test(0, "present xml", "");
+        let uninstall_error = require_scheduler_state(
+            &present,
+            SchedulerTaskState::Missing,
+            "post-Delete Query",
+            task_name,
+        )
+        .expect_err("Delete verification must reject present")
+        .to_string();
+        assert!(uninstall_error.contains("post-Delete Query"));
+        assert!(uninstall_error.contains(task_name));
+        assert!(uninstall_error.contains("0x00000000"));
+        assert!(uninstall_error.contains("present xml"));
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn scheduler_lifecycle_is_explicitly_unsupported_off_windows() {
@@ -1456,8 +1571,18 @@ mod tests {
         let dir = tempfile::tempdir()?;
         assert!(canonical_main_repo(&dir.path().join("missing")).is_err());
 
+        let parent = dir.path().join("parent git");
+        std::fs::create_dir(&parent)?;
+        init_git(&parent)?;
+        assert!(canonical_main_repo(&parent).is_err());
+        let nested = parent.join("nested edda");
+        std::fs::create_dir(&nested)?;
+        Ledger::ensure_initialized(&nested)?;
+        assert_eq!(canonical_main_repo(&nested)?, nested.canonicalize()?);
+
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(repo.join(".git").join("worktrees").join("scheduler"))?;
+        Ledger::ensure_initialized(&repo)?;
         let worktree = dir.path().join("linked worktree");
         std::fs::create_dir_all(&worktree)?;
         let gitdir = repo.join(".git").join("worktrees").join("scheduler");
@@ -1471,6 +1596,43 @@ mod tests {
             edda_store::project_id(&worktree),
             edda_store::project_id(&repo)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_repo_reentry_runs_against_the_explicit_repo_from_an_unrelated_root(
+    ) -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let repo = dir.path().join("scheduled repo");
+        let unrelated = dir.path().join("unrelated cwd");
+        std::fs::create_dir(&repo)?;
+        std::fs::create_dir(&unrelated)?;
+        init_git(&repo)?;
+        Ledger::ensure_initialized(&repo)?;
+        let ledger = Ledger::open(&repo)?;
+        create_task(&ledger, 91, &["src/scheduled.rs".into()])?;
+        append_started(&ledger, 91, 1, 1)?;
+        ledger.upsert_task_lease(&lease(91, 1, "2026-08-16T00:00:00Z"))?;
+
+        run(
+            &unrelated,
+            ReconcileArgs {
+                max_workers: 0,
+                max_attempts: 1,
+                lease_ttl_s: 300,
+                codex_bin: None,
+                install_scheduler: false,
+                uninstall_scheduler: false,
+                repo: Some(repo.canonicalize()?),
+                run_task: None,
+                attempt: None,
+            },
+        )?;
+
+        let view = ledger.task_views()?.remove(0);
+        assert_eq!(view.status, TaskStatus::Failed);
+        assert_eq!(view.failure_reason.as_deref(), Some("retry-cap-exhausted"));
+        assert!(!unrelated.join(".edda").exists());
         Ok(())
     }
 

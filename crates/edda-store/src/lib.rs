@@ -16,7 +16,12 @@ use std::path::{Path, PathBuf};
 pub fn project_id(repo_root_or_cwd: &Path) -> String {
     let resolved = edda_core::git::resolve_git_root(repo_root_or_cwd)
         .unwrap_or_else(|| repo_root_or_cwd.to_path_buf());
-    let normalized = normalize_path(&resolved);
+    project_id_for_root(&resolved)
+}
+
+/// Compute a deterministic project ID from an already-resolved authoritative root.
+pub fn project_id_for_root(root: &Path) -> String {
+    let normalized = normalize_path(root);
     let hash = blake3::hash(normalized.as_bytes());
     hash.to_hex()[..32].to_string()
 }
@@ -114,6 +119,20 @@ mod tests {
         assert_eq!(id1, id2);
         assert_eq!(id1.len(), 32);
         assert!(id1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn project_id_for_root_does_not_follow_an_unrelated_ancestor_git_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("parent");
+        let nested = parent.join("nested-edda");
+        fs::create_dir_all(parent.join(".git")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+
+        let nested_id = project_id_for_root(&nested);
+        assert_eq!(nested_id, project_id_for_root(&nested));
+        assert_ne!(nested_id, project_id(&nested));
+        assert_eq!(project_id(&nested), project_id(&parent));
     }
 
     #[test]
