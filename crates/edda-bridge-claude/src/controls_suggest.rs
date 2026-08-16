@@ -395,8 +395,16 @@ fn cooldown_cutoff(now: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{MutexGuard, PoisonError};
+
     use super::*;
     use edda_aggregate::quality::{ModelQuality, QualityReport};
+
+    fn store_guard() -> MutexGuard<'static, ()> {
+        crate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 
     fn make_report(success_rate: f64, total_steps: u64, cost: f64) -> QualityReport {
         QualityReport {
@@ -457,6 +465,7 @@ mod tests {
 
     #[test]
     fn suggest_returns_patch_when_triggered() {
+        let _store = store_guard();
         let report = make_report(0.30, 20, 2.0);
         let rules = default_rules();
         let result = suggest_controls_patch("test_suggest_some", &report, &rules, None).unwrap();
@@ -469,7 +478,9 @@ mod tests {
 
     #[test]
     fn crud_roundtrip() {
+        let _store = store_guard();
         let pid = "test_controls_crud";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
         let _ = edda_store::ensure_dirs(pid);
 
         let patch = ControlsPatch {
@@ -500,7 +511,9 @@ mod tests {
 
     #[test]
     fn approve_and_dismiss_transitions() {
+        let _store = store_guard();
         let pid = "test_controls_transitions";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
         let _ = edda_store::ensure_dirs(pid);
 
         // Approve path
@@ -552,7 +565,9 @@ mod tests {
 
     #[test]
     fn mark_applied_requires_approved() {
+        let _store = store_guard();
         let pid = "test_controls_applied";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
         let _ = edda_store::ensure_dirs(pid);
 
         let p1 = ControlsPatch {
@@ -583,7 +598,9 @@ mod tests {
 
     #[test]
     fn audit_log_records_actions() {
+        let _store = store_guard();
         let pid = "test_controls_audit";
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
         let _ = edda_store::ensure_dirs(pid);
 
         let patch = ControlsPatch {
