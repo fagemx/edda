@@ -257,6 +257,21 @@ fn windows_path_is_absolute(path: &Path) -> anyhow::Result<bool> {
 }
 
 #[cfg(any(windows, test))]
+fn validate_canonical_direct_codex_target(canonical: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        canonical.is_absolute()
+            && canonical.is_file()
+            && canonical
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("exe")),
+        "canonical Codex executable {} must be an absolute native .exe file",
+        canonical.display()
+    );
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
 fn canonical_direct_codex_executable(
     command: &Path,
     search_path: Option<&std::ffi::OsStr>,
@@ -293,9 +308,8 @@ fn canonical_direct_codex_executable(
         let canonical = candidate
             .canonicalize()
             .with_context(|| format!("canonicalize Codex executable {}", candidate.display()))?;
-        if canonical.is_file() {
-            return Ok(canonical);
-        }
+        validate_canonical_direct_codex_target(&canonical)?;
+        return Ok(canonical);
     }
     anyhow::bail!(
         "Codex executable {} must resolve to an absolute native .exe file",
@@ -1613,16 +1627,35 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(windows)]
     #[test]
-    fn scheduler_codex_resolver_finds_this_hosts_native_codex_exe() -> anyhow::Result<()> {
-        let resolved = canonical_direct_codex_executable(Path::new("codex"), None)?;
-        assert!(resolved.is_absolute());
-        assert!(resolved.is_file());
-        assert!(resolved
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("exe")));
+    fn scheduler_codex_resolver_revalidates_the_canonical_target_extension() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let native = dir.path().join("codex.exe");
+        std::fs::write(&native, b"MZ")?;
+        let shim = dir.path().join("codex.cmd");
+        std::fs::write(&shim, b"@echo off")?;
+
+        validate_canonical_direct_codex_target(&native.canonicalize()?)?;
+        let error = validate_canonical_direct_codex_target(&shim.canonicalize()?)
+            .expect_err("a canonical .cmd target must not be schedulable");
+        assert!(error
+            .to_string()
+            .contains("must be an absolute native .exe file"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scheduler_codex_resolver_rejects_exe_alias_to_cmd_target() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let shim = dir.path().join("codex.cmd");
+        std::fs::write(&shim, b"#!/bin/sh")?;
+        let alias = dir.path().join("codex.exe");
+        std::os::unix::fs::symlink(&shim, &alias)?;
+
+        let error = canonical_direct_codex_executable(&alias, None)
+            .expect_err("an .exe alias to a .cmd target must not be schedulable");
+        assert!(error.to_string().contains("absolute native .exe file"));
         Ok(())
     }
 
