@@ -10,6 +10,8 @@ use edda_ledger::{Ledger, TaskLease};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[cfg(any(windows, test))]
 use std::sync::atomic::AtomicU64;
 
 #[cfg(any(windows, test))]
@@ -20,6 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(test)]
 static DOORBELL_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(any(windows, test))]
 static SCHEDULER_MANIFEST_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static DOORBELL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -129,6 +132,7 @@ struct SchedulerLaunchManifestV1 {
     lease_ttl_s: u64,
 }
 
+#[cfg(any(windows, test))]
 struct PreparedSchedulerManifest {
     manifest: SchedulerLaunchManifestV1,
     bytes: Vec<u8>,
@@ -137,6 +141,7 @@ struct PreparedSchedulerManifest {
 }
 
 struct LoadedSchedulerManifest {
+    #[cfg(any(windows, test))]
     manifest: SchedulerLaunchManifestV1,
     repo: PathBuf,
     config: ReconcileConfig,
@@ -230,12 +235,14 @@ fn validate_scheduler_manifest(
         codex_bin,
     };
     Ok(LoadedSchedulerManifest {
+        #[cfg(any(windows, test))]
         manifest,
         repo,
         config,
     })
 }
 
+#[cfg(any(windows, test))]
 fn prepare_scheduler_manifest(
     store: &Path,
     repo: &Path,
@@ -263,6 +270,7 @@ fn prepare_scheduler_manifest(
     })
 }
 
+#[cfg(any(windows, test))]
 fn publish_scheduler_manifest(prepared: &PreparedSchedulerManifest) -> anyhow::Result<bool> {
     let directory = prepared
         .path
@@ -310,6 +318,7 @@ fn publish_scheduler_manifest(prepared: &PreparedSchedulerManifest) -> anyhow::R
     link_scheduler_manifest_noclobber(&temp, prepared)
 }
 
+#[cfg(any(windows, test))]
 fn validate_existing_scheduler_manifest(
     prepared: &PreparedSchedulerManifest,
 ) -> anyhow::Result<()> {
@@ -321,6 +330,7 @@ fn validate_existing_scheduler_manifest(
     Ok(())
 }
 
+#[cfg(any(windows, test))]
 fn link_scheduler_manifest_noclobber(
     temp: &Path,
     prepared: &PreparedSchedulerManifest,
@@ -729,6 +739,21 @@ fn windows_path_is_absolute(path: &Path) -> anyhow::Result<bool> {
     Ok(unc_rooted(&value[2..]))
 }
 
+#[cfg(any(windows, test))]
+fn windows_manifest_path_components(path: &Path) -> anyhow::Result<(&str, &str)> {
+    let value = path
+        .to_str()
+        .context("scheduler manifest path is not Unicode")?;
+    let (parent, filename) = value
+        .rsplit_once(['\\', '/'])
+        .context("scheduler manifest path has no Windows parent")?;
+    anyhow::ensure!(
+        !parent.is_empty() && !filename.is_empty(),
+        "scheduler manifest path has no Windows filename"
+    );
+    Ok((parent, filename))
+}
+
 fn validate_canonical_direct_codex_target(canonical: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(
         canonical.is_absolute()
@@ -1000,6 +1025,7 @@ fn manifest_cleanup_decision(
         "scheduler Query did not contain an Exec action: {}",
         query.description()
     );
+    let (expected_parent, expected_filename) = windows_manifest_path_components(expected_manifest)?;
 
     for (command, arguments) in actions {
         anyhow::ensure!(
@@ -1016,10 +1042,9 @@ fn manifest_cleanup_decision(
             "scheduler Query manifest path contains a quote"
         );
         let candidate = Path::new(path);
-        let trusted_filename = candidate
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".json"))
+        let (candidate_parent, candidate_filename) = windows_manifest_path_components(candidate)?;
+        let trusted_filename = candidate_filename
+            .strip_suffix(".json")
             .is_some_and(|digest| {
                 digest.len() == 64
                     && digest
@@ -1028,8 +1053,8 @@ fn manifest_cleanup_decision(
             });
         anyhow::ensure!(
             windows_path_is_absolute(candidate)?
-                && candidate.parent() == expected_manifest.parent()
-                && candidate != expected_manifest
+                && candidate_parent == expected_parent
+                && candidate_filename != expected_filename
                 && trusted_filename,
             "scheduler Query did not prove a different trusted manifest path: {}",
             query.description()
@@ -2888,6 +2913,34 @@ mod tests {
             executable,
             manifest
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn windows_manifest_path_components_are_host_neutral() -> anyhow::Result<()> {
+        assert_eq!(
+            windows_manifest_path_components(Path::new(
+                r"C:\store\scheduler-launch\v1\manifest.json"
+            ))?,
+            (r"C:\store\scheduler-launch\v1", "manifest.json")
+        );
+        assert_eq!(
+            windows_manifest_path_components(Path::new(
+                r"\\?\C:\store\scheduler-launch\v1\manifest.json"
+            ))?,
+            (r"\\?\C:\store\scheduler-launch\v1", "manifest.json")
+        );
+        assert_eq!(
+            windows_manifest_path_components(Path::new(r"\\?\UNC\server\share\v1\manifest.json"))?,
+            (r"\\?\UNC\server\share\v1", "manifest.json")
+        );
+        assert_eq!(
+            windows_manifest_path_components(Path::new(
+                "C:/store/scheduler-launch/v1/manifest.json"
+            ))?,
+            ("C:/store/scheduler-launch/v1", "manifest.json")
+        );
+        assert!(windows_manifest_path_components(Path::new(r"C:\")).is_err());
         Ok(())
     }
 
