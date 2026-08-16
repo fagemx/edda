@@ -10,12 +10,14 @@ use edda_ledger::{Ledger, TaskLease};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::AtomicU64;
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[cfg(test)]
 static DOORBELL_COUNT: AtomicUsize = AtomicUsize::new(0);
+static SCHEDULER_MANIFEST_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static DOORBELL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(all(test, windows))]
@@ -125,7 +127,6 @@ struct SchedulerLaunchManifestV1 {
 struct PreparedSchedulerManifest {
     manifest: SchedulerLaunchManifestV1,
     bytes: Vec<u8>,
-    #[allow(dead_code)]
     digest: String,
     path: PathBuf,
 }
@@ -245,10 +246,16 @@ fn publish_scheduler_manifest(prepared: &PreparedSchedulerManifest) -> anyhow::R
     let launch_directory = directory
         .parent()
         .context("scheduler manifest path has no launch directory")?;
-    let store = launch_directory
-        .parent()
-        .context("scheduler manifest path has no store root")?;
+    let store = edda_store::store_root();
+    anyhow::ensure!(
+        scheduler_manifest_directory(&store, false)? == directory,
+        "scheduler manifest path is outside the trusted Edda store directory"
+    );
     let _lock = edda_store::lock_file(&launch_directory.join("manifest.lock"))?;
+    anyhow::ensure!(
+        scheduler_manifest_directory(&store, false)? == directory,
+        "scheduler manifest directory changed during lock acquisition"
+    );
     std::fs::create_dir_all(directory).with_context(|| {
         format!(
             "create scheduler manifest directory {}",
@@ -256,23 +263,80 @@ fn publish_scheduler_manifest(prepared: &PreparedSchedulerManifest) -> anyhow::R
         )
     })?;
     anyhow::ensure!(
-        scheduler_manifest_directory(store, true)? == directory,
+        scheduler_manifest_directory(&store, true)? == directory,
         "scheduler manifest directory changed during publication"
     );
 
     if prepared.path.exists() {
-        let loaded = load_scheduler_manifest(&prepared.path)?;
-        anyhow::ensure!(
-            loaded.manifest == prepared.manifest
-                && std::fs::read(&prepared.path)? == prepared.bytes,
-            "existing scheduler manifest does not contain the expected bytes"
-        );
+        validate_existing_scheduler_manifest(prepared)?;
         return Ok(false);
     }
 
-    edda_store::write_atomic(&prepared.path, &prepared.bytes)
-        .with_context(|| format!("publish scheduler manifest {}", prepared.path.display()))?;
-    Ok(true)
+    let sequence =
+        SCHEDULER_MANIFEST_TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = directory.join(format!(
+        ".{}.{}.{}.tmp",
+        prepared.digest,
+        std::process::id(),
+        sequence
+    ));
+    edda_store::write_atomic(&temp, &prepared.bytes)
+        .with_context(|| format!("write scheduler manifest temporary file {}", temp.display()))?;
+    link_scheduler_manifest_noclobber(&temp, prepared)
+}
+
+fn validate_existing_scheduler_manifest(
+    prepared: &PreparedSchedulerManifest,
+) -> anyhow::Result<()> {
+    let loaded = load_scheduler_manifest(&prepared.path)?;
+    anyhow::ensure!(
+        loaded.manifest == prepared.manifest && std::fs::read(&prepared.path)? == prepared.bytes,
+        "existing scheduler manifest does not contain the expected bytes"
+    );
+    Ok(())
+}
+
+fn link_scheduler_manifest_noclobber(
+    temp: &Path,
+    prepared: &PreparedSchedulerManifest,
+) -> anyhow::Result<bool> {
+    match std::fs::hard_link(temp, &prepared.path) {
+        Ok(()) => {
+            std::fs::remove_file(temp).with_context(|| {
+                format!(
+                    "remove scheduler manifest temporary file {}",
+                    temp.display()
+                )
+            })?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            std::fs::remove_file(temp).with_context(|| {
+                format!(
+                    "remove scheduler manifest temporary file {}",
+                    temp.display()
+                )
+            })?;
+            validate_existing_scheduler_manifest(prepared)?;
+            Ok(false)
+        }
+        Err(error) => {
+            let cleanup = std::fs::remove_file(temp);
+            match cleanup {
+                Ok(()) => Err(error).with_context(|| {
+                    format!(
+                        "atomically publish scheduler manifest {}",
+                        prepared.path.display()
+                    )
+                }),
+                Err(cleanup_error) => anyhow::bail!(
+                    "atomically publish scheduler manifest {}: {error}; retain temporary file {} because cleanup failed: {cleanup_error}",
+                    prepared.path.display(),
+                    temp.display()
+                ),
+            }
+        }
+    }
 }
 
 fn load_scheduler_manifest(path: &Path) -> anyhow::Result<LoadedSchedulerManifest> {
@@ -444,23 +508,53 @@ struct SchedulerOutput {
     code: u32,
     stdout: String,
     stderr: String,
+    stdout_bytes: usize,
+    stderr_bytes: usize,
 }
 
 #[cfg(any(windows, test))]
 impl SchedulerOutput {
     #[cfg(test)]
     fn for_test(code: u32, stdout: &str, stderr: &str) -> Self {
+        Self::for_test_with_lengths(code, stdout, stderr, stdout.len(), stderr.len())
+    }
+
+    #[cfg(test)]
+    fn for_test_with_lengths(
+        code: u32,
+        stdout: &str,
+        stderr: &str,
+        stdout_bytes: usize,
+        stderr_bytes: usize,
+    ) -> Self {
         Self {
             code,
             stdout: stdout.into(),
             stderr: stderr.into(),
+            stdout_bytes,
+            stderr_bytes,
         }
+    }
+
+    fn xml(&self) -> anyhow::Result<&str> {
+        anyhow::ensure!(
+            self.stdout_bytes <= SCHEDULER_OUTPUT_LIMIT,
+            "scheduler Query XML is {} bytes; maximum bounded output is {}",
+            self.stdout_bytes,
+            SCHEDULER_OUTPUT_LIMIT
+        );
+        Ok(&self.stdout)
     }
 
     fn description(&self) -> String {
         format!(
-            "code=0x{:08x} ({}) stdout={:?} stderr={:?}",
-            self.code, self.code as i32, self.stdout, self.stderr
+            "code=0x{:08x} ({}) stdout_bytes={} stderr_bytes={} stdout={:?} stderr={:?}",
+            self.code,
+            self.code as i32,
+            self.stdout_bytes,
+            self.stderr_bytes,
+            self.stdout,
+            self.stderr
         )
     }
 }
@@ -665,52 +759,105 @@ fn windows_scheduler_spec(
 }
 
 #[cfg(any(windows, test))]
+fn decode_scheduler_xml_value(value: &str) -> anyhow::Result<String> {
+    let mut decoded = String::with_capacity(value.len());
+    let mut remaining = value;
+    while let Some(ampersand) = remaining.find('&') {
+        let literal = &remaining[..ampersand];
+        anyhow::ensure!(
+            !literal.contains('<'),
+            "scheduler Query XML contains nested markup"
+        );
+        decoded.push_str(literal);
+        let entity = &remaining[ampersand..];
+        let semicolon = entity
+            .find(';')
+            .context("scheduler Query XML contains an unterminated entity")?;
+        decoded.push(match &entity[..=semicolon] {
+            "&amp;" => '&',
+            "&lt;" => '<',
+            "&gt;" => '>',
+            "&quot;" => '"',
+            "&apos;" => '\'',
+            unknown => anyhow::bail!("scheduler Query XML contains unknown entity {unknown}"),
+        });
+        remaining = &entity[semicolon + 1..];
+    }
+    anyhow::ensure!(
+        !remaining.contains('<'),
+        "scheduler Query XML contains nested markup"
+    );
+    decoded.push_str(remaining);
+    Ok(decoded)
+}
+
+#[cfg(any(windows, test))]
+fn scheduler_exec_values(xml: &str) -> anyhow::Result<Vec<(String, String)>> {
+    anyhow::ensure!(
+        xml.len() <= SCHEDULER_OUTPUT_LIMIT,
+        "scheduler Query XML exceeds the bounded output limit"
+    );
+    let element = |action: &str, name: &str| -> anyhow::Result<String> {
+        let open = format!("<{name}>");
+        let close = format!("</{name}>");
+        let start = action
+            .find(&open)
+            .with_context(|| format!("scheduler Exec action has no {name}"))?;
+        let value = &action[start + open.len()..];
+        let end = value
+            .find(&close)
+            .with_context(|| format!("scheduler Exec action has unterminated {name}"))?;
+        anyhow::ensure!(
+            !value[end + close.len()..].contains(&open) && !action[..start].contains(&close),
+            "scheduler Exec action has duplicate {name}"
+        );
+        decode_scheduler_xml_value(&value[..end])
+    };
+
+    let mut actions = Vec::new();
+    let mut remaining = xml;
+    while let Some(start) = remaining.find("<Exec>") {
+        anyhow::ensure!(
+            !remaining[..start].contains("<Exec") && !remaining[..start].contains("</Exec>"),
+            "scheduler Query XML contains a malformed Exec action"
+        );
+        remaining = &remaining[start + "<Exec>".len()..];
+        let end = remaining
+            .find("</Exec>")
+            .context("scheduler Query XML contains an unterminated Exec action")?;
+        let action = &remaining[..end];
+        anyhow::ensure!(
+            !action.contains("<Exec"),
+            "scheduler Query XML contains a nested Exec action"
+        );
+        actions.push((element(action, "Command")?, element(action, "Arguments")?));
+        remaining = &remaining[end + "</Exec>".len()..];
+    }
+    anyhow::ensure!(
+        !remaining.contains("<Exec") && !remaining.contains("</Exec>"),
+        "scheduler Query XML contains a malformed Exec action"
+    );
+    Ok(actions)
+}
+
+#[cfg(any(windows, test))]
 fn scheduler_query_references_manifest(
     xml: &str,
     executable: &Path,
     manifest: &Path,
 ) -> anyhow::Result<bool> {
-    anyhow::ensure!(
-        xml.len() <= SCHEDULER_OUTPUT_LIMIT,
-        "scheduler Query XML exceeds the bounded output limit"
-    );
-    let escape = |value: &str| {
-        value
-            .replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-            .replace('\'', "&apos;")
-    };
-    let command = format!(
-        "<Command>{}</Command>",
-        escape(
-            executable
-                .to_str()
-                .context("scheduler executable is not Unicode")?
-        )
-    );
+    let command = executable
+        .to_str()
+        .context("scheduler executable is not Unicode")?;
     let arguments = format!(
-        "<Arguments>{}</Arguments>",
-        escape(&format!(
-            "reconcile --scheduler-manifest {}",
-            quote_windows_argument(manifest)?
-        ))
+        "reconcile --scheduler-manifest {}",
+        quote_windows_argument(manifest)?
     );
-
-    let mut remaining = xml;
-    while let Some(start) = remaining.find("<Exec>") {
-        remaining = &remaining[start + "<Exec>".len()..];
-        let Some(end) = remaining.find("</Exec>") else {
-            anyhow::bail!("scheduler Query XML contains an unterminated Exec action");
-        };
-        let action = &remaining[..end];
-        if action.contains(&command) && action.contains(&arguments) {
-            return Ok(true);
-        }
-        remaining = &remaining[end + "</Exec>".len()..];
-    }
-    Ok(false)
+    Ok(scheduler_exec_values(xml)?
+        .iter()
+        .any(|(actual_command, actual_arguments)| {
+            actual_command == command && actual_arguments == &arguments
+        }))
 }
 
 #[cfg(any(windows, test))]
@@ -723,77 +870,61 @@ fn manifest_cleanup_decision(
         SchedulerTaskState::Missing => return Ok(ManifestCleanupDecision::RemoveNewArtifact),
         SchedulerTaskState::Present => {}
     }
-    if scheduler_query_references_manifest(&query.stdout, executable, expected_manifest)? {
+    let actions = scheduler_exec_values(query.xml()?)?;
+    let executable = executable
+        .to_str()
+        .context("scheduler executable is not Unicode")?;
+    let expected_arguments = format!(
+        "reconcile --scheduler-manifest {}",
+        quote_windows_argument(expected_manifest)?
+    );
+    if actions
+        .iter()
+        .any(|(command, arguments)| command == executable && arguments == &expected_arguments)
+    {
         return Ok(ManifestCleanupDecision::Retain);
     }
-
-    let escaped_executable = executable
-        .to_str()
-        .context("scheduler executable is not Unicode")?
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;");
-    let command = format!("<Command>{escaped_executable}</Command>");
-    let arguments_prefix = "<Arguments>reconcile --scheduler-manifest &quot;";
-    let arguments_suffix = "&quot;</Arguments>";
-    let mut remaining = query.stdout.as_str();
-    while let Some(start) = remaining.find("<Exec>") {
-        remaining = &remaining[start + "<Exec>".len()..];
-        let Some(end) = remaining.find("</Exec>") else {
-            break;
-        };
-        let action = &remaining[..end];
-        if action.contains(&command) {
-            if let Some(arguments_start) = action.find(arguments_prefix) {
-                let value = &action[arguments_start + arguments_prefix.len()..];
-                if let Some(arguments_end) = value.find(arguments_suffix) {
-                    let encoded_path = &value[..arguments_end];
-                    let trailing = &value[arguments_end + arguments_suffix.len()..];
-                    if !encoded_path.is_empty()
-                        && !encoded_path.contains(['<', '>'])
-                        && !encoded_path.contains("&quot;")
-                        && trailing.trim().is_empty()
-                    {
-                        let decoded_path = encoded_path
-                            .replace("&apos;", "'")
-                            .replace("&gt;", ">")
-                            .replace("&lt;", "<")
-                            .replace("&amp;", "&");
-                        let canonical_encoding = decoded_path
-                            .replace('&', "&amp;")
-                            .replace('<', "&lt;")
-                            .replace('>', "&gt;")
-                            .replace('"', "&quot;")
-                            .replace('\'', "&apos;");
-                        let candidate = Path::new(&decoded_path);
-                        let filename = candidate.file_name().and_then(|name| name.to_str());
-                        let trusted_filename = filename.is_some_and(|name| {
-                            name.len() == 69
-                                && name.ends_with(".json")
-                                && name[..64].bytes().all(|byte| {
-                                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
-                                })
-                        });
-                        if canonical_encoding == encoded_path
-                            && windows_path_is_absolute(candidate)?
-                            && candidate.parent() == expected_manifest.parent()
-                            && candidate != expected_manifest
-                            && trusted_filename
-                        {
-                            return Ok(ManifestCleanupDecision::RemoveNewArtifact);
-                        }
-                    }
-                }
-            }
-        }
-        remaining = &remaining[end + "</Exec>".len()..];
-    }
-    anyhow::bail!(
-        "scheduler Query did not prove whether the exact task references the new manifest: {}",
+    anyhow::ensure!(
+        !actions.is_empty(),
+        "scheduler Query did not contain an Exec action: {}",
         query.description()
-    )
+    );
+
+    for (command, arguments) in actions {
+        anyhow::ensure!(
+            command == executable,
+            "scheduler Query command did not match the direct Edda executable: {}",
+            query.description()
+        );
+        let path = arguments
+            .strip_prefix("reconcile --scheduler-manifest \"")
+            .and_then(|value| value.strip_suffix('"'))
+            .context("scheduler Query Arguments were not a strict manifest command")?;
+        anyhow::ensure!(
+            !path.contains('"'),
+            "scheduler Query manifest path contains a quote"
+        );
+        let candidate = Path::new(path);
+        let trusted_filename = candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".json"))
+            .is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            });
+        anyhow::ensure!(
+            windows_path_is_absolute(candidate)?
+                && candidate.parent() == expected_manifest.parent()
+                && candidate != expected_manifest
+                && trusted_filename,
+            "scheduler Query did not prove a different trusted manifest path: {}",
+            query.description()
+        );
+    }
+    Ok(ManifestCleanupDecision::RemoveNewArtifact)
 }
 
 #[cfg(any(windows, test))]
@@ -862,6 +993,8 @@ fn run_schtasks(args: &[String]) -> anyhow::Result<SchedulerOutput> {
         code: signed_code as u32,
         stdout: bounded(&output.stdout),
         stderr: bounded(&output.stderr),
+        stdout_bytes: output.stdout.len(),
+        stderr_bytes: output.stderr.len(),
     })
 }
 
@@ -910,7 +1043,7 @@ fn scheduler_lifecycle(
                 )?;
                 anyhow::ensure!(
                     scheduler_query_references_manifest(
-                        &queried.stdout,
+                        queried.xml()?,
                         &executable,
                         &manifest.path,
                     )?,
@@ -2030,6 +2163,28 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_manifest_atomic_link_never_replaces_a_racer() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        let directory = prepared.path.parent().context("manifest directory")?;
+        std::fs::create_dir_all(directory)?;
+        let temp = directory.join("race.tmp");
+        edda_store::write_atomic(&temp, &prepared.bytes)?;
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+
+        assert!(!link_scheduler_manifest_noclobber(&temp, &prepared)?);
+        assert!(!temp.exists());
+        assert_eq!(std::fs::read(&prepared.path)?, prepared.bytes);
+
+        std::fs::write(&prepared.path, b"racer bytes")?;
+        edda_store::write_atomic(&temp, &prepared.bytes)?;
+        assert!(link_scheduler_manifest_noclobber(&temp, &prepared).is_err());
+        assert!(!temp.exists());
+        assert_eq!(std::fs::read(&prepared.path)?, b"racer bytes");
+        Ok(())
+    }
+
+    #[test]
     fn scheduler_manifest_changed_install_retains_prior_artifact() -> anyhow::Result<()> {
         let fixture = scheduler_manifest_fixture()?;
         let old = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
@@ -2061,6 +2216,22 @@ mod tests {
     }
 
     #[test]
+    fn scheduler_manifest_publish_validates_containment_before_mutation() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let mut prepared =
+            prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        let outside = fixture._root.path().join("outside-store");
+        prepared.path = outside
+            .join("scheduler-launch")
+            .join("v1")
+            .join(format!("{}.json", prepared.digest));
+
+        assert!(publish_scheduler_manifest(&prepared).is_err());
+        assert!(!outside.exists());
+        Ok(())
+    }
+
+    #[test]
     fn scheduler_query_xml_requires_exact_escaped_command_and_arguments() -> anyhow::Result<()> {
         let executable = Path::new(r"C:\Program Files\Edda & Co\edda.exe");
         let manifest = Path::new(r"C:\Store & State\scheduler-launch\v1\expected.json");
@@ -2081,6 +2252,82 @@ mod tests {
             executable,
             manifest
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_query_scans_every_exec_before_deciding() {
+        let executable = Path::new(r"C:\edda\edda.exe");
+        let expected = Path::new(
+            r"C:\store\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+        );
+        let expected_xml = r#"<Task><Actions><Exec><Command>C:\edda\edda.exe</Command><Arguments>reconcile --scheduler-manifest &quot;C:\store\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json&quot;</Arguments></Exec><Exec><Command>truncated"#;
+        assert!(scheduler_query_references_manifest(expected_xml, executable, expected).is_err());
+        let cut_open = format!(
+            "{}<Exec",
+            expected_xml.trim_end_matches("<Exec><Command>truncated")
+        );
+        assert!(scheduler_query_references_manifest(&cut_open, executable, expected).is_err());
+
+        let different_xml = expected_xml.replace(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json",
+        );
+        assert!(manifest_cleanup_decision(
+            &SchedulerOutput::for_test(0, &different_xml, ""),
+            executable,
+            expected,
+        )
+        .is_err());
+        let different_cut_open = cut_open.replace(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json",
+        );
+        assert!(manifest_cleanup_decision(
+            &SchedulerOutput::for_test(0, &different_cut_open, ""),
+            executable,
+            expected,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn scheduler_query_compares_decoded_xml_element_values() -> anyhow::Result<()> {
+        let executable = Path::new(r"C:\O'Brien & Sons\edda.exe");
+        let expected = Path::new(
+            r"C:\Store & State\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+        );
+        let literal_xml = r#"<Task><Actions><Exec><Command>C:\O'Brien &amp; Sons\edda.exe</Command><Arguments>reconcile --scheduler-manifest "C:\Store &amp; State\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"</Arguments></Exec></Actions></Task>"#;
+        assert!(scheduler_query_references_manifest(
+            literal_xml,
+            executable,
+            expected,
+        )?);
+
+        let named_xml = literal_xml
+            .replace("O'Brien", "O&apos;Brien")
+            .replace('"', "&quot;");
+        assert!(scheduler_query_references_manifest(
+            &named_xml, executable, expected,
+        )?);
+
+        let unknown_entity = literal_xml.replace("&amp;", "&unknown;");
+        assert!(
+            scheduler_query_references_manifest(&unknown_entity, executable, expected).is_err()
+        );
+
+        let different = literal_xml.replace(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json",
+        );
+        assert_eq!(
+            manifest_cleanup_decision(
+                &SchedulerOutput::for_test(0, &different, ""),
+                executable,
+                expected,
+            )?,
+            ManifestCleanupDecision::RemoveNewArtifact
+        );
         Ok(())
     }
 
@@ -2698,6 +2945,31 @@ mod tests {
             assert!(error.contains(&format!("0x{code:08x}")));
             assert!(error.contains(&(code as i32).to_string()));
         }
+    }
+
+    #[test]
+    fn scheduler_query_rejects_truncated_xml_output() {
+        let output = SchedulerOutput::for_test_with_lengths(
+            0,
+            "<Task />",
+            "",
+            SCHEDULER_OUTPUT_LIMIT + 1,
+            0,
+        );
+        let error = output
+            .xml()
+            .expect_err("truncated Query XML must be rejected")
+            .to_string();
+        assert!(error.contains(&(SCHEDULER_OUTPUT_LIMIT + 1).to_string()));
+        assert!(error.contains(&SCHEDULER_OUTPUT_LIMIT.to_string()));
+        assert!(manifest_cleanup_decision(
+            &output,
+            Path::new(r"C:\edda\edda.exe"),
+            Path::new(
+                r"C:\store\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"
+            ),
+        )
+        .is_err());
     }
 
     #[test]
