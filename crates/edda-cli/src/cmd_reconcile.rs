@@ -1040,76 +1040,255 @@ fn remove_unreferenced_scheduler_manifest(path: &Path) -> String {
 }
 
 #[cfg(any(windows, test))]
-fn scheduler_actions_xml(xml: &str) -> anyhow::Result<&str> {
+fn scheduler_direct_exec_values(xml: &str) -> anyhow::Result<Vec<(String, String)>> {
     anyhow::ensure!(
         xml.len() <= SCHEDULER_OUTPUT_LIMIT,
         "scheduler Query XML exceeds the bounded output limit"
     );
-    let xml = xml.trim();
-    let task_start = xml
-        .find("<Task")
-        .context("scheduler Query XML has no Task root")?;
-    let prefix = xml[..task_start].trim();
-    anyhow::ensure!(
-        prefix.is_empty() || (prefix.starts_with("<?xml") && prefix.ends_with("?>")),
-        "scheduler Query XML has content before the Task root"
-    );
-    anyhow::ensure!(
-        matches!(
-            xml.as_bytes().get(task_start + "<Task".len()),
-            Some(b'>') | Some(b' ' | b'\t' | b'\r' | b'\n')
-        ),
-        "scheduler Query XML has a malformed Task root"
-    );
-    let task_open_end = xml[task_start..]
-        .find('>')
-        .map(|end| task_start + end)
-        .context("scheduler Query XML has an unterminated Task root")?;
-    anyhow::ensure!(
-        !xml[task_start..=task_open_end].trim_end().ends_with("/>"),
-        "scheduler Query XML has a self-closing Task root"
-    );
-    let task_close = xml
-        .strip_suffix("</Task>")
-        .context("scheduler Query XML has an incomplete Task root")?;
-    let task_body = &task_close[task_open_end + 1..];
-    anyhow::ensure!(
-        !task_body.contains("<Task") && !task_body.contains("</Task>"),
-        "scheduler Query XML has nested or duplicate Task roots"
-    );
+    let valid_name = |name: &str| {
+        let mut bytes = name.bytes();
+        bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b':'))
+            && bytes.all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'.' | b'-')
+            })
+    };
+    let mut cursor = 0;
+    let mut stack: Vec<&str> = Vec::new();
+    let mut seen_root = false;
+    let mut seen_declaration = false;
+    let mut actions_count = 0;
+    let mut execs = Vec::new();
+    let mut command = None;
+    let mut arguments = None;
+    let mut capture: Option<(&str, String)> = None;
 
-    let actions_start = task_body
-        .find("<Actions")
-        .context("scheduler Query XML has no Actions container")?;
+    while cursor < xml.len() {
+        let start = xml[cursor..]
+            .find('<')
+            .map(|offset| cursor + offset)
+            .unwrap_or(xml.len());
+        let text = &xml[cursor..start];
+        if let Some((_, value)) = capture.as_mut() {
+            value.push_str(text);
+        } else if stack.is_empty() {
+            anyhow::ensure!(
+                text.trim().is_empty(),
+                "scheduler Query XML has text outside the Task root"
+            );
+        }
+        if start == xml.len() {
+            cursor = start;
+            break;
+        }
+
+        if xml[start..].starts_with("<!--") {
+            let comment = &xml[start + "<!--".len()..];
+            let end = comment
+                .find("-->")
+                .context("scheduler Query XML has an unterminated comment")?;
+            anyhow::ensure!(
+                !comment[..end].contains("--"),
+                "scheduler Query XML has a malformed comment"
+            );
+            cursor = start + "<!--".len() + end + "-->".len();
+            continue;
+        }
+        if xml[start..].starts_with("<?") {
+            anyhow::ensure!(
+                stack.is_empty()
+                    && !seen_root
+                    && !seen_declaration
+                    && xml[start..].starts_with("<?xml"),
+                "scheduler Query XML has an unsupported processing instruction"
+            );
+            let end = xml[start + 2..]
+                .find("?>")
+                .context("scheduler Query XML has an unterminated declaration")?;
+            seen_declaration = true;
+            cursor = start + 2 + end + 2;
+            continue;
+        }
+        anyhow::ensure!(
+            !xml[start..].starts_with("<!"),
+            "scheduler Query XML has unsupported markup"
+        );
+
+        let mut quote = None;
+        let mut end = None;
+        for (offset, character) in xml[start + 1..].char_indices() {
+            if let Some(expected) = quote {
+                anyhow::ensure!(
+                    character != '<',
+                    "scheduler Query XML has malformed tag attributes"
+                );
+                if character == expected {
+                    quote = None;
+                }
+            } else {
+                match character {
+                    '\'' | '"' => quote = Some(character),
+                    '>' => {
+                        end = Some(start + 1 + offset);
+                        break;
+                    }
+                    '<' => anyhow::bail!("scheduler Query XML has a malformed tag"),
+                    _ => {}
+                }
+            }
+        }
+        let end = end.context("scheduler Query XML has an unterminated tag")?;
+        let raw = xml[start + 1..end].trim();
+        cursor = end + 1;
+
+        if let Some(closing) = raw.strip_prefix('/') {
+            let name = closing.trim();
+            anyhow::ensure!(
+                valid_name(name) && name.len() == closing.len(),
+                "scheduler Query XML has a malformed closing tag"
+            );
+            anyhow::ensure!(
+                stack.last() == Some(&name),
+                "scheduler Query XML has mismatched element nesting"
+            );
+            if matches!(name, "Command" | "Arguments") {
+                let (kind, value) = capture
+                    .take()
+                    .context("scheduler Exec value did not close directly")?;
+                anyhow::ensure!(kind == name, "scheduler Exec values closed out of order");
+                let decoded = decode_scheduler_xml_value(&value)?;
+                if name == "Command" {
+                    command = Some(decoded);
+                } else {
+                    arguments = Some(decoded);
+                }
+            } else if name == "Exec" && stack.as_slice() == ["Task", "Actions", "Exec"] {
+                execs.push((
+                    command
+                        .take()
+                        .context("scheduler Exec action has no Command")?,
+                    arguments
+                        .take()
+                        .context("scheduler Exec action has no Arguments")?,
+                ));
+            }
+            stack.pop();
+            continue;
+        }
+
+        let (open, self_closing) = raw
+            .strip_suffix('/')
+            .map_or((raw, false), |open| (open.trim_end(), true));
+        let name_end = open.find(char::is_whitespace).unwrap_or(open.len());
+        let name = &open[..name_end];
+        anyhow::ensure!(
+            valid_name(name),
+            "scheduler Query XML has a malformed element name"
+        );
+        let mut attributes = &open[name_end..];
+        let mut attribute_names = Vec::new();
+        loop {
+            attributes = attributes.trim_start();
+            if attributes.is_empty() {
+                break;
+            }
+            let name_end = attributes
+                .find(|character: char| character.is_whitespace() || character == '=')
+                .unwrap_or(attributes.len());
+            let attribute_name = &attributes[..name_end];
+            anyhow::ensure!(
+                valid_name(attribute_name) && !attribute_names.contains(&attribute_name),
+                "scheduler Query XML has a malformed or duplicate attribute"
+            );
+            attribute_names.push(attribute_name);
+            attributes = attributes[name_end..].trim_start();
+            attributes = attributes
+                .strip_prefix('=')
+                .context("scheduler Query XML attribute has no equals sign")?
+                .trim_start();
+            let delimiter = attributes
+                .chars()
+                .next()
+                .filter(|character| matches!(character, '\'' | '"'))
+                .context("scheduler Query XML attribute value is not quoted")?;
+            attributes = &attributes[delimiter.len_utf8()..];
+            let value_end = attributes
+                .find(delimiter)
+                .context("scheduler Query XML attribute value is unterminated")?;
+            anyhow::ensure!(
+                !attributes[..value_end].contains('<'),
+                "scheduler Query XML attribute value contains markup"
+            );
+            attributes = &attributes[value_end + delimiter.len_utf8()..];
+            anyhow::ensure!(
+                attributes.is_empty() || attributes.chars().next().is_some_and(char::is_whitespace),
+                "scheduler Query XML attributes are not separated"
+            );
+        }
+
+        anyhow::ensure!(
+            capture.is_none(),
+            "scheduler Exec value contains nested markup"
+        );
+        if stack.is_empty() {
+            anyhow::ensure!(
+                !seen_root && name == "Task" && !self_closing,
+                "scheduler Query XML does not have one complete Task root"
+            );
+            seen_root = true;
+        }
+        if name == "Actions" {
+            anyhow::ensure!(
+                stack.as_slice() == ["Task"] && !self_closing,
+                "scheduler Actions container is not a direct Task child"
+            );
+            actions_count += 1;
+        } else if name == "Exec" {
+            anyhow::ensure!(
+                stack.as_slice() == ["Task", "Actions"] && !self_closing,
+                "scheduler Exec action is not a direct Actions child"
+            );
+            command = None;
+            arguments = None;
+        } else if matches!(name, "Command" | "Arguments") {
+            anyhow::ensure!(
+                stack.as_slice() == ["Task", "Actions", "Exec"],
+                "scheduler Exec value is not a direct Exec child"
+            );
+            let value = if name == "Command" {
+                &mut command
+            } else {
+                &mut arguments
+            };
+            anyhow::ensure!(
+                value.is_none(),
+                "scheduler Exec action has a duplicate {name}"
+            );
+            if self_closing {
+                *value = Some(String::new());
+            } else {
+                capture = Some((name, String::new()));
+            }
+        }
+        if !self_closing {
+            stack.push(name);
+        }
+    }
+
     anyhow::ensure!(
-        matches!(
-            task_body.as_bytes().get(actions_start + "<Actions".len()),
-            Some(b'>') | Some(b' ' | b'\t' | b'\r' | b'\n')
-        ),
-        "scheduler Query XML has a malformed Actions container"
+        cursor == xml.len(),
+        "scheduler Query XML was not fully scanned"
     );
-    let actions_open_end = task_body[actions_start..]
-        .find('>')
-        .map(|end| actions_start + end)
-        .context("scheduler Query XML has an unterminated Actions container")?;
     anyhow::ensure!(
-        !task_body[actions_start..=actions_open_end]
-            .trim_end()
-            .ends_with("/>"),
-        "scheduler Query XML has a self-closing Actions container"
+        seen_root && stack.is_empty() && capture.is_none(),
+        "scheduler Query XML has incomplete element nesting"
     );
-    let after_open = &task_body[actions_open_end + 1..];
-    let actions_close = after_open
-        .find("</Actions>")
-        .context("scheduler Query XML has an incomplete Actions container")?;
     anyhow::ensure!(
-        !task_body[..actions_start].contains("</Actions>")
-            && !after_open[..actions_close].contains("<Actions")
-            && !after_open[actions_close + "</Actions>".len()..].contains("<Actions")
-            && !after_open[actions_close + "</Actions>".len()..].contains("</Actions>"),
-        "scheduler Query XML has nested or duplicate Actions containers"
+        actions_count == 1,
+        "scheduler Query XML must have exactly one direct Actions container"
     );
-    Ok(&after_open[..actions_close])
+    Ok(execs)
 }
 
 #[cfg(any(windows, test))]
@@ -1117,12 +1296,7 @@ fn recover_scheduler_manifest_candidate(
     xml: &str,
     executable: &Path,
 ) -> anyhow::Result<Option<PathBuf>> {
-    let actions_xml = scheduler_actions_xml(xml)?;
-    let actions = scheduler_exec_values(actions_xml)?;
-    anyhow::ensure!(
-        scheduler_exec_values(xml)? == actions,
-        "scheduler Query XML has an Exec action outside its Actions container"
-    );
+    let actions = scheduler_direct_exec_values(xml)?;
     let [(command, arguments)] = actions.as_slice() else {
         return Ok(None);
     };
@@ -2667,6 +2841,10 @@ mod tests {
             xml, executable, manifest
         )?);
         assert_eq!(
+            recover_scheduler_manifest_candidate(xml, executable)?,
+            Some(manifest.to_path_buf())
+        );
+        assert_eq!(
             manifest_cleanup_decision(
                 &SchedulerOutput::for_test(0, xml, ""),
                 executable,
@@ -3311,7 +3489,11 @@ mod tests {
         edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
         let project_id = edda_store::project_id_for_root(&fixture.repo);
         let (_, query_args, delete_args) = windows_scheduler_management_args(&project_id)?;
-        let xml = scheduler_manifest_xml(&fixture.codex, &prepared.path)?;
+        let xml = format!(
+            "<?xml version=\"1.0\"?>{}",
+            scheduler_manifest_xml(&fixture.codex, &prepared.path)?
+                .replace("<Actions>", "<!-- harmless scheduler comment --><Actions>")
+        );
         let outputs = [
             SchedulerOutput::for_test(0, &xml, ""),
             SchedulerOutput::for_test(0, "", ""),
@@ -3331,6 +3513,77 @@ mod tests {
 
         assert_eq!(calls, [query_args.clone(), delete_args, query_args]);
         assert!(!prepared.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_uninstall_structural_xml_ignores_commented_matching_action() -> anyhow::Result<()>
+    {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+        let xml = format!(
+            "<?xml version=\"1.0\"?>{}",
+            scheduler_manifest_xml(&fixture.codex, &prepared.path)?
+                .replace("<Actions>", "<!-- <Actions>")
+                .replace("</Actions>", "</Actions> -->")
+        );
+        let project_id = edda_store::project_id_for_root(&fixture.repo);
+        let mut outputs = [
+            SchedulerOutput::for_test(0, &xml, ""),
+            SchedulerOutput::for_test(0, "", ""),
+            SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing"),
+        ]
+        .into_iter();
+        let mut calls = 0;
+
+        uninstall_scheduler_task_with(&fixture.repo, &fixture.codex, &project_id, |_| {
+            calls += 1;
+            outputs.next().context("unexpected scheduler call")
+        })?;
+
+        assert_eq!(calls, 3);
+        assert!(prepared.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_uninstall_structural_xml_rejects_malformed_unrelated_nesting() -> anyhow::Result<()>
+    {
+        for wrap in [
+            "<Settings><Unclosed></Settings>{actions}",
+            "<Unclosed>{actions}",
+        ] {
+            let fixture = scheduler_manifest_fixture()?;
+            let prepared =
+                prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+            edda_store::write_atomic(&prepared.path, &prepared.bytes)?;
+            let complete = scheduler_manifest_xml(&fixture.codex, &prepared.path)?;
+            let actions = complete
+                .strip_prefix("<Task>")
+                .and_then(|xml| xml.strip_suffix("</Task>"))
+                .context("test scheduler XML Task wrapper")?;
+            let xml = format!("<Task>{}</Task>", wrap.replace("{actions}", actions));
+            let project_id = edda_store::project_id_for_root(&fixture.repo);
+            let mut outputs = [
+                SchedulerOutput::for_test(0, &xml, ""),
+                SchedulerOutput::for_test(0, "", ""),
+                SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing"),
+            ]
+            .into_iter();
+            let mut calls = 0;
+
+            uninstall_scheduler_task_with(&fixture.repo, &fixture.codex, &project_id, |_| {
+                calls += 1;
+                outputs.next().context("unexpected scheduler call")
+            })?;
+
+            assert_eq!(calls, 3);
+            assert!(
+                prepared.path.exists(),
+                "wrapper {wrap:?} authorized cleanup"
+            );
+        }
         Ok(())
     }
 
