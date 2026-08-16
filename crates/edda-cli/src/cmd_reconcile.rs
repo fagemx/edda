@@ -2631,6 +2631,11 @@ mod tests {
         }
     }
 
+    fn codex_bin_env() -> Option<std::ffi::OsString> {
+        let _lock = test_lock(&CODEX_BIN_ENV_LOCK);
+        std::env::var_os("EDDA_CODEX_BIN")
+    }
+
     #[cfg(not(windows))]
     fn scheduler_config(codex_bin: &str) -> ReconcileConfig {
         ReconcileConfig {
@@ -3310,14 +3315,14 @@ mod tests {
 
     #[test]
     fn scheduler_codex_environment_guard_restores_after_unwind() {
-        let previous = std::env::var_os("EDDA_CODEX_BIN");
+        let previous = codex_bin_env();
         let result = std::panic::catch_unwind(|| {
             let _environment = codex_bin_env_guard(r"C:\environment\codex.exe");
             panic!("test unwind");
         });
 
         assert!(result.is_err());
-        assert_eq!(std::env::var_os("EDDA_CODEX_BIN"), previous);
+        assert_eq!(codex_bin_env(), previous);
     }
 
     #[test]
