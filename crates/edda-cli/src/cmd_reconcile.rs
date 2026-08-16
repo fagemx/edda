@@ -2055,11 +2055,13 @@ mod tests {
             allow_fake_turn_after_durable_session(repo.clone(), 1, 1, challenge, allow, deny);
 
         DOORBELL_COUNT.store(0, Ordering::SeqCst);
-        run_task(&repo, 1, 1, &config, true)?;
-        observer.join().expect("observer thread")?;
+        let run_result = run_task(&repo, 1, 1, &config, true);
+        let observer_result = observer.join();
         std::env::remove_var("EDDA_FAKE_CHALLENGE");
         std::env::remove_var("EDDA_FAKE_ALLOW");
         std::env::remove_var("EDDA_FAKE_DENY");
+        run_result?;
+        observer_result.expect("observer thread")?;
 
         assert_eq!(
             edda_ledger::EddaPaths::find_root(&worktree)
@@ -2201,11 +2203,13 @@ mod tests {
         let observer =
             allow_fake_turn_after_durable_session(repo.clone(), 2, 1, challenge, allow, deny);
 
-        run_task(&repo, 2, 1, &config, false)?;
-        observer.join().expect("observer thread")?;
+        let run_result = run_task(&repo, 2, 1, &config, false);
+        let observer_result = observer.join();
         std::env::remove_var("EDDA_FAKE_CHALLENGE");
         std::env::remove_var("EDDA_FAKE_ALLOW");
         std::env::remove_var("EDDA_FAKE_DENY");
+        run_result?;
+        observer_result.expect("observer thread")?;
 
         let requests = std::fs::read_to_string(dir.path().join("fake-codex.log"))?;
         assert!(requests.contains("\"method\":\"thread/resume\""));
