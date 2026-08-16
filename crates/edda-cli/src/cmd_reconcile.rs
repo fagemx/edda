@@ -36,6 +36,18 @@ pub struct ReconcileArgs {
     lease_ttl_s: u64,
     #[arg(long)]
     codex_bin: Option<PathBuf>,
+    #[arg(
+        long,
+        conflicts_with_all = ["uninstall_scheduler", "run_task", "attempt"]
+    )]
+    install_scheduler: bool,
+    #[arg(
+        long,
+        conflicts_with_all = ["install_scheduler", "run_task", "attempt"]
+    )]
+    uninstall_scheduler: bool,
+    #[arg(long, hide = true)]
+    repo: Option<PathBuf>,
     #[arg(long, hide = true)]
     run_task: Option<u64>,
     #[arg(long, hide = true)]
@@ -92,24 +104,31 @@ struct PersistOutcome {
 }
 
 pub fn run(repo_root: &Path, args: ReconcileArgs) -> anyhow::Result<()> {
+    let repo_root = match args.repo.as_deref() {
+        Some(repo) => canonical_main_repo(repo)?,
+        None => repo_root.to_path_buf(),
+    };
+    if args.install_scheduler || args.uninstall_scheduler {
+        return scheduler_lifecycle(&repo_root, args.install_scheduler);
+    }
     let config = ReconcileConfig::from_args(&args);
     if let Some(task_id) = args.run_task {
         let attempt = args
             .attempt
             .context("--run-task requires hidden --attempt")?;
-        return run_task(repo_root, task_id, attempt, &config, true);
+        return run_task(&repo_root, task_id, attempt, &config, true);
     }
     if args.attempt.is_some() {
         anyhow::bail!("--attempt is valid only with hidden --run-task");
     }
-    let persisted = persist_reconciliation(repo_root, &config)?;
+    let persisted = persist_reconciliation(&repo_root, &config)?;
     let plans = persisted.plans;
     let executable = std::env::current_exe()?;
     let executables = vec![executable; plans.len()];
-    let (launched, mut errors) = launch_plans_with(repo_root, plans, &config, &executables);
+    let (launched, mut errors) = launch_plans_with(&repo_root, plans, &config, &executables);
     errors.extend(persisted.errors);
     for plan in launched {
-        notify_started(repo_root, &plan.task);
+        notify_started(&repo_root, &plan.task);
         println!(
             "dispatched task #{} attempt {} in {}",
             plan.task.task_id,
@@ -121,6 +140,217 @@ pub fn run(repo_root: &Path, args: ReconcileArgs) -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!(errors.join("\n"));
+    }
+}
+
+#[cfg(any(windows, test))]
+const MISSING_TASK_HRESULT: u32 = 0x8007_0002;
+#[cfg(windows)]
+const SCHEDULER_OUTPUT_LIMIT: usize = 4096;
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Eq, PartialEq)]
+enum SchedulerTaskState {
+    Present,
+    Missing,
+}
+
+#[cfg(any(windows, test))]
+struct SchedulerOutput {
+    code: u32,
+    stdout: String,
+    stderr: String,
+}
+
+#[cfg(any(windows, test))]
+impl SchedulerOutput {
+    #[cfg(test)]
+    fn for_test(code: u32, stdout: &str, stderr: &str) -> Self {
+        Self {
+            code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    fn description(&self) -> String {
+        format!(
+            "code=0x{:08x} ({}) stdout={:?} stderr={:?}",
+            self.code, self.code as i32, self.stdout, self.stderr
+        )
+    }
+}
+
+#[cfg(any(windows, test))]
+struct WindowsSchedulerSpec {
+    task_name: String,
+    create_args: Vec<String>,
+    query_args: Vec<String>,
+    delete_args: Vec<String>,
+}
+
+fn canonical_main_repo(repo: &Path) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(repo.is_absolute(), "--repo must be absolute");
+    let repo = repo
+        .canonicalize()
+        .with_context(|| format!("canonicalize repository {}", repo.display()))?;
+    edda_core::git::resolve_git_root(&repo)
+        .unwrap_or(repo)
+        .canonicalize()
+        .context("canonicalize main repository")
+}
+
+#[cfg(any(windows, test))]
+fn quote_windows_argument(path: &Path) -> anyhow::Result<String> {
+    let value = path.to_str().context("scheduler path is not Unicode")?;
+    anyhow::ensure!(
+        !value.contains(['\0', '"']),
+        "scheduler path contains an unsupported character"
+    );
+    let trailing_backslashes = value
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'\\')
+        .count();
+    Ok(format!("\"{value}{}\"", "\\".repeat(trailing_backslashes)))
+}
+
+#[cfg(any(windows, test))]
+fn windows_scheduler_spec(
+    exe: &Path,
+    repo: &Path,
+    project_id: &str,
+) -> anyhow::Result<WindowsSchedulerSpec> {
+    anyhow::ensure!(exe.is_absolute(), "scheduler executable must be absolute");
+    anyhow::ensure!(repo.is_absolute(), "scheduler repository must be absolute");
+    anyhow::ensure!(
+        project_id.len() == 32
+            && project_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "project id must be 32 lowercase hexadecimal characters"
+    );
+    let task_name = format!("Edda-Reconcile-{project_id}");
+    let task_run = format!(
+        "{} reconcile --repo {}",
+        quote_windows_argument(exe)?,
+        quote_windows_argument(repo)?
+    );
+    let strings = |items: &[&str]| items.iter().map(|item| (*item).into()).collect();
+    Ok(WindowsSchedulerSpec {
+        create_args: strings(&[
+            "/Create", "/SC", "MINUTE", "/MO", "1", "/TN", &task_name, "/TR", &task_run, "/RL",
+            "LIMITED", "/F", "/HRESULT",
+        ]),
+        query_args: strings(&["/Query", "/TN", &task_name, "/XML", "/HRESULT"]),
+        delete_args: strings(&["/Delete", "/TN", &task_name, "/F", "/HRESULT"]),
+        task_name,
+    })
+}
+
+#[cfg(any(windows, test))]
+fn classify_scheduler_query(output: &SchedulerOutput) -> anyhow::Result<SchedulerTaskState> {
+    match output.code {
+        0 => Ok(SchedulerTaskState::Present),
+        MISSING_TASK_HRESULT => Ok(SchedulerTaskState::Missing),
+        _ => anyhow::bail!("scheduler query failed: {}", output.description()),
+    }
+}
+
+#[cfg(windows)]
+fn run_schtasks(args: &[String]) -> anyhow::Result<SchedulerOutput> {
+    let output = Command::new("schtasks.exe")
+        .args(args)
+        .output()
+        .context("launch schtasks.exe")?;
+    let signed_code = output
+        .status
+        .code()
+        .context("schtasks.exe terminated by signal")?;
+    let bounded = |bytes: &[u8]| {
+        String::from_utf8_lossy(&bytes[..bytes.len().min(SCHEDULER_OUTPUT_LIMIT)]).into_owned()
+    };
+    Ok(SchedulerOutput {
+        code: signed_code as u32,
+        stdout: bounded(&output.stdout),
+        stderr: bounded(&output.stderr),
+    })
+}
+
+fn scheduler_lifecycle(repo: &Path, install: bool) -> anyhow::Result<()> {
+    #[cfg(not(windows))]
+    {
+        let _ = (repo, install);
+        anyhow::bail!("Windows Task Scheduler is supported only on Windows")
+    }
+    #[cfg(windows)]
+    {
+        let repo = canonical_main_repo(repo)?;
+        let executable = std::env::current_exe()?.canonicalize()?;
+        let spec = windows_scheduler_spec(&executable, &repo, &edda_store::project_id(&repo))?;
+        if install {
+            let created = run_schtasks(&spec.create_args)
+                .with_context(|| format!("scheduler Create failed for task {}", spec.task_name))?;
+            anyhow::ensure!(
+                created.code == 0,
+                "scheduler Create failed for {}: {}",
+                spec.task_name,
+                created.description()
+            );
+            let queried = run_schtasks(&spec.query_args)
+                .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?;
+            anyhow::ensure!(
+                classify_scheduler_query(&queried).with_context(|| format!(
+                    "scheduler Query failed for task {}",
+                    spec.task_name
+                ))? == SchedulerTaskState::Present,
+                "scheduler task {} missing after Create",
+                spec.task_name
+            );
+            println!(
+                "installed scheduler task {} for {}",
+                spec.task_name,
+                repo.display()
+            );
+            return Ok(());
+        }
+
+        let before = run_schtasks(&spec.query_args)
+            .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?;
+        if classify_scheduler_query(&before)
+            .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?
+            == SchedulerTaskState::Missing
+        {
+            println!(
+                "scheduler task {} already absent for {}",
+                spec.task_name,
+                repo.display()
+            );
+            return Ok(());
+        }
+        let deleted = run_schtasks(&spec.delete_args)
+            .with_context(|| format!("scheduler Delete failed for task {}", spec.task_name))?;
+        anyhow::ensure!(
+            deleted.code == 0 || deleted.code == MISSING_TASK_HRESULT,
+            "scheduler Delete failed for {}: {}",
+            spec.task_name,
+            deleted.description()
+        );
+        let after = run_schtasks(&spec.query_args)
+            .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?;
+        anyhow::ensure!(
+            classify_scheduler_query(&after)
+                .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?
+                == SchedulerTaskState::Missing,
+            "scheduler task {} remains after Delete",
+            spec.task_name
+        );
+        println!(
+            "uninstalled scheduler task {} for {}",
+            spec.task_name,
+            repo.display()
+        );
+        Ok(())
     }
 }
 
@@ -1026,11 +1256,222 @@ fn read_brief(repo_root: &Path, reference: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser;
     use edda_ledger::tasks::{TaskStatus, TaskView};
     use edda_ledger::TaskLease;
 
+    #[derive(Parser)]
+    struct SchedulerCli {
+        #[command(flatten)]
+        args: ReconcileArgs,
+    }
+
     fn test_lock(lock: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
         lock.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    #[test]
+    fn scheduler_cli_parses_reentry_and_rejects_conflicting_modes() {
+        let parsed = SchedulerCli::try_parse_from([
+            "test",
+            "--repo",
+            r"C:\ai projects\sample",
+            "--install-scheduler",
+        ])
+        .expect("scheduler arguments");
+        assert_eq!(
+            parsed.args.repo.as_deref(),
+            Some(Path::new(r"C:\ai projects\sample"))
+        );
+        assert!(parsed.args.install_scheduler);
+        assert!(SchedulerCli::try_parse_from([
+            "test",
+            "--install-scheduler",
+            "--uninstall-scheduler"
+        ])
+        .is_err());
+        assert!(SchedulerCli::try_parse_from([
+            "test",
+            "--install-scheduler",
+            "--run-task",
+            "7",
+            "--attempt",
+            "1"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn scheduler_renderer_emits_exact_project_scoped_argv() -> anyhow::Result<()> {
+        let spec = windows_scheduler_spec(
+            Path::new(r"C:\Program Files\edda\edda.exe"),
+            Path::new(r"C:\ai projects\sample"),
+            "0123456789abcdef0123456789abcdef",
+        )?;
+
+        assert_eq!(
+            spec.task_name,
+            "Edda-Reconcile-0123456789abcdef0123456789abcdef"
+        );
+        assert_eq!(
+            spec.create_args[8],
+            r#""C:\Program Files\edda\edda.exe" reconcile --repo "C:\ai projects\sample""#
+        );
+        assert_eq!(
+            spec.create_args,
+            [
+                "/Create",
+                "/SC",
+                "MINUTE",
+                "/MO",
+                "1",
+                "/TN",
+                "Edda-Reconcile-0123456789abcdef0123456789abcdef",
+                "/TR",
+                r#""C:\Program Files\edda\edda.exe" reconcile --repo "C:\ai projects\sample""#,
+                "/RL",
+                "LIMITED",
+                "/F",
+                "/HRESULT",
+            ]
+        );
+        assert_eq!(
+            spec.query_args,
+            [
+                "/Query",
+                "/TN",
+                "Edda-Reconcile-0123456789abcdef0123456789abcdef",
+                "/XML",
+                "/HRESULT",
+            ]
+        );
+        assert_eq!(
+            spec.delete_args,
+            [
+                "/Delete",
+                "/TN",
+                "Edda-Reconcile-0123456789abcdef0123456789abcdef",
+                "/F",
+                "/HRESULT",
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_renderer_is_stable_and_quotes_terminal_backslashes() -> anyhow::Result<()> {
+        let id = "0123456789abcdef0123456789abcdef";
+        let first =
+            windows_scheduler_spec(Path::new(r"C:\edda\edda.exe"), Path::new(r"C:\repo\"), id)?;
+        let second =
+            windows_scheduler_spec(Path::new(r"C:\edda\edda.exe"), Path::new(r"C:\repo\"), id)?;
+
+        assert_eq!(first.create_args, second.create_args);
+        assert_eq!(
+            first.create_args[8],
+            r#""C:\edda\edda.exe" reconcile --repo "C:\repo\\""#
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_renderer_rejects_ambiguous_inputs() {
+        let executable = Path::new(r"C:\edda\edda.exe");
+        let repository = Path::new(r"C:\repo");
+        for id in [
+            "0123456789abcdef0123456789abcde",
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcde*",
+        ] {
+            assert!(windows_scheduler_spec(executable, repository, id).is_err());
+        }
+        assert!(windows_scheduler_spec(
+            executable,
+            Path::new("C:\\repo\"quoted"),
+            "0123456789abcdef0123456789abcdef"
+        )
+        .is_err());
+        assert!(windows_scheduler_spec(
+            Path::new("edda.exe"),
+            repository,
+            "0123456789abcdef0123456789abcdef"
+        )
+        .is_err());
+        assert!(windows_scheduler_spec(
+            executable,
+            Path::new("repo"),
+            "0123456789abcdef0123456789abcdef"
+        )
+        .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scheduler_renderer_rejects_non_unicode_paths() {
+        use std::os::windows::ffi::OsStringExt;
+
+        let invalid = std::ffi::OsString::from_wide(&[b'C' as u16, b':' as u16, 0xd800]);
+        assert!(windows_scheduler_spec(
+            Path::new(r"C:\edda\edda.exe"),
+            Path::new(&invalid),
+            "0123456789abcdef0123456789abcdef"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn scheduler_query_classifier_accepts_only_success_and_verified_missing_hresult() {
+        let present = SchedulerOutput::for_test(0, "xml", "");
+        assert_eq!(
+            classify_scheduler_query(&present).expect("present"),
+            SchedulerTaskState::Present
+        );
+        let missing = SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing");
+        assert_eq!(
+            classify_scheduler_query(&missing).expect("missing"),
+            SchedulerTaskState::Missing
+        );
+        for code in [5, 0x8007_0005, 0xdead_beef] {
+            let error = classify_scheduler_query(&SchedulerOutput::for_test(code, "", "failure"))
+                .expect_err("non-missing failures remain errors")
+                .to_string();
+            assert!(error.contains(&format!("0x{code:08x}")));
+            assert!(error.contains(&(code as i32).to_string()));
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn scheduler_lifecycle_is_explicitly_unsupported_off_windows() {
+        let error = scheduler_lifecycle(Path::new("/tmp/repo"), true)
+            .expect_err("non-Windows scheduler must fail")
+            .to_string();
+        assert!(error.contains("supported only on Windows"));
+    }
+
+    #[test]
+    fn scheduler_repo_reentry_requires_absolute_existing_path_and_resolves_main_worktree(
+    ) -> anyhow::Result<()> {
+        assert!(canonical_main_repo(Path::new("relative/repo")).is_err());
+        let dir = tempfile::tempdir()?;
+        assert!(canonical_main_repo(&dir.path().join("missing")).is_err());
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git").join("worktrees").join("scheduler"))?;
+        let worktree = dir.path().join("linked worktree");
+        std::fs::create_dir_all(&worktree)?;
+        let gitdir = repo.join(".git").join("worktrees").join("scheduler");
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}", gitdir.canonicalize()?.display()),
+        )?;
+
+        assert_eq!(canonical_main_repo(&worktree)?, repo.canonicalize()?);
+        assert_eq!(
+            edda_store::project_id(&worktree),
+            edda_store::project_id(&repo)
+        );
+        Ok(())
     }
 
     #[cfg(windows)]
