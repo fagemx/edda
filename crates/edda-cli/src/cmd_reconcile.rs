@@ -123,10 +123,7 @@ struct SchedulerLaunchManifestV1 {
 }
 
 struct PreparedSchedulerManifest {
-    // Task 3 consumes these fields when it publishes immutable manifests.
-    #[allow(dead_code)]
     manifest: SchedulerLaunchManifestV1,
-    #[allow(dead_code)]
     bytes: Vec<u8>,
     #[allow(dead_code)]
     digest: String,
@@ -134,8 +131,6 @@ struct PreparedSchedulerManifest {
 }
 
 struct LoadedSchedulerManifest {
-    // Task 3 consumes the payload when verifying existing artifacts.
-    #[allow(dead_code)]
     manifest: SchedulerLaunchManifestV1,
     repo: PathBuf,
     config: ReconcileConfig,
@@ -240,6 +235,44 @@ fn prepare_scheduler_manifest(
         digest,
         path,
     })
+}
+
+fn publish_scheduler_manifest(prepared: &PreparedSchedulerManifest) -> anyhow::Result<bool> {
+    let directory = prepared
+        .path
+        .parent()
+        .context("scheduler manifest path has no version directory")?;
+    let launch_directory = directory
+        .parent()
+        .context("scheduler manifest path has no launch directory")?;
+    let store = launch_directory
+        .parent()
+        .context("scheduler manifest path has no store root")?;
+    let _lock = edda_store::lock_file(&launch_directory.join("manifest.lock"))?;
+    std::fs::create_dir_all(directory).with_context(|| {
+        format!(
+            "create scheduler manifest directory {}",
+            directory.display()
+        )
+    })?;
+    anyhow::ensure!(
+        scheduler_manifest_directory(store, true)? == directory,
+        "scheduler manifest directory changed during publication"
+    );
+
+    if prepared.path.exists() {
+        let loaded = load_scheduler_manifest(&prepared.path)?;
+        anyhow::ensure!(
+            loaded.manifest == prepared.manifest
+                && std::fs::read(&prepared.path)? == prepared.bytes,
+            "existing scheduler manifest does not contain the expected bytes"
+        );
+        return Ok(false);
+    }
+
+    edda_store::write_atomic(&prepared.path, &prepared.bytes)
+        .with_context(|| format!("publish scheduler manifest {}", prepared.path.display()))?;
+    Ok(true)
 }
 
 fn load_scheduler_manifest(path: &Path) -> anyhow::Result<LoadedSchedulerManifest> {
@@ -389,7 +422,7 @@ pub fn run(repo_root: &Path, args: ReconcileArgs) -> anyhow::Result<()> {
 
 #[cfg(any(windows, test))]
 const MISSING_TASK_HRESULT: u32 = 0x8007_0002;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const SCHEDULER_OUTPUT_LIMIT: usize = 4096;
 
 #[cfg(any(windows, test))]
@@ -397,6 +430,13 @@ const SCHEDULER_OUTPUT_LIMIT: usize = 4096;
 enum SchedulerTaskState {
     Present,
     Missing,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, Eq, PartialEq)]
+enum ManifestCleanupDecision {
+    RemoveNewArtifact,
+    Retain,
 }
 
 #[cfg(any(windows, test))]
@@ -625,6 +665,161 @@ fn windows_scheduler_spec(
 }
 
 #[cfg(any(windows, test))]
+fn scheduler_query_references_manifest(
+    xml: &str,
+    executable: &Path,
+    manifest: &Path,
+) -> anyhow::Result<bool> {
+    anyhow::ensure!(
+        xml.len() <= SCHEDULER_OUTPUT_LIMIT,
+        "scheduler Query XML exceeds the bounded output limit"
+    );
+    let escape = |value: &str| {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
+    };
+    let command = format!(
+        "<Command>{}</Command>",
+        escape(
+            executable
+                .to_str()
+                .context("scheduler executable is not Unicode")?
+        )
+    );
+    let arguments = format!(
+        "<Arguments>{}</Arguments>",
+        escape(&format!(
+            "reconcile --scheduler-manifest {}",
+            quote_windows_argument(manifest)?
+        ))
+    );
+
+    let mut remaining = xml;
+    while let Some(start) = remaining.find("<Exec>") {
+        remaining = &remaining[start + "<Exec>".len()..];
+        let Some(end) = remaining.find("</Exec>") else {
+            anyhow::bail!("scheduler Query XML contains an unterminated Exec action");
+        };
+        let action = &remaining[..end];
+        if action.contains(&command) && action.contains(&arguments) {
+            return Ok(true);
+        }
+        remaining = &remaining[end + "</Exec>".len()..];
+    }
+    Ok(false)
+}
+
+#[cfg(any(windows, test))]
+fn manifest_cleanup_decision(
+    query: &SchedulerOutput,
+    executable: &Path,
+    expected_manifest: &Path,
+) -> anyhow::Result<ManifestCleanupDecision> {
+    match classify_scheduler_query(query)? {
+        SchedulerTaskState::Missing => return Ok(ManifestCleanupDecision::RemoveNewArtifact),
+        SchedulerTaskState::Present => {}
+    }
+    if scheduler_query_references_manifest(&query.stdout, executable, expected_manifest)? {
+        return Ok(ManifestCleanupDecision::Retain);
+    }
+
+    let escaped_executable = executable
+        .to_str()
+        .context("scheduler executable is not Unicode")?
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;");
+    let command = format!("<Command>{escaped_executable}</Command>");
+    let arguments_prefix = "<Arguments>reconcile --scheduler-manifest &quot;";
+    let arguments_suffix = "&quot;</Arguments>";
+    let mut remaining = query.stdout.as_str();
+    while let Some(start) = remaining.find("<Exec>") {
+        remaining = &remaining[start + "<Exec>".len()..];
+        let Some(end) = remaining.find("</Exec>") else {
+            break;
+        };
+        let action = &remaining[..end];
+        if action.contains(&command) {
+            if let Some(arguments_start) = action.find(arguments_prefix) {
+                let value = &action[arguments_start + arguments_prefix.len()..];
+                if let Some(arguments_end) = value.find(arguments_suffix) {
+                    let encoded_path = &value[..arguments_end];
+                    let trailing = &value[arguments_end + arguments_suffix.len()..];
+                    if !encoded_path.is_empty()
+                        && !encoded_path.contains(['<', '>'])
+                        && !encoded_path.contains("&quot;")
+                        && trailing.trim().is_empty()
+                    {
+                        let decoded_path = encoded_path
+                            .replace("&apos;", "'")
+                            .replace("&gt;", ">")
+                            .replace("&lt;", "<")
+                            .replace("&amp;", "&");
+                        let canonical_encoding = decoded_path
+                            .replace('&', "&amp;")
+                            .replace('<', "&lt;")
+                            .replace('>', "&gt;")
+                            .replace('"', "&quot;")
+                            .replace('\'', "&apos;");
+                        let candidate = Path::new(&decoded_path);
+                        let filename = candidate.file_name().and_then(|name| name.to_str());
+                        let trusted_filename = filename.is_some_and(|name| {
+                            name.len() == 69
+                                && name.ends_with(".json")
+                                && name[..64].bytes().all(|byte| {
+                                    byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                                })
+                        });
+                        if canonical_encoding == encoded_path
+                            && windows_path_is_absolute(candidate)?
+                            && candidate.parent() == expected_manifest.parent()
+                            && candidate != expected_manifest
+                            && trusted_filename
+                        {
+                            return Ok(ManifestCleanupDecision::RemoveNewArtifact);
+                        }
+                    }
+                }
+            }
+        }
+        remaining = &remaining[end + "</Exec>".len()..];
+    }
+    anyhow::bail!(
+        "scheduler Query did not prove whether the exact task references the new manifest: {}",
+        query.description()
+    )
+}
+
+#[cfg(any(windows, test))]
+fn remove_unreferenced_scheduler_manifest(path: &Path) -> String {
+    let removal = (|| -> anyhow::Result<()> {
+        let launch_directory = path
+            .parent()
+            .and_then(Path::parent)
+            .context("scheduler manifest path has no launch directory")?;
+        let _lock = edda_store::lock_file(&launch_directory.join("manifest.lock"))?;
+        std::fs::remove_file(path)
+            .with_context(|| format!("remove unreferenced scheduler manifest {}", path.display()))
+    })();
+    match removal {
+        Ok(()) => format!(
+            "new scheduler manifest removed after exact-task Query proved it unreferenced: {}",
+            path.display()
+        ),
+        Err(error) => format!(
+            "new scheduler manifest retained because exact-file cleanup failed for {}: {error:#}",
+            path.display()
+        ),
+    }
+}
+
+#[cfg(any(windows, test))]
 fn classify_scheduler_query(output: &SchedulerOutput) -> anyhow::Result<SchedulerTaskState> {
     match output.code {
         0 => Ok(SchedulerTaskState::Present),
@@ -690,22 +885,68 @@ fn scheduler_lifecycle(
             config.codex_bin = canonical_direct_codex_executable(&config.codex_bin, None)?;
             let manifest = prepare_scheduler_manifest(&edda_store::store_root(), &repo, &config)?;
             let spec = windows_scheduler_spec(&executable, &manifest.path, &project_id)?;
-            let created = run_schtasks(&spec.create_args)
-                .with_context(|| format!("scheduler Create failed for task {}", spec.task_name))?;
-            anyhow::ensure!(
-                created.code == 0,
-                "scheduler Create failed for {}: {}",
-                spec.task_name,
-                created.description()
-            );
-            let queried = run_schtasks(&spec.query_args)
-                .with_context(|| format!("scheduler Query failed for task {}", spec.task_name))?;
-            require_scheduler_state(
-                &queried,
-                SchedulerTaskState::Present,
-                "post-Create Query",
-                &spec.task_name,
-            )?;
+            let artifact_created = publish_scheduler_manifest(&manifest)?;
+            let install = (|| -> anyhow::Result<()> {
+                let created = run_schtasks(&spec.create_args).with_context(|| {
+                    format!("scheduler Create failed for task {}", spec.task_name)
+                })?;
+                anyhow::ensure!(
+                    created.code == 0,
+                    "scheduler Create failed for {}: {}",
+                    spec.task_name,
+                    created.description()
+                );
+                let queried = run_schtasks(&spec.query_args).with_context(|| {
+                    format!(
+                        "scheduler post-Create Query failed for task {}",
+                        spec.task_name
+                    )
+                })?;
+                require_scheduler_state(
+                    &queried,
+                    SchedulerTaskState::Present,
+                    "post-Create Query",
+                    &spec.task_name,
+                )?;
+                anyhow::ensure!(
+                    scheduler_query_references_manifest(
+                        &queried.stdout,
+                        &executable,
+                        &manifest.path,
+                    )?,
+                    "scheduler post-Create Query returned a different command for task {}: {}",
+                    spec.task_name,
+                    queried.description()
+                );
+                Ok(())
+            })();
+            if let Err(install_error) = install {
+                let cleanup = match run_schtasks(&spec.query_args) {
+                    Ok(query) if !artifact_created => format!(
+                        "existing scheduler manifest retained after exact-task cleanup Query: {}",
+                        query.description()
+                    ),
+                    Ok(query) => {
+                        match manifest_cleanup_decision(&query, &executable, &manifest.path) {
+                            Ok(ManifestCleanupDecision::RemoveNewArtifact) => {
+                                remove_unreferenced_scheduler_manifest(&manifest.path)
+                            }
+                            Ok(ManifestCleanupDecision::Retain) => format!(
+                                "new scheduler manifest retained because the exact task references it: {}",
+                                query.description()
+                            ),
+                            Err(error) => format!(
+                                "new scheduler manifest retained because cleanup was uncertain: {error:#}"
+                            ),
+                        }
+                    }
+                    Err(error) => format!(
+                        "{} scheduler manifest retained because cleanup Query failed for task {}: {error:#}",
+                        if artifact_created { "new" } else { "existing" }, spec.task_name
+                    ),
+                };
+                anyhow::bail!("{install_error:#}; {cleanup}");
+            }
             println!(
                 "installed scheduler task {} for {}",
                 spec.task_name,
@@ -1770,6 +2011,174 @@ mod tests {
         assert_ne!(first.bytes, second.bytes);
         assert_ne!(first.digest, second.digest);
         assert_ne!(first.path, second.path);
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_publish_reuses_identical_bytes_without_replacing() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+
+        assert!(publish_scheduler_manifest(&prepared)?);
+        assert!(!publish_scheduler_manifest(&prepared)?);
+        assert_eq!(std::fs::read(&prepared.path)?, prepared.bytes);
+
+        std::fs::write(&prepared.path, b"different")?;
+        assert!(publish_scheduler_manifest(&prepared).is_err());
+        assert_eq!(std::fs::read(&prepared.path)?, b"different");
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_changed_install_retains_prior_artifact() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let old = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        assert!(publish_scheduler_manifest(&old)?);
+
+        let mut changed = fixture.config.clone();
+        changed.max_attempts += 1;
+        let new = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &changed)?;
+        assert_ne!(old.path, new.path);
+        assert!(publish_scheduler_manifest(&new)?);
+        assert_eq!(std::fs::read(&old.path)?, old.bytes);
+        assert_eq!(std::fs::read(&new.path)?, new.bytes);
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_write_failure_precedes_scheduler_cleanup() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        std::fs::create_dir_all(fixture.store.join("scheduler-launch"))?;
+        std::fs::write(
+            fixture.store.join("scheduler-launch").join("v1"),
+            b"blocked",
+        )?;
+
+        assert!(publish_scheduler_manifest(&prepared).is_err());
+        assert!(!prepared.path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_query_xml_requires_exact_escaped_command_and_arguments() -> anyhow::Result<()> {
+        let executable = Path::new(r"C:\Program Files\Edda & Co\edda.exe");
+        let manifest = Path::new(r"C:\Store & State\scheduler-launch\v1\expected.json");
+        let xml = r#"<Task><Actions><Exec><Command>C:\Program Files\Edda &amp; Co\edda.exe</Command><Arguments>reconcile --scheduler-manifest &quot;C:\Store &amp; State\scheduler-launch\v1\expected.json&quot;</Arguments></Exec></Actions></Task>"#;
+        assert!(scheduler_query_references_manifest(
+            xml, executable, manifest
+        )?);
+
+        let wrong_arguments = xml.replace("expected.json&quot;", "expected.json&quot; --extra");
+        assert!(!scheduler_query_references_manifest(
+            &wrong_arguments,
+            executable,
+            manifest
+        )?);
+        let wrong_command = xml.replace("edda.exe</Command>", "other.exe</Command>");
+        assert!(!scheduler_query_references_manifest(
+            &wrong_command,
+            executable,
+            manifest
+        )?);
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_cleanup_requires_proved_non_reference() -> anyhow::Result<()> {
+        let executable = Path::new(r"C:\edda\edda.exe");
+        let expected = Path::new(
+            r"C:\store\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+        );
+        let missing = SchedulerOutput::for_test(MISSING_TASK_HRESULT, "", "missing");
+        assert_eq!(
+            manifest_cleanup_decision(&missing, executable, expected)?,
+            ManifestCleanupDecision::RemoveNewArtifact
+        );
+
+        let expected_xml = r#"<Task><Actions><Exec><Command>C:\edda\edda.exe</Command><Arguments>reconcile --scheduler-manifest &quot;C:\store\scheduler-launch\v1\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json&quot;</Arguments></Exec></Actions></Task>"#;
+        assert_eq!(
+            manifest_cleanup_decision(
+                &SchedulerOutput::for_test(0, expected_xml, ""),
+                executable,
+                expected,
+            )?,
+            ManifestCleanupDecision::Retain
+        );
+
+        let previous_xml = expected_xml.replace(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json",
+        );
+        assert_eq!(
+            manifest_cleanup_decision(
+                &SchedulerOutput::for_test(0, &previous_xml, ""),
+                executable,
+                expected,
+            )?,
+            ManifestCleanupDecision::RemoveNewArtifact
+        );
+
+        let aliased_expected_xml = expected_xml.replace(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+            "&#97;aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+        );
+        let non_content_addressed_xml = expected_xml.replace(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
+            "previous.json",
+        );
+        let different_directory_xml = previous_xml.replace(
+            r"C:\store\scheduler-launch\v1",
+            r"C:\other\scheduler-launch\v1",
+        );
+        for uncertain in [
+            SchedulerOutput::for_test(5, "", "access denied"),
+            SchedulerOutput::for_test(0, "<Task />", ""),
+            SchedulerOutput::for_test(0, &aliased_expected_xml, ""),
+            SchedulerOutput::for_test(0, &non_content_addressed_xml, ""),
+            SchedulerOutput::for_test(0, &different_directory_xml, ""),
+            SchedulerOutput::for_test(
+                0,
+                r#"<Task><Actions><Exec><Command>C:\other.exe</Command><Arguments>reconcile --scheduler-manifest &quot;C:\store\scheduler-launch\v1\bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.json&quot;</Arguments></Exec></Actions></Task>"#,
+                "",
+            ),
+        ] {
+            assert!(manifest_cleanup_decision(&uncertain, executable, expected).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_manifest_cleanup_failure_retains_original_error_first() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let manifest = root
+            .path()
+            .join("scheduler-launch")
+            .join("v1")
+            .join(format!("{}.json", "a".repeat(64)));
+        std::fs::create_dir_all(&manifest)?;
+
+        let cleanup = remove_unreferenced_scheduler_manifest(&manifest);
+        let combined = format!("scheduler Create failed; {cleanup}");
+        assert!(manifest.is_dir());
+        assert!(cleanup.contains("retained"));
+        assert!(combined.starts_with("scheduler Create failed;"));
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_preflight_failure_creates_no_manifest_directory() -> anyhow::Result<()> {
+        let fixture = scheduler_manifest_fixture()?;
+        let _prepared = prepare_scheduler_manifest(&fixture.store, &fixture.repo, &fixture.config)?;
+        let rejected_path = manifest_path_for_task_run_utf16_len(262);
+
+        assert!(render_scheduler_task_run(
+            Path::new(r"C:\e.exe"),
+            &rejected_path,
+            "Edda-Reconcile-0123456789abcdef0123456789abcdef",
+        )
+        .is_err());
+        assert!(!fixture.store.join("scheduler-launch").exists());
         Ok(())
     }
 
