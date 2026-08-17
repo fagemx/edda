@@ -27,6 +27,15 @@ function Get-FullPath {
     [IO.Path]::GetFullPath($Path).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
 }
 
+function Test-IsSameOrDescendantPath {
+    param([string]$Path, [string]$Ancestor)
+
+    $fullPath = Get-FullPath $Path
+    $fullAncestor = Get-FullPath $Ancestor
+    [string]::Equals($fullPath, $fullAncestor, [StringComparison]::OrdinalIgnoreCase) -or
+        $fullPath.StartsWith($fullAncestor + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-Sha256Hex {
     param([byte[]]$Bytes)
 
@@ -195,33 +204,63 @@ function Test-HistoricalCanonical {
     $false
 }
 
+function Get-CanonicalIdentity {
+    param([string]$Canonical)
+
+    try {
+        $repoRoot = Get-FullPath (Invoke-GitText $Canonical @('rev-parse', '--show-toplevel'))
+        $relative = [IO.Path]::GetRelativePath($repoRoot, $Canonical).Replace('\', '/')
+        if ($relative -eq '..' -or $relative.StartsWith('../', [StringComparison]::Ordinal)) { throw 'canonical is outside repository' }
+        [string[]]$roots = (Invoke-GitText $repoRoot @('rev-list', '--max-parents=0', 'HEAD')).Split("`n", [StringSplitOptions]::RemoveEmptyEntries)
+        if ($roots.Count -eq 0) { throw 'repository has no root commit' }
+        [Array]::Sort($roots, [StringComparer]::Ordinal)
+        $basis = "git`n$relative`n$($roots -join "`n")"
+    }
+    catch {
+        $basis = "path`n$(Get-FullPath $Canonical)"
+    }
+    Get-Sha256Hex $Utf8NoBom.GetBytes($basis)
+}
+
 function Get-Marker {
     param([string]$MarkerPath)
 
     if (-not (Test-Path -LiteralPath $MarkerPath -PathType Leaf)) {
-        return [pscustomobject]@{ Exists = $false; Valid = $false; Schema = $null; CanonicalDigest = $null; InstalledDigest = $null }
+        return [pscustomobject]@{ Exists = $false; Valid = $false; Schema = $null; CanonicalIdentity = $null; CanonicalDigest = $null; InstalledDigest = $null }
     }
     try {
         $data = Get-Content -Raw -LiteralPath $MarkerPath | ConvertFrom-Json
         $schema = $data.PSObject.Properties['Schema']
+        $canonicalIdentity = $data.PSObject.Properties['CanonicalIdentity']
         $canonicalDigest = $data.PSObject.Properties['CanonicalDigest']
         $installedDigest = $data.PSObject.Properties['InstalledDigest']
-        $valid = $null -ne $schema -and $null -ne $canonicalDigest -and $null -ne $installedDigest -and $schema.Value -eq 1
+        $valid = $null -ne $schema -and $null -ne $canonicalIdentity -and $null -ne $canonicalDigest -and
+            $null -ne $installedDigest -and $schema.Value -eq 2
         [pscustomobject]@{
             Exists = $true
             Valid = $valid
             Schema = if ($null -ne $schema) { $schema.Value } else { $null }
+            CanonicalIdentity = if ($null -ne $canonicalIdentity) { $canonicalIdentity.Value } else { $null }
             CanonicalDigest = if ($null -ne $canonicalDigest) { $canonicalDigest.Value } else { $null }
             InstalledDigest = if ($null -ne $installedDigest) { $installedDigest.Value } else { $null }
         }
     }
     catch {
-        [pscustomobject]@{ Exists = $true; Valid = $false; Schema = $null; CanonicalDigest = $null; InstalledDigest = $null }
+        [pscustomobject]@{ Exists = $true; Valid = $false; Schema = $null; CanonicalIdentity = $null; CanonicalDigest = $null; InstalledDigest = $null }
     }
 }
 
+function Get-OptionalFileDigest {
+    param([string]$Path)
+
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        return Get-Sha256Hex ([IO.File]::ReadAllBytes($Path))
+    }
+    $null
+}
+
 function Get-TargetState {
-    param([string]$Name, [string]$Path, [object]$CanonicalManifest, [string]$Canonical)
+    param([string]$Name, [string]$Path, [object]$CanonicalManifest, [string]$Canonical, [string]$CanonicalIdentity)
 
     $fullPath = Get-FullPath $Path
     $markerPath = "$fullPath.edda-provenance.json"
@@ -229,20 +268,25 @@ function Get-TargetState {
         return [pscustomobject]@{
             Target = $Name; Path = $fullPath; MarkerPath = $markerPath; Status = 'missing'
             Digest = $null; CanonicalDigest = $CanonicalManifest.Digest; MarkerCurrent = $false
+            MarkerDigest = Get-OptionalFileDigest $markerPath
         }
     }
 
     $manifest = Get-DirectoryManifest $fullPath
     $marker = Get-Marker $markerPath
-    $markerCurrent = $marker.Valid -and
+    $markerBelongs = $marker.Valid -and $marker.CanonicalIdentity -eq $CanonicalIdentity
+    $markerCurrent = $markerBelongs -and
         $marker.CanonicalDigest -eq $CanonicalManifest.Digest -and
         $marker.InstalledDigest -eq $manifest.Digest
 
-    if ($manifest.Digest -eq $CanonicalManifest.Digest) {
+    if ($marker.Exists -and -not $markerBelongs) {
+        $status = 'locally-modified'
+    }
+    elseif ($manifest.Digest -eq $CanonicalManifest.Digest) {
         $status = 'current'
     }
     elseif ($marker.Exists) {
-        $status = if ($marker.Valid -and $marker.InstalledDigest -eq $manifest.Digest) { 'stale' } else { 'locally-modified' }
+        $status = if ($markerBelongs -and $marker.InstalledDigest -eq $manifest.Digest) { 'stale' } else { 'locally-modified' }
     }
     elseif (Test-HistoricalCanonical $Canonical $manifest) {
         $status = 'stale'
@@ -254,6 +298,7 @@ function Get-TargetState {
     [pscustomobject]@{
         Target = $Name; Path = $fullPath; MarkerPath = $markerPath; Status = $status
         Digest = $manifest.Digest; CanonicalDigest = $CanonicalManifest.Digest; MarkerCurrent = $markerCurrent
+        MarkerDigest = Get-OptionalFileDigest $markerPath
     }
 }
 
@@ -281,7 +326,7 @@ function Assert-UniqueSibling {
 }
 
 function Write-Provenance {
-    param([object]$State, [string]$Canonical, [string]$Digest)
+    param([object]$State, [string]$Canonical, [string]$CanonicalIdentity, [string]$Digest)
 
     $markerPath = Get-FullPath $State.MarkerPath
     if (-not [string]::Equals($markerPath, "$($State.Path).edda-provenance.json", [StringComparison]::OrdinalIgnoreCase)) {
@@ -290,7 +335,8 @@ function Write-Provenance {
     $temporary = Join-Path ([IO.Path]::GetDirectoryName($State.Path)) "$([IO.Path]::GetFileName($State.Path)).edda-staging-marker-$([guid]::NewGuid().ToString('N'))"
     Assert-UniqueSibling $temporary $State.Path staging
     $payload = [ordered]@{
-        Schema = 1
+        Schema = 2
+        CanonicalIdentity = $CanonicalIdentity
         CanonicalDigest = $Digest
         InstalledDigest = $Digest
         CanonicalPath = $Canonical
@@ -325,8 +371,32 @@ function Copy-ToStage {
     }
 }
 
+function Invoke-TestFault {
+    param([string]$Name, [string]$TargetPath)
+
+    if ($env:EDDA_FLEET_SYNC_TEST_FAULT -ne $Name) { return }
+    if (-not $env:EDDA_FLEET_SYNC_TEST_ROOT) { throw 'Test fault requires EDDA_FLEET_SYNC_TEST_ROOT' }
+    $root = Get-FullPath $env:EDDA_FLEET_SYNC_TEST_ROOT
+    $targetFull = Get-FullPath $TargetPath
+    $rootPrefix = $root + [IO.Path]::DirectorySeparatorChar
+    if (-not $targetFull.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Test fault target is outside EDDA_FLEET_SYNC_TEST_ROOT'
+    }
+    if ($Name -eq 'TargetChanged') {
+        [IO.File]::AppendAllText((Join-Path $targetFull 'SKILL.md'), "`nTEST BOUNDARY MUTATION`n", $Utf8NoBom)
+    }
+    elseif ($Name -eq 'StageMove') {
+        throw 'injected stage move failure'
+    }
+    elseif ($Name -eq 'Cleanup') {
+        $firstFile = Get-ChildItem -LiteralPath $targetFull -Recurse -File | Sort-Object FullName | Select-Object -First 1
+        if ($null -ne $firstFile) { [IO.File]::Delete($firstFile.FullName) }
+        throw 'injected cleanup failure after partial backup deletion'
+    }
+}
+
 function Install-Target {
-    param([object]$State, [string]$Canonical, [object]$CanonicalManifest, [bool]$KeepBackup, [string]$RequestedStage)
+    param([object]$State, [string]$Canonical, [string]$CanonicalIdentity, [object]$CanonicalManifest, [bool]$ForceInstall, [string]$RequestedStage)
 
     Assert-TargetPath $State.Path $State.Path
     $parent = [IO.Path]::GetDirectoryName($State.Path)
@@ -341,43 +411,64 @@ function Install-Target {
 
     $stageCreated = $false
     $oldTarget = $null
-    $swapped = $false
+    $oldRenamed = $false
+    $newTargetLive = $false
     try {
         Copy-ToStage $Canonical $CanonicalManifest $stage
         $stageCreated = $true
+        Invoke-TestFault 'TargetChanged' $State.Path
+        $currentState = Get-TargetState $State.Target $State.Path $CanonicalManifest $Canonical $CanonicalIdentity
+        $targetChanged = $currentState.Status -ne $State.Status -or
+            $currentState.Digest -ne $State.Digest -or
+            $currentState.MarkerDigest -ne $State.MarkerDigest
+        if ($targetChanged -and -not $ForceInstall) {
+            $exception = [InvalidOperationException]::new('Target changed after classification; use -Force to preserve a backup and replace it.')
+            $exception.Data['Operation'] = 'Refused'
+            throw $exception
+        }
+        $keepBackup = ($State.Status -eq 'locally-modified') -or $targetChanged
         if (Test-Path -LiteralPath $State.Path -PathType Container) {
-            $kind = if ($KeepBackup) { 'backup' } else { 'backup-transient' }
+            $kind = if ($keepBackup) { 'backup' } else { 'backup-transient' }
             $oldTarget = Join-Path $parent "$([IO.Path]::GetFileName($State.Path)).edda-$kind-$([guid]::NewGuid().ToString('N'))"
             Assert-UniqueSibling $oldTarget $State.Path backup
             [IO.Directory]::Move($State.Path, $oldTarget)
+            $oldRenamed = $true
         }
+        Invoke-TestFault 'StageMove' $State.Path
         [IO.Directory]::Move($stage, $State.Path)
         $stageCreated = $false
-        $swapped = $true
-        Write-Provenance $State $Canonical $CanonicalManifest.Digest
+        $newTargetLive = $true
+        Write-Provenance $State $Canonical $CanonicalIdentity $CanonicalManifest.Digest
 
         $installed = Get-DirectoryManifest $State.Path
         $marker = Get-Marker $State.MarkerPath
         if ($installed.Digest -ne $CanonicalManifest.Digest -or -not $marker.Valid -or
-            $marker.CanonicalDigest -ne $CanonicalManifest.Digest -or $marker.InstalledDigest -ne $installed.Digest) {
+            $marker.CanonicalIdentity -ne $CanonicalIdentity -or $marker.CanonicalDigest -ne $CanonicalManifest.Digest -or
+            $marker.InstalledDigest -ne $installed.Digest) {
             throw 'Post-sync parity or provenance verification failed'
         }
-        if ($null -ne $oldTarget -and -not $KeepBackup) {
+        if ($null -ne $oldTarget -and -not $keepBackup) {
             Assert-UniqueSibling $oldTarget $State.Path backup
-            [IO.Directory]::Delete($oldTarget, $true)
-            $oldTarget = $null
+            try {
+                Invoke-TestFault 'Cleanup' $oldTarget
+                [IO.Directory]::Delete($oldTarget, $true)
+                $oldTarget = $null
+            }
+            catch {
+                return [pscustomobject]@{ BackupPath = $oldTarget; CleanupError = $_.Exception.Message }
+            }
         }
-        return $oldTarget
+        return [pscustomobject]@{ BackupPath = $oldTarget; CleanupError = $null }
     }
     catch {
-        if ($swapped -and $null -ne $oldTarget -and (Test-Path -LiteralPath $oldTarget -PathType Container)) {
-            if (Test-Path -LiteralPath $State.Path -PathType Container) {
-                Assert-UniqueSibling $stage $State.Path staging
-                [IO.Directory]::Move($State.Path, $stage)
-                $stageCreated = $true
-            }
+        if ($oldRenamed -and -not $newTargetLive -and
+            $null -ne $oldTarget -and (Test-Path -LiteralPath $oldTarget -PathType Container) -and
+            -not (Test-Path -LiteralPath $State.Path)) {
             [IO.Directory]::Move($oldTarget, $State.Path)
             $oldTarget = $null
+        }
+        elseif ($newTargetLive -and $null -ne $oldTarget -and (Test-Path -LiteralPath $oldTarget -PathType Container)) {
+            $_.Exception.Data['BackupPath'] = $oldTarget
         }
         throw
     }
@@ -416,6 +507,7 @@ try {
     }
     $canonicalManifest = Get-DirectoryManifest $canonical
     if ($canonicalManifest.Entries.Count -eq 0) { throw "Canonical skill directory is empty: $canonical" }
+    $canonicalIdentity = Get-CanonicalIdentity $canonical
 
     $selected = switch ($Target) {
         'Codex' { @([pscustomobject]@{ Name = 'Codex'; Path = $CodexPath }) }
@@ -431,10 +523,11 @@ try {
 
     $states = foreach ($item in $selected) {
         $fullTarget = Get-FullPath $item.Path
-        if ([string]::Equals($canonical, $fullTarget, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Canonical and target paths must differ: $canonical"
+        if ((Test-IsSameOrDescendantPath $fullTarget $canonical) -or
+            (Test-IsSameOrDescendantPath $canonical $fullTarget)) {
+            throw "Canonical and target paths must not overlap: canonical=$canonical target=$fullTarget"
         }
-        Get-TargetState $item.Name $fullTarget $canonicalManifest $canonical
+        Get-TargetState $item.Name $fullTarget $canonicalManifest $canonical $canonicalIdentity
     }
 
     foreach ($state in $states) {
@@ -456,23 +549,35 @@ try {
 
         try {
             $backup = $null
+            $operationError = $null
             if ($state.Status -eq 'current') {
-                Write-Provenance $state $canonical $canonicalManifest.Digest
+                Write-Provenance $state $canonical $canonicalIdentity $canonicalManifest.Digest
                 $operation = if ($state.MarkerCurrent) { 'None' } else { 'Marked' }
             }
             else {
-                $backup = Install-Target $state $canonical $canonicalManifest ($state.Status -eq 'locally-modified') $StagingPath
-                $operation = 'Synced'
+                $installResult = Install-Target $state $canonical $canonicalIdentity $canonicalManifest $Force $StagingPath
+                $backup = $installResult.BackupPath
+                if ($installResult.CleanupError) {
+                    $operation = 'CleanupFailed'
+                    $operationError = $installResult.CleanupError
+                    $exitCode = 1
+                }
+                else {
+                    $operation = 'Synced'
+                    $operationError = $null
+                }
             }
-            $current = Get-TargetState $state.Target $state.Path $canonicalManifest $canonical
+            $current = Get-TargetState $state.Target $state.Path $canonicalManifest $canonical $canonicalIdentity
             if ($current.Status -ne 'current' -or -not $current.MarkerCurrent) {
                 throw 'Post-sync target is not current'
             }
-            $results += New-Result $current $operation $previousStatus $backup $null
+            $results += New-Result $current $operation $previousStatus $backup $operationError
         }
         catch {
-            $failed = Get-TargetState $state.Target $state.Path $canonicalManifest $canonical
-            $results += New-Result $failed 'Failed' $previousStatus $null $_.Exception.Message
+            $failed = Get-TargetState $state.Target $state.Path $canonicalManifest $canonical $canonicalIdentity
+            $failedOperation = if ($_.Exception.Data.Contains('Operation')) { $_.Exception.Data['Operation'] } else { 'Failed' }
+            $failedBackup = if ($_.Exception.Data.Contains('BackupPath')) { $_.Exception.Data['BackupPath'] } else { $null }
+            $results += New-Result $failed $failedOperation $previousStatus $failedBackup $_.Exception.Message
             $exitCode = 1
         }
     }

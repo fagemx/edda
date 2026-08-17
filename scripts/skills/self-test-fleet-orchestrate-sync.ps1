@@ -148,6 +148,74 @@ try {
     Assert-True ((Get-FixtureDigest $codex) -eq $oldDigest) 'dry-run preserves target bytes'
     Assert-True (($beforeDryRun -join '|') -eq ($afterDryRun -join '|')) 'dry-run creates no sibling files'
 
+    $env:EDDA_FLEET_SYNC_TEST_ROOT = $fixtureRoot
+    $env:EDDA_FLEET_SYNC_TEST_FAULT = 'TargetChanged'
+    try {
+        $boundaryRefused = Invoke-SyncTool (@('-Action', 'Sync', '-Target', 'Codex') + $common)
+    }
+    finally {
+        Remove-Item Env:EDDA_FLEET_SYNC_TEST_FAULT, Env:EDDA_FLEET_SYNC_TEST_ROOT -ErrorAction SilentlyContinue
+    }
+    Assert-True ($boundaryRefused.ExitCode -ne 0) 'mutation-boundary change is refused without Force'
+    Assert-True ($boundaryRefused.Data[0].Operation -eq 'Refused') 'mutation-boundary refusal is reported'
+    $changedBeforeForce = [IO.File]::ReadAllText((Join-Path $codex 'SKILL.md'))
+
+    $env:EDDA_FLEET_SYNC_TEST_ROOT = $fixtureRoot
+    $env:EDDA_FLEET_SYNC_TEST_FAULT = 'TargetChanged'
+    try {
+        $boundaryForced = Invoke-SyncTool (@('-Action', 'Sync', '-Target', 'Codex', '-Force') + $common)
+    }
+    finally {
+        Remove-Item Env:EDDA_FLEET_SYNC_TEST_FAULT, Env:EDDA_FLEET_SYNC_TEST_ROOT -ErrorAction SilentlyContinue
+    }
+    Assert-True ($boundaryForced.ExitCode -eq 0) 'Force accepts a mutation-boundary change'
+    Assert-True (Test-Path -LiteralPath $boundaryForced.Data[0].BackupPath -PathType Container) 'Force preserves a mutation-boundary backup'
+    $expectedChangedBytes = $changedBeforeForce + "`nTEST BOUNDARY MUTATION`n"
+    Assert-True ([IO.File]::ReadAllText((Join-Path $boundaryForced.Data[0].BackupPath 'SKILL.md')) -eq $expectedChangedBytes) 'Force backup preserves the changed bytes'
+
+    $canonicalBeforeOverlap = Get-FixtureDigest $canonical
+    $targetBelowCanonical = Join-Path $canonical 'nested target'
+    $belowResult = Invoke-SyncTool @('-Action', 'Sync', '-Target', 'Codex', '-CanonicalPath', $canonical, '-CodexPath', $targetBelowCanonical, '-Json')
+    Assert-True ($belowResult.ExitCode -ne 0) 'target below canonical is rejected'
+    Assert-True (-not (Test-Path -LiteralPath $targetBelowCanonical)) 'target-below-canonical rejection writes nothing'
+    Assert-True ((Get-FixtureDigest $canonical) -eq $canonicalBeforeOverlap) 'target-below-canonical rejection preserves canonical'
+
+    $targetAboveCanonical = Join-Path $fixtureRoot 'ancestor target'
+    $canonicalBelowTarget = Join-Path $targetAboveCanonical 'canonical child'
+    Copy-FixtureTree $canonical $canonicalBelowTarget
+    $aboveBefore = Get-FixtureDigest $targetAboveCanonical
+    $aboveResult = Invoke-SyncTool @('-Action', 'Sync', '-Target', 'Codex', '-Force', '-CanonicalPath', $canonicalBelowTarget, '-CodexPath', $targetAboveCanonical, '-Json')
+    Assert-True ($aboveResult.ExitCode -ne 0) 'canonical below target is rejected'
+    Assert-True ((Get-FixtureDigest $targetAboveCanonical) -eq $aboveBefore) 'canonical-below-target rejection writes nothing'
+    Assert-True (Test-Path -LiteralPath $canonicalBelowTarget -PathType Container) 'canonical-below-target rejection preserves canonical'
+
+    $claudeBeforeStageMove = Get-FixtureDigest $claude
+    $env:EDDA_FLEET_SYNC_TEST_ROOT = $fixtureRoot
+    $env:EDDA_FLEET_SYNC_TEST_FAULT = 'StageMove'
+    try {
+        $stageMoveFailure = Invoke-SyncTool (@('-Action', 'Sync', '-Target', 'Claude') + $common)
+    }
+    finally {
+        Remove-Item Env:EDDA_FLEET_SYNC_TEST_FAULT, Env:EDDA_FLEET_SYNC_TEST_ROOT -ErrorAction SilentlyContinue
+    }
+    Assert-True ($stageMoveFailure.ExitCode -ne 0) 'stage move failure is reported'
+    Assert-True (Test-Path -LiteralPath $claude -PathType Container) 'stage move failure leaves a live target'
+    Assert-True ((Get-FixtureDigest $claude) -eq $claudeBeforeStageMove) 'stage move failure restores the complete old target'
+
+    $env:EDDA_FLEET_SYNC_TEST_ROOT = $fixtureRoot
+    $env:EDDA_FLEET_SYNC_TEST_FAULT = 'Cleanup'
+    try {
+        $cleanupFailure = Invoke-SyncTool (@('-Action', 'Sync', '-Target', 'Claude') + $common)
+    }
+    finally {
+        Remove-Item Env:EDDA_FLEET_SYNC_TEST_FAULT, Env:EDDA_FLEET_SYNC_TEST_ROOT -ErrorAction SilentlyContinue
+    }
+    Assert-True ($cleanupFailure.ExitCode -ne 0) 'cleanup failure is reported'
+    Assert-True ($cleanupFailure.Data[0].Operation -eq 'CleanupFailed') 'cleanup failure has a distinct operation'
+    Assert-True ((Get-FixtureDigest $claude) -eq $canonicalDigest) 'cleanup failure leaves the complete new target live'
+    Assert-True (Test-Path -LiteralPath $cleanupFailure.Data[0].BackupPath -PathType Container) 'cleanup failure reports the remaining backup'
+    Assert-True ($cleanupFailure.Data[0].Error.Contains('injected cleanup failure')) 'cleanup error is explicit'
+
     $syncAll = Invoke-SyncTool (@('-Action', 'Sync', '-Target', 'All') + $common)
     Assert-True ($syncAll.ExitCode -eq 0) 'normal sync succeeds for both targets'
     Assert-True ($syncAll.Data.Count -eq 2) 'all returns both target results'
@@ -160,6 +228,19 @@ try {
         Assert-True ($result.Status -eq 'current') 'post-sync status is current'
         Assert-True ($result.MarkerCurrent -eq $true) 'post-sync provenance is current'
     }
+
+    $otherCanonical = Join-Path $repo 'other/fleet-orchestrate'
+    Copy-FixtureTree $canonical $otherCanonical
+    & git -C $repo add --all
+    & git -C $repo commit --quiet -m 'other canonical lineage path'
+    $beforeForeignCanonical = Get-FixtureDigest $codex
+    $foreignArgs = @('-CanonicalPath', $otherCanonical, '-CodexPath', $codex, '-Json')
+    $foreignStatus = Invoke-SyncTool (@('-Action', 'Status', '-Target', 'Codex') + $foreignArgs)
+    Assert-True ($foreignStatus.Data[0].Status -eq 'locally-modified') 'marker from another canonical identity is locally modified'
+    $foreignRefused = Invoke-SyncTool (@('-Action', 'Sync', '-Target', 'Codex') + $foreignArgs)
+    Assert-True ($foreignRefused.ExitCode -ne 0) 'another canonical identity is refused without Force'
+    Assert-True ($foreignRefused.Data[0].Operation -eq 'Refused') 'another canonical refusal is reported'
+    Assert-True ((Get-FixtureDigest $codex) -eq $beforeForeignCanonical) 'another canonical refusal preserves target bytes'
 
     Add-Content -LiteralPath (Join-Path $codex 'SKILL.md') -Value 'local edit' -Encoding utf8
     $modifiedDigest = Get-FixtureDigest $codex

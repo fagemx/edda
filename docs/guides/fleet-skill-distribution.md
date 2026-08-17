@@ -44,13 +44,23 @@ when Git or relevant history is unavailable, a differing target is classified
 `locally-modified`. Historical comparison folds CRLF to LF only for valid
 UTF-8 text, covering Git checkout normalization while retaining exact matching
 for binary files. Marked installs always use their exact recorded byte digest.
+Their marker also binds that digest to a canonical identity derived from the
+Git root lineage plus repository-relative skill path, with the absolute path as
+the fail-safe identity when Git is unavailable. A marker from another identity
+is `locally-modified`, not stale.
 
 Sync stages the complete canonical tree in a unique sibling directory, checks
-manifest parity, then renames it into place. The adjacent
+manifest parity, then revalidates the target immediately before the first
+rename. A target changed since classification is refused unless `-Force` is
+explicit, in which case the changed bytes become the reported backup.
+Canonical and target paths are rejected if either contains the other. The
+adjacent
 `fleet-orchestrate.edda-provenance.json` marker records the canonical and
 installed digests without changing the installed directory manifest. A
 locally modified target is refused unless `-Force` is explicit; forced sync
 renames the previous directory to a reported sibling backup before installing.
+If transient-backup cleanup fails after promotion, the complete new target
+stays live and the result reports the remaining backup and cleanup error.
 
 Fixture callers can override `-CanonicalPath`, `-CodexPath`, and `-ClaudePath`.
 `-StagingPath` is limited to one target and must name a unique
