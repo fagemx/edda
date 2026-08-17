@@ -17,7 +17,9 @@ and multi-agent coordination.
   callers/consumers, issue/spec acceptance, introduced or exposed security or
   data-loss regressions, and current-base integration. Adjacent, pre-existing,
   or speculative findings become evidenced `FOLLOW-UP ISSUE`s and do not
-  extend the current PR.
+  extend the current PR. This is a bounded complete review, never a minimal
+  review: every frozen-surface failure is mandatory, and only findings
+  genuinely outside that surface qualify for follow-up.
 - Reviewers complete the whole scoped audit and batch blocking P0/P1 before
   requesting changes. Later-round blockers must be fix-caused or previously
   unobservable. The issue/spec is the acceptance ceiling; extra evidence is
@@ -27,6 +29,8 @@ and multi-agent coordination.
   relevant validation plus exact-head CI as `RAN`, and record available cost.
   Stop after two non-product/harness-only cycles without useful progress or at
   diminishing returns; route follow-up or ask the operator to expand scope.
+- This is policy for sessions invoking `coord-review`, `coord-orchestrate`, or
+  `fleet-orchestrate`; it is not an Edda runtime rule imposed on every project.
 - Review immutable full SHAs; any push invalidates the prior verdict.
 - On GitHub PRs, publish numbered SHA-pinned review rounds. Requested changes
   require an implementer point-by-point response and a new review round; merge

@@ -223,11 +223,16 @@ Ignoring these rules causes merge conflicts and duplicated work.
 
 Before merging any GitHub PR, the PR itself must show the complete loop:
 
+This is a bounded complete review, never a minimal review. It governs sessions
+invoking the coordination review/orchestration skills; it is not an Edda
+runtime rule imposed on every project.
+
 1. Each handoff freezes `IN SCOPE`: changed behavior/paths, direct
    callers/consumers, issue/spec acceptance, security/data-loss regressions
    introduced or exposed by the change, and current-base integration.
    Adjacent, pre-existing, and speculative findings are evidenced
-   `FOLLOW-UP ISSUE`s that do not extend the PR.
+   `FOLLOW-UP ISSUE`s that do not extend the PR. Every frozen-surface failure
+   is mandatory; only findings genuinely outside it qualify for follow-up.
 2. Before `Changes Requested`, finish the whole scoped audit and batch every
    blocking P0/P1. Later-round blockers must be fix-caused or previously
    unobservable; otherwise route follow-up. The issue/spec is the acceptance

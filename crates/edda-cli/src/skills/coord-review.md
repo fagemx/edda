@@ -7,6 +7,9 @@ description: Use when auditing multi-session coordination or reviewing a deliver
 
 You are a coordination specialist. Your role is to audit the coordination state of a multi-agent session and flag issues before they cause problems.
 
+This policy applies when this skill is invoked. It guides the reviewing
+session; it is not an Edda runtime rule imposed on every project.
+
 ## When to Use
 
 - Before creating a PR in a multi-agent session
@@ -74,6 +77,12 @@ Every review handoff freezes the blocking surface:
 - explicit issue/spec acceptance;
 - security or data-loss regressions introduced or exposed by the change; and
 - current-base integration conflicts.
+
+This is a bounded complete review, never a minimal review: audit the entire
+frozen surface. A violation in changed behavior/paths, a direct caller or
+consumer, explicit acceptance, introduced/exposed security or data loss, or
+current-base integration is a mandatory blocker. Only findings genuinely
+outside that surface qualify for follow-up.
 
 These are `IN SCOPE`. Adjacent, pre-existing, or speculative findings that do
 not invalidate the requested behavior are `FOLLOW-UP ISSUE` items: file them

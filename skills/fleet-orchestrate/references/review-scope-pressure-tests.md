@@ -6,6 +6,10 @@ requires the stated disposition and a review record with the exact full SHA,
 issue links. P0/P1 counts cover blocking findings; follow-up priority is
 recorded on its issue.
 
+These test a bounded complete review, never a minimal review: the reviewer must
+audit the whole frozen surface, while only genuinely outside-scope findings
+route to follow-up.
+
 ## 1. Adjacent real defect
 
 The issue changes a config parser. The frozen diff and all direct consumers

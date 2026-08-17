@@ -285,6 +285,15 @@ bundles. Do not spin or broaden scope to appear active.
 
 Every review handoff freezes one blocking contract:
 
+This is a bounded complete review, never a minimal review. The reviewer audits
+the entire frozen surface. Every failure in changed behavior/paths, a direct
+caller/consumer, explicit acceptance, introduced/exposed security or data
+loss, or current-base integration is mandatory. Only findings genuinely
+outside that surface qualify for follow-up.
+
+This workflow applies when the coord review/orchestration skills are invoked;
+it is not an Edda runtime rule imposed on every project.
+
 **`IN SCOPE`**
 
 - changed behavior and changed paths;

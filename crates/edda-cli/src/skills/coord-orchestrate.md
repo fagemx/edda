@@ -10,6 +10,9 @@ teach a session to be a good peer (coord-sync/request/handoff/review); this
 one teaches the seat that runs the whole formation. The companion prose is
 the "Coordination discipline" section of edda's multi-agent guide.
 
+This policy applies when this skill is invoked. It guides the coordinating
+session; it is not an Edda runtime rule imposed on every project.
+
 ## Layers — never mixed
 
 | Layer | Carrier | Property |
@@ -41,6 +44,10 @@ data-loss regressions introduced or exposed by the change, and current-base
 integration conflicts. Adjacent, pre-existing, or speculative findings that
 do not invalidate the requested behavior become evidenced `FOLLOW-UP ISSUE`s;
 they do not extend the PR or require a response/current-round fix.
+
+This is a bounded complete review, never a minimal review. Audit every item in
+the frozen surface; any failure there is mandatory. Only findings genuinely
+outside that surface qualify for follow-up.
 
 The issue/spec is the acceptance ceiling. Extra evidence is advisory unless
 needed to prove a required fact or safety boundary. Before `Changes Requested`,

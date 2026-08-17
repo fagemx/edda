@@ -11,6 +11,10 @@ Run a fleet as a durable control system, not a group chat. Divide context and
 ownership only where work is genuinely independent; keep decisions, evidence,
 and state recoverable when any session disappears.
 
+This policy applies when `fleet-orchestrate` or its coord review/orchestration
+companions are invoked. It guides those sessions; it is not an Edda runtime
+rule imposed on every project.
+
 **REQUIRED REFERENCE:** Read [references/playbook.md](references/playbook.md)
 completely before assigning work. Every target session starts with zero
 conversation context.
@@ -50,6 +54,9 @@ when changing or validating review policy.
   security/data-loss regressions, and current-base integration. Everything
   adjacent, pre-existing, or speculative is an evidenced `FOLLOW-UP ISSUE`
   unless it invalidates that frozen surface.
+- This is a bounded complete review, never a minimal review. Audit the entire
+  frozen surface; every failure there is mandatory, and only findings
+  genuinely outside it qualify for follow-up.
 - Finish the whole scoped audit and batch all blocking P0/P1 before requesting
   changes. A later blocker must be fix-caused or previously unobservable.
 - The issue/spec is the acceptance ceiling. Require extra evidence only when
