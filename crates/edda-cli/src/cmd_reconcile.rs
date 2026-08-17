@@ -1229,6 +1229,10 @@ fn scheduler_direct_exec_values(xml: &str) -> anyhow::Result<Vec<(String, String
             capture.is_none(),
             "scheduler Exec value contains nested markup"
         );
+        anyhow::ensure!(
+            stack.as_slice() != ["Task", "Actions"] || name == "Exec",
+            "scheduler Actions contains a non-Exec direct child"
+        );
         if stack.is_empty() {
             anyhow::ensure!(
                 !seen_root && name == "Task" && !self_closing,
@@ -2953,6 +2957,30 @@ mod tests {
             manifest,
         )
         .is_err());
+
+        let com_handler = quoted.replace(
+            "</Actions>",
+            "<ComHandler><ClassId>00000000-0000-0000-0000-000000000000</ClassId><Data>ignored</Data></ComHandler></Actions>",
+        );
+        assert!(scheduler_query_references_manifest(&com_handler, executable, manifest).is_err());
+        assert!(recover_scheduler_manifest_candidate(&com_handler, executable).is_err());
+        assert!(manifest_cleanup_decision(
+            &SchedulerOutput::for_test(0, &com_handler, ""),
+            executable,
+            manifest,
+        )
+        .is_err());
+
+        let harmless_comment = quoted.replace("<Exec>", "<!-- harmless --><Exec>");
+        assert!(scheduler_query_references_manifest(
+            &harmless_comment,
+            executable,
+            manifest,
+        )?);
+        assert_eq!(
+            recover_scheduler_manifest_candidate(&harmless_comment, executable)?,
+            Some(manifest.to_path_buf())
+        );
 
         let commented_match = quoted.replace("<Exec>", "<!-- <Exec>").replace(
             "</Exec>",
