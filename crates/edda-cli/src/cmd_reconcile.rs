@@ -955,6 +955,11 @@ fn manifest_cleanup_decision(
     }
     let xml = query.xml()?;
     let actions = scheduler_direct_exec_values(xml.as_ref())?;
+    anyhow::ensure!(
+        actions.len() == 1,
+        "scheduler Query must contain exactly one direct Exec action: {}",
+        query.description()
+    );
     let expected_arguments = format!(
         "reconcile --scheduler-manifest {}",
         quote_windows_argument(expected_manifest)?
@@ -3146,6 +3151,17 @@ mod tests {
             )?,
             ManifestCleanupDecision::RemoveNewArtifact
         );
+
+        let two_previous_actions = previous_xml.replace(
+            "</Actions>",
+            r#"<Exec><Command>C:\edda\edda.exe</Command><Arguments>reconcile --scheduler-manifest &quot;C:\store\scheduler-launch\v1\cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.json&quot;</Arguments></Exec></Actions>"#,
+        );
+        assert!(manifest_cleanup_decision(
+            &SchedulerOutput::for_test(0, &two_previous_actions, ""),
+            executable,
+            expected,
+        )
+        .is_err());
 
         let aliased_expected_xml = expected_xml.replace(
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
