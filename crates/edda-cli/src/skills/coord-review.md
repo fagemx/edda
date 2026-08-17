@@ -1,6 +1,6 @@
 ---
 name: coord-review
-description: Review coordination health — check decisions, requests, binding conflicts
+description: Use when auditing multi-session coordination or reviewing a delivery candidate before PR or merge
 ---
 
 # Coordination Review
@@ -65,7 +65,42 @@ Review claims for overlapping paths:
 
 Flag any overlaps as potential merge conflict sources.
 
-### Step 5: Generate Report
+### Step 5: Freeze the review contract
+
+Every review handoff freezes the blocking surface:
+
+- changed behavior and paths;
+- directly affected callers and consumers;
+- explicit issue/spec acceptance;
+- security or data-loss regressions introduced or exposed by the change; and
+- current-base integration conflicts.
+
+These are `IN SCOPE`. Adjacent, pre-existing, or speculative findings that do
+not invalidate the requested behavior are `FOLLOW-UP ISSUE` items: file them
+with evidence and a basis SHA, but do not extend the PR or require an
+implementer response. Security and data-loss remain blocking when the change
+introduces/exposes them or a direct consumer regresses.
+
+Before posting `Changes Requested`, finish the whole scoped audit and batch all
+blocking P0/P1 findings. A later round may add a blocker only when the fix
+caused it or made it previously unobservable; otherwise route it to follow-up.
+
+The issue/spec is the acceptance ceiling. Do not invent mandatory evidence
+fields unless they are needed to prove a required fact or safety boundary.
+
+Choose gates from the delta. Code/product-blob, base, or toolchain changes run
+the relevant code gates. When only docs/evidence changed and code/product
+blobs, base, and toolchain are unchanged, reuse still-applicable code results
+as `READ` with their source SHA; run only relevant diff/docs/evidence checks
+and exact-head CI as `RAN`. Never report a reused result as rerun.
+
+Record available elapsed, token, and tool cost. Stop after two consecutive
+cycles that change only non-product evidence/docs or harness material without
+improving required behavior/proof, or sooner when returns clearly diminish.
+Classify and route the finding instead of continuing: follow-up issue for
+out-of-scope work, or operator scope expansion when it must join this PR.
+
+### Step 6: Generate Report
 
 Compile all findings into a health report.
 
@@ -105,3 +140,26 @@ Present the review as a health report:
 ### Overall Health: [GOOD / NEEDS ATTENTION]
 <1-2 sentence summary with recommended actions if any>
 ```
+
+For GitHub review, append this contract to the durable PR-visible loop:
+
+```text
+## Code Review: Round N
+Reviewed full SHA: <full SHA>
+Base full SHA: <full SHA>
+IN SCOPE: <frozen changed behavior/paths, direct consumers, acceptance, safety, integration>
+BLOCKING: P0=<n>, P1=<n>
+- <finding, path/symbol, failure scenario>
+FOLLOW-UP ISSUE:
+- <issue URL and priority, or none>
+Evidence:
+- RAN: <exact command/check and result on reviewed SHA>
+- READ: <reused result and its source SHA, or none>
+Cost: elapsed=<available/unknown>, tokens=<available/unknown>, tools=<available/unknown>
+Verdict: Changes Requested | LGTM
+```
+
+`Changes Requested` requires a point-by-point response only for `BLOCKING`
+findings and a new frozen SHA. Follow-up links do not create another round
+unless their fix is deliberately pulled into scope. Final current-head
+acceptance states `LGTM`, `P0=0`, `P1=0`, and the exact required gates.

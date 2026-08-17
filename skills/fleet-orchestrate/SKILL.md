@@ -15,6 +15,10 @@ and state recoverable when any session disappears.
 completely before assigning work. Every target session starts with zero
 conversation context.
 
+**REQUIRED PRESSURE TESTS:** Use
+[references/review-scope-pressure-tests.md](references/review-scope-pressure-tests.md)
+when changing or validating review policy.
+
 ## Controller sequence
 
 1. Fix the goal, exclusions, evidence bar, issue-filing authority, merge
@@ -31,7 +35,7 @@ conversation context.
 6. Record tasks, claims, rulings, and acceptance criteria in the durable truth
    layer before ringing host messaging as a doorbell.
 7. Give self-contained briefs, monitor compressed state, adjudicate conflicts,
-   and close only against immutable full SHAs with rerun evidence.
+   and close only against immutable full SHAs with proportional evidence.
 
 ## Non-negotiable invariants
 
@@ -41,6 +45,21 @@ conversation context.
 - Highest durable `d-NNN` ruling wins; changes say `SUPERSEDES d-NNN`.
 - Reviewer/verifier does not fix the artifact it judges.
 - Review verdicts bind one full SHA; any push voids the verdict.
+- Every handoff freezes `IN SCOPE`: changed behavior/paths, direct
+  callers/consumers, issue/spec acceptance, introduced or exposed
+  security/data-loss regressions, and current-base integration. Everything
+  adjacent, pre-existing, or speculative is an evidenced `FOLLOW-UP ISSUE`
+  unless it invalidates that frozen surface.
+- Finish the whole scoped audit and batch all blocking P0/P1 before requesting
+  changes. A later blocker must be fix-caused or previously unobservable.
+- The issue/spec is the acceptance ceiling. Require extra evidence only when
+  needed to prove a required fact or safety boundary.
+- Gates follow code/product-blob, base, and toolchain changes. Docs/evidence-
+  only heads reuse still-applicable code gates as `READ` and run relevant
+  delta checks plus exact-head CI as `RAN`.
+- Record available elapsed/token/tool cost. After two consecutive
+  non-product/harness-only cycles without useful progress, or at diminishing
+  returns, stop and route follow-up or request operator scope expansion.
 - A GitHub PR carries its visible review-fix loop: numbered SHA-pinned review,
   implementer response to every requested change, and final current-head LGTM.
   An internal verifier report does not replace these PR comments.
@@ -62,4 +81,6 @@ Publish and keep current:
 2. review charter and finding queue;
 3. dependency graph and bundle ownership;
 4. fleet board with task, owner, branch, full SHA, state, review, and next step;
-5. acceptance matrix, PR review-loop state, and final merge recommendation.
+5. acceptance matrix, review handoff (`IN SCOPE`, `FOLLOW-UP ISSUE`, blocking
+   P0/P1, `RAN`/`READ`, exact SHA, cost), PR review-loop state, and final merge
+   recommendation with current-head P0=0/P1=0.

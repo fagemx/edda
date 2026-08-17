@@ -12,7 +12,7 @@
 8. Role contracts and briefs
 9. Rulings and cross-session traffic
 10. Monitoring and recovery
-11. Verification and merge
+11. Scoped verification and merge
 12. Carrier selection
 13. Worked example
 14. Common mistakes
@@ -26,10 +26,10 @@ Write an authority contract before dispatch:
 | Goal | Observable end state, not an activity |
 | In scope | Repositories, issues, modules, branches |
 | Out of scope | Explicit exclusions and optional work |
-| Evidence | Tests, checks, reproduction, review standard |
+| Evidence | Issue/spec-required facts and safety proof; do not invent acceptance fields |
 | External writes | Whether the fleet may file/close issues, comment, push, or open PRs |
 | Merge authority | Who may merge, which PRs/SHAs, and ordering constraints |
-| Stop conditions | Complete, blocked, budget/coverage limit, or operator decision |
+| Stop conditions | Complete, blocked, coverage/cost limit, diminishing returns, or operator decision |
 
 A terminal instruction such as “do not stop” requires persistence toward the
 goal. It does not authorize new products, repositories, issue spam, scope
@@ -123,9 +123,10 @@ Create a review charter before scanning:
 | Basis | Base branch and full SHA |
 | Lenses | Fixed set such as correctness, security, concurrency, data loss, UX, tests |
 | Exclusions | What this campaign will not inspect |
+| Blocking surface | Changed behavior/paths, direct consumers, acceptance, introduced/exposed safety regressions, current-base integration |
 | Evidence bar | Reproducer, failing test, trace/log, or direct code proof |
 | Coverage | Matrix of scope units × lenses |
-| Stop rule | Coverage/budget complete, blockers resolved, or operator decision |
+| Stop rule | Coverage/budget complete, blockers resolved, cost stop, or operator decision |
 
 Assign each review task one coverage cell. Rotate lenses across cells instead
 of repeating one familiar bug pattern. Mark each cell with reviewer, basis SHA,
@@ -134,8 +135,9 @@ evidence, candidates, and disposition.
 Prevent drift:
 
 - Keep the object and exclusions fixed for the campaign.
-- Park a newly discovered direction as a hypothesis; expand the charter only
-  through a durable controller ruling.
+- Route adjacent, pre-existing, or speculative defects that do not invalidate
+  the blocking surface to evidenced follow-up issues. Expand the charter only
+  through a durable operator-approved ruling.
 - Compare suspected regressions against the basis revision before escalating.
 - Have the verifier sample both positive findings and “clean” cells; a campaign
   that only checks its hits trains itself toward confirmation bias.
@@ -166,6 +168,12 @@ Require this evidence before promotion:
 Do not file vague “investigate X” issues merely to inflate the queue. If the
 direction is useful but evidence is incomplete, retain the candidate with the
 attempts already made and the next bounded experiment.
+
+Finding priority and current-PR disposition are separate. A serious adjacent
+defect can be a high-priority follow-up without becoming a blocking P0/P1 in
+the current PR. Direct caller/consumer regressions, introduced or exposed
+security/data-loss regressions, and current-base integration conflicts remain
+blocking.
 
 ## 7. Delivery graph and ownership
 
@@ -207,7 +215,7 @@ intent + basis SHA + symbol anchor + drift rule.
 3. Reproduce the failure or write the failing acceptance test first.
 4. Implement the smallest in-scope repair; surface adjacent findings instead
    of taking them.
-5. Run focused gates and the required broader gates.
+5. Run gates selected from code/product-blob, base, and toolchain changes.
 6. Push/open the delivery candidate if authorized, report the full SHA, freeze
    the branch, and leave a receipt tagged `ran` versus `read`.
 7. Never merge or rewrite another worker’s branch.
@@ -218,8 +226,9 @@ intent + basis SHA + symbol anchor + drift rule.
 2. Run baseline gates before workers code and classify existing red checks.
 3. Translate each issue into observable acceptance criteria.
 4. Audit tests for false greens and tests that encode behavior being removed.
-5. Review the exact frozen full SHA, rerun gates personally, compare against
-   the basis, and report blockers with path/symbol and failure scenario.
+5. Review the exact frozen full SHA, complete the whole scoped audit, compare
+   against the basis, and batch every blocking P0/P1 with path/symbol and
+   failure scenario before requesting changes.
 6. Acknowledge that any push voids the verdict.
 
 ### Controller contract
@@ -272,21 +281,81 @@ If work is blocked, record the reason and evidence, release/reassign ownership
 using the runtime’s current mechanism, and continue other independent ready
 bundles. Do not spin or broaden scope to appear active.
 
-## 11. Verification and merge
+## 11. Scoped verification and merge
+
+Every review handoff freezes one blocking contract:
+
+**`IN SCOPE`**
+
+- changed behavior and changed paths;
+- directly affected callers and consumers;
+- explicit issue/spec acceptance;
+- security or data-loss regressions introduced or exposed by the change; and
+- current-base integration conflicts.
+
+**`FOLLOW-UP ISSUE`**
+
+- adjacent or pre-existing defects that do not invalidate requested behavior;
+- speculative improvements; and
+- extra evidence/format preferences beyond the acceptance ceiling.
+
+File follow-ups with evidence and a basis SHA. They do not extend the current
+PR, require an implementer response, or create another review round unless the
+operator intentionally pulls their fix into scope. The issue/spec is the
+acceptance ceiling; evidence beyond it becomes mandatory only when its absence
+prevents proving a required fact or safety boundary.
+
+Before posting `Changes Requested`, finish the whole scoped audit and batch all
+blocking P0/P1. A later round may add a blocker only if the fix caused it or
+made it previously unobservable; otherwise route it to follow-up.
+
+Select gates proportionally:
+
+| Delta | Required treatment |
+|---|---|
+| Code/product blob, base SHA, or toolchain changed | Run the relevant code gates for the changed risk surface. |
+| Only docs/evidence changed; code/product blobs, base, and toolchain unchanged | Reuse still-applicable code gates as `READ` with source SHA; `RAN` only relevant diff/docs/evidence checks and exact-head CI. |
+
+Never label a reused gate `RAN`. Exact-head CI is still required because the
+review verdict binds the new full SHA.
+
+Record available elapsed time, token use, and tool cost in every handoff. Stop
+after two consecutive cycles that change only non-product evidence/docs or
+harness material without improving required behavior/proof, or sooner when
+returns clearly diminish. Classify and route instead of continuing: open a
+follow-up issue for out-of-scope work, or ask the operator to expand scope.
+
+Use this handoff request before review; it is not an implementer verdict:
+
+```text
+## Code Review Handoff: Round N
+Full SHA: <full SHA>
+Base full SHA: <full SHA>
+IN SCOPE: <frozen blocking surface>
+FOLLOW-UP ISSUE: <links or none>
+Blocking counts entering review: P0=<n>, P1=<n>
+Evidence:
+- RAN: <commands/checks executed on this SHA>
+- READ: <reused results and source SHAs>
+Cost: elapsed=<available/unknown>, tokens=<available/unknown>, tools=<available/unknown>
+Request: complete the scoped audit and publish an independent verdict
+```
 
 For each candidate:
 
 1. Worker freezes and reports a full SHA with a receipt.
 2. Controller checks scope and issue acceptance coverage.
-3. Independent verifier reviews that SHA and reruns required gates.
+3. Independent verifier reviews that SHA and runs the proportional required
+   gates.
 4. Any push voids the verdict and triggers a delta review from the new SHA.
 5. When the delivery artifact is a GitHub PR, publish the review on the PR;
    internal reports and chat are supporting evidence, not a substitute:
-   - `## Code Review: Round N` with reviewed full SHA, P0/P1 findings, testing
-     verdict, and `Changes Requested` or `LGTM`;
+   - `## Code Review: Round N` with reviewed full SHA, frozen `IN SCOPE`,
+     blocking P0/P1 counts/findings, `FOLLOW-UP ISSUE` links, `RAN` versus
+     `READ` evidence, cost, and `Changes Requested` or `LGTM`;
    - after `Changes Requested`, the implementer publishes
-     `## Review Response: Round N`, answering every finding with disposition,
-     changed paths/tests, ran evidence, and the new full SHA;
+     `## Review Response: Round N`, answering every blocking finding with
+     disposition, changed paths/tests, ran evidence, and the new full SHA;
    - the reviewer starts Round N+1 on that new frozen SHA. Repeat until the PR
      has a final current-head `LGTM` comment stating P0=0, P1=0 and exact gates.
 6. Controller reads `headRefOid`, PR comments/reviews, and CI immediately before
@@ -360,6 +429,11 @@ actual file overlap. More sessions do not make A1 → A2 parallel.
 | “The user said keep going, so nearby work is allowed.” | Persistence does not broaden scope or external-write authority. |
 | “The latest message is newest truth.” | Highest durable `d-NNN` wins; messages are doorbells. |
 | “The PR barely changed after approval.” | Any push changes the artifact and voids the SHA-bound verdict. |
+| “This adjacent defect is real, so it must block.” | Preserve the evidence in a follow-up issue unless it invalidates the frozen blocking surface. |
+| “A new preference deserves another review round.” | The issue/spec is the acceptance ceiling; only required facts and safety proof can raise it. |
+| “Docs changed, so rerun every code gate.” | Reuse still-applicable code gates as `READ`; run delta checks and exact-head CI as `RAN`. |
+| “We can reveal the next blocker after this fix.” | Complete the scoped audit and batch P0/P1; later blockers must be fix-caused or previously unobservable. |
+| “One more harness/evidence cycle might help.” | After two non-product cycles without useful progress or at diminishing returns, stop and route. |
 | “The verifier report is enough; PR comments are clerical.” | A GitHub PR is the durable collaboration surface. Publish every review round, response, and final current-head verdict there. |
 | “The final LGTM implies earlier findings were handled.” | Changes Requested requires an implementer point-by-point response before re-review. |
-| “Receipt says tests pass, so merge.” | Receipt is worker evidence; verifier reruns and merge authority accepts. |
+| “Receipt says tests pass, so merge.” | Receipt is worker evidence; verifier runs the required proportional gates and merge authority accepts. |
