@@ -223,12 +223,33 @@ Ignoring these rules causes merge conflicts and duplicated work.
 
 Before merging any GitHub PR, the PR itself must show the complete loop:
 
-1. `Code Review: Round N` pinned to the reviewed full SHA, with P0/P1 findings,
-   testing verdict, and `Changes Requested` or `LGTM`.
-2. Every `Changes Requested` round has an implementer `Review Response: Round
-   N` that answers each finding, names the new full SHA, and reports ran gates.
-3. Every push invalidates the prior verdict and requires another review round.
-4. The final comment is current-head `LGTM`, P0=0, P1=0, with exact gates.
+This is a bounded complete review, never a minimal review. It governs sessions
+invoking the coordination review/orchestration skills; it is not an Edda
+runtime rule imposed on every project.
+
+1. Each handoff freezes `IN SCOPE`: changed behavior/paths, direct
+   callers/consumers, issue/spec acceptance, security/data-loss regressions
+   introduced or exposed by the change, and current-base integration.
+   Adjacent, pre-existing, and speculative findings are evidenced
+   `FOLLOW-UP ISSUE`s that do not extend the PR. Every frozen-surface failure
+   is mandatory; only findings genuinely outside it qualify for follow-up.
+2. Before `Changes Requested`, finish the whole scoped audit and batch every
+   blocking P0/P1. Later-round blockers must be fix-caused or previously
+   unobservable; otherwise route follow-up. The issue/spec is the acceptance
+   ceiling, except evidence needed to prove a required fact or safety boundary.
+3. `Code Review: Round N` is pinned to the reviewed full SHA and records
+   `IN SCOPE`, `FOLLOW-UP ISSUE`, blocking P0/P1, `RAN` versus `READ` evidence,
+   available elapsed/token/tool cost, and `Changes Requested` or `LGTM`.
+   Gate selection follows code/product-blob, base, and toolchain changes;
+   docs/evidence-only pushes reuse applicable code gates and run only relevant
+   validation plus exact-head CI.
+4. Every `Changes Requested` round has an implementer `Review Response: Round
+   N` that answers each blocking finding, names the new full SHA, and reports
+   ran gates. Follow-up issues are linked but require no response.
+5. Every push invalidates the prior verdict and requires another review round.
+6. Stop after two non-product/harness-only cycles without useful progress or
+   at diminishing returns; classify/route the finding instead of continuing.
+7. The final comment is current-head `LGTM`, P0=0, P1=0, with exact gates.
 
 Internal verifier reports, task receipts, and CI do not replace PR comments.
 Merge still requires explicit operator authority.

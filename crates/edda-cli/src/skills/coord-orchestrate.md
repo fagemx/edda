@@ -10,6 +10,9 @@ teach a session to be a good peer (coord-sync/request/handoff/review); this
 one teaches the seat that runs the whole formation. The companion prose is
 the "Coordination discipline" section of edda's multi-agent guide.
 
+This policy applies when this skill is invoked. It guides the coordinating
+session; it is not an Edda runtime rule imposed on every project.
+
 ## Layers — never mixed
 
 | Layer | Carrier | Property |
@@ -33,6 +36,51 @@ The whole formation — you included — produces delivery candidates and
 proves what was done and how it was verified; sign-off belongs to whoever
 holds merge authority outside the formation, unless explicitly delegated.
 
+## Review scope contract
+
+Before every review, freeze `IN SCOPE`: changed behavior/paths, directly
+affected callers/consumers, explicit issue/spec acceptance, security or
+data-loss regressions introduced or exposed by the change, and current-base
+integration conflicts. Adjacent, pre-existing, or speculative findings that
+do not invalidate the requested behavior become evidenced `FOLLOW-UP ISSUE`s;
+they do not extend the PR or require a response/current-round fix.
+
+This is a bounded complete review, never a minimal review. Audit every item in
+the frozen surface; any failure there is mandatory. Only findings genuinely
+outside that surface qualify for follow-up.
+
+The issue/spec is the acceptance ceiling. Extra evidence is advisory unless
+needed to prove a required fact or safety boundary. Before `Changes Requested`,
+the reviewer completes the whole scoped audit and batches all blocking P0/P1.
+A later round adds a blocker only when the fix caused it or made it previously
+unobservable; otherwise it is follow-up.
+
+Select gates proportionally. Code/product-blob, base, or toolchain changes run
+the relevant code gates. A docs/evidence-only push with those inputs unchanged
+reuses still-applicable code results as `READ` with source SHA, then runs only
+relevant diff/docs/evidence checks and exact-head CI as `RAN`.
+
+Each handoff records available elapsed/token/tool cost. Stop after two
+consecutive non-product evidence/docs or harness-only cycles without improved
+required behavior/proof, or at clear diminishing returns; route the finding to
+follow-up or ask the operator to expand scope.
+
+Use this request template; it is not a verdict:
+
+```text
+## Code Review Handoff: Round N
+Full SHA: <full SHA>
+Base full SHA: <full SHA>
+IN SCOPE: <frozen blocking surface>
+FOLLOW-UP ISSUE: <links or none>
+Blocking counts entering review: P0=<n>, P1=<n>
+Evidence:
+- RAN: <commands/checks run on this SHA>
+- READ: <reused results and source SHAs>
+Cost: elapsed=<available/unknown>, tokens=<available/unknown>, tools=<available/unknown>
+Request: audit the whole scoped surface; publish no self-verdict from the implementer
+```
+
 ## Protocol
 
 1. **Decompose.** Bundle by code-chain cohesion (same chain → same worker,
@@ -55,12 +103,14 @@ holds merge authority outside the formation, unless explicitly delegated.
    workers. Never fixate an unverified claim.
 6. **Track without interrupting:** workers' done-bells + background poll on
    `edda task list` / PR state + read-only peeks. "Queued" means busy — fine.
-7. **Close:** receipt on the rail → your review + verifier's adversarial
-   review, independently → for GitHub delivery, publish `Code Review: Round N`
-   on the PR pinned to the full SHA. `Changes Requested` requires the
-   implementer's point-by-point `Review Response: Round N`, a new frozen SHA,
-   and another review round. Publish final current-head LGTM with P0=0, P1=0
-   and ran gates → the merge authority integrates. For local-only delivery,
+7. **Close:** receipt on the rail → publish the review handoff above → your
+   review + verifier's adversarial review, independently → for GitHub delivery,
+   publish `Code Review: Round N` on the PR pinned to the full SHA with
+   `IN SCOPE`, blocking P0/P1, `FOLLOW-UP ISSUE`, and `RAN`/`READ` evidence.
+   `Changes Requested` requires the implementer's point-by-point `Review
+   Response: Round N` for blocking findings, a new frozen SHA, and another
+   review round. Publish final current-head LGTM with P0=0, P1=0 and exact
+   required gates → the merge authority integrates. For local-only delivery,
    record the same round/response/verdict fields in the strongest durable local
    carrier; do not invent a PR. Internal reports do not replace the durable
    visible loop.
@@ -107,3 +157,6 @@ letters at the peers' natural cadence. Bell-only → ring, ledger as backstop.
 | Controller reads worker diffs mid-flight | compressed signals only until review time |
 | Verifier fixes things | read-only, always |
 | Treating a worker receipt as acceptance | receipts are execution evidence; sign-off lives outside the formation |
+| Adjacent finding becomes another blocking round | file an evidenced follow-up issue unless it is in the frozen blocking surface |
+| Docs-only push restarts full code gates | reuse applicable code gates as `READ`; run delta checks plus exact-head CI |
+| Review drips one blocker per round | audit the whole scope and batch P0/P1 before requesting changes |
