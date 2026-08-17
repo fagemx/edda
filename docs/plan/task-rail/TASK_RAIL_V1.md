@@ -1,7 +1,9 @@
 # Task Rail v1: ledger-driven multi-agent handoff（conductor 升級案）
 
-> Status: **P1 implemented**（2026-07-14:`task.*` 事件 + 投影 + CLI 動詞 + Stop-hook nudge;
-> 驗收 drill 通過,存證 [P1_DRILL_2026-07-14.md](P1_DRILL_2026-07-14.md);P2+ 未動工）
+> Status: **P1 implemented; P2 implementation under review**（2026-07-14:`task.*`
+> 事件 + 投影 + CLI 動詞 + Stop-hook nudge;P1 驗收存證
+> [P1_DRILL_2026-07-14.md](P1_DRILL_2026-07-14.md)。P2 release gate 尚未通過，
+> 見 [P2_DRILL_2026-08-16.md](P2_DRILL_2026-08-16.md)）
 > Repo: `C:\ai_agent\edda`
 > Language: **Rust**（ACP client 以 Rust 重寫語義,不是搬 JS 碼)
 > 參考實作: `C:\ai_agent\bryti\adapters\session-acp.js`（ACP 傳輸層,已 live-verified）
@@ -138,7 +140,8 @@ edda task list / edda task show 13
 edda plan run release.md          # conductor DAG 糖衣(topo 已有)
 edda plan status                  # 一眼看整條 pipeline 卡在哪
 edda reconcile                    # 兜底掃描(排程器目標,亦可手跑)
-edda reconcile --install-scheduler  # 註冊 schtasks / cron
+edda reconcile --install-scheduler  # Windows: 註冊專案限定的 schtasks
+edda reconcile --uninstall-scheduler # Windows: 只移除該專案的精確 task 名稱
 ```
 
 Hooks(edda 已有的裝置直接沿用):
@@ -166,6 +169,14 @@ Hooks(edda 已有的裝置直接沿用):
 | **P2** | `edda reconcile` + 租約 + `--install-scheduler` | 中途 kill 掉執行者,N 分鐘內任務被重排並完成;冪等鍵擋住重複副作用 |
 | **P3** | ACP runner(spawn-on-finish + brief 注入 + 續跑) | A done → B 經 ACP 自起,無人介入;F7 剝除在巢狀 session 實測;win32 實測;`session/load` 續跑 drill 至少一個 agent 通過 |
 | **P4** | plan DAG 糖衣 + `edda watch` task board | 3 步驟 × 3 種 agent 的 pipeline 在 watch TUI 全程可視 |
+
+P2 的 Windows 排程器只是每分鐘喚醒同一個 one-shot reconciler；不新增
+daemon 或第二份狀態。安裝/移除必須由 operator 明確呼叫，採目前使用者的
+`LIMITED` context，task 名稱固定為
+`Edda-Reconcile-<32-lowercase-hex-project-id>`。重裝以 `/F` 更新同一名稱，
+移除先查詢再只刪除該精確名稱；兩者都不會殺掉正在執行的 process。
+八個 real-process drills 與 missing-task HRESULT 的本機證明未完成前，P2
+仍是 **not release-accepted**。
 
 護欄(全期適用):auto-spawn 是 **opt-in**,每小時 spawn 上限 + 每任務
 attempt 上限——沿用 edda「LLM 花費一律 budget-capped」哲學。

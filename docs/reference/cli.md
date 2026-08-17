@@ -258,6 +258,49 @@ Launch the real-time TUI showing active sessions, events, and coordination state
 edda watch
 ```
 
+### `edda reconcile`
+
+Recover unfinished Task Rail attempts and dispatch ready work. The ledger,
+claims, leases, attempts, and receipts remain authoritative; reconciliation is
+safe to invoke repeatedly.
+
+```bash
+edda reconcile
+edda reconcile --install-scheduler
+edda reconcile --uninstall-scheduler
+```
+
+| Option | Description |
+|--------|-------------|
+| `--max-workers N` | Maximum concurrent workers (default: 3) |
+| `--max-attempts N` | Retry cap per task (default: 3) |
+| `--lease-ttl-s N` | Runner lease lifetime in seconds (default: 300) |
+| `--codex-bin PATH` | Codex executable used for runners |
+| `--install-scheduler` | On Windows, create or replace this project's one-minute scheduler task |
+| `--uninstall-scheduler` | On Windows, remove this project's exact scheduler task if present |
+
+The lifecycle flags are explicit machine mutations and never run from
+`edda init` or ordinary reconciliation. They are mutually exclusive and return
+without dispatching workers. Windows registration calls `schtasks.exe`
+directly under the current user with `LIMITED`; it does not use `SYSTEM`,
+`HIGHEST`, a password, shell wrapper, or background daemon.
+
+Each project uses the exact name `Edda-Reconcile-<32-lowercase-hex-project-id>`.
+Install uses `/F`, so repeating it replaces only that name. Uninstall queries
+and deletes only that exact name and is idempotent; it never terminates a
+running reconciler or worker. The compact scheduled command contains canonical
+Edda and manifest paths; the repository path lives in the validated manifest,
+so linked worktrees share one task and execution does not depend on the
+scheduler's working directory.
+
+Scheduler lifecycle is Windows-only. A local exact-name missing-task HRESULT
+lifecycle run reported the expected signed and hexadecimal result codes, but
+its raw command, output, and Query XML artifacts were not preserved. D1 stopped
+`RED / BLOCKED` on a scheduler re-entry defect, and D2–D8 were not run. The
+incomplete evidence and rerun requirements are tracked in
+[`P2_DRILL_2026-08-16.md`](../plan/task-rail/P2_DRILL_2026-08-16.md); neither the
+lifecycle nor the controller-loss drills are release-accepted.
+
 ---
 
 ## Branches & drafts
