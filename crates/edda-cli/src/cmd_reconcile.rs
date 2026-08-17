@@ -916,63 +916,11 @@ fn decode_scheduler_xml_value(value: &str) -> anyhow::Result<String> {
 }
 
 #[cfg(any(windows, test))]
-fn contains_scheduler_exec_candidate(xml: &str) -> bool {
-    xml.match_indices("<Exec").any(|(start, _)| {
-        matches!(
-            xml.as_bytes().get(start + "<Exec".len()),
-            None | Some(b'>' | b'/') | Some(b' ' | b'\t' | b'\r' | b'\n')
-        )
-    })
-}
-
-#[cfg(any(windows, test))]
-fn scheduler_exec_values(xml: &str) -> anyhow::Result<Vec<(String, String)>> {
-    anyhow::ensure!(
-        xml.len() <= SCHEDULER_OUTPUT_LIMIT,
-        "scheduler Query XML exceeds the bounded output limit"
-    );
-    let element = |action: &str, name: &str| -> anyhow::Result<String> {
-        let open = format!("<{name}>");
-        let close = format!("</{name}>");
-        let start = action
-            .find(&open)
-            .with_context(|| format!("scheduler Exec action has no {name}"))?;
-        let value = &action[start + open.len()..];
-        let end = value
-            .find(&close)
-            .with_context(|| format!("scheduler Exec action has unterminated {name}"))?;
-        anyhow::ensure!(
-            !value[end + close.len()..].contains(&open) && !action[..start].contains(&close),
-            "scheduler Exec action has duplicate {name}"
-        );
-        decode_scheduler_xml_value(&value[..end])
-    };
-
-    let mut actions = Vec::new();
-    let mut remaining = xml;
-    while let Some(start) = remaining.find("<Exec>") {
-        anyhow::ensure!(
-            !contains_scheduler_exec_candidate(&remaining[..start])
-                && !remaining[..start].contains("</Exec>"),
-            "scheduler Query XML contains a malformed Exec action"
-        );
-        remaining = &remaining[start + "<Exec>".len()..];
-        let end = remaining
-            .find("</Exec>")
-            .context("scheduler Query XML contains an unterminated Exec action")?;
-        let action = &remaining[..end];
-        anyhow::ensure!(
-            !contains_scheduler_exec_candidate(action),
-            "scheduler Query XML contains a nested Exec action"
-        );
-        actions.push((element(action, "Command")?, element(action, "Arguments")?));
-        remaining = &remaining[end + "</Exec>".len()..];
-    }
-    anyhow::ensure!(
-        !contains_scheduler_exec_candidate(remaining) && !remaining.contains("</Exec>"),
-        "scheduler Query XML contains a malformed Exec action"
-    );
-    Ok(actions)
+fn scheduler_command_matches_executable(command: &str, executable: &Path) -> anyhow::Result<bool> {
+    let expected = executable
+        .to_str()
+        .context("scheduler executable is not Unicode")?;
+    Ok(command == expected || command == quote_windows_argument(executable)?)
 }
 
 #[cfg(any(windows, test))]
@@ -981,18 +929,18 @@ fn scheduler_query_references_manifest(
     executable: &Path,
     manifest: &Path,
 ) -> anyhow::Result<bool> {
-    let command = executable
-        .to_str()
-        .context("scheduler executable is not Unicode")?;
     let arguments = format!(
         "reconcile --scheduler-manifest {}",
         quote_windows_argument(manifest)?
     );
-    Ok(scheduler_exec_values(xml)?
-        .iter()
-        .any(|(actual_command, actual_arguments)| {
-            actual_command == command && actual_arguments == &arguments
-        }))
+    let actions = scheduler_direct_exec_values(xml)?;
+    let [(command, actual_arguments)] = actions.as_slice() else {
+        return Ok(false);
+    };
+    Ok(
+        scheduler_command_matches_executable(command, executable)?
+            && actual_arguments == &arguments,
+    )
 }
 
 #[cfg(any(windows, test))]
@@ -1006,19 +954,17 @@ fn manifest_cleanup_decision(
         SchedulerTaskState::Present => {}
     }
     let xml = query.xml()?;
-    let actions = scheduler_exec_values(xml.as_ref())?;
-    let executable = executable
-        .to_str()
-        .context("scheduler executable is not Unicode")?;
+    let actions = scheduler_direct_exec_values(xml.as_ref())?;
     let expected_arguments = format!(
         "reconcile --scheduler-manifest {}",
         quote_windows_argument(expected_manifest)?
     );
-    if actions
-        .iter()
-        .any(|(command, arguments)| command == executable && arguments == &expected_arguments)
-    {
-        return Ok(ManifestCleanupDecision::Retain);
+    if let [(command, arguments)] = actions.as_slice() {
+        if scheduler_command_matches_executable(command, executable)?
+            && arguments == &expected_arguments
+        {
+            return Ok(ManifestCleanupDecision::Retain);
+        }
     }
     anyhow::ensure!(
         !actions.is_empty(),
@@ -1029,7 +975,7 @@ fn manifest_cleanup_decision(
 
     for (command, arguments) in actions {
         anyhow::ensure!(
-            command == executable,
+            scheduler_command_matches_executable(&command, executable)?,
             "scheduler Query command did not match the direct Edda executable: {}",
             query.description()
         );
@@ -1347,11 +1293,7 @@ fn recover_scheduler_manifest_candidate(
     let [(command, arguments)] = actions.as_slice() else {
         return Ok(None);
     };
-    if command
-        != executable
-            .to_str()
-            .context("scheduler executable is not Unicode")?
-    {
+    if !scheduler_command_matches_executable(command, executable)? {
         return Ok(None);
     }
     let Some(value) = arguments
@@ -2913,6 +2855,114 @@ mod tests {
             executable,
             manifest
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn scheduler_query_accepts_exact_windows_quoted_executable_only() -> anyhow::Result<()> {
+        let executable = Path::new(r"\\?\C:\Program Files\Edda\edda.exe");
+        let manifest = Path::new(r"C:\Store\scheduler-launch\v1\expected.json");
+        let arguments = r#"reconcile --scheduler-manifest &quot;C:\Store\scheduler-launch\v1\expected.json&quot;"#;
+        let xml = |command: &str| {
+            format!(
+                "<Task><Actions><Exec><Command>{command}</Command><Arguments>{arguments}</Arguments></Exec></Actions></Task>"
+            )
+        };
+
+        let quoted = xml(r#"&quot;\\?\C:\Program Files\Edda\edda.exe&quot;"#);
+        assert!(scheduler_query_references_manifest(
+            &quoted, executable, manifest
+        )?);
+        assert_eq!(
+            recover_scheduler_manifest_candidate(&quoted, executable)?,
+            Some(manifest.to_path_buf())
+        );
+        assert_eq!(
+            manifest_cleanup_decision(
+                &SchedulerOutput::for_test(0, &quoted, ""),
+                executable,
+                manifest,
+            )?,
+            ManifestCleanupDecision::Retain
+        );
+
+        let literal_quoted = xml(r#""\\?\C:\Program Files\Edda\edda.exe""#);
+        assert!(scheduler_query_references_manifest(
+            &literal_quoted,
+            executable,
+            manifest,
+        )?);
+
+        for rejected in [
+            r#"&quot;\\?\C:\Program Files\Edda\edda.exe&quot; --extra"#,
+            r#"&quot;\\?\C:\Program Files\Edda\edda.exe"#,
+            r#"&quot;&quot;\\?\C:\Program Files\Edda\edda.exe&quot;&quot;"#,
+            r#" &quot;\\?\C:\Program Files\Edda\edda.exe&quot;"#,
+            r#"&quot;\\?\C:\Program Files\Edda\edda.exe&quot; "#,
+            r#"&quot;C:\other\edda.exe&quot;"#,
+            r#"cmd.exe /c &quot;\\?\C:\Program Files\Edda\edda.exe&quot;"#,
+            r#"&quot;\\?\C:\Program Files\Edda\edda.exe&quot; &quot;C:\other.exe&quot;"#,
+        ] {
+            let rejected = xml(rejected);
+            assert!(!scheduler_query_references_manifest(
+                &rejected, executable, manifest
+            )?);
+            assert_eq!(
+                recover_scheduler_manifest_candidate(&rejected, executable)?,
+                None
+            );
+            assert!(manifest_cleanup_decision(
+                &SchedulerOutput::for_test(0, &rejected, ""),
+                executable,
+                manifest,
+            )
+            .is_err());
+        }
+
+        let entity_trick = xml(r#"&#34;\\?\C:\Program Files\Edda\edda.exe&#34;"#);
+        assert!(scheduler_query_references_manifest(&entity_trick, executable, manifest).is_err());
+        assert!(recover_scheduler_manifest_candidate(&entity_trick, executable).is_err());
+        assert!(manifest_cleanup_decision(
+            &SchedulerOutput::for_test(0, &entity_trick, ""),
+            executable,
+            manifest,
+        )
+        .is_err());
+
+        let extra_exec = quoted.replace(
+            "</Actions>",
+            "<Exec><Command>cmd.exe</Command><Arguments>/c exit</Arguments></Exec></Actions>",
+        );
+        assert!(!scheduler_query_references_manifest(
+            &extra_exec,
+            executable,
+            manifest,
+        )?);
+        assert_eq!(
+            recover_scheduler_manifest_candidate(&extra_exec, executable)?,
+            None
+        );
+        assert!(manifest_cleanup_decision(
+            &SchedulerOutput::for_test(0, &extra_exec, ""),
+            executable,
+            manifest,
+        )
+        .is_err());
+
+        let commented_match = quoted.replace("<Exec>", "<!-- <Exec>").replace(
+            "</Exec>",
+            "</Exec> --><Exec><Command>cmd.exe</Command><Arguments>/c exit</Arguments></Exec>",
+        );
+        assert!(
+            scheduler_query_references_manifest(&commented_match, executable, manifest).is_err()
+        );
+        assert!(recover_scheduler_manifest_candidate(&commented_match, executable).is_err());
+        assert!(manifest_cleanup_decision(
+            &SchedulerOutput::for_test(0, &commented_match, ""),
+            executable,
+            manifest,
+        )
+        .is_err());
         Ok(())
     }
 
