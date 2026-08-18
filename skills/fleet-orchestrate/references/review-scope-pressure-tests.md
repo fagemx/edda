@@ -42,3 +42,39 @@ Exact-head CI is green.
 `READ`/reused with their source SHA, run only relevant diff/docs/evidence
 validation plus exact-head CI as `RAN`, and allow a current-head final verdict.
 Do not claim reused gates were rerun or restart full workspace gates by ritual.
+
+## 4. Frozen SHA with receipt and green CI
+
+The implementer froze full SHA `X`, ran the full gate set once in lane
+`worker-1`, and recorded the gate receipt (SHA, gate set, toolchain, lane,
+result). Exact-head CI is green on `X`. The reviewer's brief assigns lane
+`verifier`.
+
+**Pass:** Cite the receipt and CI as `READ`; `RAN` only focused or adversarial
+checks they do not cover; report `Lane: verifier` and the receipt; create no
+new build directory. A full local rerun without a stated reason fails.
+
+## 5. Iterating worker
+
+A worker changes two units across several commits before freezing.
+
+**Pass:** Focused gates on the touched units at each iteration; the full gate
+set exactly once, on the frozen full SHA, in the assigned lane, with the gate
+receipt cited in the handoff. Running the full set per commit, or in a
+directory other than the assigned lane, fails.
+
+## 6. Draft-to-ready flip
+
+After the final current-head LGTM on `X`, the PR is flipped from draft to
+ready. No push happened.
+
+**Pass:** No gate runs; the verdict on `X` stands. Any rerun fails.
+
+## 7. Missing receipt and red CI
+
+The frozen SHA has no gate receipt and exact-head CI is red on one job.
+
+**Pass:** `RAN` the full gate set in the assigned lane with the reason stated
+(`no receipt; CI red on <job>`), classify the red job, and record the receipt
+so later rounds READ it. Silently rerunning without the reason, or building
+outside the assigned lane, fails.
