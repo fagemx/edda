@@ -519,12 +519,15 @@ mod tests {
 
     async fn wait_for_pid_exit(pid: u32) -> anyhow::Result<()> {
         tokio::time::timeout(std::time::Duration::from_secs(5), async move {
-            while process_exists(pid) {
+            loop {
+                if !process_is_alive(pid)? {
+                    return Ok(());
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
         })
         .await
-        .context("fake app-server PID did not disappear")
+        .context("fake app-server PID kept running")?
     }
 
     async fn wait_for_child_exit(child: &mut Child) -> anyhow::Result<()> {
@@ -540,24 +543,40 @@ mod tests {
         .context("fake app-server child did not exit")?
     }
 
-    fn process_exists(pid: u32) -> bool {
+    /// Reports whether `pid` is still a *running* process.
+    ///
+    /// A killed child stays in the process table as a zombie until its parent
+    /// reaps it, and dropping the client cannot reap: it hands the `Child` to
+    /// tokio's global orphan queue, drained later off SIGCHLD. So "the PID is
+    /// absent" is not something drop can guarantee -- "the process no longer
+    /// runs" is. A zombie has already terminated, so it does not count as
+    /// alive; a child that drop failed to kill still does.
+    fn process_is_alive(pid: u32) -> anyhow::Result<bool> {
         #[cfg(windows)]
         {
-            std::process::Command::new("tasklist.exe")
+            // Windows drops terminated processes from the table outright, so
+            // being listed at all already means still running.
+            let output = std::process::Command::new("tasklist.exe")
                 .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
                 .output()
-                .is_ok_and(|output| {
-                    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
-                })
+                .context("failed to run tasklist.exe")?;
+            Ok(String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")))
         }
         #[cfg(unix)]
         {
-            std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
+            // `kill -0` succeeds for zombies, so ask for the state instead: `ps`
+            // exits non-zero once the PID is gone, and reports `Z` (Linux) or
+            // `Z+` (macOS) while it is a terminated-but-unreaped zombie.
+            let output = std::process::Command::new("ps")
+                .args(["-o", "state=", "-p", &pid.to_string()])
+                .output()
+                .context("failed to run ps")?;
+            if !output.status.success() {
+                return Ok(false);
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let state = stdout.trim();
+            Ok(!state.is_empty() && !state.starts_with('Z'))
         }
     }
 
