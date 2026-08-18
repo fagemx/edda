@@ -454,14 +454,18 @@ mod tests {
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-
-            let launcher = dir.path().join("fake-app-server");
-            std::fs::write(&launcher, shell_fake_script(scenario))?;
-            let mut permissions = std::fs::metadata(&launcher)?.permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&launcher, permissions)?;
-            Ok((dir, Command::new(launcher)))
+            // Feed the script to `sh` instead of exec'ing it, mirroring the
+            // PowerShell branch above. Linux `execve` fails with ETXTBSY while
+            // any process holds the target file open for writing, and in a
+            // threaded test binary a concurrent spawn elsewhere can be sitting
+            // between fork and exec holding an inherited write fd for this very
+            // file -- O_CLOEXEC only clears it at exec, not at fork. `sh` opens
+            // the script read-only, so that window cannot bite.
+            let script = dir.path().join("fake-app-server.sh");
+            std::fs::write(&script, shell_fake_script(scenario))?;
+            let mut command = Command::new("/bin/sh");
+            command.arg(script);
+            Ok((dir, command))
         }
     }
 
