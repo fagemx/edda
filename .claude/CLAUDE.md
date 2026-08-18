@@ -130,14 +130,27 @@ cargo test --workspace
 ### Verification ladder
 
 Verify once per frozen SHA; cite that result everywhere else. Full workspace
-gates are expensive (23 crates; 8–13 GB of build output per target directory)
-and GitHub CI already runs them on three operating systems for every push.
+gates are expensive (23 crates; 8–13 GB of build output per target directory),
+and CI already re-runs most of them independently on every push.
+
+**Know exactly what CI does and does not cover** (`.github/workflows/ci.yml`):
+
+| CI job | Coverage |
+|---|---|
+| Format | `cargo fmt --check` |
+| Clippy | `cargo clippy --workspace --all-targets` on Linux, macOS **and** Windows |
+| Test (Linux, macOS) | `cargo test --workspace` — all 23 crates |
+| Test (Windows) | **only 7 crates** — `edda-store`, `edda-ledger`, `edda-search-fts`, `edda-transcript`, `edda-bridge-claude`, `edda-conductor`, `edda` (Windows build/link is ~5x slower; the subset is derived from process-spawn, file-lock, and mmap criteria — GH-433) |
+
+So a **Windows-specific risk in any of the other 16 crates is not covered by
+CI**. That is a stated reason for the verifier to run it locally, and it is why
+the L1 receipt from a Windows workstation is load-bearing rather than redundant.
 
 | Level | When | Run |
 |---|---|---|
 | L0 iterate | while editing | `cargo fmt --all --check`; `cargo clippy -p <crate> --all-targets -- -D warnings`; `cargo test -p <crate>` for each touched crate |
 | L1 freeze | once per frozen full SHA, clean tree, before push / PR update | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`, with `CARGO_INCREMENTAL=0`; record the result together with the full SHA (gate receipt) |
-| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN only focused or adversarial checks they do not cover. A full local rerun needs a stated reason: no receipt, red or absent CI, or grounds to distrust the receipt. Deterministically red CI already blocks the SHA — audit and request changes instead of spending a full run |
+| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN only focused or adversarial checks they do not cover — **including Windows behavior in any crate outside the CI Windows subset above**. A full local rerun needs a stated reason: no receipt, red or absent CI, grounds to distrust the receipt, or coverage CI genuinely lacks. Deterministically red CI already blocks the SHA — audit and request changes instead of spending a full run; if the red is environmental, re-run only the failed job |
 | L3 pre-merge | merge authority | READ exact-head CI and the final current-head LGTM; RAN only a merge check against the current base. A draft/ready, label, or status flip is not a push — nothing reruns |
 
 Docs-only changes (no code/product blob, `Cargo.lock`, or toolchain change)
@@ -146,15 +159,21 @@ run no Cargo gate locally; exact-head CI is the gate.
 ### Build lanes
 
 - Never create ad-hoc `CARGO_TARGET_DIR`s per round, per SHA, or per
-  timestamp. Build output is disposable cache, but unbounded copies are not:
-  twelve such directories reached ~194 GB on one workstation.
+  timestamp. Build output is disposable cache, but unbounded copies are not: an
+  audit of one workstation counted 15 such directories and ~194 GB, with a
+  single directory at 12.79 GB.
 - Solo work uses the worktree's default `target/`.
+- **Lane root** is `%LOCALAPPDATA%\fleet-workstation\lanes` unless
+  `FLEET_LANE_ROOT` is set or the brief names a different absolute path. A lane
+  is always `<lane-root>\<lane-name>` — resolve it from that rule, never invent
+  a path.
 - Fleet sessions build only in the lane named in their brief — one of
   `worker-1`, `worker-2`, `verifier`, `verifier-2` — for their whole lifetime.
-  Where the workstation lane tool is installed, run gates through it
-  (`lane.ps1 -Lane <assigned> -Gate focused|freeze`); without it, set
-  `CARGO_TARGET_DIR` only to `<lane-root>\<assigned-lane>` from the brief and
-  reuse it every round.
+  The workstation lane tool (`lane.ps1 -Lane <assigned> -Gate focused|freeze`)
+  is not shipped yet; until it is, set `CARGO_TARGET_DIR` to
+  `<lane-root>\<assigned-lane>` yourself and reuse it every round. If your brief
+  names no lane and you are running gates for a fleet, ask the controller for
+  one rather than creating a directory.
 - Verifier lanes and every L1 run set `CARGO_INCREMENTAL=0`.
 - Deleting lane build output is authorized and non-destructive; deleting
   worktrees, branches, or sources is not. Stop and report instead of building
@@ -168,10 +187,17 @@ cargo fmt --check
 cargo clippy -p <touched crate> --all-targets -- -D warnings
 cargo test -p <touched crate>
 
-# Before freezing a SHA for push / PR update (L1 — once per frozen SHA)
-cargo clippy --workspace --all-targets -- -D warnings   # CI uses -Dwarnings
-cargo test --workspace
+# Before freezing a SHA for push / PR update (L1 — once per frozen SHA,
+# clean tree, incremental off). Record the result with the full SHA.
+cargo fmt --all --check
+CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets -- -D warnings
+CARGO_INCREMENTAL=0 cargo test --workspace
+# then record the gate receipt: full SHA, gate set, toolchain, lane, result
 ```
+
+The L1 block is the ladder's L1 row — keep the two identical. Skipping the
+receipt is not a shortcut: without it the reviewer has nothing to READ and must
+run the whole set again, which is the cost this ladder exists to remove.
 
 ## Commit Conventions
 

@@ -968,6 +968,33 @@ Expected: the PR shows the handoff comment; CI runs on the exact head; no local 
 
 ---
 
+## Round 1 review amendments (2026-08-18)
+
+The text blocks above are the plan as executed at `738c5ce`. An independent
+review of that SHA returned `Changes Requested` with P0=0, P1=4, and the fixes
+changed wording this plan quotes verbatim. This plan is kept as the execution
+record; the **spec is the living contract**. What changed:
+
+1. **CI coverage stated accurately.** The ladder's justification claimed CI runs
+   full workspace gates on three operating systems. It does not: Windows tests
+   only a 7-crate subset (`.github/workflows/ci.yml`, GH-433). `.claude/CLAUDE.md`
+   now carries a CI coverage table, L2 names the uncovered surface as a
+   legitimate reason to RAN, and spec §1/§4.1 match.
+2. **Deterministic-red clause distributed to all six carriers** (it had landed
+   in three), and pressure fixture 7 — which still demanded a full run for red
+   CI — split into fixture 7 (deterministic → do not run) and fixture 8
+   (environmental → re-run the failed job, then the full set once).
+3. **Pre-commit L1 block aligned with the ladder's L1 row**: `cargo fmt --all
+   --check`, `CARGO_INCREMENTAL=0`, and the gate receipt were missing from the
+   checklist, so a worker following it would freeze without a receipt — which
+   hands L2 a reason to run everything again and cancels the saving.
+4. **Lane root defined.** `<lane-root>` appeared in the fallback instruction but
+   in no brief template. `.claude/CLAUDE.md` now gives the concrete default,
+   `playbook.md` and `coord-orchestrate.md` require the absolute root in the
+   brief, and `coord-review.md` states the solo default.
+
+New fixture 9 covers the CI-coverage-gap case that no fixture exercised.
+
 ## Post-merge (outside this plan, listed so nobody forgets)
 
 1. `scripts/skills/sync-fleet-orchestrate.ps1` to propagate `skills/fleet-orchestrate/*` to fleet-playbook / user skills (see `docs/guides/fleet-skill-distribution.md`).

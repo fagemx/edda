@@ -74,6 +74,10 @@ when changing or validating review policy.
   toolchain, lane, result); reviewers READ that receipt and exact-head CI and
   RAN only what they do not cover, stating the reason for any full rerun. A
   status, label, or draft flip is not a push.
+- Know what the project's CI actually covers before citing it as independent
+  evidence; a real coverage gap is a legitimate reason to RAN. Deterministically
+  red CI already blocks the artifact — audit and request changes instead of
+  spending a full run; re-run only the failed job when the red is environmental.
 - Build environments are bounded: one assigned lane per session for its
   lifetime from a fixed pool named in the brief, never per round, SHA, or
   timestamp; lane build cache is disposable, worktrees and sources are not;

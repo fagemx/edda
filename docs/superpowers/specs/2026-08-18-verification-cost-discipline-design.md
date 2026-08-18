@@ -32,10 +32,15 @@ Evidence collected on 2026-08-18 (read-only; nothing was modified or deleted):
 - Ledger decision `d-032` records a full workspace rerun (fmt, clippy
   `--workspace --all-targets`, `test --workspace`, isolated target) after PRs
   were flipped from draft to ready with zero code change.
-- GitHub CI already runs fmt + clippy `--workspace --all-targets` on three
-  operating systems + `cargo test --workspace` on three operating systems for
-  every push (the "7/7 green" recorded throughout the ledger). Local full reruns
-  by verifiers and controllers duplicate that independent run.
+- GitHub CI already runs fmt, plus clippy `--workspace --all-targets` on Linux,
+  macOS and Windows, plus `cargo test --workspace` on Linux and macOS, for every
+  push (the "7/7 green" recorded throughout the ledger). Local full reruns by
+  verifiers and controllers largely duplicate that independent run. **Windows
+  tests only a 7-crate subset** (`edda-store`, `edda-ledger`, `edda-search-fts`,
+  `edda-transcript`, `edda-bridge-claude`, `edda-conductor`, `edda`; GH-433), so
+  Windows behavior in the other 16 crates is genuinely uncovered — the ladder
+  must name that gap rather than let a reviewer treat green CI as total
+  coverage.
 
 ## 2. Root causes
 
@@ -94,7 +99,7 @@ Non-goals:
 |---|---|---|---|
 | L0 iterate | worker while editing | focused gates on touched units, in the session's own lane, incremental cache on | workspace gates per edit |
 | L1 freeze | worker, once per frozen full SHA before push/PR update | full gate set on the committed SHA in the session's lane; receipt recorded | freezing a dirty tree; a second L1 run for the same key |
-| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN adversarial/focused checks and anything neither covers | full local rerun without a stated reason (missing receipt, red/absent CI, receipt suspected invalid) |
+| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN adversarial/focused checks and anything neither covers, including behavior on a platform the CI matrix only partially covers | full local rerun without a stated reason (missing receipt, red/absent CI, receipt suspected invalid, real CI coverage gap); a full run against deterministically red CI, which cannot change the verdict |
 | L3 pre-merge | controller / merge authority | READ exact-head CI + final current-head LGTM; RAN only a merge-conflict check against current base | any rerun triggered by a status/label/draft flip — that is not a push |
 
 Independence is preserved by construction: exact-head CI is an independent
@@ -277,13 +282,18 @@ merged because it pins that revision.
   append-only.
 - A3 Doctor: `doctor.ps1` prints lane pool total, per-lane size, and
   OK/WARN/FAIL against the thresholds.
-- A4 Fresh-agent pressure tests (same method as GH-474): (i) verifier given a
-  frozen SHA with a `freeze` receipt and green exact-head CI → handoff shows
-  READ for workspace gates, RAN only focused/adversarial checks, the assigned
-  lane, and no new build directory; (ii) worker iterating → `focused` on
-  touched crates, `freeze` exactly once at push; (iii) draft→ready flip → no
-  gate run; (iv) missing receipt plus red CI → RAN full with the reason
-  stated.
+- A4 Fresh-agent pressure tests (same method as GH-474), fixtures 4–9 in
+  `skills/fleet-orchestrate/references/review-scope-pressure-tests.md`:
+  (i) frozen SHA with a `freeze` receipt and green exact-head CI → READ for the
+  full gates, RAN only focused/adversarial checks, assigned lane named, no new
+  build directory; (ii) worker iterating → focused gates on touched crates,
+  full set exactly once at freeze; (iii) draft→ready flip → no gate run;
+  (iv) missing receipt plus *deterministically* red CI → classify the red job,
+  request changes, and do **not** spend a full run; (v) missing receipt plus
+  *environmentally* red CI → re-run the failed job only, then the full set once
+  with the reason stated; (vi) green receipt and green CI but behavior on a
+  platform CI only partially covers → name the gap and RAN a focused check for
+  it.
 - A5 Distribution: fleet-workstation pin and lock updated to the merged edda
   revision; `update.ps1` installs the new wording for both runtimes.
 

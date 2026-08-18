@@ -64,10 +64,13 @@ Verify once per frozen artifact. The implementer runs the full gate set once
 per frozen full SHA in the assigned build lane and records a gate receipt (SHA,
 gate set, toolchain, lane, result). The reviewer READs that receipt and
 exact-head CI, RANs only focused or adversarial checks they do not cover, and
-states the reason for any full rerun (no receipt, red or absent CI, or grounds
-to distrust the receipt). Focused gates on touched units while iterating, never
-the full set per edit. A status, label, or draft flip is not a push and reruns
-nothing.
+states the reason for any full rerun (no receipt, red or absent CI, grounds to
+distrust the receipt, or coverage the project's CI genuinely lacks — know that
+gap before you cite CI as independent evidence). Deterministically red CI
+already blocks the artifact: audit and request changes rather than spending a
+full run, and re-run only the failed job when the red is environmental. Focused
+gates on touched units while iterating, never the full set per edit. A status,
+label, or draft flip is not a push and reruns nothing.
 
 Each handoff records available elapsed/token/tool cost. Stop after two
 consecutive non-product evidence/docs or harness-only cycles without improved
@@ -106,10 +109,13 @@ Request: audit the whole scoped surface; publish no self-verdict from the implem
 3. **Brief workers** — self-contained (they have zero context): issues to
    read, worktree + branch command, `edda claim` label and paths, files
    owned/forbidden, quality gates verbatim, assigned build lane from the fixed
-   pool, verification budget (focused gates on touched units while iterating;
-   the full gate set once per frozen SHA with a receipt; READ receipts before
-   any RAN), cleanup authority (lane build cache is disposable; worktrees,
-   branches, and sources are never deleted), done = GitHub PR when available,
+   pool **with its absolute lane root** (a worker who cannot resolve
+   `<lane root>/<lane name>` will invent a directory — the exact failure the
+   lane rule exists to prevent), verification budget (focused gates on touched
+   units while iterating; the full gate set once per frozen SHA with a receipt;
+   READ receipts before any RAN), cleanup authority (lane build cache is
+   disposable; worktrees, branches, and sources are never deleted), done =
+   GitHub PR when available,
    otherwise a frozen local branch plus durable review carrier (never invent a
    PR); never merge + `edda task done --receipt`. Include the receiver tie-break
    verbatim (see Traffic rules).

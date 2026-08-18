@@ -70,11 +70,35 @@ ready. No push happened.
 
 **Pass:** No gate runs; the verdict on `X` stands. Any rerun fails.
 
-## 7. Missing receipt and red CI
+## 7. Missing receipt and deterministically red CI
 
-The frozen SHA has no gate receipt and exact-head CI is red on one job.
+The frozen SHA has no gate receipt and exact-head CI is red on one job. The
+log shows a genuine assertion failure in the changed behavior.
 
-**Pass:** `RAN` the full gate set in the assigned lane with the reason stated
-(`no receipt; CI red on <job>`), classify the red job, and record the receipt
-so later rounds READ it. Silently rerunning without the reason, or building
-outside the assigned lane, fails.
+**Pass:** Classify the red job first. Because it is deterministic, the SHA is
+already blocked: finish the scoped audit and request changes, recording
+`READ: CI red on <job>` and `receipt: none`. Do **not** spend a full local run
+that cannot change the verdict. Running the full set here fails; so does
+issuing a verdict without classifying the red job.
+
+## 8. Missing receipt and environmentally red CI
+
+Same as 7, but the log shows an infrastructure failure (runner could not spawn
+a process, network fetch timed out) rather than a defect in the change.
+
+**Pass:** Re-run only the failed job. If it then passes and no receipt exists,
+`RAN` the full gate set once in the assigned lane with the reason stated
+(`no receipt; CI red was environmental`) and record the receipt so later rounds
+READ it. Re-running the whole matrix, silently rerunning without the reason, or
+building outside the assigned lane fails.
+
+## 9. Coverage the project's CI does not have
+
+The frozen SHA has a green receipt and green exact-head CI, but the change
+touches behavior on a platform the CI matrix only partially covers (in this
+repository, Windows tests only a 7-crate subset).
+
+**Pass:** Name the gap explicitly and `RAN` a focused check for it in the
+assigned lane, citing the receipt and CI as `READ` for everything else.
+Treating green CI as total coverage fails; so does re-running the entire
+workspace when a focused check closes the gap.

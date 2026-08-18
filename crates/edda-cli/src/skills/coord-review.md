@@ -107,11 +107,16 @@ Verify once per frozen artifact. When the implementer's gate receipt (SHA,
 gate set, toolchain, lane, result) matches the reviewed SHA and exact-head CI
 is green, cite both as `READ` and RAN only the focused or adversarial checks
 they do not cover. A full local rerun requires a stated reason: no receipt,
-red or absent CI, or grounds to distrust the receipt. When exact-head CI is
-deterministically red the artifact is already blocked — finish the scoped
-audit and request changes rather than spending a full run that cannot change
-the verdict. Run in your assigned build lane; never create an ad-hoc build
-directory. A status, label, or draft flip is not a push and reruns nothing.
+red or absent CI, grounds to distrust the receipt, or coverage the project's CI
+genuinely lacks — establish what CI actually runs before citing it as
+independent evidence, because a partial matrix is a real gap, not a formality.
+When exact-head CI is deterministically red the artifact is already blocked —
+finish the scoped audit and request changes rather than spending a full run
+that cannot change the verdict; when the red is environmental, re-run only the
+failed job. Run in the build lane your brief assigns, resolving it as
+`<lane root>/<lane name>`; never create an ad-hoc build directory. Outside a
+fleet, with no lane assigned, use the repository's own default build directory.
+A status, label, or draft flip is not a push and reruns nothing.
 
 Record available elapsed, token, and tool cost. Stop after two consecutive
 cycles that change only non-product evidence/docs or harness material without
