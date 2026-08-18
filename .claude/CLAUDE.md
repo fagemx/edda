@@ -137,7 +137,7 @@ and GitHub CI already runs them on three operating systems for every push.
 |---|---|---|
 | L0 iterate | while editing | `cargo fmt --all --check`; `cargo clippy -p <crate> --all-targets -- -D warnings`; `cargo test -p <crate>` for each touched crate |
 | L1 freeze | once per frozen full SHA, clean tree, before push / PR update | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`, with `CARGO_INCREMENTAL=0`; record the result together with the full SHA (gate receipt) |
-| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN only focused or adversarial checks they do not cover. A full local rerun needs a stated reason: no receipt, red or absent CI, or grounds to distrust the receipt |
+| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN only focused or adversarial checks they do not cover. A full local rerun needs a stated reason: no receipt, red or absent CI, or grounds to distrust the receipt. Deterministically red CI already blocks the SHA — audit and request changes instead of spending a full run |
 | L3 pre-merge | merge authority | READ exact-head CI and the final current-head LGTM; RAN only a merge check against the current base. A draft/ready, label, or status flip is not a push — nothing reruns |
 
 Docs-only changes (no code/product blob, `Cargo.lock`, or toolchain change)

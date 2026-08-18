@@ -350,6 +350,7 @@ Select gates proportionally:
 | Only docs/evidence changed; code/product blobs, base, and toolchain unchanged | Reuse still-applicable code gates as `READ` with source SHA; `RAN` only relevant diff/docs/evidence checks and exact-head CI. |
 | Code changed; a gate receipt for this exact SHA, gate set, and toolchain exists and exact-head CI is green | READ the receipt and CI; `RAN` only focused or adversarial checks they do not cover. Full rerun only with a stated reason (no receipt, red or absent CI, grounds to distrust the receipt). |
 | Status, label, or draft flip without a push | Not a new artifact; nothing reruns. |
+| Exact-head CI is deterministically red | The SHA is already blocked; finish the scoped audit and request changes instead of spending a full local run that cannot change the verdict. Rerun only failed jobs when logs show a transient failure, and run the missing full set only once the artifact is otherwise acceptable. |
 
 Never label a reused gate `RAN`. Exact-head CI is still required because the
 review verdict binds the new full SHA.
