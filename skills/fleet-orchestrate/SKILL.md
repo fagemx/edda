@@ -38,8 +38,10 @@ when changing or validating review policy.
    two concurrent workers onward, reserve a verifier seat.
 6. Record tasks, claims, rulings, and acceptance criteria in the durable truth
    layer before ringing host messaging as a doorbell.
-7. Give self-contained briefs, monitor compressed state, adjudicate conflicts,
-   and close only against immutable full SHAs with proportional evidence.
+7. Give self-contained briefs (including assigned build lane, verification
+   budget, and cleanup authority), monitor compressed state, adjudicate
+   conflicts, and close only against immutable full SHAs with proportional
+   evidence.
 
 ## Non-negotiable invariants
 
@@ -67,6 +69,15 @@ when changing or validating review policy.
 - Record available elapsed/token/tool cost. After two consecutive
   non-product/harness-only cycles without useful progress, or at diminishing
   returns, stop and route follow-up or request operator scope expansion.
+- Verify once per frozen artifact: the full gate set runs once per frozen
+  full SHA in an assigned build lane and leaves a gate receipt (SHA, gate set,
+  toolchain, lane, result); reviewers READ that receipt and exact-head CI and
+  RAN only what they do not cover, stating the reason for any full rerun. A
+  status, label, or draft flip is not a push.
+- Build environments are bounded: one assigned lane per session for its
+  lifetime from a fixed pool named in the brief, never per round, SHA, or
+  timestamp; lane build cache is disposable, worktrees and sources are not;
+  over the pool ceiling the fleet stops and reports instead of building.
 - A GitHub PR carries its visible review-fix loop: numbered SHA-pinned review,
   implementer response to every requested change, and final current-head LGTM.
   An internal verifier report does not replace these PR comments.
@@ -87,7 +98,8 @@ Publish and keep current:
 1. authority contract;
 2. review charter and finding queue;
 3. dependency graph and bundle ownership;
-4. fleet board with task, owner, branch, full SHA, state, review, and next step;
+4. fleet board with task, owner, branch, full SHA, state, review, build lane,
+   and next step;
 5. acceptance matrix, review handoff (`IN SCOPE`, `FOLLOW-UP ISSUE`, blocking
-   P0/P1, `RAN`/`READ`, exact SHA, cost), PR review-loop state, and final merge
-   recommendation with current-head P0=0/P1=0.
+   P0/P1, `RAN`/`READ`, lane, gate receipt, exact SHA, cost), PR review-loop
+   state, and final merge recommendation with current-head P0=0/P1=0.
