@@ -142,9 +142,12 @@ and CI already re-runs most of them independently on every push.
 | Test (Linux, macOS) | `cargo test --workspace` — all 23 crates |
 | Test (Windows) | **only 7 crates** — `edda-store`, `edda-ledger`, `edda-search-fts`, `edda-transcript`, `edda-bridge-claude`, `edda-conductor`, `edda` (Windows build/link is ~5x slower; the subset is derived from process-spawn, file-lock, and mmap criteria — GH-433) |
 
-So a **Windows-specific risk in any of the other 16 crates is not covered by
-CI**. That is a stated reason for the verifier to run it locally, and it is why
-the L1 receipt from a Windows workstation is load-bearing rather than redundant.
+So on Windows every crate is still **compiled and linted** (Clippy is
+workspace-wide on all three OSes), but **only those 7 crates have their tests
+run**. A Windows-specific *runtime* defect in the other 16 — a path, a file
+lock, a spawned process, a temp directory — is caught by no CI job. That is a
+stated reason for the verifier to run it locally, and it is why the L1 receipt
+from a Windows workstation is load-bearing rather than redundant.
 
 | Level | When | Run |
 |---|---|---|
@@ -163,10 +166,11 @@ run no Cargo gate locally; exact-head CI is the gate.
   audit of one workstation counted 15 such directories and ~194 GB, with a
   single directory at 12.79 GB.
 - Solo work uses the worktree's default `target/`.
-- **Lane root** is `%LOCALAPPDATA%\fleet-workstation\lanes` unless
-  `FLEET_LANE_ROOT` is set or the brief names a different absolute path. A lane
-  is always `<lane-root>\<lane-name>` — resolve it from that rule, never invent
-  a path.
+- **Lane root** is the `LOCALAPPDATA` directory plus `\fleet-workstation\lanes`
+  — `$env:LOCALAPPDATA\fleet-workstation\lanes` in PowerShell,
+  `$LOCALAPPDATA/fleet-workstation/lanes` in Git Bash — unless `FLEET_LANE_ROOT`
+  is set or the brief names a different absolute path. A lane is always
+  `<lane-root>\<lane-name>`; resolve it from that rule, never invent a path.
 - Fleet sessions build only in the lane named in their brief — one of
   `worker-1`, `worker-2`, `verifier`, `verifier-2` — for their whole lifetime.
   The workstation lane tool (`lane.ps1 -Lane <assigned> -Gate focused|freeze`)
@@ -190,9 +194,20 @@ cargo test -p <touched crate>
 # Before freezing a SHA for push / PR update (L1 — once per frozen SHA,
 # clean tree, incremental off). Record the result with the full SHA.
 cargo fmt --all --check
-CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets -- -D warnings
-CARGO_INCREMENTAL=0 cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 # then record the gate receipt: full SHA, gate set, toolchain, lane, result
+```
+
+Set `CARGO_INCREMENTAL=0` in the environment for the whole L1 run — not as an
+inline prefix, which only POSIX shells accept:
+
+```powershell
+$env:CARGO_INCREMENTAL = "0"   # PowerShell
+```
+
+```bash
+export CARGO_INCREMENTAL=0     # bash / Git Bash
 ```
 
 The L1 block is the ladder's L1 row — keep the two identical. Skipping the
