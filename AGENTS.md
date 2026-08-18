@@ -32,9 +32,9 @@ and multi-agent coordination.
 - Verify once per frozen SHA on the ladder in `.claude/CLAUDE.md`: focused
   crate gates while iterating (L0); the full workspace set once per frozen full
   SHA with a recorded receipt (L1); reviewers READ that receipt and exact-head
-  CI and RAN only what they do not cover (L2); nothing reruns on a draft,
-  label, or status flip (L3). State the reason whenever you rerun a recorded
-  gate.
+  CI and RAN only what they do not cover (L2); a draft, label, or status flip
+  is not a push, so nothing reruns (L3). State the reason whenever you rerun a
+  recorded gate.
 - Build only in the lane your brief assigns (`worker-1`, `worker-2`,
   `verifier`, `verifier-2`). Never create ad-hoc `CARGO_TARGET_DIR`s per round,
   SHA, or timestamp; solo work uses the worktree's default `target/`. Lane
