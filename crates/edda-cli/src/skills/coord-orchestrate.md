@@ -60,10 +60,27 @@ the relevant code gates. A docs/evidence-only push with those inputs unchanged
 reuses still-applicable code results as `READ` with source SHA, then runs only
 relevant diff/docs/evidence checks and exact-head CI as `RAN`.
 
+Verify once per frozen artifact. The implementer runs the full gate set once
+per frozen full SHA in the assigned build lane and records a gate receipt (SHA,
+gate set, toolchain, lane, result). The reviewer READs that receipt and
+exact-head CI, RANs only focused or adversarial checks they do not cover, and
+states the reason for any full rerun (no receipt, red or absent CI, grounds to
+distrust the receipt, or coverage the project's CI genuinely lacks — know that
+gap before you cite CI as independent evidence). Deterministically red CI
+already blocks the artifact: audit and request changes rather than spending a
+full run, and re-run only the failed job when the red is environmental. Focused
+gates on touched units while iterating, never the full set per edit. A status,
+label, or draft flip is not a push and reruns nothing.
+
 Each handoff records available elapsed/token/tool cost. Stop after two
 consecutive non-product evidence/docs or harness-only cycles without improved
 required behavior/proof, or at clear diminishing returns; route the finding to
 follow-up or ask the operator to expand scope.
+
+Over-verification is a process finding, not a product blocker: a second RAN
+for an already-receipted SHA without a reason, full gates for a docs-only push,
+or an ad-hoc build directory goes into the cost line, routes as a `FOLLOW-UP
+ISSUE`, and corrects the next brief.
 
 Use this request template; it is not a verdict:
 
@@ -77,6 +94,8 @@ Blocking counts entering review: P0=<n>, P1=<n>
 Evidence:
 - RAN: <commands/checks run on this SHA>
 - READ: <reused results and source SHAs>
+- Lane: <assigned build lane>
+- Receipt: <gate receipt for this SHA (SHA, gate set, toolchain, lane, result), or none>
 Cost: elapsed=<available/unknown>, tokens=<available/unknown>, tools=<available/unknown>
 Request: audit the whole scoped surface; publish no self-verdict from the implementer
 ```
@@ -89,15 +108,26 @@ Request: audit the whole scoped surface; publish no self-verdict from the implem
    bundle. Specs live in issues, never only in messages.
 3. **Brief workers** — self-contained (they have zero context): issues to
    read, worktree + branch command, `edda claim` label and paths, files
-   owned/forbidden, quality gates verbatim, done = GitHub PR when available,
+   owned/forbidden, quality gates verbatim, assigned build lane from the fixed
+   pool **with its absolute lane root** (a worker who cannot resolve
+   `<lane root>/<lane name>` will invent a directory — the exact failure the
+   lane rule exists to prevent), verification budget (focused gates on touched
+   units while iterating; the full gate set once per frozen SHA with a receipt;
+   READ receipts before any RAN), cleanup authority (lane build cache is
+   disposable; worktrees, branches, and sources are never deleted), done =
+   GitHub PR when available,
    otherwise a frozen local branch plus durable review carrier (never invent a
    PR); never merge + `edda task done --receipt`. Include the receiver tie-break
    verbatim (see Traffic rules).
-4. **Brief the verifier — read-only, starts BEFORE code:** baseline gates on
-   main; flake hunt; observable-behavior criteria per issue; sweep for two
-   test poisons — tests asserting the behavior being removed (invert and
-   rename, never delete) and single-case tests that pass either way (demand
-   the second case).
+4. **Brief the verifier — read-only, starts BEFORE code:** baseline on the
+   basis SHA by READing exact-head CI and any existing gate receipt, RANning
+   only what they do not cover in the assigned verifier lane, and classifying
+   existing red checks; flake hunt; observable-behavior criteria per issue;
+   sweep for two test poisons — tests asserting the behavior being removed
+   (invert and rename, never delete) and single-case tests that pass either
+   way (demand the second case). One verifier identity per delivery
+   candidate: rounds resume the same session and lane; a replacement reads
+   receipts and CI before running anything.
 5. **Relay loop:** verifier intel → spot-check the load-bearing claims
    yourself → adjudicate → fixate as issue comment → doorbell affected
    workers. Never fixate an unverified claim.
@@ -160,3 +190,6 @@ letters at the peers' natural cadence. Bell-only → ring, ledger as backstop.
 | Adjacent finding becomes another blocking round | file an evidenced follow-up issue unless it is in the frozen blocking surface |
 | Docs-only push restarts full code gates | reuse applicable code gates as `READ`; run delta checks plus exact-head CI |
 | Review drips one blocker per round | audit the whole scope and batch P0/P1 before requesting changes |
+| Fresh verifier reruns every gate "to be safe" | READ the frozen SHA's receipt and exact-head CI; RAN only what they do not cover, or state the reason |
+| New build directory per round, SHA, or timestamp | one assigned lane per session for its lifetime; lane cache is disposable, sources are not |
+| Status/label/draft flip treated as a push | not a push; nothing reruns |
