@@ -112,14 +112,14 @@ pub use types::*;
 ## Testing Standards
 
 ```bash
-# Run all tests
-cargo test --workspace
-
-# Run tests for single crate
+# Run tests for a single crate (default while iterating)
 cargo test -p edda-core
 
-# Run specific test
+# Run a specific test
 cargo test -p edda-core test_name
+
+# Run all tests (once per frozen SHA — see Verification ladder)
+cargo test --workspace
 ```
 
 - **Unit tests**: In `#[cfg(test)] mod tests` within source files
@@ -127,12 +127,50 @@ cargo test -p edda-core test_name
 - **No mocking internal crates** — use real SQLite via `tempfile`
 - See `edda-core/src/types.rs:261-667` for test patterns
 
+### Verification ladder
+
+Verify once per frozen SHA; cite that result everywhere else. Full workspace
+gates are expensive (23 crates; 8–13 GB of build output per target directory)
+and GitHub CI already runs them on three operating systems for every push.
+
+| Level | When | Run |
+|---|---|---|
+| L0 iterate | while editing | `cargo fmt --all --check`; `cargo clippy -p <crate> --all-targets -- -D warnings`; `cargo test -p <crate>` for each touched crate |
+| L1 freeze | once per frozen full SHA, clean tree, before push / PR update | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`, with `CARGO_INCREMENTAL=0`; record the result together with the full SHA (gate receipt) |
+| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN only focused or adversarial checks they do not cover. A full local rerun needs a stated reason: no receipt, red or absent CI, or grounds to distrust the receipt |
+| L3 pre-merge | merge authority | READ exact-head CI and the final current-head LGTM; RAN only a merge check against the current base. A draft/ready, label, or status flip is not a push — nothing reruns |
+
+Docs-only changes (no code/product blob, `Cargo.lock`, or toolchain change)
+run no Cargo gate locally; exact-head CI is the gate.
+
+### Build lanes
+
+- Never create ad-hoc `CARGO_TARGET_DIR`s per round, per SHA, or per
+  timestamp. Build output is disposable cache, but unbounded copies are not:
+  twelve such directories reached ~194 GB on one workstation.
+- Solo work uses the worktree's default `target/`.
+- Fleet sessions build only in the lane named in their brief — one of
+  `worker-1`, `worker-2`, `verifier`, `verifier-2` — for their whole lifetime.
+  Where the workstation lane tool is installed, run gates through it
+  (`lane.ps1 -Lane <assigned> -Gate focused|freeze`); without it, set
+  `CARGO_TARGET_DIR` only to `<lane-root>\<assigned-lane>` from the brief and
+  reuse it every round.
+- Verifier lanes and every L1 run set `CARGO_INCREMENTAL=0`.
+- Deleting lane build output is authorized and non-destructive; deleting
+  worktrees, branches, or sources is not. Stop and report instead of building
+  when the lane pool exceeds 50 GB.
+
 ## Pre-commit Checklist
 
 ```bash
-cargo fmt --check      # Format check
-cargo clippy           # Lint (CI uses -Dwarnings)
-cargo test --workspace # All tests
+# Before every commit (L0 — touched crates only)
+cargo fmt --check
+cargo clippy -p <touched crate> --all-targets -- -D warnings
+cargo test -p <touched crate>
+
+# Before freezing a SHA for push / PR update (L1 — once per frozen SHA)
+cargo clippy --workspace --all-targets -- -D warnings   # CI uses -Dwarnings
+cargo test --workspace
 ```
 
 ## Commit Conventions
@@ -256,3 +294,21 @@ Merge still requires explicit operator authority.
 
 For local-only delivery, record the same round/response/verdict fields in the
 strongest durable local carrier; do not invent a PR.
+
+### Verification cost
+
+Rules regulate cost and reclamation, not only evidence:
+
+- Verify once per frozen SHA on the ladder above. READ recorded gate results
+  and exact-head CI before any RAN, and state the reason whenever you rerun a
+  recorded gate.
+- Every worker/verifier brief names a build lane, a verification budget (L0
+  while iterating; L1 once per frozen SHA), and cleanup authority (lane build
+  cache is disposable; worktrees, branches, and sources are never deleted).
+- One verifier identity per PR: rounds resume the same session and lane; a
+  replacement reads receipts and CI before running anything.
+- Over-verification — a second RAN for an already-recorded SHA without a
+  reason, workspace gates for a docs-only push, an ad-hoc target directory —
+  is a process finding: record it in the handoff cost line, route it as a
+  `FOLLOW-UP ISSUE`, correct the next brief. It does not block a product-green
+  PR.
