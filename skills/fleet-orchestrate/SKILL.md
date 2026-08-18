@@ -38,10 +38,10 @@ when changing or validating review policy.
    two concurrent workers onward, reserve a verifier seat.
 6. Record tasks, claims, rulings, and acceptance criteria in the durable truth
    layer before ringing host messaging as a doorbell.
-7. Give self-contained briefs (including assigned build lane, verification
-   budget, and cleanup authority), monitor compressed state, adjudicate
-   conflicts, and close only against immutable full SHAs with proportional
-   evidence.
+7. Give self-contained briefs (verification budget and cleanup authority
+   always; an assigned build lane whenever the session builds locally),
+   monitor compressed state, adjudicate conflicts, and close only against
+   immutable full SHAs with proportional evidence.
 
 ## Non-negotiable invariants
 
@@ -70,18 +70,22 @@ when changing or validating review policy.
   non-product/harness-only cycles without useful progress, or at diminishing
   returns, stop and route follow-up or request operator scope expansion.
 - Verify once per frozen artifact: the full gate set runs once per frozen
-  full SHA in an assigned build lane and leaves a gate receipt (SHA, gate set,
-  toolchain, lane, result); reviewers READ that receipt and exact-head CI and
-  RAN only what they do not cover, stating the reason for any full rerun. A
-  status, label, or draft flip is not a push.
+  full SHA — in the assigned build lane where one applies — and leaves a gate
+  receipt (SHA, gate set, toolchain, lane or n/a, result); reviewers READ that
+  receipt and exact-head CI and RAN only what they do not cover, stating the
+  reason for any full rerun. A status, label, or draft flip is not a push.
 - Know what the project's CI actually covers before citing it as independent
   evidence; a real coverage gap is a legitimate reason to RAN. Deterministically
   red CI already blocks the artifact — audit and request changes instead of
   spending a full run; re-run only the failed job when the red is environmental.
-- Build environments are bounded: one assigned lane per session for its
-  lifetime from a fixed pool named in the brief, never per round, SHA, or
-  timestamp; lane build cache is disposable, worktrees and sources are not;
-  over the pool ceiling the fleet stops and reports instead of building.
+- Where sessions build or cache locally, that environment is bounded: one
+  assigned lane per session for its lifetime from a fixed pool named in the
+  brief, never per round, SHA, or timestamp; lane build cache is disposable,
+  worktrees and sources are not; the fleet stops and reports rather than let
+  the pool grow without bound. This invariant is inert for work that produces
+  no local build cache — it costs nothing to carry and binds nothing to invent.
+  Size any ceiling from a measurement of the project’s own footprint, never
+  from a number carried over from another project.
 - A GitHub PR carries its visible review-fix loop: numbered SHA-pinned review,
   implementer response to every requested change, and final current-head LGTM.
   An internal verifier report does not replace these PR comments.

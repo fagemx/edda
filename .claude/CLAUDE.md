@@ -130,8 +130,9 @@ cargo test --workspace
 ### Verification ladder
 
 Verify once per frozen SHA; cite that result everywhere else. Full workspace
-gates are expensive (23 crates; 8–13 GB of build output per target directory),
-and CI already re-runs most of them independently on every push.
+gates are expensive (23 crates; a long-lived target directory for this
+workspace measured 40.9 GB — see Build lanes), and CI already re-runs most of
+them independently on every push.
 
 **Know exactly what CI does and does not cover** (`.github/workflows/ci.yml`):
 
@@ -161,27 +162,58 @@ run no Cargo gate locally; exact-head CI is the gate.
 
 ### Build lanes
 
+**When this section applies:** only to sessions that compile this workspace on
+this machine. It is a rule about local Cargo build cache, not about edda or the
+fleet in general. For scale: *using* edda costs about 26 MB for the binary plus
+0.4–9 MB of ledger per project, while *compiling* this 23-crate workspace costs
+tens of GB per target directory. Everything below is about the second number.
+A fleet session that runs no local build has no lane and needs none.
+
 - Never create ad-hoc `CARGO_TARGET_DIR`s per round, per SHA, or per
   timestamp. Build output is disposable cache, but unbounded copies are not: an
-  audit of one workstation counted 15 such directories and ~194 GB, with a
-  single directory at 12.79 GB.
+  audit of one workstation counted 15 such directories and ~194 GB.
 - Solo work uses the worktree's default `target/`.
 - **Lane root** is the `LOCALAPPDATA` directory plus `\fleet-workstation\lanes`
   — `$env:LOCALAPPDATA\fleet-workstation\lanes` in PowerShell,
   `$LOCALAPPDATA/fleet-workstation/lanes` in Git Bash — unless `FLEET_LANE_ROOT`
   is set or the brief names a different absolute path. A lane is always
   `<lane-root>\<lane-name>`; resolve it from that rule, never invent a path.
-- Fleet sessions build only in the lane named in their brief — one of
-  `worker-1`, `worker-2`, `verifier`, `verifier-2` — for their whole lifetime.
-  The workstation lane tool (`lane.ps1 -Lane <assigned> -Gate focused|freeze`)
-  is not shipped yet; until it is, set `CARGO_TARGET_DIR` to
+- Fleet sessions that build locally use only the lane named in their brief —
+  one of `worker-1`, `worker-2`, `verifier`, `verifier-2` — for their whole
+  lifetime. The workstation lane tool (`lane.ps1 -Lane <assigned> -Gate
+  focused|freeze`) is not shipped yet; until it is, set `CARGO_TARGET_DIR` to
   `<lane-root>\<assigned-lane>` yourself and reuse it every round. If your brief
   names no lane and you are running gates for a fleet, ask the controller for
   one rather than creating a directory.
 - Verifier lanes and every L1 run set `CARGO_INCREMENTAL=0`.
 - Deleting lane build output is authorized and non-destructive; deleting
-  worktrees, branches, or sources is not. Stop and report instead of building
-  when the lane pool exceeds 50 GB.
+  worktrees, branches, or sources is not.
+
+#### Footprint and thresholds — measured, and larger than they should be
+
+A long-lived `target/debug` for this workspace was measured at **40.9 GB**
+across 88,789 files:
+
+| Part | Size | What it is |
+|---|---:|---|
+| `incremental` | 21.6 GB | per-session codegen caches (`.o` + `.bin`) |
+| `.rlib` + `.rmeta` | 10.3 GB | compiled libraries and metadata |
+| `.pdb` | 8.1 GB | Windows debug symbols — `edda.pdb` alone is 310 MB against a 51 MB `edda.exe` |
+| `.exe` | 0.9 GB | the 84 test and binary executables that actually run |
+
+Two thirds of that is avoidable rather than intrinsic. Every one of the 509
+incremental session directories was older than 24 hours — orphans left by
+interrupted or killed builds, which nothing in Cargo ever reclaims. The
+workspace tunes `[profile.release]` only, so debug builds carry full symbols
+into every statically linked test binary.
+
+**Any lane pool ceiling stated before that footprint is fixed is provisional.**
+A single warm lane can reach 40 GB, so a four-lane pool at today's settings
+would need well over 100 GB — a ceiling calibrated against the 194 GB pathology
+would refuse during normal operation. Do not treat a fixed number here as
+authority yet: reclaim stale `incremental` sessions by age, and measure again
+before setting a limit. Stop and report if the pool is clearly growing without
+bound.
 
 ## Pre-commit Checklist
 

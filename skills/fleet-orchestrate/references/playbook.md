@@ -199,15 +199,16 @@ Owned paths/symbols; forbidden paths
 Dependencies and highest durable d-NNN ruling
 Required worktree/branch and claim label
 Test-first acceptance criteria and exact gates
-Build lane: <assigned name from the fixed pool> at <absolute lane root>
+Build lane (only when the session builds or caches locally; write "n/a"
+  otherwise): <assigned name from the fixed pool> at <absolute lane root>
   (the worker resolves its build directory as <lane root>/<lane name> and never
-  invents one; if this line is missing, ask before building)
+  invents one; if this line is missing and you are about to build, ask first)
 Verification budget: focused gates on touched units while iterating; the full
   gate set once per frozen full SHA with a gate receipt; READ receipts and
   exact-head CI before any RAN; name the coverage the project's CI genuinely
   lacks, since that is the reviewer's legitimate reason to run it
-Cleanup authority: lane build cache is disposable; worktrees, branches, and
-  sources are never deleted
+Cleanup authority: build cache is disposable and stale cache should be
+  reclaimed by age; worktrees, branches, and sources are never deleted
 Drift rule: if HEAD differs, satisfy intent against HEAD and report full SHA
 Done: pushed candidate/PR, frozen full SHA, receipt, no merge
 ```
