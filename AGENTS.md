@@ -29,6 +29,17 @@ and multi-agent coordination.
   relevant validation plus exact-head CI as `RAN`, and record available cost.
   Stop after two non-product/harness-only cycles without useful progress or at
   diminishing returns; route follow-up or ask the operator to expand scope.
+- Verify once per frozen SHA on the ladder in `.claude/CLAUDE.md`: focused
+  crate gates while iterating (L0); the full workspace set once per frozen full
+  SHA with a recorded receipt (L1); reviewers READ that receipt and exact-head
+  CI and RAN only what they do not cover (L2); nothing reruns on a draft,
+  label, or status flip (L3). State the reason whenever you rerun a recorded
+  gate.
+- Build only in the lane your brief assigns (`worker-1`, `worker-2`,
+  `verifier`, `verifier-2`). Never create ad-hoc `CARGO_TARGET_DIR`s per round,
+  SHA, or timestamp; solo work uses the worktree's default `target/`. Lane
+  build cache is disposable; worktrees, branches, and sources are not. Stop and
+  report when the lane pool exceeds 50 GB.
 - This is policy for sessions invoking `coord-review`, `coord-orchestrate`, or
   `fleet-orchestrate`; it is not an Edda runtime rule imposed on every project.
 - Review immutable full SHAs; any push invalidates the prior verdict.
@@ -45,4 +56,6 @@ and multi-agent coordination.
 
 - Preserve unrelated user changes.
 - Use `codex/` branch names for Codex-created branches unless directed otherwise.
-- Run the checks required by `.claude/CLAUDE.md` before claiming completion.
+- Run the checks required by `.claude/CLAUDE.md` at the ladder level that
+  matches your change before claiming completion; docs-only changes rely on
+  exact-head CI and run no Cargo gate locally.
