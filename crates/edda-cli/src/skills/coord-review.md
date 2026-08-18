@@ -103,11 +103,24 @@ blobs, base, and toolchain are unchanged, reuse still-applicable code results
 as `READ` with their source SHA; run only relevant diff/docs/evidence checks
 and exact-head CI as `RAN`. Never report a reused result as rerun.
 
+Verify once per frozen artifact. When the implementer's gate receipt (SHA,
+gate set, toolchain, lane, result) matches the reviewed SHA and exact-head CI
+is green, cite both as `READ` and RAN only the focused or adversarial checks
+they do not cover. A full local rerun requires a stated reason: no receipt,
+red or absent CI, or grounds to distrust the receipt. Run in your assigned
+build lane; never create an ad-hoc build directory. A status, label, or draft
+flip is not a push and reruns nothing.
+
 Record available elapsed, token, and tool cost. Stop after two consecutive
 cycles that change only non-product evidence/docs or harness material without
 improving required behavior/proof, or sooner when returns clearly diminish.
 Classify and route the finding instead of continuing: follow-up issue for
 out-of-scope work, or operator scope expansion when it must join this PR.
+
+Over-verification you find in the implementer's evidence — a second RAN for
+an already-receipted SHA without a reason, full gates for a docs-only push, an
+ad-hoc build directory — is a process finding: note it in the cost line, route
+it as a `FOLLOW-UP ISSUE`, and do not block a product-green PR on it.
 
 ### Step 6: Generate Report
 
@@ -164,6 +177,8 @@ FOLLOW-UP ISSUE:
 Evidence:
 - RAN: <exact command/check and result on reviewed SHA>
 - READ: <reused result and its source SHA, or none>
+- Lane: <build lane used, or n/a for docs-only>
+- Receipt: <implementer gate receipt cited (SHA, gate set, toolchain, lane, result), or none>
 Cost: elapsed=<available/unknown>, tokens=<available/unknown>, tools=<available/unknown>
 Verdict: Changes Requested | LGTM
 ```
