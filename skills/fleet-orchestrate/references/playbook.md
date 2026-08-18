@@ -199,6 +199,12 @@ Owned paths/symbols; forbidden paths
 Dependencies and highest durable d-NNN ruling
 Required worktree/branch and claim label
 Test-first acceptance criteria and exact gates
+Build lane: <assigned name from the fixed pool>
+Verification budget: focused gates on touched units while iterating; the full
+  gate set once per frozen full SHA with a gate receipt; READ receipts and
+  exact-head CI before any RAN
+Cleanup authority: lane build cache is disposable; worktrees, branches, and
+  sources are never deleted
 Drift rule: if HEAD differs, satisfy intent against HEAD and report full SHA
 Done: pushed candidate/PR, frozen full SHA, receipt, no merge
 ```
@@ -215,21 +221,33 @@ intent + basis SHA + symbol anchor + drift rule.
 3. Reproduce the failure or write the failing acceptance test first.
 4. Implement the smallest in-scope repair; surface adjacent findings instead
    of taking them.
-5. Run gates selected from code/product-blob, base, and toolchain changes.
+5. Run focused gates on touched units while iterating; run the full gate set
+   once on the frozen full SHA in the assigned build lane and record the gate
+   receipt (SHA, gate set, toolchain, lane, result). Never build in an ad-hoc
+   directory.
 6. Push/open the delivery candidate if authorized, report the full SHA, freeze
-   the branch, and leave a receipt tagged `ran` versus `read`.
+   the branch, and leave a receipt tagged `ran` versus `read` that cites the
+   gate receipt.
 7. Never merge or rewrite another worker’s branch.
 
 ### Verifier contract
 
 1. Remain read-only for every artifact under review.
-2. Run baseline gates before workers code and classify existing red checks.
+2. Establish the baseline once on the basis SHA before workers code: READ
+   exact-head CI and any existing gate receipt, RAN only what they do not
+   cover in the assigned verifier lane, and classify existing red checks.
 3. Translate each issue into observable acceptance criteria.
 4. Audit tests for false greens and tests that encode behavior being removed.
 5. Review the exact frozen full SHA, complete the whole scoped audit, compare
    against the basis, and batch every blocking P0/P1 with path/symbol and
-   failure scenario before requesting changes.
-6. Acknowledge that any push voids the verdict.
+   failure scenario before requesting changes. READ the frozen SHA's gate
+   receipt and exact-head CI; RAN only focused or adversarial checks they do
+   not cover, and state the reason for any full rerun.
+6. Acknowledge that any push voids the verdict; a status, label, or draft flip
+   is not a push and reruns nothing.
+7. Keep one verifier identity per delivery candidate: rounds resume the same
+   session and lane; a replacement reads receipts and CI before running
+   anything.
 
 ### Controller contract
 
@@ -238,6 +256,12 @@ intent + basis SHA + symbol anchor + drift rule.
 3. Avoid reading full diffs mid-flight; consume status, receipts, blocker
    reports, and verifier criteria until formal review time.
 4. Never reinterpret a receipt as acceptance.
+5. Assign build lanes from the fixed pool, put the verification budget and
+   cleanup authority in every brief, and route over-verification (a second RAN
+   for an already-receipted SHA without a reason, full gates for a docs-only
+   push, an ad-hoc build directory) as a process finding — cost line,
+   `FOLLOW-UP ISSUE`, corrected brief — never as a reason to block a
+   product-green candidate.
 
 ## 9. Rulings and cross-session traffic
 
@@ -324,9 +348,17 @@ Select gates proportionally:
 |---|---|
 | Code/product blob, base SHA, or toolchain changed | Run the relevant code gates for the changed risk surface. |
 | Only docs/evidence changed; code/product blobs, base, and toolchain unchanged | Reuse still-applicable code gates as `READ` with source SHA; `RAN` only relevant diff/docs/evidence checks and exact-head CI. |
+| Code changed; a gate receipt for this exact SHA, gate set, and toolchain exists and exact-head CI is green | READ the receipt and CI; `RAN` only focused or adversarial checks they do not cover. Full rerun only with a stated reason (no receipt, red or absent CI, grounds to distrust the receipt). |
+| Status, label, or draft flip without a push | Not a new artifact; nothing reruns. |
 
 Never label a reused gate `RAN`. Exact-head CI is still required because the
 review verdict binds the new full SHA.
+
+Verify once per frozen artifact. The implementer's full gate run leaves a gate
+receipt (SHA, gate set, toolchain, lane, result); the reviewer cites it. Runs
+happen in the assigned build lane, never in an ad-hoc directory.
+Over-verification found in evidence is a process finding — cost line,
+`FOLLOW-UP ISSUE`, corrected brief — not a product blocker.
 
 Record available elapsed time, token use, and tool cost in every handoff. Stop
 after two consecutive cycles that change only non-product evidence/docs or
@@ -445,4 +477,8 @@ actual file overlap. More sessions do not make A1 → A2 parallel.
 | “One more harness/evidence cycle might help.” | After two non-product cycles without useful progress or at diminishing returns, stop and route. |
 | “The verifier report is enough; PR comments are clerical.” | A GitHub PR is the durable collaboration surface. Publish every review round, response, and final current-head verdict there. |
 | “The final LGTM implies earlier findings were handled.” | Changes Requested requires an implementer point-by-point response before re-review. |
-| “Receipt says tests pass, so merge.” | Receipt is worker evidence; verifier runs the required proportional gates and merge authority accepts. |
+| “Receipt says tests pass, so merge.” | Receipt is worker evidence; the verifier READs it against exact-head CI, RANs what they do not cover, and merge authority accepts. |
+| “A fresh session should build in its own directory to be safe.” | Use the assigned lane; lanes are the isolation. Ad-hoc build directories are forbidden. |
+| “The verifier must rerun everything to be independent.” | Exact-head CI and the gate receipt are independent evidence; RAN only what they do not cover, or state the reason. |
+| “The PR flipped to ready, so rerun the gates.” | Not a push; nothing reruns. |
+| “Cleanup is destructive, so leave every build directory.” | Lane build cache is disposable by design; worktrees, branches, and sources are not. |
