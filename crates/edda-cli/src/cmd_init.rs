@@ -122,9 +122,12 @@ actors: {}
         auto_install_bridges(repo_root);
     }
 
-    // Scaffold coordination skills into .claude/skills/
+    // Scaffold coordination skills for detected agent hosts.
     if repo_root.join(".claude").is_dir() {
-        scaffold_skills(repo_root, force_skills);
+        scaffold_skills(&repo_root.join(".claude").join("skills"), force_skills);
+    }
+    if repo_root.join("AGENTS.md").is_file() || repo_root.join(".agents").is_dir() {
+        scaffold_skills(&repo_root.join(".agents").join("skills"), force_skills);
     }
 
     // Scan and register skills in the user-level skill registry
@@ -154,10 +157,9 @@ fn auto_install_bridges(repo_root: &Path) {
     }
 }
 
-/// Write embedded coord skill templates to `.claude/skills/coord-*/SKILL.md`.
+/// Write embedded coord skill templates to `<host>/skills/coord-*/SKILL.md`.
 /// Skips files that already exist unless `force` is true.
-fn scaffold_skills(repo_root: &Path, force: bool) {
-    let skills_dir = repo_root.join(".claude").join("skills");
+fn scaffold_skills(skills_dir: &Path, force: bool) {
     for &(name, content) in SKILLS {
         let dir = skills_dir.join(name);
         let path = dir.join("SKILL.md");
@@ -310,6 +312,29 @@ mod tests {
             assert!(
                 content.contains(&format!("name: {name}")),
                 "{name} should have correct frontmatter"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn init_scaffolds_codex_coord_skills() {
+        let _store = crate::test_support::isolated_store();
+        let tmp = temp_dir();
+        std::fs::write(tmp.join("AGENTS.md"), "# Project instructions\n").unwrap();
+
+        execute(&tmp, true, false).unwrap();
+
+        for &(name, _) in SKILLS {
+            let path = tmp
+                .join(".agents")
+                .join("skills")
+                .join(name)
+                .join("SKILL.md");
+            assert!(
+                path.exists(),
+                "{name}/SKILL.md should be scaffolded for Codex"
             );
         }
 
