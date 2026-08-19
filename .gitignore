@@ -1,6 +1,7 @@
 /target
 .edda/
 .claude/
+.agents/
 CLAUDE.md
 docs/archive/
 /tmp/
