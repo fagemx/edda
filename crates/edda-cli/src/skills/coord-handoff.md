@@ -68,24 +68,53 @@ Where host bridge hooks are wired, unclaim happens automatically on session
 end — nothing to do.
 
 Where they are not (claims made from a bare CLI, CI, or a host without bridge
-hooks), release the scope by naming it:
+hooks), release the scope by naming it. The id is the `session:` line
+`edda claim` printed:
 
-```bash
-edda unclaim --session <id>
+```bash edda-doctest
+$ edda claim "auth" --paths "src/auth/*"
+> session: cli-auth
+$ edda unclaim --session cli-auth
+> Unclaimed scope for session: cli-auth
 ```
 
-The id is the `session:` line `edda claim` printed. Run it without `--session`
-and the refusal lists every claim with its session id, so the value you need is
-in the error. `edda peers --json` carries it too, under `claims[].session_id`;
-plain `edda peers` does not, because it lists live heartbeats and a bare-CLI
-claim has none.
+Omit `--session` and it refuses rather than guessing, listing every claim with
+its id — so the value you need is in the error:
 
-`unclaim` deliberately does not pick a claim for you when you have no session
-of your own: it cannot tell whose claim it is, and releasing the wrong one
-would drop the off-limits protection a live peer is relying on.
+```bash edda-doctest
+$ edda claim "auth" --paths "src/auth/*"
+> session: cli-auth
+$ edda unclaim
+! cannot tell which claim is yours
+! cli-auth
+```
 
-`unclaim` never reports success for a session that holds nothing — if it prints
-a released scope, that scope is gone.
+That refusal is deliberate. A caller with no session of its own cannot tell
+whose claim it is, and releasing the wrong one would drop the off-limits
+protection a live peer is relying on.
+
+`unclaim` also never reports success for a session that holds nothing — if it
+prints a released scope, that scope is gone:
+
+```bash edda-doctest
+$ edda claim "auth" --paths "src/auth/*"
+> session: cli-auth
+$ edda unclaim --session cli-nobody
+! holds no claim
+```
+
+`edda peers --json` carries the id too, under `claims[].session_id`. Plain
+`edda peers` does not, because it lists live heartbeats and a bare-CLI claim
+has none:
+
+```bash edda-doctest
+$ edda claim "auth" --paths "src/auth/*"
+> session: cli-auth
+$ edda peers --json
+> "session_id": "cli-auth"
+$ edda peers
+> No active sessions
+```
 
 Enforcement stays safe either way: every consumer joins claims against live
 heartbeats, so a claim left behind by a dead session does not block a peer.
