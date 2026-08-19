@@ -717,9 +717,11 @@ pub fn unclaim(repo_root: &Path, cli_session: Option<&str>) -> anyhow::Result<()
 
 /// Name the session whose claim `unclaim` should release.
 ///
-/// Explicit `--session` and `EDDA_SESSION_ID` win, then a sole live heartbeat,
-/// then the board itself. The board tier is what makes a bare `edda unclaim`
-/// work for a claim made from a plain CLI, which writes no heartbeat.
+/// Explicit `--session` wins, then `EDDA_SESSION_ID`, then a sole live
+/// heartbeat. There is deliberately no further tier: a caller with none of
+/// those has no identity, and picking a claim off the board for it would
+/// release a scope its real owner is still relying on. Refuse and show the
+/// board instead, so the id for `--session` is in the error.
 fn resolve_unclaim_target(
     cli_session: Option<&str>,
     project_id: &str,
