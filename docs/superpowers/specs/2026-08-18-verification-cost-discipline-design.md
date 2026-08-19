@@ -187,8 +187,9 @@ measure second, set a number third.
 - Fixed allowlist: `worker-1`, `worker-2`, `verifier`, `verifier-2`. Unknown
   names are refused. The controller's primary checkout keeps its normal
   `target/`; it is not a lane.
-- The controller assigns a lane in every brief. A session keeps its lane for
-  its lifetime; the same PR's verifier rounds reuse `verifier`; a lane changes
+- The controller assigns a lane in every brief **for a session that builds or
+  caches locally**; a session that compiles nothing gets no lane and reports
+  `n/a`. A session that has one keeps it for its lifetime; the same PR's verifier rounds reuse `verifier`; a lane changes
   hands only when the previous holder is finished or dead. Lanes are per
   concurrent session, never per round, SHA, or timestamp.
 - Verifier lanes and every `freeze` run set `CARGO_INCREMENTAL=0` (one-shot
@@ -208,10 +209,12 @@ measure second, set a number third.
   build output. The tool never removes anything outside the lane root, never
   removes a path containing `.git`, and never touches worktrees, branches, or
   sources. Briefs say so verbatim.
-- Capacity: warn at 35 GB total, refuse to run gates at 50 GB
-  (`FLEET_LANE_CEILING_GB` overrides). Over the ceiling the tool prints the
-  pool table and the reclaim command and exits non-zero; capacity refusal has
-  no bypass flag. `doctor.ps1` reports the same numbers.
+- Capacity: **the tool ships with no default ceiling** (see the footprint note
+  above — a limit sized against the 194 GB pathology would refuse during normal
+  operation). `-Status` and `doctor.ps1` report the pool size; `FLEET_LANE_WARN_GB`
+  and `FLEET_LANE_CEILING_GB` are unset until an operator sets them from a
+  measured steady state. Once a ceiling exists, exceeding it prints the pool
+  table and the reclaim command and exits non-zero, with no bypass flag.
 
 ### 4.4 Brake authority — who stops it
 
@@ -356,7 +359,10 @@ the tool enforces a limit against an artificially inflated number.
 ## 8. Decisions taken in this design (defaults, revisable in the plan)
 
 - Lane allowlist: `worker-1`, `worker-2`, `verifier`, `verifier-2`.
-- Thresholds: warn 35 GB, refuse 50 GB, env-overridable.
+- Thresholds: **none by default.** `FLEET_LANE_WARN_GB` and
+  `FLEET_LANE_CEILING_GB` are operator-set from a measured steady state; the
+  earlier 35/50 GB pair was drawn from the pathology, not from a healthy
+  lane, and is superseded (§4.3).
 - Receipt store: `<lane-root>\receipts.jsonl` plus `edda note --tag gate`
   when `.edda/` exists.
 - Verifier lanes always `CARGO_INCREMENTAL=0`; worker lanes only for `freeze`.

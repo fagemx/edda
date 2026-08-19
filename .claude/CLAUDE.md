@@ -375,11 +375,15 @@ Rules regulate cost and reclamation, not only evidence:
 - Verify once per frozen SHA on the ladder above. READ recorded gate results
   and exact-head CI before any RAN, and state the reason whenever you rerun a
   recorded gate.
-- Every worker/verifier brief names a build lane, a verification budget (L0
-  while iterating; L1 once per frozen SHA), and cleanup authority (lane build
-  cache is disposable; worktrees, branches, and sources are never deleted).
-- One verifier identity per PR: rounds resume the same session and lane; a
-  replacement reads receipts and CI before running anything.
+- Every worker/verifier brief names a verification budget (L0 while iterating;
+  L1 once per frozen SHA) and cleanup authority (build cache is disposable and
+  stale cache should be reclaimed by age; worktrees, branches, and sources are
+  never deleted). It names a build lane **only when the session compiles
+  locally** — see Build lanes; a session that builds nothing has no lane and
+  reports `n/a`.
+- One verifier identity per PR: rounds resume the same session, and the same
+  lane where one applies; a replacement reads receipts and CI before running
+  anything.
 - Over-verification — a second RAN for an already-recorded SHA without a
   reason, workspace gates for a docs-only push, an ad-hoc target directory —
   is a process finding: record it in the handoff cost line, route it as a

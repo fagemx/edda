@@ -8,6 +8,14 @@
 
 **Tech Stack:** Markdown, git, `rg`/`grep` for consistency checks, one fresh agent session per dry-run pressure test. No Cargo invocation anywhere in this plan.
 
+> **This plan is a historical execution record, frozen at `738c5ce`. Do not
+> take any figure or constraint below as current.** Three review rounds and a
+> follow-up PR changed several of them — notably the `8–13 GB` per-target
+> figure (measured 40.9 GB) and the `warn 35 GB / refuse 50 GB` thresholds
+> (withdrawn; no default ceiling ships until a measured steady state exists).
+> See “Round 1 review amendments” at the end of this file, and the spec for the
+> living contract.
+
 ## Global Constraints
 
 - Branch `docs/verification-cost-discipline` in worktree `C:\ai_agent\edda\.claude\worktrees\verification-cost-discipline`, based on `origin/main 7f5d1555b4c00e4fe6ac9a452a3c81c62289972c`. Do not touch the `codex/fleet-orchestrate-skill` checkout at `C:\ai_agent\edda` (stale, has another session's uncommitted diff).

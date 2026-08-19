@@ -260,8 +260,10 @@ intent + basis SHA + symbol anchor + drift rule.
 3. Avoid reading full diffs mid-flight; consume status, receipts, blocker
    reports, and verifier criteria until formal review time.
 4. Never reinterpret a receipt as acceptance.
-5. Assign build lanes from the fixed pool, put the verification budget and
-   cleanup authority in every brief, and route over-verification (a second RAN
+5. Put the verification budget and cleanup authority in every brief, and
+   assign a build lane from the fixed pool to every session that builds or
+   caches locally (a session that builds nothing needs none). Route
+   over-verification (a second RAN
    for an already-receipted SHA without a reason, full gates for a docs-only
    push, an ad-hoc build directory) as a process finding — cost line,
    `FOLLOW-UP ISSUE`, corrected brief — never as a reason to block a
