@@ -74,10 +74,12 @@ hooks), release the scope explicitly — and **pass the session id**:
 edda unclaim --session <id>
 ```
 
-The id is the `session:` line `edda claim` printed, and `edda peers` shows it
-too. Without hooks there is no heartbeat to infer from, and bare `edda unclaim`
-falls back to the session `cli-cli` rather than the `cli-<label>` your claim
-created: it exits 0, prints a reassuring line, and releases nothing (GH-455).
+The id is the `session:` line `edda claim` printed; `edda peers --json` also
+carries it. Plain `edda peers` will not: it lists live heartbeats, which a
+bare-CLI claim does not have, and it abbreviates ids. Without hooks there is no
+heartbeat to infer from either, so bare `edda unclaim` falls back to the
+session `cli-cli` rather than the `cli-<label>` your claim created: it exits 0,
+prints a reassuring line, and releases nothing (GH-455).
 
 Enforcement stays safe either way: every consumer joins claims against live
 heartbeats, so a claim left behind by a dead session does not block a peer.
