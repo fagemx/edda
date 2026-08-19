@@ -68,18 +68,27 @@ Where host bridge hooks are wired, unclaim happens automatically on session
 end — nothing to do.
 
 Where they are not (claims made from a bare CLI, CI, or a host without bridge
-hooks), release the scope explicitly — and **pass the session id**:
+hooks), release the scope explicitly:
+
+```bash
+edda unclaim
+```
+
+That resolves the target from the board, so it works for a claim made without
+hooks. When several sessions hold claims it refuses and lists them rather than
+guessing — name one:
 
 ```bash
 edda unclaim --session <id>
 ```
 
-The id is the `session:` line `edda claim` printed; `edda peers --json` also
-carries it. Plain `edda peers` will not: it lists live heartbeats, which a
-bare-CLI claim does not have, and it abbreviates ids. Without hooks there is no
-heartbeat to infer from either, so bare `edda unclaim` falls back to the
-session `cli-cli` rather than the `cli-<label>` your claim created: it exits 0,
-prints a reassuring line, and releases nothing (GH-455).
+The id is the `session:` line `edda claim` printed, and the refusal message
+carries it too. `edda peers --json` also has it under `claims[].session_id`;
+plain `edda peers` does not, because it lists live heartbeats and a bare-CLI
+claim has none.
+
+`unclaim` never reports success for a session that holds nothing — if it prints
+a released scope, that scope is gone.
 
 Enforcement stays safe either way: every consumer joins claims against live
 heartbeats, so a claim left behind by a dead session does not block a peer.

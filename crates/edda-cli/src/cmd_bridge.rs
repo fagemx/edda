@@ -676,12 +676,90 @@ pub fn claim(
 }
 
 /// `edda unclaim [--session <id>]` — release a coordination scope.
+///
+/// Unlike `claim`, this verb never mints a session id. `claim` may invent
+/// `cli-<label>` because it is creating the claim; `unclaim` has to name one
+/// that already exists, so it resolves against the board and refuses rather
+/// than reporting success for a session that holds nothing (GH-486).
+///
+/// The automatic session-end path does not come through here — bridges call
+/// `peers::write_unclaim` directly — so refusing costs a hooked session
+/// nothing.
 pub fn unclaim(repo_root: &Path, cli_session: Option<&str>) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
-    let (session_id, _label) = resolve_session_id(cli_session, &project_id, "cli");
+    let board = edda_bridge_claude::peers::compute_board_state(&project_id);
+    let session_id = resolve_unclaim_target(cli_session, &project_id, &board.claims)?;
+
+    let held: Vec<&edda_bridge_claude::peers::ClaimEntry> = board
+        .claims
+        .iter()
+        .filter(|c| c.session_id == session_id)
+        .collect();
+    if held.is_empty() {
+        anyhow::bail!(
+            "session {session_id} holds no claim; nothing was released.\n{}",
+            describe_claims(&board.claims)
+        );
+    }
+
     edda_bridge_claude::peers::write_unclaim(&project_id, &session_id);
-    println!("Unclaimed scope for session: {session_id}");
+    let labels: Vec<&str> = held.iter().map(|c| c.label.as_str()).collect();
+    println!(
+        "Unclaimed scope for session: {session_id} ({})",
+        labels.join(", ")
+    );
     Ok(())
+}
+
+/// Name the session whose claim `unclaim` should release.
+///
+/// Explicit `--session` and `EDDA_SESSION_ID` win, then a sole live heartbeat,
+/// then the board itself. The board tier is what makes a bare `edda unclaim`
+/// work for a claim made from a plain CLI, which writes no heartbeat.
+fn resolve_unclaim_target(
+    cli_session: Option<&str>,
+    project_id: &str,
+    claims: &[edda_bridge_claude::peers::ClaimEntry],
+) -> anyhow::Result<String> {
+    if let Some(sid) = cli_session.filter(|s| !s.is_empty()) {
+        return Ok(sid.to_string());
+    }
+    if let Ok(sid) = std::env::var("EDDA_SESSION_ID") {
+        if !sid.is_empty() {
+            return Ok(sid);
+        }
+    }
+    if let Some((sid, _label)) = edda_bridge_claude::peers::infer_session_id(project_id) {
+        return Ok(sid);
+    }
+
+    let mut sessions: Vec<&str> = claims.iter().map(|c| c.session_id.as_str()).collect();
+    sessions.sort_unstable();
+    sessions.dedup();
+    match sessions.len() {
+        0 => anyhow::bail!("no claims on the board; nothing to unclaim"),
+        1 => Ok(sessions[0].to_string()),
+        _ => anyhow::bail!(
+            "several sessions hold claims, so --session is required.\n{}",
+            describe_claims(claims)
+        ),
+    }
+}
+
+/// Render the board's claims for an error message, so the reader can copy the
+/// session id straight into `--session` instead of hunting for it.
+fn describe_claims(claims: &[edda_bridge_claude::peers::ClaimEntry]) -> String {
+    if claims.is_empty() {
+        return "The board holds no claims.".to_string();
+    }
+    let mut out = String::from("Claims on the board:");
+    for c in claims {
+        out.push_str(&format!("\n  {} — {}", c.session_id, c.label));
+        if !c.paths.is_empty() {
+            out.push_str(&format!(" ({})", c.paths.join(", ")));
+        }
+    }
+    out
 }
 
 /// `edda bridge claude decide <key=value>` — record a decision.
@@ -2206,6 +2284,94 @@ mod tests {
         assert!(edda_bridge_claude::peers::compute_board_state(&pid)
             .claims
             .is_empty());
+    }
+
+    #[test]
+    fn unclaim_without_session_releases_the_sole_claim() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        // A bare-CLI claim: `edda claim "auth"` mints session cli-auth and
+        // writes no heartbeat, so nothing can be inferred from live sessions.
+        edda_bridge_claude::peers::write_claim(&pid, "cli-auth", "auth", &["src/auth.rs".into()]);
+
+        unclaim(repo.path(), None).expect("the sole claim is unambiguous");
+
+        assert!(
+            edda_bridge_claude::peers::compute_board_state(&pid)
+                .claims
+                .is_empty(),
+            "bare unclaim must release the only claim on the board"
+        );
+    }
+
+    #[test]
+    fn unclaim_without_session_refuses_when_several_claims_exist() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        edda_bridge_claude::peers::write_claim(&pid, "cli-auth", "auth", &["src/auth.rs".into()]);
+        edda_bridge_claude::peers::write_claim(&pid, "cli-api", "api", &["src/api.rs".into()]);
+
+        let err = unclaim(repo.path(), None).expect_err("ambiguous target must not guess");
+        let msg = err.to_string();
+        assert!(msg.contains("cli-auth") && msg.contains("cli-api"), "{msg}");
+
+        assert_eq!(
+            edda_bridge_claude::peers::compute_board_state(&pid)
+                .claims
+                .len(),
+            2,
+            "a refused unclaim must release nothing"
+        );
+    }
+
+    #[test]
+    fn unclaim_refuses_when_the_board_is_empty() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+
+        unclaim(repo.path(), None).expect_err("nothing to release must not report success");
+    }
+
+    #[test]
+    fn unclaim_refuses_a_session_that_holds_no_claim() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        edda_bridge_claude::peers::write_claim(&pid, "cli-auth", "auth", &["src/auth.rs".into()]);
+
+        // This is the exact silent-failure this fix exists to remove: the old
+        // fallback resolved to `cli-cli`, wrote an unclaim for a session that
+        // held nothing, printed success, and left the real claim standing.
+        let err = unclaim(repo.path(), Some("cli-cli"))
+            .expect_err("releasing nothing must not report success");
+        assert!(err.to_string().contains("cli-auth"), "{err}");
+
+        assert_eq!(
+            edda_bridge_claude::peers::compute_board_state(&pid)
+                .claims
+                .len(),
+            1,
+            "the real claim must survive a refused unclaim"
+        );
     }
 
     #[test]
