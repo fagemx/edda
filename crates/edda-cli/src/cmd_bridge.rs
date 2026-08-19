@@ -682,6 +682,10 @@ pub fn claim(
 /// that already exists, so it resolves against the board and refuses rather
 /// than reporting success for a session that holds nothing (GH-486).
 ///
+/// It also never guesses from the board. A caller with no session identity
+/// cannot know that a claim is its own, and releasing someone else's would
+/// drop the off-limits protection their live session depends on.
+///
 /// The automatic session-end path does not come through here — bridges call
 /// `peers::write_unclaim` directly — so refusing costs a hooked session
 /// nothing.
@@ -733,17 +737,17 @@ fn resolve_unclaim_target(
         return Ok(sid);
     }
 
-    let mut sessions: Vec<&str> = claims.iter().map(|c| c.session_id.as_str()).collect();
-    sessions.sort_unstable();
-    sessions.dedup();
-    match sessions.len() {
-        0 => anyhow::bail!("no claims on the board; nothing to unclaim"),
-        1 => Ok(sessions[0].to_string()),
-        _ => anyhow::bail!(
-            "several sessions hold claims, so --session is required.\n{}",
-            describe_claims(claims)
-        ),
+    // No identity of our own, so there is nothing to infer from. Do NOT fall
+    // back to "the sole claim on the board": a caller without a session cannot
+    // know that claim is theirs, and releasing it drops the off-limits
+    // protection its real owner is relying on.
+    if claims.is_empty() {
+        anyhow::bail!("no claims on the board; nothing to unclaim");
     }
+    anyhow::bail!(
+        "cannot tell which claim is yours, so --session is required.\n{}",
+        describe_claims(claims)
+    );
 }
 
 /// Render the board's claims for an error message, so the reader can copy the
@@ -2287,7 +2291,7 @@ mod tests {
     }
 
     #[test]
-    fn unclaim_without_session_releases_the_sole_claim() {
+    fn unclaim_without_identity_refuses_rather_than_guessing_the_sole_claim() {
         let _store = crate::test_support::isolated_store();
         let _env = env_guard();
         std::env::remove_var("EDDA_SESSION_ID");
@@ -2295,17 +2299,48 @@ mod tests {
         let repo = tempfile::tempdir().expect("tempdir");
         let pid = edda_store::project_id(repo.path());
         let _ = edda_store::ensure_dirs(&pid);
-        // A bare-CLI claim: `edda claim "auth"` mints session cli-auth and
-        // writes no heartbeat, so nothing can be inferred from live sessions.
         edda_bridge_claude::peers::write_claim(&pid, "cli-auth", "auth", &["src/auth.rs".into()]);
 
-        unclaim(repo.path(), None).expect("the sole claim is unambiguous");
+        let err = unclaim(repo.path(), None).expect_err("a caller with no identity must not guess");
+        assert!(err.to_string().contains("cli-auth"), "{err}");
 
-        assert!(
+        assert_eq!(
             edda_bridge_claude::peers::compute_board_state(&pid)
                 .claims
-                .is_empty(),
-            "bare unclaim must release the only claim on the board"
+                .len(),
+            1,
+            "a refused unclaim must release nothing"
+        );
+    }
+
+    #[test]
+    fn unclaim_without_identity_never_releases_a_live_peers_claim() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+
+        // Two live peers, so infer_session_id yields nothing, and only one of
+        // them holds a claim. A shell with no identity of its own must not
+        // decide that claim is its to release: check_offlimits enforces
+        // exactly this claim for its live owner.
+        edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "sess-a", "worker-a", "/tmp/a");
+        edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "sess-b", "worker-b", "/tmp/b");
+        edda_bridge_claude::peers::write_claim(&pid, "sess-a", "worker-a", &["src/a.rs".into()]);
+
+        let err = unclaim(repo.path(), None)
+            .expect_err("a bare shell must not release another live session's scope");
+        assert!(err.to_string().contains("sess-a"), "{err}");
+
+        assert_eq!(
+            edda_bridge_claude::peers::compute_board_state(&pid)
+                .claims
+                .len(),
+            1,
+            "the live peer's claim must survive"
         );
     }
 
