@@ -61,8 +61,9 @@ reuses still-applicable code results as `READ` with source SHA, then runs only
 relevant diff/docs/evidence checks and exact-head CI as `RAN`.
 
 Verify once per frozen artifact. The implementer runs the full gate set once
-per frozen full SHA in the assigned build lane and records a gate receipt (SHA,
-gate set, toolchain, lane, result). The reviewer READs that receipt and
+per frozen full SHA — in the assigned build lane where the session builds
+locally — and records a gate receipt (SHA, gate set, toolchain, lane or n/a,
+result). The reviewer READs that receipt and
 exact-head CI, RANs only focused or adversarial checks they do not cover, and
 states the reason for any full rerun (no receipt, red or absent CI, grounds to
 distrust the receipt, or coverage the project's CI genuinely lacks — know that
@@ -94,7 +95,7 @@ Blocking counts entering review: P0=<n>, P1=<n>
 Evidence:
 - RAN: <commands/checks run on this SHA>
 - READ: <reused results and source SHAs>
-- Lane: <assigned build lane>
+- Lane: <assigned build lane, or n/a when nothing was built locally>
 - Receipt: <gate receipt for this SHA (SHA, gate set, toolchain, lane, result), or none>
 Cost: elapsed=<available/unknown>, tokens=<available/unknown>, tools=<available/unknown>
 Request: audit the whole scoped surface; publish no self-verdict from the implementer
@@ -108,17 +109,18 @@ Request: audit the whole scoped surface; publish no self-verdict from the implem
    bundle. Specs live in issues, never only in messages.
 3. **Brief workers** — self-contained (they have zero context): issues to
    read, worktree + branch command, `edda claim` label and paths, files
-   owned/forbidden, quality gates verbatim, assigned build lane from the fixed
-   pool **with its absolute lane root** (a worker who cannot resolve
-   `<lane root>/<lane name>` will invent a directory — the exact failure the
-   lane rule exists to prevent), verification budget (focused gates on touched
-   units while iterating; the full gate set once per frozen SHA with a receipt;
-   READ receipts before any RAN), cleanup authority (lane build cache is
-   disposable; worktrees, branches, and sources are never deleted), done =
-   GitHub PR when available,
-   otherwise a frozen local branch plus durable review carrier (never invent a
-   PR); never merge + `edda task done --receipt`. Include the receiver tie-break
-   verbatim (see Traffic rules).
+   owned/forbidden, quality gates verbatim, verification budget (focused gates
+   on touched units while iterating; the full gate set once per frozen SHA with
+   a receipt; READ receipts before any RAN), cleanup authority (build cache is
+   disposable and stale cache should be reclaimed by age; worktrees, branches,
+   and sources are never deleted), and — only when the session compiles locally
+   — an assigned build lane from the fixed pool **with its absolute lane root**
+   (a worker who cannot resolve `<lane root>/<lane name>` will invent a
+   directory, the exact failure the lane rule exists to prevent; a session that
+   builds nothing needs no lane), done = GitHub PR when available, otherwise a
+   frozen local branch plus durable review carrier (never invent a PR); never
+   merge + `edda task done --receipt`. Include the receiver tie-break verbatim
+   (see Traffic rules).
 4. **Brief the verifier — read-only, starts BEFORE code:** baseline on the
    basis SHA by READing exact-head CI and any existing gate receipt, RANning
    only what they do not cover in the assigned verifier lane, and classifying

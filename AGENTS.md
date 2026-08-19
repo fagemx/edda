@@ -39,11 +39,15 @@ and multi-agent coordination.
   Deterministically red CI already blocks the SHA: audit and request changes
   instead of spending a full run; re-run only the failed job when the red is
   environmental.
-- Build only in the lane your brief assigns (`worker-1`, `worker-2`,
-  `verifier`, `verifier-2`). Never create ad-hoc `CARGO_TARGET_DIR`s per round,
-  SHA, or timestamp; solo work uses the worktree's default `target/`. Lane
-  build cache is disposable; worktrees, branches, and sources are not. Stop and
-  report when the lane pool exceeds 50 GB.
+- When you compile this workspace locally, build only in the lane your brief
+  assigns (`worker-1`, `worker-2`, `verifier`, `verifier-2`). Never create
+  ad-hoc `CARGO_TARGET_DIR`s per round, SHA, or timestamp; solo work uses the
+  worktree's default `target/`. Lane build cache is disposable; worktrees,
+  branches, and sources are not. This is about local Cargo build output only —
+  a session that runs no local build has no lane and needs none. Reclaim stale
+  `incremental` sessions by age, and report if the pool grows without bound;
+  see Build lanes in `.claude/CLAUDE.md` for the measured footprint and why any
+  fixed ceiling is provisional.
 - This is policy for sessions invoking `coord-review`, `coord-orchestrate`, or
   `fleet-orchestrate`; it is not an Edda runtime rule imposed on every project.
 - Review immutable full SHAs; any push invalidates the prior verdict.

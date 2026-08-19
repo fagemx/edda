@@ -113,10 +113,11 @@ independent evidence, because a partial matrix is a real gap, not a formality.
 When exact-head CI is deterministically red the artifact is already blocked —
 finish the scoped audit and request changes rather than spending a full run
 that cannot change the verdict; when the red is environmental, re-run only the
-failed job. Run in the build lane your brief assigns, resolving it as
-`<lane root>/<lane name>`; never create an ad-hoc build directory. Outside a
-fleet, with no lane assigned, use the repository's own default build directory.
-A status, label, or draft flip is not a push and reruns nothing.
+failed job. When you build locally, run in the build lane your brief assigns,
+resolving it as `<lane root>/<lane name>`; never create an ad-hoc build
+directory. A review that compiles nothing needs no lane and reports `n/a`.
+Outside a fleet, with no lane assigned, use the repository's own default build
+directory. A status, label, or draft flip is not a push and reruns nothing.
 
 Record available elapsed, token, and tool cost. Stop after two consecutive
 cycles that change only non-product evidence/docs or harness material without
@@ -184,7 +185,7 @@ FOLLOW-UP ISSUE:
 Evidence:
 - RAN: <exact command/check and result on reviewed SHA>
 - READ: <reused result and its source SHA, or none>
-- Lane: <build lane used, or n/a for docs-only>
+- Lane: <build lane used, or n/a when nothing was built locally>
 - Receipt: <implementer gate receipt cited (SHA, gate set, toolchain, lane, result), or none>
 Cost: elapsed=<available/unknown>, tokens=<available/unknown>, tools=<available/unknown>
 Verdict: Changes Requested | LGTM

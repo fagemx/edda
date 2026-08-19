@@ -159,6 +159,25 @@ Key = (`repo`, `sha`, `gate`, `crates`, `toolchain`, `lockfile`). Rules:
 
 ### 4.3 Build lanes (machine level)
 
+**Scope of this section — narrower than the rest of the design.** Lanes govern
+*local compilation cache for a large Cargo workspace on one Windows
+workstation*. They are not fleet-wide infrastructure and not a cost of adopting
+edda: the installed binary is ~26 MB and a project ledger is 0.4–9 MB, while a
+long-lived `target/debug` for this 23-crate workspace measured 40.9 GB. Only
+the second number motivates anything here. A project that is not compiled on
+this machine needs no lane, and `lane.ps1` must be presented as a tool for
+local heavy builds rather than as a standard every fleet session adopts.
+
+**Footprint before ceilings.** That 40.9 GB is mostly reclaimable, not
+intrinsic: 21.6 GB sat in 509 `incremental` session directories, every one older
+than 24 hours — orphans from interrupted or killed builds that Cargo never
+collects — and 8.1 GB was Windows debug symbols (`edda.pdb` 310 MB against a
+51 MB `edda.exe`) because the workspace tunes `[profile.release]` only. Any
+fixed pool ceiling is therefore provisional until that footprint work lands;
+sizing a limit against the 194 GB pathology would refuse during normal
+operation, since one warm lane alone approaches 40 GB. Reclaim by age first,
+measure second, set a number third.
+
 - One lane root per machine, configurable (`FLEET_LANE_ROOT`, default
   the `LOCALAPPDATA` directory plus `\fleet-workstation\lanes`, written
   shell-appropriately — `$env:LOCALAPPDATA` in PowerShell, `$LOCALAPPDATA` in
@@ -168,8 +187,9 @@ Key = (`repo`, `sha`, `gate`, `crates`, `toolchain`, `lockfile`). Rules:
 - Fixed allowlist: `worker-1`, `worker-2`, `verifier`, `verifier-2`. Unknown
   names are refused. The controller's primary checkout keeps its normal
   `target/`; it is not a lane.
-- The controller assigns a lane in every brief. A session keeps its lane for
-  its lifetime; the same PR's verifier rounds reuse `verifier`; a lane changes
+- The controller assigns a lane in every brief **for a session that builds or
+  caches locally**; a session that compiles nothing gets no lane and reports
+  `n/a`. A session that has one keeps it for its lifetime; the same PR's verifier rounds reuse `verifier`; a lane changes
   hands only when the previous holder is finished or dead. Lanes are per
   concurrent session, never per round, SHA, or timestamp.
 - Verifier lanes and every `freeze` run set `CARGO_INCREMENTAL=0` (one-shot
@@ -189,10 +209,12 @@ Key = (`repo`, `sha`, `gate`, `crates`, `toolchain`, `lockfile`). Rules:
   build output. The tool never removes anything outside the lane root, never
   removes a path containing `.git`, and never touches worktrees, branches, or
   sources. Briefs say so verbatim.
-- Capacity: warn at 35 GB total, refuse to run gates at 50 GB
-  (`FLEET_LANE_CEILING_GB` overrides). Over the ceiling the tool prints the
-  pool table and the reclaim command and exits non-zero; capacity refusal has
-  no bypass flag. `doctor.ps1` reports the same numbers.
+- Capacity: **the tool ships with no default ceiling** (see the footprint note
+  above — a limit sized against the 194 GB pathology would refuse during normal
+  operation). `-Status` and `doctor.ps1` report the pool size; `FLEET_LANE_WARN_GB`
+  and `FLEET_LANE_CEILING_GB` are unset until an operator sets them from a
+  measured steady state. Once a ceiling exists, exceeding it prints the pool
+  table and the reclaim command and exits non-zero, with no bypass flag.
 
 ### 4.4 Brake authority — who stops it
 
@@ -224,7 +246,7 @@ Key = (`repo`, `sha`, `gate`, `crates`, `toolchain`, `lockfile`). Rules:
 | Shipped skills (all projects) | `crates/edda-cli/src/skills/coord-orchestrate.md` (brief step, review scope contract, traffic table); `coord-review.md` (gate paragraph, Round N template gains `Lane:` and `Receipt:` under Evidence) | carrier-neutral, no Cargo words |
 | Codex entry | `AGENTS.md` | two bullets: ladder + assigned lane, READ before RAN; never create ad-hoc build directories; "run the checks required by CLAUDE.md at the ladder level that matches the change" |
 | Project canonical | `.claude/CLAUDE.md` Testing Standards + Pre-commit Checklist | Cargo L0/L1 commands above; "Build lanes" subsection; checklist split into before-commit (L0) and before-freeze (L1) |
-| Machine tooling | fleet-workstation `scripts/lane.ps1` + `tests/lane.tests.ps1`; `doctor.ps1` lanes check; `adapters/codex/AGENTS.global.md` and `adapters/claude/CLAUDE.global.md` one bullet each; `fleet-workstation.json` / `source-lock.json` pin bump | tool contract in §4.6 |
+| Machine tooling (local heavy builds only) | fleet-workstation `scripts/lane.ps1` + tests; `doctor.ps1` lanes check; `adapters/codex/AGENTS.global.md` and `adapters/claude/CLAUDE.global.md` one bullet each, worded so a session that runs no local build knows the rule does not apply to it; `fleet-workstation.json` / `source-lock.json` pin bump | tool contract in §4.6 |
 | Operator's generic doc | `C:\ai_agent\EXECUTION-COORDINATION.md` | one axiom, only if the operator approves: regulate cost and reclamation, not only evidence |
 
 Existing distribution stays the single path: fleet-workstation pins an edda
@@ -261,17 +283,29 @@ lane.ps1 -Reclaim [-All] [-WhatIf]
 
 ## 5. Delivery slices
 
-Each slice gets its own implementation plan; PR-2 depends on PR-1 being
-merged because it pins that revision.
+Each slice gets its own implementation plan. **Order matters and changed after
+measurement:** shrink the footprint before building a tool that polices it, or
+the tool enforces a limit against an artificially inflated number.
 
 1. **PR-1 (edda)** — policy only: `.claude/CLAUDE.md`, `AGENTS.md`,
    `crates/edda-cli/src/skills/coord-orchestrate.md`, `coord-review.md`,
    `skills/fleet-orchestrate/SKILL.md`, `references/playbook.md`, plus this
    spec and its plan. Docs-only: gates are exact-head CI plus the docs/skill
-   consistency checks in §6; no local Cargo run.
-2. **PR-2 (fleet-workstation)** — `scripts/lane.ps1`, tests, `doctor.ps1`
+   consistency checks in §6; no local Cargo run. *(Merged as `91534f9`;
+   scope-correction follow-up in progress.)*
+2. **PR-1b (edda) — footprint, new and now ahead of the tool.** Reclaim stale
+   `incremental` sessions by age, and evaluate a debug-profile setting
+   (`debug = "line-tables-only"` or `debug = 1`) against a measured before/after
+   in an isolated directory. Both are the difference between a ~40 GB and a
+   ~10 GB steady state, and neither needs a tool. Only after this does a pool
+   ceiling mean anything.
+3. **PR-2 (fleet-workstation)** — `scripts/lane.ps1`, tests, `doctor.ps1`
    lanes check, adapter bullets, docs page, pin bump to the edda revision that
-   contains PR-1, `source-lock.json` digests, `update.ps1` verified.
+   contains PR-1, `source-lock.json` digests, `update.ps1` verified. Positioned
+   as a tool for machines that compile a large workspace locally, not as
+   default workstation infrastructure: `bootstrap.ps1` installs it without
+   implying every session uses it, and its docs page opens with the scope
+   statement from §4.3. Thresholds come from PR-1b's measurement.
 3. Follow-ups (issues, not this work): fleet-playbook `fleet-review` /
    `fleet-pr-loop` "re-run gates" wording; `edda gate` native receipts;
    Bash twin of `lane.ps1`; repo-level gate profile override; operator
@@ -325,7 +359,10 @@ merged because it pins that revision.
 ## 8. Decisions taken in this design (defaults, revisable in the plan)
 
 - Lane allowlist: `worker-1`, `worker-2`, `verifier`, `verifier-2`.
-- Thresholds: warn 35 GB, refuse 50 GB, env-overridable.
+- Thresholds: **none by default.** `FLEET_LANE_WARN_GB` and
+  `FLEET_LANE_CEILING_GB` are operator-set from a measured steady state; the
+  earlier 35/50 GB pair was drawn from the pathology, not from a healthy
+  lane, and is superseded (§4.3).
 - Receipt store: `<lane-root>\receipts.jsonl` plus `edda note --tag gate`
   when `.edda/` exists.
 - Verifier lanes always `CARGO_INCREMENTAL=0`; worker lanes only for `freeze`.

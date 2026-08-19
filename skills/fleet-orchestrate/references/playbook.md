@@ -199,15 +199,16 @@ Owned paths/symbols; forbidden paths
 Dependencies and highest durable d-NNN ruling
 Required worktree/branch and claim label
 Test-first acceptance criteria and exact gates
-Build lane: <assigned name from the fixed pool> at <absolute lane root>
+Build lane (only when the session builds or caches locally; write "n/a"
+  otherwise): <assigned name from the fixed pool> at <absolute lane root>
   (the worker resolves its build directory as <lane root>/<lane name> and never
-  invents one; if this line is missing, ask before building)
+  invents one; if this line is missing and you are about to build, ask first)
 Verification budget: focused gates on touched units while iterating; the full
   gate set once per frozen full SHA with a gate receipt; READ receipts and
   exact-head CI before any RAN; name the coverage the project's CI genuinely
   lacks, since that is the reviewer's legitimate reason to run it
-Cleanup authority: lane build cache is disposable; worktrees, branches, and
-  sources are never deleted
+Cleanup authority: build cache is disposable and stale cache should be
+  reclaimed by age; worktrees, branches, and sources are never deleted
 Drift rule: if HEAD differs, satisfy intent against HEAD and report full SHA
 Done: pushed candidate/PR, frozen full SHA, receipt, no merge
 ```
@@ -259,8 +260,10 @@ intent + basis SHA + symbol anchor + drift rule.
 3. Avoid reading full diffs mid-flight; consume status, receipts, blocker
    reports, and verifier criteria until formal review time.
 4. Never reinterpret a receipt as acceptance.
-5. Assign build lanes from the fixed pool, put the verification budget and
-   cleanup authority in every brief, and route over-verification (a second RAN
+5. Put the verification budget and cleanup authority in every brief, and
+   assign a build lane from the fixed pool to every session that builds or
+   caches locally (a session that builds nothing needs none). Route
+   over-verification (a second RAN
    for an already-receipted SHA without a reason, full gates for a docs-only
    push, an ad-hoc build directory) as a process finding — cost line,
    `FOLLOW-UP ISSUE`, corrected brief — never as a reason to block a
