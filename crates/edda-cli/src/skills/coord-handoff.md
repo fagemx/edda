@@ -64,15 +64,25 @@ Include:
 
 ### Step 5: Scope Release
 
-Where the Claude Code hooks are wired, unclaim happens automatically on
-session end via the SessionEnd hook — nothing to do.
+Where host bridge hooks are wired, unclaim happens automatically on session
+end — nothing to do.
 
-Where they are not (claims made from a bare CLI, CI, or a host without the
-bridge hooks), the claim outlives the session: there is currently no
-`edda unclaim` verb to release it by hand (GH-455). In that case, say so in
-your handoff summary — peers reading the board should know the claim is dead
-even though it still folds. Enforcement stays safe either way: every consumer
-joins claims against live heartbeats.
+Where they are not (claims made from a bare CLI, CI, or a host without bridge
+hooks), release the scope explicitly — and **pass the session id**:
+
+```bash
+edda unclaim --session <id>
+```
+
+The id is the `session:` line `edda claim` printed; `edda peers --json` also
+carries it. Plain `edda peers` will not: it lists live heartbeats, which a
+bare-CLI claim does not have, and it abbreviates ids. Without hooks there is no
+heartbeat to infer from either, so bare `edda unclaim` falls back to the
+session `cli-cli` rather than the `cli-<label>` your claim created: it exits 0,
+prints a reassuring line, and releases nothing (GH-455).
+
+Enforcement stays safe either way: every consumer joins claims against live
+heartbeats, so a claim left behind by a dead session does not block a peer.
 
 ## Output Format
 
