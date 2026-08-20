@@ -439,7 +439,16 @@ mod tests {
         {
             let script = dir.path().join("fake-app-server.ps1");
             std::fs::write(&script, powershell_fake_script(scenario))?;
-            let mut command = Command::new("powershell.exe");
+            // Absolute where the platform offers a reliable one, so a doctored
+            // PATH cannot choose the shell this harness runs. `%SystemRoot%` is
+            // set on every Windows install; falling back to PATH keeps the
+            // helper working if it is somehow absent (GH-482).
+            let mut command = match std::env::var("SystemRoot") {
+                Ok(root) => Command::new(format!(
+                    "{root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+                )),
+                Err(_) => Command::new("powershell.exe"),
+            };
             command.args([
                 "-NoLogo",
                 "-NoProfile",
@@ -463,11 +472,13 @@ mod tests {
             // the script read-only, so that window cannot bite.
             let script = dir.path().join("fake-app-server.sh");
             std::fs::write(&script, shell_fake_script(scenario))?;
-            // Absolute, where the Windows branch above lets PATH resolve
-            // powershell.exe. The asymmetry is deliberate: `/bin/sh` is
-            // guaranteed by POSIX at that path, so resolving it through PATH
-            // would only add a way for a doctored PATH to choose the shell
-            // this harness runs (GH-482).
+            // Absolute for the same reason as the Windows branch above. Note
+            // POSIX does *not* fix this path -- the `sh` page's Application
+            // Usage says so outright and points applications at `getconf PATH`,
+            // and Solaris put the conformant shell under /usr/xpg4/bin. What
+            // makes it safe here is narrower: every platform this harness runs
+            // on has /bin/sh, so pinning it costs portability we do not need
+            // and removes a lookup we do not control (GH-482).
             let mut command = Command::new("/bin/sh");
             command.arg(script);
             Ok((dir, command))
@@ -566,12 +577,23 @@ mod tests {
     /// arguments -- BusyBox does not accept `-o state= -p`, and the two cases
     /// are indistinguishable from the exit status alone. On such a system a
     /// caller waiting for exit would pass without the process having gone
-    /// anywhere. The pre-existing `kill -0` probe had the same blind spot; it
-    /// is recorded rather than fixed because `ci.yml` runs only the three
+    /// anywhere.
+    ///
+    /// The `kill -0` probe this replaced shared the *class* of flaw and was in
+    /// one way worse -- it swallowed spawn failure too. But on BusyBox, the
+    /// trigger named above, the two do not match: BusyBox `kill` parses numeric
+    /// signals, so `kill -0` worked there, while its `ps` rejects these
+    /// arguments twice over (the state column is `stat`, and an unknown `-o`
+    /// column is fatal; `-p` is not in its base option set). So the switch to
+    /// `ps` made this case reachable on exactly the platform class the
+    /// deferral cites, rather than inheriting it.
+    ///
+    /// It is recorded rather than fixed because `ci.yml` runs only the three
     /// GitHub-hosted images, none of them musl or Alpine and none in a
-    /// container. Distinguishing them (treating a non-zero exit that also
-    /// wrote to stderr as a probe failure) is worth doing the day such a job
-    /// is added (GH-482).
+    /// container -- so no job can reach it today. Distinguishing the two
+    /// (treating a non-zero exit that also wrote to stderr as a probe failure)
+    /// is worth doing the day such a job is added, and this note is what should
+    /// make that obvious then (GH-482).
     fn process_is_alive(pid: u32) -> anyhow::Result<bool> {
         #[cfg(windows)]
         {
