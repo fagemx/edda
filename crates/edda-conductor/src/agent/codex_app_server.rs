@@ -463,6 +463,11 @@ mod tests {
             // the script read-only, so that window cannot bite.
             let script = dir.path().join("fake-app-server.sh");
             std::fs::write(&script, shell_fake_script(scenario))?;
+            // Absolute, where the Windows branch above lets PATH resolve
+            // powershell.exe. The asymmetry is deliberate: `/bin/sh` is
+            // guaranteed by POSIX at that path, so resolving it through PATH
+            // would only add a way for a doctored PATH to choose the shell
+            // this harness runs (GH-482).
             let mut command = Command::new("/bin/sh");
             command.arg(script);
             Ok((dir, command))
@@ -555,6 +560,18 @@ mod tests {
     /// absent" is not something drop can guarantee -- "the process no longer
     /// runs" is. A zombie has already terminated, so it does not count as
     /// alive; a child that drop failed to kill still does.
+    ///
+    /// The unix probe reads a non-zero `ps` exit as "gone". That is right when
+    /// `ps` ran and found nothing, and wrong when `ps` itself rejected the
+    /// arguments -- BusyBox does not accept `-o state= -p`, and the two cases
+    /// are indistinguishable from the exit status alone. On such a system a
+    /// caller waiting for exit would pass without the process having gone
+    /// anywhere. The pre-existing `kill -0` probe had the same blind spot; it
+    /// is recorded rather than fixed because `ci.yml` runs only the three
+    /// GitHub-hosted images, none of them musl or Alpine and none in a
+    /// container. Distinguishing them (treating a non-zero exit that also
+    /// wrote to stderr as a probe failure) is worth doing the day such a job
+    /// is added (GH-482).
     fn process_is_alive(pid: u32) -> anyhow::Result<bool> {
         #[cfg(windows)]
         {
@@ -764,7 +781,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_concrete_client_makes_child_pid_disappear() -> anyhow::Result<()> {
+    async fn dropping_concrete_client_stops_the_child_process() -> anyhow::Result<()> {
         let (_fake, server) = spawn_fake_app_server(FakeScenario::Idle).await?;
         let pid = server.child.id().context("fake app-server has no PID")?;
 
