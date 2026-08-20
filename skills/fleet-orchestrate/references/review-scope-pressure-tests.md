@@ -95,8 +95,8 @@ building outside the assigned lane fails.
 ## 9. Coverage the project's CI does not have
 
 The frozen SHA has a green receipt and green exact-head CI, but the change
-touches behavior on a platform the CI matrix only partially covers (in this
-repository, Windows tests only a 7-crate subset).
+touches behavior on a platform the project's CI matrix only partially covers —
+one OS running a subset of the suite, say, while the others run all of it.
 
 **Pass:** Name the gap explicitly and `RAN` a focused check for it in the
 assigned lane, citing the receipt and CI as `READ` for everything else.

@@ -63,13 +63,14 @@ relevant diff/docs/evidence checks and exact-head CI as `RAN`.
 Verify once per frozen artifact. The implementer runs the full gate set once
 per frozen full SHA — in the assigned build lane where the session builds
 locally — and records a gate receipt (SHA, gate set, toolchain, lane or n/a,
-result). The reviewer READs that receipt and
-exact-head CI, RANs only focused or adversarial checks they do not cover, and
-states the reason for any full rerun (no receipt, red or absent CI, grounds to
-distrust the receipt, or coverage the project's CI genuinely lacks — know that
-gap before you cite CI as independent evidence). Deterministically red CI
-already blocks the artifact: audit and request changes rather than spending a
-full run, and re-run only the failed job when the red is environmental. Focused
+result). The reviewer READs that receipt and exact-head CI, RANs only focused
+or adversarial checks they do not cover, and states the reason for any full
+rerun (no receipt, red or absent CI, or grounds to distrust the receipt). Know
+what the project's CI genuinely lacks before citing it as independent evidence;
+a gap earns a focused check of the uncovered surface, not a full rerun.
+Deterministically red CI already blocks the artifact: audit and request changes
+rather than spending a full run, and re-run only the failed job when the red is
+environmental. Focused
 gates on touched units while iterating, never the full set per edit. A status,
 label, or draft flip is not a push and reruns nothing.
 

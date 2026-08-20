@@ -103,13 +103,22 @@ blobs, base, and toolchain are unchanged, reuse still-applicable code results
 as `READ` with their source SHA; run only relevant diff/docs/evidence checks
 and exact-head CI as `RAN`. Never report a reused result as rerun.
 
+An implementer's own verification counts are not `READ` evidence. A gate
+receipt and exact-head CI are artifacts you can inspect; "I grepped and found
+nothing" is a claim about work you did not see. Re-derive anything a finding
+rests on, and say which of the implementer's statements you could not
+corroborate — including the ones you believe. A response that asserts a fix it
+did not make, or a count the artifact does not support, reads exactly like one
+that is right.
+
 Verify once per frozen artifact. When the implementer's gate receipt (SHA,
 gate set, toolchain, lane, result) matches the reviewed SHA and exact-head CI
 is green, cite both as `READ` and RAN only the focused or adversarial checks
 they do not cover. A full local rerun requires a stated reason: no receipt,
-red or absent CI, grounds to distrust the receipt, or coverage the project's CI
-genuinely lacks — establish what CI actually runs before citing it as
-independent evidence, because a partial matrix is a real gap, not a formality.
+red or absent CI, or grounds to distrust the receipt. Establish what CI actually
+runs before citing it as independent evidence, because a partial matrix is a
+real gap, not a formality — but a gap earns a focused check of the surface it
+leaves uncovered, never a full rerun.
 When exact-head CI is deterministically red the artifact is already blocked —
 finish the scoped audit and request changes rather than spending a full run
 that cannot change the verdict; when the red is environmental, re-run only the

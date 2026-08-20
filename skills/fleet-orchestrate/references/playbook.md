@@ -206,7 +206,8 @@ Build lane (only when the session builds or caches locally; write "n/a"
 Verification budget: focused gates on touched units while iterating; the full
   gate set once per frozen full SHA with a gate receipt; READ receipts and
   exact-head CI before any RAN; name the coverage the project's CI genuinely
-  lacks, since that is the reviewer's legitimate reason to run it
+  lacks, which earns the reviewer a focused check of that surface rather than a
+  full rerun
 Cleanup authority: build cache is disposable and stale cache should be
   reclaimed by age; worktrees, branches, and sources are never deleted
 Drift rule: if HEAD differs, satisfy intent against HEAD and report full SHA
@@ -252,6 +253,10 @@ intent + basis SHA + symbol anchor + drift rule.
 7. Keep one verifier identity per delivery candidate: rounds resume the same
    session and lane; a replacement reads receipts and CI before running
    anything.
+8. Re-derive what a finding rests on. Receipts and CI are artifacts; an
+   implementer's reported counts are claims about work you did not watch.
+   Record which of their statements you could not corroborate, including the
+   ones you believe.
 
 ### Controller contract
 
@@ -354,7 +359,7 @@ Select gates proportionally:
 |---|---|
 | Code/product blob, base SHA, or toolchain changed | Run the relevant code gates for the changed risk surface. |
 | Only docs/evidence changed; code/product blobs, base, and toolchain unchanged | Reuse still-applicable code gates as `READ` with source SHA; `RAN` only relevant diff/docs/evidence checks and exact-head CI. |
-| Code changed; a gate receipt for this exact SHA, gate set, and toolchain exists and exact-head CI is green | READ the receipt and CI; `RAN` only focused or adversarial checks they do not cover. Full rerun only with a stated reason (no receipt, red or absent CI, grounds to distrust the receipt). |
+| Code changed; a gate receipt for this exact SHA, gate set, and toolchain exists and exact-head CI is green | READ the receipt and CI; `RAN` only focused or adversarial checks they do not cover, including any surface the project's CI does not reach. Full rerun only with a stated reason (no receipt, red or absent CI, grounds to distrust the receipt) — a coverage gap earns a focused check for that gap, not a full rerun. |
 | Status, label, or draft flip without a push | Not a new artifact; nothing reruns. |
 | Exact-head CI is deterministically red | The SHA is already blocked; finish the scoped audit and request changes instead of spending a full local run that cannot change the verdict. Rerun only failed jobs when logs show a transient failure, and run the missing full set only once the artifact is otherwise acceptable. |
 

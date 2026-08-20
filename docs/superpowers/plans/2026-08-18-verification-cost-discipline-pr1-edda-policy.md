@@ -85,7 +85,11 @@ cargo test --workspace # All tests
 ```
 ````
 
-Replace it with:
+Replace it with — and note that the ladder paragraph quoted below says CI runs
+full workspace gates on three operating systems, which is **false** and was
+corrected in Round 1 (Windows tests a 7-crate subset). The block is reproduced
+as written at `738c5ce`; see "Round 1 review amendments" at the end of this
+file:
 
 ````markdown
 ## Testing Standards
@@ -987,7 +991,12 @@ record; the **spec is the living contract**. What changed:
    full workspace gates on three operating systems. It does not: Windows tests
    only a 7-crate subset (`.github/workflows/ci.yml`, GH-433). `.claude/CLAUDE.md`
    now carries a CI coverage table, L2 names the uncovered surface as a
-   legitimate reason to RAN, and spec §1/§4.1 match.
+   legitimate reason to RAN, and spec §1/§4.1 match. *(Narrowed by a later
+   round, GH-498: the gap earns a **focused** check of the uncovered surface,
+   never a full local rerun; and what Windows leaves unexercised is those
+   crates' own test targets, not their libraries — `edda` depends on the whole
+   workspace, so `cargo test -p edda` links every crate. The spec carries the
+   current wording.)*
 2. **Deterministic-red clause distributed to all six carriers** (it had landed
    in three), and pressure fixture 7 — which still demanded a full run for red
    CI — split into fixture 7 (deterministic → do not run) and fixture 8
