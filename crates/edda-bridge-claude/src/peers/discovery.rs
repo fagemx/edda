@@ -166,6 +166,9 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
 ///
 /// Used by CLI commands (`edda decide`, etc.) to resolve session identity
 /// when `EDDA_SESSION_ID` env var is not set.
+///
+/// This cannot tell the caller apart from a lone peer: a process has no way to
+/// prove a heartbeat is its own (GH-488).
 pub fn infer_session_id(project_id: &str) -> Option<(String, String)> {
     let state_dir = edda_store::project_dir(project_id).join("state");
     let stale_threshold = stale_secs();

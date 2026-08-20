@@ -103,6 +103,21 @@ $ edda unclaim --session cli-nobody
 ! holds no claim
 ```
 
+In CI, where teardown runs whether or not a claim was made, add `--if-claimed`
+so having nothing to release is not a failure. It still names which of the two
+nothings it found — no claim it could identify as yours, or a session you named
+that holds none — because a blanket success is the false report this verb exists
+to remove:
+
+```bash edda-doctest
+$ edda unclaim --if-claimed
+> Released nothing
+$ edda claim "auth" --paths "src/auth/*"
+> session: cli-auth
+$ edda unclaim --session cli-nobody --if-claimed
+> Nothing to unclaim for session cli-nobody
+```
+
 `edda peers --json` carries the id too, under `claims[].session_id`. Plain
 `edda peers` does not, because it lists live heartbeats and a bare-CLI claim
 has none:

@@ -170,9 +170,12 @@ enum Command {
     },
     /// Release this session's coordination scope
     Unclaim {
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (inferred from a sole live session; required otherwise)
         #[arg(long)]
         session: Option<String>,
+        /// Exit 0 when there is nothing to release, for unconditional teardown
+        #[arg(long)]
+        if_claimed: bool,
     },
     /// Send a request to another session (shortcut for `bridge claude request`)
     Request {
@@ -1060,7 +1063,10 @@ fn main() -> anyhow::Result<()> {
             paths,
             session,
         } => cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref()),
-        Command::Unclaim { session } => cmd_bridge::unclaim(&repo_root, session.as_deref()),
+        Command::Unclaim {
+            session,
+            if_claimed,
+        } => cmd_bridge::unclaim(&repo_root, session.as_deref(), if_claimed),
         Command::Request {
             to,
             message,
