@@ -656,6 +656,53 @@ pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The lines `claim` prints about what a new claim did to the session's old one.
+///
+/// Split out so the strings — and, more importantly, the *absence* of a
+/// `released:` line — can be asserted. Reporting a release that did not happen
+/// is the same false success this disclosure exists to remove.
+fn claim_disclosure(
+    previous: Option<&edda_bridge_claude::peers::ClaimEntry>,
+    label: &str,
+    paths: &[String],
+) -> Vec<String> {
+    let Some(previous) = previous else {
+        return vec![format!("Claimed scope: {label}")];
+    };
+
+    // Only paths the new claim no longer covers were actually let go. Naming
+    // `previous.paths` wholesale said "released" about paths this very command
+    // had just re-claimed — and an idempotent re-claim hits exactly that, since
+    // tier 4 mints a deterministic `cli-<label>` and board claims never expire,
+    // so a bare-shell restart re-runs the same command against its own
+    // surviving claim.
+    let released: Vec<&str> = previous
+        .paths
+        .iter()
+        .filter(|p| !paths.contains(p))
+        .map(String::as_str)
+        .collect();
+    let gained = paths.iter().any(|p| !previous.paths.contains(p));
+
+    let mut lines = Vec::new();
+    if previous.label != label {
+        lines.push(format!(
+            "Claimed scope: {label} (replaces this session's earlier claim on {})",
+            previous.label
+        ));
+    } else if released.is_empty() && !gained {
+        lines.push(format!("Re-claimed scope: {label} (unchanged)"));
+    } else {
+        lines.push(format!(
+            "Re-claimed scope: {label} (previous paths replaced)"
+        ));
+    }
+    if !released.is_empty() {
+        lines.push(format!("  released: {}", released.join(", ")));
+    }
+    lines
+}
+
 /// `edda bridge claude claim <label>` — claim a coordination scope
 ///
 /// The board folds claims into one per session, so a second claim replaces the
@@ -679,20 +726,8 @@ pub fn claim(
         .find(|c| c.session_id == session_id);
 
     edda_bridge_claude::peers::write_claim(&project_id, &session_id, label, paths);
-    if let Some(previous) = replaced {
-        if previous.label == label {
-            println!("Re-claimed scope: {label} (previous paths replaced)");
-        } else {
-            println!(
-                "Claimed scope: {label} (replaces this session's earlier claim on {})",
-                previous.label
-            );
-        }
-        if !previous.paths.is_empty() {
-            println!("  released: {}", previous.paths.join(", "));
-        }
-    } else {
-        println!("Claimed scope: {label}");
+    for line in claim_disclosure(replaced.as_ref(), label, paths) {
+        println!("{line}");
     }
     if !paths.is_empty() {
         println!("  paths: {}", paths.join(", "));
@@ -2301,6 +2336,93 @@ mod tests {
         assert!(body.contains("\"from_label\":\"auth\""), "{body}");
         assert!(body.contains("\"to_label\":\"billing\""), "{body}");
         assert!(body.contains("\"message\":\"need invoice type\""), "{body}");
+    }
+
+    fn prior_claim(label: &str, paths: &[&str]) -> edda_bridge_claude::peers::ClaimEntry {
+        edda_bridge_claude::peers::ClaimEntry {
+            session_id: "s1".into(),
+            label: label.into(),
+            paths: paths.iter().map(|p| (*p).to_string()).collect(),
+            ts: "2026-08-20T00:00:00Z".into(),
+        }
+    }
+
+    fn owned(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|p| (*p).to_string()).collect()
+    }
+
+    // The disclosure lines are asserted here rather than only through the board,
+    // because a test that reads `compute_board_state` passes whether or not
+    // anything was printed -- the fold it checks pre-dates this change.
+
+    #[test]
+    fn a_first_claim_reports_no_replacement() {
+        assert_eq!(
+            claim_disclosure(None, "auth", &owned(&["src/auth/*"])),
+            vec!["Claimed scope: auth"]
+        );
+    }
+
+    #[test]
+    fn a_new_label_names_the_claim_it_replaced() {
+        let previous = prior_claim("auth", &["src/auth/*"]);
+        assert_eq!(
+            claim_disclosure(Some(&previous), "api", &owned(&["src/api/*"])),
+            vec![
+                "Claimed scope: api (replaces this session's earlier claim on auth)",
+                "  released: src/auth/*",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_identical_re_claim_releases_nothing() {
+        // The regression this verb exists to prevent, in its own image: the
+        // first version printed "released: src/api/*" for a command that had
+        // just re-claimed `src/api/*`. A bare-shell restart re-running its own
+        // command hits this, so it is the common case, not a corner.
+        let previous = prior_claim("api", &["src/api/*"]);
+        assert_eq!(
+            claim_disclosure(Some(&previous), "api", &owned(&["src/api/*"])),
+            vec!["Re-claimed scope: api (unchanged)"],
+            "an unchanged re-claim reports no release at all"
+        );
+    }
+
+    #[test]
+    fn narrowing_reports_only_the_path_it_gave_up() {
+        let previous = prior_claim("api", &["src/api/*", "src/api/v2/*"]);
+        assert_eq!(
+            claim_disclosure(Some(&previous), "api", &owned(&["src/api/v2/*"])),
+            vec![
+                "Re-claimed scope: api (previous paths replaced)",
+                "  released: src/api/*",
+            ],
+            "src/api/v2/* is still claimed, so it is not released"
+        );
+    }
+
+    #[test]
+    fn widening_reports_a_change_but_no_release() {
+        let previous = prior_claim("api", &["src/api/*"]);
+        assert_eq!(
+            claim_disclosure(
+                Some(&previous),
+                "api",
+                &owned(&["src/api/*", "src/api/v3/*"])
+            ),
+            vec!["Re-claimed scope: api (previous paths replaced)"]
+        );
+    }
+
+    #[test]
+    fn a_relabel_that_keeps_every_path_releases_nothing() {
+        let previous = prior_claim("auth", &["src/auth/*"]);
+        assert_eq!(
+            claim_disclosure(Some(&previous), "identity", &owned(&["src/auth/*"])),
+            vec!["Claimed scope: identity (replaces this session's earlier claim on auth)"],
+            "the label moved but the scope did not, so nothing was released"
+        );
     }
 
     #[test]

@@ -49,6 +49,27 @@ Guidelines:
 - Paths should use glob patterns (e.g., `crates/edda-store/*`)
 - If auto-claim already set a scope from your edits, show it and ask if manual override is needed
 
+A session holds **one** claim, so claiming again replaces the previous one
+rather than adding to it. That is how a scope is narrowed or moved, and how a
+restart re-claims — so the command says what it did to the old claim, and names
+only the paths it actually gave up:
+
+```bash edda-doctest
+$ edda claim "auth" --paths "src/auth/*" --session s1
+> Claimed scope: auth
+$ edda claim "api" --paths "src/api/*" --session s1
+> Claimed scope: api (replaces this session's earlier claim on auth)
+> released: src/auth/*
+$ edda claim "api" --paths "src/api/*" --session s1
+> Re-claimed scope: api (unchanged)
+$ edda claim "api" --paths "src/api/v2/*" --session s1
+> Re-claimed scope: api (previous paths replaced)
+> released: src/api/*
+```
+
+Re-running the same claim releases nothing — it is the same scope, not a new
+one. A peer's claim is untouched either way; the replacement is per session.
+
 ### Step 5: Acknowledge Requests
 
 For each pending request addressed to your label:
