@@ -23,6 +23,12 @@
 //! `$` runs a command, `>` asserts it succeeded and printed the text, and `!`
 //! asserts it failed with the text. Unmarked blocks are prose and are ignored,
 //! so existing examples do not have to be converted at once.
+//!
+//! Ignoring unmarked blocks is also how coverage could disappear: demoting a
+//! fence back to ```` ```bash ```` is a one-token edit that reads as cosmetic
+//! and silently stops that block from running. The steps it leaves behind are
+//! what give it away, so a `$ ` line inside an unmarked block is an error
+//! rather than prose.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -103,6 +109,36 @@ fn parse_blocks(markdown: &str) -> Vec<Vec<Step>> {
     blocks
 }
 
+/// Find doctest steps stranded in a block that is no longer marked as one.
+///
+/// `parse_blocks` ignores unmarked fences by design, so a demoted fence would
+/// otherwise drop its assertions with the suite still green. Nothing else in a
+/// skill starts a line with `$ `, so its presence outside a doctest fence means
+/// the marker was lost rather than that the block is prose.
+fn find_demoted_steps(markdown: &str) -> Vec<String> {
+    let mut stranded = Vec::new();
+    let mut in_fence = false;
+    let mut is_doctest = false;
+
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            if in_fence {
+                in_fence = false;
+                is_doctest = false;
+            } else {
+                in_fence = true;
+                is_doctest = trimmed == "```bash edda-doctest";
+            }
+            continue;
+        }
+        if in_fence && !is_doctest && trimmed.starts_with("$ ") {
+            stranded.push(trimmed.to_string());
+        }
+    }
+    stranded
+}
+
 struct Outcome {
     ok: bool,
     text: String,
@@ -165,6 +201,17 @@ fn shipped_skill_examples_still_do_what_they_say() {
         }
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let markdown = std::fs::read_to_string(&path).expect("read skill");
+
+        // Checked before the emptiness test: a file whose only doctest fence
+        // was demoted parses to zero blocks, which is precisely the silent
+        // loss this guard exists to make loud.
+        let stranded = find_demoted_steps(&markdown);
+        assert!(
+            stranded.is_empty(),
+            "{name}: doctest steps sit in a block that is not marked \
+             ```bash edda-doctest, so they never run: {stranded:?}"
+        );
+
         let blocks = parse_blocks(&markdown);
         if blocks.is_empty() {
             continue;
@@ -231,6 +278,32 @@ fn shipped_skill_examples_still_do_what_they_say() {
         dir.display()
     );
     println!("skill doctests: {checked} assertions across {files_with_blocks:?}");
+}
+
+#[test]
+fn a_demoted_fence_is_an_error_rather_than_silence() {
+    let demoted = "```bash\n$ edda claim \"auth\"\n> session: cli-auth\n```\n";
+    assert_eq!(
+        find_demoted_steps(demoted).len(),
+        1,
+        "a doctest block whose marker was removed must be reported"
+    );
+    assert!(
+        parse_blocks(demoted).is_empty(),
+        "and it must indeed have stopped running, which is why reporting matters"
+    );
+
+    let marked = "```bash edda-doctest\n$ edda claim \"auth\"\n> session: cli-auth\n```\n";
+    assert!(
+        find_demoted_steps(marked).is_empty(),
+        "a properly marked block is not stranded"
+    );
+
+    let prose = "```bash\nedda claim \"auth\" --paths \"src/a/*\"\n```\n";
+    assert!(
+        find_demoted_steps(prose).is_empty(),
+        "an ordinary example without doctest steps stays prose"
+    );
 }
 
 #[test]
