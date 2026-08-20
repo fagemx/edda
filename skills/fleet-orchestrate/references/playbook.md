@@ -206,7 +206,8 @@ Build lane (only when the session builds or caches locally; write "n/a"
 Verification budget: focused gates on touched units while iterating; the full
   gate set once per frozen full SHA with a gate receipt; READ receipts and
   exact-head CI before any RAN; name the coverage the project's CI genuinely
-  lacks, since that is the reviewer's legitimate reason to run it
+  lacks, which earns the reviewer a focused check of that surface rather than a
+  full rerun
 Cleanup authority: build cache is disposable and stale cache should be
   reclaimed by age; worktrees, branches, and sources are never deleted
 Drift rule: if HEAD differs, satisfy intent against HEAD and report full SHA

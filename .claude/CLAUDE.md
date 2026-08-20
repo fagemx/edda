@@ -143,12 +143,16 @@ them independently on every push.
 | Test (Linux, macOS) | `cargo test --workspace` — all 23 crates |
 | Test (Windows) | **only 7 crates** — `edda-store`, `edda-ledger`, `edda-search-fts`, `edda-transcript`, `edda-bridge-claude`, `edda-conductor`, `edda` (Windows build/link is ~5x slower; the subset is derived from process-spawn, file-lock, and mmap criteria — GH-433) |
 
-So on Windows every crate is still **type-checked and linted** (Clippy is
-workspace-wide on all three OSes), but **only those 7 crates are linked and
-have their tests run**. Two kinds of Windows-only defect in the other 16 are
-therefore caught by no CI job: a *runtime* one — a path, a file lock, a spawned
-process, a temp directory — and a *link* one, since `cargo clippy` stops before
-linking. That is a
+So on Windows every crate is **type-checked and linted** (Clippy is
+workspace-wide on all three OSes), and every crate's *library* is also linked,
+because `edda` depends on the whole workspace — `crates/edda-cli/Cargo.toml`
+names 21 of the other 22 directly and reaches `edda-ingestion` through
+`edda-serve`, so building `-p edda` pulls all of them into its binaries.
+
+What Windows does **not** exercise is the other 16 crates' own test targets:
+their runtime behavior goes unrun, and their test-only code and dev-dependencies
+are never linked. So a Windows-only defect in a path, a file lock, a spawned
+process, or a temp directory in those crates is caught by no CI job. That is a
 stated reason for the verifier to run it locally, and it is why the L1 receipt
 from a Windows workstation is load-bearing rather than redundant.
 

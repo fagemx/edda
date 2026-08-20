@@ -34,8 +34,9 @@ and multi-agent coordination.
   SHA with a recorded receipt (L1); reviewers READ that receipt and exact-head
   CI and RAN only what they do not cover (L2); a draft, label, or status flip
   is not a push, so nothing reruns (L3). State the reason whenever you rerun a
-  recorded gate. Know what this repository's CI actually covers — Windows tests
-  only a 7-crate subset — and treat a real gap as a legitimate reason to RAN.
+  recorded gate. Know what this repository's CI actually covers — Windows runs
+  tests for only 7 crates — and treat a real gap as a reason to RAN a focused
+  check of the uncovered surface, not the full set.
   Deterministically red CI already blocks the SHA: audit and request changes
   instead of spending a full run; re-run only the failed job when the red is
   environmental.

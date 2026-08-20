@@ -99,14 +99,14 @@ Non-goals:
 |---|---|---|---|
 | L0 iterate | worker while editing | focused gates on touched units, in the session's own lane, incremental cache on | workspace gates per edit |
 | L1 freeze | worker, once per frozen full SHA before push/PR update | full gate set on the committed SHA in the session's lane; receipt recorded | freezing a dirty tree; a second L1 run for the same key |
-| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN adversarial/focused checks and anything neither covers, including behavior on a platform the CI matrix only partially covers | full local rerun without a stated reason (missing receipt, red/absent CI, receipt suspected invalid, real CI coverage gap); a full run against deterministically red CI, which cannot change the verdict |
+| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN adversarial/focused checks and anything neither covers, including behavior on a platform the CI matrix only partially covers | full local rerun without a stated reason (missing receipt, red/absent CI, receipt suspected invalid); a full run for a coverage gap, which earns a focused check of that surface instead; a full run against deterministically red CI, which cannot change the verdict |
 | L3 pre-merge | controller / merge authority | READ exact-head CI + final current-head LGTM; RAN only a merge-conflict check against current base | any rerun triggered by a status/label/draft flip — that is not a push |
 
 Independence is preserved **only as far as the project's CI actually reaches**,
 and receipts are keyed to the immutable SHA. This is a precondition of the
 ladder, not a given: before a reviewer may cite CI as independent evidence, the
 project must state what its CI covers and what it does not, and the uncovered
-surface is a standing reason to RAN. In this repository the gap is Windows
+surface is a standing reason to RAN a focused check of it. In this repository the gap is Windows
 tests outside the 7-crate subset (§1). A project whose CI covers less gets less
 independence from this ladder, and its L2 row must say so.
 

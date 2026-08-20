@@ -75,7 +75,8 @@ when changing or validating review policy.
   receipt and exact-head CI and RAN only what they do not cover, stating the
   reason for any full rerun. A status, label, or draft flip is not a push.
 - Know what the project's CI actually covers before citing it as independent
-  evidence; a real coverage gap is a legitimate reason to RAN. Deterministically
+  evidence; a real gap earns a focused check of the uncovered surface, never a
+  full rerun. Deterministically
   red CI already blocks the artifact — audit and request changes instead of
   spending a full run; re-run only the failed job when the red is environmental.
 - A reviewer re-derives; an implementer's verification counts are not evidence.
