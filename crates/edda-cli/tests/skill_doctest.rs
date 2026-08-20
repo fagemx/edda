@@ -26,10 +26,15 @@
 //!
 //! Ignoring unmarked blocks is also how coverage could disappear: demoting a
 //! fence back to ```` ```bash ```` is a one-token edit that reads as cosmetic
-//! and silently stops that block from running. The steps it leaves behind are
-//! what give it away, so a `$ edda …` line inside an unmarked block is an
-//! error rather than prose. A shell transcript that runs something else
-//! (`$ git status`) is prose and passes.
+//! and silently stops that block from running. What gives it away is the
+//! assertions left behind — a block carrying `>` or `!` lines was checking
+//! something, so `$ edda …` steps in an unmarked fence are an error rather than
+//! prose. A transcript with nothing asserted is prose and passes, whichever
+//! command it runs.
+//!
+//! The scan errs toward reading a fence-looking line as a fence, and toward
+//! reporting. A false alarm is cheap; a skill that quietly stopped being
+//! checked is the failure this file exists to prevent.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -124,14 +129,21 @@ fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
 /// apart on what counts as a block — keeping two fence trackers in step was
 /// itself a defect (GH-492).
 ///
-/// A line indented four spaces or more outside a fence is literal text in
-/// CommonMark, so a fence opener there does not open anything (GH-494).
+/// Indentation is deliberately ignored. CommonMark treats a four-space line as
+/// literal *relative to its container*, and it strips a list marker's width
+/// first, so a fence indented under a `- ` bullet is a real fence — GitHub
+/// renders it as code. Judging indentation against the document instead turned
+/// such a block invisible: it stopped running, and a demoted one stopped being
+/// reported, which is the silence this harness exists to prevent (GH-495).
+///
+/// Reading every fence-looking line as a fence errs toward running and
+/// reporting. That is the safe direction here: the cost is a false alarm on an
+/// indented literal example, against a silently unchecked skill.
 fn fenced_blocks(markdown: &str) -> Vec<Fence<'_>> {
     let mut blocks = Vec::new();
     let mut open: Option<(char, usize, Fence)> = None;
 
     for line in markdown.lines() {
-        let indent = line.len() - line.trim_start().len();
         let trimmed = line.trim();
         let marker = fence_marker(trimmed);
 
@@ -147,9 +159,6 @@ fn fenced_blocks(markdown: &str) -> Vec<Fence<'_>> {
                 }
             }
             None => {
-                if indent >= 4 {
-                    continue;
-                }
                 if let Some((ch, run)) = marker {
                     open = Some((
                         ch,
@@ -526,13 +535,49 @@ fn a_tilde_wrapper_quotes_rather_than_leaks() {
 }
 
 #[test]
-fn an_indented_fence_is_literal_text() {
-    // Four-space indentation makes the line literal in CommonMark, so it opens
-    // nothing (GH-494).
-    let indented = "    ```bash edda-doctest\n    $ edda claim \"auth\"\n    ```\n";
-    assert!(
-        parse_blocks(indented).is_empty(),
-        "an indented fence does not open a doctest"
+fn an_indented_fence_is_still_a_fence() {
+    // Was `an_indented_fence_is_literal_text`, which judged the four-space rule
+    // against the document. CommonMark applies it relative to the container and
+    // strips a list marker first, so a fence under a `- ` bullet is real and
+    // GitHub renders it as code. Treating it as literal made such a block stop
+    // running, and a demoted one stop being reported (GH-495).
+    let indented = "    ```bash edda-doctest\n    $ edda claim \"auth\"\n    > session: \
+                    cli-auth\n    ```\n";
+    assert_eq!(
+        parse_blocks(indented).len(),
+        1,
+        "an indented doctest still runs"
+    );
+
+    let demoted = "- step one:\n\n    ```bash\n    $ edda claim \"auth\"\n    > session: \
+                   cli-auth\n    ```\n";
+    assert_eq!(
+        find_demoted_steps(demoted).len(),
+        1,
+        "and an indented demotion is still reported rather than silently dropped"
+    );
+}
+
+#[test]
+fn skills_in_subdirectories_are_scanned() {
+    // The scan was one directory deep, so a skill in a subdirectory was never
+    // checked (GH-492 item 2). Nothing in the shipped tree exercises this yet,
+    // so the walk needs its own fixture.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let nested = dir.path().join("group").join("deeper");
+    std::fs::create_dir_all(&nested).expect("nested dirs");
+    std::fs::write(dir.path().join("top.md"), "# top\n").expect("top");
+    std::fs::write(nested.join("buried.md"), "# buried\n").expect("buried");
+    std::fs::write(nested.join("ignored.txt"), "not markdown\n").expect("txt");
+
+    let found: Vec<String> = markdown_files(dir.path())
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        found,
+        vec!["buried.md", "top.md"],
+        "sorted, recursive, .md only"
     );
 }
 
