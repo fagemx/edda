@@ -27,8 +27,9 @@
 //! Ignoring unmarked blocks is also how coverage could disappear: demoting a
 //! fence back to ```` ```bash ```` is a one-token edit that reads as cosmetic
 //! and silently stops that block from running. The steps it leaves behind are
-//! what give it away, so a `$ ` line inside an unmarked block is an error
-//! rather than prose.
+//! what give it away, so a `$ edda …` line inside an unmarked block is an
+//! error rather than prose. A shell transcript that runs something else
+//! (`$ git status`) is prose and passes.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -72,71 +73,116 @@ fn split_args(line: &str) -> Vec<String> {
     out
 }
 
-/// Pull every `bash edda-doctest` block out of one skill.
-fn parse_blocks(markdown: &str) -> Vec<Vec<Step>> {
+/// The info string that makes a fenced block executable.
+const DOCTEST_FENCE: &str = "```bash edda-doctest";
+
+/// One fenced block, kept with the marker that decides whether it runs.
+struct Fence<'a> {
+    is_doctest: bool,
+    lines: Vec<&'a str>,
+}
+
+/// Walk the markdown once and return every fenced block.
+///
+/// Both the runner and the demotion guard read this, so they cannot drift
+/// apart on what counts as a block — keeping two fence trackers in step was
+/// itself a defect (GH-492).
+///
+/// Closing needs a fence at least as long as the opening one, per CommonMark,
+/// so a ```` wrapper can quote a ``` block. That is what lets a skill *show*
+/// the doctest format without the harness executing the illustration.
+fn fenced_blocks(markdown: &str) -> Vec<Fence<'_>> {
     let mut blocks = Vec::new();
-    let mut current: Option<Vec<Step>> = None;
+    let mut open: Option<(usize, Fence)> = None;
 
     for line in markdown.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            if let Some(block) = current.take() {
-                blocks.push(block);
-            } else if trimmed == "```bash edda-doctest" {
-                current = Some(Vec::new());
+        let ticks = trimmed.chars().take_while(|c| *c == '`').count();
+
+        match open.as_mut() {
+            Some((width, fence)) => {
+                if ticks >= *width && trimmed[ticks..].trim().is_empty() {
+                    blocks.push(open.take().expect("open fence").1);
+                } else {
+                    fence.lines.push(trimmed);
+                }
             }
-            continue;
+            None if ticks >= 3 => {
+                open = Some((
+                    ticks,
+                    Fence {
+                        is_doctest: trimmed == DOCTEST_FENCE,
+                        lines: Vec::new(),
+                    },
+                ));
+            }
+            None => {}
         }
-        let Some(block) = current.as_mut() else {
-            continue;
-        };
-        if let Some(rest) = trimmed.strip_prefix("$ ") {
-            let args = split_args(rest);
-            assert_eq!(
-                args.first().map(String::as_str),
-                Some("edda"),
-                "a doctest step must invoke edda: {trimmed}"
-            );
-            block.push(Step::Run(args[1..].to_vec()));
-        } else if let Some(rest) = trimmed.strip_prefix("> ") {
-            block.push(Step::ExpectOk(rest.to_string()));
-        } else if let Some(rest) = trimmed.strip_prefix("! ") {
-            block.push(Step::ExpectErr(rest.to_string()));
-        } else if !trimmed.is_empty() {
-            panic!("unrecognized doctest line (want `$ `, `> ` or `! `): {trimmed}");
+    }
+    // An unclosed fence still carries its steps; report them rather than drop
+    // them, or a stray backtick would hide a whole block.
+    if let Some((_, fence)) = open {
+        blocks.push(fence);
+    }
+    blocks
+}
+
+/// Does this line invoke edda as a doctest step?
+///
+/// The guard and the runner agree on this, so a line that would have run is
+/// exactly the line whose absence from a doctest fence is worth reporting.
+/// Narrow to `edda` on purpose: a prose block written as a shell transcript
+/// (`$ git status`) is not a lost doctest, and claiming it was would be a
+/// false alarm in a message asserting a marker went missing (GH-492).
+fn edda_step_args(trimmed: &str) -> Option<Vec<String>> {
+    let rest = trimmed.strip_prefix("$ ")?;
+    let args = split_args(rest);
+    match args.first().map(String::as_str) {
+        Some("edda") => Some(args[1..].to_vec()),
+        _ => None,
+    }
+}
+
+/// Pull every `bash edda-doctest` block out of one skill.
+fn parse_blocks(markdown: &str) -> Vec<Vec<Step>> {
+    let mut blocks = Vec::new();
+
+    for fence in fenced_blocks(markdown).into_iter().filter(|f| f.is_doctest) {
+        let mut steps = Vec::new();
+        for trimmed in fence.lines {
+            if let Some(args) = edda_step_args(trimmed) {
+                steps.push(Step::Run(args));
+            } else if let Some(rest) = trimmed.strip_prefix("> ") {
+                steps.push(Step::ExpectOk(rest.to_string()));
+            } else if let Some(rest) = trimmed.strip_prefix("! ") {
+                steps.push(Step::ExpectErr(rest.to_string()));
+            } else if trimmed.starts_with("$ ") {
+                panic!("a doctest step must invoke edda: {trimmed}");
+            } else if !trimmed.is_empty() {
+                panic!("unrecognized doctest line (want `$ `, `> ` or `! `): {trimmed}");
+            }
         }
+        blocks.push(steps);
     }
     blocks
 }
 
 /// Find doctest steps stranded in a block that is no longer marked as one.
 ///
-/// `parse_blocks` ignores unmarked fences by design, so a demoted fence would
-/// otherwise drop its assertions with the suite still green. Nothing else in a
-/// skill starts a line with `$ `, so its presence outside a doctest fence means
-/// the marker was lost rather than that the block is prose.
+/// Unmarked fences are ignored by design, so a demoted fence would otherwise
+/// drop its assertions with the suite still green.
 fn find_demoted_steps(markdown: &str) -> Vec<String> {
-    let mut stranded = Vec::new();
-    let mut in_fence = false;
-    let mut is_doctest = false;
-
-    for line in markdown.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            if in_fence {
-                in_fence = false;
-                is_doctest = false;
-            } else {
-                in_fence = true;
-                is_doctest = trimmed == "```bash edda-doctest";
-            }
-            continue;
-        }
-        if in_fence && !is_doctest && trimmed.starts_with("$ ") {
-            stranded.push(trimmed.to_string());
-        }
-    }
-    stranded
+    fenced_blocks(markdown)
+        .into_iter()
+        // A block that quotes the marker as content is illustrating the
+        // format, not a doctest that lost its own. Its steps are meant to be
+        // read, so reporting them would be the false alarm this guard was
+        // narrowed to avoid.
+        .filter(|f| !f.is_doctest && !f.lines.contains(&DOCTEST_FENCE))
+        .flat_map(|f| f.lines)
+        .filter(|line| edda_step_args(line).is_some())
+        .map(str::to_string)
+        .collect()
 }
 
 struct Outcome {
@@ -303,6 +349,54 @@ fn a_demoted_fence_is_an_error_rather_than_silence() {
     assert!(
         find_demoted_steps(prose).is_empty(),
         "an ordinary example without doctest steps stays prose"
+    );
+}
+
+#[test]
+fn a_shell_transcript_is_prose_not_a_lost_doctest() {
+    // The guard used to fire on any `$ ` line, so a prose block written as a
+    // transcript would be reported as a doctest whose marker went missing --
+    // a false alarm asserting something that never happened (GH-492).
+    let transcript = "```bash\n$ git status\n$ gh pr view 491\n```\n";
+    assert!(
+        find_demoted_steps(transcript).is_empty(),
+        "a transcript of other commands is prose"
+    );
+
+    let mixed = "```bash\n$ git status\n$ edda claim \"auth\"\n```\n";
+    assert_eq!(
+        find_demoted_steps(mixed),
+        vec!["$ edda claim \"auth\"".to_string()],
+        "only the edda step is a stranded doctest step"
+    );
+}
+
+#[test]
+fn an_illustrated_doctest_inside_a_longer_fence_does_not_run() {
+    // A skill may want to show the format. CommonMark closes a fence only with
+    // one at least as long, so a ```` wrapper quotes the ``` block inside it;
+    // the harness must read it the same way or it would execute an example
+    // that was never meant to run (GH-492).
+    let illustrated = "````markdown\n```bash edda-doctest\n$ edda claim \"auth\"\n> session: \
+                       cli-auth\n```\n````\n";
+    assert!(
+        parse_blocks(illustrated).is_empty(),
+        "the illustration is quoted, not executed"
+    );
+    assert!(
+        find_demoted_steps(illustrated).is_empty(),
+        "and quoting it is not a demotion either"
+    );
+}
+
+#[test]
+fn an_unclosed_fence_still_reports_its_steps() {
+    // A stray backtick must not be able to hide a whole block from the guard.
+    let unclosed = "```bash\n$ edda claim \"auth\"\n";
+    assert_eq!(
+        find_demoted_steps(unclosed).len(),
+        1,
+        "an unterminated block still carries steps worth reporting"
     );
 }
 
