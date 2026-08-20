@@ -35,6 +35,13 @@
 //! The scan errs toward reading a fence-looking line as a fence, and toward
 //! reporting. A false alarm is cheap; a skill that quietly stopped being
 //! checked is the failure this file exists to prevent.
+//!
+//! That bias is not free in only one direction. A stray unmatched marker opens
+//! a span that the *opening* line of a following doctest cannot close, because
+//! a closing fence carries no info string -- so the doctest is swallowed as
+//! ordinary content. It does not run, and the quoted-illustration exemption
+//! then hides it from the demotion guard as well. Silence, not a false alarm.
+//! `a_stray_fence_marker_swallows_the_next_doctest` pins that gap (GH-497).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -137,8 +144,10 @@ fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
 /// reported, which is the silence this harness exists to prevent (GH-495).
 ///
 /// Reading every fence-looking line as a fence errs toward running and
-/// reporting. That is the safe direction here: the cost is a false alarm on an
-/// indented literal example, against a silently unchecked skill.
+/// reporting. That is the safe direction here, but it costs two things rather
+/// than one: a false alarm on an indented literal example, and -- quieter -- a
+/// stray unmatched marker that swallows a following doctest into its span,
+/// where the exemption then hides it from the guard too (GH-497).
 fn fenced_blocks(markdown: &str) -> Vec<Fence<'_>> {
     let mut blocks = Vec::new();
     let mut open: Option<(char, usize, Fence)> = None;
@@ -563,21 +572,72 @@ fn skills_in_subdirectories_are_scanned() {
     // The scan was one directory deep, so a skill in a subdirectory was never
     // checked (GH-492 item 2). Nothing in the shipped tree exercises this yet,
     // so the walk needs its own fixture.
+    // The names are mixed-case on purpose, and the writes are out of order on
+    // purpose. The old fixture (`top.md` plus a buried `buried.md`) could not
+    // fail: NTFS hands back entries in name order, so the walk already emitted
+    // sorted paths and deleting the sort changed nothing observable — the
+    // assertion claimed `sorted` without establishing it (GH-497 item 1).
+    //
+    // Here the three orders are all different. NTFS collates case-insensitively
+    // (`apple.md` < `group` < `Zebra.md`) while `Path` compares bytes, so the
+    // sorted answer puts `Zebra.md` first — an unsorted walk reads it last. A
+    // filesystem that returns entries as created is caught by the write order.
     let dir = tempfile::tempdir().expect("tempdir");
     let nested = dir.path().join("group").join("deeper");
     std::fs::create_dir_all(&nested).expect("nested dirs");
-    std::fs::write(dir.path().join("top.md"), "# top\n").expect("top");
     std::fs::write(nested.join("buried.md"), "# buried\n").expect("buried");
+    std::fs::write(dir.path().join("Zebra.md"), "# zebra\n").expect("zebra");
+    std::fs::write(dir.path().join("apple.md"), "# apple\n").expect("apple");
     std::fs::write(nested.join("ignored.txt"), "not markdown\n").expect("txt");
 
     let found: Vec<String> = markdown_files(dir.path())
         .iter()
-        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .map(|p| {
+            p.strip_prefix(dir.path())
+                .expect("under the fixture root")
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
         .collect();
     assert_eq!(
         found,
-        vec!["buried.md", "top.md"],
-        "sorted, recursive, .md only"
+        vec!["Zebra.md", "apple.md", "group/deeper/buried.md"],
+        "recursive, .md only, and sorted rather than in directory order"
+    );
+}
+
+#[test]
+fn a_stray_fence_marker_swallows_the_next_doctest() {
+    // The second cost of reading every fence-looking line as a fence, and the
+    // quiet one. An unmatched marker opens a span; the next marker is the
+    // *opening* of a real doctest, which cannot close that span because a
+    // closing fence carries no info string. So the doctest becomes content of
+    // the stray block: it never runs. The demotion guard would normally catch
+    // an unmarked block carrying assertions, but the swallowed opener sets the
+    // quoted-illustration exemption, and nothing after it is a fence marker to
+    // clear the exemption — so the guard reports nothing either.
+    //
+    // Asserted as the current behaviour rather than fixed here: the mechanism
+    // is the unterminated-quoted-marker case from #495 Round 1, which belongs
+    // with #494's exemption-scope decision. Pinned so a change to either has to
+    // face it (GH-497 item 2).
+    let stray = "prose\n```\n\n```bash edda-doctest\n$ edda peers\n> ok\n```\n";
+    assert!(
+        parse_blocks(stray).is_empty(),
+        "known gap: the stray marker consumes the doctest's opening fence"
+    );
+    assert!(
+        find_demoted_steps(stray).is_empty(),
+        "and the exemption hides the stranded step from the guard"
+    );
+
+    // Remove the stray marker and the same block is a live doctest, so the
+    // fixture is testing the stray marker and not a malformed block.
+    let clean = "prose\n\n```bash edda-doctest\n$ edda peers\n> ok\n```\n";
+    assert_eq!(
+        parse_blocks(clean).len(),
+        1,
+        "without the stray marker the block runs"
     );
 }
 
