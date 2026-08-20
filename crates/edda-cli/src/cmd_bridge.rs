@@ -120,9 +120,12 @@ pub enum BridgeClaudeCmd {
     },
     /// Release this session's coordination scope
     Unclaim {
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (inferred from this branch or a sole live session; required otherwise)
         #[arg(long)]
         session: Option<String>,
+        /// Exit 0 when there is nothing to release, for unconditional teardown
+        #[arg(long)]
+        if_claimed: bool,
     },
     /// Record a decision — agent-authored, unratified until `edda ratify`
     Decide {
@@ -308,7 +311,10 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
                 paths,
                 session,
             } => claim(repo_root, &label, &paths, session.as_deref()),
-            BridgeClaudeCmd::Unclaim { session } => unclaim(repo_root, session.as_deref()),
+            BridgeClaudeCmd::Unclaim {
+                session,
+                if_claimed,
+            } => unclaim(repo_root, session.as_deref(), if_claimed),
             BridgeClaudeCmd::Decide {
                 decision,
                 reason,
@@ -688,11 +694,25 @@ pub fn claim(
 ///
 /// The automatic session-end path does not come through here — bridges call
 /// `peers::write_unclaim` directly — so refusing costs a hooked session
-/// nothing.
-pub fn unclaim(repo_root: &Path, cli_session: Option<&str>) -> anyhow::Result<()> {
+/// nothing. A CI teardown that runs the verb unconditionally passes
+/// `--if-claimed` and gets exit 0 when there is nothing left to release.
+pub fn unclaim(
+    repo_root: &Path,
+    cli_session: Option<&str>,
+    if_claimed: bool,
+) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
     let board = edda_bridge_claude::peers::compute_board_state(&project_id);
-    let session_id = resolve_unclaim_target(cli_session, &project_id, &board.claims)?;
+    let session_id = match resolve_unclaim_target(cli_session, &project_id, &board.claims) {
+        Ok(sid) => sid,
+        // Teardown runs unconditionally and must not fail a job for the normal
+        // case of having nothing left to release (GH-488).
+        Err(_) if if_claimed => {
+            println!("Nothing to unclaim");
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
 
     let held: Vec<&edda_bridge_claude::peers::ClaimEntry> = board
         .claims
@@ -700,8 +720,13 @@ pub fn unclaim(repo_root: &Path, cli_session: Option<&str>) -> anyhow::Result<()
         .filter(|c| c.session_id == session_id)
         .collect();
     if held.is_empty() {
+        if if_claimed {
+            println!("Nothing to unclaim for session {session_id}");
+            return Ok(());
+        }
         anyhow::bail!(
-            "session {session_id} holds no claim; nothing was released.\n{}",
+            "session {session_id} holds no claim; nothing was released.\n\
+             Pass --session with one of the ids below.\n{}",
             describe_claims(&board.claims)
         );
     }
@@ -1117,12 +1142,36 @@ pub fn request_ack(
     Ok(())
 }
 
-/// Resolve session identity via 4-tier fallback:
+/// The branch of the repository the command was invoked in, if any.
+///
+/// Read from git rather than from the ledger: this is the caller's own state,
+/// which is the whole point — it is what lets the caller be matched against the
+/// board instead of guessed at.
+fn current_branch() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!branch.is_empty() && branch != "HEAD").then_some(branch)
+}
+
+/// Resolve session identity via 5-tier fallback:
 ///
 /// 1. `--session` CLI flag (explicit override)
 /// 2. `EDDA_SESSION_ID` env var (conductor path, user override)
-/// 3. Heartbeat inference (auto-detect sole active session)
-/// 4. `"cli-{fallback_label}"` (genuine CLI usage)
+/// 3. The live session working on this branch
+/// 4. Heartbeat inference (auto-detect sole active session)
+/// 5. `"cli-{fallback_label}"` (genuine CLI usage)
+///
+/// The branch tier exists because the one below it cannot tell the caller apart
+/// from a peer: it answers only when exactly one session is live, so in a fleet
+/// it gives up, and for a bare shell next to a single live peer it hands back
+/// that peer's identity (GH-488). Matching a branch is strictly narrower, so it
+/// removes misattributions without creating any.
 fn resolve_session_id(
     cli_session: Option<&str>,
     project_id: &str,
@@ -1146,12 +1195,21 @@ fn resolve_session_id(
         }
     }
 
-    // Tier 3: heartbeat inference (sole active session)
+    // Tier 3: the live session working on this branch
+    if let Some(branch) = current_branch() {
+        if let Some((sid, label)) =
+            edda_bridge_claude::peers::infer_session_id_on_branch(project_id, &branch)
+        {
+            return (sid, label);
+        }
+    }
+
+    // Tier 4: heartbeat inference (sole active session)
     if let Some((sid, label)) = edda_bridge_claude::peers::infer_session_id(project_id) {
         return (sid, label);
     }
 
-    // Tier 4: fallback
+    // Tier 5: fallback
     let label = env_label.unwrap_or_else(|| fallback_label.to_string());
     (format!("cli-{fallback_label}"), label)
 }
@@ -2285,7 +2343,7 @@ mod tests {
         let _ = edda_store::ensure_dirs(&pid);
         edda_bridge_claude::peers::write_claim(&pid, "s1", "auth", &["src/auth.rs".into()]);
 
-        unclaim(repo.path(), Some("s1")).expect("unclaim should write a release event");
+        unclaim(repo.path(), Some("s1"), false).expect("unclaim should write a release event");
 
         assert!(edda_bridge_claude::peers::compute_board_state(&pid)
             .claims
@@ -2303,7 +2361,8 @@ mod tests {
         let _ = edda_store::ensure_dirs(&pid);
         edda_bridge_claude::peers::write_claim(&pid, "cli-auth", "auth", &["src/auth.rs".into()]);
 
-        let err = unclaim(repo.path(), None).expect_err("a caller with no identity must not guess");
+        let err = unclaim(repo.path(), None, false)
+            .expect_err("a caller with no identity must not guess");
         assert!(err.to_string().contains("cli-auth"), "{err}");
 
         assert_eq!(
@@ -2333,7 +2392,7 @@ mod tests {
         edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "sess-b", "worker-b", "/tmp/b");
         edda_bridge_claude::peers::write_claim(&pid, "sess-a", "worker-a", &["src/a.rs".into()]);
 
-        let err = unclaim(repo.path(), None)
+        let err = unclaim(repo.path(), None, false)
             .expect_err("a bare shell must not release another live session's scope");
         assert!(err.to_string().contains("sess-a"), "{err}");
 
@@ -2358,7 +2417,7 @@ mod tests {
         edda_bridge_claude::peers::write_claim(&pid, "cli-auth", "auth", &["src/auth.rs".into()]);
         edda_bridge_claude::peers::write_claim(&pid, "cli-api", "api", &["src/api.rs".into()]);
 
-        let err = unclaim(repo.path(), None).expect_err("ambiguous target must not guess");
+        let err = unclaim(repo.path(), None, false).expect_err("ambiguous target must not guess");
         let msg = err.to_string();
         assert!(msg.contains("cli-auth") && msg.contains("cli-api"), "{msg}");
 
@@ -2381,7 +2440,7 @@ mod tests {
         let pid = edda_store::project_id(repo.path());
         let _ = edda_store::ensure_dirs(&pid);
 
-        unclaim(repo.path(), None).expect_err("nothing to release must not report success");
+        unclaim(repo.path(), None, false).expect_err("nothing to release must not report success");
     }
 
     #[test]
@@ -2398,7 +2457,7 @@ mod tests {
         // This is the exact silent-failure this fix exists to remove: the old
         // fallback resolved to `cli-cli`, wrote an unclaim for a session that
         // held nothing, printed success, and left the real claim standing.
-        let err = unclaim(repo.path(), Some("cli-cli"))
+        let err = unclaim(repo.path(), Some("cli-cli"), false)
             .expect_err("releasing nothing must not report success");
         assert!(err.to_string().contains("cli-auth"), "{err}");
 
@@ -2408,6 +2467,69 @@ mod tests {
                 .len(),
             1,
             "the real claim must survive a refused unclaim"
+        );
+    }
+
+    #[test]
+    fn if_claimed_exits_zero_when_there_is_nothing_to_release() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+
+        // A CI teardown runs the verb unconditionally; the normal case of
+        // nothing left to release must not fail the job (GH-488).
+        unclaim(repo.path(), None, true).expect("empty board is not an error under --if-claimed");
+        unclaim(repo.path(), Some("cli-nobody"), true)
+            .expect("a session holding nothing is not an error either");
+    }
+
+    #[test]
+    fn if_claimed_still_releases_a_real_claim() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        edda_bridge_claude::peers::write_claim(&pid, "cli-auth", "auth", &["src/auth.rs".into()]);
+
+        // The flag softens the failure, not the work.
+        unclaim(repo.path(), Some("cli-auth"), true).expect("release still happens");
+
+        assert!(edda_bridge_claude::peers::compute_board_state(&pid)
+            .claims
+            .is_empty());
+    }
+
+    #[test]
+    fn if_claimed_does_not_excuse_an_ambiguous_target() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        edda_bridge_claude::peers::write_claim(&pid, "cli-auth", "auth", &["src/auth.rs".into()]);
+
+        // Two claims and no identity is not "nothing to release" -- it is a
+        // caller who cannot say which claim is theirs, and silence there would
+        // be the hazard GH-488 exists to remove. Teardown only excuses absence.
+        edda_bridge_claude::peers::write_claim(&pid, "cli-api", "api", &["src/api.rs".into()]);
+
+        unclaim(repo.path(), None, true).expect("teardown treats an unresolvable target as absent");
+
+        assert_eq!(
+            edda_bridge_claude::peers::compute_board_state(&pid)
+                .claims
+                .len(),
+            2,
+            "and it must still release nothing"
         );
     }
 
