@@ -78,6 +78,9 @@ when changing or validating review policy.
   evidence; a real coverage gap is a legitimate reason to RAN. Deterministically
   red CI already blocks the artifact — audit and request changes instead of
   spending a full run; re-run only the failed job when the red is environmental.
+- A reviewer re-derives; an implementer's verification counts are not evidence.
+  Receipts and CI are artifacts to inspect, a reported grep is a claim about
+  unseen work. Name what you could not corroborate.
 - Where sessions build or cache locally, that environment is bounded: one
   assigned lane per session for its lifetime from a fixed pool named in the
   brief, never per round, SHA, or timestamp; lane build cache is disposable,

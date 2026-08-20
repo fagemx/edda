@@ -143,10 +143,12 @@ them independently on every push.
 | Test (Linux, macOS) | `cargo test --workspace` — all 23 crates |
 | Test (Windows) | **only 7 crates** — `edda-store`, `edda-ledger`, `edda-search-fts`, `edda-transcript`, `edda-bridge-claude`, `edda-conductor`, `edda` (Windows build/link is ~5x slower; the subset is derived from process-spawn, file-lock, and mmap criteria — GH-433) |
 
-So on Windows every crate is still **compiled and linted** (Clippy is
-workspace-wide on all three OSes), but **only those 7 crates have their tests
-run**. A Windows-specific *runtime* defect in the other 16 — a path, a file
-lock, a spawned process, a temp directory — is caught by no CI job. That is a
+So on Windows every crate is still **type-checked and linted** (Clippy is
+workspace-wide on all three OSes), but **only those 7 crates are linked and
+have their tests run**. Two kinds of Windows-only defect in the other 16 are
+therefore caught by no CI job: a *runtime* one — a path, a file lock, a spawned
+process, a temp directory — and a *link* one, since `cargo clippy` stops before
+linking. That is a
 stated reason for the verifier to run it locally, and it is why the L1 receipt
 from a Windows workstation is load-bearing rather than redundant.
 
@@ -154,7 +156,7 @@ from a Windows workstation is load-bearing rather than redundant.
 |---|---|---|
 | L0 iterate | while editing | `cargo fmt --all --check`; `cargo clippy -p <crate> --all-targets -- -D warnings`; `cargo test -p <crate>` for each touched crate |
 | L1 freeze | once per frozen full SHA, clean tree, before push / PR update | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`, with `CARGO_INCREMENTAL=0`; record the result together with the full SHA (gate receipt) |
-| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN only focused or adversarial checks they do not cover — **including Windows behavior in any crate outside the CI Windows subset above**. A full local rerun needs a stated reason: no receipt, red or absent CI, grounds to distrust the receipt, or coverage CI genuinely lacks. Deterministically red CI already blocks the SHA — audit and request changes instead of spending a full run; if the red is environmental, re-run only the failed job |
+| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN only focused or adversarial checks they do not cover — **including Windows behavior in any crate outside the CI Windows subset above**. A full local rerun needs a stated reason: no receipt, red or absent CI, or grounds to distrust the receipt. A coverage gap earns a **focused** check for that gap, not a full rerun — running the workspace to reach one uncovered crate is the cost this ladder exists to remove. Deterministically red CI already blocks the SHA — audit and request changes instead of spending a full run; if the red is environmental, re-run only the failed job |
 | L3 pre-merge | merge authority | READ exact-head CI and the final current-head LGTM; RAN only a merge check against the current base. A draft/ready, label, or status flip is not a push — nothing reruns |
 
 Docs-only changes (no code/product blob, `Cargo.lock`, or toolchain change)
@@ -174,7 +176,8 @@ A fleet session that runs no local build has no lane and needs none.
   audit of one workstation counted 15 such directories and ~194 GB.
 - Solo work uses the worktree's default `target/`.
 - **Lane root** is the `LOCALAPPDATA` directory plus `\fleet-workstation\lanes`
-  — `$env:LOCALAPPDATA\fleet-workstation\lanes` in PowerShell,
+  — `"$env:LOCALAPPDATA\fleet-workstation\lanes"` in PowerShell (quoted: a
+  bare assignment of that path is a parser error),
   `$LOCALAPPDATA/fleet-workstation/lanes` in Git Bash — unless `FLEET_LANE_ROOT`
   is set or the brief names a different absolute path. A lane is always
   `<lane-root>\<lane-name>`; resolve it from that rule, never invent a path.
@@ -183,8 +186,8 @@ A fleet session that runs no local build has no lane and needs none.
   lifetime. The workstation lane tool (`lane.ps1 -Lane <assigned> -Gate
   focused|freeze`) is not shipped yet; until it is, set `CARGO_TARGET_DIR` to
   `<lane-root>\<assigned-lane>` yourself and reuse it every round. If your brief
-  names no lane and you are running gates for a fleet, ask the controller for
-  one rather than creating a directory.
+  names no lane or no lane root and you are about to build for a fleet, ask the
+  controller first rather than creating a directory.
 - Verifier lanes and every L1 run set `CARGO_INCREMENTAL=0`.
 - Deleting lane build output is authorized and non-destructive; deleting
   worktrees, branches, or sources is not.
@@ -219,7 +222,7 @@ bound.
 
 ```bash
 # Before every commit (L0 — touched crates only)
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy -p <touched crate> --all-targets -- -D warnings
 cargo test -p <touched crate>
 

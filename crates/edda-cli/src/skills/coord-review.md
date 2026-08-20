@@ -103,6 +103,14 @@ blobs, base, and toolchain are unchanged, reuse still-applicable code results
 as `READ` with their source SHA; run only relevant diff/docs/evidence checks
 and exact-head CI as `RAN`. Never report a reused result as rerun.
 
+An implementer's own verification counts are not `READ` evidence. A gate
+receipt and exact-head CI are artifacts you can inspect; "I grepped and found
+nothing" is a claim about work you did not see. Re-derive anything a finding
+rests on, and say which of the implementer's statements you could not
+corroborate — including the ones you believe. A response that asserts a fix it
+did not make, or a count the artifact does not support, reads exactly like one
+that is right.
+
 Verify once per frozen artifact. When the implementer's gate receipt (SHA,
 gate set, toolchain, lane, result) matches the reviewed SHA and exact-head CI
 is green, cite both as `READ` and RAN only the focused or adversarial checks

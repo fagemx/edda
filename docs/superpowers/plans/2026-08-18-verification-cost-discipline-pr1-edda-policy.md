@@ -85,7 +85,11 @@ cargo test --workspace # All tests
 ```
 ````
 
-Replace it with:
+Replace it with — and note that the ladder paragraph quoted below says CI runs
+full workspace gates on three operating systems, which is **false** and was
+corrected in Round 1 (Windows tests a 7-crate subset). The block is reproduced
+as written at `738c5ce`; see "Round 1 review amendments" at the end of this
+file:
 
 ````markdown
 ## Testing Standards

@@ -113,7 +113,10 @@ independence from this ladder, and its L2 row must say so.
 Carrying this policy to another project (§4.5, §5 slice 2) therefore carries the
 obligation with it: the adapter bullet states the rule, and the project supplies
 its own coverage statement. A verifier who cannot find one treats CI as
-unproven coverage and RANs what the receipt alone would otherwise carry.
+unproven and RANs a focused check of the surface actually at risk in the change
+— not the whole gate set. Absent evidence of coverage is a reason to look at
+the changed behavior directly, never a standing licence for a full local
+rerun.
 
 A verifier keeps the right to RAN anything, but must state why the READ evidence
 is insufficient.

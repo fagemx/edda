@@ -252,6 +252,10 @@ intent + basis SHA + symbol anchor + drift rule.
 7. Keep one verifier identity per delivery candidate: rounds resume the same
    session and lane; a replacement reads receipts and CI before running
    anything.
+8. Re-derive what a finding rests on. Receipts and CI are artifacts; an
+   implementer's reported counts are claims about work you did not watch.
+   Record which of their statements you could not corroborate, including the
+   ones you believe.
 
 ### Controller contract
 
@@ -354,7 +358,7 @@ Select gates proportionally:
 |---|---|
 | Code/product blob, base SHA, or toolchain changed | Run the relevant code gates for the changed risk surface. |
 | Only docs/evidence changed; code/product blobs, base, and toolchain unchanged | Reuse still-applicable code gates as `READ` with source SHA; `RAN` only relevant diff/docs/evidence checks and exact-head CI. |
-| Code changed; a gate receipt for this exact SHA, gate set, and toolchain exists and exact-head CI is green | READ the receipt and CI; `RAN` only focused or adversarial checks they do not cover. Full rerun only with a stated reason (no receipt, red or absent CI, grounds to distrust the receipt). |
+| Code changed; a gate receipt for this exact SHA, gate set, and toolchain exists and exact-head CI is green | READ the receipt and CI; `RAN` only focused or adversarial checks they do not cover, including any surface the project's CI does not reach. Full rerun only with a stated reason (no receipt, red or absent CI, grounds to distrust the receipt) — a coverage gap earns a focused check for that gap, not a full rerun. |
 | Status, label, or draft flip without a push | Not a new artifact; nothing reruns. |
 | Exact-head CI is deterministically red | The SHA is already blocked; finish the scoped audit and request changes instead of spending a full local run that cannot change the verdict. Rerun only failed jobs when logs show a transient failure, and run the missing full set only once the artifact is otherwise acceptable. |
 
