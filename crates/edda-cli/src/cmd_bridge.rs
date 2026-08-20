@@ -120,7 +120,7 @@ pub enum BridgeClaudeCmd {
     },
     /// Release this session's coordination scope
     Unclaim {
-        /// Session ID (inferred from this branch or a sole live session; required otherwise)
+        /// Session ID (inferred from a sole live session; required otherwise)
         #[arg(long)]
         session: Option<String>,
         /// Exit 0 when there is nothing to release, for unconditional teardown
@@ -706,9 +706,12 @@ pub fn unclaim(
     let session_id = match resolve_unclaim_target(cli_session, &project_id, &board.claims) {
         Ok(sid) => sid,
         // Teardown runs unconditionally and must not fail a job for the normal
-        // case of having nothing left to release (GH-488).
-        Err(_) if if_claimed => {
-            println!("Nothing to unclaim");
+        // case of having nothing left to release (GH-488). It reports what it
+        // actually found: saying "nothing to unclaim" over a populated board
+        // would be false, and the point of this verb is to stop reporting
+        // releases that did not happen.
+        Err(e) if if_claimed => {
+            println!("Released nothing: {e}");
             return Ok(());
         }
         Err(e) => return Err(e),
@@ -1142,36 +1145,17 @@ pub fn request_ack(
     Ok(())
 }
 
-/// The branch of the repository the command was invoked in, if any.
-///
-/// Read from git rather than from the ledger: this is the caller's own state,
-/// which is the whole point — it is what lets the caller be matched against the
-/// board instead of guessed at.
-fn current_branch() -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!branch.is_empty() && branch != "HEAD").then_some(branch)
-}
-
-/// Resolve session identity via 5-tier fallback:
+/// Resolve session identity via 4-tier fallback:
 ///
 /// 1. `--session` CLI flag (explicit override)
 /// 2. `EDDA_SESSION_ID` env var (conductor path, user override)
-/// 3. The live session working on this branch
-/// 4. Heartbeat inference (auto-detect sole active session)
-/// 5. `"cli-{fallback_label}"` (genuine CLI usage)
+/// 3. Heartbeat inference (auto-detect sole active session)
+/// 4. `"cli-{fallback_label}"` (genuine CLI usage)
 ///
-/// The branch tier exists because the one below it cannot tell the caller apart
-/// from a peer: it answers only when exactly one session is live, so in a fleet
-/// it gives up, and for a bare shell next to a single live peer it hands back
-/// that peer's identity (GH-488). Matching a branch is strictly narrower, so it
-/// removes misattributions without creating any.
+/// Tier 3 cannot tell the caller apart from a lone peer, and GH-488 item 1 is
+/// still open on that. A branch does not fix it: a branch belongs to a
+/// worktree, not to a process, so every process in that worktree matches one
+/// equally well.
 fn resolve_session_id(
     cli_session: Option<&str>,
     project_id: &str,
@@ -1195,21 +1179,12 @@ fn resolve_session_id(
         }
     }
 
-    // Tier 3: the live session working on this branch
-    if let Some(branch) = current_branch() {
-        if let Some((sid, label)) =
-            edda_bridge_claude::peers::infer_session_id_on_branch(project_id, &branch)
-        {
-            return (sid, label);
-        }
-    }
-
-    // Tier 4: heartbeat inference (sole active session)
+    // Tier 3: heartbeat inference (sole active session)
     if let Some((sid, label)) = edda_bridge_claude::peers::infer_session_id(project_id) {
         return (sid, label);
     }
 
-    // Tier 5: fallback
+    // Tier 4: fallback
     let label = env_label.unwrap_or_else(|| fallback_label.to_string());
     (format!("cli-{fallback_label}"), label)
 }

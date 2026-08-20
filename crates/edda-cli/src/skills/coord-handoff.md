@@ -108,7 +108,7 @@ so having nothing to release is not a failure:
 
 ```bash edda-doctest
 $ edda unclaim --if-claimed
-> Nothing to unclaim
+> Released nothing
 ```
 
 `edda peers --json` carries the id too, under `claims[].session_id`. Plain

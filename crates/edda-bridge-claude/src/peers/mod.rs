@@ -254,9 +254,7 @@ pub use board::{
     compute_board_state, compute_board_state_for_compaction, partition_requests_for_session,
     request_is_expired,
 };
-pub use discovery::{
-    discover_active_peers, discover_all_sessions, infer_session_id, infer_session_id_on_branch,
-};
+pub use discovery::{discover_active_peers, discover_all_sessions, infer_session_id};
 pub(crate) use heartbeat::{
     cleanup_subagent_heartbeats, ensure_heartbeat_exists, read_heartbeat, resolve_teammate_session,
     update_heartbeat_branch, update_teammate_phase, write_heartbeat, write_subagent_completed,

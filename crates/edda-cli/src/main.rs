@@ -170,7 +170,7 @@ enum Command {
     },
     /// Release this session's coordination scope
     Unclaim {
-        /// Session ID (inferred from this branch or a sole live session; required otherwise)
+        /// Session ID (inferred from a sole live session; required otherwise)
         #[arg(long)]
         session: Option<String>,
         /// Exit 0 when there is nothing to release, for unconditional teardown
