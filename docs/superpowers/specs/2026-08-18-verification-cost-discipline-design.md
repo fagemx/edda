@@ -310,8 +310,11 @@ the tool enforces a limit against an artificially inflated number.
    `fleet-pr-loop` "re-run gates" wording; `edda gate` native receipts;
    Bash twin of `lane.ps1`; repo-level gate profile override; operator
    decision on the `EXECUTION-COORDINATION.md` axiom; the pre-existing
-   ubuntu-only flake `codex_app_server::tests::dropping_concrete_client_makes_child_pid_disappear`
-   observed red on `7f5d155` (classified baseline; unrelated to PR #479).
+   ubuntu-only flake in `codex_app_server` observed red on `7f5d155`
+   (classified baseline; unrelated to PR #479). The test was
+   `dropping_concrete_client_makes_child_pid_disappear`, renamed to
+   `..._stops_the_child_process` in GH-482 because a zombie has already
+   terminated, so the assertion was never about the PID disappearing.
 
 ## 6. Acceptance criteria
 
