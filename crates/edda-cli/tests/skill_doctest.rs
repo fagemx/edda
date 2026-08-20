@@ -26,10 +26,15 @@
 //!
 //! Ignoring unmarked blocks is also how coverage could disappear: demoting a
 //! fence back to ```` ```bash ```` is a one-token edit that reads as cosmetic
-//! and silently stops that block from running. The steps it leaves behind are
-//! what give it away, so a `$ edda …` line inside an unmarked block is an
-//! error rather than prose. A shell transcript that runs something else
-//! (`$ git status`) is prose and passes.
+//! and silently stops that block from running. What gives it away is the
+//! assertions left behind — a block carrying `>` or `!` lines was checking
+//! something, so `$ edda …` steps in an unmarked fence are an error rather than
+//! prose. A transcript with nothing asserted is prose and passes, whichever
+//! command it runs.
+//!
+//! The scan errs toward reading a fence-looking line as a fence, and toward
+//! reporting. A false alarm is cheap; a skill that quietly stopped being
+//! checked is the failure this file exists to prevent.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -46,6 +51,26 @@ enum Step {
 
 fn skills_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src/skills")
+}
+
+/// Every markdown file under `dir`, at any depth.
+///
+/// The scan used to be one directory deep, so a skill added in a subdirectory
+/// would simply never be checked (GH-492).
+fn markdown_files(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    for entry in entries {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            found.extend(markdown_files(&path));
+        } else if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            found.push(path);
+        }
+    }
+    found.sort();
+    found
 }
 
 /// Split a command line on spaces, keeping double-quoted runs together.
@@ -82,46 +107,74 @@ struct Fence<'a> {
     lines: Vec<&'a str>,
 }
 
+/// The fence character and run length that opened a block, if this line opens
+/// or closes one.
+///
+/// CommonMark allows both backticks and tildes, and closes a block only with
+/// the same character at least as long as the opener. Recognising tildes keeps
+/// a `~~~markdown` wrapper from leaking its quoted contents into the scan
+/// (GH-494).
+fn fence_marker(trimmed: &str) -> Option<(char, usize)> {
+    let ch = trimmed.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    let run = trimmed.chars().take_while(|c| *c == ch).count();
+    (run >= 3).then_some((ch, run))
+}
+
 /// Walk the markdown once and return every fenced block.
 ///
 /// Both the runner and the demotion guard read this, so they cannot drift
 /// apart on what counts as a block — keeping two fence trackers in step was
 /// itself a defect (GH-492).
 ///
-/// Closing needs a fence at least as long as the opening one, per CommonMark,
-/// so a ```` wrapper can quote a ``` block. That is what lets a skill *show*
-/// the doctest format without the harness executing the illustration.
+/// Indentation is deliberately ignored. CommonMark treats a four-space line as
+/// literal *relative to its container*, and it strips a list marker's width
+/// first, so a fence indented under a `- ` bullet is a real fence — GitHub
+/// renders it as code. Judging indentation against the document instead turned
+/// such a block invisible: it stopped running, and a demoted one stopped being
+/// reported, which is the silence this harness exists to prevent (GH-495).
+///
+/// Reading every fence-looking line as a fence errs toward running and
+/// reporting. That is the safe direction here: the cost is a false alarm on an
+/// indented literal example, against a silently unchecked skill.
 fn fenced_blocks(markdown: &str) -> Vec<Fence<'_>> {
     let mut blocks = Vec::new();
-    let mut open: Option<(usize, Fence)> = None;
+    let mut open: Option<(char, usize, Fence)> = None;
 
     for line in markdown.lines() {
         let trimmed = line.trim();
-        let ticks = trimmed.chars().take_while(|c| *c == '`').count();
+        let marker = fence_marker(trimmed);
 
         match open.as_mut() {
-            Some((width, fence)) => {
-                if ticks >= *width && trimmed[ticks..].trim().is_empty() {
-                    blocks.push(open.take().expect("open fence").1);
+            Some((ch, width, fence)) => {
+                let closes = marker
+                    .filter(|(c, run)| c == ch && run >= width)
+                    .is_some_and(|(_, run)| trimmed[run..].trim().is_empty());
+                if closes {
+                    blocks.push(open.take().expect("open fence").2);
                 } else {
                     fence.lines.push(trimmed);
                 }
             }
-            None if ticks >= 3 => {
-                open = Some((
-                    ticks,
-                    Fence {
-                        is_doctest: trimmed == DOCTEST_FENCE,
-                        lines: Vec::new(),
-                    },
-                ));
+            None => {
+                if let Some((ch, run)) = marker {
+                    open = Some((
+                        ch,
+                        run,
+                        Fence {
+                            is_doctest: trimmed == DOCTEST_FENCE,
+                            lines: Vec::new(),
+                        },
+                    ));
+                }
             }
-            None => {}
         }
     }
     // An unclosed fence still carries its steps; report them rather than drop
     // them, or a stray backtick would hide a whole block.
-    if let Some((_, fence)) = open {
+    if let Some((_, _, fence)) = open {
         blocks.push(fence);
     }
     blocks
@@ -167,22 +220,62 @@ fn parse_blocks(markdown: &str) -> Vec<Vec<Step>> {
     blocks
 }
 
+/// Steps of an unmarked block, with any quoted illustration removed.
+///
+/// The exemption used to cover a whole fence, so one unbalanced fence could
+/// merge an illustration with a later genuinely demoted block and excuse it.
+/// Skipping only the span from a quoted marker to its matching closer keeps
+/// the rest of the block under the guard (GH-494).
+fn lines_outside_quoted_illustrations<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut quoting = false;
+    for line in lines {
+        if *line == DOCTEST_FENCE {
+            quoting = true;
+            continue;
+        }
+        if quoting {
+            if fence_marker(line).is_some() {
+                quoting = false;
+            }
+            continue;
+        }
+        out.push(*line);
+    }
+    out
+}
+
 /// Find doctest steps stranded in a block that is no longer marked as one.
 ///
 /// Unmarked fences are ignored by design, so a demoted fence would otherwise
 /// drop its assertions with the suite still green.
+///
+/// A block is only treated as demoted when it still carries assertions. A
+/// transcript of `$ edda …` commands with no `>` or `!` lines is prose showing
+/// usage — the style four docs under `docs/decision/` already use — and calling
+/// it a lost marker would be a false alarm (GH-494).
 fn find_demoted_steps(markdown: &str) -> Vec<String> {
-    fenced_blocks(markdown)
+    let mut stranded = Vec::new();
+
+    for fence in fenced_blocks(markdown)
         .into_iter()
-        // A block that quotes the marker as content is illustrating the
-        // format, not a doctest that lost its own. Its steps are meant to be
-        // read, so reporting them would be the false alarm this guard was
-        // narrowed to avoid.
-        .filter(|f| !f.is_doctest && !f.lines.contains(&DOCTEST_FENCE))
-        .flat_map(|f| f.lines)
-        .filter(|line| edda_step_args(line).is_some())
-        .map(str::to_string)
-        .collect()
+        .filter(|f| !f.is_doctest)
+    {
+        let lines = lines_outside_quoted_illustrations(&fence.lines);
+        let has_assertions = lines
+            .iter()
+            .any(|l| l.starts_with("> ") || l.starts_with("! "));
+        if !has_assertions {
+            continue;
+        }
+        stranded.extend(
+            lines
+                .iter()
+                .filter(|l| edda_step_args(l).is_some())
+                .map(|l| (*l).to_string()),
+        );
+    }
+    stranded
 }
 
 struct Outcome {
@@ -238,14 +331,12 @@ fn shipped_skill_examples_still_do_what_they_say() {
     let mut checked = 0usize;
     let mut files_with_blocks = Vec::new();
 
-    let entries =
-        std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
-    for entry in entries {
-        let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("md") {
-            continue;
-        }
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    for path in markdown_files(&dir) {
+        let name = path
+            .strip_prefix(&dir)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
         let markdown = std::fs::read_to_string(&path).expect("read skill");
 
         // Checked before the emptiness test: a file whose only doctest fence
@@ -353,21 +444,31 @@ fn a_demoted_fence_is_an_error_rather_than_silence() {
 }
 
 #[test]
-fn a_shell_transcript_is_prose_not_a_lost_doctest() {
-    // The guard used to fire on any `$ ` line, so a prose block written as a
-    // transcript would be reported as a doctest whose marker went missing --
-    // a false alarm asserting something that never happened (GH-492).
-    let transcript = "```bash\n$ git status\n$ gh pr view 491\n```\n";
+fn a_transcript_without_assertions_is_prose() {
+    // Was `a_shell_transcript_is_prose_not_a_lost_doctest`, which exempted a
+    // block only when its commands were not edda. That missed the style four
+    // docs under docs/decision/ actually use -- `$ edda …` transcripts showing
+    // usage. What separates prose from a demoted doctest is not the command but
+    // the absence of assertions, so the rule moved and this test moved with it
+    // (GH-494).
+    let other_commands = "```bash\n$ git status\n$ gh pr view 491\n```\n";
     assert!(
-        find_demoted_steps(transcript).is_empty(),
+        find_demoted_steps(other_commands).is_empty(),
         "a transcript of other commands is prose"
     );
 
-    let mixed = "```bash\n$ git status\n$ edda claim \"auth\"\n```\n";
+    let edda_transcript = "```bash\n$ edda claim \"auth\"\n$ edda peers --json\n```\n";
+    assert!(
+        find_demoted_steps(edda_transcript).is_empty(),
+        "an edda transcript with nothing asserted is prose too"
+    );
+
+    let demoted = "```bash\n$ git status\n$ edda claim \"auth\"\n> session: cli-auth\n```\n";
     assert_eq!(
-        find_demoted_steps(mixed),
+        find_demoted_steps(demoted),
         vec!["$ edda claim \"auth\"".to_string()],
-        "only the edda step is a stranded doctest step"
+        "assertions make it a doctest that lost its marker, and only the edda \
+         step is reported"
     );
 }
 
@@ -391,12 +492,92 @@ fn an_illustrated_doctest_inside_a_longer_fence_does_not_run() {
 
 #[test]
 fn an_unclosed_fence_still_reports_its_steps() {
-    // A stray backtick must not be able to hide a whole block from the guard.
-    let unclosed = "```bash\n$ edda claim \"auth\"\n";
+    // A stray backtick must not be able to hide a block from the guard.
+    let unclosed = "```bash\n$ edda claim \"auth\"\n> session: cli-auth\n";
     assert_eq!(
         find_demoted_steps(unclosed).len(),
         1,
         "an unterminated block still carries steps worth reporting"
+    );
+}
+
+#[test]
+fn an_unbalanced_illustration_cannot_launder_a_later_demotion() {
+    // The exemption used to cover a whole fence, so an unbalanced illustration
+    // could swallow a genuinely demoted block and excuse it. Skipping only the
+    // quoted span keeps the rest under the guard (GH-494).
+    // The outer fence has to be longer than the quoted one, or the inner
+    // backticks close it and the two blocks never share a fence to begin with.
+    let laundered = "````markdown\n```bash edda-doctest\n$ edda peers\n> ok\n```\n\
+                     $ edda claim \"auth\"\n> session: cli-auth\n````\n";
+    let stranded = find_demoted_steps(laundered);
+    assert!(
+        stranded.iter().any(|l| l.contains("claim")),
+        "the demoted step outside the quoted span must still be reported: {stranded:?}"
+    );
+    assert!(
+        !stranded.iter().any(|l| l.contains("peers")),
+        "the quoted illustration must stay exempt: {stranded:?}"
+    );
+}
+
+#[test]
+fn a_tilde_wrapper_quotes_rather_than_leaks() {
+    // CommonMark allows tilde fences; before GH-494 only backticks were
+    // recognised, so a ~~~ wrapper left its quoted doctest visible to the
+    // scanner and the illustration ran for real.
+    let wrapped = "~~~markdown\n```bash edda-doctest\n$ edda claim \"auth\"\n> session: \
+                   cli-auth\n```\n~~~\n";
+    assert!(
+        parse_blocks(wrapped).is_empty(),
+        "a tilde wrapper quotes its contents"
+    );
+}
+
+#[test]
+fn an_indented_fence_is_still_a_fence() {
+    // Was `an_indented_fence_is_literal_text`, which judged the four-space rule
+    // against the document. CommonMark applies it relative to the container and
+    // strips a list marker first, so a fence under a `- ` bullet is real and
+    // GitHub renders it as code. Treating it as literal made such a block stop
+    // running, and a demoted one stop being reported (GH-495).
+    let indented = "    ```bash edda-doctest\n    $ edda claim \"auth\"\n    > session: \
+                    cli-auth\n    ```\n";
+    assert_eq!(
+        parse_blocks(indented).len(),
+        1,
+        "an indented doctest still runs"
+    );
+
+    let demoted = "- step one:\n\n    ```bash\n    $ edda claim \"auth\"\n    > session: \
+                   cli-auth\n    ```\n";
+    assert_eq!(
+        find_demoted_steps(demoted).len(),
+        1,
+        "and an indented demotion is still reported rather than silently dropped"
+    );
+}
+
+#[test]
+fn skills_in_subdirectories_are_scanned() {
+    // The scan was one directory deep, so a skill in a subdirectory was never
+    // checked (GH-492 item 2). Nothing in the shipped tree exercises this yet,
+    // so the walk needs its own fixture.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let nested = dir.path().join("group").join("deeper");
+    std::fs::create_dir_all(&nested).expect("nested dirs");
+    std::fs::write(dir.path().join("top.md"), "# top\n").expect("top");
+    std::fs::write(nested.join("buried.md"), "# buried\n").expect("buried");
+    std::fs::write(nested.join("ignored.txt"), "not markdown\n").expect("txt");
+
+    let found: Vec<String> = markdown_files(dir.path())
+        .iter()
+        .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        found,
+        vec!["buried.md", "top.md"],
+        "sorted, recursive, .md only"
     );
 }
 
