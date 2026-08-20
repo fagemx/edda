@@ -657,6 +657,13 @@ pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
 }
 
 /// `edda bridge claude claim <label>` — claim a coordination scope
+///
+/// The board folds claims into one per session, so a second claim replaces the
+/// first rather than adding to it. That is the right shape — it is how a
+/// session narrows or moves its scope, and how a restart re-claims
+/// idempotently — but it used to happen in silence, so a worker could believe
+/// it held two scopes while peers saw one (GH-488). The replacement is now
+/// named.
 pub fn claim(
     repo_root: &Path,
     label: &str,
@@ -666,8 +673,27 @@ pub fn claim(
     let project_id = edda_store::project_id(repo_root);
     let (session_id, _) = resolve_session_id(cli_session, &project_id, label);
 
+    let replaced = edda_bridge_claude::peers::compute_board_state(&project_id)
+        .claims
+        .into_iter()
+        .find(|c| c.session_id == session_id);
+
     edda_bridge_claude::peers::write_claim(&project_id, &session_id, label, paths);
-    println!("Claimed scope: {label}");
+    if let Some(previous) = replaced {
+        if previous.label == label {
+            println!("Re-claimed scope: {label} (previous paths replaced)");
+        } else {
+            println!(
+                "Claimed scope: {label} (replaces this session's earlier claim on {})",
+                previous.label
+            );
+        }
+        if !previous.paths.is_empty() {
+            println!("  released: {}", previous.paths.join(", "));
+        }
+    } else {
+        println!("Claimed scope: {label}");
+    }
     if !paths.is_empty() {
         println!("  paths: {}", paths.join(", "));
     }
@@ -2275,6 +2301,75 @@ mod tests {
         assert!(body.contains("\"from_label\":\"auth\""), "{body}");
         assert!(body.contains("\"to_label\":\"billing\""), "{body}");
         assert!(body.contains("\"message\":\"need invoice type\""), "{body}");
+    }
+
+    #[test]
+    fn a_second_claim_replaces_the_first_and_says_so() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+
+        claim(repo.path(), "auth", &["src/auth/*".into()], Some("s1")).expect("first claim");
+        claim(repo.path(), "api", &["src/api/*".into()], Some("s1")).expect("second claim");
+
+        // The board folds to one claim per session, so the first scope is gone.
+        // GH-488 item 2 was that this happened without saying so; the printed
+        // line is the fix, and the fold is the behaviour it discloses.
+        let claims = edda_bridge_claude::peers::compute_board_state(&pid).claims;
+        assert_eq!(claims.len(), 1, "one session holds one claim");
+        assert_eq!(claims[0].label, "api");
+        assert_eq!(claims[0].paths, vec!["src/api/*".to_string()]);
+    }
+
+    #[test]
+    fn re_claiming_the_same_label_keeps_one_claim() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+
+        // Narrowing a scope, and re-claiming after a restart, both go through
+        // this path -- which is why replacement is right and rejecting a second
+        // claim would not be.
+        claim(
+            repo.path(),
+            "auth",
+            &["src/auth/*".into(), "src/token/*".into()],
+            Some("s1"),
+        )
+        .expect("first claim");
+        claim(repo.path(), "auth", &["src/auth/*".into()], Some("s1")).expect("narrowed claim");
+
+        let claims = edda_bridge_claude::peers::compute_board_state(&pid).claims;
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].paths, vec!["src/auth/*".to_string()]);
+    }
+
+    #[test]
+    fn one_session_claiming_does_not_disturb_another() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+
+        claim(repo.path(), "auth", &["src/auth/*".into()], Some("s1")).expect("s1 claim");
+        claim(repo.path(), "api", &["src/api/*".into()], Some("s2")).expect("s2 claim");
+
+        let mut claims = edda_bridge_claude::peers::compute_board_state(&pid).claims;
+        claims.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        assert_eq!(claims.len(), 2, "the fold is per session, not global");
+        assert_eq!(claims[0].label, "auth");
+        assert_eq!(claims[1].label, "api");
     }
 
     #[test]
