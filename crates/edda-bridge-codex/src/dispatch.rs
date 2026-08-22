@@ -4,7 +4,10 @@
 //! ```json
 //! {
 //!   "continue": true,
-//!   "hookSpecificOutput": { "additionalContext": "..." }
+//!   "hookSpecificOutput": {
+//!     "hookEventName": "SessionStart",
+//!     "additionalContext": "..."
+//!   }
 //! }
 //! ```
 //!
@@ -42,10 +45,13 @@ fn ok() -> HookResult {
     HookResult::output(r#"{"continue":true}"#.to_string())
 }
 
-fn with_context(context: &str) -> anyhow::Result<HookResult> {
+fn with_context(hook_event_name: &str, context: &str) -> anyhow::Result<HookResult> {
     let output = serde_json::json!({
         "continue": true,
-        "hookSpecificOutput": { "additionalContext": context }
+        "hookSpecificOutput": {
+            "hookEventName": hook_event_name,
+            "additionalContext": context
+        }
     });
     Ok(HookResult::output(serde_json::to_string(&output)?))
 }
@@ -148,7 +154,7 @@ fn dispatch_session_start(
     let budgeted_body = render::apply_budget(&body, body_budget);
     let content = format!("{budgeted_body}{tail}");
     let wrapped = render::wrap_boundary(&content);
-    with_context(&wrapped)
+    with_context(&envelope.hook_event_name, &wrapped)
 }
 
 // ── UserPromptSubmit: light workspace-only injection with dedup ──
@@ -176,7 +182,7 @@ fn dispatch_user_prompt_submit(
     if !session_id.is_empty() {
         state::write_inject_hash(project_id, session_id, &wrapped);
     }
-    with_context(&wrapped)
+    with_context(&envelope.hook_event_name, &wrapped)
 }
 
 // ── PreToolUse: L3 rule evaluation ──
@@ -216,7 +222,7 @@ fn dispatch_pre_tool_use(project_id: &str, envelope: &CodexEnvelope) -> anyhow::
         let _ = rules_store.save_project(project_id);
     }
     match edda_postmortem::hooks::format_warnings(&result) {
-        Some(warning) => with_context(&warning),
+        Some(warning) => with_context(&envelope.hook_event_name, &warning),
         None => Ok(ok()),
     }
 }
@@ -252,7 +258,7 @@ fn dispatch_post_tool_use(
     }
     state::mark_nudge_sent(project_id, session_id);
     state::increment_counter(project_id, session_id, "nudge_count");
-    with_context(&nudge_text)
+    with_context(&envelope.hook_event_name, &nudge_text)
 }
 
 // ── PreCompact / SessionEnd ──
@@ -327,6 +333,7 @@ mod tests {
         let stdin = stdin_event("SessionStart", tmp.path().to_str().unwrap(), "codex-ss-1");
         let r = hook_entrypoint_from_stdin(&stdin).unwrap();
         let v: serde_json::Value = serde_json::from_str(r.stdout.as_ref().unwrap()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
         let ctx = v["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
