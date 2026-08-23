@@ -1,8 +1,6 @@
 use std::fs;
 
 use super::autoclaim::*;
-use super::board::*;
-use super::discovery::*;
 use super::heartbeat::*;
 use super::helpers::*;
 use super::render_coord::*;
