@@ -11,10 +11,9 @@
 //! }
 //! ```
 //!
-//! For PreToolUse we can also return `{ "continue": false, "stopReason": "..." }`
-//! to block, but this skeleton emits advisory context only — L3 rule enforcement
-//! is wired to the same `edda_postmortem::hooks::evaluate_rules` used by the
-//! Claude bridge, but delivered as `additionalContext` warnings for now.
+//! For Bash `PreToolUse`, `permissionDecision: "allow"` plus `updatedInput`
+//! carries the hook session id into that command. L3 rule enforcement is wired
+//! to the same evaluator as the Claude bridge and remains advisory context.
 
 use edda_bridge_claude::{render, state};
 
@@ -54,6 +53,60 @@ fn with_context(hook_event_name: &str, context: &str) -> anyhow::Result<HookResu
         }
     });
     Ok(HookResult::output(serde_json::to_string(&output)?))
+}
+
+fn pre_tool_context(context: &str) -> anyhow::Result<HookResult> {
+    let output = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": context,
+        }
+    });
+    Ok(HookResult::output(serde_json::to_string(&output)?))
+}
+
+fn pre_tool_result(envelope: &CodexEnvelope, warning: Option<&str>) -> anyhow::Result<HookResult> {
+    let rewritten = if envelope.tool_name == "Bash" && !envelope.session_id.is_empty() {
+        envelope
+            .tool_input
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(|command| command_with_session_identity(command, &envelope.session_id))
+    } else {
+        None
+    };
+
+    let Some(command) = rewritten else {
+        return match warning {
+            Some(warning) => pre_tool_context(warning),
+            None => Ok(HookResult::output("{}".to_string())),
+        };
+    };
+
+    let mut hook_output = serde_json::json!({
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "allow",
+        "updatedInput": { "command": command },
+    });
+    if let Some(warning) = warning {
+        hook_output["additionalContext"] = serde_json::Value::String(warning.to_string());
+    }
+    let output = serde_json::json!({ "hookSpecificOutput": hook_output });
+    Ok(HookResult::output(serde_json::to_string(&output)?))
+}
+
+fn command_with_session_identity(command: &str, session_id: &str) -> String {
+    if cfg!(windows) {
+        format!(
+            "$env:EDDA_SESSION_ID = '{}';\n{command}",
+            session_id.replace('\'', "''")
+        )
+    } else {
+        format!(
+            "export EDDA_SESSION_ID='{}';\n{command}",
+            session_id.replace('\'', "'\\''")
+        )
+    }
 }
 
 // ── Entry ──
@@ -189,11 +242,11 @@ fn dispatch_user_prompt_submit(
 
 fn dispatch_pre_tool_use(project_id: &str, envelope: &CodexEnvelope) -> anyhow::Result<HookResult> {
     if std::env::var("EDDA_POSTMORTEM").unwrap_or_else(|_| "1".into()) == "0" {
-        return Ok(ok());
+        return pre_tool_result(envelope, None);
     }
     let mut rules_store = edda_postmortem::RulesStore::load_project(project_id);
     if rules_store.active_rules().is_empty() {
-        return Ok(ok());
+        return pre_tool_result(envelope, None);
     }
 
     let files_touched: Vec<String> = envelope
@@ -221,10 +274,8 @@ fn dispatch_pre_tool_use(project_id: &str, envelope: &CodexEnvelope) -> anyhow::
         edda_postmortem::hooks::record_matched_hits(&mut rules_store, &result.matched_rule_ids);
         let _ = rules_store.save_project(project_id);
     }
-    match edda_postmortem::hooks::format_warnings(&result) {
-        Some(warning) => with_context(&envelope.hook_event_name, &warning),
-        None => Ok(ok()),
-    }
+    let warning = edda_postmortem::hooks::format_warnings(&result);
+    pre_tool_result(envelope, warning.as_deref())
 }
 
 // ── PostToolUse: nudge on decision signals ──
@@ -363,19 +414,49 @@ mod tests {
     }
 
     #[test]
-    fn pre_tool_use_no_rules_returns_ok() {
+    fn pre_tool_use_carries_process_identity_without_changing_command_bytes() {
         std::env::set_var("EDDA_POSTMORTEM", "1");
+        let command = "printf 'untouched';\nwhoami";
         let stdin = serde_json::json!({
             "hook_event_name": "PreToolUse",
-            "session_id": "codex-ptu-1",
+            "session_id": "codex-'ptu-1",
             "cwd": "/tmp/codex-ptu",
             "tool_name": "Bash",
-            "tool_input": { "command": "ls" }
+            "tool_input": { "command": command }
         })
         .to_string();
         let r = hook_entrypoint_from_stdin(&stdin).unwrap();
         let v: serde_json::Value = serde_json::from_str(r.stdout.as_ref().unwrap()).unwrap();
-        assert_eq!(v["continue"], true);
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "allow");
+        assert!(
+            v.get("continue").is_none(),
+            "PreToolUse rejects the SessionStart-only continue field"
+        );
+        let rewritten = v["hookSpecificOutput"]["updatedInput"]["command"]
+            .as_str()
+            .expect("rewritten Bash command");
+        let prefix = if cfg!(windows) {
+            "$env:EDDA_SESSION_ID = 'codex-''ptu-1';\n"
+        } else {
+            "export EDDA_SESSION_ID='codex-'\\''ptu-1';\n"
+        };
+        assert_eq!(rewritten, format!("{prefix}{command}"));
+    }
+
+    #[test]
+    fn pre_tool_use_leaves_non_shell_tools_unchanged() {
+        let stdin = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "codex-read-1",
+            "cwd": "/tmp/codex-read",
+            "tool_name": "Read",
+            "tool_input": { "file_path": "README.md" }
+        })
+        .to_string();
+        let r = hook_entrypoint_from_stdin(&stdin).unwrap();
+        let v: serde_json::Value = serde_json::from_str(r.stdout.as_ref().unwrap()).unwrap();
+        assert!(v["hookSpecificOutput"]["updatedInput"].is_null());
+        assert!(v.get("continue").is_none());
     }
 
     #[test]

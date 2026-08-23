@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use crate::signals::{extract_session_signals, save_session_signals, TaskSnapshot};
@@ -698,6 +699,8 @@ pub(super) fn dispatch_session_start(
     cwd: &str,
     digest_warning: Option<&str>,
 ) -> anyhow::Result<HookResult> {
+    persist_session_identity(session_id)?;
+
     // Conductor mode: skip sections that overlap with conductor's --append-system-prompt.
     // See CONDUCTOR-SPEC.md §10.2.
     let conductor_mode = std::env::var("EDDA_CONDUCTOR_MODE").is_ok();
@@ -916,4 +919,21 @@ pub(super) fn dispatch_session_start(
     } else {
         Ok(HookResult::empty())
     }
+}
+
+fn persist_session_identity(session_id: &str) -> anyhow::Result<()> {
+    let Some(env_file) = std::env::var_os("CLAUDE_ENV_FILE") else {
+        return Ok(());
+    };
+    if session_id.is_empty() || env_file.is_empty() {
+        return Ok(());
+    }
+
+    let quoted = session_id.replace('\'', "'\\''");
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(env_file)?;
+    writeln!(file, "export EDDA_SESSION_ID='{quoted}'")?;
+    Ok(())
 }

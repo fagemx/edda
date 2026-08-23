@@ -1,9 +1,20 @@
 const { execSync } = require("child_process");
 
+const sessionIdentityByKey = new Map();
+
+function heartbeatSessionId(ctx) {
+  const sessionKey = ctx.sessionKey || "";
+  const sessionId = ctx.sessionId || sessionKey;
+  if (sessionKey && sessionId) {
+    sessionIdentityByKey.set(sessionKey, sessionId);
+  }
+  return sessionId;
+}
+
 function callEdda(hookName, eventData, ctx, logger, timeout) {
   const payload = JSON.stringify({
     hook_event_name: hookName,
-    session_id: ctx.sessionId || "",
+    session_id: heartbeatSessionId(ctx),
     session_key: ctx.sessionKey || "",
     agent_id: ctx.agentId || "main",
     workspace_dir: ctx.workspaceDir || "",
@@ -32,6 +43,12 @@ const plugin = {
 
     api.on("session_start", async (event, ctx) => {
       callEdda("session_start", {}, ctx, logger, 15000);
+    });
+
+    api.on("resolve_exec_env", async (event, ctx) => {
+      const sessionKey = event.sessionKey || ctx.sessionKey || "";
+      const sessionId = sessionIdentityByKey.get(sessionKey);
+      return sessionId ? { EDDA_SESSION_ID: sessionId } : {};
     });
 
     api.on("before_agent_start", async (event, ctx) => {
@@ -101,6 +118,9 @@ const plugin = {
         logger,
         15000,
       );
+      if (ctx.sessionKey) {
+        sessionIdentityByKey.delete(ctx.sessionKey);
+      }
     });
   },
 };

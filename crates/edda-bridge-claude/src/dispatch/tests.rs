@@ -62,6 +62,31 @@ fn hook_entrypoint_session_start() {
 }
 
 #[test]
+fn session_start_exports_shell_quoted_process_identity() {
+    let env_file = tempfile::NamedTempFile::new().expect("env file");
+    fs::write(env_file.path(), "export EXISTING=kept\n").expect("seed env file");
+    let env_path = env_file.path().to_string_lossy().into_owned();
+    crate::with_env_guard(
+        &[
+            ("EDDA_BRIDGE_AUTO_DIGEST", Some("0")),
+            ("EDDA_PLANS_DIR", Some("/nonexistent/plans/dir")),
+            ("CLAUDE_ENV_FILE", Some(&env_path)),
+        ],
+        || {
+            let stdin = r#"{"session_id":"claude-'worker","hook_event_name":"SessionStart","cwd":".","transcript_path":"","permission_mode":"default"}"#;
+            hook_entrypoint_from_stdin(stdin).expect("session start");
+            let resumed = r#"{"session_id":"claude-resumed","hook_event_name":"SessionStart","source":"resume","cwd":".","transcript_path":"","permission_mode":"default"}"#;
+            hook_entrypoint_from_stdin(resumed).expect("resumed session start");
+        },
+    );
+
+    assert_eq!(
+        fs::read_to_string(env_file.path()).expect("read env file"),
+        "export EXISTING=kept\nexport EDDA_SESSION_ID='claude-'\\''worker'\nexport EDDA_SESSION_ID='claude-resumed'\n"
+    );
+}
+
+#[test]
 fn hook_entrypoint_camel_case_input() {
     crate::with_env_guard(&[("EDDA_CLAUDE_AUTO_APPROVE", Some("1"))], || {
         // Claude Code sends camelCase JSON

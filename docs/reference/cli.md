@@ -153,7 +153,7 @@ edda decide <DECISION> [OPTIONS]
 |--------|-------------|
 | `DECISION` | Key=value format (e.g. `"db.engine=postgres"`) |
 | `--reason TEXT` | Reason for the decision |
-| `--session ID` | Session ID (auto-inferred from active heartbeats) |
+| `--session ID` | Explicit session attribution; otherwise uses process-carried `EDDA_SESSION_ID` |
 
 ```bash
 edda decide "db.engine=sqlite" --reason "embedded, zero-config"
@@ -191,6 +191,13 @@ edda run -- npm run build
 
 ## Coordination (multi-agent)
 
+Hook integrations carry their session ID into shell commands as
+`EDDA_SESSION_ID`; an explicit `--session` overrides it. Without either, the
+CLI uses a deterministic `cli-<label>` identity only when no live session is
+present. Beside one or more live sessions it refuses before mutating state and
+asks for `--session`, because a heartbeat cannot prove which process owns it.
+These IDs provide attribution, not authentication or authorization.
+
 ### `edda claim`
 
 Claim a scope for coordination. Other agents see claimed paths as off-limits.
@@ -203,7 +210,7 @@ edda claim <LABEL> [OPTIONS]
 |--------|-------------|
 | `LABEL` | Short label (e.g. `"auth"`, `"billing"`) |
 | `--paths PATTERN` | One file path pattern; repeat for multiple patterns |
-| `--session ID` | Session ID (auto-inferred) |
+| `--session ID` | Explicit session attribution; otherwise uses process-carried `EDDA_SESSION_ID` |
 
 ```bash
 edda claim "auth" --paths "src/auth/*"
@@ -227,7 +234,7 @@ edda request <TO> <MESSAGE> [OPTIONS]
 |--------|-------------|
 | `TO` | Target session label |
 | `MESSAGE` | Request message |
-| `--session ID` | Session ID (auto-inferred) |
+| `--session ID` | Explicit session attribution; otherwise uses process-carried `EDDA_SESSION_ID` |
 | `--force` | Send even when no active session answers to `TO` |
 
 ```bash
