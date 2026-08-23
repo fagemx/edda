@@ -4,7 +4,8 @@ const sessionIdentityByKey = new Map();
 
 function heartbeatSessionId(ctx) {
   const sessionKey = ctx.sessionKey || "";
-  const sessionId = ctx.sessionId || sessionKey;
+  const sessionId =
+    ctx.sessionId || sessionIdentityByKey.get(sessionKey) || sessionKey;
   if (sessionKey && sessionId) {
     sessionIdentityByKey.set(sessionKey, sessionId);
   }

@@ -18,7 +18,8 @@ const sessionIdentityByKey = new Map();
 
 function heartbeatSessionId(ctx) {
   const sessionKey = ctx.sessionKey || "";
-  const sessionId = ctx.sessionId || sessionKey;
+  const sessionId =
+    ctx.sessionId || sessionIdentityByKey.get(sessionKey) || sessionKey;
   if (sessionKey && sessionId) {
     sessionIdentityByKey.set(sessionKey, sessionId);
   }
@@ -272,7 +273,7 @@ mod tests {
         assert!(js.contains("additionalContext"));
         assert!(js.contains("resolve_exec_env"));
         assert!(js.contains("session_id: heartbeatSessionId(ctx)"));
-        assert!(js.contains("sessionIdentityByKey.get(sessionKey)"));
+        assert!(js.contains("ctx.sessionId || sessionIdentityByKey.get(sessionKey) || sessionKey"));
         assert!(js.contains("{ EDDA_SESSION_ID: sessionId }"));
     }
 
