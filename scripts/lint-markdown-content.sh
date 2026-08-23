@@ -23,24 +23,42 @@ function marker(s,    i, c) {
     return 1
 }
 
+function container_line(s, track,    indent, base, rest) {
+    for (indent = 0; substr(s, indent + 1, 1) == " "; indent++);
+    if (!track)
+        return indent >= container_indent ? substr(s, container_indent + 1) : s
+    if (s !~ /^[ \t]*$/ && indent < container_indent)
+        container_indent = 0
+    base = container_indent
+    rest = substr(s, base + 1)
+    if (match(rest, /^ {0,3}([-+*]|[0-9]{1,9}[.)])[ \t]{1,4}/) &&
+        substr(rest, RLENGTH + 1, 1) !~ /[ \t]/) {
+        container_indent = base + RLENGTH
+        return substr(rest, RLENGTH + 1)
+    }
+    return rest
+}
+
 FNR == 1 {
     in_fence = 0
     fence_char = ""
     fence_width = 0
+    container_indent = 0
 }
 
 {
     line = $0
     sub(/\r$/, "", line)
+    fence_line = container_line(line, !in_fence)
 
     if (in_fence) {
-        if (marker(line) && mark_char == fence_char &&
+        if (marker(fence_line) && mark_char == fence_char &&
             mark_width >= fence_width && mark_rest ~ /^[ \t]*$/)
             in_fence = 0
         next
     }
 
-    if (marker(line) && !(mark_char == "`" && mark_rest ~ /`/)) {
+    if (marker(fence_line) && !(mark_char == "`" && mark_rest ~ /`/)) {
         in_fence = 1
         fence_char = mark_char
         fence_width = mark_width
