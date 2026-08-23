@@ -626,7 +626,9 @@ impl SchedulerOutput {
                 "scheduler Query XML contains odd-length UTF-16"
             );
             let units = encoded
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|bytes| {
                     if little_endian {
                         u16::from_le_bytes([bytes[0], bytes[1]])
