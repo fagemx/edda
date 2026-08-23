@@ -202,13 +202,18 @@ edda claim <LABEL> [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `LABEL` | Short label (e.g. `"auth"`, `"billing"`) |
-| `--paths PATTERN` | File path patterns (e.g. `"src/auth/*"`) |
+| `--paths PATTERN` | One file path pattern; repeat for multiple patterns |
 | `--session ID` | Session ID (auto-inferred) |
 
 ```bash
 edda claim "auth" --paths "src/auth/*"
-edda claim "billing" --paths "src/billing/*,src/invoice/*"
+edda claim "billing" --paths "src/billing/*" --paths "src/invoice/*"
 ```
+
+A session holds one active claim. Running `edda claim` again from the same
+session replaces its previous label and complete path list; it does not add a
+second claim. Pass each path pattern with its own `--paths` flag; comma-separated
+values are not split.
 
 ### `edda request`
 
