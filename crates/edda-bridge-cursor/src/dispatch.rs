@@ -266,6 +266,7 @@ fn dispatch_session_start(
     let output = serde_json::json!({
         "env": {
             "EDDA_HOT_PACK_PATH": sidefile.to_string_lossy(),
+            "EDDA_SESSION_ID": session_id,
         },
         "additional_context": wrapped,
     });
@@ -332,6 +333,7 @@ mod tests {
         assert!(context.contains("edda decide"));
         let sidefile = output["env"]["EDDA_HOT_PACK_PATH"].as_str().unwrap();
         assert!(std::path::Path::new(sidefile).is_file());
+        assert_eq!(output["env"]["EDDA_SESSION_ID"], "cursor-session-start-1");
     }
 
     #[test]

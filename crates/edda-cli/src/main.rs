@@ -104,7 +104,7 @@ enum Command {
         /// Decision keys this decision depends on (repeatable)
         #[arg(long = "refs")]
         refs: Vec<String>,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
         /// Decision scope: local (default), shared, or global
@@ -129,7 +129,7 @@ enum Command {
         /// resolved session label.
         #[arg(long)]
         by: Option<String>,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
@@ -164,13 +164,13 @@ enum Command {
         /// File path patterns this scope covers (e.g. "src/auth/*")
         #[arg(long)]
         paths: Vec<String>,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
     /// Release this session's coordination scope
     Unclaim {
-        /// Session ID (inferred from a sole live session; required otherwise)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
         /// Exit 0 when there is nothing to release, for unconditional teardown
@@ -183,7 +183,7 @@ enum Command {
         to: String,
         /// Request message
         message: String,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
         /// Send even when no active session answers to the target label
@@ -195,7 +195,7 @@ enum Command {
     RequestAck {
         /// Label of the session whose request to acknowledge
         from: String,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
@@ -207,7 +207,7 @@ enum Command {
     },
     /// Show coordination state (shortcut for `bridge claude render-coordination`)
     Coord {
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
@@ -716,7 +716,7 @@ enum BridgeClaudeCmd {
         /// File path patterns this scope covers (e.g. "src/auth/*")
         #[arg(long)]
         paths: Vec<String>,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
@@ -730,7 +730,7 @@ enum BridgeClaudeCmd {
         /// Decision keys this decision depends on (repeatable)
         #[arg(long = "refs")]
         refs: Vec<String>,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
         /// File glob patterns this decision governs (repeatable)
@@ -746,7 +746,7 @@ enum BridgeClaudeCmd {
         to: String,
         /// Request message
         message: String,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
         /// Send even when no active session answers to the target label
@@ -763,7 +763,7 @@ enum BridgeClaudeCmd {
     },
     /// Render L2 coordination protocol
     RenderCoordination {
-        /// Session ID (auto-inferred if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
@@ -776,19 +776,19 @@ enum BridgeClaudeCmd {
         /// Session label (e.g. "auth", "billing")
         #[arg(long)]
         label: String,
-        /// Session ID (auto-inferred if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
     /// Touch heartbeat timestamp (liveness ping)
     HeartbeatTouch {
-        /// Session ID (auto-inferred if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
     /// Remove session heartbeat
     HeartbeatRemove {
-        /// Session ID (auto-inferred if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },

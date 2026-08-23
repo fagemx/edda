@@ -114,13 +114,13 @@ pub enum BridgeClaudeCmd {
         /// File path patterns this scope covers (e.g. "src/auth/*")
         #[arg(long)]
         paths: Vec<String>,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
     /// Release this session's coordination scope
     Unclaim {
-        /// Session ID (inferred from a sole live session; required otherwise)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
         /// Exit 0 when there is nothing to release, for unconditional teardown
@@ -137,7 +137,7 @@ pub enum BridgeClaudeCmd {
         /// Decision keys this decision depends on (repeatable)
         #[arg(long = "refs")]
         refs: Vec<String>,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
         /// File glob patterns this decision governs (repeatable)
@@ -153,7 +153,7 @@ pub enum BridgeClaudeCmd {
         to: String,
         /// Request message
         message: String,
-        /// Session ID (auto-inferred from active heartbeats if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
         /// Send even when no active session answers to the target label
@@ -170,7 +170,7 @@ pub enum BridgeClaudeCmd {
     },
     /// Render L2 coordination protocol
     RenderCoordination {
-        /// Session ID (auto-inferred if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
@@ -189,19 +189,19 @@ pub enum BridgeClaudeCmd {
         /// Session label (e.g. "auth", "billing")
         #[arg(long)]
         label: String,
-        /// Session ID (auto-inferred if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
     /// Touch heartbeat timestamp (liveness ping)
     HeartbeatTouch {
-        /// Session ID (auto-inferred if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
     /// Remove session heartbeat
     HeartbeatRemove {
-        /// Session ID (auto-inferred if omitted)
+        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
     },
@@ -726,7 +726,7 @@ pub fn claim(
     cli_session: Option<&str>,
 ) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
-    let (session_id, _) = resolve_session_id(cli_session, &project_id, label);
+    let (session_id, _) = resolve_session_id(cli_session, &project_id, label)?;
 
     let replaced = edda_bridge_claude::peers::compute_board_state(&project_id)
         .claims
@@ -808,11 +808,10 @@ pub fn unclaim(
 
 /// Name the session whose claim `unclaim` should release.
 ///
-/// Explicit `--session` wins, then `EDDA_SESSION_ID`, then a sole live
-/// heartbeat. There is deliberately no further tier: a caller with none of
-/// those has no identity, and picking a claim off the board for it would
-/// release a scope its real owner is still relying on. Refuse and show the
-/// board instead, so the id for `--session` is in the error.
+/// Explicit `--session` wins, then process-carried `EDDA_SESSION_ID`.
+/// Heartbeats are evidence that identity is ambiguous, never evidence that a
+/// session belongs to this process. Refuse and show the board instead, so the
+/// id for `--session` is in the error.
 fn resolve_unclaim_target(
     cli_session: Option<&str>,
     project_id: &str,
@@ -826,8 +825,11 @@ fn resolve_unclaim_target(
             return Ok(sid);
         }
     }
-    if let Some((sid, _label)) = edda_bridge_claude::peers::infer_session_id(project_id) {
-        return Ok(sid);
+    if has_live_sessions(project_id) {
+        anyhow::bail!(
+            "cannot prove which live session belongs to this process, so --session is required.\n{}",
+            describe_claims(claims)
+        );
     }
 
     // No identity of our own, so there is nothing to infer from. Do NOT fall
@@ -911,7 +913,7 @@ pub fn decide(
     }
 
     let project_id = edda_store::project_id(repo_root);
-    let (session_id, label) = resolve_session_id(cli_session, &project_id, "cli");
+    let (session_id, label) = resolve_session_id(cli_session, &project_id, "cli")?;
 
     // L2 conflict check (coordination.jsonl) — before writing
     if let Some(conflict) =
@@ -1086,7 +1088,7 @@ pub fn ratify(
 ) -> anyhow::Result<()> {
     let key = key.trim();
     let project_id = edda_store::project_id(repo_root);
-    let (_session_id, label) = resolve_session_id(cli_session, &project_id, "cli");
+    let (_session_id, label) = resolve_session_id(cli_session, &project_id, "cli")?;
     let ratified_by = by.unwrap_or(&label);
 
     let ledger = edda_ledger::Ledger::open(repo_root).context("cmd_bridge: opening ledger")?;
@@ -1130,7 +1132,7 @@ pub fn request(
     force: bool,
 ) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
-    let (session_id, from_label) = resolve_session_id(cli_session, &project_id, "cli");
+    let (session_id, from_label) = resolve_session_id(cli_session, &project_id, "cli")?;
 
     let targets = edda_bridge_claude::peers::resolve_request_targets(&project_id, to);
     if targets.is_empty() && !force {
@@ -1201,29 +1203,32 @@ pub fn request_ack(
     cli_session: Option<&str>,
 ) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
-    let (session_id, _label) = resolve_session_id(cli_session, &project_id, "cli");
+    let (session_id, _label) = resolve_session_id(cli_session, &project_id, "cli")?;
 
     edda_bridge_claude::peers::write_request_ack(&project_id, &session_id, from_label);
     println!("Acknowledged request from [{from_label}]");
     Ok(())
 }
 
-/// Resolve session identity via 4-tier fallback:
+/// Resolve attribution identity for a session-taking CLI verb.
 ///
 /// 1. `--session` CLI flag (explicit override)
-/// 2. `EDDA_SESSION_ID` env var (conductor path, user override)
-/// 3. Heartbeat inference (auto-detect sole active session)
-/// 4. `"cli-{fallback_label}"` (genuine CLI usage)
+/// 2. Process-carried `EDDA_SESSION_ID` (bridge/conductor path, user override)
+/// 3. `"cli-{fallback_label}"` only when no live session makes that ambiguous
 ///
-/// Tier 3 cannot tell the caller apart from a lone peer, and GH-488 item 1 is
-/// still open on that. A branch does not fix it: a branch belongs to a
-/// worktree, not to a process, so every process in that worktree matches one
-/// equally well.
+/// `EDDA_SESSION_ID` proves only that the invoking process received an id; it
+/// is attribution and an explicit user override, not authentication or
+/// authorization. Heartbeats, branches, and working directories cannot prove
+/// which process owns a session, so any live heartbeat makes an uncarried
+/// identity an error. With no live sessions, the deterministic `cli-*`
+/// fallback preserves genuine standalone CLI use. A carrier can preserve only
+/// the identity its host exposes; Codex tool hooks, for example, attribute
+/// subagent commands to the parent session (GH-503).
 fn resolve_session_id(
     cli_session: Option<&str>,
     project_id: &str,
     fallback_label: &str,
-) -> (String, String) {
+) -> anyhow::Result<(String, String)> {
     let env_label = std::env::var("EDDA_SESSION_LABEL")
         .ok()
         .filter(|v| !v.is_empty());
@@ -1231,25 +1236,33 @@ fn resolve_session_id(
     // Tier 1: explicit --session flag
     if let Some(sid) = cli_session.filter(|s| !s.is_empty()) {
         let label = env_label.unwrap_or_else(|| fallback_label.to_string());
-        return (sid.to_string(), label);
+        return Ok((sid.to_string(), label));
     }
 
     // Tier 2: EDDA_SESSION_ID env var
     if let Ok(sid) = std::env::var("EDDA_SESSION_ID") {
         if !sid.is_empty() {
             let label = env_label.unwrap_or_else(|| fallback_label.to_string());
-            return (sid, label);
+            return Ok((sid, label));
         }
     }
 
-    // Tier 3: heartbeat inference (sole active session)
-    if let Some((sid, label)) = edda_bridge_claude::peers::infer_session_id(project_id) {
-        return (sid, label);
+    if has_live_sessions(project_id) {
+        anyhow::bail!(
+            "cannot prove which live session belongs to this process, so --session is required \
+             (or set EDDA_SESSION_ID in the invoking process)"
+        );
     }
 
-    // Tier 4: fallback
     let label = env_label.unwrap_or_else(|| fallback_label.to_string());
-    (format!("cli-{fallback_label}"), label)
+    Ok((format!("cli-{fallback_label}"), label))
+}
+
+fn has_live_sessions(project_id: &str) -> bool {
+    let stale = edda_bridge_claude::peers::stale_secs();
+    edda_bridge_claude::peers::discover_all_sessions(project_id)
+        .into_iter()
+        .any(|session| session.age_secs <= stale)
 }
 
 /// `edda bridge claude digest --session <id>` or `--all`
@@ -1382,7 +1395,7 @@ pub fn render_workspace(repo_root: &Path, budget: usize) -> anyhow::Result<()> {
 /// `edda bridge claude render-coordination`
 pub fn render_coordination(repo_root: &Path, cli_session: Option<&str>) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
-    let (session_id, _) = resolve_session_id(cli_session, &project_id, "cli");
+    let (session_id, _) = resolve_session_id(cli_session, &project_id, "cli")?;
     match edda_bridge_claude::render::coordination(&project_id, &session_id) {
         Some(s) => println!("{s}"),
         None => println!("(no coordination context)"),
@@ -1432,7 +1445,7 @@ pub fn heartbeat_write(
     cli_session: Option<&str>,
 ) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
-    let (session_id, _) = resolve_session_id(cli_session, &project_id, label);
+    let (session_id, _) = resolve_session_id(cli_session, &project_id, label)?;
     let _ = edda_store::ensure_dirs(&project_id);
     edda_bridge_claude::peers::write_heartbeat_minimal(
         &project_id,
@@ -1447,7 +1460,7 @@ pub fn heartbeat_write(
 /// `edda bridge claude heartbeat-touch`
 pub fn heartbeat_touch(repo_root: &Path, cli_session: Option<&str>) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
-    let (session_id, _) = resolve_session_id(cli_session, &project_id, "cli");
+    let (session_id, _) = resolve_session_id(cli_session, &project_id, "cli")?;
     edda_bridge_claude::peers::touch_heartbeat(&project_id, &session_id);
     println!("Heartbeat touched: {session_id}");
     Ok(())
@@ -1456,7 +1469,7 @@ pub fn heartbeat_touch(repo_root: &Path, cli_session: Option<&str>) -> anyhow::R
 /// `edda bridge claude heartbeat-remove`
 pub fn heartbeat_remove(repo_root: &Path, cli_session: Option<&str>) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
-    let (session_id, _) = resolve_session_id(cli_session, &project_id, "cli");
+    let (session_id, _) = resolve_session_id(cli_session, &project_id, "cli")?;
     edda_bridge_claude::peers::remove_heartbeat(&project_id, &session_id);
     println!("Heartbeat removed: {session_id}");
     Ok(())
@@ -2062,7 +2075,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
     }
 
-    // ── Integration: resolve_session_id 4-tier fallback (Issue #148 Gap 4) ──
+    #[test]
+    fn bare_decide_beside_two_live_sessions_refuses_without_writing() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let (repo, ledger) = setup_workspace();
+        let pid = edda_store::project_id(&repo);
+        edda_store::ensure_dirs(&pid).expect("store dirs");
+        edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "worker-a", "worker-a", "/tmp/a");
+        edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "worker-b", "worker-b", "/tmp/b");
+        let before = ledger.iter_events().expect("events before").len();
+
+        let err = decide(
+            &repo,
+            "unsafe.adoption=blocked",
+            Some("identity must come from the process"),
+            &[],
+            None,
+            None,
+            &[],
+            &[],
+        )
+        .expect_err("a bare shell beside live sessions must refuse");
+        assert!(err.to_string().contains("--session"), "{err}");
+        assert_eq!(
+            ledger.iter_events().expect("events after").len(),
+            before,
+            "a refused decide must not append to the ledger"
+        );
+        assert!(
+            edda_bridge_claude::peers::compute_board_state(&pid)
+                .bindings
+                .is_empty(),
+            "a refused decide must not broadcast a binding"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
+    }
+
+    // ── Integration: process-bound session identity (GH-503) ──
 
     #[test]
     fn resolve_session_id_tiers() {
@@ -2076,17 +2129,17 @@ mod tests {
         std::env::remove_var("EDDA_SESSION_LABEL");
 
         // Tier 1: explicit cli_session
-        let (sid, label) = resolve_session_id(Some("explicit-sid"), pid, "cli");
+        let (sid, label) = resolve_session_id(Some("explicit-sid"), pid, "cli").unwrap();
         assert_eq!(sid, "explicit-sid");
         assert_eq!(label, "cli");
 
         // Tier 2: EDDA_SESSION_ID env
         std::env::set_var("EDDA_SESSION_ID", "env-sid");
-        let (sid, _) = resolve_session_id(None, pid, "cli");
+        let (sid, _) = resolve_session_id(None, pid, "cli").unwrap();
         assert_eq!(sid, "env-sid");
         std::env::remove_var("EDDA_SESSION_ID");
 
-        // Tier 3: heartbeat inference (single active session)
+        // A process-carried id remains authoritative beside a live session.
         // Clean state dir first to avoid interference from concurrent sessions
         let state_dir = edda_store::project_dir(pid).join("state");
         if state_dir.exists() {
@@ -2122,19 +2175,24 @@ mod tests {
             serde_json::to_string_pretty(&hb).unwrap(),
         )
         .unwrap();
-        let (sid, label) = resolve_session_id(None, pid, "cli");
-        assert_eq!(sid, "inferred-sess", "should infer from sole heartbeat");
-        assert_eq!(label, "worker", "should use heartbeat label");
+        std::env::set_var("EDDA_SESSION_ID", "env-live-sid");
+        let (sid, _) = resolve_session_id(None, pid, "cli").unwrap();
+        assert_eq!(sid, "env-live-sid");
+        std::env::set_var("EDDA_SESSION_ID", "");
+        let err = resolve_session_id(None, pid, "cli")
+            .expect_err("an empty env value must not adopt the sole heartbeat");
+        assert!(err.to_string().contains("--session"), "{err}");
+        std::env::remove_var("EDDA_SESSION_ID");
         let _ = std::fs::remove_file(state_dir.join("session.inferred-sess.json"));
 
-        // Tier 4: fallback (no heartbeats, no env)
-        let (sid, label) = resolve_session_id(None, pid, "cli");
+        // Standalone fallback (no heartbeats, no env)
+        let (sid, label) = resolve_session_id(None, pid, "cli").unwrap();
         assert_eq!(sid, "cli-cli");
         assert_eq!(label, "cli");
 
         // Tier 1 wins over Tier 2
         std::env::set_var("EDDA_SESSION_ID", "env-sid");
-        let (sid, _) = resolve_session_id(Some("explicit-wins"), pid, "cli");
+        let (sid, _) = resolve_session_id(Some("explicit-wins"), pid, "cli").unwrap();
         assert_eq!(sid, "explicit-wins", "tier 1 should beat tier 2");
         std::env::remove_var("EDDA_SESSION_ID");
 
@@ -2350,6 +2408,9 @@ mod tests {
     #[test]
     fn request_emits_request_pending_notification() {
         let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::set_var("EDDA_SESSION_ID", "s-auth");
+        std::env::set_var("EDDA_SESSION_LABEL", "auth");
         let repo = tempfile::tempdir().expect("tempdir");
         let pid = edda_store::project_id(repo.path());
         let _ = edda_store::ensure_dirs(&pid);
@@ -2371,6 +2432,8 @@ mod tests {
         assert!(body.contains("\"from_label\":\"auth\""), "{body}");
         assert!(body.contains("\"to_label\":\"billing\""), "{body}");
         assert!(body.contains("\"message\":\"need invoice type\""), "{body}");
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
     }
 
     fn prior_claim(label: &str, paths: &[&str]) -> edda_bridge_claude::peers::ClaimEntry {
@@ -2482,6 +2545,39 @@ mod tests {
     }
 
     #[test]
+    fn bare_claim_beside_one_live_session_refuses_and_preserves_scope() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        edda_store::ensure_dirs(&pid).expect("store dirs");
+        edda_bridge_claude::peers::write_heartbeat_minimal(
+            &pid,
+            "live-worker",
+            "worker",
+            "/tmp/worker",
+        );
+        edda_bridge_claude::peers::write_claim(
+            &pid,
+            "live-worker",
+            "worker",
+            &["src/worker.rs".into()],
+        );
+
+        let err = claim(repo.path(), "intruder", &["docs/*".into()], None)
+            .expect_err("an adjacent shell must not adopt the live worker");
+        assert!(err.to_string().contains("--session"), "{err}");
+
+        let claims = edda_bridge_claude::peers::compute_board_state(&pid).claims;
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].session_id, "live-worker");
+        assert_eq!(claims[0].label, "worker");
+        assert_eq!(claims[0].paths, vec!["src/worker.rs".to_string()]);
+    }
+
+    #[test]
     fn re_claiming_the_same_label_keeps_one_claim() {
         let _store = crate::test_support::isolated_store();
         let _env = env_guard();
@@ -2577,10 +2673,9 @@ mod tests {
         let pid = edda_store::project_id(repo.path());
         let _ = edda_store::ensure_dirs(&pid);
 
-        // Two live peers, so infer_session_id yields nothing, and only one of
-        // them holds a claim. A shell with no identity of its own must not
-        // decide that claim is its to release: check_offlimits enforces
-        // exactly this claim for its live owner.
+        // Only one of two live peers holds a claim. A shell with no identity
+        // of its own must not decide that claim is its to release:
+        // check_offlimits enforces exactly this claim for its live owner.
         edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "sess-a", "worker-a", "/tmp/a");
         edda_bridge_claude::peers::write_heartbeat_minimal(&pid, "sess-b", "worker-b", "/tmp/b");
         edda_bridge_claude::peers::write_claim(&pid, "sess-a", "worker-a", &["src/a.rs".into()]);
@@ -2595,6 +2690,40 @@ mod tests {
                 .len(),
             1,
             "the live peer's claim must survive"
+        );
+    }
+
+    #[test]
+    fn unclaim_without_identity_never_releases_the_sole_live_peers_claim() {
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        edda_store::ensure_dirs(&pid).expect("store dirs");
+        edda_bridge_claude::peers::write_heartbeat_minimal(
+            &pid,
+            "sole-live-worker",
+            "worker",
+            "/tmp/worker",
+        );
+        edda_bridge_claude::peers::write_claim(
+            &pid,
+            "sole-live-worker",
+            "worker",
+            &["src/worker.rs".into()],
+        );
+
+        let err = unclaim(repo.path(), None, false)
+            .expect_err("an adjacent shell must not release the sole live worker");
+        assert!(err.to_string().contains("--session"), "{err}");
+        assert_eq!(
+            edda_bridge_claude::peers::compute_board_state(&pid)
+                .claims
+                .len(),
+            1,
+            "the live worker's claim must survive"
         );
     }
 

@@ -164,11 +164,13 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
 /// If exactly one non-stale session exists for the project, returns
 /// `Some((session_id, label))`. Otherwise returns `None` (ambiguous or no context).
 ///
-/// Used by CLI commands (`edda decide`, etc.) to resolve session identity
-/// when `EDDA_SESSION_ID` env var is not set.
-///
-/// This cannot tell the caller apart from a lone peer: a process has no way to
-/// prove a heartbeat is its own (GH-488).
+/// This observes heartbeat cardinality; it does not establish caller identity.
+/// A process has no way to prove a heartbeat is its own, so mutating CLI verbs
+/// must use explicit `--session` or process-carried `EDDA_SESSION_ID` instead.
+/// The environment value is attribution and a user override, not
+/// authentication or authorization. This helper remains available only for
+/// callers that need the observational "exactly one live heartbeat" fact
+/// (GH-503).
 pub fn infer_session_id(project_id: &str) -> Option<(String, String)> {
     let state_dir = edda_store::project_dir(project_id).join("state");
     let stale_threshold = stale_secs();

@@ -7,12 +7,12 @@
 //! | `pre_llm_call`    | `{"context": "..."}`                              | Injects into next LLM turn   |
 //! | `pre_tool_call`   | `{"decision":"block","reason":"..."}` (Claude)    | Blocks tool call             |
 //! | `pre_tool_call`   | `{"action":"block","message":"..."}` (Hermes)     | Blocks tool call             |
+//! | `pre_tool_call`   | `{"action":"modify","args":{...}}`                 | Rewrites tool arguments      |
 //! | `pre_verify`      | `{"action":"continue","message":"..."}`           | Keep going with instruction  |
 //! | others            | `{}` or empty                                     | No-op (observation only)     |
 //!
-//! Emit Claude-Code style for `pre_tool_call` since Hermes translates
-//! internally — this lets us reuse `edda_postmortem::hooks::format_warnings`
-//! logic without a Hermes-specific translation layer.
+//! Block responses retain the Claude-compatible shape Hermes translates;
+//! command-local identity uses Hermes' canonical modify response.
 
 use edda_bridge_claude::{render, state};
 
@@ -55,6 +55,44 @@ fn block_tool_call(reason: &str) -> anyhow::Result<HookResult> {
     // (verified via shell_hooks.py::_parse_response line 601-602).
     let out = serde_json::json!({ "decision": "block", "reason": reason });
     Ok(HookResult::output(serde_json::to_string(&out)?))
+}
+
+fn process_identity_modification(envelope: &HermesEnvelope) -> anyhow::Result<Option<HookResult>> {
+    if !matches!(
+        envelope.tool_name.as_str(),
+        "terminal" | "shell" | "bash" | "Bash"
+    ) || envelope.session_id.is_empty()
+    {
+        return Ok(None);
+    }
+    let Some(command) = envelope
+        .tool_input
+        .get("command")
+        .and_then(|value| value.as_str())
+    else {
+        return Ok(None);
+    };
+    let out = serde_json::json!({
+        "action": "modify",
+        "args": {
+            "command": command_with_session_identity(command, &envelope.session_id),
+        }
+    });
+    Ok(Some(HookResult::output(serde_json::to_string(&out)?)))
+}
+
+fn command_with_session_identity(command: &str, session_id: &str) -> String {
+    if cfg!(windows) {
+        format!(
+            "$env:EDDA_SESSION_ID = '{}';\n{command}",
+            session_id.replace('\'', "''")
+        )
+    } else {
+        format!(
+            "export EDDA_SESSION_ID='{}';\n{command}",
+            session_id.replace('\'', "'\\''")
+        )
+    }
 }
 
 // ── Entry ──
@@ -208,12 +246,13 @@ fn dispatch_pre_tool_call(
     project_id: &str,
     envelope: &HermesEnvelope,
 ) -> anyhow::Result<HookResult> {
+    let identity = process_identity_modification(envelope)?;
     if std::env::var("EDDA_POSTMORTEM").unwrap_or_else(|_| "1".into()) == "0" {
-        return Ok(ok());
+        return Ok(identity.unwrap_or_else(ok));
     }
     let mut rules_store = edda_postmortem::RulesStore::load_project(project_id);
     if rules_store.active_rules().is_empty() {
-        return Ok(ok());
+        return Ok(identity.unwrap_or_else(ok));
     }
 
     let files_touched: Vec<String> = envelope
@@ -258,7 +297,7 @@ fn dispatch_pre_tool_call(
         // blocks on Hermes.
         // TODO: honor category=Block once the postmortem module distinguishes.
     }
-    Ok(ok())
+    Ok(identity.unwrap_or_else(ok))
 }
 
 fn normalize_tool_name(name: &str) -> &str {
@@ -442,14 +481,39 @@ mod tests {
     }
 
     #[test]
-    fn pre_tool_call_no_rules_returns_ok() {
+    fn pre_tool_call_carries_process_identity_without_changing_command_bytes() {
         std::env::set_var("EDDA_POSTMORTEM", "1");
+        let command = "printf 'untouched';\nwhoami";
         let stdin = serde_json::json!({
             "hook_event_name": "pre_tool_call",
-            "session_id": "hermes-pt-1",
+            "session_id": "hermes-'pt-1",
             "cwd": "/tmp/hermes-pt",
             "tool_name": "terminal",
-            "tool_input": { "command": "ls" }
+            "tool_input": { "command": command }
+        })
+        .to_string();
+        let r = hook_entrypoint_from_stdin(&stdin).unwrap();
+        let v: serde_json::Value = serde_json::from_str(r.stdout.as_ref().unwrap()).unwrap();
+        assert_eq!(v["action"], "modify");
+        let rewritten = v["args"]["command"]
+            .as_str()
+            .expect("rewritten terminal command");
+        let prefix = if cfg!(windows) {
+            "$env:EDDA_SESSION_ID = 'hermes-''pt-1';\n"
+        } else {
+            "export EDDA_SESSION_ID='hermes-'\\''pt-1';\n"
+        };
+        assert_eq!(rewritten, format!("{prefix}{command}"));
+    }
+
+    #[test]
+    fn pre_tool_call_leaves_non_shell_tools_unchanged() {
+        let stdin = serde_json::json!({
+            "hook_event_name": "pre_tool_call",
+            "session_id": "hermes-read-1",
+            "cwd": "/tmp/hermes-read",
+            "tool_name": "read_file",
+            "tool_input": { "path": "README.md" }
         })
         .to_string();
         let r = hook_entrypoint_from_stdin(&stdin).unwrap();
