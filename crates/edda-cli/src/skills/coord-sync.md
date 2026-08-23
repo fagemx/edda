@@ -62,6 +62,8 @@ $ edda claim "api" --paths "src/api/*" --session s1
 > released: src/auth/*
 $ edda claim "api" --paths "src/api/*" --session s1
 > Re-claimed scope: api (unchanged)
+$ edda claim "api" --paths "src/api/*" --paths "src/api/v2/*" --session s1
+> Re-claimed scope: api (paths added)
 $ edda claim "api" --paths "src/api/v2/*" --session s1
 > Re-claimed scope: api (previous paths replaced)
 > released: src/api/*

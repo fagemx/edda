@@ -698,6 +698,8 @@ fn claim_disclosure(
         ));
     } else if released.is_empty() && !gained {
         lines.push(format!("Re-claimed scope: {label} (unchanged)"));
+    } else if released.is_empty() {
+        lines.push(format!("Re-claimed scope: {label} (paths added)"));
     } else {
         lines.push(format!(
             "Re-claimed scope: {label} (previous paths replaced)"
@@ -2436,7 +2438,7 @@ mod tests {
     }
 
     #[test]
-    fn widening_reports_a_change_but_no_release() {
+    fn widening_reports_paths_added_but_no_release() {
         let previous = prior_claim("api", &["src/api/*"]);
         assert_eq!(
             claim_disclosure(
@@ -2444,7 +2446,7 @@ mod tests {
                 "api",
                 &owned(&["src/api/*", "src/api/v3/*"])
             ),
-            vec!["Re-claimed scope: api (previous paths replaced)"]
+            vec!["Re-claimed scope: api (paths added)"]
         );
     }
 
@@ -2459,7 +2461,7 @@ mod tests {
     }
 
     #[test]
-    fn a_second_claim_replaces_the_first_and_says_so() {
+    fn a_second_claim_leaves_one_claim_on_the_board() {
         let _store = crate::test_support::isolated_store();
         let _env = env_guard();
         std::env::remove_var("EDDA_SESSION_ID");
@@ -2472,8 +2474,7 @@ mod tests {
         claim(repo.path(), "api", &["src/api/*".into()], Some("s1")).expect("second claim");
 
         // The board folds to one claim per session, so the first scope is gone.
-        // GH-488 item 2 was that this happened without saying so; the printed
-        // line is the fix, and the fold is the behaviour it discloses.
+        // The disclosure tests above separately pin what the command prints.
         let claims = edda_bridge_claude::peers::compute_board_state(&pid).claims;
         assert_eq!(claims.len(), 1, "one session holds one claim");
         assert_eq!(claims[0].label, "api");
