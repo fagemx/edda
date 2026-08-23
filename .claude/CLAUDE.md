@@ -5,7 +5,7 @@ Rust development principles and conventions for the edda project.
 ## Project Overview
 
 - **Language**: Rust (edition 2021)
-- **Structure**: Cargo workspace with 19 crates
+- **Structure**: Cargo workspace with 23 crates
 - **Runtime**: Zero external runtime dependencies (CLI tool)
 - **Storage**: SQLite (rusqlite), JSONL append-only ledger
 
@@ -17,13 +17,14 @@ Rust development principles and conventions for the edda project.
 | `edda-ledger` | Append-only SQLite ledger with hash-chained events |
 | `edda-derive` | View rebuilding and tiered history |
 | `edda-store` | Per-user store with atomic writes |
-| `edda-cli` | CLI and TUI (binary crate, published as `edda`) |
+| `edda` | CLI and TUI (binary crate) |
 | `edda-serve` | HTTP API server |
 | `edda-mcp` | MCP server (JSON-RPC 2.0) |
 | `edda-ask` | Cross-source decision query engine |
 | `edda-search-fts` | Full-text search (Tantivy) |
 | `edda-index` | Transcript index |
 | `edda-transcript` | Transcript delta ingest and classification |
+| `edda-ingestion` | Ingestion trigger evaluation |
 | `edda-pack` | Context generation and budget controls |
 | `edda-conductor` | Multi-phase plan orchestration |
 | `edda-aggregate` | Cross-repo aggregation queries |
@@ -31,6 +32,9 @@ Rust development principles and conventions for the edda project.
 | `edda-postmortem` | L3 post-mortem analysis with TTL decay |
 | `edda-notify` | Push notification dispatch |
 | `edda-bridge-claude` | Claude Code hooks and transcript ingest |
+| `edda-bridge-codex` | Codex CLI hooks and context injection |
+| `edda-bridge-cursor` | Cursor Agent hooks and context injection |
+| `edda-bridge-hermes` | Hermes agent shell hooks and context injection |
 | `edda-bridge-openclaw` | OpenClaw hooks and plugin |
 
 ## Development Principles
@@ -138,7 +142,7 @@ them independently on every push.
 
 | CI job | Coverage |
 |---|---|
-| Format | `cargo fmt --check` |
+| Format | `cargo fmt --check`; `sh -n install.sh`; installer `resolve_version` latest-version stdout test |
 | Clippy | `cargo clippy --workspace --all-targets` on Linux, macOS **and** Windows |
 | Test (Linux, macOS) | `cargo test --workspace` — all 23 crates |
 | Test (Windows) | **only 7 crates** — `edda-store`, `edda-ledger`, `edda-search-fts`, `edda-transcript`, `edda-bridge-claude`, `edda-conductor`, `edda` (Windows build/link is ~5x slower; the subset is derived from process-spawn, file-lock, and mmap criteria — GH-433) |
