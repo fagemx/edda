@@ -537,7 +537,7 @@ mod tests {
         )
     }
 
-    async fn wait_for_pid_exit(pid: u32) -> anyhow::Result<()> {
+    async fn wait_for_process_stop(pid: u32) -> anyhow::Result<()> {
         tokio::time::timeout(std::time::Duration::from_secs(5), async move {
             loop {
                 if !process_is_alive(pid)? {
@@ -561,6 +561,16 @@ mod tests {
         })
         .await
         .context("fake app-server child did not exit")?
+    }
+
+    #[cfg(windows)]
+    fn tasklist_reports_alive(output: &std::process::Output, pid: u32) -> anyhow::Result<bool> {
+        anyhow::ensure!(
+            output.status.success(),
+            "tasklist.exe exited with {}",
+            output.status
+        );
+        Ok(String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")))
     }
 
     /// Reports whether `pid` is still a *running* process.
@@ -603,7 +613,7 @@ mod tests {
                 .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
                 .output()
                 .context("failed to run tasklist.exe")?;
-            Ok(String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")))
+            tasklist_reports_alive(&output, pid)
         }
         #[cfg(unix)]
         {
@@ -621,6 +631,23 @@ mod tests {
             let state = stdout.trim();
             Ok(!state.is_empty() && !state.starts_with('Z'))
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn rejects_failed_tasklist_probe() {
+        use std::os::windows::process::ExitStatusExt;
+
+        let output = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1),
+            stdout: br#""fake.exe","123","Console","1","1 K""#.to_vec(),
+            stderr: b"probe failed".to_vec(),
+        };
+
+        let error = tasklist_reports_alive(&output, 123)
+            .expect_err("failed tasklist probe should not report a process state");
+
+        assert!(error.to_string().contains("tasklist.exe exited"));
     }
 
     #[test]
@@ -751,7 +778,7 @@ mod tests {
 
         assert!(error.to_string().contains("no thread id"));
         assert!(server.child.try_wait()?.is_some(), "child was not reaped");
-        wait_for_pid_exit(pid).await?;
+        wait_for_process_stop(pid).await?;
         Ok(())
     }
 
@@ -770,7 +797,7 @@ mod tests {
 
         assert!(error.to_string().contains("no thread id"));
         assert!(server.child.try_wait()?.is_some(), "child was not reaped");
-        wait_for_pid_exit(pid).await?;
+        wait_for_process_stop(pid).await?;
         Ok(())
     }
 
@@ -798,7 +825,7 @@ mod tests {
 
         assert!(error.to_string().contains("bad turn"));
         assert!(server.child.try_wait()?.is_some(), "child was not reaped");
-        wait_for_pid_exit(pid).await?;
+        wait_for_process_stop(pid).await?;
         Ok(())
     }
 
@@ -809,11 +836,11 @@ mod tests {
 
         drop(server);
 
-        wait_for_pid_exit(pid).await
+        wait_for_process_stop(pid).await
     }
 
     #[tokio::test]
-    async fn cancelling_concrete_method_makes_child_pid_disappear() -> anyhow::Result<()> {
+    async fn cancelling_concrete_method_stops_the_child_process() -> anyhow::Result<()> {
         let (_fake, mut server) = spawn_fake_app_server(FakeScenario::Idle).await?;
         let pid = server.child.id().context("fake app-server has no PID")?;
 
@@ -825,7 +852,7 @@ mod tests {
 
         assert!(timed_out.is_err(), "fake method unexpectedly completed");
         wait_for_child_exit(&mut server.child).await?;
-        wait_for_pid_exit(pid).await?;
+        wait_for_process_stop(pid).await?;
         Ok(())
     }
 
