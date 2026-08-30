@@ -65,8 +65,16 @@ pub fn execute_run(repo_root: &Path, issue_id: u64, dry_run: bool) -> Result<()>
     std::fs::write(&plan_file, &yaml)?;
     println!("Plan written to {}", plan_file.display());
 
-    // 6. Delegate to conductor
-    crate::cmd_conduct::run(&plan_file, Some(repo_root), false, true, false, false)
+    // 6. Delegate to conductor (default agent: claude)
+    crate::cmd_conduct::run(
+        &plan_file,
+        Some(repo_root),
+        false,
+        true,
+        false,
+        false,
+        crate::cmd_conduct::AgentKind::Claude,
+    )
 }
 
 /// Execute `edda pipeline status [issue-id]`.
