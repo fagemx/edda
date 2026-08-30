@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use edda_conductor::agent::budget::BudgetTracker;
-use edda_conductor::agent::launcher::{phase_session_id, ClaudeCodeLauncher};
+use edda_conductor::agent::launcher::{phase_session_id, AgentLauncher, ClaudeCodeLauncher};
+use edda_conductor::agent::pi_rpc::PiRpcLauncher;
 use edda_conductor::check::engine::CheckEngine;
 use edda_conductor::plan::parser::load_plan;
 use edda_conductor::runner::notify::StdoutNotifier;
@@ -11,6 +12,35 @@ use edda_conductor::state::persist::{load_state, save_state};
 use edda_conductor::tmux::TmuxSession;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
+
+// ── Agent selection ──
+
+/// Which agent backend runs the plan's phases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum AgentKind {
+    /// Claude Code via `claude -p` (default)
+    Claude,
+    /// pi coding agent via `pi --mode rpc`
+    Pi,
+}
+
+impl AgentKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "claude",
+            AgentKind::Pi => "pi",
+        }
+    }
+
+    /// Whether this backend tees per-phase transcripts to disk, which the
+    /// tmux phase panes tail.
+    fn writes_transcripts(self) -> bool {
+        match self {
+            AgentKind::Claude => true,
+            AgentKind::Pi => false,
+        }
+    }
+}
 
 // ── CLI Schema ──
 
@@ -35,6 +65,9 @@ pub enum ConductCmd {
         /// Create a tmux session with per-phase transcript panes + dashboard
         #[arg(long)]
         tmux: bool,
+        /// Agent backend that runs the phases (default: claude)
+        #[arg(long, value_enum, default_value_t = AgentKind::Claude)]
+        agent: AgentKind,
     },
     /// Show status of running/completed plans
     Status {
@@ -81,6 +114,7 @@ pub fn run_cmd(cmd: ConductCmd, repo_root: &Path) -> Result<()> {
             quiet,
             json,
             tmux,
+            agent,
         } => run(
             Path::new(&plan_file),
             cwd.as_deref().map(Path::new),
@@ -88,6 +122,7 @@ pub fn run_cmd(cmd: ConductCmd, repo_root: &Path) -> Result<()> {
             !quiet,
             json,
             tmux,
+            agent,
         ),
         ConductCmd::Status { plan_name, json } => status(repo_root, plan_name.as_deref(), json),
         ConductCmd::Retry { phase_id, plan } => retry(repo_root, &phase_id, plan.as_deref()),
@@ -110,6 +145,7 @@ pub fn run(
     verbose: bool,
     json_events: bool,
     tmux: bool,
+    agent: AgentKind,
 ) -> Result<()> {
     let plan = load_plan(plan_file)?;
     let cwd = cwd_override
@@ -131,14 +167,24 @@ pub fn run(
 
     // Resolve tmux availability
     let use_tmux = if tmux {
-        if TmuxSession::is_available() {
-            true
-        } else {
+        if !TmuxSession::is_available() {
             eprintln!(
                 "Warning: --tmux requested but tmux is not installed. \
                  Falling back to normal mode."
             );
             false
+        } else if !agent.writes_transcripts() {
+            // Phase panes tail transcript files; an agent that writes none
+            // would leave every pane permanently blank.
+            eprintln!(
+                "Warning: --tmux requested but agent \"{}\" does not write phase \
+                 transcripts, so the panes would stay empty. \
+                 Falling back to normal mode.",
+                agent.as_str()
+            );
+            false
+        } else {
+            true
         }
     } else {
         false
@@ -206,9 +252,21 @@ pub fn run(
         .join(&plan.name)
         .join("transcripts");
 
-    let mut launcher = ClaudeCodeLauncher::new().with_verbose(verbose);
-    launcher.transcript_dir = Some(transcript_dir.clone());
-    launcher.verify_available()?;
+    // pi has no transcript tee capability yet; the transcript dir stays
+    // claude-only and tmux panes only mirror it when claude is selected.
+    let launcher: Box<dyn AgentLauncher> = match agent {
+        AgentKind::Claude => {
+            let mut launcher = ClaudeCodeLauncher::new().with_verbose(verbose);
+            launcher.transcript_dir = Some(transcript_dir.clone());
+            launcher.verify_available()?;
+            Box::new(launcher)
+        }
+        AgentKind::Pi => {
+            let launcher = PiRpcLauncher::new().with_verbose(verbose);
+            launcher.verify_available()?;
+            Box::new(launcher)
+        }
+    };
     let engine = CheckEngine::new(cwd.clone());
     let notifier = StdoutNotifier;
     let mut budget = BudgetTracker::new(plan.budget_usd);
@@ -245,7 +303,7 @@ pub fn run(
         &plan,
         &mut state,
         RunContext {
-            launcher: &launcher,
+            launcher: launcher.as_ref(),
             check_engine: &engine,
             notifier: &notifier,
             budget: &mut budget,
@@ -507,4 +565,68 @@ fn ctrlc_cancel(cancel: CancellationToken) {
     let _ = ctrlc::set_handler(move || {
         cancel.cancel();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Minimal parser harness: `ConductCmd` is a `Subcommand`, so it needs a
+    /// root command to be parsed standalone.
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        cmd: ConductCmd,
+    }
+
+    fn parse(args: &[&str]) -> ConductCmd {
+        TestCli::try_parse_from(args)
+            .expect("args should parse")
+            .cmd
+    }
+
+    fn agent_of(cmd: ConductCmd) -> AgentKind {
+        match cmd {
+            ConductCmd::Run { agent, .. } => agent,
+            _ => panic!("expected the Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn run_defaults_to_claude_agent() {
+        // Guards the single line keeping every existing `conduct run`
+        // invocation on the claude backend.
+        assert_eq!(
+            agent_of(parse(&["edda", "run", "plan.yaml"])),
+            AgentKind::Claude
+        );
+    }
+
+    #[test]
+    fn run_accepts_explicit_agents() {
+        assert_eq!(
+            agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "pi"])),
+            AgentKind::Pi
+        );
+        assert_eq!(
+            agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "claude"])),
+            AgentKind::Claude
+        );
+    }
+
+    #[test]
+    fn run_rejects_unknown_agent() {
+        assert!(TestCli::try_parse_from(["edda", "run", "plan.yaml", "--agent", "gpt"]).is_err());
+    }
+
+    #[test]
+    fn only_claude_writes_transcripts() {
+        // Drives the --tmux fallback: an agent without transcripts would
+        // otherwise get panes tailing files nobody writes.
+        assert!(AgentKind::Claude.writes_transcripts());
+        assert!(!AgentKind::Pi.writes_transcripts());
+        assert_eq!(AgentKind::Claude.as_str(), "claude");
+        assert_eq!(AgentKind::Pi.as_str(), "pi");
+    }
 }
