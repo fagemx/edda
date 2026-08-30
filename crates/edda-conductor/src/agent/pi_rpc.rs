@@ -4,9 +4,11 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 /// Launches the pi coding agent via `pi --mode rpc`.
@@ -96,7 +98,10 @@ impl PiRpcLauncher {
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Piped, not inherited: stderr would corrupt the console during a
+            // JSONL run, but it is the only channel carrying startup failures,
+            // so it is drained in the background and folded into error text.
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             // Propagate session_id so agent-spawned `edda decide` etc. can resolve identity
             .env("EDDA_SESSION_ID", session_id);
@@ -170,6 +175,7 @@ struct PiRpcSession {
     child: Child,
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
+    stderr: Arc<Mutex<String>>,
     next_id: u64,
 }
 
@@ -178,15 +184,32 @@ impl PiRpcSession {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
 
         let mut child = command.spawn().context("failed to spawn pi RPC process")?;
         let stdin = child.stdin.take().context("pi RPC stdin was not piped")?;
         let stdout = child.stdout.take().context("pi RPC stdout was not piped")?;
+
+        // Drain stderr continuously: an unread pipe fills and blocks the child.
+        let stderr = Arc::new(Mutex::new(String::new()));
+        if let Some(pipe) = child.stderr.take() {
+            let sink = Arc::clone(&stderr);
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(pipe).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let mut buf = sink.lock().await;
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
+            });
+        }
+
         Ok(Self {
             child,
             stdin,
             stdout: BufReader::new(stdout).lines(),
+            stderr,
             next_id: 1,
         })
     }
@@ -231,6 +254,7 @@ impl PiRpcSession {
             child,
             stdin,
             stdout,
+            stderr,
             ..
         } = self;
         let mut settled = false;
@@ -238,8 +262,9 @@ impl PiRpcSession {
             tokio::select! {
                 line = stdout.next_line() => {
                     let Some(line) = line.context("failed reading pi RPC stdout")? else {
+                        let tail = format_stderr_tail(&stderr.lock().await.clone());
                         return Ok(PhaseResult::AgentCrash {
-                            error: eof_error(child),
+                            error: eof_error(child, &tail),
                         });
                     };
                     let record = clean_record(&line);
@@ -351,7 +376,8 @@ impl PiRpcSession {
                 .await
                 .context("failed reading pi RPC stdout")?
             else {
-                return Err(anyhow!(eof_error(&mut self.child)));
+                let tail = format_stderr_tail(&self.stderr.lock().await.clone());
+                return Err(anyhow!(eof_error(&mut self.child, &tail)));
             };
             let record = clean_record(&line);
             if record.is_empty() {
@@ -400,15 +426,41 @@ async fn write_json_line(stdin: &mut ChildStdin, value: &Value) -> Result<()> {
     stdin.flush().await.context("failed flushing pi RPC stdin")
 }
 
-fn eof_error(child: &mut Child) -> String {
-    match child.try_wait() {
+fn eof_error(child: &mut Child, stderr_tail: &str) -> String {
+    let base = match child.try_wait() {
         Ok(Some(status)) if !status.success() => {
             format!("pi RPC process exited with non-zero status {status} before agent_settled")
         }
         Ok(Some(status)) => format!("unexpected EOF from pi RPC process (status {status})"),
         Ok(None) => "unexpected EOF from pi RPC process".to_owned(),
         Err(error) => format!("unexpected EOF from pi RPC process: {error}"),
+    };
+    if stderr_tail.is_empty() {
+        base
+    } else {
+        // Startup failures (missing auth, bad --model, unwritable --session-dir)
+        // only ever surface on stderr; without it the operator sees a bare
+        // exit status and no reason.
+        format!("{base}; pi stderr: {stderr_tail}")
     }
+}
+
+/// Last few non-empty stderr lines, joined, capped so one runaway trace cannot
+/// dominate the error message.
+fn format_stderr_tail(raw: &str) -> String {
+    const MAX_LINES: usize = 5;
+    const MAX_CHARS: usize = 500;
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(MAX_LINES);
+    let mut tail = lines[start..].join(" | ");
+    if tail.chars().count() > MAX_CHARS {
+        tail = tail.chars().take(MAX_CHARS).collect::<String>() + "…";
+    }
+    tail
 }
 
 fn is_prompt_response(msg: &Value, prompt_id: &str) -> bool {
@@ -807,5 +859,27 @@ mod tests {
         assert!(!over_budget(None, Some(1.0)));
         assert!(!over_budget(Some(5.0), None));
         assert!(!over_budget(None, None));
+    }
+
+    #[test]
+    fn stderr_tail_keeps_last_lines_and_drops_blanks() {
+        let raw = "first\n\n  second  \nthird\nfourth\nfifth\nsixth\n";
+        let tail = format_stderr_tail(raw);
+        assert_eq!(tail, "second | third | fourth | fifth | sixth");
+        assert!(!tail.contains("first"), "only the last 5 lines are kept");
+    }
+
+    #[test]
+    fn stderr_tail_is_empty_for_no_output() {
+        assert_eq!(format_stderr_tail(""), "");
+        assert_eq!(format_stderr_tail("\n   \n"), "");
+    }
+
+    #[test]
+    fn stderr_tail_is_capped() {
+        let raw = "x".repeat(2000);
+        let tail = format_stderr_tail(&raw);
+        assert_eq!(tail.chars().count(), 501, "500 chars plus the ellipsis");
+        assert!(tail.ends_with('…'));
     }
 }

@@ -16,12 +16,30 @@ use tokio_util::sync::CancellationToken;
 // ── Agent selection ──
 
 /// Which agent backend runs the plan's phases.
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum AgentKind {
     /// Claude Code via `claude -p` (default)
     Claude,
     /// pi coding agent via `pi --mode rpc`
     Pi,
+}
+
+impl AgentKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            AgentKind::Claude => "claude",
+            AgentKind::Pi => "pi",
+        }
+    }
+
+    /// Whether this backend tees per-phase transcripts to disk, which the
+    /// tmux phase panes tail.
+    fn writes_transcripts(self) -> bool {
+        match self {
+            AgentKind::Claude => true,
+            AgentKind::Pi => false,
+        }
+    }
 }
 
 // ── CLI Schema ──
@@ -149,14 +167,24 @@ pub fn run(
 
     // Resolve tmux availability
     let use_tmux = if tmux {
-        if TmuxSession::is_available() {
-            true
-        } else {
+        if !TmuxSession::is_available() {
             eprintln!(
                 "Warning: --tmux requested but tmux is not installed. \
                  Falling back to normal mode."
             );
             false
+        } else if !agent.writes_transcripts() {
+            // Phase panes tail transcript files; an agent that writes none
+            // would leave every pane permanently blank.
+            eprintln!(
+                "Warning: --tmux requested but agent \"{}\" does not write phase \
+                 transcripts, so the panes would stay empty. \
+                 Falling back to normal mode.",
+                agent.as_str()
+            );
+            false
+        } else {
+            true
         }
     } else {
         false
@@ -537,4 +565,68 @@ fn ctrlc_cancel(cancel: CancellationToken) {
     let _ = ctrlc::set_handler(move || {
         cancel.cancel();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Minimal parser harness: `ConductCmd` is a `Subcommand`, so it needs a
+    /// root command to be parsed standalone.
+    #[derive(Parser)]
+    struct TestCli {
+        #[command(subcommand)]
+        cmd: ConductCmd,
+    }
+
+    fn parse(args: &[&str]) -> ConductCmd {
+        TestCli::try_parse_from(args)
+            .expect("args should parse")
+            .cmd
+    }
+
+    fn agent_of(cmd: ConductCmd) -> AgentKind {
+        match cmd {
+            ConductCmd::Run { agent, .. } => agent,
+            _ => panic!("expected the Run subcommand"),
+        }
+    }
+
+    #[test]
+    fn run_defaults_to_claude_agent() {
+        // Guards the single line keeping every existing `conduct run`
+        // invocation on the claude backend.
+        assert_eq!(
+            agent_of(parse(&["edda", "run", "plan.yaml"])),
+            AgentKind::Claude
+        );
+    }
+
+    #[test]
+    fn run_accepts_explicit_agents() {
+        assert_eq!(
+            agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "pi"])),
+            AgentKind::Pi
+        );
+        assert_eq!(
+            agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "claude"])),
+            AgentKind::Claude
+        );
+    }
+
+    #[test]
+    fn run_rejects_unknown_agent() {
+        assert!(TestCli::try_parse_from(["edda", "run", "plan.yaml", "--agent", "gpt"]).is_err());
+    }
+
+    #[test]
+    fn only_claude_writes_transcripts() {
+        // Drives the --tmux fallback: an agent without transcripts would
+        // otherwise get panes tailing files nobody writes.
+        assert!(AgentKind::Claude.writes_transcripts());
+        assert!(!AgentKind::Pi.writes_transcripts());
+        assert_eq!(AgentKind::Claude.as_str(), "claude");
+        assert_eq!(AgentKind::Pi.as_str(), "pi");
+    }
 }
