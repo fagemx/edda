@@ -9,7 +9,11 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+/// Upper bound on waiting for the stderr drain once stdout has hit EOF.
+const STDERR_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 /// Launches the pi coding agent via `pi --mode rpc`.
 ///
@@ -176,6 +180,9 @@ struct PiRpcSession {
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
     stderr: Arc<Mutex<String>>,
+    /// Handle to the stderr drain task, awaited before reading the buffer so
+    /// the tail is known-complete rather than whatever happened to land first.
+    stderr_drain: Option<JoinHandle<()>>,
     next_id: u64,
 }
 
@@ -193,7 +200,7 @@ impl PiRpcSession {
 
         // Drain stderr continuously: an unread pipe fills and blocks the child.
         let stderr = Arc::new(Mutex::new(String::new()));
-        if let Some(pipe) = child.stderr.take() {
+        let stderr_drain = child.stderr.take().map(|pipe| {
             let sink = Arc::clone(&stderr);
             tokio::spawn(async move {
                 let mut lines = BufReader::new(pipe).lines();
@@ -202,14 +209,15 @@ impl PiRpcSession {
                     buf.push_str(&line);
                     buf.push('\n');
                 }
-            });
-        }
+            })
+        });
 
         Ok(Self {
             child,
             stdin,
             stdout: BufReader::new(stdout).lines(),
             stderr,
+            stderr_drain,
             next_id: 1,
         })
     }
@@ -255,6 +263,7 @@ impl PiRpcSession {
             stdin,
             stdout,
             stderr,
+            stderr_drain,
             ..
         } = self;
         let mut settled = false;
@@ -262,7 +271,10 @@ impl PiRpcSession {
             tokio::select! {
                 line = stdout.next_line() => {
                     let Some(line) = line.context("failed reading pi RPC stdout")? else {
-                        let tail = format_stderr_tail(&stderr.lock().await.clone());
+                        // Reap first so the stderr pipe is closed, then let the
+                        // drain finish — otherwise the reason races the report.
+                        let _ = child.wait().await;
+                        let tail = collect_stderr_tail(stderr_drain, stderr).await;
                         return Ok(PhaseResult::AgentCrash {
                             error: eof_error(child, &tail),
                         });
@@ -376,7 +388,8 @@ impl PiRpcSession {
                 .await
                 .context("failed reading pi RPC stdout")?
             else {
-                let tail = format_stderr_tail(&self.stderr.lock().await.clone());
+                let _ = self.child.wait().await;
+                let tail = collect_stderr_tail(&mut self.stderr_drain, &self.stderr).await;
                 return Err(anyhow!(eof_error(&mut self.child, &tail)));
             };
             let record = clean_record(&line);
@@ -443,6 +456,28 @@ fn eof_error(child: &mut Child, stderr_tail: &str) -> String {
         // exit status and no reason.
         format!("{base}; pi stderr: {stderr_tail}")
     }
+}
+
+/// Wait for the stderr drain to finish, then read the buffer.
+///
+/// The caller reaches this only after stdout hit EOF, so pi's stderr pipe is
+/// closing too and the drain terminates on its own. The bound is a safety net
+/// for a child that leaves the pipe open (e.g. an inherited grandchild), where
+/// a best-effort tail beats hanging the phase.
+async fn collect_stderr_tail(
+    drain: &mut Option<JoinHandle<()>>,
+    buffer: &Arc<Mutex<String>>,
+) -> String {
+    if let Some(handle) = drain.take() {
+        if tokio::time::timeout(STDERR_DRAIN_GRACE, handle)
+            .await
+            .is_err()
+        {
+            // Timed out: the task keeps running against a detached pipe and
+            // exits when it closes. Read whatever landed so far.
+        }
+    }
+    format_stderr_tail(&buffer.lock().await)
 }
 
 /// Last few non-empty stderr lines, joined, capped so one runaway trace cannot
@@ -527,6 +562,7 @@ mod tests {
     const SETTLED: &str = r#"{"type":"agent_settled"}"#;
     const STATS_042: &str = r#"{"id":"req-2","type":"response","command":"get_session_stats","success":true,"data":{"cost":0.42}}"#;
     const STATS_990: &str = r#"{"id":"req-2","type":"response","command":"get_session_stats","success":true,"data":{"cost":9.9}}"#;
+    const STARTUP_DIAGNOSTIC: &str = "pi: no API key configured for provider openrouter";
 
     fn delta_line(usage_cost: &str, text: &str) -> String {
         format!(
@@ -545,6 +581,8 @@ mod tests {
         /// JSONL line containing a raw U+2028 inside a string value.
         #[cfg(unix)]
         Utf8Framing,
+        /// Writes a startup diagnostic to stderr and dies before settling.
+        StderrThenDie,
     }
 
     fn body_for(scenario: FakeScenario) -> String {
@@ -566,6 +604,11 @@ mod tests {
             }
             FakeScenario::Idle => "sleep 60".to_owned(),
             FakeScenario::Malformed => "read_cmd\nwrite_line 'not-json'\nsleep 60".to_owned(),
+            // No stdout at all: only the stderr diagnostic, then a hard exit —
+            // the shape of a real pi startup failure (bad auth, bad --model).
+            FakeScenario::StderrThenDie => {
+                format!("write_err '{STARTUP_DIAGNOSTIC}'\nexit_fail")
+            }
             #[cfg(unix)]
             FakeScenario::Utf8Framing => format!(
                 "read_cmd\nwrite_line '{PROMPT_OK}'\nprintf '%s\\n' '{}'\nwrite_line '{SETTLED}'\nread_cmd\nwrite_line '{STATS_042}'\nsleep 60",
@@ -614,17 +657,19 @@ mod tests {
         let body = body_for(scenario)
             .replace("read_cmd", "Read-Line")
             .replace("write_line", "Write-Line")
+            .replace("write_err", "Write-Err")
+            .replace("exit_fail", "exit 3")
             .replace("sleep 60", "Start-Sleep -Seconds 60");
         format!(
-            "$ErrorActionPreference = 'Stop'\nfunction Read-Line {{ if ($null -eq [Console]::In.ReadLine()) {{ exit 0 }} }}\nfunction Write-Line([string]$line) {{ [Console]::Out.WriteLine($line); [Console]::Out.Flush() }}\n{body}\n"
+            "$ErrorActionPreference = 'Stop'\nfunction Read-Line {{ if ($null -eq [Console]::In.ReadLine()) {{ exit 0 }} }}\nfunction Write-Line([string]$line) {{ [Console]::Out.WriteLine($line); [Console]::Out.Flush() }}\nfunction Write-Err([string]$line) {{ [Console]::Error.WriteLine($line); [Console]::Error.Flush() }}\n{body}\n"
         )
     }
 
     #[cfg(unix)]
     fn shell_script(scenario: FakeScenario) -> String {
-        let body = body_for(scenario);
+        let body = body_for(scenario).replace("exit_fail", "exit 3");
         format!(
-            "#!/bin/sh\nread_cmd() {{ IFS= read -r _ || exit 0; }}\nwrite_line() {{ printf '%s\\n' \"$1\"; }}\n{body}\n"
+            "#!/bin/sh\nread_cmd() {{ IFS= read -r _ || exit 0; }}\nwrite_line() {{ printf '%s\\n' \"$1\"; }}\nwrite_err() {{ printf '%s\\n' \"$1\" >&2; }}\n{body}\n"
         )
     }
 
@@ -859,6 +904,27 @@ mod tests {
         assert!(!over_budget(None, Some(1.0)));
         assert!(!over_budget(Some(5.0), None));
         assert!(!over_budget(None, None));
+    }
+
+    #[tokio::test]
+    async fn startup_stderr_reaches_the_crash_error() -> Result<()> {
+        // Regression guard for the drain race: the reason must be present
+        // every run, not whenever the drain task happens to win.
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
+        for attempt in 0..5 {
+            let result = run_fake(FakeScenario::StderrThenDie, &phase).await?;
+            match result {
+                PhaseResult::AgentCrash { error } => {
+                    assert!(
+                        error.contains(STARTUP_DIAGNOSTIC),
+                        "attempt {attempt}: stderr reason missing from {error}"
+                    );
+                    assert!(error.contains("pi stderr:"), "attempt {attempt}: {error}");
+                }
+                other => panic!("expected AgentCrash, got {other:?}"),
+            }
+        }
+        Ok(())
     }
 
     #[test]
