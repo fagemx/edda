@@ -18,7 +18,23 @@ pub async fn check_wait_until(
 
     loop {
         attempt += 1;
-        let result = run_inner(inner, cwd, phase_started_at).await;
+        // GH-529 review: the outer budget must bound each inner attempt.
+        // A wrapped cmd_succeeds can now default to 1800s — far past this
+        // wait's own timeout_sec — so awaiting run_inner unbounded would
+        // make the outer budget a lie. Abandon the attempt when the
+        // remaining budget elapses.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let result =
+            match tokio::time::timeout(remaining, run_inner(inner, cwd, phase_started_at)).await {
+                Ok(result) => result,
+                Err(_) => CheckOutput::timed_out(
+                    format!(
+                        "timed out after {}s ({attempt} attempts). Last: (no detail)",
+                        timeout_sec
+                    ),
+                    start.elapsed(),
+                ),
+            };
         if result.passed {
             return CheckOutput::passed_with_detail(
                 format!("passed after {attempt} attempts"),
@@ -205,6 +221,46 @@ mod tests {
         .await;
 
         assert!(!out.passed);
+        assert!(out.timed_out, "budget expiry is a harness timeout (GH-529)");
+        assert!(out.detail.unwrap().contains("timed out"));
+    }
+
+    /// GH-529 review: an inner cmd_succeeds whose own timeout exceeds the
+    /// wait's outer budget must be abandoned when the budget elapses — the
+    /// wait returns promptly and marks the failure as a timeout.
+    #[tokio::test]
+    async fn wait_until_outer_budget_bounds_slow_inner_cmd() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = std::time::Instant::now();
+
+        // An inner command that would hang far past the outer 1s budget.
+        #[cfg(windows)]
+        let cmd = "while ($true) { Start-Sleep -Milliseconds 100 }";
+        #[cfg(not(windows))]
+        let cmd = "sleep 30";
+        let out = check_wait_until(
+            &CheckSpec::CmdSucceeds {
+                cmd: cmd.into(),
+                timeout_sec: 60,
+            },
+            1, // 1s interval
+            1, // 1s outer budget < inner 60s
+            BackoffStrategy::None,
+            dir.path(),
+            None,
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+        assert!(!out.passed);
+        assert!(
+            out.timed_out,
+            "outer budget elapse must mark timed_out (GH-529)"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "outer budget must bound the inner attempt, took {elapsed:?}"
+        );
         assert!(out.detail.unwrap().contains("timed out"));
     }
 }

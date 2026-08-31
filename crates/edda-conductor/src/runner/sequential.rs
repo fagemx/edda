@@ -1579,32 +1579,8 @@ phases:
                 result_text: None,
             }],
         );
-        let plan = parse_plan(&yaml).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let mut state = PlanState::from_plan(&plan, "test.yaml");
-        let engine = CheckEngine::new(dir.path().to_path_buf());
-        let notifier = CollectNotifier::new();
-        let mut budget = BudgetTracker::new(plan.budget_usd);
+        let (state, msgs) = run_test_plan(&yaml, &launcher).await;
 
-        run_plan(
-            &plan,
-            &mut state,
-            RunContext {
-                launcher: &launcher,
-                check_engine: &engine,
-                notifier: &notifier,
-                budget: &mut budget,
-                cancel: CancellationToken::new(),
-                cwd: dir.path(),
-                interactive: false,
-                json_events: false,
-                tmux_session: None,
-            },
-        )
-        .await
-        .unwrap();
-
-        let msgs = notifier.messages();
         let phase = &state.phases[0];
         assert_eq!(phase.status, PhaseStatus::Failed);
         assert_eq!(

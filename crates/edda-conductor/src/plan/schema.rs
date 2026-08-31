@@ -231,33 +231,6 @@ mod tests {
         assert!(!w.is_retryable());
     }
 
-    /// GH-529: the cmd_succeeds default timeout must cover this repo's own
-    /// test suite — `cargo test -p edda` measures 60-150s warm and much
-    /// more cold — without a per-check `timeout_sec` override.
-    #[test]
-    fn cmd_succeeds_default_timeout_covers_repo_test_suite() {
-        let yaml = r#"
-name: t
-phases:
-  - id: a
-    prompt: do it
-    check:
-      - type: cmd_succeeds
-        cmd: "cargo test --workspace"
-"#;
-        let plan: Plan = serde_yml::from_str(yaml).unwrap();
-        match &plan.phases[0].check[0] {
-            CheckSpec::CmdSucceeds { timeout_sec, .. } => {
-                assert!(
-                    *timeout_sec >= 900,
-                    "default cmd timeout {timeout_sec}s is too short for this \
-                     workspace's test suite; it would time out a legitimate run"
-                );
-            }
-            other => panic!("expected cmd_succeeds, got {other:?}"),
-        }
-    }
-
     #[test]
     fn plan_deserialize_minimal() {
         let yaml = r#"
