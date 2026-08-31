@@ -46,6 +46,7 @@ mod cmd_sync;
 mod cmd_task;
 mod cmd_tool_tier;
 mod cmd_user;
+mod cmd_verdict;
 mod cmd_watch;
 mod fleet;
 mod pipeline_templates;
@@ -153,6 +154,11 @@ enum Command {
     Task {
         #[command(subcommand)]
         cmd: cmd_task::TaskCmd,
+    },
+    /// Issue a verdict on a gated subject (approve/reject) — GH-519
+    Verdict {
+        #[command(subcommand)]
+        cmd: cmd_verdict::VerdictCmd,
     },
     /// Recover and dispatch unfinished task attempts
     Reconcile {
@@ -1079,6 +1085,7 @@ fn main() -> anyhow::Result<()> {
         Command::Group { cmd } => cmd_group::execute(cmd, &repo_root),
         Command::Sync { from, dry_run } => cmd_sync::execute(&repo_root, from.as_deref(), dry_run),
         Command::Task { cmd } => cmd_task::execute(cmd, &repo_root),
+        Command::Verdict { cmd } => cmd_verdict::run(cmd, &repo_root),
         Command::Reconcile { args } => cmd_reconcile::run(&repo_root, args),
         Command::Claim {
             label,

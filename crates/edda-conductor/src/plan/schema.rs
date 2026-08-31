@@ -56,6 +56,36 @@ pub struct Phase {
     pub allowed_tools: Option<Vec<String>>,
     #[serde(default = "default_permission_mode")]
     pub permission_mode: String,
+    /// Verdict gate: after checks pass, the phase pauses in AWAITING_VERDICT
+    /// until an external `edda verdict` arrives (D2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<GateKind>,
+    /// Gate wait timeout in seconds; None = wait until cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_timeout_sec: Option<u64>,
+    /// Policy when the gate verdict rejects. Default: redispatch.
+    #[serde(default)]
+    pub on_reject: OnReject,
+}
+
+/// Kind of approval gate a phase can declare (D2).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GateKind {
+    /// External verdict via `edda verdict approve|reject`.
+    Verdict,
+}
+
+/// What happens when a verdict gate is rejected (D2/D3).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnReject {
+    /// Run ONE more agent turn in the SAME session with the rejection
+    /// comment as prompt, then re-check and re-gate.
+    #[default]
+    Redispatch,
+    /// Fail the phase with the rejection comment as the error.
+    Halt,
 }
 
 /// Failure policy for a phase.
@@ -254,5 +284,74 @@ phases:
         assert_eq!(phase.on_fail, Some(OnFail::Abort));
         assert_eq!(phase.check.len(), 2);
         assert_eq!(phase.env.get("FOO").unwrap(), "bar");
+    }
+
+    // ── Gate fields (D2) ─────────────────────────────────────────────
+
+    #[test]
+    fn phase_defaults_have_no_gate() {
+        let yaml = r#"
+name: test
+phases:
+  - id: a
+    prompt: "x"
+"#;
+        let plan: Plan = serde_yml::from_str(yaml).unwrap();
+        let phase = &plan.phases[0];
+        assert!(phase.gate.is_none());
+        assert!(phase.gate_timeout_sec.is_none());
+        assert_eq!(phase.on_reject, OnReject::Redispatch);
+    }
+
+    #[test]
+    fn phase_deserialize_gate_verdict() {
+        let yaml = r#"
+name: test
+phases:
+  - id: a
+    prompt: "x"
+    gate: verdict
+    gate_timeout_sec: 3600
+    on_reject: halt
+"#;
+        let plan: Plan = serde_yml::from_str(yaml).unwrap();
+        let phase = &plan.phases[0];
+        assert_eq!(phase.gate, Some(GateKind::Verdict));
+        assert_eq!(phase.gate_timeout_sec, Some(3600));
+        assert_eq!(phase.on_reject, OnReject::Halt);
+    }
+
+    #[test]
+    fn phase_unknown_gate_value_fails_loudly() {
+        let yaml = r#"
+name: test
+phases:
+  - id: a
+    prompt: "x"
+    gate: magic_gate
+"#;
+        let err = serde_yml::from_str::<Plan>(yaml).unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("magic_gate"));
+    }
+
+    #[test]
+    fn phase_unknown_on_reject_value_fails_loudly() {
+        let yaml = r#"
+name: test
+phases:
+  - id: a
+    prompt: "x"
+    gate: verdict
+    on_reject: explode
+"#;
+        assert!(serde_yml::from_str::<Plan>(yaml).is_err());
+    }
+
+    #[test]
+    fn gate_kind_serializes_snake_case() {
+        let json = serde_json::to_string(&GateKind::Verdict).unwrap();
+        assert_eq!(json, r#""verdict""#);
+        let back: GateKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, GateKind::Verdict);
     }
 }

@@ -38,6 +38,22 @@ pub enum Event {
         phase_id: String,
         reason: String,
     },
+    /// A gated phase passed its checks and entered AWAITING_VERDICT (D4).
+    GateEntered {
+        phase_id: String,
+        /// `<plan-name>/<phase-id>` — the subject an `edda verdict` targets.
+        subject: String,
+        gate_sha: String,
+    },
+    /// A verdict for a waiting gate was observed in the ledger (D4).
+    VerdictReceived {
+        phase_id: String,
+        /// "approved" | "rejected"
+        decision: String,
+        gate_sha: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
+    },
     PlanCompleted {
         phases_passed: usize,
         total_cost_usd: f64,
@@ -124,6 +140,9 @@ pub struct RunnerStatus {
     pub current_phase: Option<String>,
     pub completed: Vec<String>,
     pub failed: Vec<String>,
+    /// Phases holding AWAITING_VERDICT (D4) — external actors poll this
+    /// to learn the subject + gate_sha they must issue a verdict against.
+    pub awaiting_verdict: Vec<String>,
     pub updated_at: String,
 }
 
@@ -149,6 +168,12 @@ pub fn write_runner_status(
             .phases
             .iter()
             .filter(|p| p.status == PhaseStatus::Failed || p.status == PhaseStatus::Stale)
+            .map(|p| p.id.clone())
+            .collect(),
+        awaiting_verdict: state
+            .phases
+            .iter()
+            .filter(|p| p.status == PhaseStatus::AwaitingVerdict)
             .map(|p| p.id.clone())
             .collect(),
         updated_at: now_rfc3339(),
@@ -268,11 +293,39 @@ mod tests {
             current_phase: Some("build".into()),
             completed: vec!["lint".into()],
             failed: vec![],
+            awaiting_verdict: vec!["build".into()],
             updated_at: "2026-02-18T10:00:00Z".into(),
         };
         let json = serde_json::to_string_pretty(&status).unwrap();
         assert!(json.contains(r#""plan": "my-plan""#));
         assert!(json.contains(r#""current_phase": "build""#));
         assert!(json.contains(r#""completed""#));
+    }
+
+    #[test]
+    fn event_gate_entered_serialization() {
+        let event = Event::GateEntered {
+            phase_id: "build".into(),
+            subject: "my-plan/build".into(),
+            gate_sha: "a".repeat(40),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"gate_entered""#));
+        assert!(json.contains(r#""subject":"my-plan/build""#));
+        assert!(json.contains(r#""gate_sha":"aaaa"#));
+    }
+
+    #[test]
+    fn event_verdict_received_serialization() {
+        let event = Event::VerdictReceived {
+            phase_id: "build".into(),
+            decision: "rejected".into(),
+            gate_sha: "b".repeat(40),
+            comment: Some("fix tests".into()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"verdict_received""#));
+        assert!(json.contains(r#""decision":"rejected""#));
+        assert!(json.contains(r#""comment":"fix tests""#));
     }
 }

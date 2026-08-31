@@ -215,6 +215,9 @@ pub fn build_phase(
         budget_usd,
         allowed_tools: None,
         permission_mode: permission_mode.to_owned(),
+        gate: None,
+        gate_timeout_sec: None,
+        on_reject: Default::default(),
     }
 }
 

@@ -1224,7 +1224,7 @@ pub fn request_ack(
 /// fallback preserves genuine standalone CLI use. A carrier can preserve only
 /// the identity its host exposes; Codex tool hooks, for example, attribute
 /// subagent commands to the parent session (GH-503).
-fn resolve_session_id(
+pub(crate) fn resolve_session_id(
     cli_session: Option<&str>,
     project_id: &str,
     fallback_label: &str,

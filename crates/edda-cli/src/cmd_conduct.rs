@@ -546,6 +546,7 @@ fn print_status(state: &PlanState) {
             PhaseStatus::Running | PhaseStatus::Checking => "\u{25B6}", // ▶
             PhaseStatus::Skipped => "\u{2298}",                         // ⊘
             PhaseStatus::Stale => "\u{23F0}",                           // ⏰
+            PhaseStatus::AwaitingVerdict => "\u{23F8}",                 // ⏸
             PhaseStatus::Pending => "\u{25CB}",                         // ○
         };
         let detail = match ps.status {

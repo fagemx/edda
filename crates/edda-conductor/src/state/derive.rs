@@ -3,10 +3,11 @@ use crate::state::machine::{ErrorInfo, ErrorType, PhaseStatus, PlanState, PlanSt
 
 /// Derive plan-level status from phase states.
 pub fn derive_plan_status(phases: &[crate::state::machine::PhaseState]) -> PlanStatus {
-    if phases
-        .iter()
-        .any(|p| p.status == PhaseStatus::Running || p.status == PhaseStatus::Checking)
-    {
+    if phases.iter().any(|p| {
+        p.status == PhaseStatus::Running
+            || p.status == PhaseStatus::Checking
+            || p.status == PhaseStatus::AwaitingVerdict
+    }) {
         return PlanStatus::Running;
     }
     if phases
@@ -132,6 +133,12 @@ mod tests {
                 error: None,
                 skip_reason: None,
                 retry_context: None,
+                gate_sha: None,
+                gate_entered_at: None,
+                gate_redispatches: 0,
+                verdict_decision: None,
+                verdict_actor: None,
+                verdict_comment: None,
             })
             .collect()
     }
