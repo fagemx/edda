@@ -277,7 +277,23 @@ impl PiRpcSession {
     ) -> Result<PhaseResult> {
         let prompt_id = self.take_id();
         let request = json!({ "id": prompt_id, "type": "prompt", "message": message });
-        self.write(&request).await?;
+        if let Err(error) = self.write(&request).await {
+            // A pi that dies during startup (bad auth, bad --model,
+            // unwritable --session-dir) never reads stdin, so this write
+            // races the process death. Losing that race used to discard the
+            // collected stderr — the only place the real reason appears — and
+            // surface a bare IO error instead. Reclassify the dead-child
+            // error class into the same reap → drain-stderr → crash path the
+            // stdout-EOF branch takes, so the outcome is unconditional.
+            if !is_child_gone_error(&error) {
+                return Err(error);
+            }
+            let _ = self.child.wait().await;
+            let tail = collect_stderr_tail(&mut self.stderr_drain, &self.stderr).await;
+            return Ok(PhaseResult::AgentCrash {
+                error: eof_error(&mut self.child, &tail),
+            });
+        }
 
         let mut state = TurnState::default();
         let deadline = tokio::time::sleep(timeout);
@@ -452,6 +468,25 @@ fn clean_record(line: &str) -> &str {
 
 fn parse_message(line: &str) -> Result<Value> {
     serde_json::from_str(line).with_context(|| format!("invalid pi RPC JSON: {line}"))
+}
+
+/// Classify a stdin-write failure as "the child is gone".
+///
+/// Only `BrokenPipe` / `WriteZero` indicate the reader side of the stdin pipe
+/// has been closed — the signature of a pi that died during startup and never
+/// read its stdin. Every other IO error (disk full, permission denied, ...) is
+/// a genuine failure while pi may still be alive and keeps the documented
+/// `Err`-for-IO contract.
+fn is_child_gone_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|io| {
+            matches!(
+                io.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::WriteZero
+            )
+        })
 }
 
 async fn write_json_line(stdin: &mut ChildStdin, value: &Value) -> Result<()> {
@@ -950,6 +985,78 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// The deterministic losing branch of the startup race (#536): the fake
+    /// writes a stderr diagnostic and exits WITHOUT reading stdin, and this
+    /// test waits until the child has demonstrably exited BEFORE invoking the
+    /// turn — so the stdin write is guaranteed to hit a dead child instead of
+    /// racing it. The turn must still surface AgentCrash with the stderr
+    /// reason, not a bare IO error.
+    #[tokio::test]
+    async fn dead_child_stdin_write_still_reports_stderr_reason() -> Result<()> {
+        let (_dir, command) = fake_pi_command(FakeScenario::StderrThenDie)?;
+        let mut session = PiRpcSession::spawn_command(command).await?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if session.child.try_wait()?.is_some() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "fake pi never exited"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let cancel = CancellationToken::new();
+        let result = session
+            .run_turn("do the task", None, Duration::from_secs(30), false, &cancel)
+            .await;
+        session.terminate().await;
+        let result = result?;
+        match result {
+            PhaseResult::AgentCrash { error } => {
+                assert!(error.contains(STARTUP_DIAGNOSTIC), "{error}");
+                assert!(error.contains("pi stderr:"), "{error}");
+            }
+            other => panic!("expected AgentCrash, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn child_gone_error_predicate_matches_broken_pipe_and_write_zero() {
+        // A genuine stdin IO error with a LIVE child (e.g. a full disk, a
+        // permission failure on the pipe handle) returning `Err` cannot be
+        // constructed cheaply with the fake machinery: the fake scripts only
+        // control stdout/stderr and exit codes, and there is no portable way
+        // to inject an arbitrary IO error into a live pipe write. The
+        // classification boundary is therefore pinned directly on the
+        // predicate: only BrokenPipe/WriteZero — the kinds the OS reports
+        // when the reader side of the pipe is gone — are reclassified, and
+        // every other kind (and non-IO error) stays `Err`.
+        let broken_pipe = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "pipe closed",
+        ))
+        .context("failed writing pi RPC stdin");
+        assert!(is_child_gone_error(&broken_pipe));
+
+        let write_zero = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "write zero",
+        ))
+        .context("failed writing pi RPC stdin");
+        assert!(is_child_gone_error(&write_zero));
+
+        let permission = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ))
+        .context("failed writing pi RPC stdin");
+        assert!(!is_child_gone_error(&permission));
+
+        assert!(!is_child_gone_error(&anyhow!("not an io error")));
     }
 
     #[test]
