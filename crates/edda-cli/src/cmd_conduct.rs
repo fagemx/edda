@@ -5,7 +5,7 @@ use edda_conductor::agent::budget::BudgetTracker;
 use edda_conductor::agent::launcher::phase_session_id;
 use edda_conductor::check::engine::CheckEngine;
 use edda_conductor::plan::parser::load_plan;
-use edda_conductor::plan::schema::Plan;
+use edda_conductor::plan::schema::{Phase, Plan};
 use edda_conductor::runner::notify::StdoutNotifier;
 use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
@@ -210,7 +210,7 @@ pub fn run(
             } else {
                 format!(" ({} checks)", phase.check.len())
             };
-            println!("  {}. {}{}", i + 1, id, checks);
+            println!("  {}. {}{}{}", i + 1, id, checks, gate_preview(phase));
         }
         println!("\n  Session IDs:");
         for id in &order {
@@ -479,6 +479,25 @@ pub(crate) fn budget_warning_for_agent(agent: AgentKind, any_budget: bool) -> Op
     }
 }
 
+/// Dry-run suffix rendering a phase's verdict gate, so `--dry-run` shows
+/// "this phase will stop and wait for a human" — the one thing a gate
+/// changes about the operational shape of the run. The no-timeout case
+/// spells out "waits until cancelled" because that is the footgun for
+/// unattended batches.
+fn gate_preview(phase: &Phase) -> String {
+    let Some(kind) = phase.gate else {
+        return String::new();
+    };
+    // All variants are single snake_case words, so a lowercased Debug
+    // matches their YAML spelling (`verdict`, `redispatch`, `halt`).
+    let kind = format!("{kind:?}").to_lowercase();
+    let on_reject = format!("{:?}", phase.on_reject).to_lowercase();
+    let timeout = phase
+        .gate_timeout_sec
+        .map_or_else(|| "waits until cancelled".into(), |t| format!("{t}s"));
+    format!("  [gate: {kind}, timeout: {timeout}, on_reject: {on_reject}]")
+}
+
 /// The honest stand-in for a cost figure nobody measured, shared with
 /// `edda dispatch`'s no-usage rendering so the string has one source.
 pub(crate) const NO_USAGE_COST_TEXT: &str = "n/a (no usage data reported)";
@@ -690,6 +709,37 @@ mod tests {
         assert!(budget_warning_for_agent(AgentKind::Codex, false).is_none());
         assert!(budget_warning_for_agent(AgentKind::Claude, true).is_none());
         assert!(budget_warning_for_agent(AgentKind::Pi, true).is_none());
+    }
+
+    #[test]
+    fn gate_preview_renders_gate_timeout_and_policy() {
+        let plan = parse_plan(
+            "name: t\nphases:\n  - id: a\n    prompt: x\n    gate: verdict\n    gate_timeout_sec: 3600\n    on_reject: halt\n",
+        )
+        .expect("test plan parses");
+        assert_eq!(
+            gate_preview(&plan.phases[0]),
+            "  [gate: verdict, timeout: 3600s, on_reject: halt]"
+        );
+    }
+
+    #[test]
+    fn gate_preview_spells_out_the_no_timeout_case() {
+        // The footgun for unattended batches must not render as a bare
+        // "timeout: -" or silently look bounded.
+        let plan = parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\n    gate: verdict\n")
+            .expect("test plan parses");
+        assert_eq!(
+            gate_preview(&plan.phases[0]),
+            "  [gate: verdict, timeout: waits until cancelled, on_reject: redispatch]"
+        );
+    }
+
+    #[test]
+    fn gate_preview_is_empty_for_ungated_phases() {
+        let plan =
+            parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\n").expect("test plan parses");
+        assert_eq!(gate_preview(&plan.phases[0]), "");
     }
 
     #[test]
