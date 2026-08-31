@@ -73,7 +73,7 @@ pub fn execute_run(repo_root: &Path, issue_id: u64, dry_run: bool) -> Result<()>
         true,
         false,
         false,
-        crate::cmd_conduct::AgentKind::Claude,
+        crate::agent_kind::AgentKind::Claude,
     )
 }
 
