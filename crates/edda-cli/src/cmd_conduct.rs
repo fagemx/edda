@@ -1,10 +1,12 @@
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use edda_conductor::agent::budget::BudgetTracker;
+use edda_conductor::agent::codex_rpc::CodexLauncher;
 use edda_conductor::agent::launcher::{phase_session_id, AgentLauncher, ClaudeCodeLauncher};
 use edda_conductor::agent::pi_rpc::PiRpcLauncher;
 use edda_conductor::check::engine::CheckEngine;
 use edda_conductor::plan::parser::load_plan;
+use edda_conductor::plan::schema::Plan;
 use edda_conductor::runner::notify::StdoutNotifier;
 use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
@@ -22,6 +24,8 @@ pub enum AgentKind {
     Claude,
     /// pi coding agent via `pi --mode rpc`
     Pi,
+    /// codex CLI via `codex app-server`
+    Codex,
 }
 
 impl AgentKind {
@@ -29,6 +33,7 @@ impl AgentKind {
         match self {
             AgentKind::Claude => "claude",
             AgentKind::Pi => "pi",
+            AgentKind::Codex => "codex",
         }
     }
 
@@ -38,6 +43,7 @@ impl AgentKind {
         match self {
             AgentKind::Claude => true,
             AgentKind::Pi => false,
+            AgentKind::Codex => false,
         }
     }
 }
@@ -190,6 +196,10 @@ pub fn run(
         false
     };
 
+    if let Some(warning) = budget_warning(&plan, agent) {
+        eprintln!("{warning}");
+    }
+
     // Load or create state
     let mut state = match load_state(&cwd, &plan.name)? {
         Some(s) => {
@@ -263,6 +273,11 @@ pub fn run(
         }
         AgentKind::Pi => {
             let launcher = PiRpcLauncher::new().with_verbose(verbose);
+            launcher.verify_available()?;
+            Box::new(launcher)
+        }
+        AgentKind::Codex => {
+            let launcher = CodexLauncher::new().with_verbose(verbose);
             launcher.verify_available()?;
             Box::new(launcher)
         }
@@ -484,6 +499,42 @@ pub fn abort(repo_root: &Path, plan_name: Option<&str>) -> Result<()> {
 
 // --- helpers ---
 
+/// One-line startup warning when the selected backend cannot enforce budgets.
+///
+/// codex exposes no cost/usage data, so every phase reports `cost_usd: None`:
+/// the per-phase gate is inert and the sequential runner never feeds the
+/// plan-level `BudgetTracker`, leaving both phase and plan `budget_usd`
+/// unenforced and any printed cost figure a guess. Mirrors the --tmux
+/// warn-and-fall-back tone above.
+fn budget_warning(plan: &Plan, agent: AgentKind) -> Option<String> {
+    let any_budget =
+        plan.budget_usd.is_some() || plan.phases.iter().any(|p| p.budget_usd.is_some());
+    if agent == AgentKind::Codex && any_budget {
+        Some(format!(
+            "Warning: agent \"{}\" exposes no usage data, so budget_usd limits will not \
+             be enforced and reported cost is unavailable.",
+            agent.as_str()
+        ))
+    } else {
+        None
+    }
+}
+
+/// The status cost line.
+///
+/// `PlanState` does not record which agent backend ran, so a zero total
+/// cannot be attributed: usage-free backends like codex report no cost data
+/// at all, while a backend that reports usage overwrites the zero with a
+/// real figure once a phase completes. Printing "$0.00" for a codex run
+/// would assert a spend nobody measured, so a zero total renders as "n/a".
+fn cost_line(total_cost_usd: f64) -> String {
+    if total_cost_usd == 0.0 {
+        "n/a (no usage data reported)".to_owned()
+    } else {
+        format!("${total_cost_usd:.2}")
+    }
+}
+
 fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Result<String> {
     if let Some(name) = explicit {
         return Ok(name.to_string());
@@ -522,7 +573,7 @@ fn print_status(state: &PlanState) {
     if !state.plan_file.is_empty() {
         println!("  File: {}", state.plan_file);
     }
-    println!("  Cost: ${:.2}", state.total_cost_usd);
+    println!("  Cost: {}", cost_line(state.total_cost_usd));
 
     println!();
     for ps in &state.phases {
@@ -571,6 +622,7 @@ fn ctrlc_cancel(cancel: CancellationToken) {
 mod tests {
     use super::*;
     use clap::Parser;
+    use edda_conductor::plan::parser::parse_plan;
 
     /// Minimal parser harness: `ConductCmd` is a `Subcommand`, so it needs a
     /// root command to be parsed standalone.
@@ -613,11 +665,70 @@ mod tests {
             agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "claude"])),
             AgentKind::Claude
         );
+        assert_eq!(
+            agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "codex"])),
+            AgentKind::Codex
+        );
     }
 
     #[test]
     fn run_rejects_unknown_agent() {
-        assert!(TestCli::try_parse_from(["edda", "run", "plan.yaml", "--agent", "gpt"]).is_err());
+        let error = match TestCli::try_parse_from(["edda", "run", "plan.yaml", "--agent", "gpt"]) {
+            Err(error) => error,
+            Ok(_) => panic!("unknown agent must be rejected"),
+        };
+        let text = error.to_string();
+        for expected in ["claude", "pi", "codex"] {
+            assert!(
+                text.contains(expected),
+                "error should list the valid agents, missing {expected:?}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn budget_warning_fires_for_codex_with_plan_budget() {
+        let plan = parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\nbudget_usd: 5.0\n")
+            .expect("test plan parses");
+        let warning = budget_warning(&plan, AgentKind::Codex).expect("warning expected");
+        assert!(warning.contains("codex"), "{warning}");
+        assert!(warning.contains("budget_usd"), "{warning}");
+        assert!(warning.contains("not be enforced"), "{warning}");
+        assert!(warning.contains("cost is unavailable"), "{warning}");
+    }
+
+    #[test]
+    fn budget_warning_fires_for_codex_with_phase_budget() {
+        let plan = parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\n    budget_usd: 1.0\n")
+            .expect("test plan parses");
+        assert!(budget_warning(&plan, AgentKind::Codex).is_some());
+    }
+
+    #[test]
+    fn budget_warning_stays_silent_without_a_budget() {
+        let plan =
+            parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\n").expect("test plan parses");
+        assert!(budget_warning(&plan, AgentKind::Codex).is_none());
+    }
+
+    #[test]
+    fn budget_warning_stays_silent_for_other_agents() {
+        let plan = parse_plan("name: t\nphases:\n  - id: a\n    prompt: x\nbudget_usd: 5.0\n")
+            .expect("test plan parses");
+        assert!(budget_warning(&plan, AgentKind::Claude).is_none());
+        assert!(budget_warning(&plan, AgentKind::Pi).is_none());
+    }
+
+    #[test]
+    fn cost_line_reports_na_for_a_zero_total() {
+        // A zero total cannot be attributed to a backend (PlanState records
+        // no agent); codex runs would otherwise print a false "$0.00".
+        assert_eq!(cost_line(0.0), "n/a (no usage data reported)");
+    }
+
+    #[test]
+    fn cost_line_formats_a_reported_total() {
+        assert_eq!(cost_line(1.234), "$1.23");
     }
 
     #[test]
@@ -626,7 +737,9 @@ mod tests {
         // otherwise get panes tailing files nobody writes.
         assert!(AgentKind::Claude.writes_transcripts());
         assert!(!AgentKind::Pi.writes_transcripts());
+        assert!(!AgentKind::Codex.writes_transcripts());
         assert_eq!(AgentKind::Claude.as_str(), "claude");
         assert_eq!(AgentKind::Pi.as_str(), "pi");
+        assert_eq!(AgentKind::Codex.as_str(), "codex");
     }
 }

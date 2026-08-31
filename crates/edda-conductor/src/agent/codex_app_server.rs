@@ -23,10 +23,10 @@ impl CodexAppServer {
     pub async fn spawn(bin: &Path) -> Result<Self> {
         let mut command = Command::new(bin);
         command.arg("app-server");
-        Self::spawn_command(command).await
+        Self::spawn_with_command(command).await
     }
 
-    async fn spawn_command(mut command: Command) -> Result<Self> {
+    async fn spawn_with_command(mut command: Command) -> Result<Self> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -64,6 +64,13 @@ impl CodexAppServer {
             .await?;
         server.notify("initialized").await?;
         Ok(server)
+    }
+
+    /// Test-only wrapper so sibling-module tests (codex_rpc) can drive fake
+    /// app-servers through the same spawn+initialize path as [`Self::spawn`].
+    #[cfg(test)]
+    pub(crate) async fn spawn_command(command: Command) -> Result<Self> {
+        Self::spawn_with_command(command).await
     }
 
     pub async fn open_thread(&mut self, cwd: &Path, resume: Option<&str>) -> Result<String> {
@@ -393,46 +400,35 @@ impl<'a> TurnAccumulator<'a> {
     }
 }
 
+/// Scripted Codex App Server processes for tests, shared with the launcher
+/// tests in `codex_rpc.rs` so every protocol-level fake lives in one place.
 #[cfg(test)]
-fn response_for_id<'a>(lines: impl IntoIterator<Item = &'a str>, id: u64) -> Result<Value> {
-    for line in lines {
-        let message = parse_message(line)?;
-        if let Some(result) = matching_response(&message, id) {
-            return result;
-        }
-    }
-    bail!("unexpected EOF waiting for app-server response {id}")
-}
-
-#[cfg(test)]
-fn turn_outcome_from_lines<'a>(
-    lines: impl IntoIterator<Item = &'a str>,
-    thread_id: &str,
-    turn_id: &str,
-) -> Result<CodexTurnOutcome> {
-    let mut turn = TurnAccumulator::new(thread_id, turn_id);
-    for line in lines {
-        if let Some(outcome) = turn.observe(&parse_message(line)?)? {
-            return Ok(outcome);
-        }
-    }
-    bail!("unexpected EOF waiting for terminal Codex turn notification")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod fake_support {
+    use anyhow::Result;
+    use tokio::process::Command;
 
     #[derive(Clone, Copy)]
-    enum FakeScenario {
+    pub(crate) enum FakeScenario {
         MissingThreadId,
         EmptyThreadId,
+        /// One thread/start (t-1) + one completed turn ("turn complete").
+        RunTurnCompletes,
         RunTurnInterleaving,
+        /// turn/start answers with a JSON-RPC error on request id 2, i.e. a
+        /// client that calls run_turn directly without opening a thread first.
         RunTurnError,
+        /// thread/start succeeds (t-1), then turn/start answers with a
+        /// JSON-RPC error. Scripted for a client that opened the thread first,
+        /// so the error lands on request id 3.
+        RunTurnStartError,
+        /// Two full turns: thread/start (t-1) + turn ("first answer"), then
+        /// thread/resume (t-2) + turn ("second answer"). Drives the session
+        /// continuity path end to end.
+        TwoTurnsWithResume,
         Idle,
     }
 
-    fn fake_app_server(scenario: FakeScenario) -> anyhow::Result<(tempfile::TempDir, Command)> {
+    pub(crate) fn fake_app_server(scenario: FakeScenario) -> Result<(tempfile::TempDir, Command)> {
         let dir = tempfile::tempdir()?;
 
         #[cfg(windows)]
@@ -485,14 +481,6 @@ mod tests {
         }
     }
 
-    async fn spawn_fake_app_server(
-        scenario: FakeScenario,
-    ) -> anyhow::Result<(tempfile::TempDir, CodexAppServer)> {
-        let (dir, command) = fake_app_server(scenario)?;
-        let server = CodexAppServer::spawn_command(command).await?;
-        Ok((dir, server))
-    }
-
     #[cfg(windows)]
     fn powershell_fake_script(scenario: FakeScenario) -> String {
         let body = match scenario {
@@ -502,11 +490,20 @@ mod tests {
             FakeScenario::EmptyThreadId => {
                 "Read-Line\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"\"}}}'\nStart-Sleep -Seconds 60"
             }
+            FakeScenario::RunTurnCompletes => {
+                "Read-Line\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nRead-Line\nWrite-Line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"turn complete\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nStart-Sleep -Seconds 60"
+            }
             FakeScenario::RunTurnInterleaving => {
                 "Read-Line\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nRead-Line\nWrite-Line '{\"id\":99,\"result\":{\"ignored\":true}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"other-thread\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"wrong thread\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"other-thread\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"target final\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nWrite-Line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nStart-Sleep -Seconds 60"
             }
             FakeScenario::RunTurnError => {
                 "Read-Line\nWrite-Line '{\"id\":2,\"error\":{\"code\":-32602,\"message\":\"bad turn\"}}'\nStart-Sleep -Seconds 60"
+            }
+            FakeScenario::RunTurnStartError => {
+                "Read-Line\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nRead-Line\nWrite-Line '{\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad turn\"}}'\nStart-Sleep -Seconds 60"
+            }
+            FakeScenario::TwoTurnsWithResume => {
+                "Read-Line\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nRead-Line\nWrite-Line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"first answer\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nRead-Line\nWrite-Line '{\"id\":4,\"result\":{\"thread\":{\"id\":\"t-2\"}}}'\nRead-Line\nWrite-Line '{\"id\":5,\"result\":{\"turn\":{\"id\":\"turn-2\"}}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-2\",\"turnId\":\"turn-2\",\"item\":{\"type\":\"agentMessage\",\"text\":\"second answer\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-2\",\"turn\":{\"id\":\"turn-2\",\"status\":\"completed\"}}}'\nStart-Sleep -Seconds 60"
             }
             FakeScenario::Idle => "Start-Sleep -Seconds 60",
         };
@@ -524,17 +521,66 @@ mod tests {
             FakeScenario::EmptyThreadId => {
                 "read_line\nwrite_line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"\"}}}'\nsleep 60"
             }
+            FakeScenario::RunTurnCompletes => {
+                "read_line\nwrite_line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nread_line\nwrite_line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"turn complete\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nsleep 60"
+            }
             FakeScenario::RunTurnInterleaving => {
                 "read_line\nwrite_line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nread_line\nwrite_line '{\"id\":99,\"result\":{\"ignored\":true}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"other-thread\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"wrong thread\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"other-thread\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"target final\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nwrite_line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nsleep 60"
             }
             FakeScenario::RunTurnError => {
                 "read_line\nwrite_line '{\"id\":2,\"error\":{\"code\":-32602,\"message\":\"bad turn\"}}'\nsleep 60"
             }
+            FakeScenario::RunTurnStartError => {
+                "read_line\nwrite_line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nread_line\nwrite_line '{\"id\":3,\"error\":{\"code\":-32602,\"message\":\"bad turn\"}}'\nsleep 60"
+            }
+            FakeScenario::TwoTurnsWithResume => {
+                "read_line\nwrite_line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nread_line\nwrite_line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"first answer\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nread_line\nwrite_line '{\"id\":4,\"result\":{\"thread\":{\"id\":\"t-2\"}}}'\nread_line\nwrite_line '{\"id\":5,\"result\":{\"turn\":{\"id\":\"turn-2\"}}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-2\",\"turnId\":\"turn-2\",\"item\":{\"type\":\"agentMessage\",\"text\":\"second answer\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-2\",\"turn\":{\"id\":\"turn-2\",\"status\":\"completed\"}}}'\nsleep 60"
+            }
             FakeScenario::Idle => "sleep 60",
         };
         format!(
             "#!/bin/sh\nread_line() {{ IFS= read -r _ || exit 0; }}\nwrite_line() {{ printf '%s\\n' \"$1\"; }}\nread_line\nwrite_line '{{\"id\":1,\"result\":{{}}}}'\nread_line\n{body}\n"
         )
+    }
+}
+
+#[cfg(test)]
+fn response_for_id<'a>(lines: impl IntoIterator<Item = &'a str>, id: u64) -> Result<Value> {
+    for line in lines {
+        let message = parse_message(line)?;
+        if let Some(result) = matching_response(&message, id) {
+            return result;
+        }
+    }
+    bail!("unexpected EOF waiting for app-server response {id}")
+}
+
+#[cfg(test)]
+fn turn_outcome_from_lines<'a>(
+    lines: impl IntoIterator<Item = &'a str>,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<CodexTurnOutcome> {
+    let mut turn = TurnAccumulator::new(thread_id, turn_id);
+    for line in lines {
+        if let Some(outcome) = turn.observe(&parse_message(line)?)? {
+            return Ok(outcome);
+        }
+    }
+    bail!("unexpected EOF waiting for terminal Codex turn notification")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake_support::{fake_app_server, FakeScenario};
+    use super::*;
+
+    async fn spawn_fake_app_server(
+        scenario: FakeScenario,
+    ) -> anyhow::Result<(tempfile::TempDir, CodexAppServer)> {
+        let (dir, command) = fake_app_server(scenario)?;
+        let server = CodexAppServer::spawn_command(command).await?;
+        Ok((dir, server))
     }
 
     async fn wait_for_process_stop(pid: u32) -> anyhow::Result<()> {
