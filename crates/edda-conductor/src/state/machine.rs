@@ -15,6 +15,8 @@ pub enum PhaseStatus {
     Failed,
     Skipped,
     Stale,
+    /// Checks passed but an external verdict gate is holding the phase (D3).
+    AwaitingVerdict,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +68,27 @@ pub struct PhaseState {
     /// Error context from previous attempt, injected into retry prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_context: Option<String>,
+    /// Git HEAD captured when the phase entered AWAITING_VERDICT (D3).
+    /// On restart the wait resumes against this SHA without re-running the phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_sha: Option<String>,
+    /// RFC3339 timestamp of when the phase entered AWAITING_VERDICT (D3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_entered_at: Option<String>,
+    /// Completed redispatch cycles at the verdict gate (D6). Persisted and
+    /// counted separately from `attempts` — D3 forbids incrementing attempt
+    /// on redispatch, and a redispatch turn is not guaranteed to produce a
+    /// new commit, so `max_attempts` can never bound the (subject, gate_sha)
+    /// loop. This counter is the real bound.
+    #[serde(default)]
+    pub gate_redispatches: u32,
+    /// Verdict metadata recorded when the gate resolved (D3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_decision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_comment: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +109,8 @@ pub enum ErrorType {
     Timeout,
     BudgetExceeded,
     UserAbort,
+    /// A verdict gate rejected the phase (D3, on_reject: halt or bound hit).
+    GateRejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,7 +148,21 @@ const VALID_TRANSITIONS: &[(PhaseStatus, &[PhaseStatus])] = &[
     ),
     (
         PhaseStatus::Checking,
-        &[PhaseStatus::Passed, PhaseStatus::Failed],
+        &[
+            PhaseStatus::Passed,
+            PhaseStatus::Failed,
+            PhaseStatus::AwaitingVerdict,
+        ],
+    ),
+    (
+        PhaseStatus::AwaitingVerdict,
+        &[
+            PhaseStatus::Passed,
+            PhaseStatus::Failed,
+            // Rejected verdict with on_reject: redispatch runs one more agent
+            // turn in the SAME session (D3), so the phase goes back to Running.
+            PhaseStatus::Running,
+        ],
     ),
     (PhaseStatus::Failed, &[PhaseStatus::Pending]), // retry
     (PhaseStatus::Stale, &[PhaseStatus::Pending]),  // retry
@@ -148,6 +187,10 @@ pub struct PhaseUpdate {
     pub error: Option<ErrorInfo>,
     pub skip_reason: Option<String>,
     pub retry_context: Option<Option<String>>,
+    /// Gate SHA captured when entering AWAITING_VERDICT.
+    pub gate_sha: Option<String>,
+    /// RFC3339 timestamp of gate entry.
+    pub gate_entered_at: Option<String>,
 }
 
 impl PhaseUpdate {
@@ -172,6 +215,12 @@ impl PhaseUpdate {
         }
         if let Some(v) = self.retry_context {
             phase.retry_context = v;
+        }
+        if let Some(v) = self.gate_sha {
+            phase.gate_sha = Some(v);
+        }
+        if let Some(v) = self.gate_entered_at {
+            phase.gate_entered_at = Some(v);
         }
     }
 }
@@ -220,6 +269,12 @@ impl PlanState {
                 error: None,
                 skip_reason: None,
                 retry_context: None,
+                gate_sha: None,
+                gate_entered_at: None,
+                gate_redispatches: 0,
+                verdict_decision: None,
+                verdict_actor: None,
+                verdict_comment: None,
             })
             .collect();
 
@@ -453,5 +508,145 @@ phases:
         let restored: PlanState = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.plan_name, "test");
         assert_eq!(restored.phases.len(), 2);
+    }
+
+    // ── AwaitingVerdict gate state (D2/D3) ──────────────────────────
+
+    #[test]
+    fn awaiting_verdict_serializes_snake_case() {
+        let json = serde_json::to_string(&PhaseStatus::AwaitingVerdict).unwrap();
+        assert_eq!(json, r#""awaiting_verdict""#);
+        let back: PhaseStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, PhaseStatus::AwaitingVerdict);
+    }
+
+    fn run_to_checking(state: &mut PlanState, id: &str) {
+        transition(state, id, PhaseStatus::Pending, PhaseStatus::Running, None).unwrap();
+        transition(state, id, PhaseStatus::Running, PhaseStatus::Checking, None).unwrap();
+    }
+
+    #[test]
+    fn checking_to_awaiting_verdict_is_valid() {
+        let plan = test_plan();
+        let mut state = PlanState::from_plan(&plan, "plan.yaml");
+        run_to_checking(&mut state, "a");
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Checking,
+            PhaseStatus::AwaitingVerdict,
+            Some(PhaseUpdate {
+                gate_sha: Some("abc123".into()),
+                gate_entered_at: Some("2026-01-01T00:00:00Z".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        let phase = state.get_phase("a").unwrap();
+        assert_eq!(phase.status, PhaseStatus::AwaitingVerdict);
+        assert_eq!(phase.gate_sha.as_deref(), Some("abc123"));
+        assert_eq!(
+            phase.gate_entered_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn awaiting_verdict_resolves_to_passed_or_failed() {
+        let plan = test_plan();
+
+        // approve → Passed
+        let mut state = PlanState::from_plan(&plan, "plan.yaml");
+        run_to_checking(&mut state, "a");
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Checking,
+            PhaseStatus::AwaitingVerdict,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::AwaitingVerdict,
+            PhaseStatus::Passed,
+            None,
+        )
+        .unwrap();
+        assert_eq!(state.get_phase("a").unwrap().status, PhaseStatus::Passed);
+
+        // reject (halt) / timeout → Failed
+        let mut state = PlanState::from_plan(&plan, "plan.yaml");
+        run_to_checking(&mut state, "a");
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Checking,
+            PhaseStatus::AwaitingVerdict,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::AwaitingVerdict,
+            PhaseStatus::Failed,
+            None,
+        )
+        .unwrap();
+        assert_eq!(state.get_phase("a").unwrap().status, PhaseStatus::Failed);
+    }
+
+    #[test]
+    fn awaiting_verdict_to_pending_is_invalid() {
+        let plan = test_plan();
+        let mut state = PlanState::from_plan(&plan, "plan.yaml");
+        run_to_checking(&mut state, "a");
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Checking,
+            PhaseStatus::AwaitingVerdict,
+            None,
+        )
+        .unwrap();
+        let err = transition(
+            &mut state,
+            "a",
+            PhaseStatus::AwaitingVerdict,
+            PhaseStatus::Pending,
+            None,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn awaiting_verdict_state_persists_gate_sha_and_restore() {
+        let plan = test_plan();
+        let mut state = PlanState::from_plan(&plan, "plan.yaml");
+        run_to_checking(&mut state, "a");
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Checking,
+            PhaseStatus::AwaitingVerdict,
+            Some(PhaseUpdate {
+                gate_sha: Some("deadbeef".into()),
+                gate_entered_at: Some("2026-01-01T00:00:00Z".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        let json = serde_json::to_string(&state).unwrap();
+        let restored: PlanState = serde_json::from_str(&json).unwrap();
+        let phase = restored.get_phase("a").unwrap();
+        assert_eq!(phase.status, PhaseStatus::AwaitingVerdict);
+        assert_eq!(phase.gate_sha.as_deref(), Some("deadbeef"));
+        assert_eq!(
+            phase.gate_entered_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
     }
 }

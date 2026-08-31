@@ -201,10 +201,20 @@ impl AgentLauncher for ClaudeCodeLauncher {
     }
 }
 
+/// One recorded launcher call (for tests asserting session continuity etc.).
+#[derive(Debug, Clone)]
+pub struct LauncherCall {
+    pub phase_id: String,
+    pub session_id: String,
+    pub prompt: String,
+}
+
 /// Mock launcher for testing. Pops results on each call per phase ID.
 /// If no results configured (or exhausted), returns AgentDone.
+/// Records every call so tests can assert session ids and prompts.
 pub struct MockLauncher {
     results: std::sync::Mutex<std::collections::HashMap<String, Vec<PhaseResult>>>,
+    calls: std::sync::Mutex<Vec<LauncherCall>>,
 }
 
 impl Default for MockLauncher {
@@ -217,6 +227,7 @@ impl MockLauncher {
     pub fn new() -> Self {
         Self {
             results: std::sync::Mutex::new(std::collections::HashMap::new()),
+            calls: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -226,6 +237,24 @@ impl MockLauncher {
             .unwrap()
             .insert(phase_id.to_string(), results);
     }
+
+    /// Every recorded call, in launch order.
+    pub fn calls(&self) -> Vec<LauncherCall> {
+        self.calls.lock().unwrap().clone()
+    }
+
+    /// Recorded calls for one phase, in launch order.
+    pub fn calls_for(&self, phase_id: &str) -> Vec<LauncherCall> {
+        self.calls()
+            .into_iter()
+            .filter(|c| c.phase_id == phase_id)
+            .collect()
+    }
+
+    /// How many times this phase launched an agent turn.
+    pub fn call_count(&self, phase_id: &str) -> u32 {
+        self.calls_for(phase_id).len() as u32
+    }
 }
 
 #[async_trait::async_trait]
@@ -233,9 +262,9 @@ impl AgentLauncher for MockLauncher {
     async fn run_phase(
         &self,
         phase: &Phase,
-        _prompt: &str,
+        prompt: &str,
         _plan_context: &str,
-        _session_id: &str,
+        session_id: &str,
         _cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult> {
@@ -244,6 +273,12 @@ impl AgentLauncher for MockLauncher {
                 error: "cancelled".into(),
             });
         }
+
+        self.calls.lock().unwrap().push(LauncherCall {
+            phase_id: phase.id.clone(),
+            session_id: session_id.to_string(),
+            prompt: prompt.to_string(),
+        });
 
         let mut map = self.results.lock().unwrap();
         if let Some(vec) = map.get_mut(&phase.id) {

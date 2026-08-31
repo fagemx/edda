@@ -82,6 +82,53 @@ mod tests {
         assert_eq!(loaded.version, 42);
     }
 
+    #[test]
+    fn awaiting_verdict_state_survives_disk_roundtrip() {
+        use crate::state::machine::{transition, PhaseStatus, PhaseUpdate};
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = parse_plan("name: gated\nphases:\n  - id: a\n    prompt: x\n").unwrap();
+        let mut state = PlanState::from_plan(&plan, "plan.yaml");
+        transition(
+            &mut state,
+            "a",
+            crate::state::machine::PhaseStatus::Pending,
+            crate::state::machine::PhaseStatus::Running,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Running,
+            PhaseStatus::Checking,
+            None,
+        )
+        .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Checking,
+            PhaseStatus::AwaitingVerdict,
+            Some(PhaseUpdate {
+                gate_sha: Some("0123456789abcdef".into()),
+                gate_entered_at: Some("2026-01-01T00:00:00Z".into()),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        save_state(dir.path(), &state).unwrap();
+        let loaded = load_state(dir.path(), "gated").unwrap().unwrap();
+        let phase = loaded.get_phase("a").unwrap();
+        assert_eq!(phase.status, PhaseStatus::AwaitingVerdict);
+        assert_eq!(phase.gate_sha.as_deref(), Some("0123456789abcdef"));
+        assert_eq!(
+            phase.gate_entered_at.as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+    }
+
     // ── Corrupted state recovery tests ─────────────────────────────
 
     /// Helper: create the state.json directory structure and write content.

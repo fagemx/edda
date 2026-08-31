@@ -890,6 +890,8 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "edda-core",
+ "edda-ledger",
  "edda-store",
  "regex",
  "serde",

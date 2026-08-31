@@ -1,5 +1,6 @@
 use crate::paths::EddaPaths;
 use crate::sqlite_store::{BundleRow, SqliteStore};
+use crate::verdict::{self, VerdictRecord};
 use crate::view::{self, DecisionView};
 use anyhow::Context;
 use edda_core::Event;
@@ -76,6 +77,51 @@ impl Ledger {
         self.sqlite
             .set_head_branch(name)
             .context("Ledger::set_head_branch")
+    }
+
+    // ── Verdicts (GH-519) ───────────────────────────────────────
+
+    /// Read every `verdict.recorded` event in insertion order. Malformed
+    /// payloads are skipped: the ledger stays append-only, and a broken row
+    /// must not take down the whole verdict history.
+    pub fn iter_verdicts(&self) -> anyhow::Result<Vec<VerdictRecord>> {
+        let events = self
+            .iter_events_by_type("verdict.recorded")
+            .context("Ledger::iter_verdicts")?;
+        Ok(events
+            .iter()
+            .filter_map(verdict::parse_verdict_event)
+            .collect())
+    }
+
+    /// Latest verdict for `(subject, sha)`, by ledger insertion order.
+    /// A verdict recorded against a different SHA never matches this query:
+    /// it stays findable via [`Ledger::iter_verdicts`] but cannot satisfy a
+    /// gate waiting on another SHA (GH-519 D1).
+    pub fn latest_verdict(
+        &self,
+        subject: &str,
+        sha: &str,
+    ) -> anyhow::Result<Option<VerdictRecord>> {
+        let verdicts = self.iter_verdicts()?;
+        Ok(verdict::latest_verdict(&verdicts, subject, sha).cloned())
+    }
+
+    /// Latest verdict for `(subject, sha)` recorded strictly AFTER
+    /// `not_before` (RFC3339, e.g. a gate's `gate_entered_at`) — GH-519 D6
+    /// verdict freshness. A re-entered gate can wait on the same
+    /// `(subject, gate_sha)` as its previous incarnation (a redispatch turn
+    /// is not guaranteed to produce a commit), so only verdicts that
+    /// postdate this gate's entry may satisfy it. See
+    /// [`verdict::latest_verdict_fresh`] for the exact semantics.
+    pub fn latest_verdict_fresh(
+        &self,
+        subject: &str,
+        sha: &str,
+        not_before: Option<&str>,
+    ) -> anyhow::Result<Option<VerdictRecord>> {
+        let verdicts = self.iter_verdicts()?;
+        Ok(verdict::latest_verdict_fresh(&verdicts, subject, sha, not_before).cloned())
     }
 
     // ── Events ──────────────────────────────────────────────────────

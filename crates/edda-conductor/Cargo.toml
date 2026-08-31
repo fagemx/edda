@@ -11,6 +11,8 @@ keywords.workspace = true
 
 [dependencies]
 edda-store = { path = "../edda-store", version = "0.3.0" }
+edda-core = { path = "../edda-core", version = "0.3.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.3.0" }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true

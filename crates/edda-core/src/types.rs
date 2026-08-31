@@ -130,6 +130,10 @@ pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'
         "task.session" => (Some(event_family::SIGNAL), Some(event_level::TRACE)),
         "task.done" => (Some(event_family::MILESTONE), Some(event_level::MILESTONE)),
         "task.requeued" => (Some(event_family::ADMIN), Some(event_level::INFO)),
+        "verdict.recorded" => (
+            Some(event_family::GOVERNANCE),
+            Some(event_level::GOVERNANCE),
+        ),
         _ => (None, None),
     }
 }
@@ -201,6 +205,42 @@ pub struct DecisionPayload {
     /// Village scope identifier. Default: None (not village-scoped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub village_id: Option<String>,
+}
+
+/// An issued verdict on a gated subject (GH-519).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerdictDecision {
+    Approved,
+    Rejected,
+}
+
+impl std::fmt::Display for VerdictDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Approved => write!(f, "approved"),
+            Self::Rejected => write!(f, "rejected"),
+        }
+    }
+}
+
+/// Structured payload of a `verdict.recorded` ledger event (GH-519).
+///
+/// A verdict is a first-class ledger object bound to (subject, full SHA):
+/// the conductor consumes verdicts, it does not own them. A verdict recorded
+/// for one SHA is findable but never satisfies a gate waiting on another SHA.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VerdictPayload {
+    /// Free-form subject; for conductor gates it is `<plan-name>/<phase-id>`.
+    pub subject: String,
+    pub decision: VerdictDecision,
+    /// Full 40-hex git SHA the verdict applies to.
+    pub sha: String,
+    /// Required on reject (fed back to the agent); optional context on approve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// Who issued the verdict — same identity source as other edda writes.
+    pub actor: String,
 }
 
 /// Status of a task brief.
@@ -421,6 +461,11 @@ mod tests {
             ("task.done", event_family::MILESTONE, event_level::MILESTONE),
             ("task.failed", event_family::SIGNAL, event_level::INFO),
             ("task.requeued", event_family::ADMIN, event_level::INFO),
+            (
+                "verdict.recorded",
+                event_family::GOVERNANCE,
+                event_level::GOVERNANCE,
+            ),
         ];
 
         for (event_type, expected_family, expected_level) in &table {

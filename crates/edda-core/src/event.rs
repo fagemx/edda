@@ -1,7 +1,8 @@
 use crate::canon::canonical_json_bytes;
 use crate::hash::sha256_hex;
 use crate::types::{
-    classify_event_type, DecisionPayload, Digest, Event, Refs, CANON_EDDA_V1, SCHEMA_VERSION,
+    classify_event_type, DecisionPayload, Digest, Event, Refs, VerdictPayload, CANON_EDDA_V1,
+    SCHEMA_VERSION,
 };
 
 /// Compute the hash for an event: serialize without the `hash` field,
@@ -281,6 +282,33 @@ pub fn new_decision_ratify_event(
         event_level: None,
     };
 
+    finalize(&mut event)?;
+    Ok(event)
+}
+
+/// Create a new `verdict.recorded` event — an external actor's approval or
+/// rejection of a gated subject (GH-519). The conductor consumes verdicts;
+/// it does not own them. A verdict is bound to (subject, full SHA) and is
+/// queryable via `edda log --type verdict.recorded`.
+pub fn new_verdict_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    verdict: &VerdictPayload,
+) -> anyhow::Result<Event> {
+    let mut event = Event {
+        event_id: new_event_id(),
+        ts: now_rfc3339(),
+        event_type: "verdict.recorded".to_string(),
+        branch: branch.to_string(),
+        parent_hash: parent_hash.map(|s| s.to_string()),
+        hash: String::new(),
+        payload: serde_json::to_value(verdict)?,
+        refs: Refs::default(),
+        schema_version: SCHEMA_VERSION,
+        digests: Vec::new(),
+        event_family: None,
+        event_level: None,
+    };
     finalize(&mut event)?;
     Ok(event)
 }
@@ -1167,6 +1195,7 @@ pub fn new_task_requeued_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{VerdictDecision, VerdictPayload};
 
     #[test]
     fn note_event_has_valid_id_and_hash() {
@@ -2074,6 +2103,44 @@ mod tests {
         assert_eq!(event.payload["acp_session_id"], "sess-acp-42");
         assert_eq!(event.event_family.as_deref(), Some("signal"));
         assert_eq!(event.event_level.as_deref(), Some("trace"));
+    }
+
+    #[test]
+    fn verdict_event_fields_roundtrip() {
+        let payload = VerdictPayload {
+            subject: "plan-x/phase-1".to_string(),
+            decision: VerdictDecision::Rejected,
+            sha: "a".repeat(40),
+            comment: Some("check 2 failed".to_string()),
+            actor: "tim".to_string(),
+        };
+        let event = new_verdict_event("main", Some("abc"), &payload).unwrap();
+        assert_eq!(event.event_type, "verdict.recorded");
+        assert_eq!(event.payload["subject"], "plan-x/phase-1");
+        assert_eq!(event.payload["decision"], "rejected");
+        assert_eq!(event.payload["sha"], "a".repeat(40));
+        assert_eq!(event.payload["actor"], "tim");
+        assert_eq!(event.event_family.as_deref(), Some("governance"));
+        assert_eq!(event.event_level.as_deref(), Some("governance"));
+        assert_eq!(event.digests[0].value, event.hash);
+        // The payload deserializes back into the typed struct.
+        let parsed: VerdictPayload = serde_json::from_value(event.payload).unwrap();
+        assert_eq!(parsed, payload);
+    }
+
+    #[test]
+    fn verdict_event_approved_without_comment_omits_comment_key() {
+        let payload = VerdictPayload {
+            subject: "plan-x/phase-1".to_string(),
+            decision: VerdictDecision::Approved,
+            sha: "b".repeat(40),
+            comment: None,
+            actor: "tim".to_string(),
+        };
+        let event = new_verdict_event("main", None, &payload).unwrap();
+        assert!(event.payload.get("comment").is_none());
+        let parsed: VerdictPayload = serde_json::from_value(event.payload).unwrap();
+        assert_eq!(parsed.comment, None);
     }
 
     #[test]

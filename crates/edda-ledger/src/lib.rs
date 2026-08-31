@@ -9,6 +9,7 @@ pub(crate) mod sqlite_store;
 pub mod sync;
 pub mod tasks;
 pub mod tombstone;
+pub mod verdict;
 pub mod view;
 
 pub use blob_meta::{BlobClass, BlobMetaEntry, BlobMetaMap, ClassChange};
@@ -28,6 +29,7 @@ pub use lock::WorkspaceLock;
 pub use paths::{validate_branch_name, EddaPaths};
 pub use tasks::{TaskStatus, TaskView};
 pub use tombstone::{append_tombstone, list_tombstones, make_tombstone, DeleteReason, Tombstone};
+pub use verdict::{latest_verdict, parse_verdict_event, VerdictRecord};
 pub use view::DecisionView;
 
 /// Maximum number of decision snapshots returned by one query.
