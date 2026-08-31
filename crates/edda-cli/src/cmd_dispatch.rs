@@ -11,14 +11,11 @@
 //! - 3 = budget exceeded
 //! - 4 = max turns
 
-use crate::agent_kind::AgentKind;
-use crate::cmd_conduct::{budget_warning_for_agent, cost_line};
+use crate::agent_kind::{build_launcher, AgentKind, LauncherOptions};
+use crate::cmd_conduct::{budget_warning_for_agent, cost_line, NO_USAGE_COST_TEXT};
 use anyhow::{Context, Result};
 use clap::Args;
-use edda_conductor::agent::codex_rpc::CodexLauncher;
-use edda_conductor::agent::launcher::PhaseResult;
-use edda_conductor::agent::launcher::{phase_session_id, AgentLauncher, ClaudeCodeLauncher};
-use edda_conductor::agent::pi_rpc::PiRpcLauncher;
+use edda_conductor::agent::launcher::{phase_session_id, AgentLauncher, PhaseResult};
 use edda_conductor::plan::schema::Phase as PhaseSchema;
 use tokio_util::sync::CancellationToken;
 
@@ -33,9 +30,13 @@ pub struct DispatchArgs {
     /// Path to a file containing the prompt (read verbatim)
     #[arg(long)]
     pub prompt_file: String,
-    /// Session id passed to the backend verbatim (create-or-continue is the
-    /// backend's concern). Generated and printed when omitted so the caller
-    /// can reuse it on the next call.
+    /// Session id passed to the backend verbatim. Continuity semantics are
+    /// per-backend: claude and pi persist conversations externally, so the
+    /// same id resumes the prior conversation across invocations; codex
+    /// keeps its thread state in-process, so each `edda dispatch`
+    /// invocation starts a fresh conversation no matter what id you pass
+    /// (a warning is printed). Generated and printed when omitted so the
+    /// caller can reuse it on the next call.
     #[arg(long)]
     pub session_id: Option<String>,
     /// Working directory for the agent (default: current directory)
@@ -47,6 +48,11 @@ pub struct DispatchArgs {
     /// Turn timeout in seconds (default: 1800, like a conduct phase)
     #[arg(long)]
     pub timeout_sec: Option<u64>,
+    /// Permission mode carried on the synthetic phase verbatim (default:
+    /// bypassPermissions). Only the claude backend consumes this today;
+    /// pi and codex ignore it.
+    #[arg(long, default_value = "bypassPermissions")]
+    pub permission_mode: String,
     /// Print one JSON object to stdout instead of text lines
     #[arg(long)]
     pub json: bool,
@@ -153,7 +159,7 @@ impl DispatchOutput {
     fn cost_text(&self) -> String {
         self.cost_usd
             .map(cost_line)
-            .unwrap_or_else(|| "n/a (no usage data reported)".to_owned())
+            .unwrap_or_else(|| NO_USAGE_COST_TEXT.to_owned())
     }
 
     /// Text-mode stdout: result text, then `Cost:`, then `Session:`.
@@ -186,10 +192,15 @@ impl DispatchOutput {
 // ── Phase + launcher construction ──
 
 /// Build the synthetic single-turn phase, mapping flags exactly the way a
-/// conduct phase's fields map: budget and timeout land on the phase, and a
-/// missing timeout falls back to the launcher's 1800 s default — the same
-/// default a plan-level `timeout_sec` would supply.
-pub fn build_phase(prompt: &str, budget_usd: Option<f64>, timeout_sec: Option<u64>) -> PhaseSchema {
+/// conduct phase's fields map: budget, timeout, and permission mode land on
+/// the phase, and a missing timeout falls back to the launcher's 1800 s
+/// default — the same default a plan-level `timeout_sec` would supply.
+pub fn build_phase(
+    prompt: &str,
+    budget_usd: Option<f64>,
+    timeout_sec: Option<u64>,
+    permission_mode: &str,
+) -> PhaseSchema {
     PhaseSchema {
         id: "dispatch".to_owned(),
         prompt: prompt.to_owned(),
@@ -203,7 +214,7 @@ pub fn build_phase(prompt: &str, budget_usd: Option<f64>, timeout_sec: Option<u6
         env: std::collections::HashMap::new(),
         budget_usd,
         allowed_tools: None,
-        permission_mode: "bypassPermissions".to_owned(),
+        permission_mode: permission_mode.to_owned(),
     }
 }
 
@@ -219,32 +230,48 @@ pub fn generate_session_id() -> String {
     phase_session_id("dispatch", &unique).to_string()
 }
 
-/// Construct the launcher exactly the way `edda conduct run` does,
-/// including the `verify_available()` probe before any dispatch happens.
-fn build_launcher(agent: AgentKind) -> Result<Box<dyn AgentLauncher>> {
-    Ok(match agent {
-        AgentKind::Claude => {
-            let launcher = ClaudeCodeLauncher::new();
-            launcher.verify_available()?;
-            Box::new(launcher)
-        }
-        AgentKind::Pi => {
-            let launcher = PiRpcLauncher::new();
-            launcher.verify_available()?;
-            Box::new(launcher)
-        }
-        AgentKind::Codex => {
-            let launcher = CodexLauncher::new();
-            launcher.verify_available()?;
-            Box::new(launcher)
-        }
-    })
+/// One-line startup warning when an explicit `--session-id` cannot do what
+/// the caller probably expects.
+///
+/// claude and pi delegate continuity to their backends (external
+/// persistence), so a repeated id really does resume the prior
+/// conversation across dispatch invocations. CodexLauncher keeps
+/// continuity in its in-memory threads map, and `build_launcher`
+/// constructs a fresh launcher per process — so for codex the map is
+/// always empty, resume is `None`, and two calls with the same id are two
+/// unrelated conversations. Persistence for codex is routed as a follow-up
+/// issue; until then this warning is the honest surface. Mirrors
+/// [`budget_warning_for_agent`]'s tone.
+fn session_id_warning_for_agent(agent: AgentKind, explicit_id: bool) -> Option<String> {
+    if agent == AgentKind::Codex && explicit_id {
+        Some(
+            "Warning: codex thread state is per-process, so --session-id does not resume \
+             a prior conversation across dispatch invocations (claude/pi do persist); \
+             continuity for codex currently requires a single long-lived process (conduct)."
+                .to_owned(),
+        )
+    } else {
+        None
+    }
 }
 
 // ── Run ──
 
 /// Execute `edda dispatch`.
+///
+/// The whole run happens in [`run_inner`] so the tokio runtime and the
+/// launcher are dropped before the process exits: `std::process::exit`
+/// skips destructors, and a future launcher holding a live child across a
+/// non-zero outcome must not be orphaned.
 pub fn run(args: DispatchArgs) -> Result<()> {
+    let code = run_inner(args)?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+fn run_inner(args: DispatchArgs) -> Result<i32> {
     let prompt = std::fs::read_to_string(&args.prompt_file)
         .with_context(|| format!("--prompt-file not readable: {}", args.prompt_file))?;
 
@@ -265,9 +292,23 @@ pub fn run(args: DispatchArgs) -> Result<()> {
     if let Some(warning) = budget_warning_for_agent(args.agent, args.budget_usd.is_some()) {
         eprintln!("{warning}");
     }
+    if let Some(warning) = session_id_warning_for_agent(args.agent, args.session_id.is_some()) {
+        eprintln!("{warning}");
+    }
 
-    let launcher = build_launcher(args.agent)?;
-    let phase = build_phase(&prompt, args.budget_usd, args.timeout_sec);
+    let launcher = build_launcher(
+        args.agent,
+        LauncherOptions {
+            verbose: false,
+            transcript_dir: None,
+        },
+    )?;
+    let phase = build_phase(
+        &prompt,
+        args.budget_usd,
+        args.timeout_sec,
+        &args.permission_mode,
+    );
     let cancel = CancellationToken::new();
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -289,10 +330,7 @@ pub fn run(args: DispatchArgs) -> Result<()> {
     }
 
     let code = output.exit_code();
-    if code != 0 {
-        std::process::exit(code);
-    }
-    Ok(())
+    Ok(code)
 }
 
 /// One turn through the launcher with an empty plan context. Split out from
@@ -564,8 +602,10 @@ mod tests {
         assert!(out.to_json().contains("my-session-42"));
     }
 
-    /// Records the session ids it receives — proves the caller's id reaches
-    /// the launcher verbatim on every call.
+    /// Records the session ids it receives. This proves verbatim delivery
+    /// of the caller's id to the launcher within one process — it says
+    /// nothing about cross-invocation continuity, which for codex does not
+    /// hold (see `session_id_warning_for_agent`).
     struct RecordingLauncher {
         session_ids: Mutex<Vec<String>>,
     }
@@ -590,11 +630,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_session_id_reaches_launcher_verbatim_on_every_call() {
+    async fn session_id_is_delivered_verbatim_on_every_call_within_one_process() {
+        // Verbatim delivery only: repeating the same id inside one process
+        // reaches the launcher unchanged. This test does not (and cannot)
+        // prove cross-invocation continuity — for codex it does not hold.
         let recorder = RecordingLauncher {
             session_ids: Mutex::new(Vec::new()),
         };
-        let phase = build_phase("prompt", None, None);
+        let phase = build_phase("prompt", None, None, "bypassPermissions");
         let cancel = CancellationToken::new();
 
         run_with_launcher(
@@ -620,7 +663,7 @@ mod tests {
 
     #[test]
     fn phase_maps_budget_and_timeout_flags_like_conduct() {
-        let phase = build_phase("do the thing", Some(1.5), Some(60));
+        let phase = build_phase("do the thing", Some(1.5), Some(60), "bypassPermissions");
         assert_eq!(phase.id, "dispatch");
         assert_eq!(phase.prompt, "do the thing");
         assert_eq!(phase.budget_usd, Some(1.5));
@@ -628,12 +671,60 @@ mod tests {
 
         // Omitted flags stay None, exactly like a conduct phase without
         // them; the launcher then applies its 1800 s default.
-        let phase = build_phase("p", None, None);
+        let phase = build_phase("p", None, None, "bypassPermissions");
         assert_eq!(phase.budget_usd, None);
         assert_eq!(phase.timeout_sec, None);
         assert_eq!(phase.permission_mode, "bypassPermissions");
         assert!(phase.env.is_empty());
         assert!(phase.check.is_empty());
+    }
+
+    #[test]
+    fn phase_carries_permission_mode_verbatim() {
+        // The flag lands on the synthetic phase the way a conduct phase
+        // carries its own permission_mode.
+        let phase = build_phase("p", None, None, "acceptEdits");
+        assert_eq!(phase.permission_mode, "acceptEdits");
+    }
+
+    // ── --permission-mode flag ──
+
+    #[test]
+    fn dispatch_defaults_permission_mode_to_bypass() {
+        let args = parse(&["edda", "--agent", "claude", "--prompt-file", "p.txt"]);
+        assert_eq!(args.permission_mode, "bypassPermissions");
+    }
+
+    #[test]
+    fn dispatch_parses_explicit_permission_mode() {
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "claude",
+            "--prompt-file",
+            "p.txt",
+            "--permission-mode",
+            "default",
+        ]);
+        assert_eq!(args.permission_mode, "default");
+    }
+
+    // ── codex --session-id warning ──
+
+    #[test]
+    fn session_id_warning_fires_only_for_codex_with_an_explicit_id() {
+        let warning =
+            session_id_warning_for_agent(AgentKind::Codex, true).expect("warning expected");
+        assert!(warning.contains("codex"), "{warning}");
+        assert!(warning.contains("per-process"), "{warning}");
+        assert!(warning.contains("does not resume"), "{warning}");
+        assert!(warning.contains("conduct"), "{warning}");
+
+        // A generated id (flag omitted) never warns, and neither do the
+        // backends whose persistence makes the id a real resume handle.
+        assert!(session_id_warning_for_agent(AgentKind::Codex, false).is_none());
+        assert!(session_id_warning_for_agent(AgentKind::Claude, true).is_none());
+        assert!(session_id_warning_for_agent(AgentKind::Pi, true).is_none());
     }
 
     // ── End-to-end-ish run through MockLauncher ──
@@ -648,7 +739,7 @@ mod tests {
                 result_text: Some("(mock) finished".into()),
             }],
         );
-        let phase = build_phase("prompt", None, None);
+        let phase = build_phase("prompt", None, None, "bypassPermissions");
         let out = run_with_launcher(
             &launcher,
             &phase,
@@ -669,7 +760,7 @@ mod tests {
     async fn mock_timeout_maps_to_exit_code_2() {
         let launcher = MockLauncher::new();
         launcher.set_results("dispatch", vec![PhaseResult::Timeout]);
-        let phase = build_phase("prompt", None, None);
+        let phase = build_phase("prompt", None, None, "bypassPermissions");
         let out = run_with_launcher(
             &launcher,
             &phase,

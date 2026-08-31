@@ -1,7 +1,13 @@
 //! Shared agent-backend selection, used by both `edda conduct` (plan runs)
-//! and `edda dispatch` (single-turn runs). The enum, its string form, and
-//! the transcript capability flag live here so neither command duplicates
-//! the other's backend list.
+//! and `edda dispatch` (single-turn runs). The enum, its string form, the
+//! transcript capability flag, and the launcher construct-and-probe factory
+//! live here so neither command duplicates the other's backend list.
+
+use anyhow::Result;
+use edda_conductor::agent::codex_rpc::CodexLauncher;
+use edda_conductor::agent::launcher::{AgentLauncher, ClaudeCodeLauncher};
+use edda_conductor::agent::pi_rpc::PiRpcLauncher;
+use std::path::PathBuf;
 
 /// Which agent backend runs the plan's phases.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
@@ -32,6 +38,49 @@ impl AgentKind {
             AgentKind::Codex => false,
         }
     }
+}
+
+// ── Launcher factory ──
+
+/// Per-backend options for [`build_launcher`]: verbose streaming and, for
+/// the backend that tees transcripts, the directory to tee into.
+pub(crate) struct LauncherOptions {
+    /// Stream live agent activity while the phase runs.
+    pub verbose: bool,
+    /// If set, claude captures raw agent stdout to
+    /// `{transcript_dir}/{phase_id}-{session_id_prefix}.jsonl`.
+    pub transcript_dir: Option<PathBuf>,
+}
+
+/// Construct and probe (`verify_available`) the launcher for `agent`.
+///
+/// This is the single construct-and-probe table: the backend list exists in
+/// exactly one place, shared by `edda conduct run` (which threads
+/// `--verbose` and a transcript dir for claude) and `edda dispatch` (which
+/// uses defaults). pi has no transcript tee capability yet, so the
+/// transcript dir is claude-only — see [`AgentKind::writes_transcripts`].
+pub(crate) fn build_launcher(
+    agent: AgentKind,
+    options: LauncherOptions,
+) -> Result<Box<dyn AgentLauncher>> {
+    Ok(match agent {
+        AgentKind::Claude => {
+            let mut launcher = ClaudeCodeLauncher::new().with_verbose(options.verbose);
+            launcher.transcript_dir = options.transcript_dir;
+            launcher.verify_available()?;
+            Box::new(launcher)
+        }
+        AgentKind::Pi => {
+            let launcher = PiRpcLauncher::new().with_verbose(options.verbose);
+            launcher.verify_available()?;
+            Box::new(launcher)
+        }
+        AgentKind::Codex => {
+            let launcher = CodexLauncher::new().with_verbose(options.verbose);
+            launcher.verify_available()?;
+            Box::new(launcher)
+        }
+    })
 }
 
 #[cfg(test)]

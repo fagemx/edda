@@ -1,10 +1,8 @@
-use crate::agent_kind::AgentKind;
+use crate::agent_kind::{build_launcher, AgentKind, LauncherOptions};
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use edda_conductor::agent::budget::BudgetTracker;
-use edda_conductor::agent::codex_rpc::CodexLauncher;
-use edda_conductor::agent::launcher::{phase_session_id, AgentLauncher, ClaudeCodeLauncher};
-use edda_conductor::agent::pi_rpc::PiRpcLauncher;
+use edda_conductor::agent::launcher::phase_session_id;
 use edda_conductor::check::engine::CheckEngine;
 use edda_conductor::plan::parser::load_plan;
 use edda_conductor::plan::schema::Plan;
@@ -230,26 +228,13 @@ pub fn run(
         .join(&plan.name)
         .join("transcripts");
 
-    // pi has no transcript tee capability yet; the transcript dir stays
-    // claude-only and tmux panes only mirror it when claude is selected.
-    let launcher: Box<dyn AgentLauncher> = match agent {
-        AgentKind::Claude => {
-            let mut launcher = ClaudeCodeLauncher::new().with_verbose(verbose);
-            launcher.transcript_dir = Some(transcript_dir.clone());
-            launcher.verify_available()?;
-            Box::new(launcher)
-        }
-        AgentKind::Pi => {
-            let launcher = PiRpcLauncher::new().with_verbose(verbose);
-            launcher.verify_available()?;
-            Box::new(launcher)
-        }
-        AgentKind::Codex => {
-            let launcher = CodexLauncher::new().with_verbose(verbose);
-            launcher.verify_available()?;
-            Box::new(launcher)
-        }
-    };
+    let launcher = build_launcher(
+        agent,
+        LauncherOptions {
+            verbose,
+            transcript_dir: Some(transcript_dir.clone()),
+        },
+    )?;
     let engine = CheckEngine::new(cwd.clone());
     let notifier = StdoutNotifier;
     let mut budget = BudgetTracker::new(plan.budget_usd);
@@ -494,6 +479,10 @@ pub(crate) fn budget_warning_for_agent(agent: AgentKind, any_budget: bool) -> Op
     }
 }
 
+/// The honest stand-in for a cost figure nobody measured, shared with
+/// `edda dispatch`'s no-usage rendering so the string has one source.
+pub(crate) const NO_USAGE_COST_TEXT: &str = "n/a (no usage data reported)";
+
 /// The status cost line.
 ///
 /// `PlanState` does not record which agent backend ran, so a zero total
@@ -503,7 +492,7 @@ pub(crate) fn budget_warning_for_agent(agent: AgentKind, any_budget: bool) -> Op
 /// would assert a spend nobody measured, so a zero total renders as "n/a".
 pub(crate) fn cost_line(total_cost_usd: f64) -> String {
     if total_cost_usd == 0.0 {
-        "n/a (no usage data reported)".to_owned()
+        NO_USAGE_COST_TEXT.to_owned()
     } else {
         format!("${total_cost_usd:.2}")
     }
