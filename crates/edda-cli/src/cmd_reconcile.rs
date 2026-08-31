@@ -2031,16 +2031,26 @@ fn persist_reconciliation(
     Ok(PersistOutcome { plans, errors })
 }
 
+// A reconciler legitimately holds the workspace lock for its whole critical
+// section (git batch prep incl. `git worktree add`, SQLite appends,
+// `rebuild_branch`), which measured 3-5 s on Windows under full-suite load.
+// A concurrent reconciler must wait out that section rather than bail early;
+// a fixed small retry budget here was the root cause of the GH-524 flake.
+const WORKSPACE_LOCK_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn acquire_workspace_lock(paths: &edda_ledger::EddaPaths) -> anyhow::Result<WorkspaceLock> {
-    let mut last = None;
-    for _ in 0..120 {
+    let deadline = std::time::Instant::now() + WORKSPACE_LOCK_WAIT_BUDGET;
+    loop {
         match WorkspaceLock::acquire(paths) {
             Ok(lock) => return Ok(lock),
-            Err(error) => last = Some(error),
+            Err(error) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(error);
+                }
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    Err(last.expect("lock retry records an error"))
 }
 
 fn task_view(views: &[TaskView], task_id: u64) -> anyhow::Result<&TaskView> {
@@ -5289,10 +5299,15 @@ mod tests {
 
         assert_eq!(launched.len(), 1);
         assert_eq!(errors.len(), 1);
-        for _ in 0..40 {
-            if launched_file.exists() {
-                break;
-            }
+        // Spawning a .cmd child via cmd.exe routinely exceeds 1 s under full-suite
+        // load; wait for the side effect with a realistic deadline instead of a
+        // fixed 40 x 25 ms budget (same shape as the GH-524 lock-wait flake).
+        let spawn_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !launched_file.exists() {
+            anyhow::ensure!(
+                std::time::Instant::now() < spawn_deadline,
+                "later-launch.cmd side effect did not appear before the spawn deadline"
+            );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(launched_file.exists());
