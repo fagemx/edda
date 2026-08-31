@@ -45,6 +45,13 @@ impl CheckEngine {
             });
 
             if !output.passed {
+                // GH-529: a harness-side timeout must not be classified as a
+                // retryable check failure — a retry cannot change the outcome.
+                let (error_type, retryable) = if output.timed_out {
+                    (ErrorType::Timeout, false)
+                } else {
+                    (ErrorType::CheckFailed, spec.is_retryable())
+                };
                 // Mark remaining as Waiting
                 for check in &checks[(i + 1)..] {
                     results.push(CheckResult {
@@ -58,11 +65,11 @@ impl CheckEngine {
                     all_passed: false,
                     results,
                     error: Some(ErrorInfo {
-                        error_type: ErrorType::CheckFailed,
+                        error_type,
                         message: output
                             .detail
                             .unwrap_or_else(|| format!("check {} failed", spec.type_name())),
-                        retryable: spec.is_retryable(),
+                        retryable,
                         check_index: Some(i),
                         timestamp: now_rfc3339(),
                     }),
@@ -187,5 +194,57 @@ mod tests {
         assert_eq!(result.results.len(), 2);
         assert_eq!(result.results[0].status, CheckStatus::Failed);
         assert_eq!(result.results[1].status, CheckStatus::Waiting); // short-circuited
+    }
+
+    /// GH-529: a timed-out cmd_succeeds must classify as `ErrorType::Timeout`
+    /// with `retryable: false`, distinct from a genuine check failure.
+    #[tokio::test]
+    async fn cmd_timeout_classifies_as_timeout_not_check_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = CheckEngine::new(dir.path().to_path_buf());
+
+        // A command that never finishes inside its 1s budget.
+        #[cfg(windows)]
+        let cmd = "while ($true) { Start-Sleep -Milliseconds 100 }";
+        #[cfg(not(windows))]
+        let cmd = "sleep 30";
+        let checks = vec![CheckSpec::CmdSucceeds {
+            cmd: cmd.into(),
+            timeout_sec: 1,
+        }];
+
+        let result = engine.run_all(&checks, None).await;
+        assert!(!result.all_passed);
+        let err = result.error.expect("timeout must carry an error");
+        assert_eq!(err.error_type, ErrorType::Timeout);
+        assert!(
+            !err.retryable,
+            "retrying a timeout cannot change the outcome"
+        );
+        assert!(err.message.contains("timed out"), "got: {}", err.message);
+        assert_eq!(result.results[0].status, CheckStatus::Failed);
+    }
+
+    /// GH-529: a genuine command failure (non-zero exit) must STILL classify
+    /// as `ErrorType::CheckFailed` and stay retryable.
+    #[tokio::test]
+    async fn cmd_failure_stays_retryable_check_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = CheckEngine::new(dir.path().to_path_buf());
+
+        #[cfg(windows)]
+        let cmd = "exit 1";
+        #[cfg(not(windows))]
+        let cmd = "false";
+        let checks = vec![CheckSpec::CmdSucceeds {
+            cmd: cmd.into(),
+            timeout_sec: 10,
+        }];
+
+        let result = engine.run_all(&checks, None).await;
+        assert!(!result.all_passed);
+        let err = result.error.expect("failure must carry an error");
+        assert_eq!(err.error_type, ErrorType::CheckFailed);
+        assert!(err.retryable);
     }
 }

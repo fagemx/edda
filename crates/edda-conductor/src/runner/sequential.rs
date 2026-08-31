@@ -696,6 +696,12 @@ async fn fail_checking_phase(
             (msg, check_result.error.clone())
         }
     };
+    // GH-529: a harness-side timeout is surfaced distinctly from a genuine
+    // check failure — the fix differs (raise timeout_sec / inspect command
+    // vs. let the agent fix the work).
+    let is_timeout = error_info
+        .as_ref()
+        .is_some_and(|e| e.error_type == ErrorType::Timeout);
     transition(
         state,
         phase_id,
@@ -707,10 +713,17 @@ async fn fail_checking_phase(
             ..Default::default()
         }),
     )?;
-    println!(
-        "  ✗ Phase \"{phase_id}\" failed ({}): {err_msg}",
-        format_elapsed(elapsed),
-    );
+    if is_timeout {
+        println!(
+            "  ⏰ Phase \"{phase_id}\" check timed out ({}): {err_msg}",
+            format_elapsed(elapsed),
+        );
+    } else {
+        println!(
+            "  ✗ Phase \"{phase_id}\" failed ({}): {err_msg}",
+            format_elapsed(elapsed),
+        );
+    }
     if let Some(tmux) = tmux_session {
         let _ = tmux.update_phase_status(phase_id, "Failed");
     }
@@ -1025,6 +1038,24 @@ async fn handle_on_fail(
 
     match on_fail {
         OnFail::AutoRetry => {
+            // GH-529: a check timeout is a property of the harness, not of
+            // the agent's work — every retry hits the same wall at the same
+            // second, so auto-retry must not burn the ladder on it. Halt
+            // and report with an actionable message instead.
+            if check_result
+                .error
+                .as_ref()
+                .is_some_and(|e| e.error_type == ErrorType::Timeout)
+            {
+                notifier
+                    .notify(&format!(
+                        "Phase \"{phase_id}\" check timed out — auto_retry skipped \
+                         (retrying cannot change the outcome). Raise the check's \
+                         timeout_sec or inspect the command."
+                    ))
+                    .await;
+                return;
+            }
             let max = phase.max_attempts.unwrap_or(plan.max_attempts);
             let (attempts, should_retry) = {
                 let ps = state
@@ -1515,6 +1546,85 @@ phases:
         assert_eq!(state.phases[0].status, PhaseStatus::Failed);
         assert_eq!(state.phases[0].attempts, 2);
         assert!(msgs.iter().any(|m| m.contains("failed after 2 attempts")));
+    }
+
+    /// GH-529: a timed-out check must NOT burn the auto_retry ladder — it
+    /// is a harness property, so every retry would hit the same wall. One
+    /// attempt, distinct Timeout error, halt-and-report.
+    #[tokio::test]
+    async fn check_timeout_does_not_burn_retry_ladder() {
+        // A command that never finishes inside its 1s budget.
+        #[cfg(windows)]
+        let cmd = "while ($true) { Start-Sleep -Milliseconds 100 }";
+        #[cfg(not(windows))]
+        let cmd = "sleep 30";
+        let yaml = format!(
+            r#"
+name: test
+max_attempts: 3
+phases:
+  - id: a
+    prompt: "do it"
+    check:
+      - type: cmd_succeeds
+        cmd: "{cmd}"
+        timeout_sec: 1
+"#
+        );
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: Some(0.1),
+                result_text: None,
+            }],
+        );
+        let plan = parse_plan(&yaml).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        let engine = CheckEngine::new(dir.path().to_path_buf());
+        let notifier = CollectNotifier::new();
+        let mut budget = BudgetTracker::new(plan.budget_usd);
+
+        run_plan(
+            &plan,
+            &mut state,
+            RunContext {
+                launcher: &launcher,
+                check_engine: &engine,
+                notifier: &notifier,
+                budget: &mut budget,
+                cancel: CancellationToken::new(),
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+                tmux_session: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let msgs = notifier.messages();
+        let phase = &state.phases[0];
+        assert_eq!(phase.status, PhaseStatus::Failed);
+        assert_eq!(
+            phase.attempts, 1,
+            "timeout must not consume the retry ladder"
+        );
+        assert_eq!(launcher.call_count("a"), 1, "no re-dispatch on timeout");
+        let err = phase.error.as_ref().expect("timeout must set an error");
+        assert_eq!(err.error_type, ErrorType::Timeout);
+        assert!(!err.retryable);
+        assert!(
+            err.message.contains("timed out"),
+            "persisted error must name the timeout, got: {}",
+            err.message
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("timed out") && m.contains("auto_retry skipped")),
+            "actionable halt-and-report message, got: {msgs:?}"
+        );
     }
 
     #[tokio::test]

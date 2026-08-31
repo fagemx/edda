@@ -186,7 +186,15 @@ fn default_permission_mode() -> String {
     "bypassPermissions".into()
 }
 fn default_cmd_timeout() -> u64 {
-    120
+    // 1800s — the same ceiling as a phase's agent turn (default_timeout_sec).
+    // The old 120s default made the most natural check — running this
+    // workspace's own test suite — structurally unpassable: `cargo test -p
+    // edda` measures 60-150s warm (GH-529 live run) and far more cold or
+    // with --workspace, so every run timed out and then burned the whole
+    // retry ladder. A check verifies what the agent just spent up to 30
+    // minutes producing; it must never time out before the work it
+    // verifies can even finish.
+    1800
 }
 fn default_wait_interval() -> u64 {
     30
@@ -221,6 +229,33 @@ mod tests {
         };
         assert_eq!(w.type_name(), "wait_until");
         assert!(!w.is_retryable());
+    }
+
+    /// GH-529: the cmd_succeeds default timeout must cover this repo's own
+    /// test suite — `cargo test -p edda` measures 60-150s warm and much
+    /// more cold — without a per-check `timeout_sec` override.
+    #[test]
+    fn cmd_succeeds_default_timeout_covers_repo_test_suite() {
+        let yaml = r#"
+name: t
+phases:
+  - id: a
+    prompt: do it
+    check:
+      - type: cmd_succeeds
+        cmd: "cargo test --workspace"
+"#;
+        let plan: Plan = serde_yml::from_str(yaml).unwrap();
+        match &plan.phases[0].check[0] {
+            CheckSpec::CmdSucceeds { timeout_sec, .. } => {
+                assert!(
+                    *timeout_sec >= 900,
+                    "default cmd timeout {timeout_sec}s is too short for this \
+                     workspace's test suite; it would time out a legitimate run"
+                );
+            }
+            other => panic!("expected cmd_succeeds, got {other:?}"),
+        }
     }
 
     #[test]

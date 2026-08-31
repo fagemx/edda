@@ -27,7 +27,9 @@ pub async fn check_wait_until(
         }
 
         if Instant::now() >= deadline {
-            return CheckOutput::failed(
+            // The wait's own budget expired — a harness-side timeout, not a
+            // check failure (GH-529); the inner check already retried.
+            return CheckOutput::timed_out(
                 format!(
                     "timed out after {}s ({attempt} attempts). Last: {}",
                     timeout_sec,

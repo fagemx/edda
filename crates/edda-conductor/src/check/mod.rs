@@ -14,6 +14,11 @@ pub struct CheckOutput {
     pub passed: bool,
     pub detail: Option<String>,
     pub duration: Duration,
+    /// True when the failure was a harness-side timeout (GH-529). A timeout
+    /// is a property of the harness, not of the agent's work, so it must be
+    /// distinguishable from a genuine check failure downstream (retry
+    /// policy, console output, persisted error type).
+    pub timed_out: bool,
 }
 
 impl CheckOutput {
@@ -22,6 +27,7 @@ impl CheckOutput {
             passed: true,
             detail: None,
             duration,
+            timed_out: false,
         }
     }
 
@@ -30,6 +36,7 @@ impl CheckOutput {
             passed: true,
             detail: Some(detail),
             duration,
+            timed_out: false,
         }
     }
 
@@ -38,6 +45,18 @@ impl CheckOutput {
             passed: false,
             detail: Some(detail),
             duration,
+            timed_out: false,
+        }
+    }
+
+    /// A harness-side timeout failure (GH-529): the command outlived its
+    /// `timeout_sec`. Never classified as a retryable check failure.
+    pub fn timed_out(detail: String, duration: Duration) -> Self {
+        Self {
+            passed: false,
+            detail: Some(detail),
+            duration,
+            timed_out: true,
         }
     }
 }
