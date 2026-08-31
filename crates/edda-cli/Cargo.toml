@@ -58,3 +58,4 @@ tui = ["ratatui", "crossterm"]
 
 [dev-dependencies]
 tempfile.workspace = true
+async-trait = "0.1"

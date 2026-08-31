@@ -1,3 +1,4 @@
+mod agent_kind;
 mod cmd_actor;
 mod cmd_ask;
 mod cmd_blob;
@@ -11,6 +12,7 @@ mod cmd_conduct;
 mod cmd_config;
 mod cmd_context;
 mod cmd_controls;
+mod cmd_dispatch;
 mod cmd_draft;
 mod cmd_export;
 mod cmd_gc;
@@ -441,6 +443,26 @@ enum Command {
     Conduct {
         #[command(subcommand)]
         cmd: cmd_conduct::ConductCmd,
+    },
+    /// Run one agent turn with no plan file, DAG, or state machine
+    ///
+    /// Reads the prompt from --prompt-file and runs exactly one turn through
+    /// the selected backend; loop control stays with the caller.
+    ///
+    /// Exit codes by outcome class:
+    ///   0 = agent done
+    ///   1 = agent crash or any other failure (including pre-dispatch errors)
+    ///   2 = timeout
+    ///   3 = budget exceeded
+    ///   4 = max turns
+    ///
+    /// With --json, exactly one object is printed to stdout:
+    ///   {"outcome":"done|crash|timeout|max_turns|budget_exceeded",
+    ///    "result_text":string|null,"cost_usd":number|null,
+    ///    "session_id":string,"error":string|null}
+    Dispatch {
+        #[command(flatten)]
+        args: cmd_dispatch::DispatchArgs,
     },
     /// Task intake — ingest external tasks into the ledger
     Intake {
@@ -1210,6 +1232,7 @@ fn main() -> anyhow::Result<()> {
         Command::Blob { cmd } => cmd_blob::run(cmd, &repo_root),
         Command::Plan { cmd } => cmd_plan::run(cmd, &repo_root),
         Command::Conduct { cmd } => cmd_conduct::run_cmd(cmd, &repo_root),
+        Command::Dispatch { args } => cmd_dispatch::run(args),
         Command::Intake { cmd } => match cmd {
             IntakeCmd::Github { issue_id } => cmd_intake::execute_github(&repo_root, issue_id),
         },
