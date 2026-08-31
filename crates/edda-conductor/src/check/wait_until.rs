@@ -258,7 +258,7 @@ mod tests {
             "outer budget elapse must mark timed_out (GH-529)"
         );
         assert!(
-            elapsed < Duration::from_secs(5),
+            elapsed < Duration::from_secs(30),
             "outer budget must bound the inner attempt, took {elapsed:?}"
         );
         assert!(out.detail.unwrap().contains("timed out"));

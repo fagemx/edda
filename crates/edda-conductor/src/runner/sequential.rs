@@ -2575,7 +2575,7 @@ phases:
         let rejecter = tokio::spawn(async move {
             let root = rejecter_root;
             for i in 0..=3 {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
                 loop {
                     let mut shas = Vec::new();
                     let path = root.join(".edda/conductor/gated/events.jsonl");
@@ -2608,16 +2608,18 @@ phases:
         });
 
         // FOUR gate cycles, each paced by the runner's 2s ledger poll —
-        // needs a wider outer bound than single-gate tests, especially
-        // under full-suite parallel load.
+        // needs a wide outer bound, especially under full-suite parallel
+        // load (60s was exceeded once at full load; isolated run is ~19s).
+        // A genuine hang still can't stall the test: the runner's own
+        // gate deadline resolves the await with an error.
         let (state, _notifier, launcher) =
-            tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            tokio::time::timeout(std::time::Duration::from_secs(120), async {
                 let res = handle.await.unwrap().unwrap();
                 rejecter.abort();
                 res
             })
             .await
-            .expect("gate test exceeded 60s");
+            .expect("gate test exceeded 120s");
 
         // 1 gated attempt + MAX_GATE_REDISPATCHES redispatch turns, no more.
         assert_eq!(
