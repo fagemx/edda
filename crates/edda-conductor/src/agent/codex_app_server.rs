@@ -23,10 +23,10 @@ impl CodexAppServer {
     pub async fn spawn(bin: &Path) -> Result<Self> {
         let mut command = Command::new(bin);
         command.arg("app-server");
-        Self::spawn_command(command).await
+        Self::spawn_with_command(command).await
     }
 
-    pub(crate) async fn spawn_command(mut command: Command) -> Result<Self> {
+    async fn spawn_with_command(mut command: Command) -> Result<Self> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -64,6 +64,13 @@ impl CodexAppServer {
             .await?;
         server.notify("initialized").await?;
         Ok(server)
+    }
+
+    /// Test-only wrapper so sibling-module tests (codex_rpc) can drive fake
+    /// app-servers through the same spawn+initialize path as [`Self::spawn`].
+    #[cfg(test)]
+    pub(crate) async fn spawn_command(command: Command) -> Result<Self> {
+        Self::spawn_with_command(command).await
     }
 
     pub async fn open_thread(&mut self, cwd: &Path, resume: Option<&str>) -> Result<String> {

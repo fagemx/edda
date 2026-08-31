@@ -43,9 +43,12 @@ fn default_codex_bin() -> PathBuf {
 /// [`CodexAppServer`] and is reused unchanged.
 ///
 /// Session continuity: the app-server process is spawned once and reused,
-/// and each conductor `session_id` maps to a codex thread id. A session
-/// seen before resumes its thread via `thread/resume`, so report →
-/// dispatch-next phases stay in one conversation. When the child dies
+/// and the `threads` map keys on the conductor session id, resuming a
+/// thread via `thread/resume` whenever a caller reuses a session id. That
+/// is a forward-looking path for a future dispatch primitive: the
+/// sequential runner derives a unique session id per plan+phase+attempt,
+/// so resume does not currently fire in production (see
+/// [`crate::agent::launcher::phase_session_id`]). When the child dies
 /// (crash, timeout, cancellation) the client is dropped and the next phase
 /// re-spawns it; the thread map survives because codex persists threads.
 pub struct CodexLauncher {
@@ -213,9 +216,13 @@ async fn drive_turn(
         _ = cancel.cancelled() => return (shutdown(), false),
     };
 
-    // The app-server protocol exposes no cost/usage data, so the per-phase
-    // budget gate cannot fire here (`over_budget(None, _)` is always false);
-    // the cost column stays empty for codex phases by design.
+    // The app-server protocol exposes no cost/usage data, so neither budget
+    // gate can fire. The per-phase check (`over_budget(None, _)`) is always
+    // false, and the sequential runner only calls BudgetTracker::record and
+    // accumulates state.total_cost_usd inside `if let Some(cost)`, so the
+    // plan-level tracker never sees a figure either: both phase and plan
+    // budget_usd are unenforced for codex. `edda conduct run` warns about
+    // this at startup; the cost column stays empty for codex phases by design.
     let cost_usd = None;
     if over_budget(cost_usd, phase.budget_usd) {
         return (PhaseResult::BudgetExceeded { cost_usd }, true);
@@ -454,9 +461,12 @@ mod tests {
 
     #[tokio::test]
     async fn same_session_id_resumes_the_same_conversation() -> Result<()> {
-        // The scripted fake answers thread/start with t-1 and thread/resume
-        // with t-2, so a second turn that produces output proves the launcher
-        // resumed the persisted thread instead of starting a new one.
+        // Exercises the forward-looking resume path: the scripted fake
+        // answers thread/start with t-1 and thread/resume with t-2, so a
+        // second turn that produces output proves the launcher resumed the
+        // persisted thread instead of starting a new one. The sequential
+        // runner assigns a unique session id per phase+attempt, so this
+        // reuse is not hit in production today.
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
         let (_dir, mut server) = spawn_fake_server(FakeScenario::TwoTurnsWithResume).await;
         let mut threads = HashMap::new();
