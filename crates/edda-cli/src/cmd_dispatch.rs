@@ -247,7 +247,8 @@ fn session_id_warning_for_agent(agent: AgentKind, explicit_id: bool) -> Option<S
         Some(
             "Warning: codex thread state is per-process, so --session-id does not resume \
              a prior conversation across dispatch invocations (claude/pi do persist); \
-             continuity for codex currently requires a single long-lived process (conduct)."
+             codex has no cross-invocation continuity today, and conduct shares the \
+             limitation for the same reason (persistence is tracked as GH-535)."
                 .to_owned(),
         )
     } else {
