@@ -2,6 +2,7 @@ use crate::agent::launcher::{AgentLauncher, PhaseResult};
 use crate::plan::schema::Phase;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -14,6 +15,29 @@ use tokio_util::sync::CancellationToken;
 
 /// Upper bound on waiting for the stderr drain once stdout has hit EOF.
 const STDERR_DRAIN_GRACE: Duration = Duration::from_secs(2);
+
+/// Resolve the pi executable from an explicit `EDDA_PI_BIN` value, falling
+/// back to the name npm installs on this platform.
+///
+/// On Windows the npm package ships `pi` as a `.cmd` shim with no `.exe`;
+/// `CreateProcess` — unlike a shell — does not apply `PATHEXT`, so the bare
+/// name never resolves and every phase fails at `verify_available`.
+///
+/// Takes the override as an argument rather than reading the environment so
+/// the resolution is testable without mutating process-wide state.
+fn resolve_pi_bin(explicit: Option<OsString>) -> PathBuf {
+    match explicit {
+        // An empty `EDDA_PI_BIN=` is a set-but-unusable value; treat it as unset
+        // rather than spawning an empty path.
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ if cfg!(windows) => PathBuf::from("pi.cmd"),
+        _ => PathBuf::from("pi"),
+    }
+}
+
+fn default_pi_bin() -> PathBuf {
+    resolve_pi_bin(std::env::var_os("EDDA_PI_BIN"))
+}
 
 /// Launches the pi coding agent via `pi --mode rpc`.
 ///
@@ -43,7 +67,7 @@ impl Default for PiRpcLauncher {
 impl PiRpcLauncher {
     pub fn new() -> Self {
         Self {
-            pi_bin: PathBuf::from("pi"),
+            pi_bin: default_pi_bin(),
             verbose: false,
             model: None,
             session_dir: None,
@@ -85,7 +109,8 @@ impl PiRpcLauncher {
             Ok(s) if s.success() => Ok(()),
             _ => anyhow::bail!(
                 "pi CLI not found (looked for {:?}).\n\
-                 Install: npm install -g @earendil-works/pi-coding-agent",
+                 Install: npm install -g @earendil-works/pi-coding-agent\n\
+                 Or set EDDA_PI_BIN if the executable lives elsewhere.",
                 self.pi_bin
             ),
         }
@@ -933,6 +958,39 @@ mod tests {
         let tail = format_stderr_tail(raw);
         assert_eq!(tail, "second | third | fourth | fifth | sixth");
         assert!(!tail.contains("first"), "only the last 5 lines are kept");
+    }
+
+    #[test]
+    fn pi_bin_falls_back_to_the_platform_install() {
+        // npm ships pi as a .cmd shim on Windows with no .exe, and
+        // CreateProcess does not apply PATHEXT — the bare name never resolves.
+        let expected = if cfg!(windows) { "pi.cmd" } else { "pi" };
+        assert_eq!(resolve_pi_bin(None), PathBuf::from(expected));
+    }
+
+    #[test]
+    fn edda_pi_bin_overrides_the_platform_default() {
+        let custom = "/opt/pi/bin/pi-custom";
+        assert_eq!(
+            resolve_pi_bin(Some(OsString::from(custom))),
+            PathBuf::from(custom)
+        );
+    }
+
+    #[test]
+    fn empty_edda_pi_bin_is_treated_as_unset() {
+        let expected = if cfg!(windows) { "pi.cmd" } else { "pi" };
+        assert_eq!(
+            resolve_pi_bin(Some(OsString::new())),
+            PathBuf::from(expected),
+            "an empty override must not produce an unspawnable empty path"
+        );
+    }
+
+    #[test]
+    fn with_bin_overrides_the_default() {
+        let custom = PathBuf::from("/opt/pi/bin/pi");
+        assert_eq!(PiRpcLauncher::with_bin(custom.clone()).pi_bin, custom);
     }
 
     #[test]
