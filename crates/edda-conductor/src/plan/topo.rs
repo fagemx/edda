@@ -4,14 +4,21 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Topological sort of phases by dependency order (Kahn's algorithm).
 /// Returns phase IDs in execution order.
+///
+/// Ties (phases whose dependencies are all satisfied at the same time) are
+/// broken by declaration order in the plan file, not alphabetically — the
+/// YAML sequence is what the author reads top-to-bottom (GH-532).
 pub fn topo_sort(plan: &Plan) -> Result<Vec<String>> {
     let mut in_degree: HashMap<&str, usize> = HashMap::new();
     let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+    // Declaration position of each phase id — the deterministic tie-break.
+    let mut position: HashMap<&str, usize> = HashMap::new();
 
     // Initialize
-    for phase in &plan.phases {
+    for (idx, phase) in plan.phases.iter().enumerate() {
         in_degree.entry(&phase.id).or_insert(0);
         dependents.entry(&phase.id).or_default();
+        position.entry(&phase.id).or_insert(idx);
     }
 
     // Build graph
@@ -22,17 +29,14 @@ pub fn topo_sort(plan: &Plan) -> Result<Vec<String>> {
         }
     }
 
-    // Kahn's algorithm
-    let mut queue: VecDeque<&str> = in_degree
+    // Kahn's algorithm; the queue is kept in declaration order so that
+    // equal-rank phases execute in the order they were declared (GH-532).
+    let mut queue: VecDeque<&str> = plan
+        .phases
         .iter()
-        .filter(|(_, &deg)| deg == 0)
-        .map(|(&id, _)| id)
+        .filter(|p| in_degree.get(p.id.as_str()) == Some(&0))
+        .map(|p| p.id.as_str())
         .collect();
-
-    // Sort the initial queue for deterministic output
-    let mut sorted_queue: Vec<&str> = queue.drain(..).collect();
-    sorted_queue.sort();
-    queue.extend(sorted_queue);
 
     let mut order = Vec::with_capacity(plan.phases.len());
 
@@ -49,8 +53,8 @@ pub fn topo_sort(plan: &Plan) -> Result<Vec<String>> {
                     next.push(dep);
                 }
             }
-            // Sort for deterministic output
-            next.sort();
+            // Re-sort by declaration position for deterministic output
+            next.sort_by_key(|id| position.get(id).copied().unwrap_or(usize::MAX));
             queue.extend(next);
         }
     }
@@ -118,7 +122,7 @@ phases:
         let order = topo_sort(&plan).unwrap();
         assert_eq!(order[0], "a");
         assert_eq!(order[3], "d");
-        // b and c can be in either order, but sorted deterministically
+        // b and c are tied after a; they run in declaration order (b first)
         assert_eq!(order[1], "b");
         assert_eq!(order[2], "c");
     }
@@ -137,8 +141,49 @@ phases:
 "#;
         let plan = parse_plan(yaml).unwrap();
         let order = topo_sort(&plan).unwrap();
-        // Alphabetically sorted since all have in_degree 0
-        assert_eq!(order, vec!["a", "b", "c"]);
+        // Declaration order preserved when all have in_degree 0
+        assert_eq!(order, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn declaration_order_tie_break_regression_gh532() {
+        // GH-532: a real plan declared phases in the order adapt, wire, freeze
+        // (no depends_on). Alphabetical tie-breaking executed freeze before
+        // wire — the commit/receipt phase sealed an unfinished tree.
+        let yaml = r#"
+name: gh532-regression
+phases:
+  - id: adapt
+    prompt: "x"
+  - id: wire
+    prompt: "x"
+  - id: freeze
+    prompt: "x"
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let order = topo_sort(&plan).unwrap();
+        assert_eq!(order, vec!["adapt", "wire", "freeze"]);
+    }
+
+    #[test]
+    fn declaration_order_tie_break_among_siblings() {
+        // Siblings freed at the same time run in declaration order, even when
+        // their ids sort the other way.
+        let yaml = r#"
+name: test
+phases:
+  - id: root
+    prompt: "x"
+  - id: zeta
+    prompt: "x"
+    depends_on: [root]
+  - id: alpha
+    prompt: "x"
+    depends_on: [root]
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let order = topo_sort(&plan).unwrap();
+        assert_eq!(order, vec!["root", "zeta", "alpha"]);
     }
 
     #[test]
