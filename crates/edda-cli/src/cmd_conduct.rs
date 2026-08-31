@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use clap::Subcommand;
 use edda_conductor::agent::budget::BudgetTracker;
+use edda_conductor::agent::codex_rpc::CodexLauncher;
 use edda_conductor::agent::launcher::{phase_session_id, AgentLauncher, ClaudeCodeLauncher};
 use edda_conductor::agent::pi_rpc::PiRpcLauncher;
 use edda_conductor::check::engine::CheckEngine;
@@ -22,6 +23,8 @@ pub enum AgentKind {
     Claude,
     /// pi coding agent via `pi --mode rpc`
     Pi,
+    /// codex CLI via `codex app-server`
+    Codex,
 }
 
 impl AgentKind {
@@ -29,6 +32,7 @@ impl AgentKind {
         match self {
             AgentKind::Claude => "claude",
             AgentKind::Pi => "pi",
+            AgentKind::Codex => "codex",
         }
     }
 
@@ -38,6 +42,7 @@ impl AgentKind {
         match self {
             AgentKind::Claude => true,
             AgentKind::Pi => false,
+            AgentKind::Codex => false,
         }
     }
 }
@@ -263,6 +268,11 @@ pub fn run(
         }
         AgentKind::Pi => {
             let launcher = PiRpcLauncher::new().with_verbose(verbose);
+            launcher.verify_available()?;
+            Box::new(launcher)
+        }
+        AgentKind::Codex => {
+            let launcher = CodexLauncher::new().with_verbose(verbose);
             launcher.verify_available()?;
             Box::new(launcher)
         }
@@ -613,6 +623,10 @@ mod tests {
             agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "claude"])),
             AgentKind::Claude
         );
+        assert_eq!(
+            agent_of(parse(&["edda", "run", "plan.yaml", "--agent", "codex"])),
+            AgentKind::Codex
+        );
     }
 
     #[test]
@@ -626,7 +640,9 @@ mod tests {
         // otherwise get panes tailing files nobody writes.
         assert!(AgentKind::Claude.writes_transcripts());
         assert!(!AgentKind::Pi.writes_transcripts());
+        assert!(!AgentKind::Codex.writes_transcripts());
         assert_eq!(AgentKind::Claude.as_str(), "claude");
         assert_eq!(AgentKind::Pi.as_str(), "pi");
+        assert_eq!(AgentKind::Codex.as_str(), "codex");
     }
 }
