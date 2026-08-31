@@ -5,7 +5,7 @@ use edda_conductor::agent::budget::BudgetTracker;
 use edda_conductor::agent::launcher::phase_session_id;
 use edda_conductor::check::engine::CheckEngine;
 use edda_conductor::plan::parser::load_plan;
-use edda_conductor::plan::schema::{Phase, Plan};
+use edda_conductor::plan::schema::{GateKind, OnReject, Phase, Plan};
 use edda_conductor::runner::notify::StdoutNotifier;
 use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
@@ -488,10 +488,16 @@ fn gate_preview(phase: &Phase) -> String {
     let Some(kind) = phase.gate else {
         return String::new();
     };
-    // All variants are single snake_case words, so a lowercased Debug
-    // matches their YAML spelling (`verdict`, `redispatch`, `halt`).
-    let kind = format!("{kind:?}").to_lowercase();
-    let on_reject = format!("{:?}", phase.on_reject).to_lowercase();
+    // Literal YAML spellings, matched exhaustively: a future variant must
+    // fail to compile here rather than render a string no plan file could
+    // have spelled.
+    let kind = match kind {
+        GateKind::Verdict => "verdict",
+    };
+    let on_reject = match phase.on_reject {
+        OnReject::Redispatch => "redispatch",
+        OnReject::Halt => "halt",
+    };
     let timeout = phase
         .gate_timeout_sec
         .map_or_else(|| "waits until cancelled".into(), |t| format!("{t}s"));
