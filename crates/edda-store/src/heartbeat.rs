@@ -306,30 +306,3 @@ mod tests {
     }
 }
 
-#[cfg(test)]
-mod scratch_tests {
-    use super::*;
-
-    #[test]
-    fn scratch_update_heartbeat_creates_file() {
-        let tmp = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("EDDA_STORE_ROOT");
-        std::env::set_var("EDDA_STORE_ROOT", tmp.path());
-        let r = update_heartbeat("proj", "s1", |hb| {
-            eprintln!("DEBUG mutate: started_at={:?} last={:?}", hb.started_at, hb.last_heartbeat);
-            if hb.started_at.is_empty() {
-                hb.started_at = "T0".into();
-            }
-            hb.last_heartbeat = "T1".into();
-            hb.plan = Some("p".into());
-        });
-        eprintln!("DEBUG update result: {r:?}");
-        let p = heartbeat_path("proj", "s1");
-        eprintln!("DEBUG path {} exists={}", p.display(), p.exists());
-        match previous {
-            Some(v) => std::env::set_var("EDDA_STORE_ROOT", v),
-            None => std::env::remove_var("EDDA_STORE_ROOT"),
-        }
-        assert!(p.exists());
-    }
-}
