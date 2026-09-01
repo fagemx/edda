@@ -436,6 +436,12 @@ pub(crate) mod fake_support {
         /// answers `thread/start` with t-1 + one completed turn ("fresh
         /// answer"). Drives the stale-binding degrade path.
         ResumeErrorThenStart,
+        /// Rejects the first thread request — `thread/resume` *or*
+        /// `thread/start` — with a JSON-RPC error. Drives the failed
+        /// fallback branch: after a rejected persisted resume, the fresh
+        /// `thread/start` retry fails too, so the phase cannot recover and
+        /// the erased stale binding must still not survive on disk.
+        ResumeErrorThenStartError,
         Idle,
     }
 
@@ -563,6 +569,9 @@ pub(crate) mod fake_support {
             FakeScenario::ResumeErrorThenStart => {
                 "$req = [Console]::In.ReadLine()\nif ($null -eq $req) { exit 0 }\nif ($req -match 'thread/resume') { Write-Line '{\"id\":2,\"error\":{\"code\":-1,\"message\":\"unknown thread\"}}'; exit 1 }\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nRead-Line\nWrite-Line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"fresh answer\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nStart-Sleep -Seconds 60"
             }
+            FakeScenario::ResumeErrorThenStartError => {
+                "Read-Line\nWrite-Line '{\"id\":2,\"error\":{\"code\":-1,\"message\":\"unknown thread\"}}'\nStart-Sleep -Seconds 60"
+            }
             FakeScenario::Idle => "Start-Sleep -Seconds 60",
         };
         format!(
@@ -599,6 +608,9 @@ pub(crate) mod fake_support {
             }
             FakeScenario::ResumeErrorThenStart => {
                 "IFS= read -r req || exit 0\ncase \"$req\" in *'\"thread/resume\"'*) write_line '{\"id\":2,\"error\":{\"code\":-1,\"message\":\"unknown thread\"}}'; exit 1;; esac\nwrite_line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nread_line\nwrite_line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"fresh answer\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nsleep 60"
+            }
+            FakeScenario::ResumeErrorThenStartError => {
+                "read_line\nwrite_line '{\"id\":2,\"error\":{\"code\":-1,\"message\":\"unknown thread\"}}'\nsleep 60"
             }
             FakeScenario::Idle => "sleep 60",
         };

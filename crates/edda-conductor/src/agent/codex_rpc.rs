@@ -2,7 +2,7 @@ use crate::agent::codex_app_server::{CodexAppServer, CodexTurnOutcome};
 use crate::agent::launcher::{AgentLauncher, PhaseResult};
 use crate::plan::schema::Phase;
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -59,8 +59,16 @@ fn default_codex_bin() -> PathBuf {
 /// pre-persistence path (no store reads, no surprise resumes). A missing
 /// entry is simply a new conversation. A persisted binding that the server
 /// rejects — corrupt file or a stale/invalid thread id — degrades to
-/// `thread/start` within the same dispatch, and the bad binding is not
-/// written back: resume is a convenience and must never fail a dispatch.
+/// `thread/start` within the same dispatch, and the bad binding is erased
+/// from the persisted map: the removal is recorded as an explicit deletion
+/// that [`ThreadStore::persist`] honors, so even a failed fallback (the
+/// retry also erroring, timing out, or being cancelled) cannot write the
+/// rejected binding back and make the next dispatch resume it again.
+/// Resume is a convenience and must never fail a dispatch. This degrade
+/// path is persistence-scoped: a launcher without a thread store (conduct)
+/// keeps the pre-persistence behavior for an in-memory resume failure — the
+/// turn simply crashes — because conduct's verdict-gated redispatch turns
+/// reuse the same session id on purpose and must stay byte-identical.
 /// Within one process the in-memory map stays the hot path and behavior is
 /// unchanged. When the child dies (crash, timeout, cancellation) the
 /// client is dropped and the next phase re-spawns it; the thread map
@@ -120,9 +128,12 @@ impl ThreadStore {
 
     /// Merge `threads` into the persisted map under an exclusive file lock,
     /// so two concurrent dispatch processes cannot lose each other's
-    /// entries. In-memory entries win on key conflicts.
-    fn persist(&self, cwd: &Path, threads: &HashMap<String, String>) {
-        if threads.is_empty() {
+    /// entries. In-memory entries win on key conflicts, and every session
+    /// in `removals` is deleted from the merged map before the overlay: a
+    /// binding the server rejected must not survive a failed fallback just
+    /// because it is absent from the in-memory overlay.
+    fn persist(&self, cwd: &Path, threads: &HashMap<String, String>, removals: &HashSet<String>) {
+        if threads.is_empty() && removals.is_empty() {
             return;
         }
         let path = self.map_path(cwd);
@@ -130,6 +141,13 @@ impl ThreadStore {
             return;
         };
         let mut merged = self.load_quiet(cwd);
+        // Honor explicit deletions before overlaying in-memory entries, so
+        // a rejected binding is erased from disk even when no fresh binding
+        // replaces it. In-memory entries still win for anything present in
+        // both (a fresh binding supersedes its own tombstone).
+        for session in removals {
+            merged.remove(session);
+        }
         for (session, thread) in threads {
             merged.insert(session.clone(), thread.clone());
         }
@@ -155,6 +173,11 @@ struct LauncherState {
     server: Option<CodexAppServer>,
     /// conductor session_id → codex thread_id
     threads: HashMap<String, String>,
+    /// Sessions whose persisted binding the server rejected: explicit
+    /// deletions that [`ThreadStore::persist`] applies to the on-disk map.
+    /// A tombstone stays until a fresh binding for the session overrules
+    /// it in the merge, so it cannot be resurrected by a reload.
+    removals: HashSet<String>,
 }
 
 impl Default for CodexLauncher {
@@ -269,9 +292,31 @@ impl AgentLauncher for CodexLauncher {
             }
         }
 
-        let LauncherState { server, threads } = &mut *state;
+        let LauncherState {
+            server,
+            threads,
+            removals,
+        } = &mut *state;
         let server = server.as_mut().expect("server spawned above");
-        let outcome = drive_turn(server, threads, phase, &message, session_id, cwd, &cancel).await;
+        // Only a persistence-enabled launcher may degrade a rejected
+        // resume to thread/start. With `thread_store: None` (conduct), an
+        // in-memory resume failure must crash exactly as before the
+        // persistence feature: conduct deliberately redispatches the same
+        // session id, and silently starting a new thread would lose the
+        // same-session conversation.
+        let persist_enabled = self.thread_store.is_some();
+        let outcome = drive_turn(
+            server,
+            threads,
+            removals,
+            persist_enabled,
+            phase,
+            &message,
+            session_id,
+            cwd,
+            &cancel,
+        )
+        .await;
 
         if !outcome.keep_server {
             // The turn ended in a crash, timeout, or shutdown, and the child
@@ -299,10 +344,24 @@ impl AgentLauncher for CodexLauncher {
                     });
                 }
             }
-            let LauncherState { server, threads } = &mut *state;
+            let LauncherState {
+                server,
+                threads,
+                removals,
+            } = &mut *state;
             let server = server.as_mut().expect("server respawned above");
-            let retry =
-                drive_turn(server, threads, phase, &message, session_id, cwd, &cancel).await;
+            let retry = drive_turn(
+                server,
+                threads,
+                removals,
+                persist_enabled,
+                phase,
+                &message,
+                session_id,
+                cwd,
+                &cancel,
+            )
+            .await;
             if !retry.keep_server {
                 state.server = None;
             }
@@ -314,7 +373,7 @@ impl AgentLauncher for CodexLauncher {
         // the thread was created and codex persists it, so the next process
         // can resume it. Best-effort — failures are swallowed by design.
         if let Some(store) = &self.thread_store {
-            store.persist(cwd, &state.threads);
+            store.persist(cwd, &state.threads, &state.removals);
         }
         Ok(result)
     }
@@ -380,10 +439,15 @@ async fn open_thread_or_fail(
 }
 
 /// Open (or resume) the codex thread for `session_id`, run one turn, and map
-/// the outcome onto [`DriveOutcome`].
+/// the outcome onto [`DriveOutcome`]. The parameters are one flat turn
+/// description; a parameter struct would be churn, so the argument count is
+/// accepted here.
+#[allow(clippy::too_many_arguments)]
 async fn drive_turn(
     server: &mut CodexAppServer,
     threads: &mut HashMap<String, String>,
+    removals: &mut HashSet<String>,
+    persist_enabled: bool,
     phase: &Phase,
     message: &str,
     session_id: &str,
@@ -410,11 +474,15 @@ async fn drive_turn(
         Ok(thread_id) => thread_id,
         // A persisted binding the server rejects (stale or invalid thread
         // id) must degrade to `thread/start`, not fail the dispatch. Drop
-        // the binding so it is never written back, and tell run_phase to
-        // retry on a fresh app-server — the failed resume terminated the
-        // child.
-        Err(OpenFailure::Error(_)) if resume.is_some() => {
+        // the binding and record an explicit deletion so `persist` erases
+        // it from disk even if the fallback never records a fresh id, and
+        // tell run_phase to retry on a fresh app-server — the failed resume
+        // terminated the child. Gated on persistence: with no thread store
+        // (conduct) the error below falls through to the plain crash path,
+        // byte-identical with the pre-persistence behavior.
+        Err(OpenFailure::Error(_)) if resume.is_some() && persist_enabled => {
             threads.remove(session_id);
+            removals.insert(session_id.to_owned());
             return DriveOutcome {
                 result: PhaseResult::AgentCrash {
                     error: "persisted thread binding rejected; degrading to thread/start".into(),
@@ -474,7 +542,7 @@ fn over_budget(cost: Option<f64>, budget: Option<f64>) -> bool {
 pub(crate) mod test_support {
     use super::CodexLauncher;
     use crate::agent::codex_app_server::CodexAppServer;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use tokio::sync::Mutex;
 
@@ -487,6 +555,7 @@ pub(crate) mod test_support {
         launcher.state = Mutex::new(super::LauncherState {
             server: Some(server),
             threads: HashMap::new(),
+            removals: HashSet::new(),
         });
         launcher
     }
@@ -596,6 +665,8 @@ mod tests {
         let outcome = drive_turn(
             &mut server,
             &mut threads,
+            &mut HashSet::new(),
+            false,
             &phase,
             "do the task",
             "sid",
@@ -628,6 +699,8 @@ mod tests {
         let outcome = drive_turn(
             &mut server,
             &mut threads,
+            &mut HashSet::new(),
+            false,
             &phase,
             "do the task",
             "sid",
@@ -655,6 +728,8 @@ mod tests {
         let outcome = drive_turn(
             &mut server,
             &mut threads,
+            &mut HashSet::new(),
+            false,
             &phase,
             "do the task",
             "sid",
@@ -684,6 +759,8 @@ mod tests {
         let outcome = drive_turn(
             &mut server,
             &mut threads,
+            &mut HashSet::new(),
+            false,
             &phase,
             "do the task",
             "sid",
@@ -711,6 +788,8 @@ mod tests {
         let outcome = drive_turn(
             &mut server,
             &mut threads,
+            &mut HashSet::new(),
+            false,
             &phase,
             "do the task",
             "sid",
@@ -741,6 +820,8 @@ mod tests {
         let first = drive_turn(
             &mut server,
             &mut threads,
+            &mut HashSet::new(),
+            false,
             &phase,
             "turn one",
             "sid",
@@ -759,6 +840,8 @@ mod tests {
         let second = drive_turn(
             &mut server,
             &mut threads,
+            &mut HashSet::new(),
+            false,
             &phase,
             "turn two",
             "sid",
@@ -893,7 +976,7 @@ mod tests {
         let mut threads = HashMap::new();
         threads.insert("sess-1".to_owned(), "t-1".to_owned());
 
-        store.persist(cwd.path(), &threads);
+        store.persist(cwd.path(), &threads, &HashSet::new());
 
         let loaded = store.load(cwd.path());
         assert_eq!(loaded.get("sess-1").map(String::as_str), Some("t-1"));
@@ -915,7 +998,7 @@ mod tests {
 
         let mut threads = HashMap::new();
         threads.insert("sess-mine".to_owned(), "t-fresh".to_owned());
-        store.persist(cwd.path(), &threads);
+        store.persist(cwd.path(), &threads, &HashSet::new());
 
         let loaded = store.load(cwd.path());
         assert_eq!(
@@ -923,6 +1006,40 @@ mod tests {
             Some("t-other")
         );
         assert_eq!(loaded.get("sess-mine").map(String::as_str), Some("t-fresh"));
+        Ok(())
+    }
+
+    #[test]
+    fn thread_store_persist_honors_removal_tombstones() -> Result<()> {
+        // A rejected binding is modeled as an explicit deletion, not mere
+        // absence from the in-memory overlay: persist must apply the
+        // removal to the on-disk map, so a failed fallback (no fresh
+        // binding recorded) cannot resurrect the rejected entry.
+        let root = tempfile::tempdir()?;
+        let cwd = tempfile::tempdir()?;
+        let store = ThreadStore {
+            root: root.path().to_path_buf(),
+        };
+        let map = map_path_for(root.path(), cwd.path());
+        std::fs::create_dir_all(map.parent().unwrap())?;
+        std::fs::write(&map, r#"{"sess-1":"stale","sess-other":"t-other"}"#)?;
+
+        let mut threads = HashMap::new();
+        threads.insert("sess-2".to_owned(), "t-2".to_owned());
+        let mut removals = HashSet::new();
+        removals.insert("sess-1".to_owned());
+        store.persist(cwd.path(), &threads, &removals);
+
+        let loaded = store.load(cwd.path());
+        assert_eq!(
+            loaded.get("sess-other").map(String::as_str),
+            Some("t-other")
+        );
+        assert_eq!(loaded.get("sess-2").map(String::as_str), Some("t-2"));
+        assert!(
+            !loaded.contains_key("sess-1"),
+            "the tombstoned binding must be deleted from disk, got {loaded:?}"
+        );
         Ok(())
     }
 
@@ -1076,6 +1193,100 @@ mod tests {
             std::fs::read_to_string(&map).expect("map rewritten"),
             r#"{"sess-1":"t-1"}"#,
             "the stale binding must not be written back"
+        );
+        Ok(())
+    }
+
+    /// Seed the in-memory session→thread map of a launcher built by
+    /// [`launcher_with_server`], without touching the real store.
+    async fn seed_threads(launcher: &CodexLauncher, session: &str, thread: &str) {
+        let mut state = launcher.state.lock().await;
+        state.threads.insert(session.to_owned(), thread.to_owned());
+    }
+
+    #[tokio::test]
+    async fn conduct_without_persistence_still_crashes_when_resume_is_rejected() -> Result<()> {
+        // GH-535 round 2, P1-B: the stale-binding fallback (drop + retry as
+        // thread/start) must be reachable only on the persistence-enabled
+        // dispatch path. Conduct reuses a deterministic session id for a
+        // verdict-gated redispatch; if that in-memory resume is rejected,
+        // conduct must fail with the server's error exactly as before the
+        // persistence feature — not silently start a new thread and lose
+        // the same-session conversation. The ResumeErrorThenStart fake
+        // would happily answer thread/start with "fresh answer", so a
+        // retry here would show up as AgentDone instead of the crash.
+        let (_dir, server) = spawn_fake_server(FakeScenario::ResumeErrorThenStart).await;
+        let launcher = launcher_with_server(server);
+        seed_threads(&launcher, "sid", "stale-thread").await;
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
+        let result = launcher
+            .run_phase(
+                &phase,
+                "redispatch turn",
+                "",
+                "sid",
+                Path::new("."),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("run_phase returns a result, not an IO error");
+        match result {
+            PhaseResult::AgentCrash { error } => {
+                assert!(
+                    error.contains("unknown thread"),
+                    "conduct resume failure must surface the server's own error, got {error}"
+                );
+            }
+            other => {
+                panic!("non-persistent conduct must not fall back to thread/start, got {other:?}")
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_fallback_still_erases_the_stale_binding_from_disk() -> Result<()> {
+        // GH-535 round 2, P1-A: dropping the stale binding from the
+        // in-memory map is not enough — if the fallback thread/start fails
+        // (or times out, or is cancelled) before a fresh id is recorded,
+        // the merge-style persist reloads the on-disk map and would write
+        // the rejected binding straight back. The removal must survive as
+        // an explicit deletion that persist honors, so the next dispatch
+        // never resumes the same rejected thread id again.
+        let store_root = tempfile::tempdir()?;
+        let cwd = tempfile::tempdir()?;
+        let map = map_path_for(store_root.path(), cwd.path());
+        std::fs::create_dir_all(map.parent().unwrap())?;
+        std::fs::write(&map, br#"{"sess-1":"stale-thread"}"#)?;
+
+        let (_fake_dir, bin) =
+            fake_app_server_bin(FakeScenario::ResumeErrorThenStartError).expect("fake written");
+        let launcher =
+            CodexLauncher::with_bin(bin).with_thread_store(store_root.path().to_path_buf());
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
+        let result = launcher
+            .run_phase(
+                &phase,
+                "turn one",
+                "",
+                "sess-1",
+                cwd.path(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("run_phase returns a result, not an IO error");
+        // The fallback thread/start fails too, so the phase ends in a
+        // crash — but the rejected binding must still be gone from disk.
+        assert!(
+            matches!(&result, PhaseResult::AgentCrash { error } if error.contains("unknown thread")),
+            "expected the failed fallback to surface as AgentCrash, got {result:?}"
+        );
+        let loaded: HashMap<String, String> =
+            serde_json::from_str(&std::fs::read_to_string(&map).expect("map still readable"))
+                .expect("map stays valid JSON");
+        assert!(
+            !loaded.contains_key("sess-1"),
+            "the rejected binding must not survive on disk after a failed fallback, got {loaded:?}"
         );
         Ok(())
     }
