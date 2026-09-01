@@ -168,22 +168,21 @@ enum Command {
     },
     /// Claim a scope for coordination (shortcut for `bridge claude claim`).
     /// `edda claim check <paths|globs>...` instead runs the read-only
-    /// surface-intersection query of GH-562 (exit 0 disjoint, 1 conflict).
+    /// surface-intersection query of GH-562 (exit 0 disjoint, 1 conflict,
+    /// 2 error). The two forms cannot be mixed: check-only arguments are a
+    /// usage error on a plain claim, exactly as before GH-562.
+    #[command(args_conflicts_with_subcommands = true)]
     Claim {
-        /// Short label for this session's scope (e.g. "auth", "billing"),
-        /// or the literal "check" to query conflicts against active claims
-        label: String,
+        /// Short label for this session's scope (e.g. "auth", "billing")
+        label: Option<String>,
         /// File path patterns this scope covers (e.g. "src/auth/*")
         #[arg(long)]
         paths: Vec<String>,
-        /// For `claim check`: paths/globs to intersect against active claims
-        trailing: Vec<String>,
         /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
-        /// For `claim check`: emit the conflict list as JSON
-        #[arg(long)]
-        json: bool,
+        #[command(subcommand)]
+        cmd: Option<ClaimCmd>,
     },
     /// Release this session's coordination scope
     Unclaim {
@@ -614,6 +613,22 @@ enum Command {
     ToolTier {
         #[command(subcommand)]
         cmd: cmd_tool_tier::ToolTierCmd,
+    },
+}
+
+/// Subcommands of `edda claim`. `check` is a real subcommand so its
+/// arguments (`query`, `--json`) can never be accepted — and silently
+/// dropped — on a plain claim, which would let a typo record a pathless
+/// claim and silently narrow the operator's off-limits guard (Round-1 P1-3).
+#[derive(Debug, Subcommand)]
+enum ClaimCmd {
+    /// Read-only conflict query: exit 0 disjoint, 1 conflict, 2 error (GH-562)
+    Check {
+        /// Paths/globs to intersect against active claims
+        query: Vec<String>,
+        /// Emit the conflict list as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1101,21 +1116,24 @@ fn main() -> anyhow::Result<()> {
         Command::Claim {
             label,
             paths,
-            trailing,
             session,
-            json,
-        } => {
-            // `edda claim check <paths|globs>...` is the read-only surface
-            // intersection query (GH-562); the literal label "check" is
-            // reserved for it. Any other label claims as before.
-            if label == "check" {
-                let mut query = trailing;
-                query.extend(paths);
+            cmd,
+        } => match cmd {
+            Some(ClaimCmd::Check { query, json }) => {
                 cmd_claim::claim_check(&repo_root, &query, json)
-            } else {
-                cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref())
             }
-        }
+            None => match label {
+                Some(label) => cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref()),
+                // No label and no `check` subcommand: invalid usage, exactly
+                // like the pre-GH-562 "missing <LABEL>" clap error.
+                None => {
+                    eprintln!(
+                        "error: 'edda claim' requires a label (e.g. 'edda claim auth --paths src/auth/*') or the 'check' subcommand"
+                    );
+                    std::process::exit(2);
+                }
+            },
+        },
         Command::Unclaim {
             session,
             if_claimed,
