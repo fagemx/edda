@@ -1699,6 +1699,11 @@ fn suggest_claim_command_from_focus_files() {
         branch: Some("feat/issue-131".into()),
         current_phase: None,
         parent_session_id: None,
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
     let result = suggest_claim_command("worker", &Some(hb));
     assert!(result.contains("edda claim"), "should contain edda claim");
@@ -1723,6 +1728,11 @@ fn suggest_claim_command_from_branch() {
         branch: Some("feat/auth-refactor".into()),
         current_phase: None,
         parent_session_id: None,
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
     let result = suggest_claim_command("", &Some(hb));
     assert!(
@@ -1842,6 +1852,11 @@ fn protocol_nudge_uses_branch_context() {
         branch: Some("feat/billing-v2".into()),
         current_phase: None,
         parent_session_id: None,
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
     let hb_path = heartbeat_path(pid, "s2");
     let _ = fs::create_dir_all(hb_path.parent().unwrap());
@@ -2349,6 +2364,11 @@ fn subagent_stale_threshold_extended() {
         branch: None,
         current_phase: None,
         parent_session_id: Some("parent-session".to_string()),
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
     let path = heartbeat_path(pid, "sub-stale");
     let _ = fs::create_dir_all(path.parent().unwrap());
@@ -3201,5 +3221,66 @@ fn legacy_ack_comparison_keeps_subsecond_order() {
         "an earlier same-second ack must not retire a later request"
     );
 
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+/// GH-569/GH-566: a lane that fires no bridge hooks (e.g. `edda dispatch
+/// --agent pi`) must still become a discoverable peer. The conductor runner
+/// writes the shared session heartbeat through the store-level writer
+/// (`edda-store`), NOT through any bridge API — that decoupling is the fix.
+/// Before it, the only production writer sat inside the Claude hook path, so
+/// such a lane never appeared in `edda peers` at all.
+#[test]
+fn lane_heartbeat_written_without_bridge_is_discovered_then_goes_stale() {
+    let pid = "test_lane_hb_discovery";
+    let sid = "lane-sess-001";
+    let _ = edda_store::ensure_dirs(pid);
+
+    let fmt = |t: time::OffsetDateTime| {
+        t.format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    };
+    let now = time::OffsetDateTime::now_utc();
+    let make = |last: String| edda_store::SessionHeartbeat {
+        session_id: sid.into(),
+        started_at: fmt(now),
+        last_heartbeat: last,
+        label: "a".into(),
+        focus_files: vec![],
+        active_tasks: vec![],
+        files_modified_count: 0,
+        total_edits: 0,
+        recent_commits: vec![],
+        branch: None,
+        current_phase: Some("running".into()),
+        parent_session_id: None,
+        plan: Some("hbplan".into()),
+        phase: Some("a".into()),
+        attempt: Some(1),
+        stage: Some("running".into()),
+        pid: Some(4242),
+    };
+
+    edda_store::write_heartbeat(pid, &make(fmt(now))).expect("lane heartbeat write");
+
+    let peers = discover_active_peers(pid, "observer");
+    assert_eq!(
+        peers.len(),
+        1,
+        "a no-hook lane with a fresh heartbeat must be a peer"
+    );
+    assert_eq!(peers[0].label, "a");
+    assert_eq!(peers[0].current_phase.as_deref(), Some("running"));
+
+    // The lane stops: backdate beyond the stale threshold; discovery must
+    // drop it without any explicit removal call.
+    let stale = fmt(now - time::Duration::new(3600, 0));
+    edda_store::write_heartbeat(pid, &make(stale)).expect("stale heartbeat write");
+    assert!(
+        discover_active_peers(pid, "observer").is_empty(),
+        "a stopped lane goes stale naturally"
+    );
+
+    remove_heartbeat(pid, sid);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }

@@ -6,12 +6,10 @@ use crate::parse::now_rfc3339;
 
 // ── Session Signals (extracted from transcript) ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskSnapshot {
-    pub id: String,
-    pub subject: String,
-    pub status: String,
-}
+// GH-569: the heartbeat surface (and its TaskSnapshot) moved to edda-store so
+// non-bridge producers (the conductor runner) can write heartbeats. Re-export
+// to keep `crate::signals::TaskSnapshot` paths stable.
+pub use edda_store::TaskSnapshot;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FileEditCount {

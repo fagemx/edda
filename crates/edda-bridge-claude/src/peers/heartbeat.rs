@@ -7,7 +7,7 @@ use crate::signals::SessionSignals;
 use super::board::{compute_board_state, partition_requests_for_session};
 use super::helpers::{auto_label, parse_rfc3339_to_epoch, session_label_from_board};
 use super::{
-    coordination_path, detect_git_branch_in, env_label, heartbeat_path, stale_secs,
+    coordination_path, detect_git_branch_in, env_label, heartbeat_path, read_heartbeat, stale_secs,
     BindingConflict, CoordEvent, CoordEventType, SessionHeartbeat,
 };
 
@@ -73,6 +73,11 @@ pub(crate) fn write_heartbeat(
         current_phase: crate::agent_phase::read_phase_state(project_id, session_id)
             .map(|ps| ps.phase.to_string()),
         parent_session_id: None,
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
 
     let data = match serde_json::to_string_pretty(&heartbeat) {
@@ -157,6 +162,11 @@ pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str, 
         branch: detect_git_branch_in(cwd),
         current_phase: None,
         parent_session_id: None,
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
 
     let data = match serde_json::to_string_pretty(&heartbeat) {
@@ -190,6 +200,11 @@ pub(crate) fn write_subagent_heartbeat(
         branch: detect_git_branch_in(cwd),
         current_phase: None,
         parent_session_id: Some(parent_session_id.to_string()),
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
     let data = match serde_json::to_string_pretty(&heartbeat) {
         Ok(d) => d,
@@ -221,12 +236,7 @@ pub(crate) fn cleanup_subagent_heartbeats(project_id: &str, parent_session_id: &
     }
 }
 
-/// Read a single session's heartbeat file.
-pub(crate) fn read_heartbeat(project_id: &str, session_id: &str) -> Option<SessionHeartbeat> {
-    let path = heartbeat_path(project_id, session_id);
-    let content = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
-}
+// read_heartbeat lives in edda_store (re-exported by super).
 
 // ── Coordination Events (append-only log) ──
 
@@ -377,8 +387,9 @@ pub fn resolve_request_targets(project_id: &str, to_label: &str) -> Vec<String> 
             None => continue,
         };
 
-        // Sub-agents can't touch their heartbeat while running; match the
-        // extended threshold peer discovery already uses for them.
+        // Parented sub-agent heartbeats match the extended threshold peer
+        // discovery uses for them (they have no in-flight writer); conductor
+        // lanes write real periodic heartbeats and use the standard one.
         let effective_threshold = if hb.parent_session_id.is_some() {
             stale_threshold * 15
         } else {

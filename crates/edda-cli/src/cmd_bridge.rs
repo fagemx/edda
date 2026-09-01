@@ -571,9 +571,30 @@ fn peers_json(project_id: &str) -> serde_json::Value {
             })
             .collect();
     let board = edda_bridge_claude::peers::compute_board_state(project_id);
+    // GH-569: claims are part of the JSON surface programs consume, so each
+    // carries its age and a stale flag — otherwise a 55-day-old zombie claim
+    // and a 37-second-old live claim are indistinguishable to a program.
+    let now_epoch = time::OffsetDateTime::now_utc().unix_timestamp();
+    let claims: Vec<serde_json::Value> = board
+        .claims
+        .iter()
+        .map(|claim| {
+            let mut value = serde_json::to_value(claim).unwrap_or_default();
+            let ts_epoch = time::OffsetDateTime::parse(
+                &claim.ts,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .map(|t| t.unix_timestamp())
+            .unwrap_or(0);
+            let age_secs = (now_epoch - ts_epoch).max(0) as u64;
+            value["age_secs"] = serde_json::json!(age_secs);
+            value["stale"] = serde_json::json!(age_secs > stale_threshold);
+            value
+        })
+        .collect();
     serde_json::json!({
         "sessions": sessions,
-        "claims": board.claims,
+        "claims": claims,
         "requests": board.requests,
         "acks": board.request_acks,
     })
@@ -2853,6 +2874,26 @@ mod tests {
             2,
             "and it must still release nothing"
         );
+    }
+
+    #[test]
+    fn peers_json_claims_carry_staleness() {
+        // GH-569: programs reading `edda peers --json` must be able to make
+        // the same live-vs-stale judgement the human view makes. Claims are
+        // entries of that surface, so each carries its age and a stale flag.
+        let _store = crate::test_support::isolated_store();
+        let repo = tempfile::tempdir().expect("tempdir");
+        let pid = edda_store::project_id(repo.path());
+        let _ = edda_store::ensure_dirs(&pid);
+        edda_bridge_claude::peers::write_claim(&pid, "s1", "auth", &["src/auth.rs".into()]);
+
+        let json = peers_json(&pid);
+        let claim = &json["claims"][0];
+        assert!(
+            claim["age_secs"].is_u64(),
+            "claim carries age_secs: {claim}"
+        );
+        assert_eq!(claim["stale"], false, "fresh claim is not stale");
     }
 
     #[test]

@@ -1,7 +1,12 @@
 pub mod fleet;
+pub mod heartbeat;
 pub mod registry;
 pub mod skill_registry;
 pub mod user_config;
+
+pub use heartbeat::{
+    heartbeat_path, read_heartbeat, write_heartbeat, SessionHeartbeat, TaskSnapshot,
+};
 
 use fs2::FileExt;
 use std::fs;

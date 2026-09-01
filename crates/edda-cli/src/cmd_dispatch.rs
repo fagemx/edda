@@ -324,6 +324,13 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
 
 /// One turn through the launcher with an empty plan context. Split out from
 /// [`run`] so tests can drive it with MockLauncher or a recording stub.
+///
+/// GH-566/GH-569: the turn runs through the conductor runner's
+/// `run_phase_with_heartbeat`, so a dispatched lane (any backend, no Claude
+/// hooks) periodically refreshes the session heartbeat and is visible to
+/// `edda peers` while it works. The write lives in the conductor runner;
+/// dispatch stays stateless — the heartbeat is an observation surface, not a
+/// control surface, and ages out through the normal staleness threshold.
 pub async fn run_with_launcher(
     launcher: &dyn AgentLauncher,
     phase: &PhaseSchema,
@@ -331,9 +338,25 @@ pub async fn run_with_launcher(
     cwd: &std::path::Path,
     cancel: CancellationToken,
 ) -> Result<DispatchOutput> {
-    let result = launcher
-        .run_phase(phase, &phase.prompt, "", session_id, cwd, cancel)
-        .await?;
+    let result = {
+        let hb = edda_conductor::runner::heartbeat::LaneHeartbeat {
+            cwd: cwd.to_path_buf(),
+            session_id: session_id.to_string(),
+            plan: "dispatch".to_string(),
+            phase: phase.id.clone(),
+            attempt: 1,
+        };
+        edda_conductor::runner::heartbeat::run_phase_with_heartbeat(
+            launcher,
+            phase,
+            &phase.prompt,
+            "",
+            cwd,
+            &cancel,
+            &hb,
+        )
+        .await?
+    };
     Ok(DispatchOutput::from_result(result, session_id.to_owned()))
 }
 

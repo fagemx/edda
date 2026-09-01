@@ -5,6 +5,9 @@ use crate::plan::schema::{CheckSpec, OnFail, OnReject, Plan};
 use crate::plan::topo::topo_sort;
 use crate::runner::edda;
 use crate::runner::event_log::{self, Event, EventLogger};
+use crate::runner::heartbeat::{
+    lane_heartbeat_interval_secs, run_phase_with_heartbeat, LaneHeartbeat,
+};
 use crate::runner::notify::Notifier;
 use crate::state::brief::write_brief;
 use crate::state::derive::{
@@ -205,6 +208,20 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
             event_log::write_runner_status(cwd, state, Some(&gated_id));
             write_brief(cwd, state, None);
 
+            // The lane stays alive while gated — keep its heartbeat honest
+            // with an "awaiting_verdict" stage (GH-566).
+            let lane_hb = {
+                let ps = state.get_phase(&gated_id)?;
+                LaneHeartbeat {
+                    cwd: cwd.to_path_buf(),
+                    session_id: phase_session_id_attempt(&plan.name, &gated_id, ps.attempts)
+                        .to_string(),
+                    plan: plan.name.clone(),
+                    phase: gated_id.clone(),
+                    attempt: ps.attempts,
+                }
+            };
+
             match wait_for_verdict(
                 cwd,
                 &subject,
@@ -212,6 +229,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                 phase.gate_timeout_sec,
                 Some(&entered_at),
                 &cancel,
+                Some(&lane_hb),
             )
             .await
             {
@@ -329,16 +347,23 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         println!(
                             "  ↻ Redispatching one more turn in the same session ({session_id})"
                         );
-                        let result = launcher
-                            .run_phase(
-                                phase,
-                                &prompt,
-                                &plan_context,
-                                &session_id,
-                                &phase_cwd,
-                                cancel.child_token(),
-                            )
-                            .await?;
+                        let lane_hb = LaneHeartbeat {
+                            cwd: cwd.to_path_buf(),
+                            session_id: session_id.clone(),
+                            plan: plan.name.clone(),
+                            phase: gated_id.clone(),
+                            attempt: attempts,
+                        };
+                        let result = run_phase_with_heartbeat(
+                            launcher,
+                            phase,
+                            &prompt,
+                            &plan_context,
+                            &phase_cwd,
+                            &cancel,
+                            &lane_hb,
+                        )
+                        .await?;
                         process_phase_result(
                             plan,
                             phase,
@@ -469,16 +494,26 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
         // Auto-claim scope for this phase (so peers can see it and send requests)
         write_phase_claim(cwd, &session_id, &phase_id, &phase.owns);
 
-        let result = launcher
-            .run_phase(
-                phase,
-                &prompt,
-                &plan_context,
-                &session_id,
-                &phase_cwd,
-                cancel.child_token(),
-            )
-            .await?;
+        // GH-566/GH-569: the runner refreshes the lane heartbeat during the
+        // agent turn so any backend (no Claude hooks required) is visible to
+        // `edda peers` while it works. One write site serves conduct + dispatch.
+        let lane_hb = LaneHeartbeat {
+            cwd: cwd.to_path_buf(),
+            session_id: session_id.clone(),
+            plan: plan.name.clone(),
+            phase: phase_id.clone(),
+            attempt,
+        };
+        let result = run_phase_with_heartbeat(
+            launcher,
+            phase,
+            &prompt,
+            &plan_context,
+            &phase_cwd,
+            &cancel,
+            &lane_hb,
+        )
+        .await?;
 
         // 5. Process result (shared with the post-rejection redispatch turn;
         // gated phases enter AWAITING_VERDICT here instead of Passed — D3)
@@ -601,6 +636,7 @@ async fn wait_for_verdict(
     timeout_sec: Option<u64>,
     entered_at: Option<&str>,
     cancel: &CancellationToken,
+    heartbeat: Option<&LaneHeartbeat>,
 ) -> GateVerdict {
     let deadline = timeout_sec.map(|t| {
         let base = entered_at
@@ -610,6 +646,13 @@ async fn wait_for_verdict(
             .unwrap_or_else(time::OffsetDateTime::now_utc);
         base + time::Duration::seconds(t as i64)
     });
+
+    // A gated lane is still alive — refresh its heartbeat while waiting so
+    // it does not read as stale to peer discovery (GH-566).
+    if let Some(hb) = heartbeat {
+        hb.write("awaiting_verdict");
+    }
+    let mut last_heartbeat = Instant::now();
 
     loop {
         // Poll BEFORE the deadline check: a verdict recorded during this
@@ -631,7 +674,14 @@ async fn wait_for_verdict(
             }
         }
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(GATE_POLL_SEC)) => {}
+            _ = tokio::time::sleep(Duration::from_secs(GATE_POLL_SEC)) => {
+                if let Some(hb) = heartbeat {
+                    if last_heartbeat.elapsed() >= Duration::from_secs(lane_heartbeat_interval_secs()) {
+                        hb.write("awaiting_verdict");
+                        last_heartbeat = Instant::now();
+                    }
+                }
+            }
             _ = cancel.cancelled() => return GateVerdict::Cancelled,
         }
     }
@@ -2879,6 +2929,7 @@ phases:
             Some(1),
             Some(&now_rfc3339()),
             &cancel,
+            None,
         )
         .await;
         assert!(matches!(verdict, GateVerdict::TimedOut));
@@ -2906,6 +2957,7 @@ phases:
             Some(30),
             Some(&entered_at),
             &cancel,
+            None,
         )
         .await;
         match verdict {
@@ -3175,6 +3227,151 @@ phases:
             "payload": { "label": "no-owns", "paths": [] }
         });
         assert_eq!(events[0], legacy);
+    }
+
+    // ── Lane heartbeat (GH-566/GH-569) ──────────────────────────────
+
+    /// A launcher that stalls briefly, so the test can observe the lane
+    /// heartbeat while the agent turn is genuinely mid-flight.
+    struct SlowLauncher;
+
+    #[async_trait::async_trait]
+    impl AgentLauncher for SlowLauncher {
+        async fn run_phase(
+            &self,
+            _phase: &crate::plan::schema::Phase,
+            _prompt: &str,
+            _plan_context: &str,
+            _session_id: &str,
+            _cwd: &Path,
+            _cancel: CancellationToken,
+        ) -> Result<PhaseResult> {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok(PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: None,
+            })
+        }
+    }
+
+    fn hb_path(cwd: &Path, session_id: &str) -> std::path::PathBuf {
+        let project_id = edda_store::project_id(cwd);
+        edda_store::project_dir(&project_id)
+            .join("state")
+            .join(format!("session.{session_id}.json"))
+    }
+
+    /// A lane launched with no bridge hooks (`edda dispatch --agent pi`) must
+    /// still leave a session heartbeat that `edda peers` can find: the runner
+    /// writes it during the agent turn, carrying plan/phase/attempt/stage/pid.
+    #[tokio::test]
+    async fn phase_heartbeat_written_during_agent_turn() {
+        let guard = ClaimEnvGuard::new();
+        let cwd = make_repo(guard._store_root.path());
+
+        let yaml = "name: hbplan\nphases:\n  - id: a\n    prompt: \"work\"\n";
+        let plan = parse_plan(yaml).unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        let engine = CheckEngine::new(cwd.clone());
+        let notifier = CollectNotifier::new();
+        let mut budget = BudgetTracker::new(plan.budget_usd);
+        let cancel = CancellationToken::new();
+
+        let run_cwd = cwd.clone();
+        let handle = tokio::spawn(async move {
+            run_plan(
+                &plan,
+                &mut state,
+                RunContext {
+                    launcher: &SlowLauncher,
+                    check_engine: &engine,
+                    notifier: &notifier,
+                    budget: &mut budget,
+                    cancel,
+                    cwd: &run_cwd,
+                    interactive: false,
+                    json_events: false,
+                    tmux_session: None,
+                },
+            )
+            .await
+            .map(|_| state)
+        });
+
+        let session_id = phase_session_id_attempt("hbplan", "a", 1).to_string();
+        let path = hb_path(&cwd, &session_id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if path.exists() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "lane heartbeat never appeared during the agent turn"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let hb: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(hb["session_id"], session_id.as_str());
+        assert_eq!(hb["label"], "a", "heartbeat label matches the claim label");
+        assert_eq!(hb["plan"], "hbplan");
+        assert_eq!(hb["phase"], "a");
+        assert_eq!(hb["attempt"], 1);
+        assert_eq!(hb["stage"], "running");
+        assert!(hb["pid"].as_u64().is_some(), "heartbeat carries the pid");
+        assert!(hb["last_heartbeat"].as_str().is_some());
+
+        let (state, _dir) = {
+            let state = handle.await.unwrap().unwrap();
+            (state, ())
+        };
+        assert_eq!(state.plan_status, PlanStatus::Completed);
+    }
+
+    /// The observation plane must never kill the work plane: if the store is
+    /// unwritable (here: the project directory is a regular file), the phase
+    /// still runs to completion — at most a warning is printed.
+    #[tokio::test]
+    async fn heartbeat_write_failure_does_not_fail_phase() {
+        let guard = ClaimEnvGuard::new();
+        let store_root = guard._store_root.path();
+        let cwd = make_repo(store_root);
+
+        let project_id = edda_store::project_id(&cwd);
+        let project_dir = edda_store::project_dir(&project_id);
+        let _ = std::fs::remove_dir_all(&project_dir);
+        std::fs::write(&project_dir, b"not a directory").unwrap();
+
+        let yaml = "name: hbplan2\nphases:\n  - id: a\n    prompt: \"work\"\n";
+        let launcher = SlowLauncher;
+        let (state, _msgs) = {
+            let plan = parse_plan(yaml).unwrap();
+            let mut state = PlanState::from_plan(&plan, "test.yaml");
+            let engine = CheckEngine::new(cwd.clone());
+            let notifier = CollectNotifier::new();
+            let mut budget = BudgetTracker::new(plan.budget_usd);
+            run_plan(
+                &plan,
+                &mut state,
+                RunContext {
+                    launcher: &launcher,
+                    check_engine: &engine,
+                    notifier: &notifier,
+                    budget: &mut budget,
+                    cancel: CancellationToken::new(),
+                    cwd: &cwd,
+                    interactive: false,
+                    json_events: false,
+                    tmux_session: None,
+                },
+            )
+            .await
+            .unwrap();
+            (state, notifier.messages())
+        };
+        assert_eq!(state.plan_status, PlanStatus::Completed);
+        assert_eq!(state.phases[0].status, PhaseStatus::Passed);
     }
 
     #[test]

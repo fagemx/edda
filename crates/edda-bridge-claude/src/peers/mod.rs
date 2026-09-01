@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::signals::TaskSnapshot;
+// GH-569: the heartbeat type and its path/IO live in edda-store so any crate
+// (conductor runner included) can write heartbeats without depending on this
+// bridge. This module re-exports to preserve the public API surface.
+pub use edda_store::{heartbeat_path, read_heartbeat, SessionHeartbeat};
 
 // ── Configuration ──
 
@@ -60,28 +63,10 @@ pub(crate) fn detect_git_branch_in(cwd: &str) -> Option<String> {
 
 // ── Data Structures ──
 
-/// Per-session heartbeat file.
-/// Location: ~/.edda/projects/{pid}/state/session.{sid}.json
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionHeartbeat {
-    pub session_id: String,
-    pub started_at: String,
-    pub last_heartbeat: String,
-    pub label: String,
-    pub focus_files: Vec<String>,
-    pub active_tasks: Vec<TaskSnapshot>,
-    pub files_modified_count: usize,
-    pub total_edits: usize,
-    pub recent_commits: Vec<String>,
-    #[serde(default)]
-    pub branch: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_phase: Option<String>,
-    /// Set for sub-agent heartbeats to link back to the parent session.
-    /// Used for orphan cleanup and extended stale threshold.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
-}
+// Per-session heartbeat file.
+// Location: ~/.edda/projects/{pid}/state/session.{sid}.json
+// GH-569: the struct itself lives in `edda_store::SessionHeartbeat` and is
+// re-exported above.
 
 /// Append-only coordination event.
 /// Location: ~/.edda/projects/{pid}/state/coordination.jsonl
@@ -221,11 +206,7 @@ fn autoclaim_state_path(project_id: &str, session_id: &str) -> PathBuf {
         .join(format!("autoclaim.{session_id}.json"))
 }
 
-fn heartbeat_path(project_id: &str, session_id: &str) -> PathBuf {
-    edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("session.{session_id}.json"))
-}
+// heartbeat_path now comes from edda_store (re-exported above).
 
 pub(crate) fn coordination_path(project_id: &str) -> PathBuf {
     let dir = edda_store::project_dir(project_id).join("state");
@@ -256,7 +237,7 @@ pub use board::{
 };
 pub use discovery::{discover_active_peers, discover_all_sessions, infer_session_id};
 pub(crate) use heartbeat::{
-    cleanup_subagent_heartbeats, ensure_heartbeat_exists, read_heartbeat, resolve_teammate_session,
+    cleanup_subagent_heartbeats, ensure_heartbeat_exists, resolve_teammate_session,
     update_heartbeat_branch, update_teammate_phase, write_heartbeat, write_subagent_completed,
     write_subagent_heartbeat, write_task_completed, write_teammate_idle, SubagentReport,
 };

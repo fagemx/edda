@@ -1992,6 +1992,11 @@ fn write_test_heartbeat(pid: &str, sid: &str, branch: Option<&str>) {
         branch: branch.map(|s| s.to_string()),
         current_phase: None,
         parent_session_id: None,
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
     let path = edda_store::project_dir(pid)
         .join("state")
