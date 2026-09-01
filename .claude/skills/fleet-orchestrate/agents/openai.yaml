@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fleet Orchestrate"
+  short_description: "Coordinate durable multi-session delivery fleets"
+  default_prompt: "Use $fleet-orchestrate to coordinate this work across multiple agent sessions."

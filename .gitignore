@@ -1,6 +1,5 @@
 /target
 .edda/
-.claude/
 .agents/
 CLAUDE.md
 docs/archive/
@@ -9,3 +8,9 @@ docs/archive/
 push.log
 .env
 nul
+
+# Claude project config: track skills and commands, ignore runtime state
+.claude/*
+!.claude/CLAUDE.md
+!.claude/skills/
+!.claude/commands/
