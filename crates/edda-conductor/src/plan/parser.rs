@@ -299,10 +299,16 @@ phases:
       - cmd_succeeds: "cargo build"
 "#;
         let plan = parse_plan(yaml).unwrap();
-        assert!(matches!(
-            &plan.phases[0].check[0],
-            CheckSpec::CmdSucceeds { cmd, .. } if cmd == "cargo build"
-        ));
+        match &plan.phases[0].check[0] {
+            CheckSpec::CmdSucceeds { cmd, timeout_sec } => {
+                assert_eq!(cmd, "cargo build");
+                // GH-529: the default must cover this repo's own test suite
+                // (cargo test -p edda: 60-150s warm, far more cold) without
+                // a per-check timeout_sec override.
+                assert_eq!(*timeout_sec, 1800);
+            }
+            other => panic!("expected cmd_succeeds, got {other:?}"),
+        }
     }
 
     #[test]
