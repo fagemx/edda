@@ -54,7 +54,7 @@ Edda fixes both with the same primitive: **local, append-only state in `.edda/`,
 
 Use layer 1 alone from day one. Layer 2 is simply there — same workspace, same CLI — when you start running more than one agent.
 
-**Two persistence planes, deliberately.** Decisions, notes, session digests, tasks, and verdicts are events in the hash-chained SQLite ledger — tamper-evident and replayable. Live coordination state (claims, peer heartbeats) is a separate append-only log in the per-user store, and each `edda conduct` plan keeps its own state file and event log. All of it is local and inspectable; the hash chain covers the ledger.
+**Separate persistence planes, deliberately.** Decisions, notes, session digests, tasks, and verdicts are events in the hash-chained SQLite ledger — tamper-evident and replayable. Live coordination state sits outside that chain, in the per-user store: claims append to a coordination log, while each session's heartbeat is a small snapshot file, rewritten while the session runs and deleted when it ends. Each `edda conduct` plan keeps its own state file and event log again separately. All of it is local and inspectable; the hash chain covers the ledger.
 
 ## Layer 1 — Memory that survives sessions
 
@@ -114,7 +114,7 @@ Edda starts paying for itself when any of these is true:
 
 ## Layer 2 — Coordination that survives agents
 
-The moment you run a second agent, memory stops being the hard problem. The hard problems become: *who is working where, who decided what under which authority, and what actually happened while you weren't looking.* Edda answers all three from the same ledger.
+The moment you run a second agent, memory stops being the hard problem. The hard problems become: *who is working where, who decided what under which authority, and what actually happened while you weren't looking.* Edda answers all three from the same local workspace — the ledger holds the durable record, the coordination plane holds who is live right now.
 
 **Claims — who is working where.** Sessions declare their scope, and every peer sees it in the context injected at session start, so parallel agents know who owns what before they touch it. Claims are **advisory by default**: edda records and surfaces them, but nothing blocks a write until you opt in with `EDDA_ENFORCE_OFFLIMITS=1` (or `bridge.enforce_offlimits=true`), which makes the Claude Code hook refuse `Edit`/`Write` on a peer-claimed path.
 
@@ -139,7 +139,7 @@ edda verdict approve my-plan/impl --sha <full-40-hex-sha>
 edda verdict reject  my-plan/impl --sha <sha> --comment "tests missing"
 ```
 
-**Single-turn lanes — work a controller can detach.** `edda dispatch` runs exactly one agent turn (Claude, Codex, or pi) in the foreground and exits with a typed outcome — done, crash, timeout, budget exceeded — with `--json` for machine consumption. It carries no plan, DAG, or loop state; loop control stays with the caller. That statelessness is what makes it safe for a controller to launch as a detached OS process instead of a child of its own session — which is how work survives a dead controller. When our controller session died mid-flight, three times in one day, the detached lanes kept running and their results were recovered from branches, PRs, and the ledger rather than from anyone's memory.
+**Single-turn lanes — work a controller can detach.** `edda dispatch` runs exactly one agent turn (Claude, Codex, or pi) in the foreground and exits with a typed outcome — done, crash, timeout, max turns, or budget exceeded, each with its own exit code — and `--json` for machine consumption. It carries no plan, DAG, or loop state; loop control stays with the caller. That statelessness is what makes it safe for a controller to launch as a detached OS process instead of a child of its own session — which is how work survives a dead controller. When our controller session died mid-flight, three times in one day, the detached lanes kept running and their results were recovered from branches, PRs, and the ledger rather than from anyone's memory.
 
 ```bash
 edda dispatch --agent codex --prompt-file task.md
@@ -207,7 +207,8 @@ Claude Code session
    │  .edda/ledger.db             │  ← decisions, notes, tasks,
    │    append-only, hash-chained │     verdicts, digests
    ├──────────────────────────────┤
-   │  coordination log (per-user) │  ← claims, peer heartbeats
+   │  coordination log (per-user) │  ← claims (appended)
+   │  session heartbeat files     │  ← one per live session
    │  conduct plan state + events │  ← one set per plan
    └──────────────────────────────┘
         │
@@ -218,7 +219,7 @@ Claude Code session
    Next session sees everything
 ```
 
-Edda stores every ledger event as a hash-chained JSON record in a local SQLite database. Ledger events include decisions, notes, session digests, tasks, verdicts, and command outputs. The hash chain makes that history tamper-evident and the retrieval deterministic — same query, same answer, no LLM in the loop. Claims and peer heartbeats are deliberately kept out of the chain: they are live, expiring coordination state, appended to their own log and read on every session start.
+Edda stores every ledger event as a hash-chained JSON record in a local SQLite database. Ledger events include decisions, notes, session digests, tasks, verdicts, and command outputs. The hash chain makes that history tamper-evident and the retrieval deterministic — same query, same answer, no LLM in the loop. Coordination state is deliberately kept out of the chain, because it is live rather than historical: claims are appended to their own log, and a session's heartbeat is a snapshot file that exists only while that session does. Both are read on every session start.
 
 At the start of each session, edda assembles a context snapshot from the ledger and injects it — the agent sees recent decisions, active tasks, peer coordination, and (if configured) a doctrine pack from [havamal](https://github.com/fagemx/havamal), without reading through old transcripts.
 
