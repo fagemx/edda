@@ -42,14 +42,21 @@ impl AgentKind {
 
 // ── Launcher factory ──
 
-/// Per-backend options for [`build_launcher`]: verbose streaming and, for
-/// the backend that tees transcripts, the directory to tee into.
+/// Per-backend options for [`build_launcher`]: verbose streaming, the
+/// transcript directory for the backend that tees transcripts, and whether
+/// codex thread persistence is enabled.
 pub(crate) struct LauncherOptions {
     /// Stream live agent activity while the phase runs.
     pub verbose: bool,
     /// If set, claude captures raw agent stdout to
     /// `{transcript_dir}/{phase_id}-{session_id_prefix}.jsonl`.
     pub transcript_dir: Option<PathBuf>,
+    /// Persist codex's session→thread map in the per-user edda store so a
+    /// repeated `--session-id` resumes across invocations. Dispatch-scoped
+    /// (GH-535 round 1): `edda dispatch` sets this, `edda conduct` must not
+    /// — conduct session ids are deterministic per plan/phase/attempt and
+    /// its behavior must stay byte-identical with the pre-persistence path.
+    pub persistent_codex_threads: bool,
 }
 
 /// Construct and probe (`verify_available`) the launcher for `agent`.
@@ -57,8 +64,9 @@ pub(crate) struct LauncherOptions {
 /// This is the single construct-and-probe table: the backend list exists in
 /// exactly one place, shared by `edda conduct run` (which threads
 /// `--verbose` and a transcript dir for claude) and `edda dispatch` (which
-/// uses defaults). pi has no transcript tee capability yet, so the
-/// transcript dir is claude-only — see [`AgentKind::writes_transcripts`].
+/// uses defaults plus codex thread persistence). pi has no transcript tee
+/// capability yet, so the transcript dir is claude-only — see
+/// [`AgentKind::writes_transcripts`].
 pub(crate) fn build_launcher(
     agent: AgentKind,
     options: LauncherOptions,
@@ -76,7 +84,10 @@ pub(crate) fn build_launcher(
             Box::new(launcher)
         }
         AgentKind::Codex => {
-            let launcher = CodexLauncher::new().with_verbose(options.verbose);
+            let mut launcher = CodexLauncher::new().with_verbose(options.verbose);
+            if options.persistent_codex_threads {
+                launcher = launcher.with_persistent_threads();
+            }
             launcher.verify_available()?;
             Box::new(launcher)
         }
