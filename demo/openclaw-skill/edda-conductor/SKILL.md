@@ -162,6 +162,7 @@ phases:
 
 - Each phase should produce verifiable output (files, content)
 - Use `depends_on` to express ordering between phases
+- Without `depends_on`, phases run in declaration order (top-to-bottom in the plan file), not alphabetically. Declare commit/receipt phases (e.g. `freeze`) last.
 - Keep prompts specific — the agent has no context from previous phases
 - Set `max_attempts: 2` so failed phases get one retry automatically
 - Add `timeout_sec` appropriate to phase complexity (300s for small, 600s for large)
