@@ -44,6 +44,13 @@ pub struct PlanState {
     pub aborted_at: Option<String>,
     #[serde(default)]
     pub total_cost_usd: f64,
+    /// GH-533: whether any phase recorded a measured cost. `total_cost_usd`
+    /// alone cannot distinguish "usage-free backend (codex)" from a genuine
+    /// $0.00 run, so renderers must consult this flag instead of inferring
+    /// from the zero sentinel. Legacy state files (field absent) restore as
+    /// unmeasured — under-claiming beats asserting an unmeasured figure.
+    #[serde(default)]
+    pub cost_measured: bool,
     pub phases: Vec<PhaseState>,
     #[serde(default)]
     pub version: u32,
@@ -286,6 +293,7 @@ impl PlanState {
             completed_at: None,
             aborted_at: None,
             total_cost_usd: 0.0,
+            cost_measured: false,
             phases,
             version: 0,
         }
@@ -296,6 +304,12 @@ impl PlanState {
             .iter()
             .find(|p| p.id == id)
             .ok_or_else(|| anyhow::anyhow!("phase not found: \"{id}\""))
+    }
+
+    /// Record a measured cost reported by an agent backend (GH-533).
+    pub fn record_cost(&mut self, cost: f64) {
+        self.total_cost_usd += cost;
+        self.cost_measured = true;
     }
 
     pub fn get_phase_mut(&mut self, id: &str) -> Result<&mut PhaseState> {
@@ -511,6 +525,34 @@ phases:
     }
 
     // ── AwaitingVerdict gate state (D2/D3) ──────────────────────────
+
+    #[test]
+    fn legacy_state_without_cost_measured_deserializes_unmeasured() {
+        // Pre-GH-533 state files carry `total_cost_usd` but no `cost_measured`
+        // flag; they must restore as unmeasured (under-claim), never as a
+        // measured figure.
+        let json = r#"{
+            "plan_name": "test",
+            "plan_file": "plan.yaml",
+            "plan_status": "pending",
+            "total_cost_usd": 0.0,
+            "phases": [],
+            "version": 0
+        }"#;
+        let restored: PlanState = serde_json::from_str(json).unwrap();
+        assert!(!restored.cost_measured);
+    }
+
+    #[test]
+    fn record_cost_marks_measured_and_accumulates() {
+        let plan = test_plan();
+        let mut state = PlanState::from_plan(&plan, "plan.yaml");
+        assert!(!state.cost_measured);
+        state.record_cost(0.42);
+        state.record_cost(0.11);
+        assert!(state.cost_measured);
+        assert!((state.total_cost_usd - 0.53).abs() < 1e-9);
+    }
 
     #[test]
     fn awaiting_verdict_serializes_snake_case() {

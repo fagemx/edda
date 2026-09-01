@@ -509,7 +509,8 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
         println!("\n✓ Plan \"{}\" completed ({passed} passed)", plan.name);
         event_log.record(Event::PlanCompleted {
             phases_passed: passed,
-            total_cost_usd: state.total_cost_usd,
+            // GH-533: None (null in JSONL) until some phase measured a cost.
+            total_cost_usd: state.cost_measured.then_some(state.total_cost_usd),
         });
         notifier
             .notify(&format!(
@@ -775,7 +776,7 @@ async fn process_phase_result(
         } => {
             if let Some(cost) = cost_usd {
                 budget.record(cost);
-                state.total_cost_usd += cost;
+                state.record_cost(cost);
             }
 
             // running → checking
@@ -994,7 +995,7 @@ async fn process_phase_result(
         PhaseResult::MaxTurns { cost_usd } | PhaseResult::BudgetExceeded { cost_usd } => {
             if let Some(cost) = cost_usd {
                 budget.record(cost);
-                state.total_cost_usd += cost;
+                state.record_cost(cost);
             }
             let elapsed_ms = phase_start.elapsed().as_millis() as u64;
             let msg = format!("{result:?}");
@@ -1848,6 +1849,65 @@ phases:
         // Seq increments
         assert_eq!(events[0]["seq"], 0);
         assert_eq!(events[3]["seq"], 3);
+    }
+
+    #[tokio::test]
+    async fn plan_completed_usage_free_run_does_not_assert_zero_cost() {
+        // GH-533: a codex-style run (no usage data) must not emit the
+        // unmeasured sentinel `total_cost_usd: 0.0` in the event stream.
+        let yaml = r#"
+name: test
+phases:
+  - id: a
+    prompt: "usage-free"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: None,
+            }],
+        );
+        let (state, dir) = run_test_plan_with_dir(yaml, &launcher).await;
+
+        assert!(!state.cost_measured, "usage-free run must not be measured");
+        let events = read_events(dir.path(), "test");
+        let completed = events
+            .iter()
+            .find(|e| e["type"] == "plan_completed")
+            .expect("plan_completed event");
+        assert_ne!(completed["total_cost_usd"], serde_json::json!(0.0));
+        assert!(completed["total_cost_usd"].is_null());
+    }
+
+    #[tokio::test]
+    async fn plan_completed_measured_cost_round_trips_exactly() {
+        // GH-533: a run whose backend reported usage keeps the exact total.
+        let yaml = r#"
+name: test
+phases:
+  - id: a
+    prompt: "measured"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: Some(0.42),
+                result_text: None,
+            }],
+        );
+        let (state, dir) = run_test_plan_with_dir(yaml, &launcher).await;
+
+        assert!(state.cost_measured);
+        assert!((state.total_cost_usd - 0.42).abs() < 1e-9);
+        let events = read_events(dir.path(), "test");
+        let completed = events
+            .iter()
+            .find(|e| e["type"] == "plan_completed")
+            .expect("plan_completed event");
+        assert_eq!(completed["total_cost_usd"], serde_json::json!(0.42));
     }
 
     #[tokio::test]
