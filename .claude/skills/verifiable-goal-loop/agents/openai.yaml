@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verifiable Goal Loop"
+  short_description: "Run long goals with external verification"
+  default_prompt: "Use the verifiable-goal-loop skill to turn my broad objective into a verifiable goal operating loop."
