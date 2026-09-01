@@ -7,6 +7,7 @@ mod cmd_bridge;
 mod cmd_brief;
 mod cmd_bundle;
 mod cmd_checkpoint;
+mod cmd_claim;
 mod cmd_commit;
 mod cmd_conduct;
 mod cmd_config;
@@ -165,16 +166,24 @@ enum Command {
         #[command(flatten)]
         args: cmd_reconcile::ReconcileArgs,
     },
-    /// Claim a scope for coordination (shortcut for `bridge claude claim`)
+    /// Claim a scope for coordination (shortcut for `bridge claude claim`).
+    /// `edda claim check <paths|globs>...` instead runs the read-only
+    /// surface-intersection query of GH-562 (exit 0 disjoint, 1 conflict).
     Claim {
-        /// Short label for this session's scope (e.g. "auth", "billing")
+        /// Short label for this session's scope (e.g. "auth", "billing"),
+        /// or the literal "check" to query conflicts against active claims
         label: String,
         /// File path patterns this scope covers (e.g. "src/auth/*")
         #[arg(long)]
         paths: Vec<String>,
+        /// For `claim check`: paths/globs to intersect against active claims
+        trailing: Vec<String>,
         /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
+        /// For `claim check`: emit the conflict list as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Release this session's coordination scope
     Unclaim {
@@ -1092,8 +1101,21 @@ fn main() -> anyhow::Result<()> {
         Command::Claim {
             label,
             paths,
+            trailing,
             session,
-        } => cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref()),
+            json,
+        } => {
+            // `edda claim check <paths|globs>...` is the read-only surface
+            // intersection query (GH-562); the literal label "check" is
+            // reserved for it. Any other label claims as before.
+            if label == "check" {
+                let mut query = trailing;
+                query.extend(paths);
+                cmd_claim::claim_check(&repo_root, &query, json)
+            } else {
+                cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref())
+            }
+        }
         Command::Unclaim {
             session,
             if_claimed,
