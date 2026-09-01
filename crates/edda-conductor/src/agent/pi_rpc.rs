@@ -16,6 +16,12 @@ use tokio_util::sync::CancellationToken;
 /// Upper bound on waiting for the stderr drain once stdout has hit EOF.
 const STDERR_DRAIN_GRACE: Duration = Duration::from_secs(2);
 
+/// Upper bound on waiting for a child reap whose exit is expected but not
+/// guaranteed (stdout EOF or dead-stdin while the process may still live).
+/// On expiry the error carries the stderr tail collected so far plus an
+/// explicit note instead of hanging the turn; `kill_on_drop` cleans up later.
+const REAP_GRACE: Duration = Duration::from_secs(5);
+
 /// Resolve the pi executable from an explicit `EDDA_PI_BIN` value, falling
 /// back to the name npm installs on this platform.
 ///
@@ -249,7 +255,7 @@ impl PiRpcSession {
 
     async fn terminate(&mut self) {
         let _ = self.child.kill().await;
-        let _ = self.child.wait().await;
+        let _ = tokio::time::timeout(REAP_GRACE, self.child.wait()).await;
     }
 
     fn take_id(&mut self) -> String {
@@ -288,10 +294,12 @@ impl PiRpcSession {
             if !is_child_gone_error(&error) {
                 return Err(error);
             }
-            let _ = self.child.wait().await;
+            let reaped = tokio::time::timeout(REAP_GRACE, self.child.wait())
+                .await
+                .is_ok();
             let tail = collect_stderr_tail(&mut self.stderr_drain, &self.stderr).await;
             return Ok(PhaseResult::AgentCrash {
-                error: eof_error(&mut self.child, &tail),
+                error: eof_error(&mut self.child, &tail, reaped),
             });
         }
 
@@ -314,10 +322,12 @@ impl PiRpcSession {
                     let Some(line) = line.context("failed reading pi RPC stdout")? else {
                         // Reap first so the stderr pipe is closed, then let the
                         // drain finish — otherwise the reason races the report.
-                        let _ = child.wait().await;
+                        let reaped = tokio::time::timeout(REAP_GRACE, child.wait())
+                            .await
+                            .is_ok();
                         let tail = collect_stderr_tail(stderr_drain, stderr).await;
                         return Ok(PhaseResult::AgentCrash {
-                            error: eof_error(child, &tail),
+                            error: eof_error(child, &tail, reaped),
                         });
                     };
                     let record = clean_record(&line);
@@ -429,9 +439,11 @@ impl PiRpcSession {
                 .await
                 .context("failed reading pi RPC stdout")?
             else {
-                let _ = self.child.wait().await;
+                let reaped = tokio::time::timeout(REAP_GRACE, self.child.wait())
+                    .await
+                    .is_ok();
                 let tail = collect_stderr_tail(&mut self.stderr_drain, &self.stderr).await;
-                return Err(anyhow!(eof_error(&mut self.child, &tail)));
+                return Err(anyhow!(eof_error(&mut self.child, &tail, reaped)));
             };
             let record = clean_record(&line);
             if record.is_empty() {
@@ -499,7 +511,7 @@ async fn write_json_line(stdin: &mut ChildStdin, value: &Value) -> Result<()> {
     stdin.flush().await.context("failed flushing pi RPC stdin")
 }
 
-fn eof_error(child: &mut Child, stderr_tail: &str) -> String {
+fn eof_error(child: &mut Child, stderr_tail: &str, reaped: bool) -> String {
     let base = match child.try_wait() {
         Ok(Some(status)) if !status.success() => {
             format!("pi RPC process exited with non-zero status {status} before agent_settled")
@@ -508,13 +520,18 @@ fn eof_error(child: &mut Child, stderr_tail: &str) -> String {
         Ok(None) => "unexpected EOF from pi RPC process".to_owned(),
         Err(error) => format!("unexpected EOF from pi RPC process: {error}"),
     };
-    if stderr_tail.is_empty() {
+    let error = if stderr_tail.is_empty() {
         base
     } else {
         // Startup failures (missing auth, bad --model, unwritable --session-dir)
         // only ever surface on stderr; without it the operator sees a bare
         // exit status and no reason.
         format!("{base}; pi stderr: {stderr_tail}")
+    };
+    if reaped {
+        error
+    } else {
+        format!("{error}; child did not exit within grace")
     }
 }
 
@@ -643,6 +660,9 @@ mod tests {
         Utf8Framing,
         /// Writes a startup diagnostic to stderr and dies before settling.
         StderrThenDie,
+        /// Closes stdout while staying alive: stdout EOF with a live child.
+        #[cfg(unix)]
+        CloseStdoutAndLive,
     }
 
     fn body_for(scenario: FakeScenario) -> String {
@@ -669,6 +689,9 @@ mod tests {
             FakeScenario::StderrThenDie => {
                 format!("write_err '{STARTUP_DIAGNOSTIC}'\nexit_fail")
             }
+            #[cfg(unix)]
+            // stdout EOF with a still-live child: exercises the reap bound.
+            FakeScenario::CloseStdoutAndLive => "exec 1>&-\nsleep 60".to_owned(),
             #[cfg(unix)]
             FakeScenario::Utf8Framing => format!(
                 "read_cmd\nwrite_line '{PROMPT_OK}'\nprintf '%s\\n' '{}'\nwrite_line '{SETTLED}'\nread_cmd\nwrite_line '{STATS_042}'\nsleep 60",
@@ -1009,15 +1032,42 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let cancel = CancellationToken::new();
-        let result = session
-            .run_turn("do the task", None, Duration::from_secs(30), false, &cancel)
-            .await;
+        // Same outer bound `run_fake` gives siblings: a regression here must
+        // fail the test, not hang the CI job.
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            session.run_turn("do the task", None, Duration::from_secs(30), false, &cancel),
+        )
+        .await
+        .context("test timed out waiting for run_turn")?;
         session.terminate().await;
         let result = result?;
         match result {
             PhaseResult::AgentCrash { error } => {
                 assert!(error.contains(STARTUP_DIAGNOSTIC), "{error}");
                 assert!(error.contains("pi stderr:"), "{error}");
+            }
+            other => panic!("expected AgentCrash, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    /// #538: stdout hits EOF while the child is still alive — the reap must
+    /// be bounded by a grace period and the error must say the child did not
+    /// exit, instead of hanging the turn.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reap_grace_expiry_reports_instead_of_hanging() -> Result<()> {
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
+        let started = std::time::Instant::now();
+        let result = run_fake(FakeScenario::CloseStdoutAndLive, &phase).await?;
+        assert!(
+            started.elapsed() < Duration::from_secs(25),
+            "reap grace expiry must be prompt"
+        );
+        match result {
+            PhaseResult::AgentCrash { error } => {
+                assert!(error.contains("did not exit within grace"), "{error}");
             }
             other => panic!("expected AgentCrash, got {other:?}"),
         }
