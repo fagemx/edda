@@ -1,8 +1,9 @@
 <h1 align="center">Edda</h1>
 
 <p align="center">
-  <strong>Your agent's decisions shouldn't reset every session.</strong><br/>
-  Edda gives coding agents a local, automatic memory of what was decided — and why.<br/>
+  <strong>Your agents' work shouldn't vanish when the session dies.</strong><br/>
+  Edda is a local, tamper-evident ledger for coding agents:<br/>
+  decisions that survive sessions, and coordination that survives agents.<br/>
   Works with Claude Code, Cursor, Codex, OpenClaw, and any MCP client.
 </p>
 
@@ -16,6 +17,8 @@
 
 <p align="center">
   <a href="#why-edda">Why Edda?</a> ·
+  <a href="#layer-1--memory-that-survives-sessions">Memory</a> ·
+  <a href="#layer-2--coordination-that-survives-agents">Fleet</a> ·
   <a href="#install">Install</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#how-it-works">How It Works</a> ·
@@ -36,9 +39,24 @@
 
 ## Why Edda?
 
-Yesterday you and your agent argued through the tradeoffs and settled on SQLite. Today's session opens — and it proposes Postgres. Again. The reasoning died with the transcript, and compaction can't bring it back.
+Agent work disappears in two ways.
 
-Edda fixes exactly this: hooks watch your sessions, capture each decision with its rationale into a local ledger, and hand it to the next session before it starts. The agent stops forgetting.
+**The session dies, and the decisions die with it.** Yesterday you and your agent argued through the tradeoffs and settled on SQLite. Today's session opens — and it proposes Postgres. Again. The reasoning died with the transcript, and compaction can't bring it back.
+
+**The agent dies, and the work state dies with it.** You run two or three agents in parallel and one session crashes mid-task. What was it doing? What did it finish? Was anything half-done? If the answer lives in a process that no longer exists, you get to reconstruct it by hand — or worse, redo work that was already done.
+
+Edda fixes both with the same primitive: **an append-only, hash-chained ledger in `.edda/`, on your machine, that outlives any session, any agent, and any tool.** One ledger, two layers of application:
+
+| Layer | Question it answers | Primitives |
+|---|---|---|
+| **Memory** | *What was decided, and why?* | decisions, notes, session digests, automatic injection |
+| **Fleet** | *Who is doing what, and what actually happened?* | claims, tasks + receipts, plans, gates, verdicts |
+
+Use layer 1 alone from day one. Layer 2 is simply there — same ledger, same CLI — when you start running more than one agent.
+
+## Layer 1 — Memory that survives sessions
+
+Hooks watch your sessions, capture each decision with its rationale into the ledger, and hand it to the next session before it starts. The agent stops forgetting.
 
 ```
 Without edda                          With edda
@@ -60,7 +78,7 @@ You: "We settled this. YESTERDAY."       writer, JSONB not needed)…"
 
 **Data stays local** — the ledger lives in `.edda/` (SQLite + local files), with no cloud and no accounts. The core loop (record, retrieve, inject) is deterministic and never calls out. **Optional LLM assist** for session digests, decision extraction, and pattern correlation is opt-in via `EDDA_LLM_API_KEY` and budget-capped — leave the key unset and edda runs zero-egress.
 
-## One memory, every agent
+### One memory, every agent
 
 More and more developers alternate between agents — Claude Code for one task, Codex for a second opinion on the next. Both models are strong; what breaks is the memory. Each tool keeps its own silo, so every switch means re-explaining the project from zero.
 
@@ -91,6 +109,42 @@ Edda starts paying for itself when any of these is true:
 | Sessions run in containers | Each container is an island; the shared state you'd mount *is* `.edda/` |
 
 </details>
+
+## Layer 2 — Coordination that survives agents
+
+The moment you run a second agent, memory stops being the hard problem. The hard problems become: *who is working where, who decided what under which authority, and what actually happened while you weren't looking.* Edda answers all three from the same ledger.
+
+**Claims — who is working where.** Sessions declare their scope; every peer sees it injected into context, and a guard warns before an agent edits a path someone else claimed. Parallel sessions stop trampling each other.
+
+```bash
+edda claim "auth-refactor" --paths "src/auth/*"
+```
+
+**Tasks with receipts — what actually happened.** Work is handed off on a task rail, and a task is only done when it carries evidence. A `done` without a receipt does not exist.
+
+```bash
+edda task new "run integration tests" --assignee tester
+edda task done 13 --receipt "110/601 green, artifact in dist/"
+```
+
+**Plans with gates — multi-phase work that pauses for judgment.** `edda conduct` runs a YAML plan phase by phase: each phase dispatches an agent, verifies its output with checks, and can hold at a **verdict gate** before anything irreversible or expensive. The gate pins the exact git SHA it approves — a new push invalidates the old verdict by construction.
+
+```bash
+edda conduct run plan.yaml         # run a multi-phase plan
+edda conduct status                # where is every plan right now
+edda verdict approve my-plan/impl --sha <full-40-hex-sha>
+edda verdict reject  my-plan/impl --sha <sha> --comment "tests missing"
+```
+
+**Detached lanes — work that outlives its launcher.** `edda dispatch` runs one agent turn (Claude, Codex, or pi) as a self-contained unit you can launch detached. The lane does not depend on the session that spawned it: when a controller session died mid-flight — ours did, three times in one day — the dispatched work kept running, and its results were recovered from branches, PRs, and the ledger rather than from anyone's memory.
+
+```bash
+edda dispatch --agent codex --prompt-file task.md
+```
+
+**Two-tier authority — recorded is not binding.** Agents record decisions freely, but a recorded decision is *unratified* until the operator confers authority with `edda ratify`. Your fleet can propose all day; only you make it policy. Combined with the hash chain, this is the property the whole layer is built for: **agents run on your machine, and you can always check what they did — in order, tamper-evident, with the authority trail attached.**
+
+> **Maturity note:** layer 1 is stable daily-driver territory. Layer 2 ships today (claims, tasks, conduct, dispatch, verdict gates, ratify) and is where edda is growing fastest — in-flight work on liveness heartbeats, unified fleet status, and event-driven notifications is tracked in [#560](https://github.com/fagemx/edda/issues/560). It is developed by being used: edda's own multi-agent fleet builds edda with it.
 
 ## Install
 
@@ -141,7 +195,7 @@ This is the key to Edda's automation — the agent learns to call `edda decide` 
 Claude Code session
         │
    Bridge hooks (deterministic, always on)
-        │  ├── record decisions / notes / peer signals
+        │  ├── record decisions / notes / claims / peer signals
         │  ├── inject prior context on session start
         │  └── optional: doctrine pack from havamal
         ▼
@@ -157,7 +211,7 @@ Claude Code session
    Next session sees everything
 ```
 
-Edda stores every event as a hash-chained JSON record in a local SQLite database. Events include decisions, notes, session digests, and command outputs. The hash chain makes the history tamper-evident and the retrieval deterministic — same query, same answer, no LLM in the loop.
+Edda stores every event as a hash-chained JSON record in a local SQLite database. Events include decisions, notes, session digests, tasks, claims, verdicts, and command outputs. The hash chain makes the history tamper-evident and the retrieval deterministic — same query, same answer, no LLM in the loop.
 
 At the start of each session, edda assembles a context snapshot from the ledger and injects it — the agent sees recent decisions, active tasks, peer coordination, and (if configured) a doctrine pack from [havamal](https://github.com/fagemx/havamal), without reading through old transcripts.
 
@@ -175,6 +229,7 @@ At the start of each session, edda assembles a context snapshot from the ledger 
 | **Tracks "why"?** | Sometimes | No | Lossy | **Yes** (rationale + rejected alternatives) |
 | **Cross-session?** | Manual copy | Yes | Session-scoped | **Yes** (automatic) |
 | **Cross-agent?** | No — one tool's file | Per-app integration | No — vendor silo | **Yes** (Claude Code, Codex, OpenClaw, MCP) |
+| **Multi-agent coordination?** | No | No | No | **Yes** (claims, tasks + receipts, gates) |
 | **Cost per query** | Free | Embedding API call | LLM API call | **Free** (local SQLite); optional digests budget-capped |
 
 | **Examples** | Claude Code built-in, OpenClaw | mem0, Zep, Chroma | ChatGPT Memory, Copilot | — |
@@ -250,32 +305,45 @@ edda watch                 # real-time TUI: peers, events, decisions
 <details>
 <summary>All commands</summary>
 
+**Memory & retrieval**
+
 | Command | Description |
 |---------|-------------|
 | `edda init` | Initialize `.edda/` (auto-installs hooks if `.claude/` detected) |
 | `edda decide` | Record a decision (agent-authored; `edda ratify` to make binding) |
 | `edda note` | Record a note |
-| `edda ratify` | Confer operator authority on a decision (recorded ≠ ratified) |
-| `edda task` | Task rail: create, hand off, and track tasks (`new/start/done/fail/list/show`) |
 | `edda ask` | Query decisions, history, and conversations |
 | `edda search` | Full-text search across transcripts (Tantivy) |
 | `edda log` | Query events with filters (type, date, tag, branch) |
 | `edda context` | Output context snapshot (what the agent sees) |
 | `edda status` | Show workspace status |
-| `edda watch` | Real-time TUI: peers, events, decisions |
+| `edda run` | Run a command and record output |
 | `edda commit` | Create a commit event |
-| `edda branch` | Branch operations |
-| `edda switch` | Switch branch |
-| `edda merge` | Merge branches |
+
+**Fleet & orchestration**
+
+| Command | Description |
+|---------|-------------|
+| `edda claim` | Declare working scope so peers don't collide |
+| `edda task` | Task rail: create, hand off, and track tasks (`new/start/done/fail/list/show`) |
+| `edda ratify` | Confer operator authority on a decision (recorded ≠ ratified) |
+| `edda conduct` | Multi-phase plan orchestration with checks and gates |
+| `edda dispatch` | Single-turn agent dispatch (claude / codex / pi) |
+| `edda verdict` | Approve / reject a gated subject, pinned to a git SHA |
+| `edda watch` | Real-time TUI: peers, events, decisions |
 | `edda draft` | Propose / list / approve / reject drafts |
+
+**Workspace & plumbing**
+
+| Command | Description |
+|---------|-------------|
 | `edda bridge` | Install/uninstall tool hooks |
 | `edda doctor` | Health check |
 | `edda config` | Read/write workspace config |
 | `edda pattern` | Manage classification patterns |
 | `edda mcp` | Start MCP server (stdio JSON-RPC 2.0) |
-| `edda conduct` | Multi-phase plan orchestration |
 | `edda plan` | Plan scaffolding and templates |
-| `edda run` | Run a command and record output |
+| `edda branch` / `edda switch` / `edda merge` | Ledger branch operations |
 | `edda blob` | Manage blob metadata |
 | `edda gc` | Garbage collect expired content |
 
@@ -355,9 +423,13 @@ Shipped:
 - [x] Distribution — prebuilt binaries (macOS, Linux, Windows), one-line installer, Homebrew tap
 - [x] v0.2.0 — `edda watch` TUI, `edda ask`, peers/coordination commands, sub-agent visibility, model/token/cost capture in session hooks, user-level store (`~/.edda/`), post-mortem learned rules
 - [x] Decision deepening — `--paths`-scoped decisions, PreToolUse guard warnings, session-start decision pack, decision status lifecycle
+- [x] Fleet primitives — `edda conduct` multi-phase plans, `edda dispatch` single-turn lanes, verdict gates with SHA pinning, task rail with receipts, `edda ratify` two-tier authority
 
-Next:
+Next — folding the fleet intelligence layer into the product ([#560](https://github.com/fagemx/edda/issues/560)):
 
+- [ ] Surface-aware scheduling — phases declare the paths they own; claims carry them; overlapping dispatch is refused structurally
+- [ ] Event-driven delivery — phase terminal states and gate entries pushed through `edda-notify` instead of polled from stdout
+- [ ] Fleet observability — in-flight heartbeats and a single status plane covering both `conduct` plans and `dispatch` lanes
 - [ ] Cross-repo decision query surface — the user-level store already aggregates across projects; a first-class search/ask across repos is the remaining gap
 - [ ] Decision recall metrics — measure how often injected decisions actually change behavior
 
@@ -376,4 +448,4 @@ MIT OR Apache-2.0
 
 ---
 
-*Stop re-teaching your agent what you already decided.*
+*Stop re-teaching your agent what you already decided — and stop taking your fleet's word for what it did.*
