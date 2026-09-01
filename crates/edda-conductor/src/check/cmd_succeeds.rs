@@ -8,12 +8,17 @@ use tokio::process::Command;
 const OUTPUT_TAIL_CHARS: usize = 2000;
 
 /// Output substrings that identify a machine-layer build failure (GH-540).
-/// LNK1104's payload — the file the linker could not open — is the single
-/// token distinguishing a held .exe from a concurrent cargo or an antivirus
-/// handle, so the capture must reach the tail of the stream that names it.
-/// (Content classification, unlike the GH-529 timeout: a linker fault has no
-/// constructor-level signal, the output text is the only evidence.)
-const ENVIRONMENTAL_PATTERNS: &[&str] = &["LNK1104"];
+/// The full linker-fatal signature — not the bare code — is required (review
+/// round 1): a bare `LNK1104` token also shows up in agent output that merely
+/// DISCUSSES the error (e.g. a cargo test panicking on an assertion about the
+/// LNK1104 message), and classifying that environmental would hand a product
+/// failure free retries. link.exe's fatal line is
+/// `LINK : fatal error LNK1104: cannot open file '...'`, so the
+/// `fatal error LNK1104` pair is the signature. The capture must still reach
+/// the tail of the stream that names it. (Content classification, unlike the
+/// GH-529 timeout: a linker fault has no constructor-level signal, the output
+/// text is the only evidence.)
+const ENVIRONMENTAL_PATTERNS: &[&str] = &["fatal error LNK1104"];
 
 fn is_environmental(stderr: &str, stdout: &str) -> bool {
     ENVIRONMENTAL_PATTERNS
@@ -258,5 +263,32 @@ mod tests {
         let out = check_cmd_succeeds(cmd, 10, dir.path()).await;
         assert!(!out.passed);
         assert!(!out.environmental);
+    }
+
+    /// GH-540 review round 1: a BARE `LNK1104` token in a non-linker context
+    /// — e.g. a cargo test panicking on an assertion that discusses the
+    /// LNK1104 message — must stay a plain product failure. Only the actual
+    /// linker-fatal signature (`fatal error LNK1104`) classifies
+    /// environmental; matching the bare code misclassified exactly this
+    /// shape as a machine fault and granted it free retries.
+    #[tokio::test]
+    async fn bare_lnk1104_token_is_not_environmental() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(not(windows))]
+        let cmd = "echo 'panicked: assertion failed: detail.contains(\"LNK1104\")' 1>&2 ; exit 1";
+        #[cfg(windows)]
+        let cmd =
+            "[Console]::Error.WriteLine('panicked: assertion failed: detail.contains(''LNK1104'')') ; exit 1";
+        let out = check_cmd_succeeds(cmd, 10, dir.path()).await;
+        assert!(!out.passed);
+        let detail = out.detail.unwrap();
+        assert!(
+            detail.contains("LNK1104"),
+            "token must reach the tail: {detail}"
+        );
+        assert!(
+            !out.environmental,
+            "a bare LNK1104 mention is not a linker fault"
+        );
     }
 }

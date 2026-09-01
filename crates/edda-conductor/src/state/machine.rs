@@ -89,11 +89,13 @@ pub struct PhaseState {
     pub verdict_actor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict_comment: Option<String>,
-    /// Environmental build failures retried so far this phase run (GH-540).
+    /// Environmental build failures charged so far this phase run (GH-540).
     /// `attempts` counts every dispatch (attempt numbers must stay unique —
     /// they key the session id), so the product attempt count is
-    /// `attempts - env_retries`. Capped at `MAX_ENV_RETRIES` so a persistently
-    /// broken environment still halts instead of looping forever.
+    /// `attempts - env_retries`. Every environmental occurrence — including
+    /// the one that exhausts the cap — is charged here (review round 1), so
+    /// retrying stops once the counter passes `MAX_ENV_RETRIES` while product
+    /// accounting stays exact across a manual retry.
     #[serde(default)]
     pub env_retries: u32,
 }
@@ -122,6 +124,24 @@ pub enum ErrorType {
     /// Windows LNK1104): not the agent's work, so retrying is worthwhile —
     /// but the retry is never charged to `max_attempts`.
     Environmental,
+}
+
+impl ErrorType {
+    /// Stable snake_case tag matching this enum's serde representation
+    /// (GH-540 review round 1): the runner's `phase_failed` event carries it
+    /// so generic JSONL consumers see the failure classification without
+    /// deserializing `ErrorInfo`.
+    pub fn tag(&self) -> &'static str {
+        match self {
+            ErrorType::AgentCrash => "agent_crash",
+            ErrorType::CheckFailed => "check_failed",
+            ErrorType::Timeout => "timeout",
+            ErrorType::BudgetExceeded => "budget_exceeded",
+            ErrorType::UserAbort => "user_abort",
+            ErrorType::GateRejected => "gate_rejected",
+            ErrorType::Environmental => "environmental",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
