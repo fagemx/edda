@@ -155,10 +155,12 @@ impl DispatchOutput {
     }
 
     /// The `Cost:` line, reusing conduct's honest rendering: a total nobody
-    /// measured renders as "n/a", never as a fabricated "$0.00".
+    /// measured renders as "n/a", never as a fabricated "$0.00". Here
+    /// measured-ness is the `Option` itself — `Some(c)` means the backend
+    /// reported that figure, including a genuine $0.00 (GH-533).
     fn cost_text(&self) -> String {
         self.cost_usd
-            .map(cost_line)
+            .map(|cost| cost_line(cost, true))
             .unwrap_or_else(|| NO_USAGE_COST_TEXT.to_owned())
     }
 

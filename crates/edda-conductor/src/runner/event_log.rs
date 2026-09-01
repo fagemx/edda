@@ -78,7 +78,10 @@ pub enum Event {
     },
     PlanCompleted {
         phases_passed: usize,
-        total_cost_usd: f64,
+        /// GH-533: `None` until any phase recorded a measured cost — same
+        /// pattern as `PhasePassed::cost_usd`. A usage-free backend (codex)
+        /// emits `null`, never the unmeasured `0.0` sentinel.
+        total_cost_usd: Option<f64>,
     },
     PlanAborted {
         phases_passed: usize,
@@ -232,6 +235,29 @@ mod tests {
         assert!(json.contains(r#""type":"plan_start""#));
         assert!(json.contains(r#""plan_name":"test""#));
         assert!(json.contains(r#""phase_count":3"#));
+    }
+
+    #[test]
+    fn event_plan_completed_unmeasured_cost_is_not_asserted() {
+        // GH-533: a usage-free backend (codex) must not emit the sentinel
+        // `total_cost_usd: 0.0` as if it were a measured figure.
+        let event = Event::PlanCompleted {
+            phases_passed: 2,
+            total_cost_usd: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains(r#""total_cost_usd":0.0"#));
+        assert!(json.contains(r#""total_cost_usd":null"#));
+    }
+
+    #[test]
+    fn event_plan_completed_measured_cost_round_trips_exactly() {
+        let event = Event::PlanCompleted {
+            phases_passed: 1,
+            total_cost_usd: Some(1.234),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""total_cost_usd":1.234"#));
     }
 
     #[test]

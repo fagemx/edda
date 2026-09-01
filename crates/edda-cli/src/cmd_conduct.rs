@@ -508,15 +508,14 @@ fn gate_preview(phase: &Phase) -> String {
 /// `edda dispatch`'s no-usage rendering so the string has one source.
 pub(crate) const NO_USAGE_COST_TEXT: &str = "n/a (no usage data reported)";
 
-/// The status cost line.
+/// The status cost line, derived from the cost model (GH-533).
 ///
-/// `PlanState` does not record which agent backend ran, so a zero total
-/// cannot be attributed: usage-free backends like codex report no cost data
-/// at all, while a backend that reports usage overwrites the zero with a
-/// real figure once a phase completes. Printing "$0.00" for a codex run
-/// would assert a spend nobody measured, so a zero total renders as "n/a".
-pub(crate) fn cost_line(total_cost_usd: f64) -> String {
-    if total_cost_usd == 0.0 {
+/// `PlanState` records `cost_measured` alongside `total_cost_usd`, so a
+/// total nobody measured (usage-free backends like codex) renders as "n/a"
+/// while a genuine measured figure — including a real $0.00 — is asserted
+/// as-is. Under-claiming beats asserting an unmeasured figure.
+pub(crate) fn cost_line(total_cost_usd: f64, cost_measured: bool) -> String {
+    if !cost_measured {
         NO_USAGE_COST_TEXT.to_owned()
     } else {
         format!("${total_cost_usd:.2}")
@@ -561,7 +560,10 @@ fn print_status(state: &PlanState) {
     if !state.plan_file.is_empty() {
         println!("  File: {}", state.plan_file);
     }
-    println!("  Cost: {}", cost_line(state.total_cost_usd));
+    println!(
+        "  Cost: {}",
+        cost_line(state.total_cost_usd, state.cost_measured)
+    );
 
     println!();
     for ps in &state.phases {
@@ -749,14 +751,20 @@ mod tests {
     }
 
     #[test]
-    fn cost_line_reports_na_for_a_zero_total() {
-        // A zero total cannot be attributed to a backend (PlanState records
-        // no agent); codex runs would otherwise print a false "$0.00".
-        assert_eq!(cost_line(0.0), "n/a (no usage data reported)");
+    fn cost_line_reports_na_when_unmeasured() {
+        // GH-533: measured-ness comes from the model, not the zero sentinel.
+        assert_eq!(cost_line(0.0, false), "n/a (no usage data reported)");
     }
 
     #[test]
-    fn cost_line_formats_a_reported_total() {
-        assert_eq!(cost_line(1.234), "$1.23");
+    fn cost_line_formats_a_measured_total() {
+        assert_eq!(cost_line(1.234, true), "$1.23");
+    }
+
+    #[test]
+    fn cost_line_asserts_a_genuinely_measured_zero() {
+        // A backend that reported usage summing to zero measured a real $0.00;
+        // the model now distinguishes it from "nobody measured anything".
+        assert_eq!(cost_line(0.0, true), "$0.00");
     }
 }

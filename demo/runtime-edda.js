@@ -173,6 +173,13 @@ function translateEvent(event, taskId) {
       };
 
     case "plan_completed":
+      // GH-533: total_cost_usd is f64|null — null means the backend never
+      // reported usage (unmeasured), not a genuine $0.00. The brief schema
+      // documents cost.total_usd as a number, so an unmeasured total emits
+      // no cost claim at all rather than asserting null or a coerced 0.
+      // Mirrors the Rust cost_line model: unmeasured renders "n/a", a
+      // measured zero round-trips as 0.
+      if (event.total_cost_usd == null) return null;
       return {
         cost: { total_usd: event.total_cost_usd },
       };
@@ -195,7 +202,14 @@ function translateEvent(event, taskId) {
 function extractReplyText(events) {
   const completed = events.find((e) => e.type === "plan_completed");
   if (completed) {
-    return `Plan completed: ${completed.phases_passed} phases, $${completed.total_cost_usd.toFixed(2)}`;
+    // GH-533: null total_cost_usd is unmeasured (no usage data), not $0.00.
+    // Render it as not-available, matching the Rust cost_line wording; a
+    // genuine measured zero still renders $0.00.
+    const costText =
+      completed.total_cost_usd != null
+        ? `$${completed.total_cost_usd.toFixed(2)}`
+        : "n/a (no usage data reported)";
+    return `Plan completed: ${completed.phases_passed} phases, ${costText}`;
   }
   const aborted = events.find((e) => e.type === "plan_aborted");
   if (aborted) {
