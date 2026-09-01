@@ -475,11 +475,13 @@ enum Command {
         #[command(subcommand)]
         cmd: IntakeCmd,
     },
-    /// Show agent phase detection status
+    /// Agent phase map, plus approve/reject sugar over `edda verdict` (GH-547)
     Phase {
-        /// Output as JSON
+        /// Output as JSON (status view only)
         #[arg(long)]
         json: bool,
+        #[command(subcommand)]
+        cmd: Option<cmd_phase::PhaseCmd>,
     },
     /// Scan and record PR events from GitHub
     Prs {
@@ -1243,7 +1245,10 @@ fn main() -> anyhow::Result<()> {
         Command::Intake { cmd } => match cmd {
             IntakeCmd::Github { issue_id } => cmd_intake::execute_github(&repo_root, issue_id),
         },
-        Command::Phase { json } => cmd_phase::execute(&repo_root, json),
+        Command::Phase { json, cmd } => match cmd {
+            Some(phase_cmd) => cmd_phase::run_gate_sugar(phase_cmd, &repo_root),
+            None => cmd_phase::execute(&repo_root, json),
+        },
         Command::Prs { cmd } => cmd_prs::run_prs(cmd, &repo_root),
         Command::Pipeline { cmd } => match cmd {
             PipelineCmd::Run { issue_id, dry_run } => {
