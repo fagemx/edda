@@ -13,7 +13,7 @@
 
 use anyhow::Context;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// One query-path/claim-path pair that overlaps.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -299,6 +299,248 @@ mod tests {
         );
     }
 
+    // ── Round-1 P1-1 regressions: real intersections must never be cleared ──
+
+    #[test]
+    fn review_pair_double_star_prefix() {
+        // Both match crates/edda-cli/src/cmd_claim.rs.
+        assert!(surfaces_intersect(
+            "crates/**/cmd_*",
+            "crates/edda-cli/src/*claim.rs"
+        ));
+    }
+
+    #[test]
+    fn review_pair_both_sided_wildcards() {
+        // Both match crates/edda-cli/src/cmd_claim.rs.
+        assert!(surfaces_intersect(
+            "crates/edda-*/src/cmd_claim.rs",
+            "crates/*cli/src/cmd_claim.rs"
+        ));
+    }
+
+    #[test]
+    fn review_pair_char_class_and_question() {
+        // Both match crates/edda-cli/src/cmd_ask.rs.
+        assert!(surfaces_intersect(
+            "crates/edda-cli/src/cmd_[ab]*",
+            "*cmd_a?*"
+        ));
+    }
+
+    #[test]
+    fn review_pair_brace_expansion() {
+        // Both match crates/edda-cli/src/main.rs.
+        assert!(surfaces_intersect(
+            "crates/{edda-cli,docs}/src/main.rs",
+            "crates/edda-cli/src/*.rs"
+        ));
+    }
+
+    #[test]
+    fn review_pair_filler_longer_than_one_char() {
+        // `abcd` is matched by both; the old one-character witness missed it.
+        assert!(surfaces_intersect("ab*", "*cd"));
+    }
+
+    #[test]
+    fn review_pair_suffix_only_globs() {
+        // Both match cmd_claim.rs.
+        assert!(surfaces_intersect("*claim.rs", "*cmd_claim.rs"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_case_is_normalized() {
+        // SRC/*.RS and src/main.rs name the same file on Windows.
+        assert!(surfaces_intersect("SRC/*.RS", "src/main.rs"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_backslash_separator_is_normalized() {
+        assert!(surfaces_intersect("src\\*.rs", "src/*.rs"));
+        assert!(surfaces_intersect("src\\main.rs", "src/main.rs"));
+    }
+
+    #[test]
+    fn leading_dot_slash_is_normalized() {
+        assert!(surfaces_intersect("./src/main.rs", "src/main.rs"));
+        assert!(surfaces_intersect("./src/*.rs", "src/*.rs"));
+    }
+
+    #[test]
+    fn distinct_directories_stay_disjoint() {
+        assert!(!surfaces_intersect(
+            "crates/edda-cli/src/*",
+            "crates/edda-conductor/src/*"
+        ));
+    }
+
+    #[test]
+    fn different_extensions_stay_disjoint() {
+        assert!(!surfaces_intersect("src/*.rs", "docs/*.md"));
+    }
+
+    #[test]
+    fn double_star_confined_to_prefix_stays_disjoint() {
+        assert!(!surfaces_intersect("crates/**", "docs/x.md"));
+    }
+
+    #[test]
+    fn double_star_still_needs_final_component() {
+        assert!(!surfaces_intersect("a/**/b", "a/x"));
+    }
+
+    // ── End-to-end: the board must not fail open (Round-1 P1-2) and the
+    //    non-`check` parser must be unchanged (Round-1 P1-3). ──
+
+    /// Spawn the binary and return (exit code, stdout, stderr).
+    fn run_edda(args: &[&str], repo: &Path, store: &Path) -> (i32, String, String) {
+        let out = std::process::Command::new(edda_bin())
+            .args(args)
+            .current_dir(repo)
+            .env("EDDA_STORE_ROOT", store)
+            .output()
+            .expect("spawn edda");
+        (
+            out.status.code().expect("exit code"),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    fn board_file(store: &Path, project_id: &str) -> PathBuf {
+        store
+            .join("projects")
+            .join(project_id)
+            .join("state")
+            .join("coordination.jsonl")
+    }
+
+    #[test]
+    fn e2e_unreadable_board_is_error_not_clear() {
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        // A directory at the board path makes every read fail.
+        std::fs::create_dir_all(board_file(store.path(), &project_id)).expect("block board");
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "check", "src/main.rs", "--json"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code,
+            2,
+            "unreadable board must exit 2, got stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_malformed_board_line_is_error_not_clear() {
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &["{".to_string(), coord_event("s1", "peer-a", &["src/*"])],
+        );
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "check", "src/main.rs", "--json"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code,
+            2,
+            "malformed board line must exit 2, got stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_missing_board_is_clear() {
+        // A missing board file legitimately means an empty board: exit 0.
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let store = tempfile::tempdir().expect("store tempdir");
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "check", "src/main.rs", "--json"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code,
+            0,
+            "missing board must stay clear, got stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_non_check_label_rejects_trailing_positional() {
+        // Pre-GH-562 this was a clap usage error (exit 2); the shortcut must
+        // not silently record a pathless claim from a typo.
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "auth", "extra", "--session", "probe"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code,
+            2,
+            "expected usage error, got stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            !board_file(store.path(), &project_id).exists(),
+            "a pathless claim must not be recorded"
+        );
+    }
+
+    #[test]
+    fn e2e_non_check_label_rejects_json_flag() {
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let store = tempfile::tempdir().expect("store tempdir");
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "auth", "--json"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code,
+            2,
+            "--json is check-only, got stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_non_check_claim_still_records_paths() {
+        // The plain claim path must keep working byte-identically.
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "auth", "--paths", "src/auth/*", "--session", "probe"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code,
+            0,
+            "plain claim must still work, got stdout={stdout:?} stderr={stderr:?}"
+        );
+        let board =
+            std::fs::read_to_string(board_file(store.path(), &project_id)).expect("board file");
+        assert!(board.contains("\"paths\":[\"src/auth/*\"]"), "claim event must carry the paths, got: {board}");
+    }
     #[test]
     fn invalid_glob_degrades_to_literal() {
         // `[` without a closing bracket is unparseable for globset.
