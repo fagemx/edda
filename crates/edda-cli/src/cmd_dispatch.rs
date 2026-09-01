@@ -671,6 +671,62 @@ mod tests {
         assert_eq!(recorded[1], "fixed-id");
     }
 
+    /// P0 regression (review round 1): the user-controlled `--session-id`
+    /// reaches the heartbeat writer; a traversal id (`x\..\..\..\escaped`
+    /// was the reviewed repro that wrote `store/projects/escaped.json`)
+    /// must be contained by the store's path funnel, not escape the state
+    /// directory.
+    #[tokio::test]
+    // The mutex guard protects the process-global EDDA_STORE_ROOT against
+    // other test threads for the whole test, including the await below —
+    // that is the point, not an accidental hold.
+    #[allow(clippy::await_holding_lock)]
+    async fn hostile_session_id_cannot_escape_the_state_directory() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("EDDA_STORE_ROOT");
+        std::env::set_var("EDDA_STORE_ROOT", tmp.path());
+
+        let launcher = RecordingLauncher {
+            session_ids: Mutex::new(Vec::new()),
+        };
+        let phase = build_phase("prompt", None, None, "bypassPermissions");
+        let sid = "x\\..\\..\\..\\escaped";
+        run_with_launcher(
+            &launcher,
+            &phase,
+            sid,
+            Path::new("."),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        let project_id = edda_store::project_id(Path::new("."));
+        let project = edda_store::project_dir(&project_id);
+        let state = project.join("state");
+        assert!(
+            edda_store::read_heartbeat(&project_id, sid).is_some(),
+            "heartbeat written under the sanitized in-state-dir path"
+        );
+        // Nothing escaped to the project dir, the projects/ level or the
+        // store root.
+        assert!(!project.join("escaped.json").exists());
+        assert!(!state.join("escaped.json").exists());
+        if let Some(projects) = project.parent() {
+            assert!(!projects.join("escaped.json").exists());
+            if let Some(root) = projects.parent() {
+                assert!(!root.join("escaped.json").exists());
+            }
+        }
+        match previous {
+            Some(v) => std::env::set_var("EDDA_STORE_ROOT", v),
+            None => std::env::remove_var("EDDA_STORE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(tmp.path());
+    }
+
     // ── Synthetic phase parity with conduct ──
 
     #[test]

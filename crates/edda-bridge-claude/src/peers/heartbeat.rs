@@ -14,6 +14,10 @@ use super::{
 // ── Heartbeat Write/Read ──
 
 /// Write a full heartbeat (called from ingest_and_build_pack after signal extraction).
+/// Read-modify-write via `edda_store::update_heartbeat`: the hook producer
+/// owns the signal fields; lane fields (plan/phase/attempt/stage/pid) and
+/// the parent link written by other producers on the same shared surface are
+/// preserved, and concurrent writers are serialized by the sidecar lock.
 pub(crate) fn write_heartbeat(
     project_id: &str,
     session_id: &str,
@@ -22,12 +26,6 @@ pub(crate) fn write_heartbeat(
     cwd: &str,
 ) {
     let now = now_rfc3339();
-    let path = heartbeat_path(project_id, session_id);
-
-    // Preserve started_at from existing heartbeat, or use now
-    let started_at = read_heartbeat(project_id, session_id)
-        .map(|h| h.started_at)
-        .unwrap_or_else(|| now.clone());
 
     let branch = detect_git_branch_in(cwd);
 
@@ -48,67 +46,59 @@ pub(crate) fn write_heartbeat(
             }
         });
 
-    let heartbeat = SessionHeartbeat {
-        session_id: session_id.to_string(),
-        started_at,
-        last_heartbeat: now,
-        label: derived_label,
-        focus_files: signals
+    let _ = edda_store::update_heartbeat(project_id, session_id, |hb| {
+        if hb.started_at.is_empty() {
+            hb.started_at = now.clone();
+        }
+        hb.last_heartbeat = now.clone();
+        hb.label = derived_label.clone();
+        hb.focus_files = signals
             .files_modified
             .iter()
             .take(5)
             .map(|f| f.path.clone())
-            .collect(),
-        active_tasks: signals.tasks.clone(),
-        files_modified_count: signals.files_modified.len(),
-        total_edits: signals.files_modified.iter().map(|f| f.count).sum(),
-        recent_commits: signals
+            .collect();
+        hb.active_tasks = signals.tasks.clone();
+        hb.files_modified_count = signals.files_modified.len();
+        hb.total_edits = signals.files_modified.iter().map(|f| f.count).sum();
+        hb.recent_commits = signals
             .commits
             .iter()
             .rev()
             .take(3)
             .map(|c| format!("{} {}", &c.hash[..7.min(c.hash.len())], c.message))
-            .collect(),
-        branch,
-        current_phase: crate::agent_phase::read_phase_state(project_id, session_id)
-            .map(|ps| ps.phase.to_string()),
-        parent_session_id: None,
-        plan: None,
-        phase: None,
-        attempt: None,
-        stage: None,
-        pid: None,
-    };
-
-    let data = match serde_json::to_string_pretty(&heartbeat) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let _ = edda_store::write_atomic(&path, data.as_bytes());
+            .collect();
+        hb.branch = branch.clone();
+        hb.current_phase = crate::agent_phase::read_phase_state(project_id, session_id)
+            .map(|ps| ps.phase.to_string());
+        // parent_session_id and the conductor lane fields (plan, phase,
+        // attempt, stage, pid) belong to other producers — preserved.
+    });
 }
 
 /// Lightweight heartbeat touch: only update last_heartbeat timestamp.
+/// Rides the shared locked update; a still-virgin record is not persisted.
 pub fn touch_heartbeat(project_id: &str, session_id: &str) {
-    let path = heartbeat_path(project_id, session_id);
-    if let Some(mut hb) = read_heartbeat(project_id, session_id) {
-        hb.last_heartbeat = now_rfc3339();
-        if let Ok(data) = serde_json::to_string_pretty(&hb) {
-            let _ = edda_store::write_atomic(&path, data.as_bytes());
+    let now = now_rfc3339();
+    let _ = edda_store::update_heartbeat(project_id, session_id, |hb| {
+        if hb.started_at.is_empty() && hb.last_heartbeat.is_empty() {
+            // No existing heartbeat: skip touch (write_heartbeat creates it).
+            return;
         }
-    }
-    // If no existing heartbeat, skip touch (write_heartbeat will create it)
+        hb.last_heartbeat = now.clone();
+    });
 }
 
 /// Update the branch field in an existing heartbeat.
 /// Called when the agent intentionally switches branch (git checkout / git switch).
 pub(crate) fn update_heartbeat_branch(project_id: &str, session_id: &str, branch: &str) {
-    let path = heartbeat_path(project_id, session_id);
-    if let Some(mut hb) = read_heartbeat(project_id, session_id) {
-        hb.branch = Some(branch.to_string());
-        if let Ok(data) = serde_json::to_string_pretty(&hb) {
-            let _ = edda_store::write_atomic(&path, data.as_bytes());
+    let _ = edda_store::update_heartbeat(project_id, session_id, |hb| {
+        if hb.started_at.is_empty() && hb.last_heartbeat.is_empty() {
+            // No existing heartbeat: nothing to update.
+            return;
         }
-    }
+        hb.branch = Some(branch.to_string());
+    });
 }
 
 /// Ensure a heartbeat file exists for this session.
@@ -143,37 +133,19 @@ pub fn remove_heartbeat(project_id: &str, session_id: &str) {
 /// for peer discovery. Use `write_heartbeat` for full signal-enriched heartbeats.
 pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str, cwd: &str) {
     let now = now_rfc3339();
-    let path = heartbeat_path(project_id, session_id);
-
-    let started_at = read_heartbeat(project_id, session_id)
-        .map(|h| h.started_at)
-        .unwrap_or_else(|| now.clone());
-
-    let heartbeat = SessionHeartbeat {
-        session_id: session_id.to_string(),
-        started_at,
-        last_heartbeat: now,
-        label: label.to_string(),
-        focus_files: Vec::new(),
-        active_tasks: Vec::new(),
-        files_modified_count: 0,
-        total_edits: 0,
-        recent_commits: Vec::new(),
-        branch: detect_git_branch_in(cwd),
-        current_phase: None,
-        parent_session_id: None,
-        plan: None,
-        phase: None,
-        attempt: None,
-        stage: None,
-        pid: None,
-    };
-
-    let data = match serde_json::to_string_pretty(&heartbeat) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let _ = edda_store::write_atomic(&path, data.as_bytes());
+    let branch = detect_git_branch_in(cwd);
+    let _ = edda_store::update_heartbeat(project_id, session_id, |hb| {
+        if hb.started_at.is_empty() {
+            hb.started_at = now.clone();
+        }
+        hb.last_heartbeat = now.clone();
+        hb.label = label.to_string();
+        if branch.is_some() {
+            hb.branch = branch.clone();
+        }
+        // Signal fields and the conductor lane fields belong to other
+        // producers on the shared surface — preserved.
+    });
 }
 
 /// Write a heartbeat for a sub-agent spawned via Claude Code's Task tool.

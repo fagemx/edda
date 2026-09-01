@@ -379,6 +379,8 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                             notifier,
                             &mut event_log,
                             tmux_session,
+                            &cancel,
+                            Some(&lane_hb),
                         )
                         .await?;
                     }
@@ -532,6 +534,8 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
             notifier,
             &mut event_log,
             tmux_session,
+            &cancel,
+            Some(&lane_hb),
         )
         .await?;
 
@@ -837,6 +841,8 @@ async fn process_phase_result(
     notifier: &dyn Notifier,
     event_log: &mut EventLogger,
     tmux_session: Option<&TmuxSession>,
+    cancel: &CancellationToken,
+    lane_hb: Option<&LaneHeartbeat>,
 ) -> Result<()> {
     match result {
         PhaseResult::AgentDone {
@@ -858,6 +864,10 @@ async fn process_phase_result(
             )?;
             save_state(cwd, state)?;
 
+            // GH-566: the lane heartbeat must cover the whole phase
+            // lifetime — keep it beating (stage "checking") while the
+            // checks run, not just during the agent turn.
+            let checking_writer = lane_hb.map(|hb| hb.spawn("checking", cancel.child_token()));
             // Run checks
             let check_result = check_engine
                 .run_all(
@@ -865,6 +875,9 @@ async fn process_phase_result(
                     state.get_phase(phase_id)?.started_at.as_deref(),
                 )
                 .await;
+            if let Some(writer) = checking_writer {
+                writer.abort();
+            }
 
             if check_result.all_passed {
                 if phase.gate.is_some() {
@@ -1447,7 +1460,7 @@ fn write_phase_claim(cwd: &Path, session_id: &str, phase_id: &str, owns: &[Strin
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::agent::launcher::{MockLauncher, PhaseResult};
     use crate::plan::parser::parse_plan;
@@ -3138,12 +3151,12 @@ phases:
     // ── Phase claims carry owned write surfaces (GH-561) ────────────
 
     /// Serialize tests that redirect `EDDA_STORE_ROOT`.
-    static CLAIM_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static CLAIM_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    struct ClaimEnvGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
+    pub(crate) struct ClaimEnvGuard {
+        pub(crate) _lock: std::sync::MutexGuard<'static, ()>,
         previous_store_root: Option<std::ffi::OsString>,
-        _store_root: tempfile::TempDir,
+        pub(crate) _store_root: tempfile::TempDir,
     }
 
     impl Drop for ClaimEnvGuard {
@@ -3156,7 +3169,7 @@ phases:
     }
 
     impl ClaimEnvGuard {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let lock = CLAIM_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             let previous_store_root = std::env::var_os("EDDA_STORE_ROOT");
             let store_root = tempfile::tempdir().unwrap();
@@ -3182,7 +3195,7 @@ phases:
             .collect()
     }
 
-    fn make_repo(store_root: &Path) -> std::path::PathBuf {
+    pub(crate) fn make_repo(store_root: &Path) -> std::path::PathBuf {
         let cwd = store_root.join("repo");
         std::fs::create_dir_all(&cwd).unwrap();
         // Production writes claims into an existing project state dir
@@ -3254,7 +3267,7 @@ phases:
         }
     }
 
-    fn hb_path(cwd: &Path, session_id: &str) -> std::path::PathBuf {
+    pub(crate) fn hb_path(cwd: &Path, session_id: &str) -> std::path::PathBuf {
         let project_id = edda_store::project_id(cwd);
         edda_store::project_dir(&project_id)
             .join("state")
@@ -3327,6 +3340,118 @@ phases:
             (state, ())
         };
         assert_eq!(state.plan_status, PlanStatus::Completed);
+    }
+
+    /// P1-1 regression (review round 1): the lane heartbeat must cover the
+    /// whole phase lifetime — checks included — with the stage reflecting
+    /// what is actually happening. A fast agent turn followed by a slow
+    /// check used to abort the writer while the check still ran, letting the
+    /// lane go stale mid-work.
+    #[tokio::test]
+    async fn heartbeat_keeps_beating_through_the_running_check_stage() {
+        let guard = ClaimEnvGuard::new();
+        let previous_interval = std::env::var("EDDA_LANE_HEARTBEAT_SECS");
+        std::env::set_var("EDDA_LANE_HEARTBEAT_SECS", "1");
+        let cwd = make_repo(guard._store_root.path());
+
+        // A check slow enough to span several heartbeat intervals.
+        #[cfg(windows)]
+        let cmd = "Start-Sleep -Seconds 3";
+        #[cfg(not(windows))]
+        let cmd = "sleep 3";
+        let yaml = format!(
+            r#"
+name: hbdur
+phases:
+  - id: a
+    prompt: "work"
+    check:
+      - type: cmd_succeeds
+        cmd: "{cmd}"
+        timeout_sec: 15
+"#
+        );
+        let plan = parse_plan(&yaml).unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        let engine = CheckEngine::new(cwd.clone());
+        let notifier = CollectNotifier::new();
+        let mut budget = BudgetTracker::new(plan.budget_usd);
+        let cancel = CancellationToken::new();
+
+        // Fast agent turn, then the slow check above runs in
+        // `process_phase_result`.
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: None,
+            }],
+        );
+
+        let run_cwd = cwd.clone();
+        let handle = tokio::spawn(async move {
+            run_plan(
+                &plan,
+                &mut state,
+                RunContext {
+                    launcher: &launcher,
+                    check_engine: &engine,
+                    notifier: &notifier,
+                    budget: &mut budget,
+                    cancel,
+                    cwd: &run_cwd,
+                    interactive: false,
+                    json_events: false,
+                    tmux_session: None,
+                },
+            )
+            .await
+            .map(|_| state)
+        });
+
+        let session_id = phase_session_id_attempt("hbdur", "a", 1).to_string();
+        let path = hb_path(&cwd, &session_id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+
+        // The heartbeat must reach the checking stage ...
+        let first_checking = loop {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if v["stage"] == "checking" {
+                        break v["last_heartbeat"].clone();
+                    }
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "heartbeat never reached the checking stage while checks ran"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        };
+        // ... and keep refreshing (1s interval vs 3s check) while the check
+        // is still running.
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if v["stage"] == "checking" && v["last_heartbeat"] != first_checking {
+                        break;
+                    }
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "heartbeat stopped refreshing during the running check"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        let state = handle.await.unwrap().unwrap();
+        assert_eq!(state.plan_status, PlanStatus::Completed);
+        match previous_interval {
+            Ok(v) => std::env::set_var("EDDA_LANE_HEARTBEAT_SECS", v),
+            Err(_) => std::env::remove_var("EDDA_LANE_HEARTBEAT_SECS"),
+        }
     }
 
     /// The observation plane must never kill the work plane: if the store is
