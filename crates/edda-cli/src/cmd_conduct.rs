@@ -233,6 +233,11 @@ pub fn run(
         LauncherOptions {
             verbose,
             transcript_dir: Some(transcript_dir.clone()),
+            // Conduct never persists codex threads (GH-535 round 1): its
+            // session ids are deterministic per plan/phase/attempt, so a
+            // persisted binding could leak a stale thread/resume into a
+            // later invocation and every turn would gain store I/O.
+            persistent_codex_threads: false,
         },
     )?;
     let engine = CheckEngine::new(cwd.clone());

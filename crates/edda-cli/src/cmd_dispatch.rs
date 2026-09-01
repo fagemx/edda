@@ -282,6 +282,10 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         LauncherOptions {
             verbose: false,
             transcript_dir: None,
+            // Dispatch is the persistence scope (GH-535): a caller-chosen
+            // --session-id must resume the conversation a previous dispatch
+            // recorded.
+            persistent_codex_threads: true,
         },
     )?;
     let phase = build_phase(

@@ -46,16 +46,22 @@ fn default_codex_bin() -> PathBuf {
 /// and the `threads` map keys on the conductor session id, resuming a
 /// thread via `thread/resume` whenever a caller reuses a session id.
 ///
-/// Cross-process, the map is persisted in the per-user edda store at
-/// `<store_root>/projects/<project_id(cwd)>/state/codex-threads.json`,
-/// written through `edda_store::write_atomic` under an exclusive file lock
-/// (GH-535). A freshly constructed launcher — i.e. every `edda dispatch`
-/// process — merges the persisted map into `threads` on the first
-/// successful spawn, so a repeated `--session-id` resumes the conversation
-/// a previous process recorded. A missing entry is simply a new
-/// conversation; a corrupt file warns once and degrades to `thread/start`:
-/// resume is a convenience and must never fail a dispatch. Within one
-/// process (conduct) the in-memory map stays the hot path and behavior is
+/// Cross-process, `edda dispatch` persists the map in the per-user edda
+/// store at `<store_root>/projects/<project_id(cwd)>/state/
+/// codex-threads.json`, written through `edda_store::write_atomic` under an
+/// exclusive file lock (GH-535). Persistence is dispatch-scoped: a launcher
+/// built with [`CodexLauncher::with_persistent_threads`] — which is exactly
+/// what `edda dispatch` builds — merges the persisted map into `threads` on
+/// the first successful spawn, so a repeated `--session-id` resumes the
+/// conversation a previous process recorded. Conduct deliberately keeps the
+/// default non-persistent launcher: its session ids are deterministic per
+/// plan/phase/attempt, and its behavior must stay byte-identical with the
+/// pre-persistence path (no store reads, no surprise resumes). A missing
+/// entry is simply a new conversation. A persisted binding that the server
+/// rejects — corrupt file or a stale/invalid thread id — degrades to
+/// `thread/start` within the same dispatch, and the bad binding is not
+/// written back: resume is a convenience and must never fail a dispatch.
+/// Within one process the in-memory map stays the hot path and behavior is
 /// unchanged. When the child dies (crash, timeout, cancellation) the
 /// client is dropped and the next phase re-spawns it; the thread map
 /// survives because codex persists threads and the store records their ids.
@@ -162,7 +168,7 @@ impl CodexLauncher {
         Self {
             codex_bin: default_codex_bin(),
             verbose: false,
-            thread_store: Some(ThreadStore::from_default_root()),
+            thread_store: None,
             state: Mutex::new(LauncherState::default()),
         }
     }
@@ -171,22 +177,28 @@ impl CodexLauncher {
         Self {
             codex_bin,
             verbose: false,
-            thread_store: Some(ThreadStore::from_default_root()),
+            thread_store: None,
             state: Mutex::new(LauncherState::default()),
         }
     }
 
-    /// Point the session→thread persistence at a custom store root (tests
-    /// use this to stay out of the real per-user store).
-    pub fn with_thread_store(mut self, root: PathBuf) -> Self {
-        self.thread_store = Some(ThreadStore { root });
+    /// Enable persistence in the per-user edda store
+    /// (`edda_store::store_root()`). Dispatch-scoped (GH-535): only `edda
+    /// dispatch` opts in, because its `--session-id` is caller-chosen across
+    /// invocations and resuming is the point. Conduct keeps the default
+    /// non-persistent launcher — deterministic conduct session ids must
+    /// never load an old binding, and conduct turns must not gain store
+    /// reads/writes.
+    pub fn with_persistent_threads(mut self) -> Self {
+        self.thread_store = Some(ThreadStore::from_default_root());
         self
     }
 
-    /// Disable persistence entirely: in-memory thread continuity only.
-    #[cfg(test)]
-    fn without_thread_store(mut self) -> Self {
-        self.thread_store = None;
+    /// Point the session→thread persistence at an explicit store root
+    /// (tests use this to stay out of the real per-user store; dispatch
+    /// uses [`CodexLauncher::with_persistent_threads`] instead).
+    pub fn with_thread_store(mut self, root: PathBuf) -> Self {
+        self.thread_store = Some(ThreadStore { root });
         self
     }
 
@@ -259,10 +271,9 @@ impl AgentLauncher for CodexLauncher {
 
         let LauncherState { server, threads } = &mut *state;
         let server = server.as_mut().expect("server spawned above");
-        let (result, keep_server) =
-            drive_turn(server, threads, phase, &message, session_id, cwd, &cancel).await;
+        let outcome = drive_turn(server, threads, phase, &message, session_id, cwd, &cancel).await;
 
-        if !keep_server {
+        if !outcome.keep_server {
             // The turn ended in a crash, timeout, or shutdown, and the child
             // was killed along the way (KillOnCancel or terminate). Drop the
             // client so the next phase re-spawns a fresh app-server. The
@@ -270,6 +281,35 @@ impl AgentLauncher for CodexLauncher {
             // restores the conversation.
             state.server = None;
         }
+        let result = if outcome.dropped_stale_binding {
+            // The persisted binding for this session was rejected by the
+            // server (stale or invalid thread id). Degrade to a plain
+            // `thread/start` within the same dispatch: the failed resume
+            // terminated the child, so spawn a fresh app-server first. The
+            // bad binding was already removed from `threads`, so it is not
+            // written back below.
+            match CodexAppServer::spawn(&self.codex_bin).await {
+                Ok(server) => state.server = Some(server),
+                Err(error) => {
+                    return Ok(PhaseResult::AgentCrash {
+                        error: format!(
+                            "failed to spawn codex app-server ({:?}): {error}",
+                            self.codex_bin
+                        ),
+                    });
+                }
+            }
+            let LauncherState { server, threads } = &mut *state;
+            let server = server.as_mut().expect("server respawned above");
+            let retry =
+                drive_turn(server, threads, phase, &message, session_id, cwd, &cancel).await;
+            if !retry.keep_server {
+                state.server = None;
+            }
+            retry.result
+        } else {
+            outcome.result
+        };
         // Record the turn's session→thread binding even on a crash path:
         // the thread was created and codex persists it, so the next process
         // can resume it. Best-effort — failures are swallowed by design.
@@ -280,11 +320,67 @@ impl AgentLauncher for CodexLauncher {
     }
 }
 
+/// One [`drive_turn`] attempt: the mapped phase result, whether the
+/// app-server child survived, and whether a stale persisted thread binding
+/// was dropped — asking [`AgentLauncher::run_phase`] to retry once as a
+/// plain `thread/start`.
+struct DriveOutcome {
+    result: PhaseResult,
+    keep_server: bool,
+    dropped_stale_binding: bool,
+}
+
+impl DriveOutcome {
+    fn now(result: PhaseResult, keep_server: bool) -> Self {
+        Self {
+            result,
+            keep_server,
+            dropped_stale_binding: false,
+        }
+    }
+}
+
+/// Why a thread open did not produce a thread id. `Error` leaves the
+/// child's fate to the protocol layer (a failed request terminates it);
+/// timeout and cancellation mean the dispatch itself is over.
+enum OpenFailure {
+    Error(anyhow::Error),
+    Timeout,
+    Cancelled,
+}
+
+impl OpenFailure {
+    fn into_result(self) -> PhaseResult {
+        match self {
+            OpenFailure::Error(error) => PhaseResult::AgentCrash {
+                error: error.to_string(),
+            },
+            OpenFailure::Timeout => PhaseResult::Timeout,
+            OpenFailure::Cancelled => PhaseResult::AgentCrash {
+                error: "conductor shutdown".into(),
+            },
+        }
+    }
+}
+
+/// [`CodexAppServer::open_thread`] raced against the turn deadline and the
+/// conductor cancel token.
+async fn open_thread_or_fail(
+    server: &mut CodexAppServer,
+    cwd: &Path,
+    resume: Option<&str>,
+    deadline: std::pin::Pin<&mut tokio::time::Sleep>,
+    cancel: &CancellationToken,
+) -> Result<String, OpenFailure> {
+    tokio::select! {
+        opened = server.open_thread(cwd, resume) => opened.map_err(OpenFailure::Error),
+        _ = deadline => Err(OpenFailure::Timeout),
+        _ = cancel.cancelled() => Err(OpenFailure::Cancelled),
+    }
+}
+
 /// Open (or resume) the codex thread for `session_id`, run one turn, and map
-/// the outcome onto `PhaseResult`.
-///
-/// Returns whether the server is still usable: `false` after any crash,
-/// timeout, or cancellation, since every one of those paths kills the child.
+/// the outcome onto [`DriveOutcome`].
 async fn drive_turn(
     server: &mut CodexAppServer,
     threads: &mut HashMap<String, String>,
@@ -293,7 +389,7 @@ async fn drive_turn(
     session_id: &str,
     cwd: &Path,
     cancel: &CancellationToken,
-) -> (PhaseResult, bool) {
+) -> DriveOutcome {
     let timeout = Duration::from_secs(phase.timeout_sec.unwrap_or(1800));
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
@@ -302,20 +398,32 @@ async fn drive_turn(
     };
 
     let resume = threads.get(session_id).cloned();
-    let thread_id = tokio::select! {
-        opened = server.open_thread(cwd, resume.as_deref()) => match opened {
-            Ok(thread_id) => thread_id,
-            Err(error) => {
-                return (
-                    PhaseResult::AgentCrash {
-                        error: error.to_string(),
-                    },
-                    false,
-                );
-            }
-        },
-        _ = &mut deadline => return (PhaseResult::Timeout, false),
-        _ = cancel.cancelled() => return (shutdown(), false),
+    let thread_id = match open_thread_or_fail(
+        server,
+        cwd,
+        resume.as_deref(),
+        deadline.as_mut(),
+        cancel,
+    )
+    .await
+    {
+        Ok(thread_id) => thread_id,
+        // A persisted binding the server rejects (stale or invalid thread
+        // id) must degrade to `thread/start`, not fail the dispatch. Drop
+        // the binding so it is never written back, and tell run_phase to
+        // retry on a fresh app-server — the failed resume terminated the
+        // child.
+        Err(OpenFailure::Error(_)) if resume.is_some() => {
+            threads.remove(session_id);
+            return DriveOutcome {
+                result: PhaseResult::AgentCrash {
+                    error: "persisted thread binding rejected; degrading to thread/start".into(),
+                },
+                keep_server: false,
+                dropped_stale_binding: true,
+            };
+        }
+        Err(failure) => return DriveOutcome::now(failure.into_result(), false),
     };
     threads.insert(session_id.to_owned(), thread_id.clone());
 
@@ -323,7 +431,7 @@ async fn drive_turn(
         turned = server.run_turn(&thread_id, message) => match turned {
             Ok(outcome) => outcome,
             Err(error) => {
-                return (
+                return DriveOutcome::now(
                     PhaseResult::AgentCrash {
                         error: error.to_string(),
                     },
@@ -331,8 +439,8 @@ async fn drive_turn(
                 );
             }
         },
-        _ = &mut deadline => return (PhaseResult::Timeout, false),
-        _ = cancel.cancelled() => return (shutdown(), false),
+        _ = &mut deadline => return DriveOutcome::now(PhaseResult::Timeout, false),
+        _ = cancel.cancelled() => return DriveOutcome::now(shutdown(), false),
     };
 
     // The app-server protocol exposes no cost/usage data, so neither budget
@@ -344,9 +452,9 @@ async fn drive_turn(
     // this at startup; the cost column stays empty for codex phases by design.
     let cost_usd = None;
     if over_budget(cost_usd, phase.budget_usd) {
-        return (PhaseResult::BudgetExceeded { cost_usd }, true);
+        return DriveOutcome::now(PhaseResult::BudgetExceeded { cost_usd }, true);
     }
-    (
+    DriveOutcome::now(
         PhaseResult::AgentDone {
             cost_usd,
             result_text: outcome.final_text,
@@ -372,11 +480,10 @@ pub(crate) mod test_support {
 
     /// A launcher pre-seeded with an already-spawned server, for tests that
     /// drive `run_phase` against a fake app-server without spawning binaries.
-    /// Persistence is off: these tests assert in-process behavior and must
-    /// never touch the real per-user store.
+    /// Persistence is off (the default now): these tests assert in-process
+    /// behavior and must never touch the real per-user store.
     pub(crate) fn launcher_with_server(server: CodexAppServer) -> CodexLauncher {
-        let mut launcher =
-            CodexLauncher::with_bin(PathBuf::from("unused-fake-bin")).without_thread_store();
+        let mut launcher = CodexLauncher::with_bin(PathBuf::from("unused-fake-bin"));
         launcher.state = Mutex::new(super::LauncherState {
             server: Some(server),
             threads: HashMap::new(),
@@ -444,6 +551,35 @@ mod tests {
     }
 
     #[test]
+    fn persistence_is_opt_in() {
+        // GH-535 round 1: persistence must be dispatch-scoped. `new()` and
+        // `with_bin()` — the constructors conduct's launcher factory goes
+        // through — must not touch the per-user store at all; only an
+        // explicit opt-in enables it.
+        assert!(CodexLauncher::new().thread_store.is_none());
+        assert!(
+            CodexLauncher::with_bin(PathBuf::from("unused"))
+                .thread_store
+                .is_none(),
+            "with_bin must stay non-persistent by default"
+        );
+        assert!(
+            CodexLauncher::new()
+                .with_persistent_threads()
+                .thread_store
+                .is_some(),
+            "with_persistent_threads opts into the per-user store"
+        );
+        assert!(
+            CodexLauncher::new()
+                .with_thread_store(PathBuf::from("custom-root"))
+                .thread_store
+                .is_some(),
+            "with_thread_store opts into an explicit store root"
+        );
+    }
+
+    #[test]
     fn over_budget_semantics() {
         assert!(over_budget(Some(2.0), Some(1.0)));
         assert!(!over_budget(Some(1.0), Some(1.0)));
@@ -457,7 +593,7 @@ mod tests {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
         let (_dir, mut server) = spawn_fake_server(FakeScenario::RunTurnCompletes).await;
         let mut threads = HashMap::new();
-        let (result, keep_server) = drive_turn(
+        let outcome = drive_turn(
             &mut server,
             &mut threads,
             &phase,
@@ -467,8 +603,8 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(keep_server);
-        match result {
+        assert!(outcome.keep_server);
+        match outcome.result {
             PhaseResult::AgentDone {
                 cost_usd,
                 result_text,
@@ -489,7 +625,7 @@ mod tests {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n    budget_usd: 0.01\n");
         let (_dir, mut server) = spawn_fake_server(FakeScenario::RunTurnCompletes).await;
         let mut threads = HashMap::new();
-        let (result, keep_server) = drive_turn(
+        let outcome = drive_turn(
             &mut server,
             &mut threads,
             &phase,
@@ -499,10 +635,14 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(keep_server);
+        assert!(outcome.keep_server);
         assert!(
-            matches!(result, PhaseResult::AgentDone { cost_usd: None, .. }),
-            "expected AgentDone without cost, got {result:?}"
+            matches!(
+                outcome.result,
+                PhaseResult::AgentDone { cost_usd: None, .. }
+            ),
+            "expected AgentDone without cost, got {:?}",
+            outcome.result
         );
         Ok(())
     }
@@ -512,7 +652,7 @@ mod tests {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
         let (_dir, mut server) = spawn_fake_server(FakeScenario::RunTurnStartError).await;
         let mut threads = HashMap::new();
-        let (result, keep_server) = drive_turn(
+        let outcome = drive_turn(
             &mut server,
             &mut threads,
             &phase,
@@ -522,8 +662,11 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(!keep_server, "a failed turn kills the app-server child");
-        match result {
+        assert!(
+            !outcome.keep_server,
+            "a failed turn kills the app-server child"
+        );
+        match outcome.result {
             PhaseResult::AgentCrash { error } => {
                 assert!(error.contains("bad turn"), "{error}");
             }
@@ -538,7 +681,7 @@ mod tests {
         let (_dir, mut server) = spawn_fake_server(FakeScenario::Idle).await;
         let mut threads = HashMap::new();
         let started = tokio::time::Instant::now();
-        let (result, keep_server) = drive_turn(
+        let outcome = drive_turn(
             &mut server,
             &mut threads,
             &phase,
@@ -548,8 +691,8 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(!keep_server);
-        assert!(matches!(result, PhaseResult::Timeout));
+        assert!(!outcome.keep_server);
+        assert!(matches!(outcome.result, PhaseResult::Timeout));
         assert!(started.elapsed() < Duration::from_secs(15));
         Ok(())
     }
@@ -565,7 +708,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(300)).await;
             canceller.cancel();
         });
-        let (result, keep_server) = drive_turn(
+        let outcome = drive_turn(
             &mut server,
             &mut threads,
             &phase,
@@ -575,8 +718,8 @@ mod tests {
             &cancel,
         )
         .await;
-        assert!(!keep_server);
-        match result {
+        assert!(!outcome.keep_server);
+        match outcome.result {
             PhaseResult::AgentCrash { error } => assert_eq!(error, "conductor shutdown"),
             other => panic!("expected AgentCrash, got {other:?}"),
         }
@@ -595,7 +738,7 @@ mod tests {
         let (_dir, mut server) = spawn_fake_server(FakeScenario::TwoTurnsWithResume).await;
         let mut threads = HashMap::new();
 
-        let (first, keep) = drive_turn(
+        let first = drive_turn(
             &mut server,
             &mut threads,
             &phase,
@@ -605,15 +748,15 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(keep);
-        match first {
+        assert!(first.keep_server);
+        match first.result {
             PhaseResult::AgentDone { result_text, .. } => {
                 assert_eq!(result_text.as_deref(), Some("first answer"));
             }
             other => panic!("expected AgentDone, got {other:?}"),
         }
 
-        let (second, keep) = drive_turn(
+        let second = drive_turn(
             &mut server,
             &mut threads,
             &phase,
@@ -623,8 +766,8 @@ mod tests {
             &CancellationToken::new(),
         )
         .await;
-        assert!(keep);
-        match second {
+        assert!(second.keep_server);
+        match second.result {
             PhaseResult::AgentDone { result_text, .. } => {
                 assert_eq!(result_text.as_deref(), Some("second answer"));
             }
@@ -888,6 +1031,51 @@ mod tests {
         assert!(
             matches!(&result, PhaseResult::AgentDone { result_text, .. } if result_text.as_deref() == Some("turn complete")),
             "degraded dispatch should complete via thread/start, got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_persisted_binding_degrades_to_thread_start_and_is_not_rewritten() -> Result<()> {
+        // A syntactically valid but stale entry (the server no longer knows
+        // the thread) loads fine, so the first open is a thread/resume that
+        // the fake rejects. The dispatch must recover via thread/start
+        // within the same run — not crash — and must not write the stale
+        // binding back: the map ends up holding only the fresh binding.
+        let store_root = tempfile::tempdir()?;
+        let cwd = tempfile::tempdir()?;
+        let map = map_path_for(store_root.path(), cwd.path());
+        std::fs::create_dir_all(map.parent().unwrap())?;
+        std::fs::write(&map, br#"{"sess-1":"stale-thread"}"#)?;
+
+        let (_fake_dir, bin) =
+            fake_app_server_bin(FakeScenario::ResumeErrorThenStart).expect("fake written");
+        let launcher =
+            CodexLauncher::with_bin(bin).with_thread_store(store_root.path().to_path_buf());
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
+        let result = launcher
+            .run_phase(
+                &phase,
+                "turn one",
+                "",
+                "sess-1",
+                cwd.path(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("a stale binding must degrade, not fail the dispatch");
+        match result {
+            PhaseResult::AgentDone { result_text, .. } => {
+                assert_eq!(result_text.as_deref(), Some("fresh answer"));
+            }
+            other => panic!(
+                "stale binding should degrade to thread/start in the same dispatch, got {other:?}"
+            ),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&map).expect("map rewritten"),
+            r#"{"sess-1":"t-1"}"#,
+            "the stale binding must not be written back"
         );
         Ok(())
     }
