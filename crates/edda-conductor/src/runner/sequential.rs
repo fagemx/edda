@@ -3198,6 +3198,14 @@ phases:
     pub(crate) fn make_repo(store_root: &Path) -> std::path::PathBuf {
         let cwd = store_root.join("repo");
         std::fs::create_dir_all(&cwd).unwrap();
+        // Pre-mark the repo as initialized so `run_plan`'s `ensure_init`
+        // early-returns. Without this, the first run_plan-driven test in a
+        // process fires edda.rs's store-isolation Once, which re-points
+        // EDDA_STORE_ROOT at a leaked throwaway store mid-test — every
+        // write (claims, lane heartbeats) then lands in that store while
+        // the test polls its own guard's store, and the assertion can never
+        // observe them.
+        std::fs::create_dir_all(cwd.join(".edda")).unwrap();
         // Production writes claims into an existing project state dir
         // (created by ensure_dirs); mirror that layout here.
         let project_id = edda_store::project_id(&cwd);
