@@ -10,6 +10,11 @@ use std::path::{Path, PathBuf};
 
 // ── Event types ──
 
+/// Serde `skip_serializing_if` helper: omit numeric counters at their default.
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
 /// A conductor event. Serialized as tagged JSON (`"type": "plan_start"`, etc.).
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -33,6 +38,23 @@ pub enum Event {
         attempt: u32,
         duration_ms: u64,
         error: String,
+        /// GH-540 review round 1: snake_case [`crate::state::machine::ErrorType`]
+        /// of the failure ("environmental", "timeout", ...), so generic JSONL
+        /// consumers can distinguish a free environmental retry from a charged
+        /// product failure. Absent on records written before this field — the
+        /// field is additive and old lines parse unchanged.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_type: Option<String>,
+        /// GH-540 review round 1: environmental failures already charged to
+        /// the free-retry counter when this event was written. Absent when
+        /// zero, so pre-GH-540-shaped records and zero-state records emit the
+        /// identical object for old consumers.
+        #[serde(skip_serializing_if = "is_zero_u32")]
+        env_retries: u32,
+        /// GH-540 review round 1: whether this attempt consumed a product
+        /// attempt (the `max_attempts` ladder). Environmental failures are
+        /// never charged — their retries are free.
+        attempt_charged: bool,
     },
     PhaseSkipped {
         phase_id: String,
@@ -223,6 +245,45 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains(r#""type":"phase_passed""#));
         assert!(json.contains(r#""cost_usd":0.42"#));
+    }
+
+    #[test]
+    fn event_phase_failed_serialization() {
+        let event = Event::PhaseFailed {
+            phase_id: "build".into(),
+            attempt: 1,
+            duration_ms: 5000,
+            error: "exit 1".into(),
+            error_type: Some("environmental".into()),
+            env_retries: 2,
+            attempt_charged: false,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""type":"phase_failed""#));
+        assert!(json.contains(r#""error_type":"environmental""#));
+        assert!(json.contains(r#""env_retries":2"#));
+        assert!(json.contains(r#""attempt_charged":false"#));
+    }
+
+    /// GH-540 review round 1: the retry-accounting fields are additive —
+    /// defaulted/absent fields stay out of the JSON so records written before
+    /// the fields existed and records with zero counters parse identically
+    /// for generic JSONL consumers.
+    #[test]
+    fn event_phase_failed_additive_fields_stay_absent_when_defaulted() {
+        let event = Event::PhaseFailed {
+            phase_id: "build".into(),
+            attempt: 1,
+            duration_ms: 5000,
+            error: "boom".into(),
+            error_type: None,
+            env_retries: 0,
+            attempt_charged: true,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(!json.contains("error_type"), "json: {json}");
+        assert!(!json.contains("env_retries"), "json: {json}");
+        assert!(json.contains(r#""attempt_charged":true"#));
     }
 
     #[test]

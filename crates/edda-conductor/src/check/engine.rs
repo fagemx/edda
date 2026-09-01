@@ -47,8 +47,13 @@ impl CheckEngine {
             if !output.passed {
                 // GH-529: a harness-side timeout must not be classified as a
                 // retryable check failure — a retry cannot change the outcome.
+                // GH-540: an environmental build failure (LNK1104 et al.) is
+                // classified distinctly too — retryable, but never charged to
+                // the agent's attempt ladder (handled in `handle_on_fail`).
                 let (error_type, retryable) = if output.timed_out {
                     (ErrorType::Timeout, false)
+                } else if output.environmental {
+                    (ErrorType::Environmental, true)
                 } else {
                     (ErrorType::CheckFailed, spec.is_retryable())
                 };
@@ -246,5 +251,37 @@ mod tests {
         let err = result.error.expect("failure must carry an error");
         assert_eq!(err.error_type, ErrorType::CheckFailed);
         assert!(err.retryable);
+    }
+
+    /// GH-540: a command whose output names an environmental build fault
+    /// (LNK1104) must classify as `ErrorType::Environmental`, retryable —
+    /// distinguishable from a genuine agent-work failure.
+    #[tokio::test]
+    async fn lnk1104_classifies_as_environmental() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = CheckEngine::new(dir.path().to_path_buf());
+
+        // The exact shape of the real failure: link.exe's fatal line on stderr.
+        #[cfg(windows)]
+        let cmd = "[Console]::Error.WriteLine('LINK : fatal error LNK1104: cannot open file ''edda_conductor.exe''') ; exit 1";
+        #[cfg(not(windows))]
+        let cmd =
+            "echo \"LINK : fatal error LNK1104: cannot open file 'edda_conductor.exe'\" ; exit 1";
+        let checks = vec![CheckSpec::CmdSucceeds {
+            cmd: cmd.into(),
+            timeout_sec: 10,
+        }];
+
+        let result = engine.run_all(&checks, None).await;
+        assert!(!result.all_passed);
+        let err = result.error.expect("failure must carry an error");
+        assert_eq!(err.error_type, ErrorType::Environmental);
+        assert!(
+            err.retryable,
+            "a retry CAN fix a transient linker collision"
+        );
+        assert!(err.message.contains("LNK1104"));
+        // doneWhen 2: the occurrence names its file in the captured log.
+        assert!(err.message.contains("edda_conductor.exe"));
     }
 }

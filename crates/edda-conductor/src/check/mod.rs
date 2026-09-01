@@ -19,6 +19,11 @@ pub struct CheckOutput {
     /// distinguishable from a genuine check failure downstream (retry
     /// policy, console output, persisted error type).
     pub timed_out: bool,
+    /// True when the failure is a known environmental build failure (GH-540,
+    /// e.g. Windows LNK1104): the command's output names a machine-layer
+    /// fault, not the agent's work. Unlike a timeout, a retry CAN change the
+    /// outcome — but the retry must not consume the agent's attempt ladder.
+    pub environmental: bool,
 }
 
 impl CheckOutput {
@@ -28,6 +33,7 @@ impl CheckOutput {
             detail: None,
             duration,
             timed_out: false,
+            environmental: false,
         }
     }
 
@@ -37,6 +43,7 @@ impl CheckOutput {
             detail: Some(detail),
             duration,
             timed_out: false,
+            environmental: false,
         }
     }
 
@@ -46,6 +53,21 @@ impl CheckOutput {
             detail: Some(detail),
             duration,
             timed_out: false,
+            environmental: false,
+        }
+    }
+
+    /// An environmental build failure (GH-540): the output names a
+    /// machine-layer fault (e.g. LNK1104). Classified as
+    /// `ErrorType::Environmental` downstream — retryable, but never charged
+    /// to the agent's `max_attempts` ladder.
+    pub fn failed_environmental(detail: String, duration: Duration) -> Self {
+        Self {
+            passed: false,
+            detail: Some(detail),
+            duration,
+            timed_out: false,
+            environmental: true,
         }
     }
 
@@ -57,8 +79,28 @@ impl CheckOutput {
             detail: Some(detail),
             duration,
             timed_out: true,
+            environmental: false,
         }
     }
+}
+
+/// Keep the last `max_chars` characters of a capture (GH-540).
+///
+/// Fatal diagnostics live at the END of a build log: LNK1104's payload (the
+/// file it could not open) and `error: test failed` are the last lines stderr
+/// produces. Head-truncation cut exactly there; a tail keeps the cause.
+/// Char-boundary safe (byte slicing could panic on multibyte UTF-8).
+pub fn output_tail(text: &str, max_chars: usize) -> &str {
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    let skip = text.chars().count() - max_chars;
+    let start = text
+        .char_indices()
+        .nth(skip)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    &text[start..]
 }
 
 /// Mask secrets in output strings before storing.

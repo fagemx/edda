@@ -139,6 +139,7 @@ mod tests {
                 verdict_decision: None,
                 verdict_actor: None,
                 verdict_comment: None,
+                env_retries: 0,
             })
             .collect()
     }
