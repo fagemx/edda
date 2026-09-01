@@ -1439,6 +1439,82 @@ mod tests {
 
     // ── Concurrent writer tests ────────────────────────────────────
 
+    /// Ceiling on one writer's retries for a single event. Ten writers each
+    /// need at most nine other writers to land first, so a run that exceeds
+    /// this is starvation, not ordinary contention — fail loudly instead of
+    /// looping until the suite times out.
+    const MAX_APPEND_ATTEMPTS: u32 = 64;
+
+    /// Cap on a single backoff, well under the 5s `busy_timeout` so a waiting
+    /// writer wakes to retry rather than letting the lock request expire.
+    const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(64);
+
+    /// Exponential backoff with per-writer jitter. The jitter is derived from
+    /// the writer's index rather than a random source: the herd still
+    /// desynchronizes, but the test stays deterministic and adds no
+    /// dependency.
+    fn backoff_delay(writer: usize, attempt: u32) -> std::time::Duration {
+        let base = std::time::Duration::from_millis(1 << attempt.min(6));
+        let jitter = std::time::Duration::from_micros((writer as u64 % 8) * 125);
+        (base + jitter).min(MAX_BACKOFF)
+    }
+
+    /// Transient outcomes of losing a race between concurrent writers, which
+    /// a writer is expected to retry: another writer won the tail (stale
+    /// parent), or still held the write lock when `busy_timeout` expired
+    /// (SQLITE_BUSY). Anything else is a real defect and must surface.
+    fn is_retryable_append_error(error: &anyhow::Error) -> bool {
+        let message = error.to_string();
+        message.contains("stale parent_hash")
+            || message.contains("database is locked")
+            || message.contains("database table is locked")
+    }
+
+    #[test]
+    fn backoff_grows_is_capped_and_desynchronizes_the_herd() {
+        // Busy-spinning with yield_now() kept all ten writers hammering
+        // `BEGIN IMMEDIATE` in lockstep, so contention outlived the 5s
+        // busy_timeout (GH-583). Backing off has to do three things.
+        assert!(
+            backoff_delay(0, 2) > backoff_delay(0, 1),
+            "a later attempt must wait longer"
+        );
+        assert!(
+            backoff_delay(0, 30) <= MAX_BACKOFF,
+            "growth must be capped so a slow CI run cannot stall for minutes"
+        );
+        assert_ne!(
+            backoff_delay(0, 3),
+            backoff_delay(7, 3),
+            "two writers colliding on the same attempt must not wake together"
+        );
+    }
+
+    #[test]
+    fn a_lock_contention_error_is_retryable_like_a_stale_parent() {
+        // Both are transient outcomes of losing a race, not defects: a stale
+        // parent means another writer won the tail, and SQLITE_BUSY means
+        // another writer still holds the write lock after busy_timeout. A
+        // concurrent writer must retry on either. GH-583: only the first was
+        // classified retryable, so Windows CI turned lock contention into a
+        // hard failure.
+        let stale = anyhow::anyhow!(
+            "event evt_1 has stale parent_hash: expected Some(\"a\"), got Some(\"b\")"
+        );
+        let busy = anyhow::anyhow!("database is locked");
+        let corrupt = anyhow::anyhow!("event evt_1 has invalid hash or digest");
+
+        assert!(is_retryable_append_error(&stale), "stale parent must retry");
+        assert!(
+            is_retryable_append_error(&busy),
+            "lock contention must retry"
+        );
+        assert!(
+            !is_retryable_append_error(&corrupt),
+            "a real defect must not be retried away"
+        );
+    }
+
     #[test]
     fn concurrent_writers_no_data_loss() {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -1462,6 +1538,7 @@ mod tests {
                 std::thread::spawn(move || {
                     let store = SqliteStore::open(&path).unwrap();
                     for i in 0..events_per_thread {
+                        let mut attempt: u32 = 0;
                         loop {
                             let parent_hash = store.last_event_hash().unwrap();
                             let event = new_note_event(
@@ -1474,8 +1551,14 @@ mod tests {
                             .unwrap();
                             match store.append_event(&event) {
                                 Ok(()) => break,
-                                Err(error) if error.to_string().contains("stale parent_hash") => {
-                                    std::thread::yield_now();
+                                Err(error) if is_retryable_append_error(&error) => {
+                                    attempt += 1;
+                                    assert!(
+                                        attempt <= MAX_APPEND_ATTEMPTS,
+                                        "thread {t} event {i} still contended after \
+                                         {MAX_APPEND_ATTEMPTS} attempts: {error}"
+                                    );
+                                    std::thread::sleep(backoff_delay(t, attempt));
                                 }
                                 Err(error) => panic!("unexpected append failure: {error}"),
                             }
