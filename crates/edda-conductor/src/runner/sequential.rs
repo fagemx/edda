@@ -467,7 +467,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
         let session_id = phase_session_id_attempt(&plan.name, &phase_id, attempt).to_string();
 
         // Auto-claim scope for this phase (so peers can see it and send requests)
-        write_phase_claim(cwd, &session_id, &phase_id);
+        write_phase_claim(cwd, &session_id, &phase_id, &phase.owns);
 
         let result = launcher
             .run_phase(
@@ -1371,7 +1371,9 @@ fn now_rfc3339() -> String {
 
 /// Write a claim event to coordination.jsonl for a conductor phase.
 /// Written directly (no edda-bridge-claude dependency) since the format is simple.
-fn write_phase_claim(cwd: &Path, session_id: &str, phase_id: &str) {
+/// `owns` carries the phase's declared write-surface path globs (GH-561); an
+/// empty slice produces the same event as before the field existed.
+fn write_phase_claim(cwd: &Path, session_id: &str, phase_id: &str, owns: &[String]) {
     let project_id = edda_store::project_id(cwd);
     let state_dir = edda_store::project_dir(&project_id).join("state");
     let coord_path = state_dir.join("coordination.jsonl");
@@ -1379,7 +1381,7 @@ fn write_phase_claim(cwd: &Path, session_id: &str, phase_id: &str) {
         "ts": now_rfc3339(),
         "session_id": session_id,
         "event_type": "claim",
-        "payload": { "label": phase_id, "paths": serde_json::Value::Array(vec![]) }
+        "payload": { "label": phase_id, "paths": owns }
     });
     if let Ok(line) = serde_json::to_string(&event) {
         use std::io::Write;
@@ -3019,5 +3021,118 @@ phases:
             err.message
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── Phase claims carry owned write surfaces (GH-561) ────────────
+
+    /// Serialize tests that redirect `EDDA_STORE_ROOT`.
+    static CLAIM_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct ClaimEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous_store_root: Option<std::ffi::OsString>,
+        _store_root: tempfile::TempDir,
+    }
+
+    impl Drop for ClaimEnvGuard {
+        fn drop(&mut self) {
+            match self.previous_store_root.take() {
+                Some(root) => std::env::set_var("EDDA_STORE_ROOT", root),
+                None => std::env::remove_var("EDDA_STORE_ROOT"),
+            }
+        }
+    }
+
+    impl ClaimEnvGuard {
+        fn new() -> Self {
+            let lock = CLAIM_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let previous_store_root = std::env::var_os("EDDA_STORE_ROOT");
+            let store_root = tempfile::tempdir().unwrap();
+            std::env::set_var("EDDA_STORE_ROOT", store_root.path());
+            Self {
+                _lock: lock,
+                previous_store_root,
+                _store_root: store_root,
+            }
+        }
+    }
+
+    fn coord_lines(cwd: &Path) -> Vec<serde_json::Value> {
+        let project_id = edda_store::project_id(cwd);
+        let coord_path = edda_store::project_dir(&project_id)
+            .join("state")
+            .join("coordination.jsonl");
+        let content = std::fs::read_to_string(&coord_path).expect("coordination.jsonl exists");
+        content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).expect("each line parses as JSON"))
+            .collect()
+    }
+
+    fn make_repo(store_root: &Path) -> std::path::PathBuf {
+        let cwd = store_root.join("repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        // Production writes claims into an existing project state dir
+        // (created by ensure_dirs); mirror that layout here.
+        let project_id = edda_store::project_id(&cwd);
+        std::fs::create_dir_all(edda_store::project_dir(&project_id).join("state")).unwrap();
+        cwd
+    }
+
+    #[test]
+    fn phase_claim_with_owns_carries_the_paths() {
+        let guard = ClaimEnvGuard::new();
+        let cwd = make_repo(guard._store_root.path());
+        let owns = vec!["crates/edda-conductor/src/agent/*".to_string()];
+
+        write_phase_claim(&cwd, "sess-1", "touch-agent", &owns);
+
+        let events = coord_lines(&cwd);
+        assert_eq!(events.len(), 1);
+        let payload = &events[0]["payload"];
+        assert_eq!(payload["label"], "touch-agent");
+        assert_eq!(
+            payload["paths"],
+            serde_json::json!(["crates/edda-conductor/src/agent/*"])
+        );
+    }
+
+    #[test]
+    fn phase_claim_without_owns_is_byte_identical_to_legacy() {
+        let guard = ClaimEnvGuard::new();
+        let cwd = make_repo(guard._store_root.path());
+
+        write_phase_claim(&cwd, "sess-2", "no-owns", &[]);
+
+        let events = coord_lines(&cwd);
+        assert_eq!(events.len(), 1);
+        // Identical to the pre-GH-561 event in every field except ts.
+        let legacy = serde_json::json!({
+            "ts": events[0]["ts"],
+            "session_id": "sess-2",
+            "event_type": "claim",
+            "payload": { "label": "no-owns", "paths": [] }
+        });
+        assert_eq!(events[0], legacy);
+    }
+
+    #[test]
+    fn old_claim_event_without_paths_field_still_parses() {
+        // Legacy peer-written claims never had a paths field; the consumer
+        // reads `payload["paths"]` tolerantly (as_array → default). Prove an
+        // old record parses and yields no paths under that exact pattern.
+        let old = r#"{"event_type":"claim","payload":{"label":"legacy"},"session_id":"s"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(old).unwrap();
+        let paths = parsed["payload"]
+            .get("paths")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default();
+        assert!(paths.is_empty());
     }
 }
