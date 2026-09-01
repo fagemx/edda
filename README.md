@@ -54,7 +54,7 @@ Edda fixes both with the same primitive: **local, append-only state in `.edda/`,
 
 Use layer 1 alone from day one. Layer 2 is simply there — same workspace, same CLI — when you start running more than one agent.
 
-**Separate persistence planes, deliberately.** Decisions, notes, session digests, tasks, and verdicts are events in the hash-chained SQLite ledger — tamper-evident and replayable. Live coordination state sits outside that chain, in the per-user store: claims append to a coordination log, while each session's heartbeat is a small snapshot file, rewritten while the session runs and deleted when it ends. Each `edda conduct` plan keeps its own state file and event log again separately. All of it is local and inspectable; the hash chain covers the ledger.
+**Separate persistence planes, deliberately.** Decisions, notes, session digests, tasks, and verdicts are events in the hash-chained SQLite ledger — tamper-evident and replayable. Live coordination state sits outside that chain, in the per-user store: claims append to a coordination log, while each session's heartbeat is a small snapshot file, rewritten as the session works and removed when it exits cleanly — a session that dies without that exit leaves its snapshot behind, which `edda peers` reports as stale and `edda gc` can later reclaim. Each `edda conduct` plan keeps its own state file and event log again separately. All of it is local and inspectable; the hash chain covers the ledger.
 
 ## Layer 1 — Memory that survives sessions
 
@@ -208,7 +208,8 @@ Claude Code session
    │    append-only, hash-chained │     verdicts, digests
    ├──────────────────────────────┤
    │  coordination log (per-user) │  ← claims (appended)
-   │  session heartbeat files     │  ← one per live session
+   │  session heartbeat files     │  ← one per session, stale if
+   │                              │     it died without exiting
    │  conduct plan state + events │  ← one set per plan
    └──────────────────────────────┘
         │
@@ -219,7 +220,7 @@ Claude Code session
    Next session sees everything
 ```
 
-Edda stores every ledger event as a hash-chained JSON record in a local SQLite database. Ledger events include decisions, notes, session digests, tasks, verdicts, and command outputs. The hash chain makes that history tamper-evident and the retrieval deterministic — same query, same answer, no LLM in the loop. Coordination state is deliberately kept out of the chain, because it is live rather than historical: claims are appended to their own log, and a session's heartbeat is a snapshot file that exists only while that session does. Both are read on every session start.
+Edda stores every ledger event as a hash-chained JSON record in a local SQLite database. Ledger events include decisions, notes, session digests, tasks, verdicts, and command outputs. The hash chain makes that history tamper-evident and the retrieval deterministic — same query, same answer, no LLM in the loop. Coordination state is deliberately kept out of the chain, because it is live rather than historical: claims are appended to their own log, and a session's heartbeat is a snapshot file refreshed as it works and cleared on a clean exit, going stale rather than vanishing if the session dies. Both are read on every session start.
 
 At the start of each session, edda assembles a context snapshot from the ledger and injects it — the agent sees recent decisions, active tasks, peer coordination, and (if configured) a doctrine pack from [havamal](https://github.com/fagemx/havamal), without reading through old transcripts.
 

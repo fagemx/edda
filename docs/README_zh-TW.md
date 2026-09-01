@@ -54,7 +54,7 @@ Edda 用同一個原語治這兩種病：**append-only 的本地狀態，放在 
 
 第一層從第一天就能單獨用。第二層不用另外裝——同一個 workspace、同一個 CLI——當你開始跑多個 agent，它就在那裡。
 
-**分開的持久化平面，這是刻意的。** 決策、筆記、session 摘要、任務、verdict 是 hash-chained SQLite 帳本裡的事件——防篡改、可重播。即時協調狀態在那條鏈之外，放在使用者層 store：claims 附加進一份協調 log，而每個 session 的心跳是一個小快照檔，session 跑著時持續覆寫、結束時刪除。每個 `edda conduct` 計畫又各自保有自己的狀態檔與事件記錄。全部都在本地、都查得到；hash chain 覆蓋的是帳本那一份。
+**分開的持久化平面，這是刻意的。** 決策、筆記、session 摘要、任務、verdict 是 hash-chained SQLite 帳本裡的事件——防篡改、可重播。即時協調狀態在那條鏈之外，放在使用者層 store：claims 附加進一份協調 log，而每個 session 的心跳是一個小快照檔，工作時持續覆寫、正常結束時移除——沒走到正常結束就死掉的 session 會把快照留下，`edda peers` 會把它報成 stale，`edda gc` 之後可以回收。每個 `edda conduct` 計畫又各自保有自己的狀態檔與事件記錄。全部都在本地、都查得到；hash chain 覆蓋的是帳本那一份。
 
 ## 第一層——記憶跨 session 活著
 
@@ -207,7 +207,8 @@ Claude Code session
    │    append-only、hash-chained │     verdict、摘要
    ├──────────────────────────────┤
    │  協調 log（使用者層）        │  ← claims（附加寫入）
-   │  session 心跳檔              │  ← 每個活著的 session 一份
+   │  session 心跳檔              │  ← 每個 session 一份，非正常
+   │                              │     結束者留下並標為 stale
    │  conduct 計畫狀態 + 事件     │  ← 每個計畫各一份
    └──────────────────────────────┘
         │
@@ -218,7 +219,7 @@ Claude Code session
    下次 session 看到全部
 ```
 
-Edda 將每個帳本事件以 hash-chained JSON 記錄儲存在本地 SQLite 資料庫中。帳本事件包括決策、筆記、session 摘要、任務、verdict 和指令輸出。Hash chain 讓這份歷史防篡改、檢索確定性——同一個查詢永遠得同一個答案，迴圈裡沒有 LLM。協調狀態刻意不進這條鏈，因為它是即時的而非歷史的：claims 附加寫進自己的 log，而 session 的心跳是一個快照檔，只在那個 session 活著時存在。兩者都在每次 session 開始時讀取。
+Edda 將每個帳本事件以 hash-chained JSON 記錄儲存在本地 SQLite 資料庫中。帳本事件包括決策、筆記、session 摘要、任務、verdict 和指令輸出。Hash chain 讓這份歷史防篡改、檢索確定性——同一個查詢永遠得同一個答案，迴圈裡沒有 LLM。協調狀態刻意不進這條鏈，因為它是即時的而非歷史的：claims 附加寫進自己的 log，而 session 的心跳是一個快照檔，工作時更新、正常結束時清除，session 死掉時它不會消失而是變成 stale。兩者都在每次 session 開始時讀取。
 
 每次 session 開始時，edda 從 ledger 組裝 context snapshot 並注入——agent 看到最近的決策、進行中的任務、peer 協調狀態，以及（若有配置）來自 [havamal](https://github.com/fagemx/havamal) 的判斷層 pack，不需要閱讀舊 transcript。
 
