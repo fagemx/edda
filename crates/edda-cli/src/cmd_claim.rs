@@ -931,6 +931,25 @@ mod tests {
         report.conflicts.iter().map(|c| c.label.as_str()).collect()
     }
 
+    /// An NFA accepting exactly `s` (literal characters only), so engine
+    /// acceptance of a probe string can be tested without parsing it as a
+    /// glob.
+    fn literal_nfa(s: &str) -> Nfa {
+        let mut b = NfaBuilder::default();
+        let mut acc: Option<Frag> = None;
+        for c in s.chars() {
+            let frag = single_edge(&mut b, CharClass::Lit(c));
+            acc = Some(concat(&mut b, acc, frag));
+        }
+        let frag = acc.unwrap_or_else(|| eps_fragment(&mut b));
+        Nfa {
+            trans: b.trans,
+            eps: b.eps,
+            start: frag.start,
+            accept: frag.end,
+        }
+    }
+
     #[test]
     fn exact_overlap_conflicts() {
         let claims = vec![claim(
@@ -1081,6 +1100,106 @@ mod tests {
     fn review_pair_suffix_only_globs() {
         // Both match cmd_claim.rs.
         assert!(surfaces_intersect("*claim.rs", "*cmd_claim.rs").expect("glob pair decidable"));
+    }
+
+    // ── Round-2 P1: NTFS Unicode case and glob class escapes ──
+
+    #[cfg(windows)]
+    #[test]
+    fn ntfs_unicode_case_literal_pair_is_refused_not_clear() {
+        // On this NTFS volume `Ä.rs` and `ä.rs` resolve to the same file
+        // (Test-Path control: true), but normalize_token folds ASCII case
+        // only. The pre-fix engine reported the pair disjoint and exit 0.
+        // Rust cannot read the system upcase table that decides NTFS name
+        // equality, so the only sound answer is refusal.
+        let err = surfaces_intersect("src/Ä.rs", "src/ä.rs")
+            .expect_err("Unicode case-variant literals must be refused, not cleared");
+        assert!(err.contains("cannot decide"), "got: {err}");
+        assert!(err.contains("src/Ä.rs") && err.contains("src/ä.rs"), "got: {err}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ntfs_unicode_case_glob_vs_literal_is_refused_not_clear() {
+        // A claim `src/Ä*` can reach the same NTFS file the query names as
+        // `src/ä.rs` through a case-variant spelling. The pre-fix engine
+        // (globset is case-sensitive) reported clear.
+        let err = surfaces_intersect("src/Ä*", "src/ä.rs")
+            .expect_err("Unicode case-variant glob vs literal must be refused, not cleared");
+        assert!(err.contains("cannot decide"), "got: {err}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ntfs_unicode_case_glob_vs_glob_is_refused_not_clear() {
+        let err = surfaces_intersect("src/Ä*", "src/ä*")
+            .expect_err("Unicode case-variant globs must be refused, not cleared");
+        assert!(err.contains("cannot decide"), "got: {err}");
+    }
+
+    #[test]
+    fn class_escape_member_matches_globset_exactly() {
+        // globset 0.4.18's parse_class has no backslash handling at all: a
+        // `\` inside `[...]` is an ordinary class member. `[a\-c]` is
+        // therefore member `a`, member `\`, then range `\`..`c` — it matches
+        // `a`, `b`, `c` but neither `-` nor `\` (probed against real
+        // globset). The pre-fix engine escaped the next character instead,
+        // reduced the class to {a, -, c}, and declared the pair disjoint.
+        let accepts = |pat: &str, s: &str| {
+            let n = build_nfa(pat).expect("parses");
+            nfa_pair_intersects(&n, &literal_nfa(s)).0
+        };
+        assert!(accepts(r"[a\-c]", "b"));
+        assert!(accepts(r"[a\-c]", "a"));
+        assert!(accepts(r"[a\-c]", "c"));
+        assert!(!accepts(r"[a\-c]", "-"));
+        // `[\]]` is class {\} followed by a literal `]`: it matches only the
+        // two-character string `\]`, never a bare `]`.
+        assert!(accepts(r"[\]]", "\\]"));
+        assert!(!accepts(r"[\]]", "]"));
+        // `[\a]` is class {\, a}.
+        assert!(accepts(r"[\a]", "a"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_class_escape_pair_intersects_not_clear() {
+        // The round-2 reviewer pair, end to end through normalization: real
+        // globset matches `b` with both patterns, so the pair must conflict,
+        // never clear. (This Unix-only test could not be watched red on the
+        // Windows lane; `class_escape_member_matches_globset_exactly` above
+        // pins the same engine path and was watched red.)
+        assert!(surfaces_intersect("[a\\-c]", "[b]").expect("decidable"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn e2e_unicode_case_pair_is_error_not_clear() {
+        // Claim `src/Ä.rs`, query `src/ä.rs`: the pre-fix engine returned
+        // exit 0 with {"conflicts":[]} although both spellings resolve to
+        // the same NTFS file. The check must refuse (exit 2) instead.
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[coord_event("sess-9", "peer-c", &["src/Ä.rs"])],
+        );
+        let bin = edda_bin();
+        assert!(bin.exists(), "edda binary not found at {}", bin.display());
+        let out = std::process::Command::new(&bin)
+            .args(["claim", "check", "src/ä.rs", "--json"])
+            .current_dir(repo.path())
+            .env("EDDA_STORE_ROOT", store.path())
+            .output()
+            .expect("spawn edda");
+        let code = out.status.code().expect("exit code");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(code, 2, "stdout={stdout:?} stderr={stderr:?}");
+        assert!(stderr.contains("cannot decide"), "stderr={stderr:?}");
     }
 
     #[cfg(windows)]
@@ -1323,6 +1442,11 @@ mod tests {
             "[!a]",
             "[a-c]x",
             "[]]",
+            "[-a]",
+            "[a-]",
+            "[^a]",
+            "b",
+            "c",
             "a,b",
             "x{y/z,w}",
             "a**b",
