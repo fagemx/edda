@@ -89,6 +89,13 @@ pub struct PhaseState {
     pub verdict_actor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict_comment: Option<String>,
+    /// Environmental build failures retried so far this phase run (GH-540).
+    /// `attempts` counts every dispatch (attempt numbers must stay unique —
+    /// they key the session id), so the product attempt count is
+    /// `attempts - env_retries`. Capped at `MAX_ENV_RETRIES` so a persistently
+    /// broken environment still halts instead of looping forever.
+    #[serde(default)]
+    pub env_retries: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,6 +118,10 @@ pub enum ErrorType {
     UserAbort,
     /// A verdict gate rejected the phase (D3, on_reject: halt or bound hit).
     GateRejected,
+    /// A machine-layer build fault named in the check output (GH-540, e.g.
+    /// Windows LNK1104): not the agent's work, so retrying is worthwhile —
+    /// but the retry is never charged to `max_attempts`.
+    Environmental,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +286,7 @@ impl PlanState {
                 verdict_decision: None,
                 verdict_actor: None,
                 verdict_comment: None,
+                env_retries: 0,
             })
             .collect();
 

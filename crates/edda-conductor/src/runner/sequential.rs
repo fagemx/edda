@@ -1034,6 +1034,12 @@ async fn handle_on_fail(
     notifier: &dyn Notifier,
     event_log: &mut EventLogger,
 ) {
+    /// GH-540: bound on environmental retries per phase run. Without it a
+    /// persistently broken environment (e.g. antivirus holding every newly
+    /// linked .exe) would retry forever; two in a row failing a phase that
+    /// never had a product problem is the exact harm the issue describes.
+    const MAX_ENV_RETRIES: u32 = 2;
+
     let on_fail = phase.on_fail.unwrap_or(plan.on_fail);
 
     match on_fail {
@@ -1056,17 +1062,35 @@ async fn handle_on_fail(
                     .await;
                 return;
             }
+            let is_environmental = check_result
+                .error
+                .as_ref()
+                .is_some_and(|e| e.error_type == ErrorType::Environmental);
             let max = phase.max_attempts.unwrap_or(plan.max_attempts);
-            let (attempts, should_retry) = {
+            let (product_attempts, env_retries, should_retry) = {
                 let ps = state
                     .get_phase_mut(phase_id)
                     .expect("phase must exist in state");
-                if ps.attempts < max {
-                    let error_context = format_check_failures(&check_result.results);
-                    ps.retry_context = Some(error_context);
-                    (ps.attempts, true)
+                // GH-540: an environmental build failure (LNK1104) is not the
+                // agent's work — its attempt is not charged to the ladder.
+                // `attempts` counts every dispatch (attempt numbers key the
+                // session id and must stay unique), so the product count is
+                // `attempts - env_retries`. Once MAX_ENV_RETRIES is spent the
+                // environment is treated as persistently broken: halt and
+                // report instead of looping forever.
+                let product = ps.attempts.saturating_sub(ps.env_retries);
+                if is_environmental && ps.env_retries < MAX_ENV_RETRIES {
+                    ps.env_retries += 1;
+                    (product, ps.env_retries, true)
+                } else if !is_environmental {
+                    if product < max {
+                        let error_context = format_check_failures(&check_result.results);
+                        ps.retry_context = Some(error_context);
+                    }
+                    (product, ps.env_retries, product < max)
                 } else {
-                    (ps.attempts, false)
+                    // environmental, cap exhausted
+                    (product, ps.env_retries, false)
                 }
             };
             if should_retry {
@@ -1077,7 +1101,24 @@ async fn handle_on_fail(
                     PhaseStatus::Pending,
                     None,
                 );
-                println!("  ↻ Auto-retrying ({attempts}/{max})");
+                if is_environmental {
+                    println!(
+                        "  ↻ Environmental build failure — retrying without \
+                         charging the attempt ladder ({env_retries}/{MAX_ENV_RETRIES})"
+                    );
+                } else {
+                    println!("  ↻ Auto-retrying ({product_attempts}/{max})");
+                }
+            } else if is_environmental {
+                // cap exhausted (should_retry is only false for environmental
+                // when MAX_ENV_RETRIES is spent)
+                notifier
+                    .notify(&format!(
+                        "Phase \"{phase_id}\" failed on repeated environmental build \
+                         failures ({env_retries} retries) — the machine layer, not the \
+                         agent's work, is at fault. Clear the fault, then retry."
+                    ))
+                    .await;
             } else {
                 notifier
                     .notify(&format!(
@@ -1600,6 +1641,135 @@ phases:
             msgs.iter()
                 .any(|m| m.contains("timed out") && m.contains("auto_retry skipped")),
             "actionable halt-and-report message, got: {msgs:?}"
+        );
+    }
+
+    /// GH-540: an environmental build failure (LNK1104) retries WITHOUT
+    /// consuming the agent's attempt ladder, but is bounded — a persistently
+    /// broken environment halts after MAX_ENV_RETRIES instead of looping.
+    #[tokio::test]
+    async fn environmental_failure_bounded_and_distinct() {
+        // Always names LNK1104 and exits 1: environmental on every attempt.
+        #[cfg(windows)]
+        let cmd = "Write-Output 'LINK : fatal error LNK1104: cannot open file ''x.exe''' ; exit 1";
+        #[cfg(not(windows))]
+        let cmd = "echo 'LNK1104: cannot open file x.exe' ; exit 1";
+        let yaml = format!(
+            r#"
+name: test
+max_attempts: 2
+phases:
+  - id: a
+    prompt: "do it"
+    check:
+      - type: cmd_succeeds
+        cmd: "{cmd}"
+        timeout_sec: 10
+"#
+        );
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+            ],
+        );
+        let (state, msgs) = run_test_plan(&yaml, &launcher).await;
+
+        let phase = &state.phases[0];
+        assert_eq!(phase.status, PhaseStatus::Failed);
+        // Two free env retries (attempts 1-2), then the cap halts on the
+        // third dispatch. Without the fix this exhausts at attempts == 2.
+        assert_eq!(phase.attempts, 3);
+        assert_eq!(phase.env_retries, 2, "retry cap must be recorded");
+        assert_eq!(launcher.call_count("a"), 3);
+        let err = phase.error.as_ref().expect("env failure must set an error");
+        assert_eq!(err.error_type, ErrorType::Environmental);
+        assert!(err.retryable);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("environmental") && m.contains("retry")),
+            "halt message must name the environmental fault, got: {msgs:?}"
+        );
+    }
+
+    /// GH-540: an environmental failure must not consume a product retry —
+    /// with max_attempts: 2, one LNK1104 followed by two genuine failures
+    /// still gives the agent its full two product attempts (3 dispatches).
+    #[tokio::test]
+    async fn environmental_failure_not_charged_to_ladder() {
+        // First run: environmental LNK1104 (and plants the marker); every
+        // later run: a genuine failure with no environmental pattern.
+        #[cfg(windows)]
+        let cmd = "if (Test-Path env-marker) { exit 1 } else { Write-Output 'LNK1104: cannot open file x.exe' ; New-Item -ItemType File env-marker | Out-Null ; exit 1 }";
+        #[cfg(not(windows))]
+        let cmd = "if [ -f env-marker ]; then exit 1; else echo 'LNK1104: cannot open file x.exe' ; touch env-marker ; exit 1; fi";
+        let yaml = format!(
+            r#"
+name: test
+max_attempts: 2
+phases:
+  - id: a
+    prompt: "do it"
+    check:
+      - type: cmd_succeeds
+        cmd: "{cmd}"
+        timeout_sec: 10
+"#
+        );
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+            ],
+        );
+        let (state, msgs) = run_test_plan(&yaml, &launcher).await;
+
+        let phase = &state.phases[0];
+        assert_eq!(phase.status, PhaseStatus::Failed);
+        // attempt 1: LNK1104 (free) — attempts 2 and 3: the agent's two real
+        // product attempts. Without the fix the ladder exhausts at 2.
+        assert_eq!(phase.attempts, 3);
+        assert_eq!(phase.env_retries, 1);
+        assert_eq!(launcher.call_count("a"), 3);
+        assert!(
+            msgs.iter().any(|m| m.contains("failed after 2 attempts")),
+            "the agent still gets its full ladder, got: {msgs:?}"
         );
     }
 
