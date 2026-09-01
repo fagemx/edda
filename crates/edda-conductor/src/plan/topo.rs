@@ -29,8 +29,11 @@ pub fn topo_sort(plan: &Plan) -> Result<Vec<String>> {
         }
     }
 
-    // Kahn's algorithm; the queue is kept in declaration order so that
-    // equal-rank phases execute in the order they were declared (GH-532).
+    // Kahn's algorithm, one rank at a time: every phase currently in the
+    // queue is popped before any newly freed phase is enqueued, and the
+    // whole batch of newly freed phases is sorted by declaration position
+    // together. Ties are broken by declaration order in the plan file, not
+    // alphabetically (GH-532).
     let mut queue: VecDeque<&str> = plan
         .phases
         .iter()
@@ -40,23 +43,27 @@ pub fn topo_sort(plan: &Plan) -> Result<Vec<String>> {
 
     let mut order = Vec::with_capacity(plan.phases.len());
 
-    while let Some(id) = queue.pop_front() {
-        order.push(id.to_string());
-        if let Some(deps) = dependents.get(id) {
-            let mut next = Vec::new();
-            for &dep in deps {
-                let deg = in_degree
-                    .get_mut(dep)
-                    .context("dependent phase not found in in-degree map")?;
-                *deg -= 1;
-                if *deg == 0 {
-                    next.push(dep);
+    while !queue.is_empty() {
+        let rank: Vec<&str> = queue.drain(..).collect();
+        let mut next = Vec::new();
+        for id in &rank {
+            order.push(id.to_string());
+            if let Some(deps) = dependents.get(id) {
+                for &dep in deps {
+                    let deg = in_degree
+                        .get_mut(dep)
+                        .context("dependent phase not found in in-degree map")?;
+                    *deg -= 1;
+                    if *deg == 0 {
+                        next.push(dep);
+                    }
                 }
             }
-            // Re-sort by declaration position for deterministic output
-            next.sort_by_key(|id| position.get(id).copied().unwrap_or(usize::MAX));
-            queue.extend(next);
         }
+        // Sort the combined batch so children freed by different parents of
+        // the same rank also follow declaration order.
+        next.sort_by_key(|id| position.get(id).copied().unwrap_or(usize::MAX));
+        queue.extend(next);
     }
 
     if order.len() != plan.phases.len() {
@@ -184,6 +191,33 @@ phases:
         let plan = parse_plan(yaml).unwrap();
         let order = topo_sort(&plan).unwrap();
         assert_eq!(order, vec!["root", "zeta", "alpha"]);
+    }
+
+    #[test]
+    fn declaration_order_tie_break_across_parents() {
+        // GH-532 follow-up: children freed by DIFFERENT parents of the same
+        // rank must also follow declaration order. Here sb-child (declared
+        // 3rd, depends on root-b) and sa-child (declared 4th, depends on
+        // root-a) become ready at the same rank; declaration order is
+        // sb-child before sa-child. Alphabetical order is the opposite, so
+        // the test cannot pass by accident.
+        let yaml = r#"
+name: test
+phases:
+  - id: root-a
+    prompt: "x"
+  - id: root-b
+    prompt: "x"
+  - id: sb-child
+    prompt: "x"
+    depends_on: [root-b]
+  - id: sa-child
+    prompt: "x"
+    depends_on: [root-a]
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let order = topo_sort(&plan).unwrap();
+        assert_eq!(order, vec!["root-a", "root-b", "sb-child", "sa-child"]);
     }
 
     #[test]
