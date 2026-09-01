@@ -123,6 +123,25 @@ function testTranslatePlanCompleted() {
   console.log("  PASS: translateEvent plan_completed");
 }
 
+function testTranslatePlanCompletedUnmeasured() {
+  // GH-533: a usage-free run emits total_cost_usd:null — unmeasured, not zero.
+  // The brief schema documents cost.total_usd as a number, so an unmeasured
+  // total must not produce a cost claim at all (no null, no coerced 0).
+  const event = { type: "plan_completed", phases_passed: 3, total_cost_usd: null, seq: 5, ts: "2026-01-01T00:01:00Z" };
+  const patch = translateEvent(event, "T5");
+  assert.strictEqual(patch, null, "unmeasured total must not emit a numeric cost patch");
+  console.log("  PASS: translateEvent plan_completed unmeasured");
+}
+
+function testTranslatePlanCompletedMeasuredZero() {
+  // GH-533: a backend that reported usage summing to zero measured a real $0.00;
+  // it must round-trip as 0, distinct from an unmeasured null.
+  const event = { type: "plan_completed", phases_passed: 3, total_cost_usd: 0, seq: 5, ts: "2026-01-01T00:01:00Z" };
+  const patch = translateEvent(event, "T5");
+  assert.strictEqual(patch.cost.total_usd, 0, "a measured zero must survive as 0, not be dropped");
+  console.log("  PASS: translateEvent plan_completed measured zero");
+}
+
 function testTranslatePlanAborted() {
   const event = { type: "plan_aborted", phases_passed: 1, phases_pending: 2, seq: 5, ts: "2026-01-01T00:01:00Z" };
   const patch = translateEvent(event, "T5");
@@ -149,6 +168,29 @@ function testExtractReplyTextCompleted() {
   assert(text.includes("2 phases"), "should mention phases");
   assert(text.includes("$1.50"), "should mention cost");
   console.log("  PASS: extractReplyText completed");
+}
+
+function testExtractReplyTextUnmeasured() {
+  // GH-533: null total_cost_usd must render as not-available, mirroring the
+  // Rust cost_line model — and must not throw on toFixed of null.
+  const events = [
+    { type: "plan_start", plan_name: "test", phase_count: 2 },
+    { type: "plan_completed", phases_passed: 2, total_cost_usd: null },
+  ];
+  const text = extractReplyText(events);
+  assert(text.includes("n/a"), "unmeasured total must render as n/a");
+  console.log("  PASS: extractReplyText completed unmeasured");
+}
+
+function testExtractReplyTextMeasuredZero() {
+  // GH-533: a genuine measured zero renders $0.00, not n/a and not a lie.
+  const events = [
+    { type: "plan_start", plan_name: "test", phase_count: 2 },
+    { type: "plan_completed", phases_passed: 2, total_cost_usd: 0 },
+  ];
+  const text = extractReplyText(events);
+  assert(text.includes("$0.00"), "a measured zero must render $0.00");
+  console.log("  PASS: extractReplyText completed measured zero");
 }
 
 function testExtractReplyTextAborted() {
@@ -206,11 +248,15 @@ testTranslatePhasePassed();
 testTranslatePhaseFailed();
 testTranslatePhaseSkipped();
 testTranslatePlanCompleted();
+testTranslatePlanCompletedUnmeasured();
+testTranslatePlanCompletedMeasuredZero();
 testTranslatePlanAborted();
 testTranslateUnknownEvent();
 
 console.log("\nextractReplyText:");
 testExtractReplyTextCompleted();
+testExtractReplyTextUnmeasured();
+testExtractReplyTextMeasuredZero();
 testExtractReplyTextAborted();
 
 console.log("\nextractSessionId:");
