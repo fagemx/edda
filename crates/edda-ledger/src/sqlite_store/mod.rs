@@ -1445,18 +1445,29 @@ mod tests {
     /// looping until the suite times out.
     const MAX_APPEND_ATTEMPTS: u32 = 64;
 
-    /// Cap on a single backoff, well under the 5s `busy_timeout` so a waiting
-    /// writer wakes to retry rather than letting the lock request expire.
+    /// Cap on the exponential base, bounding the pause before a writer's next
+    /// attempt. It cannot rescue the lock request that already expired — by
+    /// the time we back off, `append_event` has returned and its 5s
+    /// `busy_timeout` wait is spent — it only keeps a deep retry from stalling
+    /// the suite for seconds at a time.
     const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_millis(64);
+
+    /// Widest per-writer jitter, added on top of the capped base.
+    const MAX_JITTER: std::time::Duration = std::time::Duration::from_micros(875);
 
     /// Exponential backoff with per-writer jitter. The jitter is derived from
     /// the writer's index rather than a random source: the herd still
     /// desynchronizes, but the test stays deterministic and adds no
     /// dependency.
+    ///
+    /// The cap applies to the base *before* the jitter is added, so capped
+    /// writers stay spread out. Capping the sum instead would collapse every
+    /// writer onto the same wake-up at deep attempts — precisely where
+    /// contention is worst and desynchronizing matters most.
     fn backoff_delay(writer: usize, attempt: u32) -> std::time::Duration {
-        let base = std::time::Duration::from_millis(1 << attempt.min(6));
+        let base = std::time::Duration::from_millis(1 << attempt.min(6)).min(MAX_BACKOFF);
         let jitter = std::time::Duration::from_micros((writer as u64 % 8) * 125);
-        (base + jitter).min(MAX_BACKOFF)
+        base + jitter
     }
 
     /// Transient outcomes of losing a race between concurrent writers, which
@@ -1480,13 +1491,19 @@ mod tests {
             "a later attempt must wait longer"
         );
         assert!(
-            backoff_delay(0, 30) <= MAX_BACKOFF,
+            backoff_delay(0, 30) <= MAX_BACKOFF + MAX_JITTER,
             "growth must be capped so a slow CI run cannot stall for minutes"
         );
         assert_ne!(
             backoff_delay(0, 3),
             backoff_delay(7, 3),
             "two writers colliding on the same attempt must not wake together"
+        );
+        assert_ne!(
+            backoff_delay(0, 30),
+            backoff_delay(7, 30),
+            "the cap must not re-synchronize the herd — deep retries are \
+             exactly where contention is worst"
         );
     }
 
