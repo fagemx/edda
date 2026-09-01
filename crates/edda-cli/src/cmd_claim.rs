@@ -10,7 +10,10 @@
 //! - 1 — at least one active claim overlaps; the conflicting labels/sessions
 //!   are named on stdout
 //! - 2 — the query could not be answered soundly: usage error, the board
-//!   cannot be read or parsed, or a glob pattern is malformed. Uncertainty
+//!   cannot be read or parsed, a glob pattern is malformed, or a pair of
+//!   surfaces cannot be decided soundly (for example two tokens differing
+//!   only by Unicode case on a Windows volume, where the glob engine can
+//!   neither prove them the same file nor prove them different). Uncertainty
 //!   must surface as an error here, never as a false "clear": this verb is
 //!   meant to become the machine judgement GH-563's dispatch guard calls
 //!   before letting two lanes write the same file.
@@ -306,7 +309,8 @@ pub fn check(
 /// so uncertainty must resolve toward "conflict", never toward "clear".
 ///
 /// - literal vs literal: exact equality after normalization (separator, case
-///   on Windows, and leading `./` — see [`normalize_token`])
+///   on Windows, and leading `./` — see [`normalize_token`]); on Windows a
+///   pair that differs only by Unicode case is refused instead of decided
 /// - glob vs literal: exact globset match of the pattern against the literal
 /// - glob vs glob: an NFA-product decision over the two glob languages (see
 ///   `globs_intersect`). Errs toward conflict whenever a glob cannot be
@@ -315,11 +319,111 @@ fn surfaces_intersect(a: &str, b: &str) -> Result<bool, String> {
     let a = normalize_token(a);
     let b = normalize_token(b);
     match (has_wildcard(&a), has_wildcard(&b)) {
-        (false, false) => Ok(a == b),
-        (true, false) => glob_matches(&a, &b),
-        (false, true) => glob_matches(&b, &a),
-        (true, true) => globs_intersect(&a, &b),
+        (false, false) => {
+            if a == b {
+                return Ok(true);
+            }
+            refuse_undecidable_unicode_case(&a, &b)?;
+            Ok(false)
+        }
+        (true, false) => glob_vs_literal(&a, &b),
+        (false, true) => glob_vs_literal(&b, &a),
+        (true, true) => glob_vs_glob(&a, &b),
     }
+}
+
+/// Refuse (error) two differing literals that differ only by Unicode case.
+///
+/// Recorded decision `claim-check.glob-soundness=refuse-undecidable-not-approximate-harder`.
+/// NTFS compares file names through the system upcase table, which Rust
+/// cannot read, so whether `Ä.rs` and `ä.rs` name one file or two cannot be
+/// proved from the strings alone: a table generated from a different Unicode
+/// version than Rust's mappings may disagree, and the reviewer's control on
+/// this very volume confirmed the collision is real (`Test-Path` finds a
+/// file created as `Ä.rs` under the spelling `ä.rs`). Approximating harder
+/// has already produced two rounds of fail-open holes; a false "clear" here
+/// lets two lanes write the same file, so the pair is refused (exit 2).
+/// Over-refusal costs a controller one manual judgement; under-refusal costs
+/// concurrent writes. On non-Windows platforms names compare
+/// case-sensitively and differing literals are provably disjoint.
+///
+/// Both fold directions are probed because the mappings disagree in both
+/// directions: `ı`/`i` share an uppercase form but not a lowercase one,/// while a pair sharing only a simple-lowercase form would be missed by the
+/// uppercase probe alone.
+fn refuse_undecidable_unicode_case(a: &str, b: &str) -> Result<(), String> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let collides =
+        unicode_upper_fold(a) == unicode_upper_fold(b) || a.to_lowercase() == b.to_lowercase();
+    if collides {
+        return Err(undecidable_case_message(a, b));
+    }
+    Ok(())
+}
+
+/// Operator-facing refusal for a pair the engine cannot decide soundly.
+fn undecidable_case_message(a: &str, b: &str) -> String {
+    format!(
+        "cannot decide whether {a:?} and {b:?} name the same file: they differ \
+         only by Unicode case, which this volume may treat as the same name \
+         while the glob engine can neither prove them equal nor prove them \
+         disjoint; refusing to report the surface clear — judge manually or \
+         restate both surfaces with an identical spelling"
+    )
+}
+
+/// Per-character uppercase fold (multi-character full mappings such as
+/// `ß` → `SS` flattened in place). Used only as a conservative refusal
+/// probe, never to decide a pair.
+fn unicode_upper_fold(s: &str) -> String {
+    s.chars().flat_map(char::to_uppercase).collect()
+}
+
+/// The fold probes a Windows refusal guard runs. Function pointers so both
+/// folds can be iterated in one loop.
+fn case_fold_probes() -> [fn(&str) -> String; 2] {
+    [unicode_upper_fold, |s: &str| s.to_lowercase()]
+}
+
+/// Glob-vs-literal decision, refusing undecidable Unicode case pairs.
+fn glob_vs_literal(pattern: &str, literal: &str) -> Result<bool, String> {
+    if glob_matches(pattern, literal)? {
+        return Ok(true);
+    }
+    if cfg!(windows) {
+        // The engine decided "clear" for the spelled tokens. On a Windows
+        // volume the same file can be spelled with a Unicode case variant,
+        // so re-decide the pair with both tokens case-folded: if a folded
+        // pattern can still reach the folded literal, some case-variant
+        // spelling may be claimed and the pair is undecidable — refuse. A
+        // fold that cannot even be parsed is also a refusal (fail closed).
+        for fold in case_fold_probes() {
+            if glob_matches(&fold(pattern), &fold(literal))? {
+                return Err(undecidable_case_message(pattern, literal));
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Glob-vs-glob decision, refusing undecidable Unicode case pairs.
+fn glob_vs_glob(a: &str, b: &str) -> Result<bool, String> {
+    if globs_intersect(a, b)? {
+        return Ok(true);
+    }
+    if cfg!(windows) {
+        // Same rationale as `glob_vs_literal`: a folded re-decision that
+        // still intersects means some case-variant spelling may be shared,
+        // which the engine can neither prove nor disprove — refuse. (A
+        // folded parse failure propagates as an error for the same reason.)
+        for fold in case_fold_probes() {
+            if globs_intersect(&fold(a), &fold(b))? {
+                return Err(undecidable_case_message(a, b));
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Normalize a surface token before any comparison.
@@ -382,6 +486,15 @@ fn globs_intersect(a: &str, b: &str) -> Result<bool, String> {
 // Semantics encoded here (probed against globset 0.4.18's default `Glob`,
 // which is NOT separator-aware):
 // - `*` and `?` match any character including `/`; `[...]` classes too.
+// - inside `[...]` a `\` is an ORDINARY CLASS MEMBER, never an escape —
+//   exactly globset 0.4.18's `parse_class`, which has no backslash handling
+//   at all. `[a\-c]` is therefore member `a`, member `\`, then range
+//   `\`..`c`, and matches `a`, `b`, `c` but neither `-` nor `\`; `[\]]` is
+//   class {\} followed by a literal `]`. `parse_class` below mirrors that
+//   state machine so class semantics are exact, not approximated.
+// - OUTSIDE a class, `\` escapes the next character like globset with its
+//   default `backslash_escape` (true on Unix; on Windows `normalize_token`
+//   folds `\` to `/` before parsing, so the engine never sees one there).
 // - a full-component `**` (i.e. preceded by start or `/` and followed by
 //   `/` or end): `x/**/y` ≡ `x/([^/]*/)*y`, `**/y` ≡ `([^/]*/)*y`,
 //   `x/**` ≡ `x/.*`, a bare `**` ≡ `.*`.
@@ -461,10 +574,6 @@ struct Cursor {
 impl Cursor {
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
-    }
-
-    fn peek_at(&self, offset: usize) -> Option<char> {
-        self.chars.get(self.pos + offset).copied()
     }
 
     fn next(&mut self) -> Option<char> {
@@ -664,41 +773,49 @@ fn parse_class(cur: &mut Cursor) -> Result<CharClass, String> {
     if negated {
         cur.pos += 1;
     }
+    // Mirrors globset 0.4.18's `parse_class` state machine exactly —
+    // notably there is NO backslash handling here: `\` is an ordinary
+    // member (see the module-level semantics notes).
     let mut ranges: Vec<(char, char)> = Vec::new();
     let mut first = true;
+    let mut in_range = false;
     loop {
         let c = cur
             .next()
             .ok_or_else(|| "unterminated [...] class".to_string())?;
-        if c == ']' && !first {
-            break;
+        match c {
+            ']' if !first => break,
+            ']' => ranges.push((']', ']')),
+            '-' if first => ranges.push(('-', '-')),
+            '-' if in_range => {
+                // in_range is only set when a member was already seen.
+                let last = ranges.last_mut().expect("in_range implies a member");
+                last.1 = '-';
+                if last.1 < last.0 {
+                    return Err(format!("invalid character range {}-{}", last.0, last.1));
+                }
+                in_range = false;
+            }
+            '-' => in_range = true,
+            c => {
+                if in_range {
+                    let last = ranges.last_mut().expect("in_range implies a member");
+                    if c < last.0 {
+                        return Err(format!("invalid character range {}-{}", last.0, c));
+                    }
+                    last.1 = c;
+                    in_range = false;
+                } else {
+                    ranges.push((c, c));
+                }
+            }
         }
         first = false;
-        let lo = if c == '\\' {
-            cur.next()
-                .ok_or_else(|| "unterminated [...] class".to_string())?
-        } else {
-            c
-        };
-        // `x-y` is a range unless the `-` is the final character before `]`.
-        if cur.peek() == Some('-') && matches!(cur.peek_at(1), Some(n) if n != ']') {
-            cur.pos += 1;
-            let hi = cur
-                .next()
-                .ok_or_else(|| "unterminated [...] class".to_string())?;
-            let hi = if hi == '\\' {
-                cur.next()
-                    .ok_or_else(|| "unterminated [...] class".to_string())?
-            } else {
-                hi
-            };
-            if hi < lo {
-                return Err(format!("invalid character range {lo}-{hi}"));
-            }
-            ranges.push((lo, hi));
-        } else {
-            ranges.push((lo, lo));
-        }
+    }
+    if in_range {
+        // The last character in the class was a `-`: a literal, as in
+        // globset.
+        ranges.push(('-', '-'));
     }
     ranges.sort();
     let mut merged: Vec<(char, char)> = Vec::with_capacity(ranges.len());
@@ -1115,7 +1232,10 @@ mod tests {
         let err = surfaces_intersect("src/Ä.rs", "src/ä.rs")
             .expect_err("Unicode case-variant literals must be refused, not cleared");
         assert!(err.contains("cannot decide"), "got: {err}");
-        assert!(err.contains("src/Ä.rs") && err.contains("src/ä.rs"), "got: {err}");
+        assert!(
+            err.contains("src/Ä.rs") && err.contains("src/ä.rs"),
+            "got: {err}"
+        );
     }
 
     #[cfg(windows)]
