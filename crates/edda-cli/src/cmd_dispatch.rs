@@ -31,12 +31,11 @@ pub struct DispatchArgs {
     #[arg(long)]
     pub prompt_file: String,
     /// Session id passed to the backend verbatim. Continuity semantics are
-    /// per-backend: claude and pi persist conversations externally, so the
-    /// same id resumes the prior conversation across invocations; codex
-    /// keeps its thread state in-process, so each `edda dispatch`
-    /// invocation starts a fresh conversation no matter what id you pass
-    /// (a warning is printed). Generated and printed when omitted so the
-    /// caller can reuse it on the next call.
+    /// per-backend, and all three persist conversations across invocations:
+    /// claude and pi delegate to their backends, and codex's session→thread
+    /// map is persisted in the per-user edda store (GH-535), so the same id
+    /// resumes the prior codex conversation. Generated and printed when
+    /// omitted so the caller can reuse it on the next call.
     #[arg(long)]
     pub session_id: Option<String>,
     /// Working directory for the agent (default: current directory)
@@ -233,31 +232,12 @@ pub fn generate_session_id() -> String {
     phase_session_id("dispatch", &unique).to_string()
 }
 
-/// One-line startup warning when an explicit `--session-id` cannot do what
-/// the caller probably expects.
-///
-/// claude and pi delegate continuity to their backends (external
-/// persistence), so a repeated id really does resume the prior
-/// conversation across dispatch invocations. CodexLauncher keeps
-/// continuity in its in-memory threads map, and `build_launcher`
-/// constructs a fresh launcher per process — so for codex the map is
-/// always empty, resume is `None`, and two calls with the same id are two
-/// unrelated conversations. Persistence for codex is routed as a follow-up
-/// issue; until then this warning is the honest surface. Mirrors
-/// [`budget_warning_for_agent`]'s tone.
-fn session_id_warning_for_agent(agent: AgentKind, explicit_id: bool) -> Option<String> {
-    if agent == AgentKind::Codex && explicit_id {
-        Some(
-            "Warning: codex thread state is per-process, so --session-id does not resume \
-             a prior conversation across dispatch invocations (claude/pi do persist); \
-             codex has no cross-invocation continuity today, and conduct shares the \
-             limitation for the same reason (persistence is tracked as GH-535)."
-                .to_owned(),
-        )
-    } else {
-        None
-    }
-}
+// The #534 round-2 startup warning for codex `--session-id` is gone
+// (GH-535): codex's session→thread map is persisted in the per-user edda
+// store, so an explicit id now resumes across dispatch invocations like
+// claude and pi. The warning survives only in the launcher, for the one
+// genuinely non-resumable case — a corrupt persisted map, which degrades
+// to `thread/start`.
 
 // ── Run ──
 
@@ -294,9 +274,6 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
     };
 
     if let Some(warning) = budget_warning_for_agent(args.agent, args.budget_usd.is_some()) {
-        eprintln!("{warning}");
-    }
-    if let Some(warning) = session_id_warning_for_agent(args.agent, args.session_id.is_some()) {
         eprintln!("{warning}");
     }
 
@@ -711,24 +688,6 @@ mod tests {
             "default",
         ]);
         assert_eq!(args.permission_mode, "default");
-    }
-
-    // ── codex --session-id warning ──
-
-    #[test]
-    fn session_id_warning_fires_only_for_codex_with_an_explicit_id() {
-        let warning =
-            session_id_warning_for_agent(AgentKind::Codex, true).expect("warning expected");
-        assert!(warning.contains("codex"), "{warning}");
-        assert!(warning.contains("per-process"), "{warning}");
-        assert!(warning.contains("does not resume"), "{warning}");
-        assert!(warning.contains("conduct"), "{warning}");
-
-        // A generated id (flag omitted) never warns, and neither do the
-        // backends whose persistence makes the id a real resume handle.
-        assert!(session_id_warning_for_agent(AgentKind::Codex, false).is_none());
-        assert!(session_id_warning_for_agent(AgentKind::Claude, true).is_none());
-        assert!(session_id_warning_for_agent(AgentKind::Pi, true).is_none());
     }
 
     // ── End-to-end-ish run through MockLauncher ──

@@ -44,17 +44,104 @@ fn default_codex_bin() -> PathBuf {
 ///
 /// Session continuity: the app-server process is spawned once and reused,
 /// and the `threads` map keys on the conductor session id, resuming a
-/// thread via `thread/resume` whenever a caller reuses a session id. That
-/// is a forward-looking path for a future dispatch primitive: the
-/// sequential runner derives a unique session id per plan+phase+attempt,
-/// so resume does not currently fire in production (see
-/// [`crate::agent::launcher::phase_session_id`]). When the child dies
-/// (crash, timeout, cancellation) the client is dropped and the next phase
-/// re-spawns it; the thread map survives because codex persists threads.
+/// thread via `thread/resume` whenever a caller reuses a session id.
+///
+/// Cross-process, the map is persisted in the per-user edda store at
+/// `<store_root>/projects/<project_id(cwd)>/state/codex-threads.json`,
+/// written through `edda_store::write_atomic` under an exclusive file lock
+/// (GH-535). A freshly constructed launcher — i.e. every `edda dispatch`
+/// process — merges the persisted map into `threads` on the first
+/// successful spawn, so a repeated `--session-id` resumes the conversation
+/// a previous process recorded. A missing entry is simply a new
+/// conversation; a corrupt file warns once and degrades to `thread/start`:
+/// resume is a convenience and must never fail a dispatch. Within one
+/// process (conduct) the in-memory map stays the hot path and behavior is
+/// unchanged. When the child dies (crash, timeout, cancellation) the
+/// client is dropped and the next phase re-spawns it; the thread map
+/// survives because codex persists threads and the store records their ids.
 pub struct CodexLauncher {
     pub codex_bin: PathBuf,
     pub verbose: bool,
+    thread_store: Option<ThreadStore>,
     state: Mutex<LauncherState>,
+}
+
+/// File-backed cold-start store for the session→thread map.
+///
+/// Purely a resume convenience: every fallible step (missing file, corrupt
+/// JSON, lock or write failure) degrades to "no persisted entries" rather
+/// than an error, so persistence problems can never fail a dispatch. Only
+/// corruption warns — a missing file is just a first conversation.
+struct ThreadStore {
+    /// Per-user edda store root (`edda_store::store_root()`).
+    root: PathBuf,
+}
+
+impl ThreadStore {
+    fn from_default_root() -> Self {
+        Self {
+            root: edda_store::store_root(),
+        }
+    }
+
+    /// One map per project, so two dispatch calls from the same repo (any
+    /// worktree — `project_id` resolves to the main root) share threads.
+    fn map_path(&self, cwd: &Path) -> PathBuf {
+        self.root
+            .join("projects")
+            .join(edda_store::project_id(cwd))
+            .join("state")
+            .join("codex-threads.json")
+    }
+
+    fn load(&self, cwd: &Path) -> HashMap<String, String> {
+        let path = self.map_path(cwd);
+        match std::fs::read_to_string(&path) {
+            Err(_) => HashMap::new(),
+            Ok(raw) => match serde_json::from_str(&raw) {
+                Ok(map) => map,
+                Err(_) => {
+                    eprintln!(
+                        "Warning: codex thread map {} is corrupt; ignoring it and \"
+                         starting fresh conversations (resume needs a new dispatch).",
+                        path.display()
+                    );
+                    HashMap::new()
+                }
+            },
+        }
+    }
+
+    /// Merge `threads` into the persisted map under an exclusive file lock,
+    /// so two concurrent dispatch processes cannot lose each other's
+    /// entries. In-memory entries win on key conflicts.
+    fn persist(&self, cwd: &Path, threads: &HashMap<String, String>) {
+        if threads.is_empty() {
+            return;
+        }
+        let path = self.map_path(cwd);
+        let Ok(_lock) = edda_store::lock_file(&path.with_extension("lock")) else {
+            return;
+        };
+        let mut merged = self.load_quiet(cwd);
+        for (session, thread) in threads {
+            merged.insert(session.clone(), thread.clone());
+        }
+        if let Ok(bytes) = serde_json::to_vec(&merged) {
+            let _ = edda_store::write_atomic(&path, &bytes);
+        }
+    }
+
+    /// [`Self::load`] without the corruption warning — used while already
+    /// holding the lock inside [`Self::persist`], where the warning would
+    /// fire twice for the same bad file.
+    fn load_quiet(&self, cwd: &Path) -> HashMap<String, String> {
+        let path = self.map_path(cwd);
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Default)]
@@ -75,6 +162,7 @@ impl CodexLauncher {
         Self {
             codex_bin: default_codex_bin(),
             verbose: false,
+            thread_store: Some(ThreadStore::from_default_root()),
             state: Mutex::new(LauncherState::default()),
         }
     }
@@ -83,8 +171,23 @@ impl CodexLauncher {
         Self {
             codex_bin,
             verbose: false,
+            thread_store: Some(ThreadStore::from_default_root()),
             state: Mutex::new(LauncherState::default()),
         }
+    }
+
+    /// Point the session→thread persistence at a custom store root (tests
+    /// use this to stay out of the real per-user store).
+    pub fn with_thread_store(mut self, root: PathBuf) -> Self {
+        self.thread_store = Some(ThreadStore { root });
+        self
+    }
+
+    /// Disable persistence entirely: in-memory thread continuity only.
+    #[cfg(test)]
+    fn without_thread_store(mut self) -> Self {
+        self.thread_store = None;
+        self
     }
 
     pub fn with_verbose(mut self, verbose: bool) -> Self {
@@ -132,7 +235,17 @@ impl AgentLauncher for CodexLauncher {
         let mut state = self.state.lock().await;
         if state.server.is_none() {
             match CodexAppServer::spawn(&self.codex_bin).await {
-                Ok(server) => state.server = Some(server),
+                // Cold start: merge the persisted session→thread map so a
+                // session id recorded by a previous process resumes instead
+                // of starting over. In-memory entries win (hot path).
+                Ok(server) => {
+                    if let Some(store) = &self.thread_store {
+                        for (session, thread) in store.load(cwd) {
+                            state.threads.entry(session).or_insert(thread);
+                        }
+                    }
+                    state.server = Some(server);
+                }
                 Err(error) => {
                     return Ok(PhaseResult::AgentCrash {
                         error: format!(
@@ -156,6 +269,12 @@ impl AgentLauncher for CodexLauncher {
             // thread map survives: codex persists threads and `thread/resume`
             // restores the conversation.
             state.server = None;
+        }
+        // Record the turn's session→thread binding even on a crash path:
+        // the thread was created and codex persists it, so the next process
+        // can resume it. Best-effort — failures are swallowed by design.
+        if let Some(store) = &self.thread_store {
+            store.persist(cwd, &state.threads);
         }
         Ok(result)
     }
@@ -253,8 +372,11 @@ pub(crate) mod test_support {
 
     /// A launcher pre-seeded with an already-spawned server, for tests that
     /// drive `run_phase` against a fake app-server without spawning binaries.
+    /// Persistence is off: these tests assert in-process behavior and must
+    /// never touch the real per-user store.
     pub(crate) fn launcher_with_server(server: CodexAppServer) -> CodexLauncher {
-        let mut launcher = CodexLauncher::with_bin(PathBuf::from("unused-fake-bin"));
+        let mut launcher =
+            CodexLauncher::with_bin(PathBuf::from("unused-fake-bin")).without_thread_store();
         launcher.state = Mutex::new(super::LauncherState {
             server: Some(server),
             threads: HashMap::new(),
@@ -267,7 +389,9 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::launcher_with_server;
     use super::*;
-    use crate::agent::codex_app_server::fake_support::{fake_app_server, FakeScenario};
+    use crate::agent::codex_app_server::fake_support::{
+        fake_app_server, fake_app_server_bin, FakeScenario,
+    };
     use crate::agent::codex_app_server::CodexAppServer;
     use crate::plan::parser::parse_plan;
 
@@ -603,6 +727,194 @@ mod tests {
             }
             other => panic!("expected AgentDone, got {other:?}"),
         }
+        Ok(())
+    }
+
+    // ── Cross-process thread-map persistence (GH-535) ──
+
+    /// The map file a launcher with `root` writes for `cwd`.
+    fn map_path_for(root: &Path, cwd: &Path) -> PathBuf {
+        root.join("projects")
+            .join(edda_store::project_id(cwd))
+            .join("state")
+            .join("codex-threads.json")
+    }
+
+    #[test]
+    fn thread_store_round_trips_the_session_map() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let cwd = tempfile::tempdir()?;
+        let store = ThreadStore {
+            root: root.path().to_path_buf(),
+        };
+        let mut threads = HashMap::new();
+        threads.insert("sess-1".to_owned(), "t-1".to_owned());
+
+        store.persist(cwd.path(), &threads);
+
+        let loaded = store.load(cwd.path());
+        assert_eq!(loaded.get("sess-1").map(String::as_str), Some("t-1"));
+        Ok(())
+    }
+
+    #[test]
+    fn thread_store_persist_merges_with_entries_from_another_process() -> Result<()> {
+        // Simulate the other process having written its own binding to the
+        // shared map between our load and our write: the merge must keep it.
+        let root = tempfile::tempdir()?;
+        let cwd = tempfile::tempdir()?;
+        let store = ThreadStore {
+            root: root.path().to_path_buf(),
+        };
+        let foreign = r#"{"sess-other":"t-other","sess-mine":"t-stale"}"#;
+        std::fs::create_dir_all(map_path_for(root.path(), cwd.path()).parent().unwrap())?;
+        std::fs::write(map_path_for(root.path(), cwd.path()), foreign)?;
+
+        let mut threads = HashMap::new();
+        threads.insert("sess-mine".to_owned(), "t-fresh".to_owned());
+        store.persist(cwd.path(), &threads);
+
+        let loaded = store.load(cwd.path());
+        assert_eq!(
+            loaded.get("sess-other").map(String::as_str),
+            Some("t-other")
+        );
+        assert_eq!(loaded.get("sess-mine").map(String::as_str), Some("t-fresh"));
+        Ok(())
+    }
+
+    #[test]
+    fn thread_store_missing_or_corrupt_file_loads_empty() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let cwd = tempfile::tempdir()?;
+        let store = ThreadStore {
+            root: root.path().to_path_buf(),
+        };
+        assert!(store.load(cwd.path()).is_empty(), "missing file is empty");
+
+        let map = map_path_for(root.path(), cwd.path());
+        std::fs::create_dir_all(map.parent().unwrap())?;
+        std::fs::write(&map, b"{ not json")?;
+        assert!(store.load(cwd.path()).is_empty(), "corrupt file is empty");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fresh_launcher_resumes_the_thread_a_previous_process_recorded() -> Result<()> {
+        // Stand-in for two `edda dispatch --agent codex --session-id sess-1`
+        // processes: two independently constructed launchers sharing the
+        // store root. The first records sess-1 → t-1 via thread/start; the
+        // second must send thread/resume (the ResumeOnly fake answers an
+        // error for anything else) and produce the resumed turn's answer.
+        let store_root = tempfile::tempdir()?;
+        let cwd = tempfile::tempdir()?;
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
+
+        let (_fake_dir, first_bin) =
+            fake_app_server_bin(FakeScenario::RunTurnCompletes).expect("first fake written");
+        let first =
+            CodexLauncher::with_bin(first_bin).with_thread_store(store_root.path().to_path_buf());
+        let first_result = first
+            .run_phase(
+                &phase,
+                "turn one",
+                "",
+                "sess-1",
+                cwd.path(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("first dispatch runs");
+        assert!(
+            matches!(&first_result, PhaseResult::AgentDone { result_text, .. } if result_text.as_deref() == Some("turn complete")),
+            "first dispatch should complete, got {first_result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(map_path_for(store_root.path(), cwd.path()))
+                .expect("map persisted"),
+            r#"{"sess-1":"t-1"}"#
+        );
+
+        let (_fake_dir, second_bin) =
+            fake_app_server_bin(FakeScenario::ResumeOnly).expect("second fake written");
+        let second =
+            CodexLauncher::with_bin(second_bin).with_thread_store(store_root.path().to_path_buf());
+        let second_result = second
+            .run_phase(
+                &phase,
+                "turn two",
+                "",
+                "sess-1",
+                cwd.path(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("second dispatch runs");
+        match second_result {
+            PhaseResult::AgentDone { result_text, .. } => {
+                assert_eq!(result_text.as_deref(), Some("resumed answer"));
+            }
+            other => panic!("second dispatch should resume the recorded thread, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn corrupt_store_entry_degrades_to_thread_start() -> Result<()> {
+        // A corrupt map must never fail the dispatch: the fresh launcher
+        // warns and falls back to thread/start, which completes normally.
+        let store_root = tempfile::tempdir()?;
+        let cwd = tempfile::tempdir()?;
+        let map = map_path_for(store_root.path(), cwd.path());
+        std::fs::create_dir_all(map.parent().unwrap())?;
+        std::fs::write(&map, b"{ corrupted")?;
+
+        let (_fake_dir, bin) =
+            fake_app_server_bin(FakeScenario::RunTurnCompletes).expect("fake written");
+        let launcher =
+            CodexLauncher::with_bin(bin).with_thread_store(store_root.path().to_path_buf());
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
+        let result = launcher
+            .run_phase(
+                &phase,
+                "do the task",
+                "",
+                "sess-1",
+                cwd.path(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("dispatch must not fail on a corrupt store entry");
+        assert!(
+            matches!(&result, PhaseResult::AgentDone { result_text, .. } if result_text.as_deref() == Some("turn complete")),
+            "degraded dispatch should complete via thread/start, got {result:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_store_entry_starts_a_fresh_thread() -> Result<()> {
+        // No map file at all: the first dispatch with a session id is a
+        // plain thread/start, not a failure and not a warning.
+        let store_root = tempfile::tempdir()?;
+        let cwd = tempfile::tempdir()?;
+        let (_fake_dir, bin) =
+            fake_app_server_bin(FakeScenario::RunTurnCompletes).expect("fake written");
+        let launcher =
+            CodexLauncher::with_bin(bin).with_thread_store(store_root.path().to_path_buf());
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
+        let result = launcher
+            .run_phase(
+                &phase,
+                "do the task",
+                "",
+                "sess-fresh",
+                cwd.path(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("first dispatch runs");
+        assert!(matches!(result, PhaseResult::AgentDone { .. }));
         Ok(())
     }
 }

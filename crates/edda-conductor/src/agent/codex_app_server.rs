@@ -425,6 +425,12 @@ pub(crate) mod fake_support {
         /// thread/resume (t-2) + turn ("second answer"). Drives the session
         /// continuity path end to end.
         TwoTurnsWithResume,
+        /// Expects the first thread request to be `thread/resume` and
+        /// answers it with t-2 + one completed turn ("resumed answer").
+        /// Any other method (e.g. a regression to thread/start) gets a
+        /// JSON-RPC error, so a test fails loudly instead of silently
+        /// passing through the start path.
+        ResumeOnly,
         Idle,
     }
 
@@ -481,6 +487,47 @@ pub(crate) mod fake_support {
         }
     }
 
+    /// The same fakes as [`fake_app_server`], packaged as a plain
+    /// executable path: tests that construct a
+    /// [`crate::agent::codex_rpc::CodexLauncher`] end to end need a
+    /// `codex_bin` the launcher can spawn as `{bin} app-server`, so a thin
+    /// wrapper script tolerates the extra argument and execs the scripted
+    /// fake.
+    pub(crate) fn fake_app_server_bin(
+        scenario: FakeScenario,
+    ) -> Result<(tempfile::TempDir, std::path::PathBuf)> {
+        let dir = tempfile::tempdir()?;
+
+        #[cfg(windows)]
+        {
+            let script = dir.path().join("fake-app-server.ps1");
+            std::fs::write(&script, powershell_fake_script(scenario))?;
+            let wrapper = dir.path().join("fake-app-server-codex.cmd");
+            std::fs::write(
+                &wrapper,
+                format!(
+                    "@echo off\r\npowershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\" %*\r\n",
+                    script.display()
+                ),
+            )?;
+            Ok((dir, wrapper))
+        }
+
+        #[cfg(unix)]
+        {
+            let script = dir.path().join("fake-app-server.sh");
+            std::fs::write(&script, shell_fake_script(scenario))?;
+            let wrapper = dir.path().join("fake-app-server-codex.sh");
+            std::fs::write(
+                &wrapper,
+                format!("#!/bin/sh\nexec /bin/sh '{}' \"$@\"\n", script.display()),
+            )?;
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))?;
+            Ok((dir, wrapper))
+        }
+    }
+
     #[cfg(windows)]
     fn powershell_fake_script(scenario: FakeScenario) -> String {
         let body = match scenario {
@@ -504,6 +551,9 @@ pub(crate) mod fake_support {
             }
             FakeScenario::TwoTurnsWithResume => {
                 "Read-Line\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nRead-Line\nWrite-Line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"first answer\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nRead-Line\nWrite-Line '{\"id\":4,\"result\":{\"thread\":{\"id\":\"t-2\"}}}'\nRead-Line\nWrite-Line '{\"id\":5,\"result\":{\"turn\":{\"id\":\"turn-2\"}}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-2\",\"turnId\":\"turn-2\",\"item\":{\"type\":\"agentMessage\",\"text\":\"second answer\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-2\",\"turn\":{\"id\":\"turn-2\",\"status\":\"completed\"}}}'\nStart-Sleep -Seconds 60"
+            }
+            FakeScenario::ResumeOnly => {
+                "$req = [Console]::In.ReadLine()\nif ($null -eq $req) { exit 0 }\nif ($req -notmatch 'thread/resume') { Write-Line '{\"id\":2,\"error\":{\"code\":-1,\"message\":\"expected thread/resume\"}}'; exit 1 }\nWrite-Line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-2\"}}}'\nRead-Line\nWrite-Line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-2\"}}}'\nWrite-Line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-2\",\"turnId\":\"turn-2\",\"item\":{\"type\":\"agentMessage\",\"text\":\"resumed answer\"}}}'\nWrite-Line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-2\",\"turn\":{\"id\":\"turn-2\",\"status\":\"completed\"}}}'\nStart-Sleep -Seconds 60"
             }
             FakeScenario::Idle => "Start-Sleep -Seconds 60",
         };
@@ -535,6 +585,9 @@ pub(crate) mod fake_support {
             }
             FakeScenario::TwoTurnsWithResume => {
                 "read_line\nwrite_line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-1\"}}}'\nread_line\nwrite_line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-1\",\"turnId\":\"turn-1\",\"item\":{\"type\":\"agentMessage\",\"text\":\"first answer\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-1\",\"turn\":{\"id\":\"turn-1\",\"status\":\"completed\"}}}'\nread_line\nwrite_line '{\"id\":4,\"result\":{\"thread\":{\"id\":\"t-2\"}}}'\nread_line\nwrite_line '{\"id\":5,\"result\":{\"turn\":{\"id\":\"turn-2\"}}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-2\",\"turnId\":\"turn-2\",\"item\":{\"type\":\"agentMessage\",\"text\":\"second answer\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-2\",\"turn\":{\"id\":\"turn-2\",\"status\":\"completed\"}}}'\nsleep 60"
+            }
+            FakeScenario::ResumeOnly => {
+                "IFS= read -r resume_request || exit 0\ncase \"$resume_request\" in *'\"thread/resume\"'*) ;; *) write_line '{\"id\":2,\"error\":{\"code\":-1,\"message\":\"expected thread/resume\"}}'; exit 1;; esac\nwrite_line '{\"id\":2,\"result\":{\"thread\":{\"id\":\"t-2\"}}}'\nread_line\nwrite_line '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-2\"}}}'\nwrite_line '{\"method\":\"item/completed\",\"params\":{\"threadId\":\"t-2\",\"turnId\":\"turn-2\",\"item\":{\"type\":\"agentMessage\",\"text\":\"resumed answer\"}}}'\nwrite_line '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"t-2\",\"turn\":{\"id\":\"turn-2\",\"status\":\"completed\"}}}'\nsleep 60"
             }
             FakeScenario::Idle => "sleep 60",
         };
