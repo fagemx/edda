@@ -66,6 +66,10 @@ pub struct Phase {
     /// Policy when the gate verdict rejects. Default: redispatch.
     #[serde(default)]
     pub on_reject: OnReject,
+    /// Path globs this phase owns as its write surface. Published in the
+    /// phase's auto-claim event so peer lanes can see the scope (GH-561).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
 }
 
 /// Kind of approval gate a phase can declare (D2).
@@ -353,6 +357,48 @@ phases:
     on_reject: explode
 "#;
         assert!(serde_yml::from_str::<Plan>(yaml).is_err());
+    }
+
+    // ── Owned write surfaces (GH-561) ─────────────────────────────
+
+    #[test]
+    fn phase_owns_parses_and_defaults_empty() {
+        let yaml = r#"
+name: owns-plan
+phases:
+  - id: touch-agent
+    prompt: "Edit the agent surface"
+    owns:
+      - "crates/edda-conductor/src/agent/*"
+      - "crates/edda-conductor/src/plan/**"
+  - id: no-owns
+    prompt: "No declared surface"
+"#;
+        let plan: Plan = serde_yml::from_str(yaml).unwrap();
+        assert_eq!(
+            plan.phases[0].owns,
+            vec![
+                "crates/edda-conductor/src/agent/*".to_string(),
+                "crates/edda-conductor/src/plan/**".to_string(),
+            ]
+        );
+        assert!(plan.phases[1].owns.is_empty());
+    }
+
+    #[test]
+    fn phase_without_owns_omits_field_when_serialized() {
+        let yaml = r#"
+name: minimal
+phases:
+  - id: a
+    prompt: "x"
+"#;
+        let plan: Plan = serde_yml::from_str(yaml).unwrap();
+        let json = serde_json::to_string(&plan.phases[0]).unwrap();
+        assert!(
+            !json.contains("owns"),
+            "empty owns must not serialize: {json}"
+        );
     }
 
     #[test]
