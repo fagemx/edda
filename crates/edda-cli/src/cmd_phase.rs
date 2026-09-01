@@ -62,12 +62,19 @@ pub(crate) struct ResolvedGate {
 
 /// Resolve subject/gate_sha/session for a gated phase from conductor state.
 ///
-/// Refuses LOUDLY and immediately when the plan does not exist, the phase
-/// does not exist, or the phase is not actually in AWAITING_VERDICT — the
+/// `sha_override` is an explicit audit override (`--sha`): when the persisted
+/// state has no `gate_sha`, the override is used instead of failing — an
+/// explicit `--sha` must always be able to record a verdict. Without an
+/// override, a missing `gate_sha` still refuses LOUDLY, as does a missing
+/// plan/phase or a phase not actually in AWAITING_VERDICT — the
 /// whole point is to turn today's silent-eternal-wait failures into instant
 /// errors. Resolution reads the same state.json the conductor itself uses;
 /// no new notion of "where" is introduced (that is #543's problem, not ours).
-pub(crate) fn resolve_gate(repo_root: &Path, subject: &str) -> anyhow::Result<ResolvedGate> {
+pub(crate) fn resolve_gate(
+    repo_root: &Path,
+    subject: &str,
+    sha_override: Option<&str>,
+) -> anyhow::Result<ResolvedGate> {
     let (plan_name, phase_id) = subject.split_once('/').ok_or_else(|| {
         anyhow::anyhow!(
             "subject must be <plan-name>/<phase-id> (got \"{subject}\") — \
@@ -104,12 +111,16 @@ pub(crate) fn resolve_gate(repo_root: &Path, subject: &str) -> anyhow::Result<Re
         );
     }
 
-    let gate_sha = phase.gate_sha.clone().ok_or_else(|| {
-        anyhow::anyhow!(
+    let gate_sha = match phase.gate_sha.clone() {
+        Some(gate_sha) => gate_sha,
+        // An explicit --sha is an audit override: it must work even when the
+        // persisted state never recorded a gate_sha (GH-547 review, round 1).
+        None if sha_override.is_some() => sha_override.expect("checked above").to_string(),
+        None => anyhow::bail!(
             "phase \"{plan_name}/{phase_id}\" is awaiting_verdict but has no gate_sha \
              recorded; pass --sha explicitly"
-        )
-    })?;
+        ),
+    };
 
     // Same deterministic session the runner used for this attempt
     // (edda-conductor/src/runner/sequential.rs); phase.attempts >= 1 by the
@@ -147,7 +158,7 @@ pub fn run_gate_sugar(cmd: PhaseCmd, repo_root: &Path) -> anyhow::Result<()> {
         ),
     };
 
-    let gate = resolve_gate(repo_root, &subject)?;
+    let gate = resolve_gate(repo_root, &subject, sha_override.as_deref())?;
     let sha = sha_override.unwrap_or_else(|| gate.gate_sha.clone());
     let session = session_override.unwrap_or_else(|| gate.session_id.clone());
     println!(
@@ -362,7 +373,9 @@ mod tests {
     #[test]
     fn sugar_requires_plan_slash_phase_subject() {
         let ws = awaiting_ws("subject");
-        let err = resolve_gate(&ws, "gated-impl").unwrap_err().to_string();
+        let err = resolve_gate(&ws, "gated-impl", None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("<plan-name>/<phase-id>"), "unexpected: {err}");
         let _ = std::fs::remove_dir_all(&ws);
     }
@@ -370,7 +383,7 @@ mod tests {
     #[test]
     fn sugar_missing_plan_is_loud() {
         let ws = awaiting_ws("noplan");
-        let err = resolve_gate(&ws, "no-such-plan/impl")
+        let err = resolve_gate(&ws, "no-such-plan/impl", None)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no conductor state"), "unexpected: {err}");
@@ -381,7 +394,9 @@ mod tests {
     #[test]
     fn sugar_missing_phase_lists_candidates() {
         let ws = awaiting_ws("nophase");
-        let err = resolve_gate(&ws, "gated/wrong-id").unwrap_err().to_string();
+        let err = resolve_gate(&ws, "gated/wrong-id", None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no phase \"wrong-id\""), "unexpected: {err}");
         assert!(err.contains("impl"), "unexpected: {err}");
         let _ = std::fs::remove_dir_all(&ws);
@@ -397,7 +412,9 @@ mod tests {
         state.phases[0].status = PhaseStatus::Pending;
         edda_conductor::state::persist::save_state(&ws, &state).unwrap();
 
-        let err = resolve_gate(&ws, "gated/impl").unwrap_err().to_string();
+        let err = resolve_gate(&ws, "gated/impl", None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not awaiting a verdict"), "unexpected: {err}");
         assert!(err.to_lowercase().contains("pending"), "unexpected: {err}");
         let _ = std::fs::remove_dir_all(&ws);
@@ -406,7 +423,7 @@ mod tests {
     #[test]
     fn sugar_resolves_sha_and_session_from_conductor_state() {
         let ws = awaiting_ws("resolve");
-        let gate = resolve_gate(&ws, "gated/impl").unwrap();
+        let gate = resolve_gate(&ws, "gated/impl", None).unwrap();
         assert_eq!(gate.gate_sha, sha('a'));
         assert_eq!(
             gate.session_id,
@@ -458,6 +475,46 @@ mod tests {
             .expect("verdict should be recorded");
         assert_eq!(verdict.payload.decision, VerdictDecision::Rejected);
         assert_eq!(verdict.payload.comment.as_deref(), Some("tests fail"));
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn sugar_sha_override_applies_even_when_state_has_no_gate_sha() {
+        let ws = awaiting_ws("override-no-state-sha");
+        // State in AWAITING_VERDICT but with gate_sha absent — a shape
+        // PhaseState permits.
+        let mut state = edda_conductor::state::persist::load_state(&ws, "gated")
+            .unwrap()
+            .unwrap();
+        state.phases[0].gate_sha = None;
+        edda_conductor::state::persist::save_state(&ws, &state).unwrap();
+
+        // Without an override, resolution still refuses loudly...
+        let err = resolve_gate(&ws, "gated/impl", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no gate_sha"), "unexpected: {err}");
+        assert!(err.contains("pass --sha explicitly"), "unexpected: {err}");
+
+        // ...but an explicit --sha must override the missing gate_sha.
+        let good = sha('f');
+        run_gate_sugar(
+            PhaseCmd::Approve {
+                subject: "gated/impl".into(),
+                sha: Some(good.clone()),
+                comment: Some("audited manually".into()),
+                session: None,
+            },
+            &ws,
+        )
+        .unwrap();
+        let ledger = Ledger::open(&ws).unwrap();
+        let verdict = ledger
+            .latest_verdict("gated/impl", &good)
+            .unwrap()
+            .expect("verdict should be recorded at the explicit --sha");
+        assert_eq!(verdict.payload.decision, VerdictDecision::Approved);
+        assert_eq!(verdict.payload.comment.as_deref(), Some("audited manually"));
         let _ = std::fs::remove_dir_all(&ws);
     }
 
