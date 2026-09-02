@@ -7,6 +7,8 @@ use std::process::Command;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+pub mod merge_gate;
+
 #[derive(Subcommand)]
 pub enum PrsCmd {
     /// Scan recent PRs and record them as events
@@ -18,11 +20,14 @@ pub enum PrsCmd {
         #[arg(long, default_value = "all")]
         state: String,
     },
+    /// Evaluate merge preconditions for a PR (current-head LGTM, green CI, SHA window)
+    CheckMerge(merge_gate::CheckMergeArgs),
 }
 
 pub fn run_prs(cmd: PrsCmd, repo_root: &Path) -> anyhow::Result<()> {
     match cmd {
         PrsCmd::Scan { limit, state } => scan_prs(repo_root, limit, &state),
+        PrsCmd::CheckMerge(args) => merge_gate::run_check_merge(args, repo_root),
     }
 }
 
