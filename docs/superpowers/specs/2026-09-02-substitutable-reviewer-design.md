@@ -30,3 +30,18 @@
 | 6 | `review:unreviewed` 與合併閘 #580 | `review:unreviewed` 是 **label／狀態，不是判決**：語意＝「審查當下沒有任何合格引擎可用（配額盡／運輸全斷／provider 過載），誠實停住」。與 #580 的關係：合併閘機械化要求 current-head LGTM＋綠 CI；`review:unreviewed` 的 PR 不可能有有效 LGTM → 閘自然擋住。解鎖唯一路徑＝某合格引擎真審一輪並產出合格判決；**不合格引擎的 LGTM 不算**（合併政策讀判決欄位不讀標頭，見 §4） | `fleet.review-provider-overload`：「unreviewed PR 是誠實的狀態，便宜模型的判決不是」；`fleet.merge-authority` |
 
 ---
+
+## 2. 引擎池表 v0
+
+合格欄是 §3 校準**之後**的提議；校準前一律 none（合格由量測不由品牌）。
+
+| 引擎 | model_requested | 允許運輸 | 成本級 | 實測成本/次 | qualified_classes（提議） | quota_signal | 備註 |
+|---|---|---|---|---|---|---|---|
+| gpt-5.6-sol | `openai-codex/gpt-5.6-sol` | A: `pi --model openai-codex/gpt-5.6-sol`；B: `edda dispatch --agent codex`（過載時先換這個） | 訂閱內，T$0 | $0.0798 | **全類別（錨，不被取代）** | #582 | `fleet.agent-model-split`＋`fleet.review-provider-overload` 的原裝組合；sol 抓到而他人漏的即成新金絲雀 |
+| Opus 5 | `opus`（`claude -p --model opus`） | **C: Claude Code only**——`claude -p --allowedTools "Read,Grep,Glob,Bash(git *),Bash(sh *)"`；**絕不**經 pi/openrouter | 訂閱內，T$1 | $1.4869 | code-risk + docs-skills（provisional，待操作者裁定） | 訂閱用量 | `fleet.claude-subscription-transport`：pi 顯示 ready 也不准派 |
+| gemini-3-pro | （見備註） | pi/openrouter | — | $0 | **none（not run）** | — | 本次校準失敗：openrouter 無 `google/gemini-3-pro` 此 id；`google/gemini-3.1-pro-preview` 重試一次仍 404（fp8 quantization 無 endpoint）。**修正 model_requested 與路由前，不得列入候選**（見 §5 學習 3、§6 後續單） |
+| glm-5.3-flash | `openrouter/z-ai/glm-5.3-flash` | pi/openrouter | 訂閱外按量，T$0 | $0.00092 | **docs-skills（provisional）**；code-risk 不合格 | #582 | code-risk 不合格的原因與 brief v1 的 `[判斷]` 標籤有關（§3 學習 1），brief v2 修正後重校，不是引擎本身判死 |
+
+成本級定義（提案）：T$0＝邊際成本 < $0.10/次；T$1＝$0.10–2.00/次。以帳本實測值滾動更新。
+
+---
