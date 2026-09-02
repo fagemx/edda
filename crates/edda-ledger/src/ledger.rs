@@ -3,6 +3,7 @@ use crate::sqlite_store::{BundleRow, SqliteStore};
 use crate::verdict::{self, VerdictRecord};
 use crate::view::{self, DecisionView};
 use anyhow::Context;
+use edda_core::event::finalize_event;
 use edda_core::Event;
 use std::path::Path;
 
@@ -10,6 +11,20 @@ use std::path::Path;
 pub struct Ledger {
     pub paths: EddaPaths,
     pub(crate) sqlite: SqliteStore,
+}
+
+/// Structured outcome of a hash-chain verification (GH-647).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChainVerifyReport {
+    /// Total number of events in the ledger.
+    pub events: usize,
+    /// `event_id` of the last event in insertion order, if any.
+    pub last_event_id: Option<String>,
+    /// `event_id` of the first event that breaks the chain, or `None` when
+    /// the chain is intact (including the empty ledger).
+    pub first_bad_event: Option<String>,
+    /// Human-readable description of the first break, if any.
+    pub reason: Option<String>,
 }
 
 impl Ledger {
@@ -23,6 +38,27 @@ impl Ledger {
             );
         }
         let sqlite = SqliteStore::open_or_create(&paths.ledger_db)?;
+        Ok(Self { paths, sqlite })
+    }
+
+    /// Open an existing workspace ledger without creating or migrating
+    /// anything (read-only).
+    ///
+    /// [`Ledger::open`] delegates to `SqliteStore::open_or_create`, so it
+    /// silently creates an empty ledger when the DB file is missing. That is
+    /// correct for writers but poisonous for integrity checks: `edda verify`
+    /// must report a vanished ledger, not bless an empty one (GH-647). This
+    /// variant fails when `.edda/ledger.db` is missing or unreadable, opens
+    /// the store `query_only`, and never applies schema or migrations.
+    pub fn open_existing(repo_root: impl Into<std::path::PathBuf>) -> anyhow::Result<Self> {
+        let paths = EddaPaths::discover(repo_root);
+        if !paths.is_initialized() {
+            anyhow::bail!(
+                "not an edda workspace ({}/.edda not found). Run `edda init` first.",
+                paths.root.display()
+            );
+        }
+        let sqlite = SqliteStore::open_existing(&paths.ledger_db)?;
         Ok(Self { paths, sqlite })
     }
 
@@ -155,6 +191,84 @@ impl Ledger {
     /// Verify parent linkage and canonical hashes for the complete event log.
     pub fn verify_chain(&self) -> anyhow::Result<()> {
         self.sqlite.verify_chain().context("Ledger::verify_chain")
+    }
+
+    /// Verify the hash chain and report the outcome as data (GH-647).
+    ///
+    /// [`Ledger::verify_chain`] predates the `edda verify` CLI verb and
+    /// reports the first break only as an error string; its signature is
+    /// frozen, so this variant exists so callers can name the first broken
+    /// event without parsing error text. The checks mirror
+    /// `SqliteStore::verify_chain` (sqlite_store/events.rs): canonical hash
+    /// and taxonomy of every event, plus parent linkage from the root, in
+    /// insertion (rowid) order. A row that cannot even be deserialized (e.g.
+    /// a payload overwritten with non-JSON) is itself the first break: it is
+    /// reported by `event_id` instead of failing the whole scan.
+    pub fn verify_chain_report(&self) -> anyhow::Result<ChainVerifyReport> {
+        let rows = self
+            .sqlite
+            .iter_events_reporting()
+            .context("Ledger::verify_chain_report")?;
+        let mut report = ChainVerifyReport {
+            events: rows.len(),
+            last_event_id: rows
+                .last()
+                .and_then(|row| row.as_ref().ok())
+                .map(|event| event.event_id.clone()),
+            first_bad_event: None,
+            reason: None,
+        };
+
+        for (i, row) in rows.iter().enumerate() {
+            let event = match row {
+                Ok(event) => event,
+                Err((event_id, err)) => {
+                    // The row cannot be deserialized, so its stored hash and
+                    // linkage cannot be checked at all: the unreadable row is
+                    // the first break, and it is named (GH-647).
+                    report.first_bad_event = Some(event_id.clone());
+                    report.reason = Some(format!("event {event_id} could not be read: {err}"));
+                    return Ok(report);
+                }
+            };
+            let mut canonical = event.clone();
+            finalize_event(&mut canonical)?;
+            if event.event_family != canonical.event_family
+                || event.event_level != canonical.event_level
+            {
+                report.first_bad_event = Some(event.event_id.clone());
+                report.reason = Some(format!("event {} has invalid taxonomy", event.event_id));
+                return Ok(report);
+            }
+            if event.hash != canonical.hash || event.digests != canonical.digests {
+                report.first_bad_event = Some(event.event_id.clone());
+                report.reason = Some(format!(
+                    "event {} has invalid hash or digest",
+                    event.event_id
+                ));
+                return Ok(report);
+            }
+            let expected_parent = if i == 0 {
+                None
+            } else {
+                match rows[i - 1].as_ref() {
+                    Ok(prev) => Some(prev.hash.as_str()),
+                    // Unreachable: an unreadable row returns above as the
+                    // first break before iteration reaches index i.
+                    Err(_) => None,
+                }
+            };
+            if event.parent_hash.as_deref() != expected_parent {
+                report.first_bad_event = Some(event.event_id.clone());
+                report.reason = Some(format!(
+                    "chain break at event {} (index {}): expected parent_hash={:?}, got {:?}",
+                    event.event_id, i, expected_parent, event.parent_hash
+                ));
+                return Ok(report);
+            }
+        }
+
+        Ok(report)
     }
 
     /// Get a single event by event_id.
@@ -1198,6 +1312,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    // GH-647: a payload corrupted below the JSON level must be reported as
+    // the first broken event by id, not abort the scan without a culprit.
+    #[test]
+    fn verify_chain_report_names_unreadable_row() {
+        let (tmp, ledger) = setup_workspace();
+        let e1 = new_note_event("main", None, "system", "init", &[]).unwrap();
+        ledger.append_event(&e1).unwrap();
+        let e2 = new_note_event("main", Some(&e1.hash), "system", "second", &[]).unwrap();
+        ledger.append_event(&e2).unwrap();
+
+        {
+            let conn = rusqlite::Connection::open(tmp.join(".edda").join("ledger.db")).unwrap();
+            conn.execute(
+                "UPDATE events SET payload = 'not-json' WHERE event_id = ?1",
+                rusqlite::params![e2.event_id],
+            )
+            .unwrap();
+        }
+
+        let report = ledger.verify_chain_report().unwrap();
+        assert_eq!(
+            report.first_bad_event.as_deref(),
+            Some(e2.event_id.as_str())
+        );
+        assert!(report
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("could not be read"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     // GH-401: ratified-state derives from insertion order (rowid), not
     // timestamps, and is branch-scoped.
 
@@ -1668,6 +1814,102 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].key, "has.paths");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn verify_chain_report_empty_ledger_is_intact() {
+        let (tmp, ledger) = setup_workspace();
+        let report = ledger.verify_chain_report().unwrap();
+        assert_eq!(report.events, 0);
+        assert_eq!(report.last_event_id, None);
+        assert_eq!(report.first_bad_event, None);
+        assert_eq!(report.reason, None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn verify_chain_report_clean_chain_counts_and_names_last() {
+        let (tmp, ledger) = setup_workspace();
+        let e1 = new_note_event("main", None, "system", "first", &[]).unwrap();
+        ledger.append_event(&e1).unwrap();
+        let e2 = new_note_event("main", Some(&e1.hash), "system", "second", &[]).unwrap();
+        ledger.append_event(&e2).unwrap();
+
+        let report = ledger.verify_chain_report().unwrap();
+        assert_eq!(report.events, 2);
+        assert_eq!(report.last_event_id.as_deref(), Some(e2.event_id.as_str()));
+        assert_eq!(report.first_bad_event, None);
+        assert_eq!(report.reason, None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn verify_chain_report_names_first_bad_event_after_payload_tamper() {
+        let (tmp, ledger) = setup_workspace();
+        let e1 = new_note_event("main", None, "system", "first", &[]).unwrap();
+        ledger.append_event(&e1).unwrap();
+        let e2 = new_note_event("main", Some(&e1.hash), "system", "second", &[]).unwrap();
+        ledger.append_event(&e2).unwrap();
+
+        // Tamper with e2's payload behind the ledger's back, via a direct
+        // second connection to the SQLite file.
+        let db = rusqlite::Connection::open(tmp.join(".edda").join("ledger.db")).unwrap();
+        db.execute(
+            "UPDATE events SET payload = replace(payload, 'second', 'tampered') \
+             WHERE event_id = ?1",
+            rusqlite::params![e2.event_id],
+        )
+        .unwrap();
+
+        let report = ledger.verify_chain_report().unwrap();
+        assert_eq!(report.events, 2);
+        assert_eq!(
+            report.first_bad_event.as_deref(),
+            Some(e2.event_id.as_str()),
+            "the first (and only) broken event must be named: {:?}",
+            report.reason
+        );
+        assert!(report.reason.unwrap().contains("invalid hash"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn verify_chain_report_names_first_broken_link_not_later_events() {
+        let (tmp, ledger) = setup_workspace();
+        let e1 = new_note_event("main", None, "system", "first", &[]).unwrap();
+        ledger.append_event(&e1).unwrap();
+        let e2 = new_note_event("main", Some(&e1.hash), "system", "second", &[]).unwrap();
+        ledger.append_event(&e2).unwrap();
+        let e3 = new_note_event("main", Some(&e2.hash), "system", "third", &[]).unwrap();
+        ledger.append_event(&e3).unwrap();
+
+        // Forge e3 with a self-consistent hash over a bogus parent, so only
+        // the parent-linkage check can catch it. The report must stop at e3
+        // — the first broken link — never skipping ahead.
+        let mut forged = e3.clone();
+        forged.parent_hash = Some("sha256:bogus".into());
+        edda_core::event::finalize_event(&mut forged).unwrap();
+        let db = rusqlite::Connection::open(tmp.join(".edda").join("ledger.db")).unwrap();
+        db.execute(
+            "UPDATE events SET parent_hash = ?2, hash = ?3, digests = ?4 WHERE event_id = ?1",
+            rusqlite::params![
+                e3.event_id,
+                forged.parent_hash,
+                forged.hash,
+                serde_json::to_string(&forged.digests).unwrap()
+            ],
+        )
+        .unwrap();
+
+        let report = ledger.verify_chain_report().unwrap();
+        assert_eq!(
+            report.first_bad_event.as_deref(),
+            Some(e3.event_id.as_str()),
+            "break must be reported at the first broken link: {:?}",
+            report.reason
+        );
+        assert!(report.reason.unwrap().contains("chain break"));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
