@@ -1,16 +1,23 @@
 /target
 .edda/
 .agents/
-CLAUDE.md
+/CLAUDE.md
 docs/archive/
 /tmp/
 .tmp/
 push.log
 .env
-nul
 
 # Claude project config: track skills and commands, ignore runtime state
 .claude/*
 !.claude/CLAUDE.md
 !.claude/skills/
 !.claude/commands/
+
+# editor / edda-hook backups inside the re-included trees
+.claude/skills/**/*.bak
+.claude/skills/**/*~
+.claude/skills/**/*.edda.bak.*
+.claude/commands/**/*.bak
+.claude/commands/**/*~
+.claude/commands/**/*.edda.bak.*
