@@ -9,7 +9,7 @@ use super::helpers::{
 use super::{ActivityType, DigestTaskSnapshot, FailedCommand, SessionOutcome, SessionStats};
 
 pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats> {
-    Ok(extract_stats_from(session_ledger_path, 0)?.0)
+    Ok(extract_stats_delta(session_ledger_path, 0)?.stats)
 }
 
 /// Tool-call event names across the bridges that persist session ledgers
@@ -136,81 +136,73 @@ pub(crate) fn watermark_matches(path: &Path, offset: u64, prefix_hash: &str) -> 
         .unwrap_or(false)
 }
 
-/// Extract statistics from the delta of a session ledger starting at
-/// `start_offset` (the digest watermark) up to the end of the last complete
-/// line. Returns the stats and the consumed byte offset.
-///
-/// A trailing unterminated line is NOT consumed: the producer may still be
-/// writing it. Only complete, newline-terminated lines count as consumed,
-/// so a line is digested exactly once, once its write completes.
-pub fn extract_stats_from(
-    session_ledger_path: &Path,
-    start_offset: u64,
-) -> anyhow::Result<(SessionStats, u64)> {
-    let mut stats = SessionStats::default();
-    let mut files_set: BTreeSet<String> = BTreeSet::new();
-    let mut file_edit_map: BTreeMap<String, u64> = BTreeMap::new();
+/// Result of one streaming pass over a session ledger (round-3 P1-1).
+pub struct ExtractedDelta {
+    pub stats: SessionStats,
+    /// Byte offset just past the last consumed complete line.
+    pub consumed: u64,
+    /// BLAKE3 of the first `consumed` bytes, computed over the SAME bytes —
+    /// read through the SAME open file handle — whose content produced
+    /// `stats` (round-3 P1-1 ruling: the note's content and its identity
+    /// proof must not be able to come from different reads). One handle,
+    /// one pass: if the path is atomically replaced mid-digest, the open
+    /// handle keeps following the original inode and BOTH the stats and
+    /// the hash are derived from it, so the emitted watermark always
+    /// proves exactly the bytes that were summarized.
+    pub prefix_hash: String,
+}
 
+/// Incremental parse state for one sequential pass over a session ledger.
+struct StatsParser {
+    stats: SessionStats,
+    files_set: BTreeSet<String>,
+    file_edit_map: BTreeMap<String, u64>,
     // Track session outcome: last event type + trailing failure count
-    let mut last_event_name = String::new();
-    let mut trailing_failures: u32 = 0;
-
+    last_event_name: String,
+    trailing_failures: u32,
     // Track timestamps for duration. Duration is the session's real activity
     // span: consecutive-event gaps are summed with idle gaps capped
     // (GH-578) — not "first timestamp until now".
-    let mut active_secs: i64 = 0;
-    let mut last_seen: Option<time::OffsetDateTime> = None;
+    active_secs: i64,
+    last_seen: Option<time::OffsetDateTime>,
+    malformed: u64,
+}
 
-    if !session_ledger_path.exists() {
-        return Ok((stats, start_offset));
+impl StatsParser {
+    fn new() -> Self {
+        Self {
+            stats: SessionStats::default(),
+            files_set: BTreeSet::new(),
+            file_edit_map: BTreeMap::new(),
+            last_event_name: String::new(),
+            trailing_failures: 0,
+            active_secs: 0,
+            last_seen: None,
+            malformed: 0,
+        }
     }
 
-    let mut file = std::fs::File::open(session_ledger_path)?;
-    let end = complete_prefix_len(&mut file)?;
-    if start_offset >= end {
-        // Nothing new (complete) since the watermark.
-        return Ok((stats, start_offset));
-    }
-
-    file.seek(SeekFrom::Start(start_offset))?;
-    let mut reader = std::io::BufReader::new(file);
-    let mut consumed = start_offset;
-    let mut line_buf: Vec<u8> = Vec::new();
-    let mut malformed: u64 = 0;
-
-    loop {
-        line_buf.clear();
-        let n = reader.read_until(b'\n', &mut line_buf)?;
-        if n == 0 {
-            break;
-        }
-        if line_buf.last() != Some(&b'\n') {
-            // Unterminated tail: the producer is (or was) mid-write.
-            // Not consumed — it will be picked up once complete.
-            break;
-        }
-        consumed += n as u64;
-
-        let line = String::from_utf8_lossy(&line_buf);
+    /// Parse one complete envelope line into the accumulating stats.
+    fn push_line(&mut self, line: &str) {
         let line = line.trim();
         if line.is_empty() {
-            continue;
+            return;
         }
         let envelope: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => {
-                malformed += 1;
-                continue; // skip malformed lines
+                self.malformed += 1;
+                return; // skip malformed lines
             }
         };
 
         let ts = envelope.get("ts").and_then(|v| v.as_str()).unwrap_or("");
         if !ts.is_empty() {
-            if stats.first_ts.is_none() {
-                stats.first_ts = Some(ts.to_string());
+            if self.stats.first_ts.is_none() {
+                self.stats.first_ts = Some(ts.to_string());
             }
-            stats.last_ts = Some(ts.to_string());
-            accumulate_active_secs(&mut active_secs, &mut last_seen, ts);
+            self.stats.last_ts = Some(ts.to_string());
+            accumulate_active_secs(&mut self.active_secs, &mut self.last_seen, ts);
         }
 
         let event_name = envelope
@@ -226,36 +218,37 @@ pub fn extract_stats_from(
 
         // Track trailing failures for outcome detection
         if is_failure {
-            trailing_failures += 1;
+            self.trailing_failures += 1;
         } else if is_call {
-            trailing_failures = 0;
+            self.trailing_failures = 0;
         }
         if !event_name.is_empty() {
-            last_event_name = event_name.to_string();
+            self.last_event_name = event_name.to_string();
         }
 
         if is_failure {
-            stats.tool_failures += 1;
+            self.stats.tool_failures += 1;
             // Extract failed Bash commands
             let tool_name = tool_name_of(&envelope);
             if tool_name == "Bash" {
                 if let Some(cmd) = extract_bash_command(&envelope) {
                     let cwd_val = extract_envelope_cwd(&envelope);
                     let exit_code = extract_exit_code(&envelope);
-                    stats.failed_cmds_detail.push(FailedCommand {
+                    self.stats.failed_cmds_detail.push(FailedCommand {
                         command: cmd.clone(),
                         cwd: cwd_val,
                         exit_code,
                     });
-                    stats.failed_commands.push(cmd);
+                    self.stats.failed_commands.push(cmd);
                 }
             }
         } else if is_call {
-            stats.tool_calls += 1;
+            self.stats.tool_calls += 1;
             // Extract tool_name and accumulate per-tool breakdown
             let tool_name = tool_name_of(&envelope);
             if !tool_name.is_empty() {
-                *stats
+                *self
+                    .stats
                     .tool_call_breakdown
                     .entry(tool_name.to_string())
                     .or_insert(0) += 1;
@@ -263,8 +256,8 @@ pub fn extract_stats_from(
             if tool_name == "Edit" || tool_name == "Write" {
                 if let Some(fp) = extract_file_path(&envelope) {
                     if !crate::signals::is_noise_file(&fp) {
-                        files_set.insert(fp.clone());
-                        *file_edit_map.entry(fp).or_insert(0) += 1;
+                        self.files_set.insert(fp.clone());
+                        *self.file_edit_map.entry(fp).or_insert(0) += 1;
                     }
                 }
             }
@@ -273,46 +266,126 @@ pub fn extract_stats_from(
                     if cmd.contains("git commit") {
                         let msg = extract_git_commit_msg(&cmd);
                         if !msg.is_empty() {
-                            stats.commits_made.push(msg);
+                            self.stats.commits_made.push(msg);
                         }
                     }
                     if let Some(pkg) = crate::nudge::extract_dependency_add(&cmd) {
-                        if !stats.deps_added.contains(&pkg) {
-                            stats.deps_added.push(pkg);
+                        if !self.stats.deps_added.contains(&pkg) {
+                            self.stats.deps_added.push(pkg);
                         }
                     }
                 }
             }
         } else if is_user_prompt_event(event_name) {
-            stats.user_prompts += 1;
+            self.stats.user_prompts += 1;
         }
     }
 
-    if malformed > 0 {
+    fn finish(mut self) -> SessionStats {
+        self.stats.files_modified = self.files_set.into_iter().collect();
+        self.stats.file_edit_counts = self.file_edit_map.into_iter().collect();
+        self.stats.duration_minutes = self.active_secs.unsigned_abs() / 60;
+
+        // Determine session outcome
+        self.stats.outcome = if self.trailing_failures >= 3 {
+            SessionOutcome::ErrorStuck
+        } else if is_user_prompt_event(&self.last_event_name) {
+            SessionOutcome::Interrupted
+        } else {
+            SessionOutcome::Completed
+        };
+
+        // Classify activity based on tool patterns
+        self.stats.activity = classify_activity(&self.stats);
+
+        self.stats
+    }
+}
+
+/// Extract the statistics of a session ledger's delta starting at
+/// `start_offset` (the digest watermark) up to the end of the last complete
+/// line, TOGETHER WITH the identity proof of the consumed prefix — derived
+/// from the same single read (round-3 P1-1).
+///
+/// One open file handle, one sequential pass: every consumed byte is hashed,
+/// and the bytes at or after `start_offset` are the bytes parsed into
+/// `stats`. The previous implementation opened the path a second time to
+/// hash the consumed prefix after parsing; an atomic replacement of the path
+/// between the two opens produced a note whose stats summarized one file
+/// while its `prefix_hash` proved another, and the retry then validated
+/// against the replacement and silently skipped every current record. That
+/// possibility is now structurally gone: there is no second read to race
+/// against.
+///
+/// A trailing unterminated line is NOT consumed: the producer may still be
+/// writing it. Only complete, newline-terminated lines count as consumed,
+/// so a line is digested exactly once, once its write completes.
+pub fn extract_stats_delta(
+    session_ledger_path: &Path,
+    start_offset: u64,
+) -> anyhow::Result<ExtractedDelta> {
+    if !session_ledger_path.exists() {
+        return Ok(ExtractedDelta {
+            stats: SessionStats::default(),
+            consumed: start_offset,
+            prefix_hash: String::new(),
+        });
+    }
+
+    let mut file = std::fs::File::open(session_ledger_path)?;
+    let end = complete_prefix_len(&mut file)?;
+    if start_offset >= end {
+        // Nothing new (complete) since the watermark. No proof is derived:
+        // the caller keeps its existing, already proof-validated watermark.
+        return Ok(ExtractedDelta {
+            stats: SessionStats::default(),
+            consumed: start_offset,
+            prefix_hash: String::new(),
+        });
+    }
+
+    // ONE pass over the SAME open handle: hash every consumed byte, parse
+    // the bytes at or after `start_offset`. One buffer of truth.
+    file.seek(SeekFrom::Start(0))?;
+    let mut reader = std::io::BufReader::with_capacity(128 * 1024, file);
+    let mut parser = StatsParser::new();
+    let mut hasher = blake3::Hasher::new();
+    let mut consumed: u64 = 0;
+    let mut line_buf: Vec<u8> = Vec::new();
+
+    loop {
+        line_buf.clear();
+        let n = reader.read_until(b'\n', &mut line_buf)?;
+        if n == 0 {
+            break;
+        }
+        if line_buf.last() != Some(&b'\n') {
+            // Unterminated tail: the producer is (or was) mid-write.
+            // Not consumed — it will be picked up once complete.
+            break;
+        }
+        hasher.update(&line_buf);
+        let line_start = consumed;
+        consumed += n as u64;
+        if line_start >= start_offset {
+            let line = String::from_utf8_lossy(&line_buf);
+            parser.push_line(&line);
+        }
+    }
+
+    if parser.malformed > 0 {
         tracing::debug!(
-            malformed,
+            malformed = parser.malformed,
             path = %session_ledger_path.display(),
             "skipped malformed lines in session ledger (never destroyed)"
         );
     }
 
-    stats.files_modified = files_set.into_iter().collect();
-    stats.file_edit_counts = file_edit_map.into_iter().collect();
-    stats.duration_minutes = active_secs.unsigned_abs() / 60;
-
-    // Determine session outcome
-    stats.outcome = if trailing_failures >= 3 {
-        SessionOutcome::ErrorStuck
-    } else if is_user_prompt_event(&last_event_name) {
-        SessionOutcome::Interrupted
-    } else {
-        SessionOutcome::Completed
-    };
-
-    // Classify activity based on tool patterns
-    stats.activity = classify_activity(&stats);
-
-    Ok((stats, consumed))
+    Ok(ExtractedDelta {
+        stats: parser.finish(),
+        consumed,
+        prefix_hash: hasher.finalize().to_hex().to_string(),
+    })
 }
 
 /// Load tasks snapshot from state/active_tasks.json for a project.

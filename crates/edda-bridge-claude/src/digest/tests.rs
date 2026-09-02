@@ -649,8 +649,18 @@ fn digest_no_reduplicate_across_sessions() {
 #[test]
 fn digest_no_workspace_records_failure() {
     let _env = env_guard();
+    // Hermetic isolation: `find_root` climbs parents, so a bare tempdir
+    // would silently resolve to whatever workspace exists above %TEMP%
+    // (a probe scratch or the fleet coordination workspace) and the
+    // digest would write THERE. Instead, anchor the climb at this test's
+    // own directory and make the ledger deterministically unopenable:
+    // `.edda/` exists (so find_root stops here) but `ledger.db` is a
+    // directory (so SqliteStore cannot open it). The digest then reports
+    // an unreachable-ledger failure and writes nowhere.
     let tmp = tempfile::tempdir().unwrap();
-    // No workspace created — just a store
+    std::fs::create_dir_all(tmp.path().join(".edda")).unwrap();
+    std::fs::create_dir(tmp.path().join(".edda").join("ledger.db")).unwrap();
+    // Just a store, with the anchored-but-unopenable workspace as cwd
     let project_id = "fake_project_no_workspace";
     let _ = edda_store::ensure_dirs(project_id);
     // Reset state and ledger dir from previous test runs
@@ -739,6 +749,7 @@ fn digest_state_round_trip() {
                 prefix_hash: String::new(),
                 event_id: "evt_abc".to_string(),
                 digested_at: "2026-02-14T10:00:00Z".to_string(),
+                zero_call: false,
             },
         )]),
         digested: Vec::new(),
@@ -2589,5 +2600,361 @@ fn lost_cache_recovered_from_ledger_without_duplicate() {
     assert_eq!(
         digests[1].payload["session_stats"]["tool_calls"], 1,
         "after cache loss plus growth, only the tail beyond the ledger note is digested"
+    );
+}
+
+// ── Round-3: one-read proof (P1-1) + ledger-sole-authority (P1-2) ──
+// Ruling `digest.proof-and-authority=derive-from-one-read-ledger-is-sole-authority`.
+
+fn copy_dir_all(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap().flatten() {
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir_all(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), to).unwrap();
+        }
+    }
+}
+
+fn big_envelope_line(tool: &str) -> String {
+    let mut s =
+        String::from("{\"ts\":\"2026-02-14T10:00:00Z\",\"project_id\":\"p\",\"session_id\":\"s\",");
+    s.push_str(&format!(
+        "\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"{tool}\",\"tool_use_id\":\"\",",
+    ));
+    s.push_str(&format!(
+        "\"raw\":{{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"{tool}\"}}}}\n",
+    ));
+    s
+}
+
+#[test]
+fn digest_note_proof_and_stats_come_from_one_read() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (workspace, project_id) = setup_digest_workspace(tmp.path());
+
+    // Same shape as the reviewer's reproduction: two same-length large
+    // ledgers, one of Edit calls, one of Bash calls.
+    let n: usize = 300_000;
+    let a_bytes = big_envelope_line("Edit").repeat(n);
+    let b_bytes = big_envelope_line("Bash").repeat(n);
+    assert_eq!(a_bytes.len(), b_bytes.len(), "fixture must be same-length");
+    let hash_a = blake3::hash(a_bytes.as_bytes()).to_hex().to_string();
+    let hash_b = blake3::hash(b_bytes.as_bytes()).to_hex().to_string();
+
+    let dir = edda_store::project_dir(&project_id).join("ledger");
+    std::fs::create_dir_all(&dir).unwrap();
+    let session_path = dir.join("sess-race.jsonl");
+    std::fs::write(&session_path, &a_bytes).unwrap();
+    let b_staging = tmp.path().join("b_version.jsonl");
+    std::fs::write(&b_staging, &b_bytes).unwrap();
+
+    // While extraction holds the file open, atomically replace the path
+    // with the same-length Bash ledger, over and over.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let swapper = {
+        let stop = std::sync::Arc::clone(&stop);
+        let session_path = session_path.clone();
+        let b_staging = b_staging.clone();
+        std::thread::spawn(move || {
+            let swap_tmp = session_path.with_extension("swap");
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::fs::copy(&b_staging, &swap_tmp).unwrap();
+                std::fs::rename(&swap_tmp, &session_path).unwrap();
+            }
+        })
+    };
+
+    let id1 =
+        digest_session_manual(&project_id, "sess-race", workspace.to_str().unwrap(), true).unwrap();
+    assert!(!id1.is_empty());
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    swapper.join().unwrap();
+
+    // The emitted note must be SELF-CONSISTENT: its stats and its
+    // prefix_hash describe the SAME bytes.
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let note1 = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .find(|e| e.event_id == id1)
+        .expect("the digest note must exist");
+    let wm_offset = note1.payload["digest_watermark"]["offset"]
+        .as_u64()
+        .unwrap();
+    let wm_hash = note1.payload["digest_watermark"]["prefix_hash"]
+        .as_str()
+        .unwrap();
+    let breakdown = &note1.payload["session_stats"]["tool_call_breakdown"];
+    let edits = breakdown["Edit"].as_u64().unwrap_or(0);
+    let bashes = breakdown["Bash"].as_u64().unwrap_or(0);
+    assert_eq!(
+        wm_offset as usize,
+        a_bytes.len(),
+        "note must claim the full read"
+    );
+    let consistent =
+        (edits == n as u64 && wm_hash == hash_a) || (bashes == n as u64 && wm_hash == hash_b);
+    assert!(
+        consistent,
+        "note stats and proof came from DIFFERENT reads: breakdown={breakdown} hash_matches_a={} hash_matches_b={}",
+        wm_hash == hash_a,
+        wm_hash == hash_b
+    );
+
+    // Settle on the Bash version and digest again: every current record
+    // must be accounted for — no silent skip. Two cases, both correct:
+    // the racy first digest read EITHER version through its single handle.
+    // If it summarized A (Edit), the retry must re-read B from zero and
+    // write a Bash note; if it already summarized B, the retry must be a
+    // no-op returning that note's id — B is fully digested, and a second
+    // note would be a duplicate, not a rescue.
+    let swap_tmp = session_path.with_extension("settle");
+    std::fs::copy(&b_staging, &swap_tmp).unwrap();
+    std::fs::rename(&swap_tmp, &session_path).unwrap();
+    let id2 =
+        digest_session_manual(&project_id, "sess-race", workspace.to_str().unwrap(), true).unwrap();
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let notes: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
+    if edits == n as u64 {
+        // First digest summarized the Edit version; the Bash version is
+        // undigested and the retry must cover it from zero.
+        let note2 = notes
+            .iter()
+            .find(|e| e.event_id == id2 && e.event_id != id1)
+            .unwrap_or_else(|| {
+                panic!(
+                    "retry after replacement wrote nothing: the current {n} Bash records were silently skipped"
+                )
+            });
+        assert_eq!(
+            note2.payload["session_stats"]["tool_call_breakdown"]["Bash"], n as u64,
+            "the current Bash records must be digested, not skipped"
+        );
+    } else {
+        // First digest already summarized the Bash version (the swap landed
+        // before its read): the retry must be a no-op returning that note's
+        // own id, with no duplicate.
+        assert_eq!(
+            notes.len(),
+            1,
+            "B is already fully digested: the retry must not duplicate"
+        );
+        assert_eq!(id2, id1, "the retry must return the covering note's id");
+    }
+}
+
+// P1-2 (round-3): the cache is an unverified hint. A preserved cache
+// watermark must not suppress a digest whose note is ABSENT from the
+// authoritative workspace ledger (rolled back / lost).
+#[test]
+fn rolled_back_ledger_cannot_be_suppressed_by_cache() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (workspace, project_id) = setup_digest_workspace(tmp.path());
+
+    write_store_session_ledger(
+        &project_id,
+        "sess-rollback",
+        &[make_envelope("PostToolUse", "Edit", serde_json::json!({}))],
+    );
+
+    // Snapshot the workspace ledger immediately BEFORE the digest.
+    let edda_dir = workspace.join(".edda");
+    let snapshot = tmp.path().join(".edda.snapshot");
+    copy_dir_all(&edda_dir, &snapshot);
+
+    let id1 = digest_session_manual(
+        &project_id,
+        "sess-rollback",
+        workspace.to_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    assert!(!id1.is_empty());
+
+    // Restore the immediately-prior valid snapshot: the stamped note is
+    // GONE from the authoritative ledger; the watermark cache survives.
+    std::fs::remove_dir_all(&edda_dir).unwrap();
+    copy_dir_all(&snapshot, &edda_dir);
+
+    let id2 = digest_session_manual(
+        &project_id,
+        "sess-rollback",
+        workspace.to_str().unwrap(),
+        true,
+    )
+    .unwrap();
+
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let notes: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
+    assert_eq!(
+        notes.len(),
+        1,
+        "the authoritative ledger had zero notes for this session; the surviving cache must not suppress the digest"
+    );
+    assert_eq!(
+        notes[0].event_id, id2,
+        "the returned event id must be a note that exists in the authoritative ledger"
+    );
+    assert_eq!(
+        notes[0].payload["session_stats"]["tool_call_breakdown"]["Edit"], 1,
+        "the re-digest must cover the Edit prefix the rolled-back note used to cover"
+    );
+
+    // After appending a Bash line, the whole content is covered — the
+    // Edit prefix must not stay permanently absent.
+    let path = edda_store::project_dir(&project_id)
+        .join("ledger")
+        .join("sess-rollback.jsonl");
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let e = make_envelope_at(
+        "PostToolUse",
+        "Bash",
+        "2026-02-14T11:00:00Z",
+        serde_json::json!({}),
+    );
+    writeln!(f, "{}", serde_json::to_string(&e).unwrap()).unwrap();
+    drop(f);
+
+    digest_session_manual(
+        &project_id,
+        "sess-rollback",
+        workspace.to_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let notes: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
+    assert_eq!(notes.len(), 2, "the tail must be digested");
+    assert_eq!(
+        notes[1].payload["session_stats"]["tool_call_breakdown"]["Bash"], 1,
+        "the tail digest covers the appended Bash line"
+    );
+}
+
+// The stated fast-path skip condition, proven: a fully-consumed
+// zero-call watermark may skip the ledger scan because its claim ("these
+// proof-validated bytes contained no tool calls and no failures") is a
+// pure function of the bytes themselves — no ledger state can make the
+// skip wrong, and content appended later is still digested.
+#[test]
+fn zero_call_cache_skip_is_provable_and_loses_no_content() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (workspace, project_id) = setup_digest_workspace(tmp.path());
+
+    write_store_session_ledger(
+        &project_id,
+        "sess-zc-proof",
+        &[make_envelope("PostToolUse", "Edit", serde_json::json!({}))],
+    );
+    digest_session_manual(
+        &project_id,
+        "sess-zc-proof",
+        workspace.to_str().unwrap(),
+        true,
+    )
+    .unwrap();
+
+    // Zero-call tail: chat-only lines advance the watermark but write no
+    // note (GH-578: zero-call deltas must not cost a ledger event).
+    let path = edda_store::project_dir(&project_id)
+        .join("ledger")
+        .join("sess-zc-proof.jsonl");
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    for ts in ["2026-02-14T11:00:00Z", "2026-02-14T11:01:00Z"] {
+        let e = make_envelope_at("UserPromptSubmit", "", ts, serde_json::json!({}));
+        writeln!(f, "{}", serde_json::to_string(&e).unwrap()).unwrap();
+    }
+    drop(f);
+
+    digest_session_manual(
+        &project_id,
+        "sess-zc-proof",
+        workspace.to_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let count = ledger
+        .iter_events()
+        .unwrap()
+        .iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .count();
+    assert_eq!(count, 1, "a zero-call delta must not write an event");
+
+    // The zero-call watermark (cache-only, unconfirmable by the ledger)
+    // may suppress the pending scan: skipping cannot change the answer.
+    let pending = find_all_pending_sessions(&project_id);
+    assert!(
+        !pending.contains(&"sess-zc-proof".to_string()),
+        "a fully-consumed zero-call watermark is provably content-free: skipping it cannot change the answer"
+    );
+
+    // ...and the skip loses nothing: new real work re-opens the digest
+    // and is covered from the authoritative note.
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let e = make_envelope_at(
+        "PostToolUse",
+        "Edit",
+        "2026-02-14T12:00:00Z",
+        serde_json::json!({}),
+    );
+    writeln!(f, "{}", serde_json::to_string(&e).unwrap()).unwrap();
+    drop(f);
+
+    let pending2 = find_all_pending_sessions(&project_id);
+    assert!(
+        pending2.contains(&"sess-zc-proof".to_string()),
+        "appended real work must re-open the digest"
+    );
+    digest_session_manual(
+        &project_id,
+        "sess-zc-proof",
+        workspace.to_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let notes: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
+    assert_eq!(notes.len(), 2);
+    assert_eq!(
+        notes[1].payload["session_stats"]["tool_call_breakdown"]["Edit"], 1,
+        "the appended Edit must be digested (the zero-call skip lost nothing)"
     );
 }

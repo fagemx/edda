@@ -5,9 +5,7 @@ use edda_core::event::finalize_event;
 use edda_core::types::Provenance;
 use serde::{Deserialize, Serialize};
 
-use super::extract::{
-    complete_prefix_len, extract_stats_from, hash_prefix, load_tasks_for_digest, watermark_matches,
-};
+use super::extract::{extract_stats_delta, load_tasks_for_digest, watermark_matches};
 use super::helpers::now_rfc3339;
 use super::prev::collect_session_ledger_extras;
 use super::render::{build_cmd_milestone_event, build_digest_event};
@@ -38,6 +36,17 @@ pub struct DigestedSession {
     /// (round-1 P1-4: per-session id, not one global latest id).
     #[serde(default)]
     pub event_id: String,
+    /// True when this watermark was advanced by a ZERO-CALL delta, for
+    /// which no digest note exists (GH-578: an empty summary must not cost
+    /// a ledger event). Its claim — "the proof-validated bytes contained
+    /// no tool calls and no failures" — is a pure function of the bytes
+    /// themselves, so re-reading them under ANY ledger state yields the
+    /// same no-op; this is the only cache watermark allowed to skip the
+    /// ledger check (round-3 P1-2). Old state files deserialize with
+    /// false: pre-round-3 entries are treated as note-backed and can only
+    /// suppress when their note is confirmed in the ledger.
+    #[serde(default)]
+    pub zero_call: bool,
     /// When this watermark was last advanced.
     #[serde(default)]
     pub digested_at: String,
@@ -132,6 +141,10 @@ pub fn migrate_legacy_state(_project_id: &str, state: &mut DigestState) {
                 prefix_hash: String::new(),
                 event_id,
                 digested_at,
+                // The legacy model cannot prove what was consumed (see
+                // above) — treat as note-backed: suppressible only via a
+                // ledger note (round-3 P1-2).
+                zero_call: false,
             },
         );
     }
@@ -152,13 +165,15 @@ fn digest_state_path(project_id: &str) -> std::path::PathBuf {
 }
 
 /// Record how far a session has been digested, which event id it got, and
-/// the identity proof of the consumed prefix.
+/// the identity proof of the consumed prefix. `zero_call` marks a
+/// watermark advanced without a note (see `DigestedSession::zero_call`).
 fn remember_digested(
     state: &mut DigestState,
     session_id: &str,
     event_id: &str,
     offset: u64,
     prefix_hash: &str,
+    zero_call: bool,
 ) {
     state.sessions.insert(
         session_id.to_string(),
@@ -167,6 +182,7 @@ fn remember_digested(
             prefix_hash: prefix_hash.to_string(),
             event_id: event_id.to_string(),
             digested_at: now_rfc3339(),
+            zero_call,
         },
     );
 }
@@ -179,66 +195,57 @@ struct WatermarkCandidate {
     event_id: String,
 }
 
-/// Recover the effective digest watermark for a session from every durable
-/// source, validating each against the current file.
+/// Recover the effective digest watermark for a session from the workspace
+/// ledger — the SOLE authority (round-3 P1-2, ruling
+/// `digest.proof-and-authority=derive-from-one-read-ledger-is-sole-authority`).
 ///
-/// Round-2 ruling: a byte offset alone cannot identify a file, and the
-/// ledger — not the side state file — is durable truth. Candidates are the
-/// per-session cache entry and every digest note in the workspace ledger
-/// stamped with a `digest_watermark`; each is accepted only if the file's
-/// first `offset` bytes still hash to the recorded proof, and the highest
-/// validated offset wins. On any mismatch (replacement, same-length
-/// rewrite, shrink, reused session id) the candidate is discarded and the
-/// session is re-read from zero — never skipped.
-///
-/// Crash-window recovery (round-2 finding 3): the note is appended before
-/// the cache is saved, so after a crash or save failure the ledger note is
-/// the only record of the watermark; this scan re-derives it, making a
-/// retry cost a re-scan instead of a duplicate.
+/// A session counts as digested exactly as far as the highest digest note
+/// for it in the ledger whose stamped `digest_watermark` still validates
+/// against the current file. The side state file is an unverified hint and
+/// is deliberately NOT a source here: a cache entry cannot prove its note
+/// still exists in the ledger (the ledger can be rolled back under a
+/// surviving cache), so letting it set the start offset — at any offset,
+/// EOF included — can silently skip content the ledger never recorded as
+/// digested. Because cache state alone can never rule out a relevant note,
+/// there is NO fast path that skips this scan: the scan IS the authority.
+/// The only skip that cannot change the answer is the provably
+/// content-free zero-call watermark in `is_fully_consumed` (its claim is a
+/// pure function of the proof-validated bytes), and even that one
+/// suppresses nothing here — the returned start offset is always
+/// ledger-derived, so a delta whose note was rolled back is re-read.
 fn effective_watermark(
     ledger: &edda_ledger::Ledger,
     session_id: &str,
     session_ledger_path: &Path,
-    cache: Option<&DigestedSession>,
 ) -> Option<WatermarkCandidate> {
-    let cache_candidate = cache.and_then(|c| {
-        if watermark_matches(session_ledger_path, c.offset, &c.prefix_hash) {
-            Some(WatermarkCandidate {
-                offset: c.offset,
-                prefix_hash: c.prefix_hash.clone(),
-                event_id: c.event_id.clone(),
-            })
-        } else {
-            None
-        }
-    });
+    stamped_watermark_index(ledger)
+        .remove(session_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|(offset, hash, _)| watermark_matches(session_ledger_path, *offset, hash))
+        .map(|(offset, prefix_hash, event_id)| WatermarkCandidate {
+            offset,
+            prefix_hash,
+            event_id,
+        })
+}
 
-    // Fast path: a cache entry that already covers the last complete line
-    // cannot be behind the ledger (notes are appended before the cache is
-    // saved, and note watermarks are complete-line boundaries of the same
-    // file), so the ledger scan can be skipped.
-    if let Some(c) = &cache_candidate {
-        if let Ok(mut file) = std::fs::File::open(session_ledger_path) {
-            if let Ok(end) = complete_prefix_len(&mut file) {
-                if c.offset >= end {
-                    return cache_candidate;
-                }
-            }
-        }
-    }
-
-    // Ledger scan: every digest note for this session carrying a stamped
-    // watermark, validated against the current file, highest offset first.
-    let mut stamped: Vec<(u64, String, String)> = Vec::new();
+/// Stamped digest watermarks per session across the whole ledger, highest
+/// offset first — the authoritative idempotency record (round-3 P1-2).
+/// Validation against the current file happens at the caller.
+fn stamped_watermark_index(
+    ledger: &edda_ledger::Ledger,
+) -> BTreeMap<String, Vec<(u64, String, String)>> {
+    let mut index: BTreeMap<String, Vec<(u64, String, String)>> = BTreeMap::new();
     if let Ok(notes) = ledger.iter_events_by_type("note") {
         for event in notes {
             let payload = &event.payload;
             if payload.get("source").and_then(|v| v.as_str()) != Some("bridge:session_digest") {
                 continue;
             }
-            if payload.get("session_id").and_then(|v| v.as_str()) != Some(session_id) {
+            let Some(session_id) = payload.get("session_id").and_then(|v| v.as_str()) else {
                 continue;
-            }
+            };
             let Some(wm) = payload.get("digest_watermark") else {
                 continue;
             };
@@ -248,41 +255,65 @@ fn effective_watermark(
             ) else {
                 continue;
             };
-            stamped.push((offset, hash.to_string(), event.event_id.clone()));
+            index.entry(session_id.to_string()).or_default().push((
+                offset,
+                hash.to_string(),
+                event.event_id.clone(),
+            ));
         }
     }
-    stamped.sort_by_key(|(offset, _, _)| std::cmp::Reverse(*offset));
-    let ledger_candidate = stamped
-        .into_iter()
-        .find(|(offset, hash, _)| watermark_matches(session_ledger_path, *offset, hash))
-        .map(|(offset, prefix_hash, event_id)| WatermarkCandidate {
-            offset,
-            prefix_hash,
-            event_id,
-        });
-
-    match (cache_candidate, ledger_candidate) {
-        (Some(c), Some(l)) => Some(if l.offset > c.offset { l } else { c }),
-        (Some(c), None) => Some(c),
-        (None, Some(l)) => Some(l),
-        (None, None) => None,
+    for candidates in index.values_mut() {
+        candidates.sort_by_key(|(offset, _, _)| std::cmp::Reverse(*offset));
     }
+    index
 }
 
-/// True if `wm` proves the ledger file is fully consumed: its offset is the
-/// whole file AND the prefix still hashes to the recorded identity proof
-/// (round-2: position alone is not identity).
-fn is_fully_consumed(path: &Path, wm: Option<&DigestedSession>) -> bool {
-    let Some(wm) = wm else {
-        return false;
-    };
+/// True if the session is PROVABLY fully consumed: some accepted authority
+/// records a watermark whose offset is the whole current file and whose
+/// identity proof re-validates (round-2: position alone is not identity).
+///
+/// Exactly two authorities can say "consumed" (round-3 P1-2):
+///
+/// * a stamped digest note in the workspace ledger — the sole authority
+///   for note-backed watermarks. A surviving cache entry can NEVER claim
+///   one: the round-3 reproduction (note-backed cache at EOF + rolled-back
+///   ledger) suppressed a live Edit prefix precisely because the cache was
+///   verified against the session file but never against the ledger.
+/// * a `zero_call` cache watermark. THE FAST-PATH SKIP CONDITION, stated:
+///   skipping the ledger scan could only be wrong if some ledger state
+///   would change the answer — but this watermark's claim ("the
+///   proof-validated bytes contain no tool calls and no failures") is a
+///   pure function of those bytes, so re-reading them under ANY ledger
+///   state (note present, absent, or rolled back) yields the same no-op.
+///   Skipping therefore cannot change the answer. This is the only skip of
+///   its kind; the condition is proven by the test
+///   `zero_call_cache_skip_is_provable_and_loses_no_content`.
+fn is_fully_consumed(
+    path: &Path,
+    stamped: &[(u64, String, String)],
+    cache: Option<&DigestedSession>,
+) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
     };
-    if meta.len() != wm.offset {
-        return false;
+    let len = meta.len();
+    // Ledger authority: a stamped note covering the whole current file.
+    if stamped
+        .iter()
+        .any(|(offset, hash, _)| *offset == len && watermark_matches(path, *offset, hash))
+    {
+        return true;
     }
-    watermark_matches(path, wm.offset, &wm.prefix_hash)
+    // The provable content-free skip (see doc comment).
+    if let Some(entry) = cache {
+        if entry.zero_call
+            && entry.offset == len
+            && watermark_matches(path, entry.offset, &entry.prefix_hash)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Find session ledger files in the store, excluding the current session.
@@ -290,6 +321,7 @@ fn find_pending_sessions(
     project_id: &str,
     current_session_id: &str,
     state: &DigestState,
+    ledger: Option<&edda_ledger::Ledger>,
 ) -> Vec<String> {
     let ledger_dir = edda_store::project_dir(project_id).join("ledger");
     let entries = match std::fs::read_dir(&ledger_dir) {
@@ -298,6 +330,10 @@ fn find_pending_sessions(
     };
 
     let mut sessions = Vec::new();
+    // The authoritative stamped watermarks (round-3 P1-2). When no ledger
+    // is available nothing is note-backed-confirmable, so only the provable
+    // zero-call skip in `is_fully_consumed` may suppress.
+    let stamped_index = ledger.map(stamped_watermark_index);
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if !name.ends_with(".jsonl") {
@@ -308,12 +344,20 @@ fn find_pending_sessions(
         if session_id == current_session_id {
             continue;
         }
-        // Skip only sessions whose watermark PROVES full consumption
+        // Skip only sessions whose consumption is PROVEN: a stamped note
+        // in the workspace ledger (the sole authority for note-backed
+        // watermarks) or a provably content-free zero-call watermark
         // (round-2: position alone is not identity — a replaced or
         // rewritten ledger re-opens the digest from zero, and a grown one
-        // is picked up as a delta).
+        // is picked up as a delta; round-3: a cache entry without its
+        // ledger note can never suppress).
         let path = ledger_dir.join(&name);
-        if is_fully_consumed(&path, state.sessions.get(&session_id)) {
+        let stamped: &[(u64, String, String)] = stamped_index
+            .as_ref()
+            .and_then(|m| m.get(&session_id))
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        if is_fully_consumed(&path, stamped, state.sessions.get(&session_id)) {
             continue;
         }
         sessions.push(session_id);
@@ -402,8 +446,17 @@ pub fn digest_previous_sessions_with_opts(
         return DigestResult::PermanentFailure(warning);
     }
 
+    // The pending scan is ledger-authoritative when the workspace ledger
+    // can be opened (round-3 P1-2): a session may only be skipped on a
+    // stamped ledger note or a provably content-free zero-call watermark.
+    // When no ledger is reachable nothing is note-backed-confirmable, so
+    // nothing note-backed may suppress — pending sessions fall through to
+    // digest_one_session, which reports the unreachable workspace honestly.
+    let ledger = edda_ledger::EddaPaths::find_root(Path::new(cwd))
+        .and_then(|root| edda_ledger::Ledger::open(&root).ok());
+
     // Find sessions to digest
-    let pending = find_pending_sessions(project_id, current_session_id, &state);
+    let pending = find_pending_sessions(project_id, current_session_id, &state, ledger.as_ref());
     if pending.is_empty() {
         // Check if there's a retry pending
         if !state.pending_session_id.is_empty() && state.retry_count > 0 {
@@ -620,18 +673,22 @@ fn digest_one_session(
     };
 
     let prev = state.sessions.get(session_id).cloned();
-    // Effective watermark: validated cache entry and/or the session's own
-    // digest notes in the ledger, highest validated offset wins (round-2:
-    // identity proof + ledger-authoritative recovery).
-    let eff = effective_watermark(&ledger, session_id, &session_ledger_path, prev.as_ref());
+    // Effective watermark: the session's own stamped digest notes in the
+    // LEDGER, highest validated offset wins (round-3 P1-2: the ledger is
+    // the sole authority — the cache is an unverified hint and cannot set
+    // the start offset).
+    let eff = effective_watermark(&ledger, session_id, &session_ledger_path);
     let start = eff.as_ref().map_or(0, |w| w.offset);
 
     // Extract the delta: everything after the last digested offset, up to
-    // the last complete line. A truncated or concurrently-written final line
-    // is not consumed (round-1 P0-2) — it is picked up once its write
-    // completes, and the source is never destroyed either way.
-    let (mut stats, consumed) = match extract_stats_from(&session_ledger_path, start) {
-        Ok(r) => r,
+    // the last complete line, plus the identity proof of the consumed
+    // prefix derived from the SAME single read (round-3 P1-1: the note's
+    // content and its proof cannot come from different reads). A truncated
+    // or concurrently-written final line is not consumed (round-1 P0-2) —
+    // it is picked up once its write completes, and the source is never
+    // destroyed either way.
+    let delta = match extract_stats_delta(&session_ledger_path, start) {
+        Ok(d) => d,
         Err(e) => {
             record_failure(
                 project_id,
@@ -642,6 +699,9 @@ fn digest_one_session(
             return DigestResult::Error(format!("extraction failed: {e}"));
         }
     };
+    let mut stats = delta.stats;
+    let consumed = delta.consumed;
+    let proof = delta.prefix_hash;
 
     if consumed <= start {
         // No new complete lines since the last digest. Repair the cache
@@ -649,13 +709,32 @@ fn digest_one_session(
         // crash between note-append and cache-save, the ledger note is the
         // watermark and the retry must be a no-op, not a duplicate).
         if let Some(w) = &eff {
+            // The cache is current if it mirrors the ledger note, or if it
+            // is a zero-call watermark at or ahead of the note with a
+            // valid proof — a content-free advance the ledger intentionally
+            // does not record, and "repairing" it would undo the zero-call
+            // skip and re-scan the same tail on every hook (round-3 P1-2).
+            // Only a cache BEHIND the ledger needs repair.
             let cache_current = prev.as_ref().is_some_and(|c| {
-                c.offset == w.offset && c.prefix_hash == w.prefix_hash && c.event_id == w.event_id
+                (!c.zero_call
+                    && c.offset == w.offset
+                    && c.prefix_hash == w.prefix_hash
+                    && c.event_id == w.event_id)
+                    || (c.zero_call
+                        && c.offset >= w.offset
+                        && watermark_matches(&session_ledger_path, c.offset, &c.prefix_hash))
             });
             if !cache_current {
                 state.session_id = session_id.to_string();
                 state.digested_at = now_rfc3339();
-                remember_digested(state, session_id, &w.event_id, w.offset, &w.prefix_hash);
+                remember_digested(
+                    state,
+                    session_id,
+                    &w.event_id,
+                    w.offset,
+                    &w.prefix_hash,
+                    false,
+                );
                 if let Err(e) = save_digest_state(project_id, state) {
                     tracing::warn!(error = %e, session = %session_id,
                         "watermark cache repair failed; the ledger note remains authoritative");
@@ -672,20 +751,10 @@ fn digest_one_session(
     // watermark is still recorded so the same delta is never rescanned.
     if stats.tool_calls == 0 && stats.tool_failures == 0 {
         let prev_event_id = eff.as_ref().map_or(String::new(), |w| w.event_id.clone());
-        let proof = match hash_prefix(&session_ledger_path, consumed) {
-            Ok(p) => p,
-            Err(e) => {
-                record_failure(
-                    project_id,
-                    session_id,
-                    state,
-                    &format!("cannot hash consumed prefix: {e}"),
-                );
-                return DigestResult::Error(format!("cannot hash consumed prefix: {e}"));
-            }
-        };
+        // The proof comes from the same single read as the stats (round-3
+        // P1-1) — no separate hash of the path.
         state.session_id = session_id.to_string();
-        remember_digested(state, session_id, &prev_event_id, consumed, &proof);
+        remember_digested(state, session_id, &prev_event_id, consumed, &proof, true);
         state.digested_at = now_rfc3339();
         state.retry_count = 0;
         state.pending_session_id = String::new();
@@ -717,19 +786,8 @@ fn digest_one_session(
     let (decisions, notes) = collect_session_ledger_extras(cwd, stats.first_ts.as_deref());
 
     // Identity proof of the consumed prefix: stamped into the note so the
-    // ledger itself is the durable idempotency record (round-2).
-    let proof = match hash_prefix(&session_ledger_path, consumed) {
-        Ok(p) => p,
-        Err(e) => {
-            record_failure(
-                project_id,
-                session_id,
-                state,
-                &format!("cannot hash consumed prefix: {e}"),
-            );
-            return DigestResult::Error(format!("cannot hash consumed prefix: {e}"));
-        }
-    };
+    // ledger itself is the durable idempotency record (round-2), derived
+    // from the same single read as the stats (round-3 P1-1).
     let watermark = super::DigestWatermark {
         offset: consumed,
         prefix_hash: proof.clone(),
@@ -777,7 +835,7 @@ fn digest_one_session(
     state.session_id = session_id.to_string();
     state.event_id = last_event_id.clone();
     state.digested_at = now_rfc3339();
-    remember_digested(state, session_id, &last_event_id, consumed, &proof);
+    remember_digested(state, session_id, &last_event_id, consumed, &proof, false);
     state.retry_count = 0;
     state.pending_session_id = String::new();
     state.last_error = String::new();
@@ -892,15 +950,21 @@ pub fn digest_session_manual(
     // stale maps and drop each other's entries.
     let mut state = load_digest_state(project_id);
     let prev = state.sessions.get(session_id).cloned();
-    // Effective watermark: validated cache entry and/or the session's own
-    // stamped digest notes in the ledger, highest validated offset wins
-    // (round-2: identity proof + ledger-authoritative recovery).
-    let eff = effective_watermark(&ledger, session_id, &session_ledger_path, prev.as_ref());
+    // Effective watermark: the session's own stamped digest notes in the
+    // LEDGER, highest validated offset wins (round-3 P1-2: the ledger is
+    // the sole authority — the cache is an unverified hint and cannot set
+    // the start offset).
+    let eff = effective_watermark(&ledger, session_id, &session_ledger_path);
     let start = eff.as_ref().map_or(0, |w| w.offset);
 
-    // Delta extraction: only complete lines after the last digested offset
-    // are consumed (round-1 P0-2); the source is never modified.
-    let (mut stats, consumed) = extract_stats_from(&session_ledger_path, start)?;
+    // Delta extraction plus the identity proof of the consumed prefix,
+    // derived from the SAME single read (round-3 P1-1): only complete
+    // lines after the last digested offset are consumed (round-1 P0-2);
+    // the source is never modified.
+    let delta = extract_stats_delta(&session_ledger_path, start)?;
+    let mut stats = delta.stats;
+    let consumed = delta.consumed;
+    let proof = delta.prefix_hash;
 
     if consumed <= start {
         // Nothing new since the last digest: no-op. Repair the cache if it
@@ -909,8 +973,20 @@ pub fn digest_session_manual(
         // watermark and the retry must be a no-op, not a duplicate), then
         // return this session's own event id (round-1 P1-4).
         if let Some(w) = &eff {
+            // The cache is current if it mirrors the ledger note, or if it
+            // is a zero-call watermark at or ahead of the note with a
+            // valid proof — a content-free advance the ledger intentionally
+            // does not record, and "repairing" it would undo the zero-call
+            // skip and re-scan the same tail on every hook (round-3 P1-2).
+            // Only a cache BEHIND the ledger needs repair.
             let cache_current = prev.as_ref().is_some_and(|c| {
-                c.offset == w.offset && c.prefix_hash == w.prefix_hash && c.event_id == w.event_id
+                (!c.zero_call
+                    && c.offset == w.offset
+                    && c.prefix_hash == w.prefix_hash
+                    && c.event_id == w.event_id)
+                    || (c.zero_call
+                        && c.offset >= w.offset
+                        && watermark_matches(&session_ledger_path, c.offset, &c.prefix_hash))
             });
             if !cache_current {
                 state.session_id = session_id.to_string();
@@ -921,6 +997,7 @@ pub fn digest_session_manual(
                     &w.event_id,
                     w.offset,
                     &w.prefix_hash,
+                    false,
                 );
                 state.retry_count = 0;
                 state.pending_session_id = String::new();
@@ -940,9 +1017,17 @@ pub fn digest_session_manual(
     // digests as its own delta.
     if stats.tool_calls == 0 && stats.tool_failures == 0 {
         let prev_event_id = eff.as_ref().map_or(String::new(), |w| w.event_id.clone());
-        let proof = hash_prefix(&session_ledger_path, consumed)?;
+        // The proof comes from the same single read as the stats (round-3
+        // P1-1) — no separate hash of the path.
         state.session_id = session_id.to_string();
-        remember_digested(&mut state, session_id, &prev_event_id, consumed, &proof);
+        remember_digested(
+            &mut state,
+            session_id,
+            &prev_event_id,
+            consumed,
+            &proof,
+            true,
+        );
         state.digested_at = now_rfc3339();
         state.retry_count = 0;
         state.pending_session_id = String::new();
@@ -958,8 +1043,8 @@ pub fn digest_session_manual(
     let (_decisions, notes) = collect_session_ledger_extras(cwd, stats.first_ts.as_deref());
 
     // Identity proof of the consumed prefix, stamped into the note so the
-    // ledger itself is the durable idempotency record (round-2).
-    let proof = hash_prefix(&session_ledger_path, consumed)?;
+    // ledger itself is the durable idempotency record (round-2), derived
+    // from the same single read as the stats (round-3 P1-1).
     let watermark = super::DigestWatermark {
         offset: consumed,
         prefix_hash: proof.clone(),
@@ -985,7 +1070,14 @@ pub fn digest_session_manual(
     state.session_id = session_id.to_string();
     state.event_id = event.event_id.clone();
     state.digested_at = now_rfc3339();
-    remember_digested(&mut state, session_id, &event.event_id, consumed, &proof);
+    remember_digested(
+        &mut state,
+        session_id,
+        &event.event_id,
+        consumed,
+        &proof,
+        false,
+    );
     state.retry_count = 0;
     state.pending_session_id = String::new();
     state.last_error = String::new();
@@ -1031,6 +1123,13 @@ pub fn digest_session_manual(
 /// A session counts as pending if it was never digested, or if new content
 /// appeared after its watermark (CLI `--all` is the top-up path for a
 /// long-lived session whose delta was digested by the bridges).
+///
+/// The CLI listing has no workspace-ledger handle, so nothing is
+/// note-backed-confirmable here (round-3 P1-2): only the provably
+/// content-free zero-call skip may suppress. Note-backed sessions may be
+/// listed; each is then resolved by `digest_session_manual`, which is
+/// ledger-authoritative and no-ops them — over-listing costs a scan,
+/// never a skipped session.
 pub fn find_all_pending_sessions(project_id: &str) -> Vec<String> {
     let state = load_digest_state(project_id);
     let ledger_dir = edda_store::project_dir(project_id).join("ledger");
@@ -1046,11 +1145,14 @@ pub fn find_all_pending_sessions(project_id: &str) -> Vec<String> {
             continue;
         }
         let session_id = name.trim_end_matches(".jsonl").to_string();
-        // Already digested — but only if the watermark PROVES full
-        // consumption of the current file (round-2: position alone is not
-        // identity; a replaced or rewritten ledger re-opens from zero).
+        // Already digested — but only if consumption is PROVEN: a stamped
+        // note in the workspace ledger (sole authority for note-backed
+        // watermarks; unavailable here, see doc comment) or a provably
+        // content-free zero-call watermark (round-2: position alone is not
+        // identity; round-3: a cache entry without its ledger note can
+        // never suppress).
         let path = ledger_dir.join(&name);
-        if is_fully_consumed(&path, state.sessions.get(&session_id)) {
+        if is_fully_consumed(&path, &[], state.sessions.get(&session_id)) {
             continue;
         }
         sessions.push(session_id);
