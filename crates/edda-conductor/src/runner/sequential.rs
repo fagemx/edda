@@ -23,6 +23,7 @@ use anyhow::Context;
 use anyhow::Result;
 use edda_core::VerdictPayload;
 use edda_ledger::VerdictRecord;
+use edda_notify::NotifyEvent;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -120,6 +121,17 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                             phase_id: failed_id.clone(),
                             reason: "manually skipped (interactive)".into(),
                         });
+                        let attempt_now =
+                            state.get_phase(&failed_id).map(|p| p.attempts).unwrap_or(0);
+                        notifier
+                            .notify_phase_terminal(phase_terminal_event(
+                                &plan.name,
+                                &failed_id,
+                                "Skipped",
+                                attempt_now,
+                                None,
+                            ))
+                            .await;
                         println!("  ⊘ Skipped \"{failed_id}\"");
                         continue;
                     }
@@ -139,6 +151,17 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                                 .filter(|p| p.status == PhaseStatus::Pending)
                                 .count(),
                         });
+                        let attempt_now =
+                            state.get_phase(&failed_id).map(|p| p.attempts).unwrap_or(0);
+                        notifier
+                            .notify_phase_terminal(phase_terminal_event(
+                                &plan.name,
+                                &failed_id,
+                                "Aborted",
+                                attempt_now,
+                                None,
+                            ))
+                            .await;
                         println!("  ✗ Plan aborted.");
                         break;
                     }
@@ -260,6 +283,16 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         &format!("Gate \"{subject}\" approved (sha {gate_sha})"),
                         &["conductor", "verdict"],
                     );
+                    let approved_ps = state.get_phase(&gated_id)?;
+                    notifier
+                        .notify_phase_terminal(phase_terminal_event(
+                            &plan.name,
+                            &gated_id,
+                            "Passed",
+                            approved_ps.attempts,
+                            None,
+                        ))
+                        .await;
                 }
                 GateVerdict::Rejected(record) => {
                     let comment = record.payload.comment.clone().unwrap_or_default();
@@ -325,6 +358,15 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                             env_retries: gate_ps.env_retries,
                             attempt_charged: true,
                         });
+                        notifier
+                            .notify_phase_terminal(phase_terminal_event(
+                                &plan.name,
+                                &gated_id,
+                                "Failed",
+                                gate_ps.attempts,
+                                None,
+                            ))
+                            .await;
                     } else {
                         // Redispatch (D3): ONE more agent turn in the SAME
                         // session — do NOT increment attempt; the rejection
@@ -423,6 +465,15 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         env_retries: gate_ps.env_retries,
                         attempt_charged: true,
                     });
+                    notifier
+                        .notify_phase_terminal(phase_terminal_event(
+                            &plan.name,
+                            &gated_id,
+                            "Failed",
+                            gate_ps.attempts,
+                            None,
+                        ))
+                        .await;
                 }
                 GateVerdict::Cancelled => {
                     // The loop top sees the cancelled token and shuts down;
@@ -734,6 +785,7 @@ async fn fail_checking_phase(
     check_result: &CheckRunResult,
     err_override: Option<&str>,
     elapsed: Duration,
+    final_output: Option<&str>,
     notifier: &dyn Notifier,
     event_log: &mut EventLogger,
     tmux_session: Option<&TmuxSession>,
@@ -808,6 +860,15 @@ async fn fail_checking_phase(
         env_retries: ps.env_retries,
         attempt_charged,
     });
+    notifier
+        .notify_phase_terminal(phase_terminal_event(
+            plan.name.as_str(),
+            phase_id,
+            "Failed",
+            ps.attempts,
+            final_output,
+        ))
+        .await;
     handle_on_fail(
         plan,
         phase,
@@ -938,6 +999,7 @@ async fn process_phase_result(
                                 &check_result,
                                 Some(&msg),
                                 phase_start.elapsed(),
+                                final_output_line(result_text.as_deref()).as_deref(),
                                 notifier,
                                 event_log,
                                 tmux_session,
@@ -974,6 +1036,15 @@ async fn process_phase_result(
                         duration_ms: elapsed_ms,
                         cost_usd,
                     });
+                    notifier
+                        .notify_phase_terminal(phase_terminal_event(
+                            &plan.name,
+                            phase_id,
+                            "Passed",
+                            attempt,
+                            final_output_line(result_text.as_deref()).as_deref(),
+                        ))
+                        .await;
                 }
             } else {
                 fail_checking_phase(
@@ -985,6 +1056,7 @@ async fn process_phase_result(
                     &check_result,
                     None,
                     phase_start.elapsed(),
+                    final_output_line(result_text.as_deref()).as_deref(),
                     notifier,
                     event_log,
                     tmux_session,
@@ -1027,6 +1099,11 @@ async fn process_phase_result(
                 env_retries: phase_env_retries(state, phase_id),
                 attempt_charged: true,
             });
+            notifier
+                .notify_phase_terminal(phase_terminal_event(
+                    &plan.name, phase_id, "Stale", attempt, None,
+                ))
+                .await;
         }
         PhaseResult::AgentCrash { error } => {
             transition(
@@ -1063,6 +1140,11 @@ async fn process_phase_result(
                 env_retries: phase_env_retries(state, phase_id),
                 attempt_charged: true,
             });
+            notifier
+                .notify_phase_terminal(phase_terminal_event(
+                    &plan.name, phase_id, "Failed", attempt, None,
+                ))
+                .await;
             // For crash, use empty check results
             let empty_result = CheckRunResult {
                 all_passed: false,
@@ -1112,6 +1194,11 @@ async fn process_phase_result(
                 env_retries: phase_env_retries(state, phase_id),
                 attempt_charged: true,
             });
+            notifier
+                .notify_phase_terminal(phase_terminal_event(
+                    &plan.name, phase_id, "Failed", attempt, None,
+                ))
+                .await;
         }
     }
     Ok(())
@@ -1125,6 +1212,38 @@ fn phase_env_retries(state: &PlanState, phase_id: &str) -> u32 {
         .get_phase(phase_id)
         .map(|p| p.env_retries)
         .unwrap_or(0)
+}
+
+/// GH-564: build the phase terminal-state notification payload. `state` is
+/// the terminal status name ("Passed" | "Failed" | "Stale" | "Skipped" |
+/// "Aborted"); "Aborted" is plan-level and names the phase that forced the
+/// abort. `final_output` carries the agent's last output line when the
+/// transition site has one (by convention it contains the PR URL).
+fn phase_terminal_event(
+    plan_name: &str,
+    phase_id: &str,
+    state: &str,
+    attempt: u32,
+    final_output: Option<&str>,
+) -> NotifyEvent {
+    NotifyEvent::PhaseTerminal {
+        plan: plan_name.to_string(),
+        phase: phase_id.to_string(),
+        state: state.to_string(),
+        attempt,
+        final_output: final_output.map(str::to_string),
+    }
+}
+
+/// Last non-empty line of the agent's result text (GH-564: by convention it
+/// contains the PR URL).
+fn final_output_line(result_text: Option<&str>) -> Option<String> {
+    result_text?
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
 }
 
 async fn handle_on_fail(
@@ -1243,6 +1362,16 @@ async fn handle_on_fail(
                 phase_id: phase_id.to_string(),
                 reason: "auto-skipped by on_fail policy".into(),
             });
+            let attempt_now = state.get_phase(phase_id).map(|p| p.attempts).unwrap_or(0);
+            notifier
+                .notify_phase_terminal(phase_terminal_event(
+                    &plan.name,
+                    phase_id,
+                    "Skipped",
+                    attempt_now,
+                    None,
+                ))
+                .await;
             println!("  → Auto-skipped (on_fail: skip)");
         }
         OnFail::Abort => {
@@ -1260,6 +1389,16 @@ async fn handle_on_fail(
                     .filter(|p| p.status == PhaseStatus::Pending)
                     .count(),
             });
+            let attempt_now = state.get_phase(phase_id).map(|p| p.attempts).unwrap_or(0);
+            notifier
+                .notify_phase_terminal(phase_terminal_event(
+                    &plan.name,
+                    phase_id,
+                    "Aborted",
+                    attempt_now,
+                    None,
+                ))
+                .await;
             println!("  → Plan aborted (on_fail: abort)");
         }
         OnFail::Ask => {
@@ -1466,7 +1605,10 @@ pub(crate) mod tests {
     use crate::plan::parser::parse_plan;
     use crate::runner::notify::CollectNotifier;
 
-    async fn run_test_plan(yaml: &str, launcher: &dyn AgentLauncher) -> (PlanState, Vec<String>) {
+    async fn run_test_plan_notifier(
+        yaml: &str,
+        launcher: &dyn AgentLauncher,
+    ) -> (PlanState, CollectNotifier) {
         let plan = parse_plan(yaml).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let mut state = PlanState::from_plan(&plan, "test.yaml");
@@ -1493,8 +1635,234 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        let msgs = notifier.messages();
-        (state, msgs)
+        (state, notifier)
+    }
+
+    async fn run_test_plan(yaml: &str, launcher: &dyn AgentLauncher) -> (PlanState, Vec<String>) {
+        let (state, notifier) = run_test_plan_notifier(yaml, launcher).await;
+        (state, notifier.messages())
+    }
+
+    /// GH-564: flatten the observed phase terminal events for assertions.
+    fn terminal_view(
+        events: &[edda_notify::NotifyEvent],
+    ) -> Vec<(String, String, String, u32, Option<String>)> {
+        events
+            .iter()
+            .map(|e| match e {
+                edda_notify::NotifyEvent::PhaseTerminal {
+                    plan,
+                    phase,
+                    state,
+                    attempt,
+                    final_output,
+                } => (
+                    plan.clone(),
+                    phase.clone(),
+                    state.clone(),
+                    *attempt,
+                    final_output.clone(),
+                ),
+                other => panic!(
+                    "unexpected non-terminal NotifyEvent: {}",
+                    other.event_name()
+                ),
+            })
+            .collect()
+    }
+
+    // ── GH-564: exactly one notification per phase terminal transition ──
+
+    #[tokio::test]
+    async fn terminal_notify_passed_exactly_one() {
+        let yaml = r#"
+name: notifytest
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some("worked hard\nPR: https://github.com/x/y/pull/9".into()),
+            }],
+        );
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Passed);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 1, "exactly one terminal notification: {tv:?}");
+        assert_eq!(tv[0].0, "notifytest");
+        assert_eq!(tv[0].1, "a");
+        assert_eq!(tv[0].2, "Passed");
+        assert_eq!(tv[0].3, 1);
+        assert_eq!(
+            tv[0].4.as_deref(),
+            Some("PR: https://github.com/x/y/pull/9")
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_one_per_transition_crash_retry_pass() {
+        let yaml = r#"
+name: notifytest
+max_attempts: 2
+on_fail: auto_retry
+phases:
+  - id: a
+    prompt: "crash then succeed"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![
+                PhaseResult::AgentCrash {
+                    error: "oops".into(),
+                },
+                PhaseResult::AgentDone {
+                    cost_usd: Some(0.5),
+                    result_text: Some("done".into()),
+                },
+            ],
+        );
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Passed);
+        assert_eq!(state.phases[0].attempts, 2);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 2, "one per terminal transition: {tv:?}");
+        assert_eq!(
+            (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
+            ("a", "Failed", 1)
+        );
+        assert_eq!(tv[0].4, None);
+        assert_eq!(
+            (tv[1].1.as_str(), tv[1].2.as_str(), tv[1].3),
+            ("a", "Passed", 2)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_stale_on_timeout() {
+        let yaml = r#"
+name: notifytest
+phases:
+  - id: a
+    prompt: "hang"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results("a", vec![PhaseResult::Timeout]);
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Stale);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 1, "exactly one terminal notification: {tv:?}");
+        assert_eq!(
+            (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
+            ("a", "Stale", 1)
+        );
+        assert_eq!(tv[0].4, None);
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_failed_then_skipped_on_fail_skip() {
+        let yaml = r#"
+name: notifytest
+on_fail: skip
+phases:
+  - id: a
+    prompt: "crash"
+  - id: b
+    prompt: "should still run"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentCrash {
+                error: "boom".into(),
+            }],
+        );
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Skipped);
+        assert_eq!(state.phases[1].status, PhaseStatus::Passed);
+        let tv = terminal_view(&notifier.terminal_events());
+        // Two terminal transitions for "a": the crash failure, then the
+        // on_fail re-classification to Skipped — one notification each.
+        // Phase "b" contributes its own Passed notification.
+        assert_eq!(tv.len(), 3, "one per terminal transition: {tv:?}");
+        assert_eq!(tv[0].2, "Failed");
+        assert_eq!(tv[1].2, "Skipped");
+        assert_eq!(tv[2].2, "Passed");
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_failed_then_aborted_on_fail_abort() {
+        let yaml = r#"
+name: notifytest
+on_fail: abort
+phases:
+  - id: a
+    prompt: "crash"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentCrash {
+                error: "boom".into(),
+            }],
+        );
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Failed);
+        assert_eq!(state.plan_status, PlanStatus::Aborted);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 2, "one per terminal transition: {tv:?}");
+        assert_eq!((tv[0].2.as_str(), tv[0].3), ("Failed", 1));
+        assert_eq!(
+            (tv[1].1.as_str(), tv[1].2.as_str(), tv[1].3),
+            ("a", "Aborted", 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_check_failure_carries_final_output() {
+        let yaml = r#"
+name: notifytest
+on_fail: skip
+phases:
+  - id: a
+    prompt: "make file"
+    check:
+      - file_exists: "output.txt"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some("built everything\nPR: https://github.com/x/y/pull/7".into()),
+            }],
+        );
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Skipped);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(
+            tv.len(),
+            2,
+            "check-fail Failed, then on_fail Skipped: {tv:?}"
+        );
+        assert_eq!((tv[0].2.as_str(), tv[0].3), ("Failed", 1));
+        assert_eq!(
+            tv[0].4.as_deref(),
+            Some("PR: https://github.com/x/y/pull/7"),
+            "check-failure notification carries the agent's final output line"
+        );
+        assert_eq!(tv[1].2, "Skipped");
+        assert_eq!(tv[1].4, None);
     }
 
     #[tokio::test]
@@ -2592,7 +2960,7 @@ phases:
         assert_eq!(shas[0], head, "gate_sha must be the phase cwd's git HEAD");
         record_verdict(&root, "gated/a", &shas[0], VerdictDecision::Approved, None);
 
-        let (state, _notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+        let (state, notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
             .await
             .expect("gate test exceeded 30s")
             .unwrap()
@@ -2606,6 +2974,21 @@ phases:
         );
         assert_eq!(launcher.call_count("a"), 1);
         assert_eq!(launcher.call_count("b"), 1);
+        // GH-564: one terminal notification per terminal transition — the
+        // gate-approved phase and the follow-on phase. The approved phase's
+        // agent output is not retained at the verdict site, so its
+        // final_output is None.
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 2, "one per terminal transition: {tv:?}");
+        assert_eq!(
+            (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
+            ("a", "Passed", 1)
+        );
+        assert_eq!(tv[0].4, None);
+        assert_eq!(
+            (tv[1].1.as_str(), tv[1].2.as_str(), tv[1].3),
+            ("b", "Passed", 1)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2702,7 +3085,7 @@ phases:
             Some("wrong approach"),
         );
 
-        let (state, _notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+        let (state, notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
             .await
             .expect("gate test exceeded 30s")
             .unwrap()
@@ -2719,6 +3102,13 @@ phases:
         );
         assert_eq!(state.plan_status, PlanStatus::Blocked);
         assert_eq!(launcher.call_count("a"), 1, "no redispatch turn on halt");
+        // GH-564: the halt failure emits exactly one terminal notification.
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 1, "exactly one terminal notification: {tv:?}");
+        assert_eq!(
+            (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
+            ("a", "Failed", 1)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2854,7 +3244,7 @@ phases:
 "#;
         let plan = parse_plan(yaml).unwrap();
         let state = PlanState::from_plan(&plan, "test.yaml");
-        let (state, _notifier, _launcher) = tokio::time::timeout(
+        let (state, notifier, _launcher) = tokio::time::timeout(
             GATE_TEST_DEADLINE,
             spawn_runner(yaml, root.clone(), launcher, state),
         )
@@ -2876,6 +3266,14 @@ phases:
             err.message
         );
         assert_eq!(state.plan_status, PlanStatus::Blocked);
+        // GH-564: the gate timeout failure emits exactly one terminal
+        // notification.
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 1, "exactly one terminal notification: {tv:?}");
+        assert_eq!(
+            (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
+            ("a", "Failed", 1)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
