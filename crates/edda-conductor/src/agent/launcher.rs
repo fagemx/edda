@@ -461,6 +461,53 @@ mod tests {
         assert_eq!(args[deny + 1], "Write,Edit");
     }
 
+    /// GH-574 round 3 (P1-1): claude's `--tools` restricts only the built-in
+    /// tool set and leaves every MCP tool reachable under bypassPermissions
+    /// (e.g. `mcp__filesystem__write_file`). A phase that claims a tool
+    /// allowlist must therefore also spawn the deny rule for all unlisted
+    /// MCP tools, or the "listed tools are the only ones the backend can
+    /// use" claim is false.
+    #[test]
+    fn claude_allowlist_also_denies_unlisted_mcp_tools() {
+        let args = args_of(&claude_command_for(
+            "  - id: a\n    prompt: x\n    tools: [Read]\n",
+        ));
+        let allow = args
+            .iter()
+            .position(|a| a == "--tools")
+            .expect("--tools must appear in the claude spawn command line");
+        assert_eq!(args[allow + 1], "Read");
+        let deny = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("an allowlist phase must also deny unlisted MCP tools");
+        assert_eq!(
+            args[deny + 1], "mcp__*",
+            "the allowlist claim must hold against MCP tools too: {args:?}"
+        );
+    }
+
+    /// The MCP deny rule merges with an explicit exclude_tools denylist
+    /// into exactly one `--disallowedTools` flag (never two).
+    #[test]
+    fn claude_allowlist_merges_the_mcp_deny_with_the_exclude_list() {
+        let args = args_of(&claude_command_for(
+            "  - id: a\n    prompt: x\n    tools: [Read]\n    exclude_tools: [Write, Edit]\n",
+        ));
+        let deny_positions: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "--disallowedTools")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            deny_positions.len(),
+            1,
+            "the deny list must be a single flag, got: {args:?}"
+        );
+        assert_eq!(args[deny_positions[0] + 1], "Write,Edit,mcp__*");
+    }
+
     /// GH-574: claude's CLI exposes no thinking-level flag, so a phase that
     /// declares one must be refused, never silently ignored. The refusal
     /// fires before any spawn, so a bare launcher suffices.

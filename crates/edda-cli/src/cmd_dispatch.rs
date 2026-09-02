@@ -810,6 +810,27 @@ mod tests {
         );
     }
 
+    /// GH-574 round 3 (P1-2): the --list-models short-circuit must not
+    /// bypass the capability gate. An explicit --permission-mode on pi is
+    /// refused even in listing mode, before any model query runs. Pre-fix,
+    /// this combination reached the pi backend and exited 0 with no
+    /// permission signal at all.
+    #[test]
+    fn list_models_does_not_short_circuit_capability_validation() {
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "pi",
+            "--list-models",
+            "definitely-no-such-model-8f3a",
+            "--permission-mode",
+            "bypassPermissions",
+        ]);
+        let error = run_inner(args)
+            .expect_err("an explicit permission-mode on pi must be refused in listing mode too");
+        assert!(error.to_string().contains("--permission-mode"), "{error}");
+    }
+
     /// GH-574 round 2 (P1-3): with --json, stdout must be exactly one JSON
     /// object. A text model listing printed at exit 0 breaks every JSON
     /// consumer mid-stream, so the combination must be an explicit conflict
