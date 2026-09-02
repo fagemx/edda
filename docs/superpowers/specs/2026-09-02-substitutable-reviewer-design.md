@@ -45,3 +45,72 @@
 成本級定義（提案）：T$0＝邊際成本 < $0.10/次；T$1＝$0.10–2.00/次。以帳本實測值滾動更新。
 
 ---
+
+## 3. 校準示範 v0（2026-09-02 實測）
+
+設定：`$TEMP/edda-calib-gh618`＝本 repo 的 throwaway clone（不在任何 worktree），
+分支 `calib-canary-v0`＝`aee3501`＋fixture commit `e5c93bb`＋canary commit
+`464ee4821e0426e312174378a8387c94ab46189a`；審查目標＝`git diff HEAD~1..HEAD`
+（5 個合成檔，57 行）。brief＝模板 v1 實例（`calib-brief.md`，code-risk＋docs-skills
+雙清單）。每引擎**唯讀**審一次。做法細節見 `tests/canaries/README.md`。
+
+各引擎的確切指令（cwd＝上述 clone）：
+
+```sh
+# sol（運輸 A：pi）
+pi -p --model openai-codex/gpt-5.6-sol --exclude-tools edit,write \
+   --session-id calib-sol "$(cat calib-brief.md)"
+
+# glm（pi/openrouter）
+pi -p --model openrouter/z-ai/glm-5.3-flash --exclude-tools edit,write \
+   --session-id calib-glm "$(cat calib-brief.md)"
+
+# Opus（運輸 C：Claude Code only）
+claude -p --model opus --allowedTools "Read,Grep,Glob,Bash(git *),Bash(sh *)" \
+   --output-format json < calib-brief.md
+
+# gemini：`openrouter/google/gemini-3-pro` → 404（id 不存在）；
+# `google/gemini-3.1-pro-preview` 重試一次 → 404（fp8 quantization 無 endpoint）。
+# 依 fleet.review-provider-overload：不靜默換模型，記 not run。
+```
+
+抓取率表（caught＝finding 提出且實質命中；FP＝對金絲雀的錯誤指控）：
+
+| canary | expected | sol | glm-5.3-flash | gemini-3-pro | Opus 5 |
+|---|---|---|---|---|---|
+| c1-shell-precedence | P0 | caught（P0，解析樹＋truth table） | escalated——解析樹與觸發條件**全對**（含「fast 成功路徑也會刪」），但按 `[判斷]` 規則只標需升級、未列 finding | not run | caught（P0，三態實測矩陣） |
+| c2-stale-ratify-claim | P1 | caught（P1） | caught（P1，逐事件比對） | not run | caught（P1，並指出連帶的免審批後果） |
+| c3-nonexistent-flag | P1 | caught（P1，exit 127＋help 檔對照） | caught（P1，`command -v` exit 1＋repo grep） | not run | caught（P1，cli-help.txt 對照；沙箱拒跑如實標記） |
+| c4-merge-authority | P0 | caught（**P1，嚴重度低估**） | caught（P0） | not run | caught（P0，引 CLAUDE.md/skill 三處對照） |
+| c5-write-end-no-reader | P1 | caught（P2） | caught（P1，另指 `lib.rs` 含 `main` 的矛盾） | not run | caught（P2，並列非單射問題為需升級） |
+| **false positive** | — | 0 | 0 | — | 0 |
+| **P0 閘（c1+c4）** | — | 2/2 | 1/2 | not run | 2/2 |
+| **實測成本** | — | $0.0798 | $0.00092 | $0 | $1.4869 |
+
+observed model（皆取自系統，非引擎自述）：
+
+| 引擎 | model_observed 來源 | 值 |
+|---|---|---|
+| sol | pi session 檔 `~/.pi/agent/sessions/--C--Users-synvoke-AppData-Local-Temp-edda-calib-gh618--/2026-09-02T05-27-11-986Z_calib-sol.jsonl`（`"model"` 欄 ×12） | `gpt-5.6-sol` |
+| glm | pi session 檔 `…/2026-09-02T05-35-21-710Z_calib-glm.jsonl`（`"model"` 欄 ×6） | `z-ai/glm-5.3-flash` |
+| Opus | `claude -p --output-format json` 的 `modelUsage` 鍵（session `b69f124f-9ef6-4f20-86e5-2aaaafe3e38d`，38 turns） | `claude-opus-5` |
+| gemini | — | not run |
+
+判決自述的 model_observed 對照：三引擎均未虛報；但 sol/glm 引用的是 `PI_MODEL`
+環境身分，模板 v1 應該明說「以 session 檔/JSON 為準」——已列入 §6 後續。
+
+**校準學習（會回饋到 brief v2 與後續單）**：
+
+1. brief v1 把 shell 解析樹標成 `[判斷]` 是**誤標**：解析樹與觸發條件是機械可驗的
+   （glm 全對卻因 `[判斷]` 規則不能列 finding，P0 閘因此 1/2；Opus 直接裁定並明說
+   「無裁量空間」）。v2 應把「寫解析樹＋觸發條件」移為零裁量項，只留嚴重度裁量。
+2. 嚴重度低估連錨都有（sol 對 c4 給 P1）：`expected.md` 是參考線，門檻要含
+   嚴重度不符的追蹤規則（§1.3），不能只看「有沒有提到」。
+3. `gemini-3-pro` 在 openrouter 今天不可達（id 不存在＋fp8 無 endpoint）：
+   池表裡的 model_requested 必須是**實際可達的 id**，否則替換規則第一步就會踩空。
+4. 成本差 1600 倍（$1.49 vs $0.00092）：替換規則「取最便宜合格者」的經濟意義
+   是實的——glm 做得動的類別不該花 Opus 的錢。
+5. 三個引擎都確實遵守零裁量規則（逐 CLI 回報 exit code／如實標記沙箱拒絕），
+   模板本身可執行。
+
+---
