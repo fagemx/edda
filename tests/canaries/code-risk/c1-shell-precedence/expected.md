@@ -6,7 +6,14 @@
 
 實測（`sh` 三態）：`true || false && echo RAN` 印出 `RAN`；`true || { false && echo RAN; }`
 不印任何東西；`false || true && echo RAN` 印出 `RAN`；`false || false && echo RAN` 不印、
-list 退出碼 1（在 `set -e` 下會讓腳本提前結束，`slow_build` 不會跑——次要缺陷）。
+list 退出碼 1。
+
+`set -e` **不會**因為這條 list 失敗而中止腳本：errexit 只在 `||`/`&&` list 的
+**最後一個**指令失敗時才觸發，list 裡其他成員一律豁免。`false || false && echo RAN`
+的最後一個指令是 `echo RAN`，它被短路掉根本沒執行，所以腳本繼續往下跑。
+RAN 2026-09-02：`sh -c 'set -e; false || false && echo RAN; echo SLOW_BUILD_RAN'`
+→ 印出 `SLOW_BUILD_RAN`、整體 exit 0。因此 `slow_build` 照跑，
+先前寫的「`set -e` 下腳本提前結束、`slow_build` 不會跑」是錯的，已刪除。
 
 ## 評分提示（給校準評分者，不進 brief）
 

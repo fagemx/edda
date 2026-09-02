@@ -39,7 +39,7 @@
 |---|---|---|---|---|---|---|---|
 | gpt-5.6-sol | `openai-codex/gpt-5.6-sol` | A: `pi --model openai-codex/gpt-5.6-sol`；B: `edda dispatch --agent codex`（過載時先換這個） | 訂閱內，T$0 | $0.0798 | **全類別（錨，不被取代）** | #582 | `fleet.agent-model-split`＋`fleet.review-provider-overload` 的原裝組合；sol 抓到而他人漏的即成新金絲雀 |
 | Opus 5 | `opus`（`claude -p --model opus`） | **C: Claude Code only**——`claude -p --allowedTools "Read,Grep,Glob,Bash(git *),Bash(sh *)"`；**絕不**經 pi/openrouter | 訂閱內，T$1 | $1.4869 | code-risk + docs-skills（provisional，待操作者裁定） | 訂閱用量 | `fleet.claude-subscription-transport`：pi 顯示 ready 也不准派 |
-| gemini-3-pro | **無可達 id**（`pi --list-models gemini` 目錄裡沒有 `google/gemini-3-pro`；pro 級只有 `google/gemini-3.1-pro-preview`） | pi/openrouter（現不通）；直連 google 供應商 `pi auth check --provider google` → `not_ready` | — | $0 | **none（not run）** | — | R2 重跑仍失敗：整個 `google/*` 家族（含 2.5-pro、3.7-flash）在本帳戶的 openrouter 路由上都回 `404 … quantization: fp8`，同一把金鑰跑 glm 正常 → 是**路由偏好**問題不是 id 拼錯。**修正 model_requested 與 fp8 路由前，不得列入候選**（錯誤原文見 §3、後續見 §7.5） |
+| gemini-3.1-pro-preview | `openrouter/google/gemini-3.1-pro-preview`——**catalogue 逐字 id**（RAN `pi --list-models gemini`，該列見 §3）。先前寫的 `google/gemini-3-pro` **不在目錄裡**，pi 會模糊解析成 `google/gemini-3-pro-image`（見 §3 的靜默替換案例） | pi/openrouter：`pi auth check --model openrouter/google/gemini-3.1-pro-preview` → **`ready`**（provider `openrouter` 亦 `ready`），但實際請求仍 `404 … quantization: fp8`（§3）；直連 google 供應商 `pi auth check --provider google` → `not_ready` | — | $0 | **none（not run，R3 實測）** | — | R3（2026-09-02）改用逐字 id 重跑：session 檔記的 `modelId` 與請求**完全一致**（沒有替換），錯的是路由。`auth check` 說 ready ≠ 路由可達——**修好 fp8 路由前不得列入候選**（錯誤原文與探測見 §3、後續見 §7.5） |
 | glm-5.3-flash | `openrouter/z-ai/glm-5.3-flash` | pi/openrouter | 訂閱外按量，T$0 | $0.00092 | **docs-skills（provisional）**；code-risk 不合格 | #582 | code-risk 不合格的原因與 brief v1 的 `[判斷]` 標籤有關（§3 學習 1），brief v2 修正後重校，不是引擎本身判死 |
 
 成本級定義（提案）：T$0＝邊際成本 < $0.10/次；T$1＝$0.10–2.00/次。以帳本實測值滾動更新。
@@ -52,7 +52,10 @@
 分支 `calib-canary-v0`＝`aee3501`＋fixture commit `e5c93bb`＋canary commit
 `464ee4821e0426e312174378a8387c94ab46189a`；審查目標＝`git diff HEAD~1..HEAD`
 （5 個合成檔，57 行）。brief＝模板 v1 實例（`calib-brief.md`，code-risk＋docs-skills
-雙清單）。每引擎**唯讀**審一次。做法細節見 `tests/canaries/README.md`。
+雙清單）。每引擎**唯讀**派工一次（＋失敗時重試一次為限）：sol／glm／Opus
+三個引擎真的產出了判決，gemini 三輪派工（R1／R2／R3）都在 provider 端失敗，
+**從未產出判決**——校準表的第四欄到目前為止是空的，見下。
+做法細節見 `tests/canaries/README.md`。
 
 各引擎的確切指令（cwd＝上述 clone）：
 
@@ -69,25 +72,35 @@ pi -p --model openrouter/z-ai/glm-5.3-flash --exclude-tools edit,write \
 claude -p --model opus --allowedTools "Read,Grep,Glob,Bash(git *),Bash(sh *)" \
    --output-format json < calib-brief.md
 
-# gemini（2026-09-02 R2 重跑，clone＝$TEMP/edda-calib-gh618-r2，
-# canary commit 0c3b487426f8f57c2ecca2df868b5333eaf9c3be，同樣 5 檔 57 行）
-pi -p --model google/gemini-3-pro --thinking high --exclude-tools edit,write \
-   --session-id calib-gemini-r2 "$(cat calib-brief.md)"
-# → 404（見下表；重試一次同錯）。依 fleet.review-provider-overload：不靜默換模型，記 not run。
+# gemini（2026-09-02 R3 重跑，clone＝<worktree>/.tmp/calib-r3——本輪 lane 的
+# 路徑政策只准存取 worktree，所以 throwaway clone 落在 worktree 底下已 gitignore
+# 的 .tmp/，程序其餘部分與 R1/R2 相同：base aee3501 → fixture commit a7d327e →
+# 五個 git apply → canary commit 55137e174b1f3759667bbedc96a7b05a0746443b，
+# git diff --stat HEAD~1..HEAD = 5 檔 57 行，與 R1/R2 相同）
+pi -p --model openrouter/google/gemini-3.1-pro-preview --thinking high \
+   --exclude-tools edit,write --session-dir "$CLONE/sessions-r3" \
+   --session-id calib-gemini-r3 "$(cat calib-brief.md)"
+# → 404（見下表；重試一次 calib-gemini-r3b 同錯）。
+# 依 fleet.review-provider-overload：不靜默換模型，記 not run。
 ```
 
 抓取率表（caught＝finding 提出且實質命中；FP＝對金絲雀的錯誤指控）：
 
-| canary | expected | sol | glm-5.3-flash | gemini-3-pro | Opus 5 |
+| canary | expected | sol | glm-5.3-flash | gemini-3.1-pro-preview | Opus 5 |
 |---|---|---|---|---|---|
-| c1-shell-precedence | P0 | caught（P0，解析樹＋truth table）＊ | escalated——解析樹與觸發條件**全對**（含「fast 成功路徑也會刪」，與更正後的 key 相符），但按 `[判斷]` 規則只標需升級、未列 finding | **not run（404，見下）** | caught（P0，三態實測矩陣）＊ |
-| c2-stale-ratify-claim | P1 | caught（P1） | caught（P1，逐事件比對） | **not run（404）** | caught（P1，並指出連帶的免審批後果） |
-| c3-nonexistent-flag | P1 | caught（P1，exit 127＋help 檔對照） | caught（P1，`command -v` exit 1＋repo grep） | **not run（404）** | caught（P1，cli-help.txt 對照；沙箱拒跑如實標記） |
-| c4-merge-authority | P0 | caught（**P1，嚴重度低估**） | caught（P0） | **not run（404）** | caught（P0，引 CLAUDE.md/skill 三處對照） |
-| c5-write-end-no-reader | P1 | caught（P2） | caught（P1，另指 `lib.rs` 含 `main` 的矛盾） | **not run（404）** | caught（P2，並列非單射問題為需升級） |
+| c1-shell-precedence | P0 | caught（P0，解析樹＋truth table）＊ | escalated——解析樹與觸發條件**全對**（含「fast 成功路徑也會刪」，與更正後的 key 相符），但按 `[判斷]` 規則只標需升級、未列 finding | **not run（404 fp8，見下）** | caught（P0，三態實測矩陣）＊ |
+| c2-stale-ratify-claim | P1 | caught（P1） | caught（P1，逐事件比對） | **not run（404 fp8）** | caught（P1，並指出連帶的免審批後果） |
+| c3-nonexistent-flag | P1 | caught（P1，exit 127＋help 檔對照） | caught（P1，`command -v` exit 1＋repo grep） | **not run（404 fp8）** | caught（P1，cli-help.txt 對照；沙箱拒跑如實標記） |
+| c4-merge-authority | P0 | caught（**P1，嚴重度低估**） | caught（P0） | **not run（404 fp8）** | caught（P0，引 CLAUDE.md/skill 三處對照） |
+| c5-write-end-no-reader | P1 | caught（P2） | caught（P1，另指 `lib.rs` 含 `main` 的矛盾） | **not run（404 fp8）** | caught（P2，並列非單射問題為需升級） |
 | **false positive** | — | 0 | 0 | — | 0 |
 | **P0 閘（c1+c4）** | — | 2/2 | 1/2 | **無資料** | 2/2 |
-| **實測成本** | — | $0.0798 | $0.00092 | $0（六次請求皆在 provider 端 404，未產生 token） | $1.4869 |
+| **實測成本** | — | $0.0798 | $0.00092 | $0（請求全數在 provider 端 404，session 檔 `usage.totalTokens` 與 `cost.total` 皆 0） | $1.4869 |
+| **qualified？** | — | 全類別（錨） | docs-skills provisional；code-risk 否 | **否——未取得任何資料** | code-risk + docs-skills provisional |
+
+供操作者逐字記帳本的一行一引擎版本（`engine \| requested \| observed \| cost \|
+c1..c5 \| qualified?`）放在 PR #638 的 body（`for ledger — fleet.review-calibration`
+區塊）；本 lane 不執行 `edda decide`，帳本紀錄由控制者做。
 
 ＊ c1 的 sol／Opus 兩格是**更正 `expected.md` 之前**評的（舊 key 誤寫成
 `fast_build || { cleanup && git rm; }`）。更正後的 key 要求 finding 明說
@@ -97,28 +110,66 @@ pi -p --model google/gemini-3-pro --thinking high --exclude-tools edit,write \
 列為 §7 後續：對著 transcript 重評 c1 三格。所有格子的 diff 目標未變
 （`diff.patch` 本輪未改），重評不需要重跑引擎。
 
-**gemini-3-pro：not run，錯誤原文（2026-09-02 R2）**
+**gemini：R2 的靜默替換，與 R3 用逐字 id 量到的真正可用性**
 
-brief 指定的指令與重試各跑一次，兩次同錯；為了分辨「模型 id 打錯」與「路由壞掉」，
-另外對可達 id 與同家族做了四次探測：
+R2 的判讀有一半是錯的，這裡先更正，因為這正好是本文件自己的規則被自己違反的案例。
 
-| # | 指令（`pi -p … --exclude-tools edit,write`） | 結果 |
+*先是 id：R2 根本沒打到請求的引擎。* `google/gemini-3-pro` 不在 pi 的目錄裡，
+pi 沒有報錯，而是**模糊解析成另一個模型** `google/gemini-3-pro-image`（影像模型）。
+`calib-gemini-r2` 與 `calib-gemini-r2b` 兩份 session 檔**確實存在**，裡面記的
+`modelId` 就是 `google/gemini-3-pro-image`，然後才是那則 404——所以 R2 文字裡
+「未產生 session 檔」是錯的，「gemini-3-pro 不可達」也沒有被證明過：那一輪
+requested 與 observed 從一開始就不是同一個模型。（來源：Round 2 審查者的 RAN
+證據與控制者的覆核；本 lane 的路徑政策讀不到預設 session 目錄，故此格記 READ 不記 RAN。）
+
+*R3 用 catalogue 逐字 id 重跑。* `pi --list-models gemini` 的 pro 級該列（RAN 2026-09-02）：
+
+```text
+provider    model                                      context  max-out  thinking  images
+openrouter  google/gemini-3.1-pro-preview              1.0M     65.5K    yes       yes
+```
+
+| # | 指令（cwd＝R3 clone） | 結果 |
 |---|---|---|
-| 1 | `--model google/gemini-3-pro --thinking high --session-id calib-gemini-r2` | `404: {"message":"No endpoints found for the request with quantization: fp8. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection","code":404}` |
-| 2 | 同上，重試（`--session-id calib-gemini-r2b`） | 同一則 404 fp8 |
-| 3 | `--model google/gemini-3.1-pro-preview`（catalog 中實際存在的 pro id） | 同一則 404 fp8 |
-| 4 | `--model google/gemini-3.1-pro-preview-customtools` | 同一則 404 fp8 |
-| 5 | `--model google/gemini-3.7-flash --no-tools "reply with OK"` | 同一則 404 fp8 |
-| 6 | `--model google/gemini-2.5-pro --no-tools "reply with OK"` | 同一則 404 fp8 |
-| 對照 | `--model openrouter/z-ai/glm-5.3-flash --no-tools "reply with OK"` | `OK`（openrouter 金鑰與路由本身正常） |
-| 對照 | `pi --list-models gemini` | 目錄裡**沒有** `google/gemini-3-pro`；pro 級只有 `google/gemini-3.1-pro-preview{,-customtools}` |
-| 對照 | `pi auth check --provider google` | `not_ready`（直連 Google 供應商未設憑證，無第二條運輸） |
+| 1 | `pi auth check --model openrouter/google/gemini-3.1-pro-preview` | `ready`，exit 0 |
+| 2 | `pi auth check --provider openrouter` | `ready`，exit 0 |
+| 3 | `pi auth check --provider google`（直連） | `not_ready`，exit 1 |
+| 4 | 金絲雀審查：`pi -p --model openrouter/google/gemini-3.1-pro-preview --thinking high --exclude-tools edit,write --session-dir "$CLONE/sessions-r3" --session-id calib-gemini-r3 "$(cat calib-brief.md)"` | `404: {"message":"No endpoints found for the request with quantization: fp8. To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing/provider-selection","code":404}`，pi exit 1 |
+| 5 | 同 4，重試一次（`--session-id calib-gemini-r3b`） | 同一則 404 fp8，pi exit 1 |
+| 6 | `--model openrouter/google/gemini-3.1-pro-preview --thinking high --no-tools "reply with OK"` | 同一則 404 fp8 |
+| 7 | 同 6，**不帶** `--thinking`（排除 thinking 觸發路由偏好） | 同一則 404 fp8 |
+| 對照 | `--model openrouter/z-ai/glm-5.3-flash --no-tools "reply with OK"` | `OK`，exit 0（openrouter 金鑰與路由本身正常） |
 
-判讀：兩條運輸都不通——直連 google 供應商未認證，openrouter 這條則是**整個
-`google/*` 家族**（含 2.5-pro、3.7-flash）都被 fp8 quantization 偏好篩掉，
-不是單一 model id 拼錯。同一支 pi、同一把 openrouter 金鑰跑 glm 正常，
-所以不是金鑰或 pi 壞掉。依 `fleet.review-provider-overload`「不靜默換模型」，
-不以 flash 級或別家模型頂替，記 `not run`；池表 `qualified_classes` 維持 `none`。
+R3 的 session 檔（`<CLONE>/sessions-r3/2026-09-02T07-26-41-618Z_calib-gemini-r3.jsonl`）
+逐字記著：
+
+```json
+{"type":"model_change","modelId":"google/gemini-3.1-pro-preview"}
+{"role":"assistant","model":"google/gemini-3.1-pro-preview","api":"openai-completions",
+ "provider":"openrouter","stopReason":"error",
+ "usage":{"input":0,"output":0,"totalTokens":0,"cost":{"total":0}}}
+```
+
+判讀（量測到的，取代 R2 那句「Gemini 沒有可達的 OpenRouter 模型」）：
+
+- **目錄裡有可達的 pro 級 id**：`google/gemini-3.1-pro-preview` 存在，
+  `pi auth check --model …` 與 provider `openrouter` 都回 `ready`。所以
+  「沒有可達模型」是錯的；池表要記的 `model_requested` 就是這個逐字 id。
+- **`auth check` 回 ready 不等於路由可達**：憑證在、目錄有這個 id，請求仍然被
+  openrouter 的 `quantization: fp8` provider preference 篩成 404。帶不帶
+  `--thinking` 都一樣，所以不是 thinking 參數觸發的。
+- **要修的是路由不是 id**：同一支 pi、同一把 openrouter 金鑰跑 glm 正常，
+  所以不是金鑰或 pi 壞掉；剩下的變數是 pi 端送出的 provider preference
+  或 openrouter 帳戶的路由設定（後續見 §7.5）。
+- 依 `fleet.review-provider-overload`「不靜默換模型」，不以 flash 級或別家模型
+  頂替，本輪記 `not run`（附上錯誤原文）；池表 `qualified_classes` 維持 `none`。
+
+**這一輪自己示範的規則**：引擎一律用 `pi --list-models` 的**逐字 catalogue id**
+定址，並把那一列貼進 brief；不准用記憶中的、猜的、或「大概是這個」的名字。
+pi 對不存在的 id **不會報錯**，它會模糊解析到最近的一個——R2 因此把一輪
+gemini 審查花在影像模型上，而且直到審查者去讀 session 檔才發現。
+這正是 §5 說的 `model_requested ≠ model_observed` P0 事故形狀，只是發生在
+派工端而非收據端：**沒有逐字 id，requested 欄本身就是假的。**
 
 observed model（皆取自系統，非引擎自述）：
 
@@ -127,7 +178,7 @@ observed model（皆取自系統，非引擎自述）：
 | sol | pi session 檔 `~/.pi/agent/sessions/--C--Users-synvoke-AppData-Local-Temp-edda-calib-gh618--/2026-09-02T05-27-11-986Z_calib-sol.jsonl`（`"model"` 欄 ×12） | `gpt-5.6-sol` |
 | glm | pi session 檔 `…/2026-09-02T05-35-21-710Z_calib-glm.jsonl`（`"model"` 欄 ×6） | `z-ai/glm-5.3-flash` |
 | Opus | `claude -p --output-format json` 的 **`modelUsage`** 頂層鍵（session `b69f124f-9ef6-4f20-86e5-2aaaafe3e38d`，38 turns） | `claude-opus-5` |
-| gemini | 無——請求在 provider 端 404，未產生 session 檔 | not run |
+| gemini | pi session 檔 `<CLONE>/sessions-r3/2026-09-02T07-26-41-618Z_calib-gemini-r3.jsonl`（`modelId` 與 assistant 訊息的 `"model"` 欄） | `google/gemini-3.1-pro-preview`——與 requested **相符**，但 `stopReason:"error"`、`totalTokens` 0、`cost.total` 0，沒有審查輸出，故評分欄記 not run。（對照 R2：requested `google/gemini-3-pro`、observed `google/gemini-3-pro-image`，**不符**） |
 
 判決自述的 model_observed 對照：三引擎均未虛報；但 sol/glm 引用的是 `PI_MODEL`
 環境身分，模板 v1 應該明說「以 session 檔/JSON 為準」——已於本輪直接改進模板
@@ -140,14 +191,21 @@ v1.1（含 `modelUsage` 鍵名更正），不留到 v2。
    「無裁量空間」）。v2 應把「寫解析樹＋觸發條件」移為零裁量項，只留嚴重度裁量。
 2. 嚴重度低估連錨都有（sol 對 c4 給 P1）：`expected.md` 是參考線，門檻要含
    嚴重度不符的追蹤規則（§1.3），不能只看「有沒有提到」。
-3. `gemini-3-pro` 在本工作站今天**兩條運輸都不可達**：openrouter 目錄裡沒有這個
-   id，而且整個 `google/*` 家族都被 fp8 quantization 路由篩掉（同金鑰跑 glm 正常），
-   直連 google 供應商又未設憑證。所以池表要記的不只是「實際可達的 id」，還要記
-   **運輸的可達性是帳戶層設定的函數**——校準前先跑一次 `--no-tools "reply with OK"`
-   探測，比燒掉一輪審查便宜。
-4. 成本差 1600 倍（$1.49 vs $0.00092）：替換規則「取最便宜合格者」的經濟意義
+3. **引擎用逐字 catalogue id 定址，不用名字。** `google/gemini-3-pro` 不在 pi
+   目錄裡，pi 不報錯而是模糊解析成 `google/gemini-3-pro-image`，R2 因此把一輪
+   gemini 校準花在影像模型上。規則：派工前跑 `pi --list-models <關鍵字>`，把那一列
+   **貼進 brief**，`model_requested` 逐字照抄；模糊解析到別的模型＝靜默替換，
+   與收據上 `model_requested ≠ model_observed` 同級（§5）。
+4. **`auth check` 說 ready 不等於路由可達。** 用逐字 id 重跑（R3）：
+   `pi auth check --model openrouter/google/gemini-3.1-pro-preview` → `ready`，
+   provider `openrouter` → `ready`，請求仍被 `quantization: fp8` 的 provider
+   preference 篩成 404（帶不帶 `--thinking` 皆同），直連 google 供應商則
+   `not_ready`。所以池表要記的不只是「實際可達的 id」，還要記**運輸的可達性是
+   帳戶層路由設定的函數**——校準前先跑一次 `--no-tools "reply with OK"` 探測，
+   比燒掉一輪審查便宜，而且 `auth check` 不能代替它。
+5. 成本差 1600 倍（$1.49 vs $0.00092）：替換規則「取最便宜合格者」的經濟意義
    是實的——glm 做得動的類別不該花 Opus 的錢。
-5. 三個引擎都確實遵守零裁量規則（逐 CLI 回報 exit code／如實標記沙箱拒絕），
+6. 三個引擎都確實遵守零裁量規則（逐 CLI 回報 exit code／如實標記沙箱拒絕），
    模板本身可執行。
 
 ---
@@ -159,6 +217,14 @@ v1.1（含 `modelUsage` 鍵名更正），不留到 v2。
    的引擎集合（池見 §2）。
 3. **選引擎**：取成本級最低者；平手取最近一次校準通過者。**sol 不是預設**——
    它是定線之錨與 `[判斷]` 抽審者。
+   - **逐字定址**：選定後跑 `pi --list-models <關鍵字>`（claude 側同理），
+     把該列**逐字貼進 brief**，`model_requested` 照抄目錄 id。**絕不用猜的、
+     記憶中的或近似的名字**：pi 對不存在的 id 不報錯，會模糊解析到最近的一個
+     （實證：`google/gemini-3-pro` → `google/gemini-3-pro-image`，§3），
+     那是**派工端的靜默替換**，與 §5 的收據事故同級。
+   - **派工前探測運輸**：跑一次 `--no-tools "reply with OK"`。`pi auth check`
+     回 `ready` **不保證**路由可達（實證：`ready` 之後仍
+     `404 … quantization: fp8`，§3）。
 4. **過載**：先換運輸（sol：pi→codex app-server；`fleet.review-provider-overload`），
    換運輸不行才換下一個合格引擎。重試同引擎一次為限。**絕不靜默換模型**。
 5. **都沒有**：PR 標 `review:unreviewed` 停住（§1.6）；不合格引擎的 LGTM 不算。
@@ -202,7 +268,7 @@ edda decide "fleet.review-qualification=p0-full-p1-80-fp-zero-recal-quarterly" \
   --reason "合格門檻＝該類別 P0 金絲雀 100% caught（提出且實質命中）、P1 ≥ 80%、FP=0、清單每項皆回報不得靜默略過。嚴重度低估記 caught 但標「嚴重度不符」，同引擎同金絲雀連續兩次不符視為 missed。重校＝每季＋引擎版次變更後＋brief 版本變更後＋金絲雀新增後 30 天內全池。抓取率進帳本。校準前 qualified=none。"
 
 edda decide "fleet.review-engine-pool=field-of-reviewer-profile-593" \
-  --reason "引擎池是 reviewer profile（#593）底下的一個欄位，不是獨立設定。池條目＝{model_requested, transports_allowed, cost_tier, qualified_classes, quota_signal}。初始池：gpt-5.6-sol（pi 或 edda dispatch --agent codex；全類別錨、不被取代）、Opus 5（claude -p only，絕不經 pi/openrouter）、gemini-3-pro（pi/openrouter，現不可達——catalog 無此 id，且整個 google/* 家族在本帳戶的 openrouter 路由上 404；修正前不得列候選）、glm-5.3-flash（pi/openrouter；本次校準提議 docs-skills provisional 合格，code-risk 不合格）。替換規則＝依類別取「合格∧運輸可用∧配額在」中最便宜者；過載先換運輸再換下一合格引擎；重試同引擎一次為限，絕不靜默換模型；無合格引擎→PR 標 review:unreviewed 停住，不合格引擎的 LGTM 不算；[判斷] 項與非平凡 diff 零發現送 sol 抽審；判決帶 model_requested/model_observed（系統取得）、brief 版本、類別、escalations，合併政策讀欄位不讀標頭。model_requested≠model_observed 為 P0 事故。"
+  --reason "引擎池是 reviewer profile（#593）底下的一個欄位，不是獨立設定。池條目＝{model_requested, transports_allowed, cost_tier, qualified_classes, quota_signal}。初始池：gpt-5.6-sol（pi 或 edda dispatch --agent codex；全類別錨、不被取代）、Opus 5（claude -p only，絕不經 pi/openrouter）、gemini-3.1-pro-preview（逐字 catalogue id openrouter/google/gemini-3.1-pro-preview；auth check 回 ready 但請求被 openrouter 的 quantization: fp8 provider preference 篩成 404，直連 google 供應商 not_ready；修好路由前不得列候選）、glm-5.3-flash（pi/openrouter；本次校準提議 docs-skills provisional 合格，code-risk 不合格）。替換規則＝依類別取「合格∧運輸可用∧配額在」中最便宜者；model_requested 一律逐字照抄 pi --list-models 的目錄 id（pi 對不存在的 id 不報錯而是模糊解析，google/gemini-3-pro → google/gemini-3-pro-image 即派工端的靜默替換）；派工前以 --no-tools 探測運輸，auth check 回 ready 不保證路由可達；過載先換運輸再換下一合格引擎；重試同引擎一次為限，絕不靜默換模型；無合格引擎→PR 標 review:unreviewed 停住，不合格引擎的 LGTM 不算；[判斷] 項與非平凡 diff 零發現送 sol 抽審；判決帶 model_requested/model_observed（系統取得）、brief 版本、類別、escalations，合併政策讀欄位不讀標頭。model_requested≠model_observed 為 P0 事故。"
 
 edda decide "fleet.review-unreviewed-state=honest-label-blocked-by-merge-gate-580" \
   --reason "review:unreviewed 是 label/狀態，不是判決——語意為「審查當下沒有任何合格引擎可用，誠實停住」。#580 合併閘機械化要求 current-head LGTM＋綠 CI，unreviewed 的 PR 不可能有有效 LGTM，閘自然擋住；解鎖唯一路徑是合格引擎真審一輪。不得用降級引擎的判決清除本狀態。依據：fleet.review-provider-overload「unreviewed PR 是誠實的狀態，便宜模型的判決不是」。"
@@ -223,10 +289,13 @@ edda decide "fleet.review-unreviewed-state=honest-label-blocked-by-merge-gate-58
 4. **brief v2**——把「shell 解析樹＋觸發條件」移出 `[判斷]`（校準學習 1）。
    `model_observed` 註記（以 session 檔／JSON 的 `modelUsage` 為準、環境變數
    身分不算數）已在 v1.1 修掉，不必等 v2。
-5. **gemini 運輸修正**——池表需要實際可達的 model id（`google/gemini-3-pro`
-   不在 openrouter 目錄裡）；`404 … quantization: fp8` 打在整個 `google/*` 家族上，
-   要查明是 pi 端的 provider preference 參數還是 openrouter 帳戶的路由設定，
-   或改走直連 google 供應商（現為 `not_ready`）。修好前 gemini 維持 `not run`。
+5. **gemini 運輸修正**——id 已經確定：`openrouter/google/gemini-3.1-pro-preview`
+   在目錄裡，`pi auth check --model` 與 provider `openrouter` 都回 `ready`。
+   剩下的是路由：`404 … quantization: fp8` 表示送出的請求帶著 fp8
+   provider preference，而 `google/*` 沒有 fp8 endpoint（同金鑰跑 glm 正常，
+   帶不帶 `--thinking` 皆同）。要查明那個偏好是 pi 端送的參數還是 openrouter
+   帳戶的路由設定，或改走直連 google 供應商（現為 `not_ready`）。
+   修好前 gemini 維持 `not run`，四引擎校準的第四格仍是空的。
 6. **重評 c1 的 sol／Opus 兩格**——`expected.md` 的 key 已更正，兩格是舊 key 下評的；
    對著既有 transcript 重評即可，不需重跑引擎（本 lane 讀不到 transcript，見 §3 ＊註）。
 7. **金絲雀重校的自動化**——把 §1.2 的跑法變成腳本／lane（#594 wiring-scan
