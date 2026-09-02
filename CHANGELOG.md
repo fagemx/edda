@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Release automation now blocks GitHub release creation until every publishable workspace crate exists at the tag version on crates.io and is not yanked
+
 ## [0.4.0] - 2026-09-02
 
 ### Added
