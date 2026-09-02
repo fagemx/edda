@@ -1,12 +1,15 @@
-# gh599 micro-test — fleet-epic-split rewrite (old vs new), attributable text-only run
+# gh599 micro-test — fleet-epic-split rewrite (old vs new), isolated-by-cwd-and-prompt run
 
 Old vs new decomposition of the same input, prompts identical except the
-embedded skill text. Redesigned after PR #653 review round 1 so the
-differential can only come from the skill text:
+embedded skill text. Redesigned after PR #653 review round 1 to remove the
+round-1 confounds:
 
-- **(a) Isolated cwd**: `run.sh` runs both arms from an empty `mktemp -d`
-  directory, so no tool can read this repo's files — the old arm cannot
-  import the new conventions from the worktree (round-1 finding).
+- **(a) Empty temp cwd**: `run.sh` runs both arms with an empty `mktemp -d`
+  directory as cwd. What this does and does not guarantee: the model keeps
+  its read/bash tools, and `OLDPWD` still points at the repository, so repo
+  files remain reachable — isolation here is by prompt and cwd only, not a
+  sandbox. What was observed in this N=1 run: the old arm did not import
+  repository conventions.
 - **(b) Byte-identical shared frame, no added requirements**: the frame is
   the first line before `=== SKILL BEGIN ===`, everything from
   `=== SKILL END ===` on, and nothing else. It adds no confirmation-table
@@ -62,7 +65,7 @@ Replay: `sh tests/microtests/gh599/run.sh` — overwrites
 
 | Run | Confirmation table | `Suspected surface` in proposed bodies | `Predicted surface` in proposed bodies | Verdict |
 |---|---|---|---|---|
-| old-1 | none — the old text has no pre-create operator gate; it flows ①recon → ②decompose → ③propose straight to would-be `gh issue create` commands ("以下為兩張 issue body 草稿與**將會執行**（dry run 不執行）的建單指令") | absent — both bodies use the old format `## 背景 / ## 改哪裡 / ## doneWhen / ## verify / ## 獨立性 / ## 尺寸`; no surface section exists in either | absent — same | **miss** (0 of 2 criteria; no dedupe step exists in the old text) |
+| old-1 | none — the old text has no pre-create operator gate; it flows ①recon → ②decompose → ③propose straight to would-be `gh issue create` commands ("以下為兩張 issue body 草稿與**將會執行**（dry run 不執行）的建單指令") | absent — both bodies use the old format `## 背景 / ## 改哪裡 / ## doneWhen / ## verify / ## 獨立性 / ## 尺寸`; no surface section exists in either | absent — same | **miss** (0 of 3 criteria; no dedupe step exists in the old text) |
 | new-1 | printed — "## ④ 確認表（dry run → 停在本步，不建任何 issue）" with 2 rows (擬建-1, 擬建-2) + skip list ("gate-entry routing → skip… #545") | present — "## Suspected surface / Phase 生命週期／終態判定所在的元件…" (擬建-1) and "## Suspected surface / Controller 的事件處理／訂閱端…" (擬建-2) | present — "## Predicted surface / phase 終態發射點…" (擬建-1) and "## Predicted surface / controller 訂閱端…" (擬建-2) | **catch** (3 of 3) |
 
 **Old 0/3 · New 3/3 (N=1 per arm).**
@@ -83,13 +86,16 @@ Additional observed behavior, quoted:
 
 ## Honest reading
 
-- The round-1 confounds are removed by construction: both arms ran in the
-  same empty temp dir (no repo files to leak conventions), and the frame
-  demanded no table and no body shape. What differs is the skill text, and
-  the outputs differ exactly on the dimensions the rewrite owns (operator
-  gate, dedupe, surface fields, provenance) while matching on what both
-  texts share (recon-first posture, independence three-question, 30-cap,
-  two-candidate split, dry-run obedience).
+- The round-1 confounds were addressed by the redesign: both arms ran in
+  the same empty temp cwd and the frame demanded no table and no body
+  shape. Isolation is by prompt and cwd only — the model kept read/bash
+  tools and `OLDPWD` still pointed at the repository — so this is not a
+  sandbox proof. What was observed: the old arm did not import repository
+  conventions in this run, and the outputs differ exactly on the dimensions
+  the rewrite owns (operator gate, dedupe, surface fields, provenance)
+  while matching on what both texts share (recon-first posture,
+  independence three-question, 30-cap, two-candidate split, dry-run
+  obedience). No causal "only" is claimed.
 - `N=1 per arm`. No repeatability or generalization claim is made: one
   cheap-model run shows what happened, not a stable differential. The new
   arm's isolation fallbacks (`unverified` dedupe, fixed-section bodies) are

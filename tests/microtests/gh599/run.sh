@@ -1,11 +1,12 @@
 #!/bin/sh
 # Replayable micro-test for the fleet-epic-split rewrite (issue #599, PR #653
-# review round 1 fix). Redesigned so the arms can be ATTRIBUTED to the skill
-# text alone:
+# review round 1 fix). Redesigned to remove the round-1 confounds:
 #
-#   (a) both arms run from an EMPTY temp directory (`mktemp -d` as cwd), so
-#       no tool can read this repo's files — the old arm cannot import the
-#       new conventions from the worktree (round-1 finding);
+#   (a) both arms run with an EMPTY temp directory (`mktemp -d`) as cwd.
+#       Isolation is by prompt and cwd only, not a sandbox: the model keeps
+#       its read/bash tools and OLDPWD still points at the repository. What
+#       was observed in the committed N=1 run: the old arm did not import
+#       repository conventions;
 #   (b) the shared prompt frame is byte-identical for both arms and adds no
 #       requirement of its own (no confirmation-table demand, no body-shape
 #       demand) — it only gives the dry-run/isolation rule;
