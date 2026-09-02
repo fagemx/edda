@@ -311,6 +311,13 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
             println!("\n⏸ [{phase_num}/{total_phases}] Phase \"{gated_id}\" AWAITING_VERDICT — waiting for an external verdict");
             println!("  subject:  {subject}");
             println!("  gate_sha: {gate_sha}");
+            // GH-551: the budget must be visible where the wait is announced
+            // — an operator who set 7200s hours earlier has no surface
+            // telling them the clock is draining.
+            println!(
+                "  deadline: {}",
+                format_gate_deadline(phase.gate_timeout_sec, &entered_at)
+            );
             println!("  approve:  edda verdict approve {subject} --sha {gate_sha}");
             println!(
                 "  reject:   edda verdict reject {subject} --sha {gate_sha} --comment \"<why>\""
@@ -340,6 +347,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                 Some(&entered_at),
                 &cancel,
                 Some(&lane_hb),
+                notifier,
             )
             .await
             {
@@ -862,6 +870,12 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
 /// Ledger poll interval while a gate waits for a verdict.
 const GATE_POLL_SEC: u64 = 2;
 
+/// GH-551: progress signals during a long gate wait. The first signal goes
+/// out after this many seconds of waiting, then the interval doubles up to
+/// the cap — low-frequency by design, so the normal 2s poll stays silent.
+const GATE_PROGRESS_FIRST_SECS: u64 = 60;
+const GATE_PROGRESS_MAX_SECS: u64 = 600;
+
 /// GH-541: first report of a persistent ledger read failure goes out
 /// immediately; repeats follow this interval, doubling up to the cap.
 const GATE_READ_ERROR_REPORT_SECS: u64 = 30;
@@ -1000,6 +1014,7 @@ enum GateVerdict {
 /// bound the re-entered gate would re-read the same rejection forever.
 /// The timeout deadline is computed from the persisted `gate_entered_at`,
 /// so it survives restarts.
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_verdict(
     cwd: &Path,
     subject: &str,
@@ -1008,6 +1023,7 @@ async fn wait_for_verdict(
     entered_at: Option<&str>,
     cancel: &CancellationToken,
     heartbeat: Option<&LaneHeartbeat>,
+    notifier: &dyn Notifier,
 ) -> GateVerdict {
     let deadline = timeout_sec.map(|t| {
         let base = entered_at
@@ -1024,6 +1040,20 @@ async fn wait_for_verdict(
         hb.write("awaiting_verdict");
     }
     let mut last_heartbeat = Instant::now();
+
+    // GH-551: a bounded gate gives no indication that a clock is running,
+    // and an unbounded one looks identical to a broken one — in the measured
+    // run two gates burned 7200s each while a one-line "still waiting" would
+    // have rescued the wait at any moment. Emit a low-frequency progress
+    // signal (60s, then doubling to 10min) naming the remaining budget.
+    // tokio::time::Instant so tests can drive the whole schedule on paused
+    // time without wall-clock sleeps.
+    let mut next_progress =
+        tokio::time::Instant::now() + Duration::from_secs(GATE_PROGRESS_FIRST_SECS);
+    let mut progress_interval = GATE_PROGRESS_FIRST_SECS;
+    // Paused-time mirror of the deadline, for the remaining-budget label —
+    // the wall-clock `deadline` above drives the actual timeout check.
+    let deadline_t = timeout_sec.map(|t| tokio::time::Instant::now() + Duration::from_secs(t));
 
     // GH-541: a failed ledger read is not the same event as "no verdict yet".
     // SQLite busy/lock contention degrades quietly (transient); every other
@@ -1063,6 +1093,29 @@ async fn wait_for_verdict(
             if time::OffsetDateTime::now_utc() >= deadline {
                 return GateVerdict::TimedOut;
             }
+        }
+        // GH-551: progress signal on the decaying schedule. Inside the same
+        // select arm cadence as the poll but gated on its own clock, so the
+        // 2s poll itself stays silent.
+        let now_t = tokio::time::Instant::now();
+        if now_t >= next_progress {
+            let wait_label = match deadline_t {
+                Some(d) => {
+                    let remaining = (d - now_t).as_secs();
+                    format!(
+                        "{} remaining",
+                        format_elapsed(std::time::Duration::from_secs(remaining))
+                    )
+                }
+                None => "no deadline (waits until cancelled)".to_string(),
+            };
+            notifier
+                .notify(&format!(
+                    "Still waiting for verdict on \"{subject}\" (sha {gate_sha}) — {wait_label}"
+                ))
+                .await;
+            progress_interval = (progress_interval * 2).min(GATE_PROGRESS_MAX_SECS);
+            next_progress = now_t + Duration::from_secs(progress_interval);
         }
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(GATE_POLL_SEC)) => {
@@ -2072,6 +2125,29 @@ fn prompt_blocked_action(phase_id: &str, status: PhaseStatus) -> BlockedAction {
             "q" | "quit" => return BlockedAction::Quit,
             _ => println!("  Invalid choice. Enter R, S, A, or Q."),
         }
+    }
+}
+
+/// GH-551: the deadline line for the AWAITING_VERDICT surface. A bounded
+/// gate states its deadline; an unbounded one says so explicitly, so an
+/// operator who set 7200s hours earlier can tell the clock is draining.
+fn format_gate_deadline(timeout_sec: Option<u64>, entered_at: &str) -> String {
+    match timeout_sec {
+        Some(secs) => {
+            let deadline = time::OffsetDateTime::parse(
+                entered_at,
+                &time::format_description::well_known::Rfc3339,
+            )
+            .ok()
+            .map(|t| t + time::Duration::seconds(secs as i64))
+            .and_then(|d| {
+                d.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            })
+            .unwrap_or_else(|| "<unparsable gate_entered_at>".into());
+            format!("{deadline} (gate_timeout_sec {secs})")
+        }
+        None => "none — waits until cancelled".to_string(),
     }
 }
 
@@ -4719,6 +4795,7 @@ phases:
             Some(&now_rfc3339()),
             &cancel,
             None,
+            &CollectNotifier::new(),
         )
         .await;
         assert!(matches!(verdict, GateVerdict::TimedOut));
@@ -4793,6 +4870,7 @@ phases:
             Some(&now_rfc3339()),
             &cancel,
             None,
+            &CollectNotifier::new(),
         )
         .await;
         match verdict {
@@ -4829,6 +4907,7 @@ phases:
             Some(&entered_at),
             &cancel,
             None,
+            &CollectNotifier::new(),
         )
         .await;
         match verdict {
@@ -4837,6 +4916,119 @@ phases:
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-551: the deadline line states the bound or its absence explicitly.
+    #[test]
+    fn gate_deadline_line_states_bound_or_absence() {
+        let entered = "2026-09-03T00:00:00Z";
+        let line = format_gate_deadline(Some(7200), entered);
+        assert!(line.starts_with("2026-09-03T02:00:00Z"), "{line}");
+        assert!(line.contains("gate_timeout_sec 7200"), "{line}");
+        let unbounded = format_gate_deadline(None, entered);
+        assert!(unbounded.contains("waits until cancelled"), "{unbounded}");
+    }
+
+    /// GH-551: a long gate wait emits progress signals naming the remaining
+    /// budget, on a decaying schedule (first at 60s, then doubling) — while
+    /// the normal short wait (a few 2s polls) stays completely silent.
+    /// Driven on paused time: no wall-clock sleeps of gate length.
+    #[tokio::test(start_paused = true)]
+    async fn gate_wait_emits_progress_signals_with_remaining_budget() {
+        let root = fresh_root("progresswait");
+        let sha = "9".repeat(40);
+        let cancel = CancellationToken::new();
+        let notifier = CollectNotifier::new();
+
+        // Approve from another task after 20 minutes of simulated waiting.
+        let root_for_task = root.clone();
+        let sha_for_task = sha.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(20 * 60)).await;
+            record_verdict(
+                &root_for_task,
+                "plan/phase",
+                &sha_for_task,
+                VerdictDecision::Approved,
+                None,
+            );
+        });
+
+        let verdict = wait_for_verdict(
+            &root,
+            "plan/phase",
+            &sha,
+            Some(3600),
+            Some(&now_rfc3339()),
+            &cancel,
+            None,
+            &notifier,
+        )
+        .await;
+        assert!(matches!(verdict, GateVerdict::Approved(_)));
+
+        let msgs = notifier.messages();
+        let progress: Vec<&String> = msgs
+            .iter()
+            .filter(|m| m.contains("Still waiting"))
+            .collect();
+        assert!(
+            !progress.is_empty(),
+            "a 20-minute wait must produce progress signals: {msgs:?}"
+        );
+        // Decaying schedule: signals at 60s, 180s (60+120), 420s (60+120+240),
+        // 900s (60+120+240+480) — 4 signals by the 20-minute mark; the 5th
+        // would land at 1860s.
+        assert_eq!(progress.len(), 4, "decaying schedule signals: {msgs:?}");
+        assert!(
+            progress[0].contains("remaining"),
+            "signal must name the remaining budget: {}",
+            progress[0]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-551: the normal short wait (a few 2s polls, well under the first
+    /// progress interval) stays completely silent — no per-poll regression.
+    #[tokio::test(start_paused = true)]
+    async fn gate_wait_short_polls_stay_silent() {
+        let root = fresh_root("silentwait");
+        let sha = "8".repeat(40);
+        let cancel = CancellationToken::new();
+        let notifier = CollectNotifier::new();
+
+        // Approve after 5 polls (10s) — well under the 60s first signal.
+        let root_for_task = root.clone();
+        let sha_for_task = sha.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            record_verdict(
+                &root_for_task,
+                "plan/phase",
+                &sha_for_task,
+                VerdictDecision::Approved,
+                None,
+            );
+        });
+
+        let verdict = wait_for_verdict(
+            &root,
+            "plan/phase",
+            &sha,
+            Some(3600),
+            Some(&now_rfc3339()),
+            &cancel,
+            None,
+            &notifier,
+        )
+        .await;
+        assert!(matches!(verdict, GateVerdict::Approved(_)));
+        assert!(
+            notifier.messages().is_empty(),
+            "short waits must stay silent: {:?}",
+            notifier.messages()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
