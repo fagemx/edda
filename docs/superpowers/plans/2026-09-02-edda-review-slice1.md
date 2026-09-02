@@ -196,7 +196,7 @@ Expected: 編譯錯誤或 0 tests（模組未宣告）。
 在 match 裡 `Command::Dispatch { args } => cmd_dispatch::run(args),` 之後加：
 
 ```rust
-        Command::Review { args } => cmd_review::run(args, &cwd),
+        Command::Review { args } => cmd_review::run(args, &repo_root),
 ```
 
 `cwd` 是 `main` 在 match 之前就解析好的那個（`main.rs`: `let cwd = std::env::current_dir()?;`）。
@@ -1256,13 +1256,18 @@ impl GhClient for GhCli {
     fn pr_checks(&self, n: u64, head_sha: &str) -> Result<Vec<(String, String)>> {
         let required = gh_json(&["pr", "checks", &n.to_string(), "--required", "--json", "name"])?;
         let required: Vec<String> = required.as_array().map(|a| a.iter().filter_map(|c| c["name"].as_str().map(String::from)).collect()).unwrap_or_default();
+        // No required checks means CI has nothing to assert about this head.
+        // Falling back to "every optional run" would let a repo with no branch
+        // protection buy `verified` with any green job it happens to have.
+        if required.is_empty() { return Ok(vec![]); }
         let runs = gh_json(&["api", &format!("repos/{{owner}}/{{repo}}/commits/{head_sha}/check-runs"), "--jq", "[.check_runs[] | {name, status, conclusion}]"])?;
         let mut out = Vec::new();
         for r in runs.as_array().cloned().unwrap_or_default() {
             let name = r["name"].as_str().unwrap_or("").to_string();
-            if !required.is_empty() && !required.contains(&name) { continue; }
+            if !required.contains(&name) { continue; }   // required-only; see the early return above
             let bucket = match (r["status"].as_str().unwrap_or(""), r["conclusion"].as_str().unwrap_or("")) {
-                ("completed", "success") | ("completed", "skipped") | ("completed", "neutral") => "pass",
+                // `neutral` is NOT a pass: it means the check declined to judge.
+                ("completed", "success") | ("completed", "skipped") => "pass",
                 ("completed", _) => "fail",
                 _ => "pending",
             };
@@ -1619,7 +1624,7 @@ git commit -m "feat(edda-cli): review brief — core-v1, REVIEW.md front matter,
 - Modify: `crates/edda-cli/src/cmd_review/mod.rs`（`mod evidence;`）
 
 **Interfaces:**
-- Produces：`pub(crate) struct GateSet { pub cmds: Vec<String>, pub declared_by: Vec<String> }`；`pub(crate) fn gate_set(fm: &FrontMatter, cli_gates: &[String], trusted_verify: &[String]) -> GateSet`；`pub(crate) fn read_gates(ledger: &Ledger, head_sha: &str, gates: &GateSet) -> (String /*status*/, Vec<ReviewGateRead>, Vec<String> /*uncovered*/)`；`pub(crate) fn read_ci(checks: &[(String, String)]) -> (Option<String> /*status*/, Vec<ReviewGateRead>)`；`pub(crate) fn normalize_cmd(s: &str) -> String`；`pub(crate) fn extract_verify(spec: &str) -> Vec<String>`（`## verify` / `verify:` 段下的每一行指令）；`pub(crate) fn extract_probe_verbs(diff: &str, spec: Option<&str>, bins: &[String]) -> Vec<(String, String)>`（只回 `(bin, verb)` 兩個 token；其餘字元一律丟棄）；`pub(crate) fn run_probes(cwd: &Path, verbs: &[(String, String)]) -> Vec<ReviewProbe>`（只執行 `<bin> <verb> --help`）；`pub(crate) fn spec_trust(explicit_path: bool, trust_flag: bool, pr_author_perm: Option<&str>) -> &'static str`；`pub(crate) fn ran_gates(cwd: &Path, gates: &[String], deadline_secs: u64, cargo_target_dir_set: bool, paths: &edda_ledger::paths::EddaPaths, out_dir: &Path) -> (Vec<ReviewGateRan>, Vec<String> /*notes*/)`（逐字 `sh -c`；硬期限：輪詢 `try_wait`、到期砍整棵程序樹（Unix `process_group(0)` ＋ `kill -9 -- -pid`，Windows `taskkill /T /F`）；stdout 寫 `out_dir/ran-<i>.out`，不用 tempfile；blob 存不進去 → `stdout_blob = None` ＋ note）；`pub(crate) fn evidence_text(read: &[ReviewGateRead], uncovered: &[String], ran: &[ReviewGateRan], probes: &[ReviewProbe], wiring_scan: Option<&str>) -> String`。
+- Produces：`pub(crate) struct GateSet { pub cmds: Vec<String>, pub declared_by: Vec<String> }`；`pub(crate) fn gate_set(fm: &FrontMatter, cli_gates: &[String], trusted_verify: &[String]) -> GateSet`；`pub(crate) fn read_gates(ledger: &Ledger, head_sha: &str, gates: &GateSet) -> (String /*status*/, Vec<ReviewGateRead>, Vec<String> /*uncovered*/)`；`pub(crate) fn read_ci(checks: &[(String, String)]) -> (Option<String> /*status*/, Vec<ReviewGateRead>)`；`pub(crate) fn normalize_cmd(s: &str) -> String`；`pub(crate) fn extract_verify(spec: &str) -> Vec<String>`（`## verify` / `verify:` 段下的每一行指令）；`pub(crate) fn extract_probe_verbs(diff: &str, spec: Option<&str>, bins: &[String]) -> Vec<(String, String)>`（只回 `(bin, verb)` 兩個 token；其餘字元一律丟棄）；`pub(crate) fn run_probes(cwd: &Path, verbs: &[(String, String)]) -> Vec<ReviewProbe>`（只執行 `<bin> <verb> --help`）；`pub(crate) enum SpecOrigin { None, Path, ExplicitIssue, PrDerived { author_perm: Option<String> } }` 與 `pub(crate) fn spec_trust(origin: &SpecOrigin, trust_flag: bool) -> &'static str`（來源決定信任：`--spec #n` 未帶 `--trust-spec` 一律 `untrusted`，只有 `--pr` 推導才查權限——Round 5 P0）；`pub(crate) fn ran_gates(cwd: &Path, gates: &[String], deadline_secs: u64, cargo_target_dir_set: bool, paths: &edda_ledger::paths::EddaPaths, out_dir: &Path) -> (Vec<ReviewGateRan>, Vec<String> /*notes*/)`（逐字 `sh -c`；硬期限：輪詢 `try_wait`、到期砍整棵程序樹（Unix `process_group(0)` ＋ `kill -9 -- -pid`，Windows `taskkill /T /F`）；stdout 寫 `out_dir/ran-<i>.out`，不用 tempfile；blob 存不進去 → `stdout_blob = None` ＋ note）；`pub(crate) fn evidence_text(read: &[ReviewGateRead], uncovered: &[String], ran: &[ReviewGateRan], probes: &[ReviewProbe], wiring_scan: Option<&str>) -> String`。
 - Consumes：Task 1 的 `cmd` payload 鍵、Task 3 的 `ReviewGateRead / ReviewGateRan / ReviewProbe`、Task 6 的 `FrontMatter`。
 
 - [ ] **Step 1: 寫失敗測試**
@@ -1715,11 +1720,19 @@ mod tests {
 
     #[test]
     fn spec_trust_levels() {
-        assert_eq!(spec_trust(true, false, None), "operator");
-        assert_eq!(spec_trust(false, true, Some("none")), "operator");
-        assert_eq!(spec_trust(false, false, Some("write")), "maintainer");
-        assert_eq!(spec_trust(false, false, Some("read")), "untrusted");
-        assert_eq!(spec_trust(false, false, None), "none");
+        use SpecOrigin::*;
+        assert_eq!(spec_trust(&Path, false), "operator");
+        assert_eq!(spec_trust(&SpecOrigin::None, false), "none");
+        assert_eq!(spec_trust(&SpecOrigin::None, true), "none");   // the flag cannot trust an absent spec
+        // --pr derivation: the ISSUE author's permission decides
+        assert_eq!(spec_trust(&PrDerived { author_perm: Some("write".into()) }, false), "maintainer");
+        assert_eq!(spec_trust(&PrDerived { author_perm: Some("read".into()) }, false), "untrusted");
+        assert_eq!(spec_trust(&PrDerived { author_perm: Option::None }, false), "untrusted");
+        // --spec #n is NOT a grant of execution: a named issue stays untrusted
+        // until --trust-spec, however privileged its author (Round 5 P0).
+        assert_eq!(spec_trust(&ExplicitIssue, false), "untrusted");
+        assert_eq!(spec_trust(&ExplicitIssue, true), "operator");
+        assert_eq!(spec_trust(&PrDerived { author_perm: Some("read".into()) }, true), "operator");
     }
 
     #[test]
@@ -1887,12 +1900,33 @@ pub(crate) fn read_ci(checks: &[(String, String)]) -> (Option<String>, Vec<Revie
     (Some(status.into()), read)
 }
 
-pub(crate) fn spec_trust(explicit_path: bool, trust_flag: bool, pr_author_perm: Option<&str>) -> &'static str {
-    if explicit_path || trust_flag { return "operator"; }
-    match pr_author_perm {
-        Some("admin") | Some("maintain") | Some("write") => "maintainer",
-        Some(_) => "untrusted",
-        None => "none",
+/// How the spec was obtained. This — not merely "does it have an author" —
+/// decides whether the spec's `verify` block may become an executable gate
+/// (spec §5.3). Naming an issue with `--spec #n` says "use its doneWhen as my
+/// acceptance bar", NOT "run whatever commands it contains": only `--pr`
+/// derivation earns the maintainer check, and only `--trust-spec` lifts an
+/// issue to operator (Round 5 P0).
+pub(crate) enum SpecOrigin {
+    /// No spec at all.
+    None,
+    /// `--spec <path>`: a file in the operator's own checkout.
+    Path,
+    /// `--spec #n`: the operator named the issue, but anyone may have written it.
+    ExplicitIssue,
+    /// `--pr` closing keyword: the ISSUE author's repo permission decides.
+    PrDerived { author_perm: Option<String> },
+}
+
+pub(crate) fn spec_trust(origin: &SpecOrigin, trust_flag: bool) -> &'static str {
+    match origin {
+        SpecOrigin::None => "none",        // nothing to trust, with or without the flag
+        SpecOrigin::Path => "operator",
+        _ if trust_flag => "operator",     // explicit operator override, either issue path
+        SpecOrigin::ExplicitIssue => "untrusted",
+        SpecOrigin::PrDerived { author_perm } => match author_perm.as_deref() {
+            Some("admin") | Some("maintain") | Some("write") => "maintainer",
+            _ => "untrusted",
+        },
     }
 }
 
@@ -2664,36 +2698,33 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
     // 3. spec + trust — the `verify` field belongs to the ISSUE author, so the
     //    permission we check is the ISSUE author's, never the PR author's
     //    (spec §5.3; a maintainer's PR may link a stranger's issue).
-    let explicit_path = args.spec.as_deref().map(|s| !s.starts_with('#')).unwrap_or(false);
+    //    Provenance, not merely "has an author", decides trust: `--spec #n`
+    //    names an issue as the acceptance bar, which is NOT a grant to run its
+    //    commands, so only `--pr` derivation consults a permission at all
+    //    (Round 5 P0).
     let mut spec_source = "none".to_string();
-    let mut spec_author: Option<String> = None;
+    let mut origin = evidence::SpecOrigin::None;
     let spec_text: Option<String> = match (&args.spec, &pr_view) {
         (Some(s), _) if s.starts_with('#') => {
             let n: u64 = s[1..].parse()?;
             spec_source = format!("issue#{n}");
-            let iv = gh.issue_view(n)?;                      // subject.rs: fn issue_view(&self, n) -> Result<IssueView>
-            spec_author = Some(iv.author_login);
-            Some(iv.body)
+            origin = evidence::SpecOrigin::ExplicitIssue;    // untrusted unless --trust-spec
+            Some(gh.issue_view(n)?.body)                     // subject.rs: fn issue_view(&self, n) -> Result<IssueView>
         }
-        (Some(p), _) => { spec_source = p.clone(); Some(std::fs::read_to_string(p)?) }
+        (Some(p), _) => { spec_source = p.clone(); origin = evidence::SpecOrigin::Path; Some(std::fs::read_to_string(p)?) }
         (None, Some(v)) => match subject::closing_issue(&v.body) {
             Some(n) => {
                 spec_source = format!("issue#{n}");
                 let iv = gh.issue_view(n)?;
-                spec_author = Some(iv.author_login);
+                // the ISSUE author's permission, never the PR author's
+                origin = evidence::SpecOrigin::PrDerived { author_perm: Some(gh.author_permission(&iv.author_login)?) };
                 Some(iv.body)
             }
             None => None,
         },
         (None, None) => None,
     };
-    // Only an issue-derived spec has an author to check; a --spec file is the
-    // operator's own and an absent spec has no trust question.
-    let perm = match (&spec_author, explicit_path) {
-        (Some(login), false) => Some(gh.author_permission(login)?),
-        _ => None,
-    };
-    let trust = evidence::spec_trust(explicit_path, args.trust_spec, perm.as_deref());
+    let trust = evidence::spec_trust(&origin, args.trust_spec);
     let spec_mode = if spec_text.is_some() { "spec-backed" } else { "convention-only" };
     let trusted_verify: Vec<String> = match (trust, &spec_text) {
         ("operator" | "maintainer", Some(t)) => evidence::extract_verify(t),
@@ -2731,11 +2762,15 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
         // CI is evidence ABOUT declared gates, never a substitute for declaring
         // them: an empty gate set stays `undeclared` no matter how green CI is,
         // or a PR with no REVIEW.md and no --gate could reach qualified.
+        // Once gates ARE declared, a local receipt and exact-head required CI
+        // are two independent paths to the same fact — either one verifies
+        // (spec §8; `review.honesty-axes`). Round 5 P1: requiring both made a
+        // green-CI PR with no local receipts read as unverified.
         if let Some(s) = ci_status {
             gates_status = match (gates_status.as_str(), s.as_str()) {
                 ("undeclared", _) => "undeclared".into(),
-                (_, "red") | ("red", _) => "red".into(),
-                ("verified", "verified") => "verified".into(),
+                ("red", _) | (_, "red") => "red".into(),
+                ("verified", _) | (_, "verified") => "verified".into(),
                 _ => "unverified".into(),
             };
         }
@@ -2904,8 +2939,11 @@ fn render_human(p: &ReviewVerdictPayload, event_id: &str) -> String {
 }
 ```
 
-Task 0 的 `run_inner` 骨架在本 task 被上面的實作取代；`main.rs` 的 match arm 改成
-`Command::Review { args } => cmd_review::run(args, &cwd),`（`cwd` 是 `main` 已解析好的那個）。
+Task 0 的 `run_inner` 骨架在本 task 被上面的實作取代；`main.rs` 的 match arm 是
+`Command::Review { args } => cmd_review::run(args, &repo_root),`——用 `repo_root` 而不是 `cwd`：
+現行 `main` 寫的是 `let repo_root = EddaPaths::find_root(&cwd).unwrap_or(cwd);`，`cwd` 在那一行
+**被移動**了，之後再借 `&cwd` 第一次編譯就會被抓（Round 5 P2）。`repo_root` 是同一次解析的
+產物且仍可借用，`git::repo_root_from` 對它是冪等的。
 
 
 - [ ] **Step 4: 跑測試確認 PASS**
@@ -3046,6 +3084,7 @@ PR body 必含：`Part of #652 (slice 1)`（**不寫 Closes**）、spec 與 plan
 ## Self-review（Round 3 後重跑）
 
 - **Round 3 收入對照**：P0（issue 作者信任）→ Task 5 `IssueView` ＋ Task 10 用 `issue.author_login`；P1 `LauncherOptions` 四欄／`validate_dispatch_options` → Global Constraints、Task 0、Task 10；tempfile → `ran_gates` 改寫 `out_dir`；capability validation → Task 10 步驟 9；程序樹 kill → Task 7 `kill_tree`；CI 釘 SHA → Task 5 `pr_checks(n, head_sha)`；code-risk 超預算 → Task 6 `assemble` 回 `Err`；背景 digest → Task 8 單一 source；fetch 競態 → Task 5 `resolve_pr` 重取 view；`run()` 形狀 → Task 10（`run_inner` 回 code、`run` 只在非 0 時 exit）；blob 失敗 → `stdout_blob: Option`；guard 移除失敗 → `remove()` 進 notes；`pending`／engine notes／mismatch note／supersedes → Task 3、10；stash 與 check-cli-docs → Global Constraints、Task 11。
+- **Round 5 收入對照**：Task 10 的型別對齊本輪判為整體通過（重寫奏效），剩下兩條是**語意**缺陷。P0 `--spec #n` 被誤升權 → `spec_trust` 改吃 `SpecOrigin` 列舉（`None`/`Path`/`ExplicitIssue`/`PrDerived{author_perm}`），只有 `PrDerived` 查權限，`ExplicitIssue` 未帶 `--trust-spec` 恆為 `untrusted`；spec §5.3 補一段說明「判定輸入是來源不是有沒有作者」，並點名布林 `explicit_path` 正是誤升的成因；測試補 `ExplicitIssue` 兩種旗標與 `PrDerived` 三種權限。P1 gate 合成 → (a) `pr_checks` 在 required 名單為空時直接回空（不再退回所有 optional check），`neutral` 不再算 pass；(b) Task 10 的合成改成「本地收據 **或** exact-head CI 任一 verified 即 verified」，不再要求兩者兼備（spec §8 與 `review.honesty-axes` 本來就是 or），`undeclared` 仍不可被 CI 蓋過。P2 `main` 的 `cwd` 已被 `unwrap_or(cwd)` 移動 → match arm 改傳 `&repo_root`，兩處說明同步。
 - **Round 4 收入對照**：Round 4 的 P0 與六條 P1 有五條同源——**Task 10 沒有跟上 Task 3–9 的簽名變更**（連續兩輪同一類）。處置不是逐點補丁而是**整段重寫 Task 10 Step 3**，對齊當下每一個 producer，並在該區塊開頭寫下對齊規則（動 producer 就回來同步）。逐條：P0 issue 作者信任 → `run_with` 改呼叫 `gh.issue_view(n)`、權限查 `spec_author`（issue 作者）而非 `pr_view.author_login`，`--spec <path>` 不查權限；P1 型別失同步（`NoGh` 舊 trait、`pr_checks` arity、`ran_gates` 少 `out_dir`、`assemble` 的 `Result`、`stdout_blob: Option`）→ 重寫後一次對齊，`NoGh` 與 Task 4 測試的 `unused_mut` 一併修；P1 `main` 前置 `current_dir()?` → `run(args, cwd)` 由 `main` 傳入，review 不再自己呼叫，spec §3 明寫這是行程級前置條件不在 review 契約內；P1 spec 誤稱 `LauncherOptions` 可用 `Default` → spec §6.1 改為四欄明列（main 沒有 derive）；P1 gate 合成 → CI 是「關於已宣告 gate 的證據」，`undeclared` 永遠不被 CI 蓋成 `verified`，且 `stdout_blob` 為 `None` 的 RAN 不算證據；P1 事件與人讀輸出 → engine `notes` 併入 payload、mismatch 寫成 INCIDENT 一行、raw blob 失敗記 note、人讀輸出印 supersedes／previous／`history_rewritten`、JSON 範例補 `pending` 與 `stdout_blob: null`；P1 codex 預算 → `run_inner` 呼叫既有 `budget_warning_for_agent`，spec §6.5 補一段。
 
 - **Spec coverage**：§3 CLI 與 exit 2 旁路（Task 0、10）；§4 主體／RAII worktree／lineage／FETCH_HEAD（Task 4、5、10）；§5 brief、front matter、多類別預算、契約在最末（Task 6）；§5.2 契約與 `subject_seen`（Task 9、10）；§5.3 trust 與 `verify`（Task 7、10）；§6.1 `Phase.tools` 經 `CapabilityOptions`（Task 10）；§6.2 in-band model（Task 10 `last_observed_model`）；§6.3 封閉家族表、digest 兩種 source、commit 標題比對（Task 2、8）；§6.4 動詞探測、硬期限 RAN、base 版 wiring-scan（Task 7、10）；§6.5 成本（Task 10）；§7 事件、taxonomy 表、`model_self_report`、RAN blobs（Task 3、9、10）；§8 收據與 CI（Task 1、7）；§9 失敗表含 overload（Task 9、10）；§10 測試含四種 exit、金絲雀（Task 10、12）；§11 deprecation／docs／COMPATIBILITY 條件（Task 11）；§12 wiring（Task 12 PR body）。**明確不在切片 1**：帳本 pack 的 active claims（spec ⑤ 排到切片 2）；結構化 phase-done 收據（等 #624）。

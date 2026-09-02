@@ -219,6 +219,15 @@ classes:                    # 類別路由；glob 對 diff 檔案清單
 `GhClient::issue_view(n)` 同時回 body 與 `author_login`；信任判定用後者。維護者的 PR 連到
 陌生人開的 issue，該 issue 的 `verify` 仍是 `untrusted`（Round 3 P0）。
 
+判定的輸入是**來源（provenance）**，不是「有沒有作者」——實作上是一個 `SpecOrigin`
+列舉（`None` / `Path` / `ExplicitIssue` / `PrDerived { author_perm }`），而不是幾個布林：
+
+- **`--spec #n` 不查權限，一律 `untrusted`**（除非 `--trust-spec`）。指名一張 issue 當
+  驗收基準，不等於授權執行它裡面的指令；作者權限再高也一樣。用布林 `explicit_path`
+  區分兩條 issue 路徑會把 `--spec #n` 誤升成 `maintainer`（Round 5 P0）。
+- 只有 `--pr` 由 closing keyword 推導出的 issue 才去查作者權限。
+- 沒有 spec 時是 `none`，`--trust-spec` 也不會把不存在的東西變可信。
+
 ## 6. 執行
 
 ### 6.1 運輸與工具政策（引擎沒有 shell）
@@ -448,7 +457,14 @@ exit 0 → `green`；非 0 → `red`；沒有 → 該 gate 未涵蓋。全部 gr
 取 required 名單做交集；PR 在解析後被 push 也不會把新 head 的綠記到受審 SHA 上。required
 全部 `completed` + `success`（或 `skipped`）→ verified；任一 `failure` / `cancelled` / `timed_out`
 → red；有 `in_progress` / `queued` → `pending`（`read[].result` 的合法值：`green | red | pending`），
-狀態 unverified。
+狀態 unverified。`neutral` **不算綠**——它的語意是「這個 check 放棄判定」。required 名單為空時
+CI 對本 head 沒有任何主張，直接不貢獻（**不可**退回「所有 optional check 都算」，否則沒設分支
+保護的 repo 用任何一個碰巧綠的 job 就買到 verified）。
+
+**兩條路徑擇一即可**：閘門集合非空時，本地收據與 exact-head required CI 是對同一件事的兩個
+獨立證據來源——任一 verified 即 `verified`，任一 red 即 `red`，都沒有才 `unverified`
+（`review.honesty-axes`）。要求兩者同時 verified 會讓「CI 全綠但作者沒在本機留收據」的 PR
+讀成 unverified，那是把證據當成儀式。集合為空時仍恆為 `undeclared`，CI 再綠也蓋不過去。
 
 PR body 裡的散文 L1 receipt 不解析；fleet 在一個迭代內改用 `edda run -- <gate>` 產收據。
 
