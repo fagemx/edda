@@ -123,6 +123,19 @@ pub struct SessionStats {
     pub activity: ActivityType,
 }
 
+/// The watermark a digest note stamps into its payload (round-2 ruling:
+/// "the ledger is durable truth; the side state file is a cache"). The
+/// note records what it consumed — the byte offset plus a hash of the
+/// consumed prefix — so idempotency is derivable from the workspace
+/// ledger itself: losing the cache costs a re-scan, never a duplicate.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct DigestWatermark {
+    /// Byte offset just past the last consumed complete line.
+    pub offset: u64,
+    /// Hash of the first `offset` bytes of the session ledger.
+    pub prefix_hash: String,
+}
+
 /// Extract statistics from a session ledger file.
 mod extract;
 mod helpers;

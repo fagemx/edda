@@ -82,7 +82,7 @@ fn tool_name_of(envelope: &serde_json::Value) -> String {
 ///
 /// A ledger that ends mid-line (truncated or concurrently-written final
 /// line, round-1 P0-2) is only ever consumed up to its last complete line.
-fn complete_prefix_len(file: &mut std::fs::File) -> std::io::Result<u64> {
+pub(crate) fn complete_prefix_len(file: &mut std::fs::File) -> std::io::Result<u64> {
     let len = file.metadata()?.len();
     if len == 0 {
         return Ok(0);
@@ -103,6 +103,37 @@ fn complete_prefix_len(file: &mut std::fs::File) -> std::io::Result<u64> {
         }
         pos = start;
     }
+}
+
+/// Proof of file identity: hash of the first `len` bytes of the file
+/// (round-2 ruling: a byte offset alone cannot identify a file — it
+/// silently assumes the file is append-only and never replaced).
+pub(crate) fn hash_prefix(path: &Path, len: u64) -> anyhow::Result<String> {
+    let file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut file.take(len), &mut hasher)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Validate a watermark candidate against the current file: the offset is
+/// only usable if the file still contains those bytes and they hash to the
+/// recorded proof. A mismatch (replacement, in-place rewrite, shrink,
+/// reused session id) means the position proves nothing and the session
+/// must be re-read from zero — never skipped. Offset 0 consumes nothing
+/// and always matches.
+pub(crate) fn watermark_matches(path: &Path, offset: u64, prefix_hash: &str) -> bool {
+    if offset == 0 {
+        return true;
+    }
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    if meta.len() < offset {
+        return false;
+    }
+    hash_prefix(path, offset)
+        .map(|h| h == prefix_hash)
+        .unwrap_or(false)
 }
 
 /// Extract statistics from the delta of a session ledger starting at

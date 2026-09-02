@@ -389,7 +389,7 @@ fn outcome_in_digest_payload() {
         outcome: SessionOutcome::ErrorStuck,
         ..Default::default()
     };
-    let event = build_digest_event("sess-outcome", &stats, "main", None, &[]).unwrap();
+    let event = build_digest_event("sess-outcome", &stats, "main", None, &[], None).unwrap();
     assert_eq!(
         event.payload["session_stats"]["outcome"].as_str().unwrap(),
         "error_stuck"
@@ -413,7 +413,7 @@ fn digest_tasks_snapshot_in_payload() {
         ..Default::default()
     };
 
-    let event = build_digest_event("sess-tasks", &stats, "main", None, &[]).unwrap();
+    let event = build_digest_event("sess-tasks", &stats, "main", None, &[], None).unwrap();
 
     // Check payload
     let tasks = event.payload["session_stats"]["tasks_snapshot"]
@@ -736,6 +736,7 @@ fn digest_state_round_trip() {
             "sess-123".to_string(),
             DigestedSession {
                 offset: 42,
+                prefix_hash: String::new(),
                 event_id: "evt_abc".to_string(),
                 digested_at: "2026-02-14T10:00:00Z".to_string(),
             },
@@ -1404,7 +1405,7 @@ fn digest_payload_has_recall_fields() {
         decide_count: 1,
         ..Default::default()
     };
-    let event = build_digest_event("sess-recall", &stats, "main", None, &[]).unwrap();
+    let event = build_digest_event("sess-recall", &stats, "main", None, &[], None).unwrap();
     assert_eq!(event.payload["session_stats"]["nudge_count"], 3);
     assert_eq!(event.payload["session_stats"]["decide_count"], 1);
 }
@@ -1420,7 +1421,7 @@ fn digest_event_contains_notes() {
         "Switched to JWT auth approach".to_string(),
         "Need to revisit caching strategy".to_string(),
     ];
-    let event = build_digest_event("sess-notes", &stats, "main", None, &notes).unwrap();
+    let event = build_digest_event("sess-notes", &stats, "main", None, &notes, None).unwrap();
 
     let payload_notes = event.payload["session_stats"]["notes"]
         .as_array()
@@ -1439,7 +1440,7 @@ fn digest_event_contains_notes() {
 #[test]
 fn digest_event_empty_notes_backward_compat() {
     let stats = SessionStats::default();
-    let event = build_digest_event("sess-no-notes", &stats, "main", None, &[]).unwrap();
+    let event = build_digest_event("sess-no-notes", &stats, "main", None, &[], None).unwrap();
 
     let payload_notes = event.payload["session_stats"]["notes"]
         .as_array()
@@ -1480,7 +1481,7 @@ fn digest_payload_has_signal_count() {
         signal_count: 5,
         ..Default::default()
     };
-    let event = build_digest_event("sess-signal", &stats, "main", None, &[]).unwrap();
+    let event = build_digest_event("sess-signal", &stats, "main", None, &[], None).unwrap();
     assert_eq!(event.payload["session_stats"]["signal_count"], 5);
 }
 
@@ -2078,15 +2079,18 @@ fn manual_digest_truncated_final_line_is_not_consumed_early() {
     );
 }
 
-// P1-2: a pre-upgrade state file (session_id/event_id populated, no
-// per-session model) must keep its idempotency semantics after migration.
-
+// P1-2 / round-2 ruling: legacy migration cannot prove what the legacy
+// build had consumed at the moment it wrote its state, so it must RE-READ
+// rather than seed the offset at current EOF — content appended between
+// the legacy state write and the first post-upgrade load must not be
+// swallowed.
 #[test]
-fn manual_digest_does_not_redigest_legacy_recorded_session() {
+fn legacy_migration_re_reads_appended_tail() {
     let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
+    // One tool line on disk when the legacy build digests and records state.
     write_store_session_ledger(
         &project_id,
         "sess-legacy",
@@ -2107,31 +2111,81 @@ fn manual_digest_does_not_redigest_legacy_recorded_session() {
     )
     .unwrap();
 
-    let returned = digest_session_manual(
+    // The producer appends more work AFTER the legacy state was written and
+    // BEFORE the first post-upgrade load. Migration must not treat this
+    // tail as consumed (round-2 finding 2: seeding the offset at current
+    // EOF silently discarded it).
+    let path = edda_store::project_dir(&project_id)
+        .join("ledger")
+        .join("sess-legacy.jsonl");
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let e = make_envelope_at(
+        "PostToolUse",
+        "Edit",
+        "2026-02-14T11:00:00Z",
+        serde_json::json!({}),
+    );
+    writeln!(f, "{}", serde_json::to_string(&e).unwrap()).unwrap();
+    drop(f);
+
+    digest_session_manual(
         &project_id,
         "sess-legacy",
         workspace.to_str().unwrap(),
         true,
     )
     .unwrap();
-    assert_eq!(
-        returned, "evt_legacy000000000000000000000000",
-        "a session recorded by legacy state must not be re-digested (round-1 P1-2)"
-    );
 
     let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let digests: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
     assert_eq!(
-        ledger.iter_events().unwrap().len(),
-        0,
-        "legacy-recorded session must not produce a second digest event"
+        digests.len(),
+        1,
+        "migration must re-read: the post-legacy tail must be digested (round-2 finding 2)"
+    );
+    assert_eq!(
+        digests[0].payload["session_stats"]["tool_calls"], 2,
+        "the re-read must cover the tail appended after the legacy state write"
+    );
+
+    // At-least-once, not at-least-twice: once the re-read watermark is
+    // durable, a retry is a no-op.
+    digest_session_manual(
+        &project_id,
+        "sess-legacy",
+        workspace.to_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let digests: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
+    assert_eq!(
+        digests.len(),
+        1,
+        "the migration re-read happens exactly once"
     );
 }
 
-// P1-3: evicting the oldest remembered id must not resurrect the digest
-// loop for a session whose ledger still exists.
+// P1-3 (round-1 fix, re-pinned under the round-2 identity ruling): the
+// per-session map never evicts, and a legacy-listed session is re-read
+// AT MOST ONCE — after the re-read the watermark carries an identity
+// proof, so repeats cannot resurrect a digest loop.
 
 #[test]
-fn evicting_oldest_remembered_session_cannot_resurrect_a_digest() {
+fn legacy_re_read_cannot_resurrect_a_digest_loop() {
     let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
@@ -2146,7 +2200,7 @@ fn evicting_oldest_remembered_session_cannot_resurrect_a_digest() {
         );
     }
 
-    // Seed state remembering the first 64 sessions (the FIFO bound).
+    // Seed state remembering the first 64 sessions via the deprecated list.
     let state_dir = edda_store::project_dir(&project_id).join("state");
     std::fs::create_dir_all(&state_dir).unwrap();
     let remembered: Vec<serde_json::Value> = ids[..n - 1]
@@ -2159,10 +2213,12 @@ fn evicting_oldest_remembered_session_cannot_resurrect_a_digest() {
     )
     .unwrap();
 
-    // Digest session 65: the FIFO evicts session 1.
+    // Digest session 65.
     digest_session_manual(&project_id, &ids[64], workspace.to_str().unwrap(), true).unwrap();
 
-    // The evicted session's ledger still exists — it must not be re-digested.
+    // Legacy-listed session 1: migration cannot prove what was consumed, so
+    // the first post-upgrade digest re-reads it once — and only once.
+    digest_session_manual(&project_id, &ids[0], workspace.to_str().unwrap(), true).unwrap();
     digest_session_manual(&project_id, &ids[0], workspace.to_str().unwrap(), true).unwrap();
 
     let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
@@ -2173,8 +2229,8 @@ fn evicting_oldest_remembered_session_cannot_resurrect_a_digest() {
         .filter(|e| e.payload["session_id"] == ids[0])
         .count();
     assert_eq!(
-        count, 0,
-        "an evicted session whose ledger still exists must not be re-digested (round-1 P1-3)"
+        count, 1,
+        "a legacy-listed session is re-read at most once; repeats must be no-ops"
     );
 }
 
@@ -2320,4 +2376,218 @@ fn manual_digest_openclaw_session_writes_event() {
     let events = ledger.iter_events().unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].payload["session_stats"]["tool_calls"], 1);
+}
+
+// ── Round-2: watermark identity + ledger-authoritative idempotency ──
+// Ruling: a byte offset alone cannot identify a file (finding 1), and the
+// ledger — not the side state file — is durable truth (finding 3).
+
+// Finding 1a: a ledger replaced under the same session id must be RE-READ
+// from zero, never skipped via the stale offset.
+#[test]
+fn replaced_ledger_same_session_id_is_reread_not_skipped() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (workspace, project_id) = setup_digest_workspace(tmp.path());
+
+    write_store_session_ledger(
+        &project_id,
+        "sess-repl",
+        &[
+            make_envelope("PostToolUse", "Edit", serde_json::json!({})),
+            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
+        ],
+    );
+    let id1 =
+        digest_session_manual(&project_id, "sess-repl", workspace.to_str().unwrap(), true).unwrap();
+    assert!(!id1.is_empty());
+
+    // The ledger is replaced under the same session id: different, valid,
+    // SHORTER content. The stale offset (past EOF) must not suppress it.
+    write_store_session_ledger(
+        &project_id,
+        "sess-repl",
+        &[make_envelope("PostToolUse", "Edit", serde_json::json!({}))],
+    );
+
+    let id2 =
+        digest_session_manual(&project_id, "sess-repl", workspace.to_str().unwrap(), true).unwrap();
+    assert!(
+        !id2.is_empty() && id2 != id1,
+        "a replaced ledger must be re-read and re-digested, not skipped (round-2 finding 1)"
+    );
+
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let digests: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
+    assert_eq!(
+        digests.len(),
+        2,
+        "the replacement content must get its own digest"
+    );
+    assert_eq!(
+        digests[1].payload["session_stats"]["tool_calls"], 1,
+        "the new digest must cover the replacement content from zero"
+    );
+}
+
+// Finding 1b: a same-length in-place rewrite is invisible to a byte offset
+// and must also be caught by the identity proof.
+#[test]
+fn same_length_rewrite_is_reread_not_skipped() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (workspace, project_id) = setup_digest_workspace(tmp.path());
+
+    write_store_session_ledger(
+        &project_id,
+        "sess-rewrite",
+        &[
+            make_envelope("PostToolUse", "Edit", serde_json::json!({})),
+            make_envelope_at(
+                "PostToolUse",
+                "Edit",
+                "2026-02-14T10:01:00Z",
+                serde_json::json!({}),
+            ),
+        ],
+    );
+    let id1 = digest_session_manual(
+        &project_id,
+        "sess-rewrite",
+        workspace.to_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    assert!(!id1.is_empty());
+
+    // Rewrite in place: same byte length, different content (the second
+    // envelope's timestamp seconds digit changes 01 -> 02).
+    let path = edda_store::project_dir(&project_id)
+        .join("ledger")
+        .join("sess-rewrite.jsonl");
+    let old = std::fs::read_to_string(&path).unwrap();
+    let new = old.replacen("2026-02-14T10:01:00Z", "2026-02-14T10:02:00Z", 1);
+    assert_eq!(
+        old.len(),
+        new.len(),
+        "fixture must be a same-length rewrite"
+    );
+    std::fs::write(&path, new).unwrap();
+
+    let id2 = digest_session_manual(
+        &project_id,
+        "sess-rewrite",
+        workspace.to_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    assert!(
+        !id2.is_empty() && id2 != id1,
+        "a same-length rewrite must be re-read, not skipped via the stale offset (round-2 finding 1)"
+    );
+
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let digests: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
+    assert_eq!(digests.len(), 2);
+}
+
+// Finding 3: the ledger is durable truth; the side state file is a cache.
+// A crash (or save failure) between the note append and the state save must
+// cost a re-scan on retry — never a duplicate digest note.
+#[test]
+fn lost_cache_recovered_from_ledger_without_duplicate() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (workspace, project_id) = setup_digest_workspace(tmp.path());
+
+    write_store_session_ledger(
+        &project_id,
+        "sess-crash",
+        &[
+            make_envelope("PostToolUse", "Edit", serde_json::json!({})),
+            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
+        ],
+    );
+    let id1 = digest_session_manual(&project_id, "sess-crash", workspace.to_str().unwrap(), true)
+        .unwrap();
+    assert!(!id1.is_empty());
+
+    // Simulate the crash window: the digest note is durable in the ledger,
+    // but the watermark cache save did not happen (failed/unwritable/lost).
+    let state_path = edda_store::project_dir(&project_id)
+        .join("state")
+        .join("last_digested_session.json");
+    std::fs::remove_file(&state_path).unwrap();
+
+    let id2 = digest_session_manual(&project_id, "sess-crash", workspace.to_str().unwrap(), true)
+        .unwrap();
+    assert_eq!(
+        id2, id1,
+        "the ledger note is authoritative: losing the cache must recover its id, not duplicate"
+    );
+
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let digests: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
+    assert_eq!(
+        digests.len(),
+        1,
+        "retry after cache loss must not append a second digest for the same ledger"
+    );
+
+    // The cache is repaired from the ledger on recovery.
+    let state = load_digest_state(&project_id);
+    assert_eq!(
+        state.sessions["sess-crash"].event_id, id1,
+        "recovery must repair the cache from the ledger note"
+    );
+
+    // And a growth after the crash window digests only the tail.
+    std::fs::remove_file(&state_path).unwrap();
+    let path = edda_store::project_dir(&project_id)
+        .join("ledger")
+        .join("sess-crash.jsonl");
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let e = make_envelope_at(
+        "PostToolUse",
+        "Edit",
+        "2026-02-15T10:00:00Z",
+        serde_json::json!({}),
+    );
+    writeln!(f, "{}", serde_json::to_string(&e).unwrap()).unwrap();
+    drop(f);
+
+    let id3 = digest_session_manual(&project_id, "sess-crash", workspace.to_str().unwrap(), true)
+        .unwrap();
+    assert!(!id3.is_empty() && id3 != id1);
+
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let digests: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
+    assert_eq!(digests.len(), 2);
+    assert_eq!(
+        digests[1].payload["session_stats"]["tool_calls"], 1,
+        "after cache loss plus growth, only the tail beyond the ledger note is digested"
+    );
 }
