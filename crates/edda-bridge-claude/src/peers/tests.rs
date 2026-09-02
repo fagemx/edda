@@ -222,6 +222,7 @@ fn per_turn_peer_block_hash_stable_across_small_age_delta() {
                 files_modified_count: 1,
                 recent_commits: vec![],
                 claimed_paths: vec!["src/a/*".into()],
+                claimed_subject: None,
                 branch: Some("main".into()),
                 current_phase: None,
             },
@@ -235,6 +236,7 @@ fn per_turn_peer_block_hash_stable_across_small_age_delta() {
                 files_modified_count: 2,
                 recent_commits: vec![],
                 claimed_paths: vec![],
+                claimed_subject: None,
                 branch: Some("main".into()),
                 current_phase: None,
             },
@@ -289,6 +291,7 @@ fn per_turn_peer_block_changes_on_real_staleness_transition() {
             files_modified_count: 1,
             recent_commits: vec![],
             claimed_paths: vec![],
+            claimed_subject: None,
             branch: Some("main".into()),
             current_phase: None,
         }]
@@ -3475,5 +3478,38 @@ fn lane_heartbeat_written_without_bridge_is_discovered_then_goes_stale() {
     );
 
     remove_heartbeat(pid, sid);
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn claim_with_process_subject_roundtrips_to_board_and_peer_summary() {
+    let pid = "test_gh581_subject_roundtrip";
+    let sid = "sess-pr-review";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    write_claim_with_subject(
+        pid,
+        sid,
+        "review-pr570",
+        &["docs/spec.md".into()],
+        Some("pr:570"),
+    );
+
+    let board = compute_board_state(pid);
+    assert_eq!(board.claims.len(), 1);
+    let claim = &board.claims[0];
+    assert_eq!(claim.session_id, sid);
+    assert_eq!(claim.label, "review-pr570");
+    assert_eq!(claim.paths, vec!["docs/spec.md".to_string()]);
+    assert_eq!(claim.subject.as_deref(), Some("pr:570"));
+
+    // Write heartbeat so discover_all_sessions finds the session
+    write_heartbeat_minimal(pid, sid, "review-pr570", "/path/to/repo");
+    let peers = discover_all_sessions(pid);
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].claimed_subject.as_deref(), Some("pr:570"));
+    assert_eq!(peers[0].claimed_paths, vec!["docs/spec.md".to_string()]);
+
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }

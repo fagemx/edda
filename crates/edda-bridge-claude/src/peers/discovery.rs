@@ -54,12 +54,9 @@ pub fn discover_active_peers(project_id: &str, current_session_id: &str) -> Vec<
             _ => continue,
         };
 
-        let claimed_paths = board
-            .claims
-            .iter()
-            .find(|c| c.session_id == hb.session_id)
-            .map(|c| c.paths.clone())
-            .unwrap_or_default();
+        let matching_claim = board.claims.iter().find(|c| c.session_id == hb.session_id);
+        let claimed_paths = matching_claim.map(|c| c.paths.clone()).unwrap_or_default();
+        let claimed_subject = matching_claim.and_then(|c| c.subject.clone());
 
         let task_subjects: Vec<String> = hb
             .active_tasks
@@ -79,6 +76,7 @@ pub fn discover_active_peers(project_id: &str, current_session_id: &str) -> Vec<
             files_modified_count: hb.files_modified_count,
             recent_commits: hb.recent_commits,
             claimed_paths,
+            claimed_subject,
             branch: hb.branch,
             current_phase: hb.current_phase,
         });
@@ -120,12 +118,9 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
         let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
         let age = now.saturating_sub(hb_epoch);
 
-        let claimed_paths = board
-            .claims
-            .iter()
-            .find(|c| c.session_id == hb.session_id)
-            .map(|c| c.paths.clone())
-            .unwrap_or_default();
+        let matching_claim = board.claims.iter().find(|c| c.session_id == hb.session_id);
+        let claimed_paths = matching_claim.map(|c| c.paths.clone()).unwrap_or_default();
+        let claimed_subject = matching_claim.and_then(|c| c.subject.clone());
 
         let task_subjects: Vec<String> = hb
             .active_tasks
@@ -145,6 +140,7 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
             files_modified_count: hb.files_modified_count,
             recent_commits: hb.recent_commits,
             claimed_paths,
+            claimed_subject,
             branch: hb.branch,
             current_phase: hb.current_phase,
         });

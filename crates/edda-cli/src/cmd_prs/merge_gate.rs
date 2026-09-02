@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// Command line arguments for `edda prs check-merge`
-#[derive(Debug, Clone, Args)]
+#[derive(Debug, Clone, Args, Default)]
 pub struct CheckMergeArgs {
     /// PR number to evaluate (queries GitHub via `gh` CLI)
     #[arg(value_name = "PR", conflicts_with = "input")]
@@ -56,10 +56,14 @@ pub struct CheckMergeArgs {
     /// Output evaluation report as JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Override process claim held by another session (GH-581)
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Host-agnostic input for evaluating merge preconditions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MergeGateInput {
     pub head_sha: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -76,10 +80,14 @@ pub struct MergeGateInput {
     pub required_ci_green: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub failed_checks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Evaluation outcome for merge preconditions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct MergeGateResult {
     pub can_merge: bool,
     pub head_sha: String,
@@ -93,6 +101,10 @@ pub struct MergeGateResult {
     pub p1_count: usize,
     pub required_ci_green: bool,
     pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Check if string is a valid 40-character hex commit SHA.
@@ -164,6 +176,15 @@ pub fn evaluate_merge_preconditions(input: &MergeGateInput) -> MergeGateResult {
         }
     }
 
+    // 6. Process object claim protection (GH-581)
+    if let Some(holder) = &input.claimed_by {
+        if !input.force {
+            reasons.push(format!(
+                "PR is claimed by active session '{holder}' — use --force to override"
+            ));
+        }
+    }
+
     MergeGateResult {
         can_merge: reasons.is_empty(),
         head_sha: input.head_sha.clone(),
@@ -175,6 +196,8 @@ pub fn evaluate_merge_preconditions(input: &MergeGateInput) -> MergeGateResult {
         p1_count: input.p1_count,
         required_ci_green: input.required_ci_green,
         reasons,
+        claimed_by: input.claimed_by.clone(),
+        force: input.force,
     }
 }
 
@@ -574,6 +597,8 @@ fn fetch_pr_from_gh(
         p1_count: p1,
         required_ci_green,
         failed_checks,
+        claimed_by: None,
+        force: false,
     })
 }
 
@@ -607,6 +632,12 @@ pub fn format_merge_report(result: &MergeGateResult) -> (String, String) {
             result.p0_count, result.p1_count
         );
         let _ = writeln!(stdout_buf, "  Required CI: green");
+        if let Some(holder) = &result.claimed_by {
+            let _ = writeln!(
+                stdout_buf,
+                "  Claim Notice: Overriding process claim held by '{holder}' (--force specified)"
+            );
+        }
     } else {
         use std::fmt::Write;
         let _ = writeln!(
@@ -631,7 +662,7 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
         anyhow::bail!("--merge requires a live PR number and cannot be used with '--input'");
     }
 
-    let input = if let Some(input_source) = &args.input {
+    let mut input = if let Some(input_source) = &args.input {
         let raw = if input_source == "-" {
             let mut buf = String::new();
             std::io::stdin().read_to_string(&mut buf)?;
@@ -654,12 +685,49 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
             p1_count: args.p1,
             required_ci_green: args.ci_green,
             failed_checks: Vec::new(),
+            claimed_by: None,
+            force: args.force,
         }
     } else {
         anyhow::bail!(
             "Specify either a PR number (e.g. 'edda prs check-merge 580') or '--input <FILE>'"
         );
     };
+
+    if args.force {
+        input.force = true;
+    }
+
+    if let Some(pr_number) = args.pr {
+        if input.claimed_by.is_none() {
+            let project_id = edda_store::project_id(repo_root);
+            let target_subject = format!("pr:{pr_number}");
+            let board = edda_bridge_claude::peers::compute_board_state(&project_id);
+            if let Some(c) = board.claims.iter().find(|c| {
+                c.subject
+                    .as_deref()
+                    .map(|s| s.eq_ignore_ascii_case(&target_subject))
+                    .unwrap_or(false)
+            }) {
+                let is_live = matches!(
+                    edda_bridge_claude::peers::classify_session_liveness(
+                        &project_id,
+                        &c.session_id,
+                    ),
+                    edda_bridge_claude::peers::SessionLiveness::Live { .. }
+                );
+                if is_live {
+                    let my_sid = std::env::var("EDDA_SESSION_ID").ok();
+                    if my_sid.as_deref() != Some(&c.session_id) {
+                        input.claimed_by = Some(format!(
+                            "{} (label: '{}', subject: '{target_subject}')",
+                            c.session_id, c.label
+                        ));
+                    }
+                }
+            }
+        }
+    }
 
     let result = evaluate_merge_preconditions(&input);
 
@@ -723,6 +791,7 @@ mod tests {
             p1_count: 0,
             required_ci_green: true,
             failed_checks: vec![],
+            ..Default::default()
         };
         let result = evaluate_merge_preconditions(&input);
         assert!(!result.can_merge);
@@ -744,6 +813,7 @@ mod tests {
             p1_count: 0,
             required_ci_green: true,
             failed_checks: vec![],
+            ..Default::default()
         };
         let result = evaluate_merge_preconditions(&input);
         assert!(!result.can_merge);
@@ -765,6 +835,7 @@ mod tests {
             p1_count: 0,
             required_ci_green: true,
             failed_checks: vec![],
+            ..Default::default()
         };
         let result = evaluate_merge_preconditions(&input);
         assert!(!result.can_merge);
@@ -786,6 +857,7 @@ mod tests {
             p1_count: 0,
             required_ci_green: false,
             failed_checks: vec!["CI Gate (fail)".into()],
+            ..Default::default()
         };
         let result = evaluate_merge_preconditions(&input);
         assert!(!result.can_merge);
@@ -805,6 +877,7 @@ mod tests {
             p1_count: 0,
             required_ci_green: true,
             failed_checks: vec![],
+            ..Default::default()
         };
         let res_cr = evaluate_merge_preconditions(&input_cr);
         assert!(!res_cr.can_merge);
@@ -821,6 +894,7 @@ mod tests {
             p1_count: 0,
             required_ci_green: true,
             failed_checks: vec![],
+            ..Default::default()
         };
         let res_p0 = evaluate_merge_preconditions(&input_p0);
         assert!(!res_p0.can_merge);
@@ -837,6 +911,7 @@ mod tests {
             p1_count: 2,
             required_ci_green: true,
             failed_checks: vec![],
+            ..Default::default()
         };
         let res_p1 = evaluate_merge_preconditions(&input_p1);
         assert!(!res_p1.can_merge);
@@ -858,6 +933,7 @@ mod tests {
             p1_count: 0,
             required_ci_green: true,
             failed_checks: vec![],
+            ..Default::default()
         };
         let result = evaluate_merge_preconditions(&input);
         assert!(result.can_merge);
@@ -1056,6 +1132,7 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             p1_count: 0,
             required_ci_green: true,
             failed_checks: vec![],
+            ..Default::default()
         };
         fs::write(&input_file, serde_json::to_string(&valid_input).unwrap()).unwrap();
 
@@ -1072,6 +1149,7 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             input: Some(input_file.to_str().unwrap().into()),
             merge: false,
             json: true,
+            ..Default::default()
         };
 
         let res = run_check_merge(args, temp_dir.path());
@@ -1097,6 +1175,7 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             input: Some(input_file.to_str().unwrap().into()),
             merge: true,
             json: false,
+            ..Default::default()
         };
 
         let res = run_check_merge(args, temp_dir.path());
@@ -1120,6 +1199,7 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             p1_count: 0,
             required_ci_green: true,
             reasons: vec![],
+            ..Default::default()
         };
 
         let (stdout, stderr) = format_merge_report(&result);
@@ -1148,6 +1228,7 @@ Commit: 1234567890abcdef1234567890abcdef12345678
                 "blocking findings present: 1 P0, 1 P1 (both must be 0)".into(),
                 "required CI check(s) are not green".into(),
             ],
+            ..Default::default()
         };
 
         let (stdout, stderr) = format_merge_report(&result);

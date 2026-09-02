@@ -99,6 +99,8 @@ pub struct ClaimEntry {
     pub label: String,
     pub paths: Vec<String>,
     pub ts: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
 }
 
 /// A binding entry in the coordination log.
@@ -173,6 +175,8 @@ pub struct PeerSummary {
     pub files_modified_count: usize,
     pub recent_commits: Vec<String>,
     pub claimed_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_subject: Option<String>,
     pub branch: Option<String>,
     pub current_phase: Option<String>,
 }
@@ -244,8 +248,8 @@ pub(crate) use heartbeat::{
 };
 pub use heartbeat::{
     find_binding_conflict, remove_heartbeat, resolve_request_targets, touch_heartbeat,
-    write_binding, write_claim, write_heartbeat_minimal, write_request, write_request_ack,
-    write_unclaim,
+    write_binding, write_claim, write_claim_with_subject, write_heartbeat_minimal, write_request,
+    write_request_ack, write_unclaim,
 };
 pub use helpers::format_age;
 pub(crate) use helpers::{format_peer_suffix, pending_requests_for_session};

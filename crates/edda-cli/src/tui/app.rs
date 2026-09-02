@@ -251,6 +251,7 @@ mod tests {
             files_modified_count: 0,
             recent_commits: vec![],
             claimed_paths: vec![],
+            claimed_subject: None,
             branch: None,
             current_phase: None,
         }
