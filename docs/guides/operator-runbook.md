@@ -40,6 +40,15 @@
    ```bash
    pwsh -NoProfile -File scripts/fleet/lane-status.ps1
    ```
+5. **停 lane**（只有這個動作是真的停）：
+   ```bash
+   pwsh -NoProfile -File scripts/fleet/lane-stop.ps1 -Name <lane>
+   ```
+   `Stop-ScheduledTask` 與 `Unregister-ScheduledTask` **都不殺子程序樹**（GH-672）：
+   它們只終止 wrapper，`edda dispatch` 子程序會繼續跑到 commit／push／開 PR，
+   而任務顯示 `State = Ready`。停 lane 一律走 `lane-stop.ps1`：它停任務、殺整棵
+   process tree、依 `CommandLine` 比對 wrapper／brief 路徑驗證無殘留，並補寫
+   wrapper 已寫不出的結束記錄（done-file + `=== EXIT ===` 行）。
 
 ---
 
@@ -148,6 +157,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 執行用便宜模型（pi 預設 glm-5.3-flash）；**審查一律 gpt-5.6-sol**（codex／pi 皆是） | `fleet.agent-model-split` |
 | 審查 provider 過載：**改運輸不降模型**——(1) 同 `--model` 先用 `--thinking minimal` 探測，通了才重試 pi 一次；(2) 仍沒有判決就對該 head 標 `review:unreviewed` 並停——未審查是誠實狀態，便宜模型的判決不是。watcher 無 Codex 路線（superseding 決策 `…codex-route-withdrawn-for-automated-watcher`：Codex 對 watcher 做不到唯讀；人類控制者仍可手動用 Codex） | `fleet.review-provider-overload` |
 | **lane 啟動走 Task Scheduler，不走 nohup／Start-Process**：Claude Code 的工具 shell 在 Windows Job Object 裡，nohup 的子程序仍隨 session 死。`Register-ScheduledTask` + `Start-ScheduledTask`（父程序是 svchost）；該環境 `HOME` 為空，lane wrapper 必須顯式設；`CARGO_TARGET_DIR` 只在 `-BuildLane` 指名四個允許 build lane 之一時設（不編譯的 session 沒有 build lane——`.claude/CLAUDE.md`、`verification.cost-discipline`；要編譯的必須給四擇一，launcher 拒絕其他名字）。`lane-launch.ps1` 不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`，設 `CARGO_TARGET_DIR`＝lane root（`$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）\`<BuildLane>`；docs lane 不傳，wrapper 不設。`Get-ScheduledTaskInfo` 可輪詢，`Unregister-ScheduledTask` 清理。重派前先讀 worktree／branch／PR 狀態，不信任 live handle。**手續已脚本化**：用 `scripts/fleet/lane-launch.ps1` 註冊起 lane、`scripts/fleet/lane-status.ps1` 盯狀態（用法見 START HERE），不要再手寫 wrapper | `fleet.lane-launch`、`fleet.lane-dispatch` |
+| **停 lane 一律走 `scripts/fleet/lane-stop.ps1 -Name <lane>`**：`Stop-ScheduledTask` 與 `Unregister-ScheduledTask` 都只終止任務的 wrapper，**不殺它 spawn 的 process tree**（GH-672：被「停」的 lane 照樣 commit／push／開 PR，任務卻顯示 `State = Ready`）。`lane-stop.ps1` 停任務、殺整棵樹（wrapper 已死時依 `CommandLine` 比對 wrapper／brief 路徑抓孤兒）、驗證無殘留、回報實際終止了什麼，並補寫結束記錄（done-file + lane log 的 `=== EXIT ===` 行）——wrapper 本身也在 `finally` 寫同樣的結束記錄，所以正常結束、出錯、被停三種 endings 都有 EXIT | `fleet.lane-stop-4090` |
 | 一 issue ＝ 一單 phase plan ＝ 一 worktree ＝ 一 build lane；並行在 plan 之間；plan 裡不寫沒理由的 `depends_on`；並行 plan 不用 verdict gate | `cleanup.parallel-exec`、`cleanup.review-gate` |
 | build lane 只用 `worker-1|worker-2|verifier|verifier-2`；永不建 ad-hoc `CARGO_TARGET_DIR`；L1 與 verifier 設 `CARGO_INCREMENTAL=0` | `verification.cost-discipline` |
 | 審查釘 full SHA；**每次 push 使前一個判決失效**；一個 PR 一個審查者身分 | `fleet.review-protocol` |

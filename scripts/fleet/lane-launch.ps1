@@ -31,7 +31,14 @@
 #
 # Prints, one line each: task name, state, wrapper path, log path, done path.
 # Poll with scripts/fleet/lane-status.ps1; the done-file appears (containing
-# the exit code) when the lane finishes.
+# the exit code) when the lane finishes. The wrapper writes its end record
+# (=== EXIT === log line + done-file) no matter how the run ends; when the
+# lane is stopped with scripts/fleet/lane-stop.ps1 the wrapper is killed and
+# cannot write it, so lane-stop.ps1 writes the end record instead (GH-672).
+#
+# The task action executes pwsh via its full resolved path: in the Task
+# Scheduler environment the bare name 'pwsh.exe' (a WindowsApps execution
+# alias) does not resolve and the task fails with 0x80070002.
 #
 # -DryRun needs no caller input: it generates its own temporary brief inside
 # -LogDir, builds the exact wrapper and `edda dispatch` command line a real
@@ -98,6 +105,11 @@ $Log = Join-Path $LogDir "$Name.log"
 $Done = Join-Path $LogDir "$Name.done"
 $Wrapper = Join-Path $LogDir "$Name.wrapper.ps1"
 
+# Full path for the task action — 'pwsh.exe' does not resolve in the task
+# environment (0x80070002).
+$PwshExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
+if (-not $PwshExe) { Fail 'pwsh.exe not found on PATH; cannot register the task' }
+
 # The real `edda dispatch` command line (also printed verbatim by -DryRun).
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
@@ -115,9 +127,18 @@ $env:HOME = $env:USERPROFILE
 $env:GIT_CONFIG_PARAMETERS = "'help.format=man'"
 $env:CARGO_TARGET_DIR = __CARGO__
 Set-Location -LiteralPath __CWD__
-__RUN__
-$code = $LASTEXITCODE
-Set-Content -LiteralPath __DONE__ -Value $code -Encoding ascii
+$code = $null
+try {
+  __RUN__
+  $code = $LASTEXITCODE
+} catch {
+  $code = 1
+} finally {
+  # The end record is written no matter how the run ends (GH-672): a log
+  # with START but no === EXIT === line means the lane was killed mid-flight.
+  Add-Content -LiteralPath __LOG__ -Value "=== EXIT code=$code ===" -Encoding utf8
+  Set-Content -LiteralPath __DONE__ -Value $code -Encoding ascii
+}
 exit $code
 '@
 $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
@@ -141,11 +162,11 @@ if ($DryRun) {
   } else {
     $wrapperText = $wrapperText -replace '(?m)^.*__CARGO__.*\r?\n', ''
   }
-  $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__RUN__', $runDry).Replace('__DONE__', (PsQuote $Done)) |
+  $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runDry).Replace('__DONE__', (PsQuote $Done)) |
     Set-Content -LiteralPath $Wrapper -Encoding utf8
   "dry-run wrapper=$Wrapper (identical to the real wrapper except __RUN__ runs the trivial process)"
 
-  $action = New-ScheduledTaskAction -Execute 'pwsh.exe' `
+  $action = New-ScheduledTaskAction -Execute $PwshExe `
     -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
     -WorkingDirectory $Cwd
   $settings = New-ScheduledTaskSettingsSet `
@@ -198,12 +219,12 @@ if ($BuildLane) {
 } else {
   $wrapperText = $wrapperText -replace '(?m)^.*__CARGO__.*\r?\n', ''
 }
-$wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__RUN__', $runReal).Replace('__DONE__', (PsQuote $Done)) |
+$wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runReal).Replace('__DONE__', (PsQuote $Done)) |
   Set-Content -LiteralPath $Wrapper -Encoding utf8
 
 Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue  # stale done-file from a previous run must not masquerade as this run
 
-$action = New-ScheduledTaskAction -Execute 'pwsh.exe' `
+$action = New-ScheduledTaskAction -Execute $PwshExe `
   -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
   -WorkingDirectory $Cwd
 $settings = New-ScheduledTaskSettingsSet `
