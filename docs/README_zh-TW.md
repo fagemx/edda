@@ -54,7 +54,7 @@ Edda 用同一個原語治這兩種病：**append-only 的本地狀態，放在 
 
 第一層從第一天就能單獨用。第二層不用另外裝——同一個 workspace、同一個 CLI——當你開始跑多個 agent，它就在那裡。
 
-**兩個持久化平面，這是刻意的。** 決策、筆記、session 摘要、任務、verdict 是 hash-chained SQLite 帳本裡的事件——防篡改、可重播。即時協調狀態（claims、peer 心跳）是使用者層 store 裡另一份 append-only log，而每個 `edda conduct` 計畫各自保有自己的狀態檔與事件記錄。全部都在本地、都查得到；hash chain 覆蓋的是帳本那一份。
+**分開的持久化平面，這是刻意的。** 決策、筆記、session 摘要、任務、verdict 是 hash-chained SQLite 帳本裡的事件——防篡改、可重播。即時協調狀態在那條鏈之外，放在使用者層 store：claims 附加進一份協調 log，而每個 session 的心跳是一個小快照檔，工作時持續覆寫、正常結束時移除——沒走到正常結束就死掉的 session 會把快照留下，`edda peers` 會把它報成 stale，`edda gc` 之後可以回收。每個 `edda conduct` 計畫又各自保有自己的狀態檔與事件記錄。全部都在本地、都查得到；hash chain 覆蓋的是帳本那一份。
 
 ## 第一層——記憶跨 session 活著
 
@@ -113,7 +113,7 @@ Claude Code（早上）                  Codex（下午）
 
 ## 第二層——協調跨 agent 活著
 
-跑第二個 agent 的那一刻起，記憶就不再是最難的問題。難的變成：*誰在動哪裡、誰用什麼權限決定了什麼、你沒在看的時候實際發生了什麼。* Edda 用同一本帳回答這三題。
+跑第二個 agent 的那一刻起，記憶就不再是最難的問題。難的變成：*誰在動哪裡、誰用什麼權限決定了什麼、你沒在看的時候實際發生了什麼。* Edda 用同一個本地 workspace 回答這三題——帳本存耐久的紀錄，協調平面存誰現在還活著。
 
 **Claims——誰在動哪裡。** 每個 session 宣告自己的工作範圍，所有 peer 都會在 session 開始注入的 context 裡看到，併行的 agent 動手前就知道哪塊是誰的。Claims **預設是宣告性的**：edda 記錄並顯示它們，但在你用 `EDDA_ENFORCE_OFFLIMITS=1`（或 `bridge.enforce_offlimits=true`）開啟之前不會擋任何寫入；開啟後 Claude Code 的 hook 會拒絕對 peer 已 claim 路徑的 `Edit`／`Write`。
 
@@ -138,7 +138,7 @@ edda verdict approve my-plan/impl --sha <完整40位SHA>
 edda verdict reject  my-plan/impl --sha <sha> --comment "tests missing"
 ```
 
-**單回合 lane——controller 可以讓它脫離。** `edda dispatch` 在前景跑完整整一個 agent 回合（Claude、Codex 或 pi），以型別化的結果收場——done、crash、timeout、超出預算——並可用 `--json` 供機器讀取。它不帶計畫、DAG 或迴圈狀態；迴圈控制留在呼叫端。正是這份無狀態，讓 controller 可以放心把它當**脫離的 OS 程序**啟動，而不是自己 session 的子程序——這才是工作能在 controller 死掉後活下來的原因。當我們的 controller session 半路死掉、一天死了三次，脫離的 lane 照跑，事後從 branch、PR 和帳本把結果撿回來，而不是靠任何人的記憶。
+**單回合 lane——controller 可以讓它脫離。** `edda dispatch` 在前景跑完整整一個 agent 回合（Claude、Codex 或 pi），以型別化的結果收場——done、crash、timeout、max turns、超出預算，各有自己的 exit code——並可用 `--json` 供機器讀取。它不帶計畫、DAG 或迴圈狀態；迴圈控制留在呼叫端。正是這份無狀態，讓 controller 可以放心把它當**脫離的 OS 程序**啟動，而不是自己 session 的子程序——這才是工作能在 controller 死掉後活下來的原因。當我們的 controller session 半路死掉、一天死了三次，脫離的 lane 照跑，事後從 branch、PR 和帳本把結果撿回來，而不是靠任何人的記憶。
 
 ```bash
 edda dispatch --agent codex --prompt-file task.md
@@ -206,7 +206,9 @@ Claude Code session
    │  .edda/ledger.db             │  ← 決策、筆記、任務、
    │    append-only、hash-chained │     verdict、摘要
    ├──────────────────────────────┤
-   │  協調 log（使用者層）        │  ← claims、peer 心跳
+   │  協調 log（使用者層）        │  ← claims（附加寫入）
+   │  session 心跳檔              │  ← 每個 session 一份，非正常
+   │                              │     結束者留下並標為 stale
    │  conduct 計畫狀態 + 事件     │  ← 每個計畫各一份
    └──────────────────────────────┘
         │
@@ -217,7 +219,7 @@ Claude Code session
    下次 session 看到全部
 ```
 
-Edda 將每個帳本事件以 hash-chained JSON 記錄儲存在本地 SQLite 資料庫中。帳本事件包括決策、筆記、session 摘要、任務、verdict 和指令輸出。Hash chain 讓這份歷史防篡改、檢索確定性——同一個查詢永遠得同一個答案，迴圈裡沒有 LLM。Claims 和 peer 心跳刻意不進這條鏈：它們是會過期的即時協調狀態，寫在自己的 log 裡，每次 session 開始時讀取。
+Edda 將每個帳本事件以 hash-chained JSON 記錄儲存在本地 SQLite 資料庫中。帳本事件包括決策、筆記、session 摘要、任務、verdict 和指令輸出。Hash chain 讓這份歷史防篡改、檢索確定性——同一個查詢永遠得同一個答案，迴圈裡沒有 LLM。協調狀態刻意不進這條鏈，因為它是即時的而非歷史的：claims 附加寫進自己的 log，而 session 的心跳是一個快照檔，工作時更新、正常結束時清除，session 死掉時它不會消失而是變成 stale。兩者都在每次 session 開始時讀取。
 
 每次 session 開始時，edda 從 ledger 組裝 context snapshot 並注入——agent 看到最近的決策、進行中的任務、peer 協調狀態，以及（若有配置）來自 [havamal](https://github.com/fagemx/havamal) 的判斷層 pack，不需要閱讀舊 transcript。
 
