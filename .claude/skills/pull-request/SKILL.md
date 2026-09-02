@@ -249,7 +249,11 @@ sleep 3
 gh pr view --json state,mergedAt
 ```
 
-Never pass `--delete-branch` — branches and worktrees are never deleted (see
+Pass `--delete-branch` only when the PR is being merged — per
+`fleet.merged-artifact-cleanup`, a merged PR's branch and lane worktree may be
+reclaimed (squash commit on main, GitHub keeps `refs/pull/N/head`); anything
+unmerged — open or closed-unmerged branches, worktrees with uncommitted work,
+another session's active branch or worktree, and sources — stays untouched (see
 `.claude/CLAUDE.md`).
 
 **Why squash merge:**

@@ -197,8 +197,13 @@ A fleet session that runs no local build has no lane and needs none.
   names no lane or no lane root and you are about to build for a fleet, ask the
   controller first rather than creating a directory.
 - Verifier lanes and every L1 run set `CARGO_INCREMENTAL=0`.
-- Deleting lane build output is authorized and non-destructive; deleting
-  worktrees, branches, or sources is not.
+- Build output is disposable and non-destructive to delete; per
+  `fleet.merged-artifact-cleanup`, an artifact whose PR is **merged** — the
+  merged PR's remote branch and its lane worktree — may also be reclaimed,
+  because the squash commit is on `main` and GitHub keeps `refs/pull/N/head`,
+  so SHA-pinned verdicts stay resolvable. Anything unmerged stays untouched:
+  open or closed-unmerged branches, worktrees carrying uncommitted work,
+  another session's active branch or worktree, and sources.
 
 #### Footprint and thresholds — measured, and larger than they should be
 
@@ -387,9 +392,14 @@ Rules regulate cost and reclamation, not only evidence:
   and exact-head CI before any RAN, and state the reason whenever you rerun a
   recorded gate.
 - Every worker/verifier brief names a verification budget (L0 while iterating;
-  L1 once per frozen SHA) and cleanup authority (build cache is disposable and
-  stale cache should be reclaimed by age; worktrees, branches, and sources are
-  never deleted). It names a build lane **only when the session compiles
+  L1 once per frozen SHA) and cleanup authority (build output is disposable and
+  stale cache should be reclaimed by age; per `fleet.merged-artifact-cleanup`,
+  an artifact whose PR is **merged** — the merged PR's remote branch and its
+  lane worktree — may be reclaimed, since the squash commit is on `main` and
+  GitHub keeps `refs/pull/N/head`, so SHA-pinned verdicts stay resolvable;
+  anything unmerged — open or closed-unmerged branches, worktrees carrying
+  uncommitted work, another session's active branch or worktree, and sources —
+  stays untouched). It names a build lane **only when the session compiles
   locally** — see Build lanes; a session that builds nothing has no lane and
   reports `n/a`.
 - One verifier identity per PR: rounds resume the same session, and the same
