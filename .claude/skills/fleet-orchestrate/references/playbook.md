@@ -206,8 +206,12 @@ Verification budget: focused gates on touched units while iterating; the full
   gate set once per frozen full SHA with a gate receipt; READ receipts and
   exact-head CI before any RAN; name the coverage the project's CI genuinely
   lacks, since that is the reviewer's legitimate reason to run it
-Cleanup authority: lane build cache is disposable; worktrees, branches, and
-  sources are never deleted
+Cleanup authority: lane build output is disposable; per
+  `fleet.merged-artifact-cleanup`, the branch and lane worktree of a **merged**
+  PR may be reclaimed (squash commit on main, GitHub keeps refs/pull/N/head);
+  anything unmerged — open or closed-unmerged branches, worktrees with
+  uncommitted work, another session's active branch or worktree, and sources —
+  stays untouched
 Drift rule: if HEAD differs, satisfy intent against HEAD and report full SHA
 Done: pushed candidate/PR, frozen full SHA, receipt, no merge
 ```

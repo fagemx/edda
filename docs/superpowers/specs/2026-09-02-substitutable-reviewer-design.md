@@ -255,7 +255,10 @@ Options:
       --reason <REASON>    Reason for the decision
 ```
 
-以下五條可直接複製執行（每條都是一個 `key=value` 引數，不是兩個位置參數）：
+以下五條可直接複製執行（每條都是一個 `key=value` 引數，不是兩個位置參數）。其中
+`fleet.review-engine-pool` 一條在 ratify 時由操作者修訂：**初版值
+`field-of-reviewer-profile-593`（把 gemini-3.1-pro-preview 列入初始池、fp8 路由修好即可列候選）已作廢**，
+下列才是 ratifier 後的版本（`fleet.review-engine-pool`，2026-09-02）；初版值僅存於本段歷史標記：
 
 ```sh
 edda decide "fleet.review-class=two-classes-path-rule" \
@@ -267,8 +270,8 @@ edda decide "fleet.review-canary-protocol=tests-canaries-diff-fixture-expected" 
 edda decide "fleet.review-qualification=p0-full-p1-80-fp-zero-recal-quarterly" \
   --reason "合格門檻＝該類別 P0 金絲雀 100% caught（提出且實質命中）、P1 ≥ 80%、FP=0、清單每項皆回報不得靜默略過。嚴重度低估記 caught 但標「嚴重度不符」，同引擎同金絲雀連續兩次不符視為 missed。重校＝每季＋引擎版次變更後＋brief 版本變更後＋金絲雀新增後 30 天內全池。抓取率進帳本。校準前 qualified=none。"
 
-edda decide "fleet.review-engine-pool=field-of-reviewer-profile-593" \
-  --reason "引擎池是 reviewer profile（#593）底下的一個欄位，不是獨立設定。池條目＝{model_requested, transports_allowed, cost_tier, qualified_classes, quota_signal}。初始池：gpt-5.6-sol（pi 或 edda dispatch --agent codex；全類別錨、不被取代）、Opus 5（claude -p only，絕不經 pi/openrouter）、gemini-3.1-pro-preview（逐字 catalogue id openrouter/google/gemini-3.1-pro-preview；auth check 回 ready 但請求被 openrouter 的 quantization: fp8 provider preference 篩成 404，直連 google 供應商 not_ready；修好路由前不得列候選）、glm-5.3-flash（pi/openrouter；本次校準提議 docs-skills provisional 合格，code-risk 不合格）。替換規則＝依類別取「合格∧運輸可用∧配額在」中最便宜者；model_requested 一律逐字照抄 pi --list-models 的目錄 id（pi 對不存在的 id 不報錯而是模糊解析，google/gemini-3-pro → google/gemini-3-pro-image 即派工端的靜默替換）；派工前以 --no-tools 探測運輸，auth check 回 ready 不保證路由可達；過載先換運輸再換下一合格引擎；重試同引擎一次為限，絕不靜默換模型；無合格引擎→PR 標 review:unreviewed 停住，不合格引擎的 LGTM 不算；[判斷] 項與非平凡 diff 零發現送 sol 抽審；判決帶 model_requested/model_observed（系統取得）、brief 版本、類別、escalations，合併政策讀欄位不讀標頭。model_requested≠model_observed 為 P0 事故。"
+edda decide "fleet.review-engine-pool=sol-anchor-opus-provisional-glm-docs-only-gemini-removed" \
+  --reason "（2026-09-02 ratifier 修訂，取代已作廢的初版 field-of-reviewer-profile-593——初版把 Gemini 列在初始池，與本池相牴觸。）Gemini 從審查引擎池拿掉——審查很少會用 Gemini，不值得為它改 pi 的 openRouterRouting（order=[novita], quantizations=[fp8]，為 glm 設的）。池＝gpt-5.6-sol（錨，openai-codex provider；pi 或 edda dispatch --agent codex）、Opus（暫定合格，只走 claude -p；fleet.claude-subscription-transport，絕不經 pi/openrouter）、glm-5.3-flash（docs/skills 暫定；code-risk 不合格）。池是 reviewer profile（#593）底下的一個欄位，不是獨立設定；池條目＝{model_requested, transports_allowed, cost_tier, qualified_classes, quota_signal}。替換規則＝依類別取「合格∧運輸可用∧配額在」中最便宜者；model_requested 一律逐字照抄 pi --list-models 的目錄 id（pi 對不存在的 id 不報錯而是模糊解析，google/gemini-3-pro → google/gemini-3-pro-image 即派工端的靜默替換）；派工前以 --no-tools 探測運輸，auth check 回 ready 不保證路由可達；過載先換運輸再換下一合格引擎；重試同引擎一次為限，絕不靜默換模型；無合格引擎→PR 標 review:unreviewed 停住，不合格引擎的 LGTM 不算；[判斷] 項與非平凡 diff 零發現送 sol 抽審；判決帶 model_requested/model_observed（系統取得）、brief 版本、類別、escalations，合併政策讀欄位不讀標頭。model_requested≠model_observed 為 P0 事故。"
 
 edda decide "fleet.review-unreviewed-state=honest-label-blocked-by-merge-gate-580" \
   --reason "review:unreviewed 是 label/狀態，不是判決——語意為「審查當下沒有任何合格引擎可用，誠實停住」。#580 合併閘機械化要求 current-head LGTM＋綠 CI，unreviewed 的 PR 不可能有有效 LGTM，閘自然擋住；解鎖唯一路徑是合格引擎真審一輪。不得用降級引擎的判決清除本狀態。依據：fleet.review-provider-overload「unreviewed PR 是誠實的狀態，便宜模型的判決不是」。"
