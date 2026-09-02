@@ -677,16 +677,15 @@ mod tests {
     /// must be contained by the store's path funnel, not escape the state
     /// directory.
     #[tokio::test]
-    // The mutex guard protects the process-global EDDA_STORE_ROOT against
-    // other test threads for the whole test, including the await below —
-    // that is the point, not an accidental hold.
+    // isolated_store() takes the shared test-support lock, so the process-global
+    // EDDA_STORE_ROOT stays ours for the whole test, including the await below —
+    // that is the point, not an accidental hold. A private lock here is what
+    // broke Windows CI (PR #588, round 2): this test relocated the root under a
+    // lock no other test knew about, so a concurrent cmd_bridge test that held
+    // the shared lock had its writes land in one store and its reads in another.
     #[allow(clippy::await_holding_lock)]
     async fn hostile_session_id_cannot_escape_the_state_directory() {
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("EDDA_STORE_ROOT");
-        std::env::set_var("EDDA_STORE_ROOT", tmp.path());
+        let _store = crate::test_support::isolated_store();
 
         let launcher = RecordingLauncher {
             session_ids: Mutex::new(Vec::new()),
@@ -720,11 +719,7 @@ mod tests {
                 assert!(!root.join("escaped.json").exists());
             }
         }
-        match previous {
-            Some(v) => std::env::set_var("EDDA_STORE_ROOT", v),
-            None => std::env::remove_var("EDDA_STORE_ROOT"),
-        }
-        let _ = std::fs::remove_dir_all(tmp.path());
+        // _store (the IsolatedStore guard) restores EDDA_STORE_ROOT on drop.
     }
 
     // ── Synthetic phase parity with conduct ──

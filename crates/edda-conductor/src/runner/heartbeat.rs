@@ -248,13 +248,18 @@ mod tests {
 
     #[test]
     fn write_failure_is_swallowed_not_fatal() {
-        // Serialize env mutation with the other heartbeat test.
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("EDDA_STORE_ROOT");
-        std::env::set_var("EDDA_STORE_ROOT", tmp.path());
-        let cwd = tmp.path().join("repo");
+        // Serialize env mutation with the other heartbeat tests via
+        // ClaimEnvGuard's shared CLAIM_ENV_LOCK. A private lock here (as an
+        // earlier draft had) is what flaked `lane_refresh_preserves_hook_
+        // telemetry_it_does_not_own`: this test relocated EDDA_STORE_ROOT
+        // under a lock that test never saw, so its seeded write landed in
+        // one store and its read-modify-write polled another — persist
+        // os error 2/5 when the stolen root's tempdir was deleted, and
+        // "focus_files preserved: left []" when the RMW read a blank
+        // record. Same defect as PR #588's Windows CI failure in edda-cli.
+        let guard = ClaimEnvGuard::new();
+        let root = guard._store_root.path();
+        let cwd = root.join("file-as-project-dir-repo");
         std::fs::create_dir_all(&cwd).unwrap();
         let project_dir = edda_store::project_dir(&edda_store::project_id(&cwd));
         let _ = std::fs::remove_dir_all(&project_dir);
@@ -276,9 +281,6 @@ mod tests {
             result.is_err(),
             "expected the heartbeat write to fail against a file-as-project-dir store, got Ok"
         );
-        match previous {
-            Some(v) => std::env::set_var("EDDA_STORE_ROOT", v),
-            None => std::env::remove_var("EDDA_STORE_ROOT"),
-        }
+        // The guard restores EDDA_STORE_ROOT on drop.
     }
 }

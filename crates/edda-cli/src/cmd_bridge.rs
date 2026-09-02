@@ -2760,6 +2760,23 @@ mod tests {
         edda_bridge_claude::peers::write_claim(&pid, "cli-auth", "auth", &["src/auth.rs".into()]);
         edda_bridge_claude::peers::write_claim(&pid, "cli-api", "api", &["src/api.rs".into()]);
 
+        // Windows-CI regression (PR #588): a sibling test that relocated
+        // EDDA_STORE_ROOT outside the shared isolated_store() lock made the
+        // claims land in one store while unclaim() read another, and the test
+        // failed with the misleading "no claims on the board". Assert the
+        // write is visible *under this test's own root* before the verb runs,
+        // so a future lock escape fails here naming the real cause instead of
+        // masquerading as a board-state defect.
+        assert_eq!(
+            edda_bridge_claude::peers::compute_board_state(&pid)
+                .claims
+                .len(),
+            2,
+            "claims must be readable under this test's own isolated store root \
+             before unclaim runs; if this fails, EDDA_STORE_ROOT was relocated \
+             mid-test by a test that bypassed the shared isolation lock"
+        );
+
         let err = unclaim(repo.path(), None, false).expect_err("ambiguous target must not guess");
         let msg = err.to_string();
         assert!(msg.contains("cli-auth") && msg.contains("cli-api"), "{msg}");
