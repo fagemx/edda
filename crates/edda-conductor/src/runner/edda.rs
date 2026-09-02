@@ -1,11 +1,31 @@
 //! Edda (edda) integration helpers for the Conductor.
 //!
-//! All operations are best-effort: if `edda` is not in PATH or the command
-//! fails, the Conductor continues without context injection. This keeps
-//! Edda optional — the Conductor works as a plain task runner without it.
+//! Ledger *writes* go through the `edda_ledger` library directly — never by
+//! shelling out to a PATH `edda` binary (GH-584): the binary on PATH can be
+//! an older build silently running old behavior, and conductor already
+//! depends on the library for reads. A failed write is never swallowed: it
+//! is reported on stderr so "no conductor events in the ledger" is always
+//! distinguishable from "the write is broken".
+//!
+//! Two operations still shell out to the installed `edda` on purpose:
+//! [`ensure_init`] (full init also registers the cwd in the operator's
+//! global project registry, which is right in production) and [`get_context`]
+//! (a read-only convenience). All operations are best-effort: if `edda` is
+//! not in PATH or the command fails, the Conductor continues without context
+//! injection. This keeps Edda optional — the Conductor works as a plain task
+//! runner without it.
 
+use anyhow::Context;
+use edda_core::event::new_note_event;
+use edda_core::secret_guard::redact;
+use edda_ledger::lock::WorkspaceLock;
+use edda_ledger::Ledger;
 use std::path::Path;
 use std::process::Command;
+
+/// Role stamped on the note events the conductor writes about its own runs.
+/// The conductor is an automated writer — never the operator.
+const ROLE: &str = "agent";
 
 /// Ensure `.edda/` ledger exists in the working directory.
 /// No-op if already initialized or if `edda` is not available.
@@ -51,17 +71,69 @@ pub fn get_context(cwd: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// Record a note to the edda ledger.
-/// Best-effort: silently ignores failures.
-pub fn record_note(cwd: &Path, text: &str, tags: &[&str]) {
-    let mut cmd = Command::new("edda");
-    cmd.arg("note").arg(text).current_dir(cwd);
-    for tag in tags {
-        cmd.arg("--tag").arg(tag);
+/// Append a `note` event to the workspace ledger at `cwd`, via the
+/// `edda_ledger` library (GH-584 problem 3: no PATH `edda` child process).
+///
+/// `structured` optionally embeds a JSON object under a dedicated payload
+/// key (same pattern as decision notes embed `payload["decision"]`). This
+/// is the report-facing shape; the human-readable `text` stays in
+/// `payload["text"]` alongside it.
+fn append_ledger_note(
+    cwd: &Path,
+    text: &str,
+    tags: &[String],
+    structured: Option<(&str, serde_json::Value)>,
+) -> anyhow::Result<()> {
+    let ledger = Ledger::open(cwd).context("opening workspace ledger")?;
+    let _lock = WorkspaceLock::acquire(&ledger.paths).context("acquiring workspace lock")?;
+    let branch = ledger.head_branch().context("reading HEAD branch")?;
+    let parent_hash = ledger
+        .last_event_hash()
+        .context("reading last event hash")?;
+
+    // EDDA-SECRET-GUARD1 q331: same scrub the `edda note` CLI applies.
+    let (safe_text, hits) = redact(text);
+    if !hits.is_empty() {
+        eprintln!(
+            "⚠ secret-guard: redacted {n} secret pattern(s) before writing conductor NOTE ({kinds})",
+            n = hits.len(),
+            kinds = hits.iter().map(|h| h.kind).collect::<Vec<_>>().join(", ")
+        );
     }
-    cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let _ = cmd.status();
+
+    let mut event = new_note_event(&branch, parent_hash.as_deref(), ROLE, &safe_text, tags)
+        .context("building note event")?;
+    if let Some((key, value)) = structured {
+        event.payload[key] = value;
+        // Embedding the structured payload changes the event body — re-hash
+        // exactly like `new_decision_event` does for `payload["decision"]`,
+        // or the append rejects the event as hash-invalid.
+        edda_core::event::finalize_event(&mut event).context("re-finalizing note event")?;
+    }
+    ledger.append_event(&event).context("appending note event")
+}
+
+/// Best-effort wrapper (GH-584 problem 2): a failed ledger write is never
+/// silent — it is reported on stderr, so a shrinking conductor presence in
+/// the workspace ledger is observable instead of indistinguishable from
+/// "the phase simply produced no note".
+fn append_ledger_note_best_effort(
+    subject: &str,
+    cwd: &Path,
+    text: &str,
+    tags: &[String],
+    structured: Option<(&str, serde_json::Value)>,
+) {
+    if let Err(e) = append_ledger_note(cwd, text, tags, structured) {
+        eprintln!("⚠ edda-conductor: workspace ledger write failed for {subject}: {e:#}");
+    }
+}
+
+/// Record a note to the workspace ledger.
+/// Best-effort: a failed write is reported on stderr, never swallowed (GH-584).
+pub fn record_note(cwd: &Path, text: &str, tags: &[&str]) {
+    let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
+    append_ledger_note_best_effort("note", cwd, text, &tags, None);
 }
 
 /// Truncate a string to at most `max` bytes on a valid UTF-8 char boundary.
@@ -78,7 +150,31 @@ fn truncate_str(s: &str, max: usize) -> &str {
 }
 
 /// Record a phase completion event.
+///
+/// See [`record_phase_done_with_plan`] — this is the plan-less wrapper kept
+/// for call sites that do not have the plan in scope (GH-584).
 pub fn record_phase_done(cwd: &Path, phase_id: &str, summary: Option<&str>, cost_usd: Option<f64>) {
+    record_phase_done_with_plan(cwd, None, phase_id, summary, cost_usd);
+}
+
+/// [`record_phase_done`] with the plan name, so the structured ledger
+/// payload carries `plan_id`. Call sites that have the plan in scope should
+/// prefer this variant (GH-584).
+///
+/// The phase terminal state reaches the workspace ledger as a note event
+/// with a structured `conductor_phase` payload:
+/// `{ plan_id, phase_id, status, cost_usd }`. Along #533's discipline,
+/// `cost_usd: None` (unmeasured) serializes as JSON **null** — never the
+/// 0.0 sentinel; a measured 0.0 stays 0.0. The human-readable text is kept
+/// alongside the structured fields, but the structured fields are the
+/// report-facing surface.
+pub fn record_phase_done_with_plan(
+    cwd: &Path,
+    plan_id: Option<&str>,
+    phase_id: &str,
+    summary: Option<&str>,
+    cost_usd: Option<f64>,
+) {
     let cost_str = cost_usd.map(|c| format!(" [${c:.3}]")).unwrap_or_default();
     let summary_str = summary
         .map(|s| {
@@ -93,21 +189,108 @@ pub fn record_phase_done(cwd: &Path, phase_id: &str, summary: Option<&str>, cost
         })
         .unwrap_or_default();
     let text = format!("Phase \"{phase_id}\" passed{cost_str}{summary_str}");
-    record_note(cwd, &text, &["conductor", &format!("phase:{phase_id}")]);
+    let tags = vec!["conductor".to_string(), format!("phase:{phase_id}")];
+    let payload = serde_json::json!({
+        "plan_id": plan_id,
+        "phase_id": phase_id,
+        "status": "passed",
+        "cost_usd": cost_usd,
+    });
+    append_ledger_note_best_effort(
+        &format!("phase \"{phase_id}\" passed"),
+        cwd,
+        &text,
+        &tags,
+        Some(("conductor_phase", payload)),
+    );
 }
 
 /// Record a phase failure event.
+///
+/// See [`record_phase_failed_with_plan`] — this is the plan-less wrapper
+/// kept for call sites that do not have the plan in scope (GH-584).
 pub fn record_phase_failed(cwd: &Path, phase_id: &str, error: &str) {
+    record_phase_failed_with_plan(cwd, None, phase_id, error);
+}
+
+/// [`record_phase_failed`] with the plan name, so the structured ledger
+/// payload carries `plan_id`. Call sites that have the plan in scope should
+/// prefer this variant (GH-584).
+pub fn record_phase_failed_with_plan(
+    cwd: &Path,
+    plan_id: Option<&str>,
+    phase_id: &str,
+    error: &str,
+) {
     let error_str = if error.len() > 200 {
         format!("{}...", truncate_str(error, 200))
     } else {
         error.to_string()
     };
     let text = format!("Phase \"{phase_id}\" failed: {error_str}");
-    record_note(
+    let mut tags = vec!["conductor".to_string(), format!("phase:{phase_id}")];
+    tags.push("failure".to_string());
+    let payload = serde_json::json!({
+        "plan_id": plan_id,
+        "phase_id": phase_id,
+        "status": "failed",
+        "cost_usd": None::<f64>,
+    });
+    append_ledger_note_best_effort(
+        &format!("phase \"{phase_id}\" failed"),
         cwd,
         &text,
-        &["conductor", &format!("phase:{phase_id}"), "failure"],
+        &tags,
+        Some(("conductor_phase", payload)),
+    );
+}
+
+/// Record plan completion in the workspace ledger with the honest total
+/// cost: `total_cost_usd: None` (unmeasured — no phase ever recorded a
+/// measured cost) serializes as JSON null, never 0.0 (#533 discipline).
+///
+/// Wiring note (GH-584): the runner's plan-completion path currently only
+/// writes the plan-local event log; handing this to the lane that owns
+/// `runner/sequential.rs`.
+pub fn record_plan_completed(cwd: &Path, plan_id: &str, total_cost_usd: Option<f64>) {
+    let cost_str = total_cost_usd
+        .map(|c| format!(" [${c:.3}]"))
+        .unwrap_or_default();
+    let text = format!("Plan \"{plan_id}\" completed{cost_str}");
+    let tags = vec!["conductor".to_string(), format!("plan:{plan_id}")];
+    let payload = serde_json::json!({
+        "plan_id": plan_id,
+        "status": "completed",
+        "total_cost_usd": total_cost_usd,
+    });
+    append_ledger_note_best_effort(
+        &format!("plan \"{plan_id}\" completed"),
+        cwd,
+        &text,
+        &tags,
+        Some(("conductor_plan", payload)),
+    );
+}
+
+/// Record plan abort in the workspace ledger (structured
+/// `conductor_plan` payload; see [`record_plan_completed`]).
+pub fn record_plan_aborted(cwd: &Path, plan_id: &str, phases_passed: usize, phases_pending: usize) {
+    let text =
+        format!("Plan \"{plan_id}\" aborted ({phases_passed} passed, {phases_pending} pending)");
+    let mut tags = vec!["conductor".to_string(), format!("plan:{plan_id}")];
+    tags.push("aborted".to_string());
+    let payload = serde_json::json!({
+        "plan_id": plan_id,
+        "status": "aborted",
+        "phases_passed": phases_passed,
+        "phases_pending": phases_pending,
+    });
+    append_ledger_note_best_effort(
+        &format!("plan \"{plan_id}\" aborted"),
+        cwd,
+        &text,
+        &tags,
+        Some(("conductor_plan", payload)),
     );
 }
 
@@ -260,5 +443,219 @@ mod tests {
         // 7 bytes = 2 full chars (6) + 1 byte into 3rd char → back to 6
         assert_eq!(truncate_str(s, 7), "你好");
         assert_eq!(truncate_str(s, 6), "你好");
+    }
+
+    // ── GH-584 regression tests ─────────────────────────────────────
+
+    /// Initialize a throwaway workspace ledger so direct `edda_ledger` writes
+    /// have a workspace to land in (the runner's `ensure_init` normally does
+    /// this at plan start).
+    fn init_test_ledger(dir: &Path) {
+        edda_ledger::Ledger::ensure_initialized(dir).expect("init test workspace ledger");
+    }
+
+    /// All `note` events currently in the throwaway workspace ledger.
+    fn note_events(dir: &Path) -> Vec<edda_core::Event> {
+        edda_ledger::Ledger::open(dir)
+            .expect("open test workspace ledger")
+            .iter_events_by_type("note")
+            .expect("read note events")
+    }
+
+    /// The one conductor phase event written so far, if any.
+    fn conductor_phase_event(dir: &Path) -> Option<edda_core::Event> {
+        note_events(dir)
+            .into_iter()
+            .find(|e| e.payload.get("conductor_phase").is_some())
+    }
+
+    /// GH-584 problem 1: measured phase cost must reach the workspace ledger
+    /// as a structured `cost_usd` field, not as `[$0.123]` prose.
+    #[test]
+    fn phase_done_writes_a_structured_cost_field_into_the_workspace_ledger() {
+        // Pre-fix this test spawns a PATH `edda`; redirect its store so it
+        // cannot touch the operator's registry (GH-417 seam).
+        let _isolation = isolate_store_for_this_process();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_ledger(dir.path());
+
+        record_phase_done(dir.path(), "build", Some("compiled cleanly"), Some(0.123));
+
+        let event = conductor_phase_event(dir.path())
+            .expect("phase done must write a structured conductor_phase payload to the ledger");
+        let payload = &event.payload["conductor_phase"];
+        assert_eq!(payload["phase_id"], "build");
+        assert_eq!(payload["status"], "passed");
+        assert_eq!(
+            payload["cost_usd"],
+            serde_json::json!(0.123),
+            "measured cost must be a structured numeric field"
+        );
+    }
+
+    /// GH-584 problem 1 + #533 discipline: unmeasured cost must be JSON null
+    /// — never the 0.0 sentinel, and never an absent event.
+    #[test]
+    fn unmeasured_phase_cost_is_null_not_a_zero_sentinel() {
+        let _isolation = isolate_store_for_this_process();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_ledger(dir.path());
+
+        record_phase_done(dir.path(), "probe", None, None);
+
+        let event = conductor_phase_event(dir.path())
+            .expect("unmeasured phase must still write a structured event (null cost)");
+        let payload = &event.payload["conductor_phase"];
+        assert_eq!(payload["phase_id"], "probe");
+        assert_eq!(payload["status"], "passed");
+        assert!(
+            payload["cost_usd"].is_null(),
+            "unmeasured cost must serialize as null, got: {}",
+            payload["cost_usd"]
+        );
+    }
+
+    /// #533 discipline: a measured cost of exactly 0.0 is a measurement, not
+    /// "unmeasured" — it must not be flattened into null.
+    #[test]
+    fn measured_zero_cost_is_not_unmeasured() {
+        let _isolation = isolate_store_for_this_process();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_ledger(dir.path());
+
+        record_phase_done(dir.path(), "free", None, Some(0.0));
+
+        let event = conductor_phase_event(dir.path())
+            .expect("zero-cost phase must write a structured event");
+        let payload = &event.payload["conductor_phase"];
+        assert_eq!(
+            payload["cost_usd"],
+            serde_json::json!(0.0),
+            "measured 0.0 must stay 0.0, not collapse into unmeasured null"
+        );
+    }
+
+    /// Phase failures share the structured payload shape (GH-584: the
+    /// `record_phase_failed` path had all three defects too).
+    #[test]
+    fn phase_failed_writes_failed_status_with_null_cost() {
+        let _isolation = isolate_store_for_this_process();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_ledger(dir.path());
+
+        record_phase_failed(dir.path(), "verify", "check engine exploded");
+
+        let event = conductor_phase_event(dir.path())
+            .expect("phase failure must write a structured conductor_phase payload");
+        let payload = &event.payload["conductor_phase"];
+        assert_eq!(payload["phase_id"], "verify");
+        assert_eq!(payload["status"], "failed");
+        assert!(payload["cost_usd"].is_null());
+    }
+
+    /// GH-584 problem 3: plain notes must be written through the
+    /// `edda_ledger` library. The pre-fix path spawned a PATH `edda` binary,
+    /// which stamps role `user` (or, on CI, writes nothing at all).
+    #[test]
+    fn notes_write_through_the_library_with_the_agent_role() {
+        let _isolation = isolate_store_for_this_process();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_ledger(dir.path());
+
+        record_note(dir.path(), "gate approved", &["conductor", "verdict"]);
+
+        let events = note_events(dir.path());
+        let event = events
+            .iter()
+            .find(|e| e.payload["text"] == "gate approved")
+            .expect("record_note must append a note event to the workspace ledger");
+        assert_eq!(
+            event.payload["role"], "agent",
+            "the conductor writes as an agent, not as the user"
+        );
+    }
+
+    /// GH-584 problem 2 (guard): a missing workspace must not panic — the
+    /// wrapper stays best-effort. The failure report itself is asserted by
+    /// `append_ledger_note_...` error tests below.
+    #[test]
+    fn phase_done_on_a_workspaceless_directory_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        record_phase_done(dir.path(), "ghost", None, None);
+        record_phase_failed(dir.path(), "ghost", "boom");
+        record_note(dir.path(), "ghost note", &["conductor"]);
+    }
+
+    /// GH-584 problem 2: the write path itself must surface failure — an
+    /// uninitialized workspace yields a contextual error which the
+    /// best-effort wrappers report on stderr, instead of the old
+    /// `let _ = cmd.status()` silent swallow.
+    #[test]
+    fn ledger_write_fails_loudly_on_an_uninitialized_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = append_ledger_note(dir.path(), "x", &["conductor".to_string()], None)
+            .expect_err("a missing .edda workspace must be an error, not a silent no-op");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("workspace ledger"),
+            "error must name the failing operation, got: {msg}"
+        );
+    }
+
+    /// Plan terminal states get the same structured treatment; the honest
+    /// total cost follows #533 (null = unmeasured).
+    #[test]
+    fn plan_completed_writes_structured_total_cost() {
+        let _isolation = isolate_store_for_this_process();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_ledger(dir.path());
+
+        record_plan_completed(dir.path(), "my-plan", Some(1.5));
+
+        let events = note_events(dir.path());
+        let event = events
+            .iter()
+            .find(|e| e.payload.get("conductor_plan").is_some())
+            .expect("plan completion must write a structured conductor_plan payload");
+        let payload = &event.payload["conductor_plan"];
+        assert_eq!(payload["plan_id"], "my-plan");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["total_cost_usd"], serde_json::json!(1.5));
+    }
+
+    #[test]
+    fn plan_completed_unmeasured_total_is_null() {
+        let _isolation = isolate_store_for_this_process();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_ledger(dir.path());
+
+        record_plan_completed(dir.path(), "my-plan", None);
+
+        let events = note_events(dir.path());
+        let event = events
+            .iter()
+            .find(|e| e.payload.get("conductor_plan").is_some())
+            .expect("unmeasured plan must still write a structured event");
+        assert!(event.payload["conductor_plan"]["total_cost_usd"].is_null());
+    }
+
+    #[test]
+    fn plan_aborted_writes_structured_counts() {
+        let _isolation = isolate_store_for_this_process();
+        let dir = tempfile::tempdir().unwrap();
+        init_test_ledger(dir.path());
+
+        record_plan_aborted(dir.path(), "my-plan", 2, 3);
+
+        let events = note_events(dir.path());
+        let event = events
+            .iter()
+            .find(|e| e.payload.get("conductor_plan").is_some())
+            .expect("plan abort must write a structured conductor_plan payload");
+        let payload = &event.payload["conductor_plan"];
+        assert_eq!(payload["plan_id"], "my-plan");
+        assert_eq!(payload["status"], "aborted");
+        assert_eq!(payload["phases_passed"], 2);
+        assert_eq!(payload["phases_pending"], 3);
     }
 }
