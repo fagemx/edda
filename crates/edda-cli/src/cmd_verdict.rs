@@ -9,7 +9,7 @@
 
 //! Freshness (GH-519 D6): a verdict only satisfies a gate if it postdates
 //! the gate's `gate_entered_at`. Approving a subject BEFORE its gate opens
-//! (a pre-recorded verdict) therefore does not work â the gate ignores any
+//! (a pre-recorded verdict) therefore does not work — the gate ignores any
 //! verdict recorded before it entered `AWAITING_VERDICT`, even for the
 //! matching SHA. Record the verdict after the gate opens; the conductor
 //! prints the exact `edda verdict` command to run.
