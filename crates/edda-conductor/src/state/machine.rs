@@ -17,6 +17,17 @@ pub enum PhaseStatus {
     Stale,
     /// Checks passed but an external verdict gate is holding the phase (D3).
     AwaitingVerdict,
+    /// GH-552: the verdict gate expired with no verdict — the phase's work
+    /// completed and its checks passed, so nothing failed and calling it
+    /// `Failed` erases the audit distinction between "the agent could not do
+    /// the work" and "the work is done, checked, and waiting on a human who
+    /// did not show up". It is also never `Skipped`: the phase ran.
+    ///
+    /// Resolution: with `skip_reason` set the gate was **waived** — the plan
+    /// treats it like a satisfied dependency and the record keeps the honest
+    /// status; without it the plan is blocked and the phase offers
+    /// retry/waive (interactive) or honors `on_gate_timeout` (headless).
+    GateTimedOut,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,6 +157,11 @@ pub enum ErrorType {
     /// work — the gate cannot observe verdicts written to a ledger it
     /// cannot read.
     LedgerUnreadable,
+    /// The verdict gate expired with no verdict (GH-552): the phase's work
+    /// completed and its checks passed — the review, not the work, ran out
+    /// of time. Distinct from `Timeout` (an agent/check timeout, where the
+    /// work itself did not finish).
+    GateTimeout,
 }
 
 impl ErrorType {
@@ -163,6 +179,7 @@ impl ErrorType {
             ErrorType::GateRejected => "gate_rejected",
             ErrorType::Environmental => "environmental",
             ErrorType::LedgerUnreadable => "ledger_unreadable",
+            ErrorType::GateTimeout => "gate_timeout",
         }
     }
 }
@@ -216,11 +233,19 @@ const VALID_TRANSITIONS: &[(PhaseStatus, &[PhaseStatus])] = &[
             // Rejected verdict with on_reject: redispatch runs one more agent
             // turn in the SAME session (D3), so the phase goes back to Running.
             PhaseStatus::Running,
+            // GH-552: the gate expired with no verdict — work completed,
+            // checks passed, nothing failed.
+            PhaseStatus::GateTimedOut,
         ],
     ),
     (PhaseStatus::Failed, &[PhaseStatus::Pending]), // retry
     (PhaseStatus::Stale, &[PhaseStatus::Pending]),  // retry
-                                                    // Passed and Skipped are terminal
+    (
+        PhaseStatus::GateTimedOut,
+        &[PhaseStatus::Pending], // retry (GH-552)
+    ),
+    // Passed and Skipped are terminal; GateTimedOut is resolved in place
+    // (waive = skip_reason set on the same status), never through Skipped.
 ];
 
 fn is_valid_transition(from: PhaseStatus, to: PhaseStatus) -> bool {

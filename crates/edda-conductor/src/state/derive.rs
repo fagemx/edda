@@ -10,16 +10,20 @@ pub fn derive_plan_status(phases: &[crate::state::machine::PhaseState]) -> PlanS
     }) {
         return PlanStatus::Running;
     }
-    if phases
-        .iter()
-        .any(|p| p.status == PhaseStatus::Failed || p.status == PhaseStatus::Stale)
-    {
+    if phases.iter().any(|p| {
+        p.status == PhaseStatus::Failed
+                || p.status == PhaseStatus::Stale
+                // GH-552: an unwaived gate timeout blocks like a failure —
+                // a waived one (skip_reason set) is a resolved dependency.
+                || (p.status == PhaseStatus::GateTimedOut && p.skip_reason.is_none())
+    }) {
         return PlanStatus::Blocked;
     }
-    if phases
-        .iter()
-        .all(|p| p.status == PhaseStatus::Passed || p.status == PhaseStatus::Skipped)
-    {
+    if phases.iter().all(|p| {
+        p.status == PhaseStatus::Passed
+            || p.status == PhaseStatus::Skipped
+            || (p.status == PhaseStatus::GateTimedOut && p.skip_reason.is_some())
+    }) {
         return PlanStatus::Completed;
     }
     PlanStatus::Pending
@@ -109,7 +113,13 @@ pub fn find_next_phase(plan: &Plan, state: &PlanState, order: &[String]) -> Opti
                 .phases
                 .iter()
                 .find(|p| p.id == *dep)
-                .map(|p| p.status == PhaseStatus::Passed || p.status == PhaseStatus::Skipped)
+                .map(|p| {
+                    p.status == PhaseStatus::Passed
+                        || p.status == PhaseStatus::Skipped
+                        // GH-552: a waived gate timeout shipped its commit;
+                        // dependents may run.
+                        || (p.status == PhaseStatus::GateTimedOut && p.skip_reason.is_some())
+                })
                 .unwrap_or(false)
         });
         if deps_ok {
@@ -180,6 +190,46 @@ mod tests {
     fn derive_completed_mixed_passed_skipped() {
         let phases = make_state(&[("a", PhaseStatus::Passed), ("b", PhaseStatus::Skipped)]);
         assert_eq!(derive_plan_status(&phases), PlanStatus::Completed);
+    }
+
+    /// GH-552: an unwaived gate timeout blocks the plan; a waived one
+    /// (skip_reason set) counts as a resolved dependency toward completion.
+    #[test]
+    fn derive_gate_timed_out_waived_vs_unwaived() {
+        let mut unwaived = make_state(&[("a", PhaseStatus::GateTimedOut)]);
+        assert_eq!(derive_plan_status(&unwaived), PlanStatus::Blocked);
+
+        unwaived[0].skip_reason = Some("gate waived".into());
+        assert_eq!(derive_plan_status(&unwaived), PlanStatus::Completed);
+    }
+
+    /// GH-552: a waived gate timeout satisfies dependencies for later
+    /// phases; an unwaived one does not.
+    #[test]
+    fn find_next_phase_treats_waived_gate_timeout_as_satisfied_dep() {
+        let yaml = r#"
+name: test
+phases:
+  - id: a
+    prompt: "x"
+  - id: b
+    prompt: "y"
+    depends_on: [a]
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        state.phases[0].status = PhaseStatus::GateTimedOut;
+        let order = vec!["a".to_string(), "b".to_string()];
+        assert!(
+            find_next_phase(&plan, &state, &order).is_none(),
+            "unwaived gate timeout must not unblock dependents"
+        );
+        state.phases[0].skip_reason = Some("gate waived".into());
+        assert_eq!(
+            find_next_phase(&plan, &state, &order).as_deref(),
+            Some("b"),
+            "waived gate timeout satisfies the dependency"
+        );
     }
 
     #[test]

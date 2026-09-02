@@ -92,6 +92,10 @@ pub struct Phase {
     /// Policy when the gate verdict rejects. Default: redispatch.
     #[serde(default)]
     pub on_reject: OnReject,
+    /// Policy when the gate times out with no verdict (GH-552). Default:
+    /// halt (block for a human).
+    #[serde(default)]
+    pub on_gate_timeout: OnGateTimeout,
     /// Path globs this phase owns as its write surface. Published in the
     /// phase's auto-claim event so peer lanes can see the scope (GH-561).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -116,6 +120,24 @@ pub enum OnReject {
     Redispatch,
     /// Fail the phase with the rejection comment as the error.
     Halt,
+}
+
+/// What happens when a verdict gate times out with no verdict (GH-552).
+/// Lets an unattended run declare the decision in advance instead of
+/// exiting with instructions it cannot follow.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnGateTimeout {
+    /// Move the phase to `GateTimedOut` and block for a human (the
+    /// pre-GH-552 behavior, minus the dishonest `Failed` label). The
+    /// interactive prompt offers retry/waive; headless runs stop and wait
+    /// for the operator.
+    #[default]
+    Halt,
+    /// Auto-waive the gate: the phase keeps its honest `GateTimedOut`
+    /// status with a waiver reason recorded, and the plan proceeds. For
+    /// scheduled sweeps whose gates are reviewed after the fact.
+    Skip,
 }
 
 /// Failure policy for a phase.

@@ -60,6 +60,27 @@ pub enum Event {
         phase_id: String,
         reason: String,
     },
+    /// The verdict gate expired with no verdict (GH-552). Distinct from
+    /// `PhaseFailed` so the audit log can tell "the agent could not do the
+    /// work" from "the work is done, checked, and waiting on a human who
+    /// did not show up". `elapsed_ms` is the real wall time spent in
+    /// AWAITING_VERDICT, not the zero a failure shape produced.
+    GateTimedOut {
+        phase_id: String,
+        gate_sha: String,
+        elapsed_ms: u64,
+    },
+    /// A timed-out gate was waived — by the operator (interactive prompt or
+    /// `edda conduct skip`) or automatically (`on_gate_timeout: skip`). The
+    /// phase keeps its honest `GateTimedOut` status; this records who moved
+    /// the plan past the gate and why (GH-552).
+    GateWaived {
+        phase_id: String,
+        reason: String,
+        /// True when `on_gate_timeout: skip` waived it without a human.
+        #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+        auto: bool,
+    },
     /// A gated phase passed its checks and entered AWAITING_VERDICT (D4).
     GateEntered {
         phase_id: String,

@@ -323,6 +323,7 @@ pub fn build_phase(
         gate: None,
         gate_timeout_sec: None,
         on_reject: Default::default(),
+        on_gate_timeout: Default::default(),
         // A dispatched single turn declares no owned write surface.
         owns: Vec::new(),
     }

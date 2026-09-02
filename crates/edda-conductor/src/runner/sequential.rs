@@ -1,7 +1,7 @@
 use crate::agent::budget::BudgetTracker;
 use crate::agent::launcher::{phase_session_id_attempt, AgentLauncher, PhaseResult};
 use crate::check::engine::{CheckEngine, CheckRunResult};
-use crate::plan::schema::{CheckSpec, OnFail, OnReject, Plan};
+use crate::plan::schema::{CheckSpec, OnFail, OnGateTimeout, OnReject, Plan};
 use crate::plan::topo::topo_sort;
 use crate::runner::edda;
 use crate::runner::event_log::{self, Event, EventLogger};
@@ -114,14 +114,17 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
         }
 
         if is_plan_blocked(state) {
-            let failed = state
-                .phases
-                .iter()
-                .find(|p| p.status == PhaseStatus::Failed || p.status == PhaseStatus::Stale);
+            let failed = state.phases.iter().find(|p| {
+                p.status == PhaseStatus::Failed
+                    || p.status == PhaseStatus::Stale
+                    // GH-552: an unwaived gate timeout blocks like a failure.
+                    || (p.status == PhaseStatus::GateTimedOut && p.skip_reason.is_none())
+            });
             let failed_id = failed.map(|f| f.id.clone()).unwrap_or_default();
+            let failed_status = failed.map(|f| f.status).unwrap_or(PhaseStatus::Failed);
 
             if interactive {
-                match prompt_blocked_action(&failed_id) {
+                match prompt_blocked_action(&failed_id, failed_status) {
                     BlockedAction::Retry => {
                         let current = state
                             .get_phase(&failed_id)
@@ -155,6 +158,50 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                             ))
                             .await;
                         println!("  ⊘ Skipped \"{failed_id}\"");
+                        continue;
+                    }
+                    BlockedAction::Waive => {
+                        // GH-552: the phase ran, its checks passed, and its
+                        // gate timed out — record a waiver on the honest
+                        // GateTimedOut status, never a false Skipped.
+                        let (gate_sha, entered_at) = {
+                            let ps = state.get_phase(&failed_id)?;
+                            (
+                                ps.gate_sha.clone().unwrap_or_default(),
+                                ps.gate_entered_at.clone(),
+                            )
+                        };
+                        let waited = entered_at
+                            .and_then(|t| {
+                                time::OffsetDateTime::parse(
+                                    &t,
+                                    &time::format_description::well_known::Rfc3339,
+                                )
+                                .ok()
+                            })
+                            .map(|t| {
+                                std::time::Duration::from_secs(
+                                    (time::OffsetDateTime::now_utc() - t).whole_seconds().max(0)
+                                        as u64,
+                                )
+                            })
+                            .map(format_elapsed)
+                            .unwrap_or_else(|| "unknown".into());
+                        let reason = format!(
+                            "gate waived after timeout: work completed and checks passed (commit {gate_sha}); waited {waited}"
+                        );
+                        let ps = state.get_phase_mut(&failed_id)?;
+                        ps.skip_reason = Some(reason.clone());
+                        state.plan_status = PlanStatus::Running;
+                        save_state_reconciled(cwd, state)?;
+                        event_log.record(Event::GateWaived {
+                            phase_id: failed_id.clone(),
+                            reason: reason.clone(),
+                            auto: false,
+                        });
+                        println!(
+                            "  ⧗ Waived gate on \"{failed_id}\" (status kept as GateTimedOut)"
+                        );
                         continue;
                     }
                     BlockedAction::Abort => {
@@ -500,8 +547,25 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                     }
                 }
                 GateVerdict::TimedOut => {
-                    // D3: distinct "gate timed out" failure — NOT silent,
-                    // NOT auto-approve.
+                    // D3: NOT silent, NOT auto-approve. GH-552: also not a
+                    // phase failure — the work completed and its checks
+                    // passed, so the honest terminal state is GateTimedOut
+                    // with the real elapsed gate time, and the plan's
+                    // on_gate_timeout policy decides what happens next.
+                    let elapsed_ms = time::OffsetDateTime::parse(
+                        &entered_at,
+                        &time::format_description::well_known::Rfc3339,
+                    )
+                    .ok()
+                    .and_then(|t| {
+                        let elapsed = time::OffsetDateTime::now_utc() - t;
+                        if elapsed.whole_seconds() < 0 {
+                            None
+                        } else {
+                            Some(elapsed.whole_seconds() as u64 * 1000)
+                        }
+                    })
+                    .unwrap_or(0);
                     let msg = format!(
                         "gate timed out: no verdict for \"{subject}\" (sha {gate_sha}) within {}s",
                         phase.gate_timeout_sec.unwrap_or(0)
@@ -510,10 +574,10 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         state,
                         &gated_id,
                         PhaseStatus::AwaitingVerdict,
-                        PhaseStatus::Failed,
+                        PhaseStatus::GateTimedOut,
                         Some(PhaseUpdate {
                             error: Some(ErrorInfo {
-                                error_type: ErrorType::Timeout,
+                                error_type: ErrorType::GateTimeout,
                                 message: msg.clone(),
                                 retryable: false,
                                 check_index: None,
@@ -524,7 +588,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                     )?;
                     println!("  ⏰ Phase \"{gated_id}\" {msg}");
                     if let Some(tmux) = tmux_session {
-                        let _ = tmux.update_phase_status(&gated_id, "Failed");
+                        let _ = tmux.update_phase_status(&gated_id, "GateTimedOut");
                     }
                     let gate_cost = state.get_phase(&gated_id).ok().and_then(|p| p.cost_usd);
                     edda::record_phase_failed_with_plan(
@@ -534,29 +598,46 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         gate_cost,
                         &msg,
                     );
-                    let gate_ps = state.get_phase(&gated_id)?;
-                    event_log.record(Event::PhaseFailed {
+                    event_log.record(Event::GateTimedOut {
                         phase_id: gated_id.clone(),
-                        attempt: gate_ps.attempts,
-                        duration_ms: 0,
-                        error: msg,
-                        error_type: Some(ErrorType::Timeout.tag().to_string()),
-                        env_retries: gate_ps.env_retries,
-                        attempt_charged: true,
+                        gate_sha: gate_sha.clone(),
+                        elapsed_ms,
                     });
                     // GH-564 P1-3: same parked output as the approved branch.
                     // Consume the sidecar with the verdict (GH-564 Round-2 P1).
                     let final_output = load_gate_output(cwd, &plan.name, &gated_id);
                     clear_gate_output(cwd, &plan.name, &gated_id);
+                    let gate_ps = state.get_phase(&gated_id)?;
                     notifier
                         .notify_phase_terminal(phase_terminal_event(
                             &plan.name,
                             &gated_id,
-                            "Failed",
+                            "GateTimedOut",
                             gate_ps.attempts,
                             final_output.as_deref(),
                         ))
                         .await;
+
+                    // GH-552 policy: let an unattended run declare the
+                    // decision in advance instead of exiting with
+                    // instructions it cannot follow.
+                    if phase.on_gate_timeout == OnGateTimeout::Skip {
+                        let reason = format!(
+                            "gate waived after timeout ({} waited, {}s configured): work completed and checks passed; auto-waived by on_gate_timeout: skip",
+                            format_elapsed(std::time::Duration::from_millis(elapsed_ms)),
+                            phase.gate_timeout_sec.unwrap_or(0)
+                        );
+                        let ps = state.get_phase_mut(&gated_id)?;
+                        ps.skip_reason = Some(reason.clone());
+                        event_log.record(Event::GateWaived {
+                            phase_id: gated_id.clone(),
+                            reason: reason.clone(),
+                            auto: true,
+                        });
+                        println!(
+                            "  ⧗ Gate auto-waived for \"{gated_id}\" (on_gate_timeout: skip) — plan proceeds"
+                        );
+                    }
                 }
                 GateVerdict::LedgerUnreadable(err) => {
                     // GH-541: the gate could not read the ledger persistently
@@ -1923,6 +2004,7 @@ fn build_plan_context(plan: &Plan, state: &PlanState, current_phase: &str) -> St
             PhaseStatus::AwaitingVerdict => "⏸",
             PhaseStatus::Skipped => "⊘",
             PhaseStatus::Stale => "⏰",
+            PhaseStatus::GateTimedOut => "⧗",
             PhaseStatus::Pending => {
                 if ps.id == current_phase {
                     "▶"
@@ -1939,12 +2021,40 @@ fn build_plan_context(plan: &Plan, state: &PlanState, current_phase: &str) -> St
 enum BlockedAction {
     Retry,
     Skip,
+    /// GH-552: move the plan past a timed-out gate WITHOUT recording the
+    /// phase as Skipped — the phase keeps its honest `GateTimedOut` status
+    /// with a waiver reason.
+    Waive,
     Abort,
     Quit,
 }
 
-fn prompt_blocked_action(phase_id: &str) -> BlockedAction {
+fn prompt_blocked_action(phase_id: &str, status: PhaseStatus) -> BlockedAction {
     use std::io::{BufRead, Write};
+    if status == PhaseStatus::GateTimedOut {
+        // GH-552: the work completed and checks passed — "skip" would lie.
+        // Offer waive instead, and record it as such.
+        println!("\n  Phase \"{phase_id}\" gate timed out (work completed, checks passed).\n");
+        println!(
+            "  [R] Retry (re-run the phase)   [W] Waive the gate (proceed)   [A] Abort   [Q] Quit (resume later)"
+        );
+        loop {
+            print!("  > ");
+            let _ = std::io::stdout().flush();
+            let mut input = String::new();
+            match std::io::stdin().lock().read_line(&mut input) {
+                Ok(0) | Err(_) => return BlockedAction::Quit, // EOF or error
+                _ => {}
+            }
+            match input.trim().to_lowercase().as_str() {
+                "r" | "retry" => return BlockedAction::Retry,
+                "w" | "waive" => return BlockedAction::Waive,
+                "a" | "abort" => return BlockedAction::Abort,
+                "q" | "quit" => return BlockedAction::Quit,
+                _ => println!("  Invalid choice. Enter R, W, A, or Q."),
+            }
+        }
+    }
     println!("\n  Phase \"{phase_id}\" is blocked.\n");
     println!("  [R] Retry   [S] Skip   [A] Abort   [Q] Quit (resume later)");
     loop {
@@ -4413,7 +4523,7 @@ phases:
     }
 
     #[tokio::test]
-    async fn gate_timeout_fails_distinctly() {
+    async fn gate_timeout_records_honest_gate_timed_out_state() {
         let root = fresh_root("timeout");
         init_git_repo(&root);
         // No verdict will ever arrive.
@@ -4438,26 +4548,109 @@ phases:
         .unwrap()
         .unwrap();
 
+        // GH-552: the work completed and its checks passed — the timeout is
+        // NOT a phase failure and NOT a skip. The persisted status and the
+        // event log both carry the honest classification.
         let phase = &state.phases[0];
-        assert_eq!(phase.status, PhaseStatus::Failed);
+        assert_eq!(phase.status, PhaseStatus::GateTimedOut);
         let err = phase
             .error
             .as_ref()
             .expect("gate timeout must set an error");
-        assert_eq!(err.error_type, ErrorType::Timeout);
+        assert_eq!(err.error_type, ErrorType::GateTimeout);
         assert!(
             err.message.contains("gate timed out"),
             "distinct gate timeout error, got: {}",
             err.message
         );
         assert_eq!(state.plan_status, PlanStatus::Blocked);
-        // GH-564: the gate timeout failure emits exactly one terminal
-        // notification.
+        // The event log records GateTimedOut with the real elapsed time.
+        let events =
+            std::fs::read_to_string(root.join(".edda/conductor/gated/events.jsonl")).unwrap();
+        assert!(
+            events.contains("gate_timed_out"),
+            "event log must classify the gate timeout: {events}"
+        );
+        let gate_event = events
+            .lines()
+            .find(|l| l.contains("gate_timed_out"))
+            .unwrap();
+        let elapsed = serde_json::from_str::<serde_json::Value>(gate_event).unwrap()["elapsed_ms"]
+            .as_u64()
+            .expect("elapsed_ms must be a number");
+        assert!(
+            elapsed >= 1000,
+            "elapsed_ms must reflect the real gate wait, got {elapsed}"
+        );
+        // GH-564: the gate timeout emits exactly one terminal notification,
+        // now carrying the honest status name.
         let tv = terminal_view(&notifier.terminal_events());
         assert_eq!(tv.len(), 1, "exactly one terminal notification: {tv:?}");
         assert_eq!(
             (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
-            ("a", "Failed", 1)
+            ("a", "GateTimedOut", 1)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-552: `on_gate_timeout: skip` lets an unattended run declare the
+    /// decision in advance — the gate is auto-waived (honest status kept,
+    /// waiver reason recorded) and the plan proceeds to dependents.
+    #[tokio::test]
+    async fn on_gate_timeout_skip_auto_waives_and_plan_proceeds() {
+        let root = fresh_root("autoskip");
+        init_git_repo(&root);
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "b",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some("done".into()),
+            }],
+        );
+        let yaml = r#"
+name: autoskip
+timeout_sec: 600
+phases:
+  - id: a
+    prompt: "do it"
+    gate: verdict
+    gate_timeout_sec: 1
+    on_gate_timeout: skip
+  - id: b
+    prompt: "next"
+    depends_on: [a]
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let state = PlanState::from_plan(&plan, "test.yaml");
+        let (state, _notifier, launcher) = tokio::time::timeout(
+            GATE_TEST_DEADLINE,
+            spawn_runner(yaml, root.clone(), launcher, state),
+        )
+        .await
+        .expect("gate test exceeded 30s")
+        .unwrap()
+        .unwrap();
+
+        let phase_a = &state.phases[0];
+        assert_eq!(phase_a.status, PhaseStatus::GateTimedOut);
+        let reason = phase_a
+            .skip_reason
+            .as_ref()
+            .expect("auto-waive must record the waiver reason");
+        assert!(reason.contains("auto-waived"), "{reason}");
+        assert!(reason.contains("checks passed"), "{reason}");
+        // The plan proceeded past the waived gate.
+        assert_eq!(state.plan_status, PlanStatus::Completed);
+        assert_eq!(state.phases[1].status, PhaseStatus::Passed);
+        assert_eq!(launcher.call_count("b"), 1, "dependent phase dispatched");
+        // The event log records the automatic waiver.
+        let events =
+            std::fs::read_to_string(root.join(".edda/conductor/autoskip/events.jsonl")).unwrap();
+        assert!(events.contains("gate_waived"), "{events}");
+        assert!(
+            events.contains("\"auto\":true"),
+            "the auto waiver must be marked automatic: {events}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4700,12 +4893,12 @@ phases:
             2,
             "exactly ONE redispatch — the stale rejection must not re-satisfy the re-entered gate"
         );
-        assert_eq!(state.phases[0].status, PhaseStatus::Failed);
+        assert_eq!(state.phases[0].status, PhaseStatus::GateTimedOut);
         let err = state.phases[0]
             .error
             .as_ref()
             .expect("gate timeout must set an error");
-        assert_eq!(err.error_type, ErrorType::Timeout);
+        assert_eq!(err.error_type, ErrorType::GateTimeout);
         assert!(
             err.message.contains("gate timed out"),
             "distinct gate timeout error, got: {}",
