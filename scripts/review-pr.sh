@@ -349,7 +349,16 @@ if [ "$IS_WIN" = "1" ]; then
   BRIEFW=$(cygpath -w "$BRIEF")
   LOGW=$(cygpath -w "$LOG")
   DONEW=$(cygpath -w "$DONE")
+  ERRW=$(cygpath -w "$DONE.err")
   LANE_FILE_ARG=$(cygpath -w "$LANE")
+  # Resolve pwsh to a full Windows path for the task action: on a Store (MSIX)
+  # install the bare "pwsh.exe" execution alias does not launch under Task
+  # Scheduler — the task dies with LastTaskResult=0x80070002 before the lane
+  # runs. Optional so offline dry-runs on machines without pwsh still work.
+  PWSH_EXE="pwsh.exe"
+  if command -v pwsh >/dev/null 2>&1; then
+    PWSH_EXE=$(cygpath -w "$(command -v pwsh)")
+  fi
   echo "lane_file_arg=$LANE_FILE_ARG"
 
   # LANE_FILE_ARG (above) is the cygpath -w form of $LANE. Building the task's
@@ -362,8 +371,39 @@ if [ "$IS_WIN" = "1" ]; then
 \$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 \$env:HOME = \$env:USERPROFILE
 Set-Location '$WTW'
-& edda dispatch --agent claude --model '$MODEL' --exclude-tools 'Edit,Write,NotebookEdit' --session-id '$SID' --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
-"DISPATCH_EXIT=\$LASTEXITCODE" | Out-File "$DONEW" -Encoding utf8
+# edda dispatch hands the prompt to 'claude -p' as a command-line argument,
+# and Windows caps a command line at 32767 chars — an oversized brief dies in
+# the spawn with os error 206 before claude starts. Under that budget the
+# transport stays edda dispatch (fleet.review-backend); over it, fall back to
+# the recorded fleet.review-engine-model invocation shape (the brief piped to
+# claude via stdin) with the same model pin, tool denial and log contract.
+\$briefChars = (Get-Content -Raw "$BRIEFW").Length
+if (\$briefChars -lt 30000) {
+  & edda dispatch --agent claude --model '$MODEL' --exclude-tools 'Edit,Write,NotebookEdit' --session-id '$SID' --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
+  "DISPATCH_EXIT=\$LASTEXITCODE" | Out-File "$DONEW" -Encoding utf8
+  exit \$LASTEXITCODE
+}
+\$raw = Get-Content -Raw "$BRIEFW"
+\$json = \$raw | & claude -p --model '$MODEL' --output-format json --session-id '$SID' --permission-mode bypassPermissions --disallowedTools 'Edit,Write,NotebookEdit' 2>"$ERRW"
+\$code = \$LASTEXITCODE
+\$r = \$null
+try { \$r = \$json | ConvertFrom-Json } catch { }
+if (\$r -and \$r.result) {
+  \$r.result | Out-File -FilePath "$LOGW" -Encoding utf8
+  \$mu = @(\$r.modelUsage.PSObject.Properties.Name) | Select-Object -First 1
+  if (-not \$mu) { \$mu = 'unknown' }
+  Add-Content -Path "$LOGW" -Value 'Model requested: $MODEL' -Encoding utf8
+  Add-Content -Path "$LOGW" -Value "Model observed: \$mu" -Encoding utf8
+  if (\$null -ne \$r.total_cost_usd) {
+    Add-Content -Path "$LOGW" -Value ("Cost: \$" + [math]::Round(\$r.total_cost_usd, 2)) -Encoding utf8
+  }
+  Add-Content -Path "$LOGW" -Value "Session: \$(\$r.session_id)" -Encoding utf8
+} else {
+  \$json | Out-File -FilePath "$LOGW" -Encoding utf8
+}
+if (Test-Path "$ERRW") { Get-Content "$ERRW" | Add-Content -Path "$LOGW" -Encoding utf8; Remove-Item "$ERRW" -ErrorAction SilentlyContinue }
+"DISPATCH_EXIT=\$code" | Out-File "$DONEW" -Encoding utf8
+exit \$code
 PS
 else
   # Linux: no job-object trap, plain nohup is enough.
@@ -371,8 +411,32 @@ else
 #!/bin/sh
 export HOME="\${HOME:-$(getent passwd "\$(id -u)" 2>/dev/null | cut -d: -f6)}"
 cd '$WT' || exit 1
-edda dispatch --agent claude --model '$MODEL' --exclude-tools 'Edit,Write,NotebookEdit' --session-id '$SID' --prompt-file '$BRIEF' > '$LOG' 2>&1
-echo "DISPATCH_EXIT=\$?" > '$DONE'
+# Same size guard as the Windows lane (see there): edda dispatch while the
+# brief fits the Windows-shaped spawn budget, claude-via-stdin above it.
+chars=\$(wc -m < '$BRIEF')
+if [ "\$chars" -lt 30000 ]; then
+  edda dispatch --agent claude --model '$MODEL' --exclude-tools Edit,Write,NotebookEdit --session-id '$SID' --prompt-file '$BRIEF' > '$LOG' 2>&1
+  code=\$?
+  echo "DISPATCH_EXIT=\$code" > '$DONE'
+  exit \$code
+fi
+claude -p --model '$MODEL' --output-format json --session-id '$SID' --permission-mode bypassPermissions --disallowedTools Edit,Write,NotebookEdit < '$BRIEF' > '$LOG.json' 2>'$LOG.err'
+code=\$?
+if command -v jq >/dev/null 2>&1; then
+  jq -r '.result // empty' '$LOG.json' > '$LOG'
+  mu=\$(jq -r '.modelUsage | keys[0] // "unknown"' '$LOG.json')
+  printf 'Model requested: %s\n' '$MODEL' >> '$LOG'
+  printf 'Model observed: %s\n' "\$mu" >> '$LOG'
+  jq -r 'if .total_cost_usd != null then "Cost: \$" + ((.total_cost_usd * 100 | round) / 100 | tostring) else empty end' '$LOG.json' >> '$LOG'
+  jq -r '"Session: " + (.session_id // "")' '$LOG.json' >> '$LOG'
+else
+  cp '$LOG.json' '$LOG'
+fi
+[ -s '$LOG' ] || cp '$LOG.json' '$LOG'
+[ -f '$LOG.err' ] && cat '$LOG.err' >> '$LOG'
+rm -f '$LOG.json' '$LOG.err'
+echo "DISPATCH_EXIT=\$code" > '$DONE'
+exit \$code
 RUN
   sh -n "$RUNNER" || exit 1
   chmod +x "$RUNNER"
@@ -421,7 +485,7 @@ if [ "$IS_WIN" = "1" ]; then
   cat > "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" <<PS
 foreach (\$f in @("$LOGW", "$DONEW")) { if (Test-Path \$f) { [System.IO.File]::Delete(\$f) } }
 Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue
-\$action = New-ScheduledTaskAction -Execute "pwsh.exe" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$LANE_FILE_ARG\`"" -WorkingDirectory '$WTW'
+\$action = New-ScheduledTaskAction -Execute "$PWSH_EXE" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$LANE_FILE_ARG\`"" -WorkingDirectory '$WTW'
 \$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited | Out-Null
 Start-ScheduledTask -TaskName '$TASK'

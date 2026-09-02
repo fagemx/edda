@@ -40,7 +40,7 @@
 判決死掉或空白（log 沒有 verdict 區塊、zero-byte log、或超過 45 分鐘沒有 `.done`）時：
 
 1. **同運輸重試一次**（同一個 `--model`）；重試**之前**先跑帳本決策指定的探測：
-   `edda dispatch --agent claude --model $EDDA_REVIEW_MODEL --prompt-file <probe> "reply OK"`（120 秒逾時）——
+   把 `reply OK` 寫進 probe 檔後跑 `edda dispatch --agent claude --model $EDDA_REVIEW_MODEL --prompt-file <probe>`（120 秒逾時；`edda dispatch` 不收位置參數 prompt，probe 檔內容就是 prompt）——
    探測失敗就直接對該 head 標 `review:unreviewed` 並停，不浪費第二次完整審查；探測通過才重試；
 2. 還是拿不到判決：label `review:unreviewed`，**該 head 停手**。
    未審查是誠實的狀態，便宜模型的判決不是。

@@ -105,7 +105,7 @@ export REVIEW_STUB_LOG="$tmp/review-stub.log"
 export PATH="$STUBBIN:$PATH"
 
 reset_stubs() {
-    : >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$REVIEW_STUB_LOG"
+    : >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$EDDA_STUB_LOG"; : >"$REVIEW_STUB_LOG"
     unset GH_FAIL_COMMENT_FIRST GH_FAIL_COMMENT_ALWAYS GH_FAIL_EDIT GH_FAIL_HEAD \
           GH_PR_LIST_FILE GH_HEAD GH_HEAD_FILE DISPATCH_FAIL_PROBE 2>/dev/null || true
     rm -f "$EDDA_FLEET_SCRATCH"/review-* 2>/dev/null || true
@@ -409,7 +409,7 @@ fi
 
 reset_stubs
 pending_set 42 1 "$sha" 0 0
-printf 'PI_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'DISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 printf 'Codex error: our servers are currently overloaded, please try again later.\n' \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
 
@@ -435,7 +435,7 @@ unset DISPATCH_FAIL_PROBE
 
 reset_stubs
 pending_set 42 1 "$sha" 0 0
-printf 'PI_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'DISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 printf 'Codex error: our servers are currently overloaded, please try again later.\n' \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (probe OK)\n' >&2; exit 1; }
