@@ -59,6 +59,10 @@ pub struct MonitorResult {
     pub total_cost_usd: f64,
     pub result: Option<ResultInfo>,
     pub result_text: Option<String>,
+    /// The model the backend itself reported in the `system/init` message,
+    /// if any. In-band observation only — `None` means claude did not
+    /// report one (GH-574).
+    pub model: Option<String>,
 }
 
 /// Reads Claude Code's `--output-format stream-json` stdout line by line,
@@ -158,11 +162,16 @@ impl StreamMonitor {
             _ => None,
         });
         let result_text = result_info.as_ref().and_then(|r| r.result_text.clone());
+        let model = self.messages.iter().rev().find_map(|m| match m {
+            StreamMessage::System { model: Some(m), .. } => Some(m.clone()),
+            _ => None,
+        });
 
         Ok(MonitorResult {
             total_cost_usd: self.total_cost_usd,
             result: result_info,
             result_text,
+            model,
         })
     }
 }
@@ -375,6 +384,7 @@ mod tests {
                 result_text: None,
             }),
             result_text: None,
+            model: None,
         };
         let r = classify_result(&monitor, Some(0));
         assert!(
@@ -393,6 +403,7 @@ mod tests {
                 result_text: None,
             }),
             result_text: None,
+            model: None,
         };
         let r = classify_result(&monitor, Some(1));
         assert!(matches!(r, PhaseResult::MaxTurns { .. }));
@@ -409,6 +420,7 @@ mod tests {
                 result_text: None,
             }),
             result_text: None,
+            model: None,
         };
         let r = classify_result(&monitor, Some(1));
         assert!(matches!(r, PhaseResult::BudgetExceeded { .. }));
@@ -425,6 +437,7 @@ mod tests {
                 result_text: None,
             }),
             result_text: None,
+            model: None,
         };
         let r = classify_result(&monitor, Some(1));
         match r {
@@ -444,6 +457,7 @@ mod tests {
                 result_text: None,
             }),
             result_text: None,
+            model: None,
         };
         let r = classify_result(&monitor, Some(2));
         assert!(matches!(r, PhaseResult::AgentCrash { .. }));
@@ -455,6 +469,7 @@ mod tests {
             total_cost_usd: 0.0,
             result: None,
             result_text: None,
+            model: None,
         };
         let r = classify_result(&monitor, Some(137));
         match r {
@@ -471,6 +486,7 @@ mod tests {
             total_cost_usd: 0.0,
             result: None,
             result_text: None,
+            model: None,
         };
         let r = classify_result(&monitor, None);
         match r {

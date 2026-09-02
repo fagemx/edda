@@ -238,6 +238,9 @@ pub fn run(
             // persisted binding could leak a stale thread/resume into a
             // later invocation and every turn would gain store I/O.
             persistent_codex_threads: false,
+            // Conduct has no session-dir surface (GH-574); pi uses its own
+            // default session storage under conduct.
+            session_dir: None,
         },
     )?;
     let engine = CheckEngine::new(cwd.clone());

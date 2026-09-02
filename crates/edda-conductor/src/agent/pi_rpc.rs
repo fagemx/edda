@@ -58,10 +58,14 @@ fn default_pi_bin() -> PathBuf {
 pub struct PiRpcLauncher {
     pub pi_bin: PathBuf,
     pub verbose: bool,
-    /// Optional `--model` pattern (e.g. `provider/id`).
+    /// Optional `--model` pattern (e.g. `provider/id`). Fallback for the
+    /// per-phase `phase.model` declaration, which takes precedence (GH-574).
     pub model: Option<String>,
     /// Optional `--session-dir` for pi session storage.
     pub session_dir: Option<PathBuf>,
+    /// In-band model report from the most recent settled turn (RPC
+    /// `get_state`), for [`AgentLauncher::last_observed_model`].
+    observed_model: std::sync::Mutex<Option<String>>,
 }
 
 impl Default for PiRpcLauncher {
@@ -77,6 +81,7 @@ impl PiRpcLauncher {
             verbose: false,
             model: None,
             session_dir: None,
+            observed_model: std::sync::Mutex::new(None),
         }
     }
 
@@ -86,6 +91,13 @@ impl PiRpcLauncher {
             verbose: false,
             model: None,
             session_dir: None,
+            observed_model: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn record_observed_model(&self, model: Option<String>) {
+        if let Ok(mut slot) = self.observed_model.lock() {
+            *slot = model;
         }
     }
 
@@ -122,6 +134,32 @@ impl PiRpcLauncher {
         }
     }
 
+    /// Resolve the effective model for one phase: the per-phase declaration
+    /// wins (it is the more specific, per-turn contract); the builder value
+    /// is the fallback. Callers must have rejected the thinking-level /
+    /// model-suffix conflict beforehand.
+    fn effective_model(&self, phase: &Phase) -> Option<String> {
+        phase.model.clone().or_else(|| self.model.clone())
+    }
+
+    /// GH-574: pi's model pattern can embed a thinking level
+    /// (`provider/id:high`) and pi also has a separate `--thinking` flag.
+    /// edda refuses the ambiguous combination instead of guessing which
+    /// one wins.
+    fn validate_phase(&self, phase: &Phase) -> Result<()> {
+        if let (Some(level), Some(model)) = (&phase.thinking, &self.effective_model(phase)) {
+            if model.contains(':') {
+                anyhow::bail!(
+                    "phase {:?} declares both thinking level {level:?} and model pattern \
+                     {model:?} with an embedded `:<thinking>` suffix; drop one — they are two \
+                     spellings of the same setting and edda refuses to guess",
+                    phase.id
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn build_command(&self, phase: &Phase, session_id: &str, cwd: &Path) -> Command {
         let mut cmd = Command::new(&self.pi_bin);
         cmd.arg("--mode")
@@ -141,11 +179,24 @@ impl PiRpcLauncher {
             // Propagate session_id so agent-spawned `edda decide` etc. can resolve identity
             .env("EDDA_SESSION_ID", session_id);
 
-        if let Some(model) = &self.model {
+        if let Some(model) = &self.effective_model(phase) {
             cmd.arg("--model").arg(model);
         }
         if let Some(dir) = &self.session_dir {
             cmd.arg("--session-dir").arg(dir);
+        }
+        // GH-574: per-phase model / thinking / tool policy. Tools are
+        // comma-joined per pi's own `--tools a,b` syntax. Note `--tools` is
+        // an allowlist that replaces pi's default tool set, while
+        // `--exclude-tools` only removes from it.
+        if let Some(level) = &phase.thinking {
+            cmd.arg("--thinking").arg(level);
+        }
+        if let Some(tools) = &phase.tools {
+            cmd.arg("--tools").arg(tools.join(","));
+        }
+        if let Some(tools) = &phase.exclude_tools {
+            cmd.arg("--exclude-tools").arg(tools.join(","));
         }
 
         for (k, v) in &phase.env {
@@ -166,9 +217,10 @@ impl AgentLauncher for PiRpcLauncher {
         cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult> {
+        self.validate_phase(phase)?;
         let command = self.build_command(phase, session_id, cwd);
         let timeout_sec = phase.timeout_sec.unwrap_or(1800);
-        run_command(
+        let (result, observed) = run_command(
             command,
             phase,
             prompt,
@@ -177,11 +229,24 @@ impl AgentLauncher for PiRpcLauncher {
             Duration::from_secs(timeout_sec),
             cancel,
         )
-        .await
+        .await?;
+        // In-band model observation: whatever pi itself reported via RPC
+        // `get_state`, or nothing. Never inferred from config or sessions.
+        self.record_observed_model(observed);
+        Ok(result)
+    }
+
+    fn last_observed_model(&self) -> Option<String> {
+        self.observed_model
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 }
 
 /// Run one phase against a pre-built command (injectable for tests).
+/// Returns the phase result plus the model pi reported in-band via RPC
+/// `get_state`, if the turn settled and pi exposed one (GH-574).
 async fn run_command(
     command: Command,
     phase: &Phase,
@@ -190,7 +255,7 @@ async fn run_command(
     verbose: bool,
     timeout: Duration,
     cancel: CancellationToken,
-) -> Result<PhaseResult> {
+) -> Result<(PhaseResult, Option<String>)> {
     let mut session = PiRpcSession::spawn_command(command).await?;
     // pi has no system-prompt flag in RPC mode; carry plan context inline.
     let message = if plan_context.is_empty() {
@@ -201,8 +266,42 @@ async fn run_command(
     let result = session
         .run_turn(&message, phase.budget_usd, timeout, verbose, &cancel)
         .await;
+    // Only a settled turn is asked for state; a crashed turn has nothing
+    // trustworthy to report.
+    let observed = if matches!(result, Ok(PhaseResult::AgentDone { .. })) {
+        session.observed_model().await
+    } else {
+        None
+    };
     session.terminate().await;
-    result
+    let result = result?;
+    Ok((result, observed))
+}
+
+/// Run `pi --list-models [search]` and return its stdout verbatim — the
+/// query path that lets callers look up available provider/model pairs
+/// instead of guessing a provider prefix (GH-574).
+pub fn list_models(pi_bin: Option<PathBuf>, search: Option<&str>) -> Result<String> {
+    let mut cmd = std::process::Command::new(pi_bin.unwrap_or_else(default_pi_bin));
+    cmd.arg("--list-models");
+    if let Some(term) = search {
+        if !term.is_empty() {
+            cmd.arg(term);
+        }
+    }
+    let output = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .context("failed to run pi --list-models")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "pi --list-models failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// One live `pi --mode rpc` process speaking JSONL.
@@ -426,6 +525,18 @@ impl PiRpcSession {
         })
     }
 
+    /// Ask pi for its current state and extract the in-band model report
+    /// (`provider/id`) per the RPC `get_state` contract. Any failure —
+    /// transport error, missing fields — renders as `None` ("unknown"),
+    /// never a guess (GH-574 honesty rule).
+    async fn observed_model(&mut self) -> Option<String> {
+        let state = self.request(json!({ "type": "get_state" })).await.ok()?;
+        let model = state.get("model")?;
+        let provider = model.get("provider").and_then(Value::as_str)?;
+        let id = model.get("id").and_then(Value::as_str)?;
+        Some(format!("{provider}/{id}"))
+    }
+
     /// Send one RPC command and wait for its matching response.
     /// Events interleaved before the response are ignored.
     async fn request(&mut self, mut command: Value) -> Result<Value> {
@@ -639,6 +750,8 @@ mod tests {
     const SETTLED: &str = r#"{"type":"agent_settled"}"#;
     const STATS_042: &str = r#"{"id":"req-2","type":"response","command":"get_session_stats","success":true,"data":{"cost":0.42}}"#;
     const STATS_990: &str = r#"{"id":"req-2","type":"response","command":"get_session_stats","success":true,"data":{"cost":9.9}}"#;
+    const STATE_GPT56: &str = r#"{"id":"req-3","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"openai-codex","id":"gpt-5.6-sol"},"thinkingLevel":"high"}}"#;
+    const STATE_NULL: &str = r#"{"id":"req-3","type":"response","command":"get_state","success":true,"data":{"model":null}}"#;
     const STARTUP_DIAGNOSTIC: &str = "pi: no API key configured for provider openrouter";
 
     fn delta_line(usage_cost: &str, text: &str) -> String {
@@ -650,6 +763,8 @@ mod tests {
     #[derive(Clone, Copy)]
     enum FakeScenario {
         Normal,
+        /// Like Normal, but pi reports no model in `get_state`.
+        NormalNoModel,
         BudgetAfterSettle,
         BudgetMidRun,
         PromptRejected,
@@ -668,7 +783,11 @@ mod tests {
     fn body_for(scenario: FakeScenario) -> String {
         match scenario {
             FakeScenario::Normal => format!(
-                "read_cmd\nwrite_line '{PROMPT_OK}'\nwrite_line '{}'\nwrite_line '{SETTLED}'\nread_cmd\nwrite_line '{STATS_042}'\nsleep 60",
+                "read_cmd\nwrite_line '{PROMPT_OK}'\nwrite_line '{}'\nwrite_line '{SETTLED}'\nread_cmd\nwrite_line '{STATS_042}'\nread_cmd\nwrite_line '{STATE_GPT56}'\nsleep 60",
+                delta_line("0.10", "phase done")
+            ),
+            FakeScenario::NormalNoModel => format!(
+                "read_cmd\nwrite_line '{PROMPT_OK}'\nwrite_line '{}'\nwrite_line '{SETTLED}'\nread_cmd\nwrite_line '{STATS_042}'\nread_cmd\nwrite_line '{STATE_NULL}'\nsleep 60",
                 delta_line("0.10", "phase done")
             ),
             FakeScenario::BudgetAfterSettle => format!(
@@ -694,7 +813,7 @@ mod tests {
             FakeScenario::CloseStdoutAndLive => "exec 1>&-\nsleep 60".to_owned(),
             #[cfg(unix)]
             FakeScenario::Utf8Framing => format!(
-                "read_cmd\nwrite_line '{PROMPT_OK}'\nprintf '%s\\n' '{}'\nwrite_line '{SETTLED}'\nread_cmd\nwrite_line '{STATS_042}'\nsleep 60",
+                "read_cmd\nwrite_line '{PROMPT_OK}'\nprintf '%s\\n' '{}'\nwrite_line '{SETTLED}'\nread_cmd\nwrite_line '{STATS_042}'\nread_cmd\nwrite_line '{STATE_GPT56}'\nsleep 60",
                 delta_line("0.10", "a\u{2028}b")
             ),
         }
@@ -763,9 +882,12 @@ mod tests {
             .remove(0)
     }
 
-    async fn run_fake(scenario: FakeScenario, phase: &Phase) -> Result<PhaseResult> {
+    async fn run_fake(
+        scenario: FakeScenario,
+        phase: &Phase,
+    ) -> Result<(PhaseResult, Option<String>)> {
         let (_dir, command) = fake_pi_command(scenario)?;
-        let result = tokio::time::timeout(
+        let outcome = tokio::time::timeout(
             Duration::from_secs(30),
             run_command(
                 command,
@@ -779,13 +901,13 @@ mod tests {
         )
         .await
         .context("test timed out waiting for run_command")??;
-        Ok(result)
+        Ok(outcome)
     }
 
     #[tokio::test]
     async fn completes_phase_via_agent_settled() -> Result<()> {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-        let result = run_fake(FakeScenario::Normal, &phase).await?;
+        let (result, observed) = run_fake(FakeScenario::Normal, &phase).await?;
         match result {
             PhaseResult::AgentDone {
                 cost_usd,
@@ -796,13 +918,24 @@ mod tests {
             }
             other => panic!("expected AgentDone, got {other:?}"),
         }
+        // GH-574: the model pi reported in-band via get_state.
+        assert_eq!(observed.as_deref(), Some("openai-codex/gpt-5.6-sol"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn no_in_band_model_report_is_none_not_a_guess() -> Result<()> {
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
+        let (result, observed) = run_fake(FakeScenario::NormalNoModel, &phase).await?;
+        assert!(matches!(result, PhaseResult::AgentDone { .. }));
+        assert!(observed.is_none(), "null model must render as unknown");
         Ok(())
     }
 
     #[tokio::test]
     async fn budget_exceeded_after_settle() -> Result<()> {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n    budget_usd: 1.0\n");
-        let result = run_fake(FakeScenario::BudgetAfterSettle, &phase).await?;
+        let (result, _observed) = run_fake(FakeScenario::BudgetAfterSettle, &phase).await?;
         match result {
             PhaseResult::BudgetExceeded { cost_usd } => {
                 assert!((cost_usd.unwrap() - 9.9).abs() < 1e-9);
@@ -815,7 +948,7 @@ mod tests {
     #[tokio::test]
     async fn budget_exceeded_mid_run_sends_abort() -> Result<()> {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n    budget_usd: 1.0\n");
-        let result = run_fake(FakeScenario::BudgetMidRun, &phase).await?;
+        let (result, _observed) = run_fake(FakeScenario::BudgetMidRun, &phase).await?;
         match result {
             PhaseResult::BudgetExceeded { cost_usd } => {
                 assert!((cost_usd.unwrap() - 5.0).abs() < 1e-9);
@@ -829,7 +962,7 @@ mod tests {
     async fn timeout_returns_timeout_result() -> Result<()> {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n    timeout_sec: 2\n");
         let started = tokio::time::Instant::now();
-        let result = run_fake(FakeScenario::Idle, &phase).await?;
+        let (result, _observed) = run_fake(FakeScenario::Idle, &phase).await?;
         assert!(matches!(result, PhaseResult::Timeout));
         assert!(started.elapsed() < Duration::from_secs(15));
         Ok(())
@@ -859,6 +992,8 @@ mod tests {
         )
         .await
         .context("test timed out waiting for run_command")??;
+        let (result, observed) = result;
+        assert!(observed.is_none(), "a cancelled turn reports no model");
         match result {
             PhaseResult::AgentCrash { error } => assert_eq!(error, "conductor shutdown"),
             other => panic!("expected AgentCrash, got {other:?}"),
@@ -869,7 +1004,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_rejection_is_agent_crash() -> Result<()> {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-        let result = run_fake(FakeScenario::PromptRejected, &phase).await?;
+        let (result, _observed) = run_fake(FakeScenario::PromptRejected, &phase).await?;
         match result {
             PhaseResult::AgentCrash { error } => {
                 assert!(error.contains("rejected prompt"), "{error}");
@@ -883,7 +1018,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_jsonl_line_is_agent_crash() -> Result<()> {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-        let result = run_fake(FakeScenario::Malformed, &phase).await?;
+        let (result, _observed) = run_fake(FakeScenario::Malformed, &phase).await?;
         match result {
             PhaseResult::AgentCrash { error } => {
                 assert!(error.contains("invalid pi RPC JSON"), "{error}");
@@ -897,7 +1032,7 @@ mod tests {
     #[tokio::test]
     async fn crlf_and_u2028_do_not_split_records() -> Result<()> {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-        let result = run_fake(FakeScenario::Utf8Framing, &phase).await?;
+        let (result, _observed) = run_fake(FakeScenario::Utf8Framing, &phase).await?;
         match result {
             PhaseResult::AgentDone { result_text, .. } => {
                 // The fake writes CRLF via sh (printf adds LF; sh keeps LF) and
@@ -995,7 +1130,7 @@ mod tests {
         // every run, not whenever the drain task happens to win.
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
         for attempt in 0..5 {
-            let result = run_fake(FakeScenario::StderrThenDie, &phase).await?;
+            let (result, _observed) = run_fake(FakeScenario::StderrThenDie, &phase).await?;
             match result {
                 PhaseResult::AgentCrash { error } => {
                     assert!(
@@ -1060,7 +1195,7 @@ mod tests {
     async fn reap_grace_expiry_reports_instead_of_hanging() -> Result<()> {
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
         let started = std::time::Instant::now();
-        let result = run_fake(FakeScenario::CloseStdoutAndLive, &phase).await?;
+        let (result, _observed) = run_fake(FakeScenario::CloseStdoutAndLive, &phase).await?;
         assert!(
             started.elapsed() < Duration::from_secs(25),
             "reap grace expiry must be prompt"
@@ -1115,6 +1250,94 @@ mod tests {
         let tail = format_stderr_tail(raw);
         assert_eq!(tail, "second | third | fourth | fifth | sixth");
         assert!(!tail.contains("first"), "only the last 5 lines are kept");
+    }
+
+    // ── GH-574: phase-declared capabilities reach the pi spawn line ──
+
+    fn pi_args_for(launcher: &PiRpcLauncher, yaml: &str) -> Vec<String> {
+        let phase = phase_from_yaml(yaml);
+        let cmd = launcher.build_command(&phase, "sess-1", Path::new("."));
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn pi_phase_capabilities_reach_the_spawn_line() {
+        let launcher = PiRpcLauncher::new();
+        let args = pi_args_for(
+            &launcher,
+            "  - id: a\n    prompt: x\n    model: anthropic/claude-opus-5\n    thinking: high\n    tools: [read, grep]\n    exclude_tools: [edit, write]\n",
+        );
+        for (flag, value) in [
+            ("--model", "anthropic/claude-opus-5"),
+            ("--thinking", "high"),
+            ("--tools", "read,grep"),
+            ("--exclude-tools", "edit,write"),
+        ] {
+            let pos = args
+                .iter()
+                .position(|a| a == flag)
+                .unwrap_or_else(|| panic!("{flag} must appear in the pi spawn line: {args:?}"));
+            assert_eq!(args[pos + 1], value, "value after {flag}");
+        }
+    }
+
+    #[test]
+    fn pi_phase_model_wins_over_the_builder_fallback() {
+        let launcher = PiRpcLauncher::new().with_model("openai-codex/gpt-5.6-sol");
+        let args = pi_args_for(&launcher, "  - id: a\n    prompt: x\n");
+        let pos = args.iter().position(|a| a == "--model").expect("--model");
+        assert_eq!(args[pos + 1], "openai-codex/gpt-5.6-sol");
+
+        let args = pi_args_for(
+            &launcher,
+            "  - id: a\n    prompt: x\n    model: anthropic/claude-opus-5\n",
+        );
+        let pos = args.iter().position(|a| a == "--model").expect("--model");
+        assert_eq!(args[pos + 1], "anthropic/claude-opus-5");
+    }
+
+    #[test]
+    fn pi_no_declarations_spawn_no_capability_flags() {
+        let args = pi_args_for(&PiRpcLauncher::new(), "  - id: a\n    prompt: x\n");
+        for flag in ["--model", "--thinking", "--tools", "--exclude-tools"] {
+            assert!(
+                !args.contains(&flag.to_string()),
+                "{flag} must be absent without a declaration: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pi_refuses_thinking_flag_plus_model_suffix() {
+        let launcher = PiRpcLauncher::new();
+        let phase = phase_from_yaml(
+            "  - id: a\n    prompt: x\n    model: openai-codex/gpt-5.6-sol:high\n    thinking: low\n",
+        );
+        let error = launcher
+            .validate_phase(&phase)
+            .expect_err("the ambiguous combination must be refused");
+        assert!(error.to_string().contains("refuses to guess"), "{error}");
+    }
+
+    #[test]
+    fn pi_accepts_thinking_flag_without_model_suffix() {
+        let launcher = PiRpcLauncher::new();
+        let phase = phase_from_yaml(
+            "  - id: a\n    prompt: x\n    model: openai-codex/gpt-5.6-sol\n    thinking: low\n",
+        );
+        launcher
+            .validate_phase(&phase)
+            .expect("a plain provider/id pattern with --thinking is unambiguous");
+    }
+
+    #[test]
+    fn list_models_fails_loudly_when_pi_is_missing() {
+        let error = list_models(Some(PathBuf::from("definitely-not-pi-xyz-8f3a")), None)
+            .expect_err("a missing pi binary must be an explicit error");
+        assert!(error.to_string().contains("list-models"), "{error}");
     }
 
     #[test]

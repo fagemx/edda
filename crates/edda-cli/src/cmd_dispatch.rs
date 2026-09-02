@@ -11,9 +11,11 @@
 //! - 3 = budget exceeded
 //! - 4 = max turns
 
-use crate::agent_kind::{build_launcher, AgentKind, LauncherOptions};
+use crate::agent_kind::{
+    build_launcher, validate_dispatch_options, AgentKind, DispatchOptions, LauncherOptions,
+};
 use crate::cmd_conduct::{budget_warning_for_agent, cost_line, NO_USAGE_COST_TEXT};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Args;
 use edda_conductor::agent::launcher::{phase_session_id, AgentLauncher, PhaseResult};
 use edda_conductor::plan::schema::Phase as PhaseSchema;
@@ -27,9 +29,10 @@ pub struct DispatchArgs {
     /// Agent backend that runs the turn
     #[arg(long, value_enum)]
     pub agent: AgentKind,
-    /// Path to a file containing the prompt (read verbatim)
-    #[arg(long)]
-    pub prompt_file: String,
+    /// Path to a file containing the prompt (read verbatim). Required
+    /// unless --list-models is given.
+    #[arg(long, required_unless_present = "list_models")]
+    pub prompt_file: Option<String>,
     /// Session id passed to the backend verbatim. Continuity semantics are
     /// per-backend, and all three persist conversations across invocations:
     /// claude and pi delegate to their backends, and codex's session→thread
@@ -47,11 +50,48 @@ pub struct DispatchArgs {
     /// Turn timeout in seconds (default: 1800, like a conduct phase)
     #[arg(long)]
     pub timeout_sec: Option<u64>,
-    /// Permission mode carried on the synthetic phase verbatim (default:
-    /// bypassPermissions). Only the claude backend consumes this today;
-    /// pi and codex ignore it.
-    #[arg(long, default_value = "bypassPermissions")]
-    pub permission_mode: String,
+    /// Permission mode for the claude backend (`claude --permission-mode`,
+    /// default bypassPermissions). pi and codex have no permission-mode
+    /// concept; an explicitly passed value is refused, never accepted and
+    /// silently dropped (GH-574).
+    #[arg(long)]
+    pub permission_mode: Option<String>,
+    /// Model selection passed to the backend verbatim (GH-574): pi gets
+    /// `--model <pattern>` (e.g. `openai-codex/gpt-5.6-sol`), claude gets
+    /// `--model`. codex has no verifiable selection path and refuses the
+    /// flag. Run `--list-models` to look up valid patterns.
+    #[arg(long)]
+    pub model: Option<String>,
+    /// Thinking level passed to pi verbatim via `--thinking`
+    /// (off|minimal|low|medium|high|xhigh|max). claude and codex refuse it.
+    #[arg(long)]
+    pub thinking: Option<String>,
+    /// Tool allowlist, comma-separated (GH-574): pi `--tools`, claude
+    /// `--tools`. Both restrict capabilities — the listed tools are the
+    /// only ones the backend can use — so e.g. `--tools read,grep,find,ls`
+    /// makes the turn structurally read-only. claude's `--tools` covers
+    /// only the built-in set, so the spawn also denies all unlisted MCP
+    /// tools (`--disallowedTools "mcp__*"`); pi's has no MCP leak. codex
+    /// refuses the flag.
+    #[arg(long, value_delimiter = ',')]
+    pub tools: Option<Vec<String>>,
+    /// Tool denylist, comma-separated (GH-574): pi `--exclude-tools`, claude
+    /// `--disallowedTools`. Structural enforcement, not prompt discipline:
+    /// e.g. `--exclude-tools edit,write` removes file-modification tools
+    /// from the agent entirely. codex refuses it.
+    #[arg(long, value_delimiter = ',')]
+    pub exclude_tools: Option<Vec<String>>,
+    /// Session storage directory (pi only, `--session-dir`). claude and
+    /// codex manage their own session storage and refuse the flag.
+    #[arg(long)]
+    pub session_dir: Option<String>,
+    /// List available provider/model pairs for the backend and exit, instead
+    /// of dispatching. Optional search term filters the listing (pi
+    /// `--list-models [search]`); other backends refuse it. Requires --agent.
+    /// The listing is text: combining it with --json is an explicit
+    /// conflict error, because --json promises exactly one JSON object.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub list_models: Option<String>,
     /// Print one JSON object to stdout instead of text lines
     #[arg(long)]
     pub json: bool,
@@ -95,7 +135,9 @@ pub fn exit_code_for(outcome: Outcome) -> i32 {
 }
 
 /// Everything the caller needs after one dispatched turn: the outcome class,
-/// the agent's summary, the honest cost figure, and the session id to reuse.
+/// the agent's summary, the honest cost figure, the session id to reuse, and
+/// the model story — what edda requested and what the backend reported
+/// observing in-band (GH-574).
 #[derive(Debug, Clone)]
 pub struct DispatchOutput {
     pub outcome: Outcome,
@@ -103,10 +145,23 @@ pub struct DispatchOutput {
     pub cost_usd: Option<f64>,
     pub session_id: String,
     pub error: Option<String>,
+    /// The model edda actually passed to the backend, or the literal
+    /// "inherited" when no --model was given (the backend's own default
+    /// applies — visible instead of silently identical).
+    pub model_requested: String,
+    /// The model the backend reported in-band, or the literal "unknown"
+    /// when it reported nothing. Observed, never inferred from config or
+    /// session files (GH-574 honesty rule).
+    pub model_observed: String,
 }
 
 impl DispatchOutput {
-    pub fn from_result(result: PhaseResult, session_id: String) -> Self {
+    pub fn from_result(
+        result: PhaseResult,
+        session_id: String,
+        model_requested: String,
+        model_observed: String,
+    ) -> Self {
         match result {
             PhaseResult::AgentDone {
                 cost_usd,
@@ -117,6 +172,8 @@ impl DispatchOutput {
                 cost_usd,
                 session_id,
                 error: None,
+                model_requested,
+                model_observed,
             },
             PhaseResult::AgentCrash { error } => Self {
                 outcome: Outcome::Crash,
@@ -124,6 +181,8 @@ impl DispatchOutput {
                 cost_usd: None,
                 session_id,
                 error: Some(error),
+                model_requested,
+                model_observed,
             },
             PhaseResult::Timeout => Self {
                 outcome: Outcome::Timeout,
@@ -131,6 +190,8 @@ impl DispatchOutput {
                 cost_usd: None,
                 session_id,
                 error: None,
+                model_requested,
+                model_observed,
             },
             PhaseResult::MaxTurns { cost_usd } => Self {
                 outcome: Outcome::MaxTurns,
@@ -138,6 +199,8 @@ impl DispatchOutput {
                 cost_usd,
                 session_id,
                 error: None,
+                model_requested,
+                model_observed,
             },
             PhaseResult::BudgetExceeded { cost_usd } => Self {
                 outcome: Outcome::BudgetExceeded,
@@ -145,6 +208,8 @@ impl DispatchOutput {
                 cost_usd,
                 session_id,
                 error: None,
+                model_requested,
+                model_observed,
             },
         }
     }
@@ -163,7 +228,8 @@ impl DispatchOutput {
             .unwrap_or_else(|| NO_USAGE_COST_TEXT.to_owned())
     }
 
-    /// Text-mode stdout: result text, then `Cost:`, then `Session:`.
+    /// Text-mode stdout: result text, then `Cost:`, then the model story
+    /// (GH-574), then `Session:`.
     pub fn render_text(&self) -> String {
         let mut out = String::new();
         if let Some(text) = &self.result_text {
@@ -173,6 +239,8 @@ impl DispatchOutput {
             }
         }
         out.push_str(&format!("Cost: {}\n", self.cost_text()));
+        out.push_str(&format!("Model requested: {}\n", self.model_requested));
+        out.push_str(&format!("Model observed: {}\n", self.model_observed));
         out.push_str(&format!("Session: {}\n", self.session_id));
         out
     }
@@ -185,6 +253,8 @@ impl DispatchOutput {
             "cost_usd": self.cost_usd,
             "session_id": self.session_id,
             "error": self.error,
+            "model_requested": self.model_requested,
+            "model_observed": self.model_observed,
         })
         .to_string()
     }
@@ -192,16 +262,37 @@ impl DispatchOutput {
 
 // ── Phase + launcher construction ──
 
+/// The GH-574 launcher-capability options a dispatched turn carries on its
+/// synthetic phase: model selection, thinking level, and tool policy.
+/// Declared but unsupported backend combinations are rejected by
+/// [`crate::agent_kind::validate_dispatch_options`] before this reaches a
+/// launcher.
+#[derive(Debug, Default, Clone)]
+pub struct CapabilityOptions {
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+    pub tools: Option<Vec<String>>,
+    pub exclude_tools: Option<Vec<String>>,
+}
+
 /// Build the synthetic single-turn phase, mapping flags exactly the way a
-/// conduct phase's fields map: budget, timeout, and permission mode land on
-/// the phase, and a missing timeout falls back to the launcher's 1800 s
-/// default — the same default a plan-level `timeout_sec` would supply.
+/// conduct phase's fields map: budget, timeout, permission mode, model,
+/// thinking level, and tool policy land on the phase, and a missing timeout
+/// falls back to the launcher's 1800 s default — the same default a
+/// plan-level `timeout_sec` would supply.
 pub fn build_phase(
     prompt: &str,
     budget_usd: Option<f64>,
     timeout_sec: Option<u64>,
     permission_mode: &str,
+    capabilities: CapabilityOptions,
 ) -> PhaseSchema {
+    let CapabilityOptions {
+        model,
+        thinking,
+        tools,
+        exclude_tools,
+    } = capabilities;
     PhaseSchema {
         id: "dispatch".to_owned(),
         prompt: prompt.to_owned(),
@@ -214,7 +305,10 @@ pub fn build_phase(
         context: None,
         env: std::collections::HashMap::new(),
         budget_usd,
-        allowed_tools: None,
+        tools,
+        exclude_tools,
+        model,
+        thinking,
         permission_mode: permission_mode.to_owned(),
         gate: None,
         gate_timeout_sec: None,
@@ -260,8 +354,56 @@ pub fn run(args: DispatchArgs) -> Result<()> {
 }
 
 fn run_inner(args: DispatchArgs) -> Result<i32> {
-    let prompt = std::fs::read_to_string(&args.prompt_file)
-        .with_context(|| format!("--prompt-file not readable: {}", args.prompt_file))?;
+    // GH-574 honesty gate: refuse unsupported backend/option combinations
+    // instead of accepting them and silently doing nothing. An explicitly
+    // passed --permission-mode on a backend with no permission concept is
+    // refused here too (GH-574 round 2, P1-2) — there is no clap default,
+    // so an absent flag claims nothing and drops nothing. Round 3 (P1-2):
+    // this gate runs before EVERY short-circuit, including --list-models —
+    // listing mode must not accept and drop a permission contract either.
+    validate_dispatch_options(
+        args.agent,
+        &DispatchOptions {
+            model: args.model.as_deref(),
+            thinking: args.thinking.as_deref(),
+            tools: args.tools.as_deref(),
+            exclude_tools: args.exclude_tools.as_deref(),
+            session_dir: args.session_dir.as_deref(),
+            permission_mode: args.permission_mode.as_deref(),
+        },
+    )?;
+
+    // --list-models short-circuits dispatch: print the provider/model table
+    // and exit 0 (GH-574 — callers look up patterns instead of guessing a
+    // provider prefix).
+    if let Some(search) = args.list_models.as_deref() {
+        // GH-574 round 2 (P1-3): the listing is text, but --json promises
+        // "exactly one object" on stdout. Refuse the combination instead of
+        // printing a text table that breaks every JSON consumer.
+        if args.json {
+            bail!(
+                "--json cannot be combined with --list-models: the model listing is \
+                 text, and --json promises exactly one JSON object on stdout"
+            );
+        }
+        if !args.agent.supports_model_listing() {
+            bail!(
+                "--list-models is only available for the pi backend; agent \"{}\" \
+                 exposes no provider/model listing query",
+                args.agent.as_str()
+            );
+        }
+        let text = edda_conductor::agent::pi_rpc::list_models(None, Some(search))?;
+        print!("{text}");
+        return Ok(0);
+    }
+
+    let prompt_file = args
+        .prompt_file
+        .as_deref()
+        .context("--prompt-file is required unless --list-models is given")?;
+    let prompt = std::fs::read_to_string(prompt_file)
+        .with_context(|| format!("--prompt-file not readable: {prompt_file}"))?;
 
     let session_id = args.session_id.clone().unwrap_or_else(generate_session_id);
 
@@ -281,6 +423,13 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         eprintln!("{warning}");
     }
 
+    // Permission mode is a claude-only contract (refused above for the
+    // other backends); an absent flag falls back to claude's default.
+    let permission_mode = args
+        .permission_mode
+        .clone()
+        .unwrap_or_else(|| "bypassPermissions".to_owned());
+
     let launcher = build_launcher(
         args.agent,
         LauncherOptions {
@@ -290,13 +439,20 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
             // --session-id must resume the conversation a previous dispatch
             // recorded.
             persistent_codex_threads: true,
+            session_dir: args.session_dir.map(std::path::PathBuf::from),
         },
     )?;
     let phase = build_phase(
         &prompt,
         args.budget_usd,
         args.timeout_sec,
-        &args.permission_mode,
+        &permission_mode,
+        CapabilityOptions {
+            model: args.model,
+            thinking: args.thinking,
+            tools: args.tools,
+            exclude_tools: args.exclude_tools,
+        },
     );
     let cancel = CancellationToken::new();
 
@@ -357,7 +513,22 @@ pub async fn run_with_launcher(
         )
         .await?
     };
-    Ok(DispatchOutput::from_result(result, session_id.to_owned()))
+    // GH-574: requested comes from the phase edda built (what was actually
+    // passed to the backend); observed is whatever the backend reported
+    // in-band, "unknown" when it reported nothing.
+    let model_requested = phase
+        .model
+        .clone()
+        .unwrap_or_else(|| "inherited".to_owned());
+    let model_observed = launcher
+        .last_observed_model()
+        .unwrap_or_else(|| "unknown".to_owned());
+    Ok(DispatchOutput::from_result(
+        result,
+        session_id.to_owned(),
+        model_requested,
+        model_observed,
+    ))
 }
 
 #[cfg(test)]
@@ -433,6 +604,249 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dispatch_prompt_file_optional_when_listing_models() {
+        let args = parse(&["edda", "--agent", "pi", "--list-models"]);
+        assert!(args.prompt_file.is_none());
+        assert_eq!(args.list_models.as_deref(), Some(""));
+        let args = parse(&["edda", "--agent", "pi", "--list-models", "sol"]);
+        assert_eq!(args.list_models.as_deref(), Some("sol"));
+    }
+
+    // ── GH-574: launcher-capability flags ──
+
+    #[test]
+    fn dispatch_parses_model_thinking_and_tool_flags() {
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "pi",
+            "--prompt-file",
+            "p.txt",
+            "--model",
+            "openai-codex/gpt-5.6-sol",
+            "--thinking",
+            "high",
+            "--tools",
+            "read,grep",
+            "--exclude-tools",
+            "edit,write",
+            "--session-dir",
+            "/tmp/pi-sessions",
+        ]);
+        assert_eq!(args.model.as_deref(), Some("openai-codex/gpt-5.6-sol"));
+        assert_eq!(args.thinking.as_deref(), Some("high"));
+        assert_eq!(args.tools, Some(vec!["read".into(), "grep".into()]));
+        assert_eq!(
+            args.exclude_tools,
+            Some(vec!["edit".into(), "write".into()])
+        );
+        assert_eq!(args.session_dir.as_deref(), Some("/tmp/pi-sessions"));
+    }
+
+    #[test]
+    fn phase_carries_model_thinking_and_tool_policy() {
+        let phase = build_phase(
+            "p",
+            None,
+            None,
+            "bypassPermissions",
+            CapabilityOptions {
+                model: Some("anthropic/claude-opus-5".into()),
+                thinking: Some("high".into()),
+                tools: Some(vec!["read".into(), "grep".into()]),
+                exclude_tools: Some(vec!["edit".into(), "write".into()]),
+            },
+        );
+        assert_eq!(phase.model.as_deref(), Some("anthropic/claude-opus-5"));
+        assert_eq!(phase.thinking.as_deref(), Some("high"));
+        assert_eq!(phase.tools, Some(vec!["read".into(), "grep".into()]));
+        assert_eq!(
+            phase.exclude_tools,
+            Some(vec!["edit".into(), "write".into()])
+        );
+    }
+
+    #[test]
+    fn model_report_defaults_to_inherited_and_unknown() {
+        let out = DispatchOutput::from_result(
+            PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: None,
+            },
+            "s".into(),
+            "inherited".into(),
+            "unknown".into(),
+        );
+        let text = out.render_text();
+        assert!(text.contains("Model requested: inherited"), "{text}");
+        assert!(text.contains("Model observed: unknown"), "{text}");
+        let value: serde_json::Value = serde_json::from_str(&out.to_json()).unwrap();
+        assert_eq!(value["model_requested"], "inherited");
+        assert_eq!(value["model_observed"], "unknown");
+    }
+
+    #[test]
+    fn model_report_carries_requested_and_observed() {
+        let out = DispatchOutput::from_result(
+            PhaseResult::AgentDone {
+                cost_usd: Some(0.2),
+                result_text: None,
+            },
+            "s".into(),
+            "openai-codex/gpt-5.6-sol".into(),
+            "openai-codex/gpt-5.6-sol".into(),
+        );
+        let text = out.render_text();
+        assert!(
+            text.contains("Model requested: openai-codex/gpt-5.6-sol"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Model observed: openai-codex/gpt-5.6-sol"),
+            "{text}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&out.to_json()).unwrap();
+        assert_eq!(value["model_requested"], "openai-codex/gpt-5.6-sol");
+    }
+
+    /// Incident counterexample (GH-574): the 2026-09-02 review degradation
+    /// produced byte-identical stdout whether the review model was applied
+    /// or silently dropped. After the fix, the requested-model line alone
+    /// makes the two dispatches distinguishable.
+    #[test]
+    fn stdout_differs_between_a_dispatched_model_and_the_inherited_default() {
+        let result = PhaseResult::AgentDone {
+            cost_usd: Some(0.2),
+            result_text: Some("review done".into()),
+        };
+        let with_model = DispatchOutput::from_result(
+            result.clone(),
+            "s".into(),
+            "openai-codex/gpt-5.6-sol".into(),
+            "unknown".into(),
+        );
+        let without_model =
+            DispatchOutput::from_result(result, "s".into(), "inherited".into(), "unknown".into());
+        assert_ne!(
+            with_model.render_text(),
+            without_model.render_text(),
+            "dispatch stdout must differ between --model X and no --model"
+        );
+    }
+
+    #[test]
+    fn run_with_launcher_reports_inherited_when_no_model_declared() {
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "dispatch",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: None,
+            }],
+        );
+        let phase = build_phase(
+            "prompt",
+            None,
+            None,
+            "bypassPermissions",
+            CapabilityOptions::default(),
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let out = rt.block_on(run_with_launcher(
+            &launcher,
+            &phase,
+            "s",
+            Path::new("."),
+            CancellationToken::new(),
+        ));
+        let out = out.unwrap();
+        assert_eq!(out.model_requested, "inherited");
+        // MockLauncher reports nothing in-band: unknown, honestly.
+        assert_eq!(out.model_observed, "unknown");
+    }
+
+    #[test]
+    fn run_with_launcher_reports_the_declared_model_as_requested() {
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "dispatch",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: None,
+            }],
+        );
+        let phase = build_phase(
+            "prompt",
+            None,
+            None,
+            "bypassPermissions",
+            CapabilityOptions {
+                model: Some("openai-codex/gpt-5.6-sol".into()),
+                thinking: None,
+                tools: None,
+                exclude_tools: None,
+            },
+        );
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let out = rt.block_on(run_with_launcher(
+            &launcher,
+            &phase,
+            "s",
+            Path::new("."),
+            CancellationToken::new(),
+        ));
+        let out = out.unwrap();
+        assert_eq!(out.model_requested, "openai-codex/gpt-5.6-sol");
+    }
+
+    /// The --list-models gate lives in run_inner ahead of any spawn, so the
+    /// refusal is testable without a backend: a backend without a listing
+    /// query is an explicit error, never a silent fallthrough.
+    #[test]
+    fn list_models_refuses_backends_without_a_listing_query() {
+        let args = parse(&["edda", "--agent", "claude", "--list-models"]);
+        let error = run_inner(args).expect_err("claude has no model listing");
+        assert!(
+            error
+                .to_string()
+                .contains("only available for the pi backend"),
+            "{error}"
+        );
+    }
+
+    /// GH-574 round 3 (P1-2): the --list-models short-circuit must not
+    /// bypass the capability gate. An explicit --permission-mode on pi is
+    /// refused even in listing mode, before any model query runs. Pre-fix,
+    /// this combination reached the pi backend and exited 0 with no
+    /// permission signal at all.
+    #[test]
+    fn list_models_does_not_short_circuit_capability_validation() {
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "pi",
+            "--list-models",
+            "definitely-no-such-model-8f3a",
+            "--permission-mode",
+            "bypassPermissions",
+        ]);
+        let error = run_inner(args)
+            .expect_err("an explicit permission-mode on pi must be refused in listing mode too");
+        assert!(error.to_string().contains("--permission-mode"), "{error}");
+    }
+
+    /// GH-574 round 2 (P1-3): with --json, stdout must be exactly one JSON
+    /// object. A text model listing printed at exit 0 breaks every JSON
+    /// consumer mid-stream, so the combination must be an explicit conflict
+    /// error — never a successful listing that silently ignores --json.
+    #[test]
+    fn list_models_with_json_is_refused_as_a_conflict() {
+        let args = parse(&["edda", "--agent", "pi", "--list-models", "--json"]);
+        let error = run_inner(args).expect_err("--json + --list-models must be refused");
+        assert!(error.to_string().contains("--json"), "{error}");
+    }
+
     // ── Outcome → exit-code mapping (all five PhaseResult variants) ──
 
     #[test]
@@ -458,7 +872,12 @@ mod tests {
             (PhaseResult::MaxTurns { cost_usd: None }, 4),
         ];
         for (result, expected) in cases {
-            let out = DispatchOutput::from_result(result, "s".into());
+            let out = DispatchOutput::from_result(
+                result,
+                "s".into(),
+                "inherited".into(),
+                "unknown".into(),
+            );
             assert_eq!(
                 exit_code_for(out.outcome),
                 expected,
@@ -477,6 +896,8 @@ mod tests {
                 result_text: Some("ok".into()),
             },
             "s".into(),
+            "inherited".into(),
+            "unknown".into(),
         );
         assert_eq!(out.exit_code(), 0);
         assert_eq!(out.outcome, Outcome::Done);
@@ -508,7 +929,12 @@ mod tests {
             ),
         ];
         for (result, expected_outcome) in cases {
-            let out = DispatchOutput::from_result(result, "sess-1".into());
+            let out = DispatchOutput::from_result(
+                result,
+                "sess-1".into(),
+                "inherited".into(),
+                "unknown".into(),
+            );
             let value: serde_json::Value =
                 serde_json::from_str(&out.to_json()).expect("json parses");
             assert_eq!(value["outcome"].as_str(), Some(expected_outcome));
@@ -525,7 +951,15 @@ mod tests {
             keys.sort_unstable();
             assert_eq!(
                 keys,
-                vec!["cost_usd", "error", "outcome", "result_text", "session_id"]
+                vec![
+                    "cost_usd",
+                    "error",
+                    "model_observed",
+                    "model_requested",
+                    "outcome",
+                    "result_text",
+                    "session_id"
+                ]
             );
         }
     }
@@ -537,6 +971,8 @@ mod tests {
                 error: "exit 3".into(),
             },
             "s".into(),
+            "inherited".into(),
+            "unknown".into(),
         );
         let value: serde_json::Value = serde_json::from_str(&crash.to_json()).unwrap();
         assert_eq!(value["outcome"].as_str(), Some("crash"));
@@ -550,6 +986,8 @@ mod tests {
                 result_text: None,
             },
             "s".into(),
+            "inherited".into(),
+            "unknown".into(),
         );
         let value: serde_json::Value = serde_json::from_str(&done.to_json()).expect("json parses");
         assert_eq!(value["outcome"].as_str(), Some("done"));
@@ -568,6 +1006,8 @@ mod tests {
                 result_text: Some("done deal".into()),
             },
             "abc-123".into(),
+            "inherited".into(),
+            "unknown".into(),
         );
         let text = out.render_text();
         assert!(text.contains("done deal\n"), "{text}");
@@ -582,7 +1022,12 @@ mod tests {
 
     #[test]
     fn text_render_reports_na_when_no_usage() {
-        let out = DispatchOutput::from_result(PhaseResult::MaxTurns { cost_usd: None }, "s".into());
+        let out = DispatchOutput::from_result(
+            PhaseResult::MaxTurns { cost_usd: None },
+            "s".into(),
+            "inherited".into(),
+            "unknown".into(),
+        );
         let text = out.render_text();
         assert!(
             text.contains("Cost: n/a (no usage data reported)"),
@@ -609,6 +1054,8 @@ mod tests {
                 result_text: None,
             },
             "my-session-42".into(),
+            "inherited".into(),
+            "unknown".into(),
         );
         assert!(out.render_text().contains("Session: my-session-42"));
         assert!(out.to_json().contains("my-session-42"));
@@ -649,7 +1096,13 @@ mod tests {
         let recorder = RecordingLauncher {
             session_ids: Mutex::new(Vec::new()),
         };
-        let phase = build_phase("prompt", None, None, "bypassPermissions");
+        let phase = build_phase(
+            "prompt",
+            None,
+            None,
+            "bypassPermissions",
+            CapabilityOptions::default(),
+        );
         let cancel = CancellationToken::new();
 
         run_with_launcher(
@@ -690,7 +1143,13 @@ mod tests {
         let launcher = RecordingLauncher {
             session_ids: Mutex::new(Vec::new()),
         };
-        let phase = build_phase("prompt", None, None, "bypassPermissions");
+        let phase = build_phase(
+            "prompt",
+            None,
+            None,
+            "bypassPermissions",
+            CapabilityOptions::default(),
+        );
         let sid = "x\\..\\..\\..\\escaped";
         run_with_launcher(
             &launcher,
@@ -726,7 +1185,13 @@ mod tests {
 
     #[test]
     fn phase_maps_budget_and_timeout_flags_like_conduct() {
-        let phase = build_phase("do the thing", Some(1.5), Some(60), "bypassPermissions");
+        let phase = build_phase(
+            "do the thing",
+            Some(1.5),
+            Some(60),
+            "bypassPermissions",
+            CapabilityOptions::default(),
+        );
         assert_eq!(phase.id, "dispatch");
         assert_eq!(phase.prompt, "do the thing");
         assert_eq!(phase.budget_usd, Some(1.5));
@@ -734,7 +1199,13 @@ mod tests {
 
         // Omitted flags stay None, exactly like a conduct phase without
         // them; the launcher then applies its 1800 s default.
-        let phase = build_phase("p", None, None, "bypassPermissions");
+        let phase = build_phase(
+            "p",
+            None,
+            None,
+            "bypassPermissions",
+            CapabilityOptions::default(),
+        );
         assert_eq!(phase.budget_usd, None);
         assert_eq!(phase.timeout_sec, None);
         assert_eq!(phase.permission_mode, "bypassPermissions");
@@ -746,16 +1217,18 @@ mod tests {
     fn phase_carries_permission_mode_verbatim() {
         // The flag lands on the synthetic phase the way a conduct phase
         // carries its own permission_mode.
-        let phase = build_phase("p", None, None, "acceptEdits");
+        let phase = build_phase("p", None, None, "acceptEdits", CapabilityOptions::default());
         assert_eq!(phase.permission_mode, "acceptEdits");
     }
 
     // ── --permission-mode flag ──
 
     #[test]
-    fn dispatch_defaults_permission_mode_to_bypass() {
+    fn dispatch_permission_mode_is_none_when_not_passed() {
+        // No clap default: an absent flag claims nothing, so backends that
+        // ignore permission modes drop nothing silently (GH-574 round 2).
         let args = parse(&["edda", "--agent", "claude", "--prompt-file", "p.txt"]);
-        assert_eq!(args.permission_mode, "bypassPermissions");
+        assert_eq!(args.permission_mode, None);
     }
 
     #[test]
@@ -769,7 +1242,40 @@ mod tests {
             "--permission-mode",
             "default",
         ]);
-        assert_eq!(args.permission_mode, "default");
+        assert_eq!(args.permission_mode.as_deref(), Some("default"));
+    }
+
+    /// The P1-2 repro, at the run_inner level: an explicit --permission-mode
+    /// on codex is refused before any launcher is built. (The cross-process
+    /// form lives in tests/dispatch_permission_mode.rs; this in-process form
+    /// needs no fake binary because the refusal fires first.)
+    #[test]
+    fn run_inner_refuses_permission_mode_on_backends_without_a_permission_concept() {
+        let dir = std::env::temp_dir().join(format!(
+            "edda-dispatch-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let prompt = dir.join("prompt.txt");
+        std::fs::write(&prompt, "p").expect("prompt written");
+        let prompt = prompt.to_string_lossy().into_owned();
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "codex",
+            "--permission-mode",
+            "bypassPermissions",
+            "--prompt-file",
+            &prompt,
+        ]);
+        let error = run_inner(args)
+            .expect_err("codex has no permission-mode concept; the value must be refused");
+        assert!(error.to_string().contains("--permission-mode"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── End-to-end-ish run through MockLauncher ──
@@ -784,7 +1290,13 @@ mod tests {
                 result_text: Some("(mock) finished".into()),
             }],
         );
-        let phase = build_phase("prompt", None, None, "bypassPermissions");
+        let phase = build_phase(
+            "prompt",
+            None,
+            None,
+            "bypassPermissions",
+            CapabilityOptions::default(),
+        );
         let out = run_with_launcher(
             &launcher,
             &phase,
@@ -805,7 +1317,13 @@ mod tests {
     async fn mock_timeout_maps_to_exit_code_2() {
         let launcher = MockLauncher::new();
         launcher.set_results("dispatch", vec![PhaseResult::Timeout]);
-        let phase = build_phase("prompt", None, None, "bypassPermissions");
+        let phase = build_phase(
+            "prompt",
+            None,
+            None,
+            "bypassPermissions",
+            CapabilityOptions::default(),
+        );
         let out = run_with_launcher(
             &launcher,
             &phase,
