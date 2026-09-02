@@ -61,13 +61,18 @@
    plan YAML 放 scratchpad 或 `.tmp/plans/`，不進 repo。Rust lane 設 `CARGO_TARGET_DIR` 為
    `$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1|worker-2`（verifier 用 `verifier|verifier-2`）。
    lane 的**啟動方式**見 §六（Task Scheduler，不是 nohup）。
-4. **PR 一開就派審**（不是等整批）。574 落地前的做法：
-   ```bash
-   pi -p --model openai-codex/gpt-5.6-sol --thinking high --exclude-tools edit,write \
-      --session-id review-prNNN "讀 <brief 路徑> 並照它審 PR #NNN"
-   ```
-   審查 brief 照 `/fleet-review`；round 記錄照 CLAUDE.md 的 review-fix loop（IN SCOPE／FOLLOW-UP ISSUE／P0-P1／RAN vs READ／cost／verdict），貼在 PR 上。
-   provider 過載時**改運輸不降模型**（§六）。
+4. **PR 一開就派審——watcher 自動**（#632，不是等整批、不需控制者接力）：
+   `scripts/pr-review-watch.sh` 每 60 秒輪詢 open PR，對**非 draft、head 未審過**的 PR
+   自動起唯讀審查者（`scripts/review-pr.sh`，一律 `--exclude-tools edit,write`、固定
+   `openai-codex/gpt-5.6-sol`）並把釘 SHA 的判決貼回 PR（Round N、model_observed、cost）。
+   push 新 head 自動再審一輪；watcher **不合併**（合併是操作者授權，見第 6 步）。
+   - **啟動**：Task Scheduler 跑 `sh <checkout>/scripts/pr-review-watch.sh`（隱藏視窗；
+     同 §六 lane 的排程方式）。狀態檔在 `~/.edda/pr-review-watch.state`（`pr → reviewed_sha`），不進 git。
+   - **停止**：結束排程任務（或殺掉那支 sh 程序）即可，watcher 沒有別的常駐子程序。
+   - **手動**：單輪 `sh scripts/pr-review-watch.sh once`；單張 PR 重審
+     `sh scripts/review-pr.sh <PR 編號> [head SHA]`。
+   - **過載改運輸不降模型**（§六）：pi 同模型重試 → `edda dispatch --agent codex` →
+     都不行就自動標 `review:unreviewed` 並停（移除該 label 可重新武装）。
 5. **收斂**：`/fleet-pr-loop` 的 bash driver 吐 `ACTION: REVIEW | FIX | DONE | BLOCKED`，照做到 LGTM；driver 不合併。
 6. **合併**（有授權時）：`git diff <LGTM 的 SHA>..origin/<branch>` 必須為空（判決還在），`gh pr checks` 7 綠，才合。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 7. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
