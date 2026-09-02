@@ -42,7 +42,7 @@ project-plan validate
 - Starting a new project or major feature that spans multiple modules
 - The work needs more than ~5 tasks and has dependency ordering
 - You want agents to execute independently with clear boundaries
-- You're about to use Karvi to dispatch parallel tracks
+- You're about to dispatch parallel tracks as lanes with `edda dispatch`
 
 **Do NOT use this for**: single-feature issues, bug fixes, refactors, or anything that fits in one PR.
 
@@ -350,7 +350,7 @@ After generating all files, present a summary:
 
 ### Next Steps
 - Review the plan, then dispatch Track A
-- Or use Karvi: `POST /api/project` with tasks from each track
+- Or dispatch each track as a lane with `edda dispatch`
 ```
 
 ---
