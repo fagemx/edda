@@ -319,6 +319,18 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                     // its lifecycle ends with this verdict.
                     let final_output = load_gate_output(cwd, &plan.name, &gated_id);
                     clear_gate_output(cwd, &plan.name, &gated_id);
+                    // GH-584 round-3: gate approval is a phase terminal
+                    // state like any other — write the structured
+                    // `conductor_phase` event with the plan id and the
+                    // measured cost parked on the phase at gate entry,
+                    // exactly as the non-gate pass path does.
+                    edda::record_phase_done_with_plan(
+                        cwd,
+                        Some(&plan.name),
+                        &gated_id,
+                        final_output.as_deref(),
+                        approved_ps.cost_usd,
+                    );
                     notifier
                         .notify_phase_terminal(phase_terminal_event(
                             &plan.name,
