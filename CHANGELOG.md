@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-02
+
+### Added
+
+- **Multi-agent conductor runtime** — `edda conduct run --agent <claude|pi|codex>` can launch the selected host, while `edda dispatch` provides a hardened single-turn agent command with persistent Codex session-to-thread continuity, honest budget reporting, and cross-process recovery
+- **Operator-controlled phase gates** — plans can pause in `AWAITING_VERDICT`, expose the gate during dry runs, and resume through `edda phase approve` or `edda phase reject`; phases can also declare owned write surfaces that become coordination claims
+- **Recoverable task execution** — scoped task leases, Codex App Server task clients, unfinished-attempt reconciliation, and validated Windows scheduler launch manifests let interrupted work re-enter safely instead of silently disappearing
+- **Coordination inspection and distribution** — `edda claim check` reports path intersections before editing, `edda init` scaffolds coordination skills for Codex as well as Claude, and repository-tracked fleet skills now include sync tooling plus executable CLI doctests
+- **Operator control-layer guidance** — the operator runbook and Layer 3/L2 design rulings describe how goals, evidence, verdicts, and non-coding work fit above the ledger and fleet runtime
+
+### Changed
+
+- Coordination reviews now use bounded, SHA-pinned scopes with a verify-once ladder and reusable build lanes, reducing repeated full-workspace runs while keeping Windows-only gaps explicit
+- Conductor scheduling now uses runner-owned lane heartbeats, declaration-order tie breaks, time-based retry and timeout deadlines, bounded child reaping, both-stream failure tails, and measured-versus-estimated cost reporting
+- Claim and session resolution now disclose replacements and widening, avoid guessing ownership during unclaim, bind process identity consistently across Claude, Codex, and OpenClaw bridges, and expose claim age/staleness through `edda peers --json` for automation consumers
+- Existing SQLite stores migrate automatically through the current schema when opened; no manual data migration is required
+- Existing installations should run `edda init --force-skills` once to refresh embedded `coord-*` skills; this overwrites local edits to those generated skill files
+
+### Fixed
+
+- Ledger writers now retry bounded SQLite lock contention instead of failing concurrent writes immediately
+- Conductor launchers now handle Windows executable lookup, child liveness, dead-child stdin writes, protocol failures, zombie processes, and app-server cleanup consistently
+- Windows scheduler manifests now preserve runtime configuration, validate task/query structure, reject unsafe actions, and clean up exact owned tasks
+- Coordination output no longer reports releases, claims, widening, or unclaims that did not actually occur
+- Markdown-content linting and coordination-skill doctests now distinguish executable commands from nested, indented, or demoted fences without silently skipping assertions
+- Release automation now validates tag/workspace/lock consistency before building, safely reuses draft releases, replaces partial assets on retry, verifies the complete non-empty asset set before publishing, and uses the Node 24 checkout runtime
+
 ## [0.3.0] - 2026-08-16
 
 ### Added
