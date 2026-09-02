@@ -97,20 +97,31 @@ pub(super) fn normalize_path(path: &str) -> String {
     path.to_string()
 }
 
-pub(super) fn compute_duration_minutes(first: &Option<String>, last: &Option<String>) -> u64 {
-    let (Some(first), Some(last)) = (first.as_deref(), last.as_deref()) else {
-        return 0;
-    };
+/// Idle-gap cap for session duration (GH-578): a gap longer than this
+/// between consecutive session events is idle time, not work, and only
+/// contributes this many seconds to the session's active duration.
+pub(super) const MAX_IDLE_GAP_SECS: i64 = 30 * 60;
+
+/// Accumulate active duration across consecutive event timestamps.
+///
+/// Gaps longer than [`MAX_IDLE_GAP_SECS`] are treated as idle and capped,
+/// so an idle-for-ten-days session does not report 14287 minutes of work./// Negative deltas (clock skew) contribute nothing.
+pub(super) fn accumulate_active_secs(
+    active_secs: &mut i64,
+    last_seen: &mut Option<time::OffsetDateTime>,
+    ts: &str,
+) {
     let fmt = &time::format_description::well_known::Rfc3339;
-    let Ok(t1) = time::OffsetDateTime::parse(first, fmt) else {
-        return 0;
+    let Ok(t) = time::OffsetDateTime::parse(ts, fmt) else {
+        return;
     };
-    let Ok(t2) = time::OffsetDateTime::parse(last, fmt) else {
-        return 0;
-    };
-    let diff: time::Duration = t2 - t1;
-    let secs = diff.whole_seconds().unsigned_abs();
-    secs / 60
+    if let Some(prev) = *last_seen {
+        let delta = (t - prev).whole_seconds();
+        if delta > 0 {
+            *active_secs += delta.min(MAX_IDLE_GAP_SECS);
+        }
+    }
+    *last_seen = Some(t);
 }
 
 pub(super) fn now_rfc3339() -> String {

@@ -33,7 +33,17 @@ pub struct DigestState {
     /// Last failure message.
     #[serde(default)]
     pub last_error: String,
+    /// Session ids already digested (bounded memory of recent ids).
+    ///
+    /// GH-578: the single `session_id` slot could not remember more than one
+    /// digested session, so an already-digested session re-entered the
+    /// pending list whenever the slot moved on and was re-digested.
+    #[serde(default)]
+    pub digested: Vec<String>,
 }
+
+/// How many recently digested session ids to remember for idempotency.
+const MAX_REMEMBERED_DIGESTS: usize = 64;
 
 /// Load the digest state from the per-user store.
 pub fn load_digest_state(project_id: &str) -> DigestState {
@@ -55,6 +65,28 @@ fn digest_state_path(project_id: &str) -> std::path::PathBuf {
     edda_store::project_dir(project_id)
         .join("state")
         .join("last_digested_session.json")
+}
+
+/// Whether this session already has a digest event in the workspace ledger.
+///
+/// Read on both the auto and the manual digest path so the same session is
+/// never digested twice (GH-578).
+pub fn already_digested_session(project_id: &str, session_id: &str) -> bool {
+    load_digest_state(project_id)
+        .digested
+        .iter()
+        .any(|s| s == session_id)
+}
+
+/// Record a session as digested (bounded, deduplicated).
+fn remember_digested(state: &mut DigestState, session_id: &str) {
+    if !state.digested.iter().any(|s| s == session_id) {
+        state.digested.push(session_id.to_string());
+        if state.digested.len() > MAX_REMEMBERED_DIGESTS {
+            let overflow = state.digested.len() - MAX_REMEMBERED_DIGESTS;
+            state.digested.drain(0..overflow);
+        }
+    }
 }
 
 /// Find session ledger files in the store, excluding the current session.
@@ -80,8 +112,8 @@ fn find_pending_sessions(
         if session_id == current_session_id {
             continue;
         }
-        // Skip already-digested session
-        if session_id == state.session_id {
+        // Skip already-digested sessions (GH-578: full set, not just the last one)
+        if session_id == state.session_id || state.digested.iter().any(|s| s == &session_id) {
             continue;
         }
         sessions.push(session_id);
@@ -325,6 +357,12 @@ fn digest_one_session(
     digest_failed_cmds: bool,
     state: &mut DigestState,
 ) -> DigestResult {
+    // Idempotency guard (GH-578): never digest a session twice, including
+    // via the retry path which bypasses find_pending_sessions.
+    if already_digested_session(project_id, session_id) {
+        return DigestResult::NoPending;
+    }
+
     // Build session ledger path
     let session_ledger_path = edda_store::project_dir(project_id)
         .join("ledger")
@@ -395,10 +433,14 @@ fn digest_one_session(
         }
     };
 
-    // Skip empty sessions (only SessionStart, no actual work)
-    if stats.tool_calls == 0 && stats.tool_failures == 0 && stats.user_prompts == 0 {
+    // Skip sessions with no tool calls and no failures: nothing to summarize
+    // (GH-578). A chat-only or idle session produces a counts-only digest
+    // with no information value; it must not cost a ledger event. Failure-
+    // only sessions are kept: their failed commands carry information.
+    if stats.tool_calls == 0 && stats.tool_failures == 0 {
         let _ = std::fs::remove_file(&session_ledger_path);
         state.session_id = session_id.to_string();
+        remember_digested(state, session_id);
         state.digested_at = now_rfc3339();
         state.retry_count = 0;
         state.pending_session_id = String::new();
@@ -489,6 +531,7 @@ fn digest_one_session(
 
     // Update state: success
     state.session_id = session_id.to_string();
+    remember_digested(state, session_id);
     state.digested_at = now_rfc3339();
     state.event_id = last_event_id.clone();
     state.retry_count = 0;
@@ -509,16 +552,24 @@ fn digest_one_session(
 
 /// Manually digest a specific session (CLI escape hatch).
 ///
-/// Unlike `digest_previous_sessions`, this:
-/// - Does NOT check or update state tracking
-/// - Forces digest even if already digested
-/// - Returns Ok(event_id) on success
+/// Unlike `digest_previous_sessions`, this digests the named session even if
+/// it is not the next pending one. It is still idempotent (GH-578): a session
+/// that already has a digest event is not digested again, and a session with
+/// no tool calls writes no event (returns an empty event id).
 pub fn digest_session_manual(
     project_id: &str,
     session_id: &str,
     cwd: &str,
     digest_failed_cmds: bool,
 ) -> anyhow::Result<String> {
+    // Idempotency guard (GH-578): this is the path the bridge dispatchers hit
+    // on every agent_end/session_end, so it must read the digest state —
+    // previously it unconditionally re-digested, writing one event per call.
+    let mut state = load_digest_state(project_id);
+    if state.digested.iter().any(|s| s == session_id) {
+        return Ok(state.event_id);
+    }
+
     let session_ledger_path = edda_store::project_dir(project_id)
         .join("ledger")
         .join(format!("{session_id}.jsonl"));
@@ -540,6 +591,14 @@ pub fn digest_session_manual(
     let parent_hash = ledger.last_event_hash()?;
 
     let mut stats = extract_stats(&session_ledger_path)?;
+
+    // No tool calls and no failures: nothing to summarize, write no event
+    // (GH-578). Not remembered and not removed, so if real work lands later
+    // the session can still be digested with it.
+    if stats.tool_calls == 0 && stats.tool_failures == 0 {
+        return Ok(String::new());
+    }
+
     stats.tasks_snapshot = load_tasks_for_digest(project_id);
     let (_decisions, notes) = collect_session_ledger_extras(cwd, stats.first_ts.as_deref());
     let event = build_digest_event(session_id, &stats, &branch, parent_hash.as_deref(), &notes)?;
@@ -559,14 +618,19 @@ pub fn digest_session_manual(
     }
 
     // Update state to mark as digested
-    let mut state = load_digest_state(project_id);
     state.session_id = session_id.to_string();
+    remember_digested(&mut state, session_id);
     state.digested_at = now_rfc3339();
     state.event_id = last_event_id.clone();
     state.retry_count = 0;
     state.pending_session_id = String::new();
     state.last_error = String::new();
     let _ = save_digest_state(project_id, &state);
+
+    // Remove the session ledger file after successful digest, mirroring the
+    // auto path: the session data now lives in the workspace ledger's digest
+    // event, and removing the file prevents repeated re-digests (GH-578).
+    let _ = std::fs::remove_file(&session_ledger_path);
 
     Ok(last_event_id)
 }
@@ -587,8 +651,8 @@ pub fn find_all_pending_sessions(project_id: &str) -> Vec<String> {
             continue;
         }
         let session_id = name.trim_end_matches(".jsonl").to_string();
-        // Skip already-digested session
-        if session_id == state.session_id {
+        // Skip already-digested sessions (GH-578: full set, not just the last one)
+        if session_id == state.session_id || state.digested.iter().any(|s| s == &session_id) {
             continue;
         }
         sessions.push(session_id);

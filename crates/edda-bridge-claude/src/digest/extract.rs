@@ -3,7 +3,7 @@ use std::io::BufRead;
 use std::path::Path;
 
 use super::helpers::{
-    compute_duration_minutes, extract_bash_command, extract_envelope_cwd, extract_exit_code,
+    accumulate_active_secs, extract_bash_command, extract_envelope_cwd, extract_exit_code,
     extract_file_path, extract_git_commit_msg,
 };
 use super::{ActivityType, DigestTaskSnapshot, FailedCommand, SessionOutcome, SessionStats};
@@ -16,6 +16,12 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
     // Track session outcome: last event type + trailing failure count
     let mut last_event_name = String::new();
     let mut trailing_failures: u32 = 0;
+
+    // Track timestamps for duration. Duration is the session's real activity
+    // span: consecutive-event gaps are summed with idle gaps capped
+    // (GH-578) — not "first timestamp until now".
+    let mut active_secs: i64 = 0;
+    let mut last_seen: Option<time::OffsetDateTime> = None;
 
     if !session_ledger_path.exists() {
         return Ok(stats);
@@ -34,13 +40,13 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
             Err(_) => continue, // skip malformed lines
         };
 
-        // Track timestamps for duration
         let ts = envelope.get("ts").and_then(|v| v.as_str()).unwrap_or("");
         if !ts.is_empty() {
             if stats.first_ts.is_none() {
                 stats.first_ts = Some(ts.to_string());
             }
             stats.last_ts = Some(ts.to_string());
+            accumulate_active_secs(&mut active_secs, &mut last_seen, ts);
         }
 
         let event_name = envelope
@@ -135,7 +141,7 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
 
     stats.files_modified = files_set.into_iter().collect();
     stats.file_edit_counts = file_edit_map.into_iter().collect();
-    stats.duration_minutes = compute_duration_minutes(&stats.first_ts, &stats.last_ts);
+    stats.duration_minutes = active_secs.unsigned_abs() / 60;
 
     // Determine session outcome
     stats.outcome = if trailing_failures >= 3 {

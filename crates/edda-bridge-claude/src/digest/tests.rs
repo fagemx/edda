@@ -266,7 +266,9 @@ fn digest_duration_computed() {
     let path = write_session_ledger(tmp.path(), &lines);
     let stats = extract_stats(&path).unwrap();
 
-    assert_eq!(stats.duration_minutes, 35);
+    // A 35-minute silent gap exceeds the 30-minute idle cap (GH-578):
+    // only 30 minutes of the span counts as activity.
+    assert_eq!(stats.duration_minutes, 30);
 }
 
 #[test]
@@ -730,10 +732,12 @@ fn digest_state_round_trip() {
         retry_count: 0,
         pending_session_id: String::new(),
         last_error: String::new(),
+        digested: vec!["sess-123".to_string()],
     };
     save_digest_state(project_id, &state).unwrap();
 
     let loaded = load_digest_state(project_id);
+    assert_eq!(loaded.digested, vec!["sess-123".to_string()]);
 
     let _ = std::fs::remove_dir_all(edda_store::project_dir(project_id));
 
@@ -966,6 +970,138 @@ fn manual_digest_specific_session() {
     assert!(!events.is_empty());
     assert_eq!(events[0].event_type, "note");
     assert_eq!(events[0].payload["source"], "bridge:session_digest");
+}
+
+// ── GH-578 regression tests ──
+
+#[test]
+fn manual_digest_zero_call_session_writes_no_event() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (workspace, project_id) = setup_digest_workspace(tmp.path());
+
+    // Session with a user prompt but no tool calls: nothing to summarize.
+    write_store_session_ledger(
+        &project_id,
+        "sess-zero-call",
+        &[make_envelope("UserPromptSubmit", "", serde_json::json!({}))],
+    );
+
+    let event_id = digest_session_manual(
+        &project_id,
+        "sess-zero-call",
+        workspace.to_str().unwrap(),
+        true,
+    )
+    .unwrap();
+    assert!(
+        event_id.is_empty(),
+        "zero-call session must not write a digest"
+    );
+
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let events = ledger.iter_events().unwrap();
+    assert_eq!(
+        events.len(),
+        0,
+        "zero-call session must not write a ledger event"
+    );
+}
+
+#[test]
+fn manual_digest_same_session_twice_writes_one_event() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (workspace, project_id) = setup_digest_workspace(tmp.path());
+
+    write_store_session_ledger(
+        &project_id,
+        "sess-twice",
+        &[
+            make_envelope("PostToolUse", "Edit", serde_json::json!({})),
+            make_envelope("PostToolUse", "Bash", serde_json::json!({})),
+        ],
+    );
+
+    digest_session_manual(&project_id, "sess-twice", workspace.to_str().unwrap(), true).unwrap();
+    // Second call (e.g. the bridge firing again on agent_end) must be a no-op.
+    digest_session_manual(&project_id, "sess-twice", workspace.to_str().unwrap(), true).unwrap();
+
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let events = ledger.iter_events().unwrap();
+    let digests = events
+        .iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .count();
+    assert_eq!(digests, 1, "same session must not be digested twice");
+}
+
+#[test]
+fn auto_digest_zero_call_session_writes_no_event() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (workspace, project_id) = setup_digest_workspace(tmp.path());
+
+    // Chat-only session: 1 user prompt, 0 tool calls.
+    write_store_session_ledger(
+        &project_id,
+        "prev-chat-only",
+        &[make_envelope("UserPromptSubmit", "", serde_json::json!({}))],
+    );
+
+    let result = digest_previous_sessions_with_opts(
+        &project_id,
+        "current",
+        workspace.to_str().unwrap(),
+        2000,
+        false,
+    );
+    assert!(matches!(result, DigestResult::NoPending));
+
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let events = ledger.iter_events().unwrap();
+    assert_eq!(
+        events.len(),
+        0,
+        "zero-call session must not write a ledger event"
+    );
+}
+
+#[test]
+fn digest_duration_excludes_idle_gap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lines = vec![
+        make_envelope_at(
+            "PostToolUse",
+            "Bash",
+            "2026-02-14T10:00:00Z",
+            serde_json::json!({}),
+        ),
+        make_envelope_at(
+            "PostToolUse",
+            "Bash",
+            "2026-02-14T10:05:00Z",
+            serde_json::json!({}),
+        ),
+        // 10 idle days later, two more events one minute apart
+        make_envelope_at(
+            "PostToolUse",
+            "Bash",
+            "2026-02-24T10:05:00Z",
+            serde_json::json!({}),
+        ),
+        make_envelope_at(
+            "PostToolUse",
+            "Bash",
+            "2026-02-24T10:06:00Z",
+            serde_json::json!({}),
+        ),
+    ];
+    let path = write_session_ledger(tmp.path(), &lines);
+    let stats = extract_stats(&path).unwrap();
+
+    // 5m active + 30m idle-gap cap + 1m active = 36, not 1440*10+6
+    assert_eq!(stats.duration_minutes, 36);
 }
 
 // ── PrevDigest tests ──
