@@ -1,11 +1,13 @@
 #!/bin/sh
 # pr-review-watch.sh — local watcher: for every open non-draft PR whose head SHA
 # has not been reviewed yet, launch the read-only reviewer (scripts/review-pr.sh),
-# post `review: started on <sha>` as an acknowledgement, then post the
-# SHA-pinned verdict when the reviewer finishes, and set review:* labels.
+# post `review: started on <sha>` as an acknowledgement (retried, bounded), then
+# post the SHA-pinned verdict when the reviewer finishes and set review:* labels.
 #
 # usage: pr-review-watch.sh [--once] [--dry-run]
-#        pr-review-watch.sh decide            (offline helper; JSON on stdin)
+#        pr-review-watch.sh decide                 (offline helper; TSV on stdin)
+#        pr-review-watch.sh label-verdict <reviewed-sha> <current-head>
+#        pr-review-watch.sh ack-try <pr> <sha> <attempts>
 #
 # Environment:
 #   EDDA_REPO                  owner/repo            (default fagemx/edda)
@@ -14,19 +16,31 @@
 #   EDDA_REVIEW_MODEL          review model          (default openai-codex/gpt-5.6-sol)
 #   EDDA_REVIEW_POLL_SECONDS   poll interval         (default 60)
 #   PR_REVIEW_WATCH_STATE      state file override   (used by tests)
+#   PR_REVIEW_WATCH_ACKS       acks file override    (used by tests)
 #
 # State (under $EDDA_FLEET_SCRATCH, not in git):
 #   review-state.tsv     pr<TAB>reviewed_sha<TAB>round
 #   review-pending.tsv   pr<TAB>round<TAB>sha<TAB>attempts<TAB>launched_epoch<TAB>postfails
+#   review-acks.tsv      pr<TAB>sha<TAB>attempts  — heads launched but not yet acked;
+#                        the entry exists only while the ack is pending (removed on
+#                        success; after 3 failed attempts -> review:post-failed)
 #   review-fails.tsv     pr<TAB>sha<TAB>consecutive launch failures
 #   watch.log            everything the watcher did
 #
-# Provider-overload rule, v1 (no Codex fallback — it cannot be made read-only):
+# Provider-overload rule, v1 (no Codex fallback — it cannot be made read-only;
+# fleet.review-provider-overload=…codex-route-withdrawn-for-automated-watcher):
 # on a dead/empty verdict, retry pi once with the same model; if that also
 # yields no verdict, label the PR `review:unreviewed`, log it, and stop for
-# that head. An unreviewed PR is an honest state; a cheap-model verdict is not.
-# model_observed and cost are read from the pi session file and are NEVER
-# fabricated — a missing session file is reported as unknown.
+# that head. model_observed and cost are read from the pi session file and are
+# NEVER fabricated — a missing session file is reported as unknown.
+#
+# review:unreviewed is per head: it blocks only while the PR's current head
+# equals the head recorded as unreviewed. A new head drops the label and is
+# reviewed again.
+#
+# The verdict comment is SHA-pinned; its label is applied only if the PR's
+# current head still equals the reviewed SHA (a moved head gets the comment
+# without the label, and the rescan launches the next round).
 #
 # A failed comment post or label update does NOT mark the head reviewed: the
 # verdict is kept and posting retries on the next poll; after 5 failed
@@ -43,6 +57,7 @@ POLL=${EDDA_REVIEW_POLL_SECONDS:-60}
 SCRATCH=${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}
 STALE=${EDDA_REVIEW_STALE_SECONDS:-2700}   # 45 min: pi task limit is 30 min
 POSTFAIL_CAP=5
+ACK_CAP=3
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REVIEW_PR="$SCRIPT_DIR/review-pr.sh"
@@ -50,56 +65,101 @@ REVIEW_PR="$SCRIPT_DIR/review-pr.sh"
 ONCE=0
 DRY=0
 TAB=$(printf '\t')   # literal tab; "\t" inside quotes is backslash-t in POSIX sh
+log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >> "$WATCHLOG"; }
 
-# ---- offline helper: decide which PRs to review ------------------------------
-# Reads `gh pr list --json number,headRefOid,isDraft,labels` JSON on stdin and
-# prints one decision line per PR: "REVIEW <pr> <sha>" or "SKIP <pr> <reason>".
-# Pure: no network, no state mutation; the state file is read-only here.
+# ---- offline helpers (unit-tested by scripts/test-pr-review-watch.sh) --------
+
+# decide: PR queue triage. Input: one TSV row per open non-draft PR from
+#   gh pr list --repo R --state open --json number,headRefOid,isDraft,labels,updatedAt \
+#     --jq '.[] | select(.isDraft|not) | [.number, .headRefOid, ([.labels[].name]|join(",")), .updatedAt] | @tsv'
+# (row: number<TAB>sha<TAB>labels<TAB>updatedAt; drafts are filtered by the --jq).
+# Output per PR: "REVIEW <n> <sha>" (+" drop-unreviewed-label" when a stale
+# review:unreviewed label must be removed) or "SKIP <n> <reason>". Pure: no
+# network, no state mutation; the state file is read-only here.
 decide() {
   state=${PR_REVIEW_WATCH_STATE:-$SCRATCH/review-state.tsv}
   # Pass the state path via the environment, not -v: gawk processes escape
   # sequences in -v values, which mangles Windows paths (C:\Users\...).
-  EDDA_REVIEW_STATE_TMP="$state" awk '
-    { raw = raw $0 }
-    function jval(o, k,   s, v) {
-      if (!match(o, "\"" k "\"[ ]*:[ ]*")) return ""
-      v = substr(o, RSTART + RLENGTH)
-      if (substr(v, 1, 1) == "\"") {
-        v = substr(v, 2)
-        if (match(v, /^[^"]*/)) return substr(v, RSTART, RLENGTH)
-        return ""
-      }
-      if (match(v, /^[^,}\]]*/)) return substr(v, RSTART, RLENGTH)
-      return ""
-    }
-    END {
-      statefile = ENVIRON["EDDA_REVIEW_STATE_TMP"]
-      while ((getline line < statefile) > 0) {
-        split(line, f, "\t")
-        rev[f[1]] = f[2]
-      }
-      close(statefile)
-      rest = raw
-      while (match(rest, /\{[ \t\n]*"(number|headRefOid)"/)) {
-        obj = substr(rest, RSTART)
-        rest = substr(rest, RSTART + RLENGTH)
-        num = jval(obj, "number")
-        if (num == "") continue
-        if (jval(obj, "isDraft") == "true") { print "SKIP " num " draft"; continue }
-        sha = jval(obj, "headRefOid")
-        if (sha == "") { print "SKIP " num " missing-head"; continue }
-        if (obj ~ /"labels"[ ]*:[ ]*\[[^]]*review:unreviewed/) {
-          print "SKIP " num " review-unreviewed"; continue
+  PR_REVIEW_STATE_TMP="$state" awk -F'\t' '
+    BEGIN {
+      sf = ENVIRON["PR_REVIEW_STATE_TMP"]
+      if (sf != "") {
+        while ((getline line < sf) > 0) {
+          split(line, s, "\t")
+          rev[s[1]] = s[2]
         }
-        if (rev[num] == sha) { print "SKIP " num " already-reviewed"; continue }
-        print "REVIEW " num " " sha
+        close(sf)
       }
+    }
+    {
+      num = $1; sha = $2; labels = $3
+      if (num !~ /^[0-9]+$/) next
+      if (sha == "") { print "SKIP " num " missing-head"; next }
+      if (("," labels ",") ~ /,review:unreviewed,/) {
+        if (rev[num] == sha || rev[num] == "") {
+          print "SKIP " num " review-unreviewed"; next
+        }
+        print "REVIEW " num " " sha " drop-unreviewed-label"; next
+      }
+      if (rev[num] == sha) { print "SKIP " num " already-reviewed"; next }
+      print "REVIEW " num " " sha
     }
   '
 }
 
+# label-verdict: should the verdict label be applied? Only when the PR's
+# current head still equals the reviewed SHA (and is known).
+label_verdict() { # $1=reviewed sha  $2=current head
+  if [ -n "${2:-}" ] && [ "$2" = "$1" ]; then echo apply; else echo skip; fi
+}
+
+# ---- acknowledgement (retried, bounded; never best-effort) -------------------
+
+ack_register() { # $1=pr $2=sha $3=attempts — record "launched, ack pending"
+  awk -F'\t' -v pr="$1" '$1!=pr' "$ACKS" > "$ACKS.tmp"
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$ACKS.tmp"
+  mv "$ACKS.tmp" "$ACKS"
+}
+
+ack_drop() { # $1=pr
+  awk -F'\t' -v pr="$1" '$1!=pr' "$ACKS" > "$ACKS.tmp"
+  mv "$ACKS.tmp" "$ACKS"
+}
+
+ack_try() { # $1=pr $2=sha $3=attempts — one attempt.
+  # exit 0 = posted (pending entry cleared); 1 = failed, retries remain;
+  # 2 = failed after the bound (entry dropped, review:post-failed label).
+  if printf 'review: started on %s\n' "$2" \
+      | gh pr comment "$1" --repo "$REPO" --body-file - >/dev/null 2>&1; then
+    ack_drop "$1"
+    log "pr$1 ack posted: review: started on $2"
+    return 0
+  fi
+  attempts=$((${3:-0} + 1))
+  if [ "$attempts" -ge "$ACK_CAP" ]; then
+    ack_drop "$1"
+    log "pr$1 ack failed $ACK_CAP times — labeling review:post-failed"
+    gh pr edit "$1" --repo "$REPO" --add-label "review:post-failed" >/dev/null 2>&1 || true
+    return 2
+  fi
+  ack_register "$1" "$2" "$attempts"
+  log "pr$1 ack failed (attempt $attempts/$ACK_CAP); will retry next poll"
+  return 1
+}
+
+# ---- offline subcommand dispatch (after all definitions) ---------------------
 case "${1:-}" in
   decide) decide; exit 0 ;;
+  label-verdict) label_verdict "${2:-}" "${3:-}"; exit 0 ;;
+  ack-try)
+    if [ $# -lt 4 ]; then echo "usage: pr-review-watch.sh ack-try <pr> <sha> <attempts>" >&2; exit 1; fi
+    mkdir -p "$SCRATCH"
+    ACKS=${PR_REVIEW_WATCH_ACKS:-$SCRATCH/review-acks.tsv}
+    WATCHLOG=${PR_REVIEW_WATCH_LOG:-$SCRATCH/watch.log}
+    touch "$ACKS"
+    ack_try "$2" "$3" "$4"
+    exit $?
+    ;;
 esac
 
 for a in "$@"; do
@@ -112,19 +172,19 @@ for a in "$@"; do
 done
 
 mkdir -p "$SCRATCH"
-STATE="$SCRATCH/review-state.tsv"
+STATE=${PR_REVIEW_WATCH_STATE:-$SCRATCH/review-state.tsv}
+ACKS=${PR_REVIEW_WATCH_ACKS:-$SCRATCH/review-acks.tsv}
 PENDING="$SCRATCH/review-pending.tsv"
 FAILS="$SCRATCH/review-fails.tsv"
 WATCHLOG="$SCRATCH/watch.log"
-touch "$STATE" "$PENDING" "$FAILS"
+touch "$STATE" "$ACKS" "$PENDING" "$FAILS"
 
-log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >> "$WATCHLOG"; }
 
 ensure_labels() {
   gh label create "review:lgtm"              --repo "$REPO" --color 0e8a16 --description "Automatic review verdict: LGTM (P0=0, P1=0)"            --force >/dev/null 2>&1 || true
   gh label create "review:changes-requested" --repo "$REPO" --color d93f0b --description "Automatic review verdict: Changes Requested"            --force >/dev/null 2>&1 || true
   gh label create "review:unreviewed"        --repo "$REPO" --color d4c5f9 --description "Review provider exhausted; verdict pending human/retry" --force >/dev/null 2>&1 || true
-  gh label create "review:post-failed"       --repo "$REPO" --color b60205 --description "Verdict could not be posted; see watcher scratch dir"   --force >/dev/null 2>&1 || true
+  gh label create "review:post-failed"       --repo "$REPO" --color b60205 --description "Verdict/ack could not be posted; see watcher scratch dir" --force >/dev/null 2>&1 || true
 }
 
 state_field() { # $1=pr  $2=field index (2=sha,3=round)
@@ -198,17 +258,18 @@ pr_is_open() { # $1=pr
   [ "$(gh pr view "$1" --repo "$REPO" --json state --jq .state 2>/dev/null)" = "OPEN" ]
 }
 
-ack_comment() { # $1=pr $2=sha — the ≤3-minute acknowledgement
-  if [ "$DRY" = "1" ]; then
-    echo "dry-run: would post 'review: started on $2' to PR #$1"
-    return 0
-  fi
-  if printf 'review: started on %s\n' "$2" \
-      | gh pr comment "$1" --repo "$REPO" --body-file - >/dev/null 2>&1; then
-    log "pr$1 ack posted: review: started on $2"
-  else
-    log "pr$1 ack comment failed (non-fatal; verdict still follows)"
-  fi
+pr_head() { # $1=pr
+  gh pr view "$1" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null
+}
+
+
+process_acks() {
+  [ -s "$ACKS" ] || return 0
+  [ "$DRY" = "1" ] && return 0
+  while IFS="$TAB" read -r pr sha attempts < "$ACKS"; do
+    [ -n "${pr:-}" ] || continue
+    ack_try "$pr" "$sha" "$attempts" || true
+  done
 }
 
 mark_unreviewed() { # $1=pr $2=sha $3=round $4=reason
@@ -249,16 +310,22 @@ settle_pending() {
     VERDICT="$SCRATCH/review-pr$pr-r$round-verdict.md"
     POSTED="$VERDICT.posted"
 
-    # Comment already posted; only labels + state remain.
-    if [ -f "$POSTED" ]; then
-      vl=$(sh "$REVIEW_PR" verdict-label < "$POSTED")
-      if [ "$DRY" = "1" ]; then
-        echo "dry-run: would set label '$vl' on PR #$pr and record it reviewed"
-        continue
+    # Apply the verdict label + record reviewed. The label goes on only if the
+    # PR's current head still equals the reviewed SHA; a moved head keeps the
+    # SHA-pinned comment but gets no label, and the rescan launches the next
+    # round.
+    finish_verdict() { # $1=SRC verdict file (already posted)
+      cur=$(pr_head "$pr")
+      if [ "$(label_verdict "$sha" "$cur")" != "apply" ]; then
+        log "pr$pr head moved: reviewed $sha current ${cur:-unknown} — verdict comment stays pinned, no label; rescan will launch the next round"
+        state_set "$pr" "$sha" "$round"
+        pending_drop "$pr"
+        return 0
       fi
+      vl=$(sh "$REVIEW_PR" verdict-label < "$1")
       if [ -n "$vl" ] && gh pr edit "$pr" --repo "$REPO" --add-label "$vl" >/dev/null 2>&1; then
-        gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed"   >/dev/null 2>&1 || true
-        gh pr edit "$pr" --repo "$REPO" --remove-label "review:post-failed"  >/dev/null 2>&1 || true
+        gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed"  >/dev/null 2>&1 || true
+        gh pr edit "$pr" --repo "$REPO" --remove-label "review:post-failed" >/dev/null 2>&1 || true
         if [ "$vl" = "review:lgtm" ]; then
           gh pr edit "$pr" --repo "$REPO" --remove-label "review:changes-requested" >/dev/null 2>&1 || true
         else
@@ -271,12 +338,21 @@ settle_pending() {
         postfails=$((postfails + 1))
         log "pr$pr r$round label update failed (attempt $postfails)"
         if [ "$postfails" -ge "$POSTFAIL_CAP" ]; then
-          mark_post_failed "$pr" "$sha" "$round" "$POSTED"
+          mark_post_failed "$pr" "$sha" "$round" "$1"
           pending_drop "$pr"
         else
           pending_update "$pr" "$round" "$sha" "$attempts" "$launched" "$postfails"
         fi
       fi
+    }
+
+    # Comment already posted; only the label + state remain.
+    if [ -f "$POSTED" ]; then
+      if [ "$DRY" = "1" ]; then
+        echo "dry-run: would finish verdict posting for PR #$pr (label + state)"
+        continue
+      fi
+      finish_verdict "$POSTED"
       continue
     fi
 
@@ -306,6 +382,7 @@ settle_pending() {
           log "pr$pr r$round posted verdict comment"
           mv "$VERDICT" "$POSTED"
           pending_update "$pr" "$round" "$sha" "$attempts" "$launched" 0
+          finish_verdict "$POSTED"
         else
           postfails=$((postfails + 1))
           log "pr$pr r$round comment post failed (attempt $postfails); verdict kept at $VERDICT"
@@ -350,15 +427,17 @@ settle_pending() {
 
 # ---- open-PR scan ------------------------------------------------------------
 scan_open_prs() {
-  rows_json=$(gh pr list --state open --repo "$REPO" --json number,headRefOid,isDraft,labels 2>/dev/null) || {
+  rows=$(gh pr list --state open --repo "$REPO" \
+      --json number,headRefOid,isDraft,labels,updatedAt \
+      --jq '.[] | select(.isDraft|not) | [.number, .headRefOid, ([.labels[].name]|join(",")), .updatedAt] | @tsv' 2>/dev/null) || {
     log "gh pr list failed; skipping this cycle"
     return 0
   }
-  decisions=$(printf '%s\n' "$rows_json" | decide) || {
+  decisions=$(printf '%s\n' "$rows" | decide) || {
     log "decide failed; skipping this cycle"
     return 0
   }
-  printf '%s\n' "$decisions" | while read -r verb pr sha; do
+  printf '%s\n' "$decisions" | while read -r verb pr sha extra; do
     [ "${verb:-}" = "REVIEW" ] || continue
     [ -n "${pr:-}" ] || continue
     pending_has "$pr" && continue
@@ -369,9 +448,17 @@ scan_open_prs() {
     newround=$((round + 1))
 
     if [ "$DRY" = "1" ]; then
-      echo "dry-run: would launch review for PR #$pr round $newround (head $sha${prev:+, prev $prev}): $REVIEW_PR $pr $newround $prev --sha $sha"
+      echo "dry-run: would launch review for PR #$pr round $newround (head $sha${prev:+, prev $prev}${extra:+, $extra}): $REVIEW_PR $pr $newround $prev --sha $sha"
       log "dry-run: would launch review for pr$pr r$newround (head $sha)"
       continue
+    fi
+
+    if [ "${extra:-}" = "drop-unreviewed-label" ]; then
+      if gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed" >/dev/null 2>&1; then
+        log "pr$pr new head $sha — stale review:unreviewed label (recorded for ${prev:-none}) removed"
+      else
+        log "pr$pr could not remove the stale review:unreviewed label (continuing)"
+      fi
     fi
 
     log "pr$pr new head $sha (reviewed: '${prev:-none}') — launching review r$newround"
@@ -381,7 +468,9 @@ scan_open_prs() {
       fail_clear "$pr"
       log "pr$pr r$newround launched and confirmed running (task edda-review-pr$pr-r$newround)"
       pending_update "$pr" "$newround" "$sha" 0 "$(date +%s)" 0
-      ack_comment "$pr" "$sha"
+      ack_register "$pr" "$sha" 0
+      log "pr$pr launched, ack pending (review: started on $sha)"
+      ack_try "$pr" "$sha" 0 || true
     elif [ "$rc" = "3" ]; then
       log "pr$pr head moved between scan and launch ($sha); will rescan"
     else
@@ -405,6 +494,7 @@ if [ "$DRY" != "1" ]; then
 fi
 
 while :; do
+  process_acks
   settle_pending
   scan_open_prs
   [ "$ONCE" = "1" ] && break

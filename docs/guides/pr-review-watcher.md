@@ -19,14 +19,19 @@
    - Windows 上照決策 `fleet.lane-launch` 用 Task Scheduler 起隱藏排程任務
      `edda-review-prN-rR`（wrapper 設 `HOME`、UTF-8；父程序是 svchost，不受
      session 的 Job Object 牽連）；Linux 上退化成 `nohup`。
-2. **確認**：排程任務確認進入 `Running` 之後（起不來就不記 pending、下一輪重試），
-   3 分鐘內貼確認留言 `review: started on <full sha>`（SHA-pinned）。
-   判決留言等審查者跑完（典型 5–15 分鐘）才貼。
+2. **確認**：排程任務確認進入 `Running` 之後（起不來就不記 pending、下一輪重試），貼確認留言
+   `review: started on <full sha>`（SHA-pinned）。ack **不是 best-effort**：貼失敗會記在
+   `review-acks.tsv`（"launched, ack pending"），每一輪重試，3 次都失敗就 label
+   `review:post-failed` 並記 log；成功才從 acks 檔移除。判決留言等審查者跑完
+   （典型 5–15 分鐘）才貼。
 3. 判決出現後（log 裡 `<<<VERDICT ... VERDICT>>>` 區塊），貼 PR 留言：表頭一行含
    **model_observed（從 pi session 檔讀，不是從 brief 宣稱；session 檔不存在就明寫
-   `unknown`，絕不編造）**、cost（session 檔加總）、釘死的 head SHA；然後加 label
-   `review:lgtm` 或 `review:changes-requested`。**留言與 label 都成功才記 state**；
-   留言失敗就保留判決檔、下一輪重貼（重試 5 次仍失敗 → label `review:post-failed`）。
+   `unknown`，絕不編造）**、cost（session 檔加總）、釘死的 head SHA。**label 只在 PR
+   目前 head 仍等於被審的 SHA 時才加**（`review:lgtm` 或 `review:changes-requested`）；
+   head 已移走時判決留言照貼（它釘在被審的 SHA），但不加 label、記 log
+   `head moved: reviewed <sha> current <sha>`，由重掃描開下一輪。**留言與 label
+   都成功才記 state**；留言失敗就保留判決檔、下一輪重貼（重試 5 次仍失敗 →
+   label `review:post-failed`）。
 4. head 被 push 之後（SHA 變了）自動再審一輪（round+1，delta brief，`prev-sha` 帶入）。
 
 ## Provider 過載怎麼辦（v1：無 codex 後備）
@@ -39,9 +44,10 @@
    （`edda dispatch --agent codex` 這條運輸在 v1 移除：Codex 設定為
    `danger-full-access`，做不到唯讀審查。）
 
-`review:unreviewed` 會**一直擋住那張 PR**，直到有人手動摘掉 label——摘掉後 watcher
-對新的掃描結果重新判斷（同 SHA 仍在 state 裡就還是跳過，push 了新 head 就會重審）。
-要手動救：手動跑一輪審查、貼上判決、把 `review-state.tsv` 補成該 head、摘 label。
+`review:unreviewed` 是 **per head**：只擋「目前 head == 被記錄為 unreviewed 的那個
+head」。push 了新 head，watcher 會摘掉過期的 label、自動再審一輪。label 存在但
+state 裡沒有對應 head 時（例如人工加的），視為仍在擋，不會自動摘。要手動救：
+手動跑一輪審查、貼上判決、把 `review-state.tsv` 補成該 head、摘 label。
 
 ## 啟動 / 停止
 
@@ -87,6 +93,7 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 |---|---|
 | `review-state.tsv` | `pr<TAB>reviewed_sha<TAB>round`——每張 PR 已審到哪個 head |
 | `review-pending.tsv` | `pr<TAB>round<TAB>sha<TAB>attempts<TAB>launched<TAB>postfails`——在途審查（attempts 0=首次 pi，1=pi 重試；postfails=判決貼文失敗次數）；**只在排程任務確認 Running 後才會寫入** |
+| `review-acks.tsv` | `pr<TAB>sha<TAB>attempts`——已啟動但 ack 未貼出的 head；成功即移除，3 次失敗 → `review:post-failed` |
 | `review-fails.tsv` | `pr<TAB>sha<TAB>count`——連續啟動失敗次數（連續 3 次 → `review:unreviewed` 並停） |
 | `watch.log` | watcher 每一步的時間戳紀錄 |
 | `review-prN-rR-brief.md` / `.log` / `.done` / `-verdict.md`（`.posted`） / `-comment.md` | 每輪審查的 brief、pi 轉錄、結束旗標、抽出來的判決（`.posted` = 留言已貼出）、貼出的留言 |
@@ -98,8 +105,8 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 |---|---|
 | `review:lgtm` | 判決 LGTM（P0=0, P1=0） |
 | `review:changes-requested` | 判決 Changes Requested |
-| `review:unreviewed` | pi 重試後仍無判決（或連續 3 次啟動失敗）；擋住該 PR 直到人工摘除 |
-| `review:post-failed` | 判決連續 5 次貼不出去；判決檔留在 scratch 目錄，人工補貼後照 `review:unreviewed` 的救法收尾 |
+| `review:unreviewed` | pi 重試後仍無判決（或連續 3 次啟動失敗）；**per head**——只擋被記錄的那個 head，新 head 會自動摘 label 重審 |
+| `review:post-failed` | 判決或 ack 連續多次貼不出去（判決 5 次／ack 3 次）；判決檔留在 scratch 目錄，人工補貼後照 `review:unreviewed` 的救法收尾 |
 
 ## 離線測試
 
@@ -125,4 +132,4 @@ JSON 驗證「新 PR → 審；同 SHA 已審 → 跳過；push 新 head → 再
 | 任務卡住不結束 | pi 的排程任務有 30 分鐘上限；watcher 45 分鐘沒看到 `.done` 會自動當死掉的判決，走 pi 重試 → `review:unreviewed`。手動救：`Get-ScheduledTask edda-review-prN-rR`、`Stop-ScheduledTask`、刪掉該輪 `.done` 後重跑 `scripts/review-pr.sh N R --sha <sha>` |
 | 判決一直貼不出去（`review:post-failed`） | 查 `watch.log` 裡 `gh pr comment` 的失敗原因（網路／token）；判決檔在 `$EDDA_FLEET_SCRATCH/review-prN-rR-verdict.md`，手動貼上後把 `review-state.tsv` 補成該 head 並摘 label |
 | 想重審某個 head | 改 `review-state.tsv` 裡該 PR 的 `reviewed_sha`（或刪掉該行），下一輪就會重審 |
-| `review:unreviewed` 之後想手動審 | 手動跑 `scripts/review-pr.sh N R --sha <sha>`、把判決貼上 PR，然後把 `review-state.tsv` 補成該 head 並摘 label；watcher 就不會再起一輪 |
+| `review:unreviewed` 之後 push 了新 head | 不用做事：watcher 會自動摘掉過期 label、對新 head 起下一輪（`watch.log` 會記 `stale review:unreviewed label … removed`）。label 存在但 state 沒記錄 head 時視為仍在擋，需人工處理 |
