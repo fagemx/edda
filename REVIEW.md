@@ -44,15 +44,27 @@ the citation wins and this file is the bug.
 | `brief-v1` | `docs/superpowers/specs/2026-09-02-reviewer-brief-template-v1.md` | zero-discretion rule, `[判斷]` tag, evidence threshold, read-only constraint, verdict fields |
 | `design` | `docs/superpowers/specs/2026-09-02-substitutable-reviewer-design.md` §1.1 | the mechanical path rule for classification, conservative up-classing |
 | `canaries` | `tests/canaries/` | the known-answer diffs that calibrate an engine against these rules |
-| `verb` | `docs/superpowers/specs/2026-09-02-edda-review-design.md` §5.1; decision `review.brief-source` | the front matter schema above, and how the `edda review` verb — designed there, implemented in issue #652, not shipped yet — consumes this file |
+| `verb` | `docs/superpowers/specs/2026-09-02-edda-review-design.md` §5.1, landed in PR #654; decision `review.brief-source` | the front matter schema above, and how the planned `edda review` verb will consume this file |
+
+The `edda review` verb is **designed, not implemented**: issue #652 is open and
+labelled `fleet:pending`, and `edda review --help` exits 2. What reads this file
+today is `scripts/review-pr.sh`.
+
+Decisions are cited by key and resolved with `edda ask <key>` **from the repo
+checkout** — the ledger is workspace-scoped and answers `No results found.`
+elsewhere (see `D2`). Each one also has a durable non-ledger carrier named
+beside it, so a reviewer who cannot reach the ledger can still check the claim.
 
 **This file is read at the base SHA, never at the head** (`verb`). A PR that
 changes `REVIEW.md` is reviewed under the *previous* version of these rules,
 the change itself adds `docs-skills` to the PR's classes, and the verdict's
 `escalations:` field carries one entry — `REVIEW.md changed in this diff` — so
-a PR cannot quietly rewrite the rules it is judged by. The front matter is the
-machine half (gate set, RAN allowlist, class globs, independence policy); the
-body below is injected verbatim and is never parsed.
+a PR cannot quietly rewrite the rules it is judged by. `scripts/review-pr.sh`
+implements this as `git show <base-sha>:REVIEW.md`; when the base SHA predates
+this file it falls back to the checkout's copy and prints which SHA the spec
+came from, so a spec-less brief is never emitted silently. The front matter is
+the machine half (gate set, RAN allowlist, class globs, independence policy);
+the body below is injected verbatim and is never parsed.
 
 ## 0. The read-only contract
 
@@ -120,11 +132,23 @@ each prior blocking finding is resolved. Do not re-review the whole PR
 ## 3. Step 3 — classify it
 
 Classification is **mechanical, from the changed-file list** (`design` §1.1).
-Feed the `--name-only` output to this router; it prints every class the PR
-belongs to.
+The router is the marked block below: it reads the `--name-only` list on stdin
+and prints the classes the PR belongs to plus the canonical class of §3.2.
 
 ```sh
-gh pr diff "$N" --name-only | sh -c '
+gh pr diff "$N" --name-only \
+  | sh -c "$(awk '/^# review-spec:classifier$/{f=1;next} /^# review-spec:classifier-end$/{exit} f' REVIEW.md)"
+```
+
+`scripts/review-pr.sh` extracts the same block by the same two marker lines and
+runs it on the PR's files, so the router exists **once**. Change it here and
+nowhere else; a copy anywhere else is an `S3` finding against that copy.
+
+```sh
+# review-spec:classifier
+# Reads the changed-file list on stdin; prints "classes=<...>" and
+# "canonical_class=<...>". Contains no single quotes, so it survives being
+# pasted into sh -c "..." unchanged.
 risk=""; plain=""; skills=""; docs=""
 while IFS= read -r f; do
   [ -n "$f" ] || continue
@@ -140,7 +164,14 @@ while IFS= read -r f; do
     *) plain=" code-plain" ;;
   esac
 done
-printf "%s\n" "${risk}${plain}${skills}${docs}" | sed "s/^ //"'
+classes=$(printf "%s" "${risk}${plain}${skills}${docs}" | sed "s/^ //")
+[ -n "$classes" ] || classes="code-plain"
+case "$classes" in
+  *code-risk*|*code-plain*) canon="code-risk" ;;
+  *) canon="docs-skills" ;;
+esac
+printf "classes=%s\ncanonical_class=%s\n" "$classes" "$canon"
+# review-spec:classifier-end
 ```
 
 ### 3.1 The risk surface, enumerated
@@ -179,7 +210,8 @@ reader to run a destructive command is reviewed as `code-risk` too (`design`
 ### 3.2 The class you report
 
 Calibration data (`canaries`, and the engine × class qualification table it
-feeds) is keyed on the two canonical classes. Report both:
+feeds) is keyed on the two canonical classes. Report both — the classifier
+above already prints both, on its `classes=` and `canonical_class=` lines:
 
 | REVIEW.md class | canonical `class:` field |
 |---|---|
@@ -282,18 +314,37 @@ non-product cycles without useful progress and route the finding instead
 ### 5.1 docs
 
 **D1 — every command named must exist. P1.** Zero discretion (`brief-v1` §1):
-for every backticked CLI invocation the diff adds, run its `--help` and report
-the exit code. A non-zero exit is a finding **unless the added text that names
-the command either names the issue that will implement it, or already states
-that non-zero exit itself** — a documented future verb and a cited failure are
-both allowed; an undocumented one is the `c3-nonexistent-flag` failure. You may
-not conclude anything about a command you did not run, and "the document says
-it does X" is not a measurement.
+for every backticked CLI invocation the diff adds, probe it and report the exit
+code. You may not conclude anything about a command you did not probe, and "the
+document says it does X" is not a measurement.
+
+**Probe `git` with `-h`, never with `--help`.** On Windows `git <verb> --help`
+does not print to the terminal: it renders the HTML manual and opens it in the
+operator's browser. It opened windows on the operator's desktop during a review
+of this very spec and had to be killed — issue #691. `git <verb> -h` writes
+usage to the terminal and opens nothing. This is deliberate; do not "helpfully"
+restore `--help` for `git`.
+
+| Tool | Probe | Expected exit |
+|---|---|---|
+| `git` | `git <verb> -h` | **129** — git's ordinary usage exit. It is a PASS, not a failure |
+| `edda`, `gh`, `cargo`, `pi`, `claude` | `<cmd> --help` | 0 |
+
+An exit other than the expected one is a finding **unless the added text that
+names the command either names the issue that will implement it, or already
+states that non-zero exit itself** — a documented future verb and a cited
+failure are both allowed; an undocumented one is the `c3-nonexistent-flag`
+failure.
 
 ```sh
 git diff "origin/$BASE..$SHA" | grep '^+' \
   | grep -oE '`(edda|gh|git|cargo|pi|claude) [a-z][a-z0-9-]*' | tr -d '`' | sort -u \
-  | while read -r c; do $c --help >/dev/null 2>&1; echo "$c --help -> exit=$?"; done
+  | while read -r c; do
+      case "$c" in git\ *) flag=-h; want=129 ;; *) flag=--help; want=0 ;; esac
+      $c "$flag" >/dev/null 2>&1; e=$?
+      if [ "$e" = "$want" ]; then echo "$c $flag -> exit=$e OK"
+      else echo "$c $flag -> exit=$e CANDIDATE"; fi
+    done
 ```
 
 **D2 — ledger claims match the ledger. P1.** Every stated decision value or
@@ -303,6 +354,19 @@ stale claim counts even when it errs safe (canary `c2-stale-ratify-claim`).
 ```sh
 edda ask <decision-key>
 ```
+
+**The ledger is workspace-scoped, and a review worktree is usually outside it.**
+`edda ask` answers from the project owning the current directory, so from a
+detached review worktree (`$EDDA_FLEET_SCRATCH/wt-review-pr<N>/`, which is not a
+registered project) it prints `No results found.` for keys that resolve fine in
+the checkout. `edda ask --fleet <key>` is no better on its own — it skips any
+project whose recorded repo path is not on this machine, and says so on the line
+above its answer. **`No results` is an unreachable ledger, not a false claim.**
+Run the query from the repo checkout before reporting a D2 finding; if the
+ledger is still unreachable, report the rule as
+`N.A.(ledger unreachable from this worktree)` and check the claim against the PR
+or issue that carries it instead — every decision this file cites also names one
+in the Canonical sources table or in the rule's own text.
 
 **D3 — every path and link resolves. P1.** Enumerate the repo-anchored paths
 the diff adds and open each one. `MISSING` lines are the findings (canary
@@ -594,8 +658,8 @@ mechanical.
 | U5 | RAN | exit 0 on this worktree |
 | U6 | RAN | `gh pr checks 664` — `CI Gate pass`, clippy/test `skipping` |
 | U7 | canonical | `loop` items 1–2 and 6; procedural, no command |
-| D1 | RAN | `edda wave --help` → exit 2 (the #616 P1); `edda ask --help` → exit 0; run against this spec's own diff it caught `edda review --help` → exit 2, which is why the rule carries the documented-future-verb clause |
-| D2 | RAN | `edda ask fleet.review-engine` |
+| D1 | RAN | `edda wave --help` → exit 2 (the #616 P1); `edda ask --help` → exit 0; run against this spec's own diff it caught `edda review --help` → exit 2, which is why the rule carries the documented-future-verb clause. The `git` arm was re-probed after #691: `git diff -h`, `git branch -h`, `git log -h` → exit 129 each, usage printed to the terminal, no browser window |
+| D2 | RAN | `edda ask fleet.review-engine`; and the scoping clause was measured — every decision this file cites resolves from the checkout, while the same `edda ask review.brief-source` from outside it prints `No results found.` |
 | D3 | RAN | 7 paths on a real docs range, 0 false positives after the trailing-argument strip |
 | D4 | RAN | 2 candidates on a real docs range, both carrying the authority caveat |
 | D5 | `[判斷]` | — |
@@ -620,7 +684,10 @@ mechanical.
   router and the enumerated risk surface, and fixes the output format. Carries
   the `edda_review: 1` front matter defined by `review.brief-source` and
   `verb` §5.1, so `scripts/review-pr.sh` today — and the `edda review` verb
-  when issue #652 ships it — read the same file.
+  if issue #652 ships it — read the same file. The §3 router is a single marked
+  block that `scripts/review-pr.sh` extracts rather than reimplements, and
+  `D1` probes `git` with `-h` because `--help` opens a browser on Windows
+  (issue #691).
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
