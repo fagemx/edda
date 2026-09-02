@@ -241,6 +241,9 @@ pub(super) fn dispatch_subagent_context(
         let suffix =
             crate::peers::format_peer_suffix(p.branch.as_deref(), p.current_phase.as_deref());
         lines.push(format!("- {} {suffix}", p.label));
+        if let Some(sub) = &p.claimed_subject {
+            lines.push(format!("  claimed subject: {sub}"));
+        }
         if !p.claimed_paths.is_empty() {
             lines.push(format!("  claimed: {}", p.claimed_paths.join(", ")));
         }

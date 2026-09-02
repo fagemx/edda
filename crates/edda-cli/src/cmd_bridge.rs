@@ -114,6 +114,9 @@ pub enum BridgeClaudeCmd {
         /// File path patterns this scope covers (e.g. "src/auth/*")
         #[arg(long)]
         paths: Vec<String>,
+        /// Process object or subject this scope covers (e.g. "pr:570", "release:v0.4.1")
+        #[arg(long)]
+        subject: Option<String>,
         /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
@@ -309,8 +312,15 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
             BridgeClaudeCmd::Claim {
                 label,
                 paths,
+                subject,
                 session,
-            } => claim(repo_root, &label, &paths, session.as_deref()),
+            } => claim(
+                repo_root,
+                &label,
+                &paths,
+                subject.as_deref(),
+                session.as_deref(),
+            ),
             BridgeClaudeCmd::Unclaim {
                 session,
                 if_claimed,
@@ -635,10 +645,11 @@ pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
     println!("Active sessions ({}):\n", active.len());
     for p in &active {
         let age = edda_bridge_claude::peers::format_age(p.age_secs);
-        let scope = if p.claimed_paths.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", p.claimed_paths.join(", "))
+        let scope = match (&p.claimed_subject, p.claimed_paths.is_empty()) {
+            (Some(sub), false) => format!(" [{sub}; {}]", p.claimed_paths.join(", ")),
+            (Some(sub), true) => format!(" [{sub}]"),
+            (None, false) => format!(" [{}]", p.claimed_paths.join(", ")),
+            (None, true) => String::new(),
         };
         let label = if p.label.is_empty() {
             "(no label)".to_string()
@@ -744,6 +755,7 @@ pub fn claim(
     repo_root: &Path,
     label: &str,
     paths: &[String],
+    subject: Option<&str>,
     cli_session: Option<&str>,
 ) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
@@ -754,9 +766,18 @@ pub fn claim(
         .into_iter()
         .find(|c| c.session_id == session_id);
 
-    edda_bridge_claude::peers::write_claim(&project_id, &session_id, label, paths);
+    edda_bridge_claude::peers::write_claim_with_subject(
+        &project_id,
+        &session_id,
+        label,
+        paths,
+        subject,
+    );
     for line in claim_disclosure(replaced.as_ref(), label, paths) {
         println!("{line}");
+    }
+    if let Some(sub) = subject {
+        println!("  subject: {sub}");
     }
     if !paths.is_empty() {
         println!("  paths: {}", paths.join(", "));
@@ -2463,6 +2484,7 @@ mod tests {
             label: label.into(),
             paths: paths.iter().map(|p| (*p).to_string()).collect(),
             ts: "2026-08-20T00:00:00Z".into(),
+            subject: None,
         }
     }
 
@@ -2554,8 +2576,15 @@ mod tests {
         let pid = edda_store::project_id(repo.path());
         let _ = edda_store::ensure_dirs(&pid);
 
-        claim(repo.path(), "auth", &["src/auth/*".into()], Some("s1")).expect("first claim");
-        claim(repo.path(), "api", &["src/api/*".into()], Some("s1")).expect("second claim");
+        claim(
+            repo.path(),
+            "auth",
+            &["src/auth/*".into()],
+            None,
+            Some("s1"),
+        )
+        .expect("first claim");
+        claim(repo.path(), "api", &["src/api/*".into()], None, Some("s1")).expect("second claim");
 
         // The board folds to one claim per session, so the first scope is gone.
         // The disclosure tests above separately pin what the command prints.
@@ -2587,7 +2616,7 @@ mod tests {
             &["src/worker.rs".into()],
         );
 
-        let err = claim(repo.path(), "intruder", &["docs/*".into()], None)
+        let err = claim(repo.path(), "intruder", &["docs/*".into()], None, None)
             .expect_err("an adjacent shell must not adopt the live worker");
         assert!(err.to_string().contains("--session"), "{err}");
 
@@ -2615,10 +2644,18 @@ mod tests {
             repo.path(),
             "auth",
             &["src/auth/*".into(), "src/token/*".into()],
+            None,
             Some("s1"),
         )
         .expect("first claim");
-        claim(repo.path(), "auth", &["src/auth/*".into()], Some("s1")).expect("narrowed claim");
+        claim(
+            repo.path(),
+            "auth",
+            &["src/auth/*".into()],
+            None,
+            Some("s1"),
+        )
+        .expect("narrowed claim");
 
         let claims = edda_bridge_claude::peers::compute_board_state(&pid).claims;
         assert_eq!(claims.len(), 1);
@@ -2635,8 +2672,15 @@ mod tests {
         let pid = edda_store::project_id(repo.path());
         let _ = edda_store::ensure_dirs(&pid);
 
-        claim(repo.path(), "auth", &["src/auth/*".into()], Some("s1")).expect("s1 claim");
-        claim(repo.path(), "api", &["src/api/*".into()], Some("s2")).expect("s2 claim");
+        claim(
+            repo.path(),
+            "auth",
+            &["src/auth/*".into()],
+            None,
+            Some("s1"),
+        )
+        .expect("s1 claim");
+        claim(repo.path(), "api", &["src/api/*".into()], None, Some("s2")).expect("s2 claim");
 
         let mut claims = edda_bridge_claude::peers::compute_board_state(&pid).claims;
         claims.sort_by(|a, b| a.session_id.cmp(&b.session_id));

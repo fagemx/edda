@@ -2183,6 +2183,33 @@ fn subagent_start_creates_heartbeat() {
 }
 
 #[test]
+fn subagent_start_renders_claimed_subject_in_injected_context() {
+    let _env = env_guard();
+    let pid = "test_subagent_start_claimed_subject";
+    let _ = edda_store::ensure_dirs(pid);
+
+    crate::peers::write_heartbeat_minimal(pid, "peer-sess", "peer-worker", ".");
+    crate::peers::write_claim_with_subject(
+        pid,
+        "peer-sess",
+        "peer-worker",
+        &["src/*".into()],
+        Some("pr:570"),
+    );
+
+    let res = crate::dispatch::session::dispatch_subagent_context(pid, "my-subagent")
+        .expect("render active peers");
+    let stdout = res.stdout.expect("has stdout");
+    assert!(
+        stdout.contains("claimed subject: pr:570"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("claimed: src/*"), "stdout: {stdout}");
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
 fn subagent_stop_removes_heartbeat() {
     let _env = env_guard();
     let pid = "test_subagent_stop";

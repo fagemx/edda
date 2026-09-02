@@ -221,18 +221,33 @@ pub(crate) fn append_coord_event(project_id: &str, event: &CoordEvent) {
     let _ = writeln!(file, "{line}");
 }
 
-/// Write a claim event.
-pub fn write_claim(project_id: &str, session_id: &str, label: &str, paths: &[String]) {
+/// Write a claim event with optional process subject.
+pub fn write_claim_with_subject(
+    project_id: &str,
+    session_id: &str,
+    label: &str,
+    paths: &[String],
+    subject: Option<&str>,
+) {
+    let mut payload = serde_json::json!({
+        "label": label,
+        "paths": paths,
+    });
+    if let Some(sub) = subject {
+        payload["subject"] = serde_json::Value::String(sub.to_string());
+    }
     let event = CoordEvent {
         ts: now_rfc3339(),
         session_id: session_id.to_string(),
         event_type: CoordEventType::Claim,
-        payload: serde_json::json!({
-            "label": label,
-            "paths": paths,
-        }),
+        payload,
     };
     append_coord_event(project_id, &event);
+}
+
+/// Write a claim event.
+pub fn write_claim(project_id: &str, session_id: &str, label: &str, paths: &[String]) {
+    write_claim_with_subject(project_id, session_id, label, paths, None);
 }
 
 /// Write an unclaim event (on session end).

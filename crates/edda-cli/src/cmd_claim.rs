@@ -298,6 +298,10 @@ fn read_active_claims(project_id: &str) -> anyhow::Result<Vec<ClaimEntry>> {
                         .collect::<Result<Vec<_>, _>>()?,
                     None => anyhow::bail!("{ctx}: claim event has no paths field"),
                 };
+                let subject = payload
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 claims.insert(
                     session_id.to_string(),
                     ClaimEntry {
@@ -305,6 +309,7 @@ fn read_active_claims(project_id: &str) -> anyhow::Result<Vec<ClaimEntry>> {
                         label: label.to_string(),
                         paths,
                         ts: ts.to_string(),
+                        subject,
                     },
                 );
             }
@@ -357,14 +362,32 @@ pub fn check(
             globset::Glob::new(&token).map_err(|e| format!("invalid glob {token:?}: {e}"))?;
         }
     }
+    for c in claims {
+        if let Some(sub) = &c.subject {
+            if has_wildcard(sub) {
+                globset::GlobBuilder::new(sub)
+                    .case_insensitive(true)
+                    .build()
+                    .map_err(|e| format!("invalid claim subject glob {sub:?}: {e}"))?;
+            }
+        }
+    }
 
     let mut conflicts = Vec::new();
     for c in claims {
-        if c.paths.is_empty() {
+        if c.paths.is_empty() && c.subject.is_none() {
             continue;
         }
         let mut intersections = Vec::new();
         for q in query {
+            if let Some(sub) = &c.subject {
+                if subjects_intersect(q, sub)? {
+                    intersections.push(PathIntersection {
+                        query: q.to_string(),
+                        claim_path: sub.clone(),
+                    });
+                }
+            }
             for claimed in &c.paths {
                 if surfaces_intersect(q, claimed)? {
                     intersections.push(PathIntersection {
@@ -386,6 +409,37 @@ pub fn check(
         conflicts,
         stale_claims: Vec::new(),
     })
+}
+
+/// Whether a query token and a claim subject token name the same process object.
+///
+/// Compares case-insensitively and allows glob matching if either side has wildcards.
+/// Fails closed with an error if a wildcard pattern cannot be parsed.
+pub fn subjects_intersect(query: &str, subject: &str) -> Result<bool, String> {
+    let q = query.trim();
+    let s = subject.trim();
+    if q.eq_ignore_ascii_case(s) {
+        return Ok(true);
+    }
+    if has_wildcard(q) {
+        let glob = globset::GlobBuilder::new(q)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| format!("invalid query glob {q:?}: {e}"))?;
+        if glob.compile_matcher().is_match(s) {
+            return Ok(true);
+        }
+    }
+    if has_wildcard(s) {
+        let glob = globset::GlobBuilder::new(s)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| format!("invalid claim subject glob {s:?}: {e}"))?;
+        if glob.compile_matcher().is_match(q) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether a query token and a claim token can name the same file.
@@ -541,7 +595,7 @@ fn normalize_token(token: &str) -> String {
     s
 }
 
-fn has_wildcard(pattern: &str) -> bool {
+pub(crate) fn has_wildcard(pattern: &str) -> bool {
     pattern.contains('*') || pattern.contains('?') || pattern.contains('[') || pattern.contains('{')
 }
 
@@ -1127,6 +1181,7 @@ mod tests {
             label: label.to_string(),
             paths: paths.iter().map(|p| p.to_string()).collect(),
             ts: "2026-01-01T00:00:00Z".to_string(),
+            subject: None,
         }
     }
 
@@ -1386,6 +1441,7 @@ mod tests {
         // the same NTFS file. The check must refuse (exit 2) instead.
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1485,6 +1541,7 @@ mod tests {
     fn e2e_unreadable_board_is_error_not_clear() {
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         // A directory at the board path makes every read fail.
@@ -1504,6 +1561,7 @@ mod tests {
     fn e2e_malformed_board_line_is_error_not_clear() {
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1527,6 +1585,7 @@ mod tests {
         // A missing board file legitimately means an empty board: exit 0.
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let store = tempfile::tempdir().expect("store tempdir");
         let (code, stdout, stderr) = run_edda(
             &["claim", "check", "src/main.rs", "--json"],
@@ -1545,6 +1604,7 @@ mod tests {
         // not silently record a pathless claim from a typo.
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         let (code, stdout, stderr) = run_edda(
@@ -1566,6 +1626,7 @@ mod tests {
     fn e2e_non_check_label_rejects_json_flag() {
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let store = tempfile::tempdir().expect("store tempdir");
         let (code, stdout, stderr) =
             run_edda(&["claim", "auth", "--json"], repo.path(), store.path());
@@ -1580,6 +1641,7 @@ mod tests {
         // The plain claim path must keep working byte-identically.
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         let (code, stdout, stderr) = run_edda(
@@ -1614,6 +1676,21 @@ mod tests {
         assert!(surfaces_intersect("src/[oops", "src/fine.rs").is_err());
         let claims = vec![claim("g", "s", &["src/[oops"])];
         assert!(check(&claims, &["src/fine.rs"]).is_err());
+    }
+
+    #[test]
+    fn invalid_subject_glob_is_an_error_not_a_clear() {
+        // GH-581 / Round 1 P1-3: unparseable subject glob must fail closed (exit 2),
+        // never fall through to false ("surface is clear").
+        assert!(subjects_intersect("pr:570", "pr:57[0-").is_err());
+        let mut bad_claim = claim("g", "s", &[]);
+        bad_claim.subject = Some("pr:57[0-".to_string());
+        assert!(check(&[bad_claim], &["pr:570"]).is_err());
+
+        // Valid globs match as expected
+        assert!(subjects_intersect("pr:570", "pr:57*").unwrap());
+        assert!(!subjects_intersect("pr:570", "pr:58*").unwrap());
+        assert!(subjects_intersect("pr:57*", "pr:570").unwrap());
     }
 
     #[test]
@@ -1796,6 +1873,7 @@ mod tests {
         // nor flip the exit code.
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1838,6 +1916,7 @@ mod tests {
         // stays distinguishable from "the liveness judgement broke".
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1867,6 +1946,7 @@ mod tests {
         // same verdict `edda peers` reaches — so its claim must not conflict.
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1895,6 +1975,7 @@ mod tests {
         // filtered stale claims alongside the (live-only) conflict list.
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1943,6 +2024,7 @@ mod tests {
         }
         let repo = tempfile::tempdir().expect("repo tempdir");
         std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
         let project_id = edda_store::project_id(repo.path());
 
         // Conflict case: an active claim overlaps the query surface.

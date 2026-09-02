@@ -218,17 +218,21 @@ pub fn render_coordination_protocol_with(
     // Off-limits
     let peer_claims: Vec<&PeerSummary> = peers
         .iter()
-        .filter(|p| !p.claimed_paths.is_empty())
+        .filter(|p| !p.claimed_paths.is_empty() || p.claimed_subject.is_some())
         .collect();
     if !peer_claims.is_empty() {
         lines.push("### Off-limits (other agents active)".to_string());
         for p in peer_claims.iter().take(5) {
             let age = format_age(p.age_secs);
-            lines.push(format!(
-                "- {} → Agent {} ({age})",
-                p.claimed_paths.join(", "),
-                p.label
-            ));
+            let target = match (&p.claimed_subject, p.claimed_paths.is_empty()) {
+                (Some(sub), false) => format!("{sub}, {}", p.claimed_paths.join(", ")),
+                (Some(sub), true) => sub.clone(),
+                (None, false) => p.claimed_paths.join(", "),
+                (None, true) => {
+                    unreachable!("peers without paths or subject are filtered out above")
+                }
+            };
+            lines.push(format!("- {} → Agent {} ({age})", target, p.label));
         }
     }
 

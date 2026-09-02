@@ -179,6 +179,9 @@ enum Command {
         /// File path patterns this scope covers (e.g. "src/auth/*")
         #[arg(long)]
         paths: Vec<String>,
+        /// Process object or subject this scope covers (e.g. "pr:570", "release:v0.4.1")
+        #[arg(long)]
+        subject: Option<String>,
         /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
@@ -781,6 +784,9 @@ enum BridgeClaudeCmd {
         /// File path patterns this scope covers (e.g. "src/auth/*")
         #[arg(long)]
         paths: Vec<String>,
+        /// Process object or subject this scope covers (e.g. "pr:570", "release:v0.4.1")
+        #[arg(long)]
+        subject: Option<String>,
         /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
         #[arg(long)]
         session: Option<String>,
@@ -1127,6 +1133,7 @@ fn main() -> anyhow::Result<()> {
         Command::Claim {
             label,
             paths,
+            subject,
             session,
             cmd,
         } => match cmd {
@@ -1134,7 +1141,13 @@ fn main() -> anyhow::Result<()> {
                 cmd_claim::claim_check(&repo_root, &query, json)
             }
             None => match label {
-                Some(label) => cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref()),
+                Some(label) => cmd_bridge::claim(
+                    &repo_root,
+                    &label,
+                    &paths,
+                    subject.as_deref(),
+                    session.as_deref(),
+                ),
                 // No label and no `check` subcommand: invalid usage.
                 // Declared contract for GH-589 (cli.claim-diagnostics-contract=explicit-mode-dispatch):
                 // require an explicit scope label or the `check` subcommand, exiting with code 2.

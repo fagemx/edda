@@ -41,6 +41,11 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
                             .collect()
                     })
                     .unwrap_or_default();
+                let subject = event
+                    .payload
+                    .get("subject")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
                 claims.insert(
                     event.session_id.clone(),
                     ClaimEntry {
@@ -48,6 +53,7 @@ pub fn compute_board_state(project_id: &str) -> BoardState {
                         label,
                         paths,
                         ts: event.ts,
+                        subject,
                     },
                 );
             }
