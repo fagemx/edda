@@ -796,33 +796,51 @@ pub fn read_usage_state(project_id: &str) -> UsageSnapshot {
 }
 
 /// Per-model pricing (USD per million tokens).
-struct ModelPricing {
-    input_per_m: f64,
-    output_per_m: f64,
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelPricing {
+    pub input_per_m: f64,
+    pub output_per_m: f64,
+    pub cache_read_multiplier: f64,
 }
 
 /// Look up pricing for a model name. Returns None for unknown models.
-fn lookup_pricing(model: &str) -> Option<ModelPricing> {
-    // Check env override first: EDDA_MODEL_PRICING="model:in:out,model2:in:out"
+pub fn lookup_pricing(model: &str) -> Option<ModelPricing> {
+    // Check env override first: EDDA_MODEL_PRICING="model:in:out,model2:in:out:cache_mult"
     if let Some(p) = lookup_pricing_from_env(model) {
         return Some(p);
     }
-    // Built-in pricing (Anthropic API rates as of 2025-05)
+    // Built-in pricing (Anthropic API published rates as of September 2026; GH-677)
+    // Sources:
+    // - Opus 5: $5.00/M in, $25.00/M out, 10% cache read ($0.50/M)
+    // - Sonnet 4/3.5: $3.00/M in, $15.00/M out, 10% cache read ($0.30/M)
+    // - Haiku 4.5: $1.00/M in, $5.00/M out, 10% cache read ($0.10/M)
+    // - Fable 5.1: $10.00/M in, $50.00/M out, 2.5% cache read ($0.25/M, multiplier 0.025)
+    // - Mythos 5.1: $10.00/M in, $50.00/M out, 2.5% cache read ($0.25/M, multiplier 0.025)
     let lower = model.to_lowercase();
-    if lower.contains("opus") {
+    if lower.contains("fable") || lower.contains("mythos") {
+        // Fable 5.1 & Mythos 5.1: $10/M in, $50/M out, 2.5% cache read ($0.25/M)
         Some(ModelPricing {
-            input_per_m: 15.0,
-            output_per_m: 75.0,
+            input_per_m: 10.0,
+            output_per_m: 50.0,
+            cache_read_multiplier: 0.025,
+        })
+    } else if lower.contains("opus") {
+        Some(ModelPricing {
+            input_per_m: 5.0,
+            output_per_m: 25.0,
+            cache_read_multiplier: 0.1,
         })
     } else if lower.contains("sonnet") {
         Some(ModelPricing {
             input_per_m: 3.0,
             output_per_m: 15.0,
+            cache_read_multiplier: 0.1,
         })
     } else if lower.contains("haiku") {
         Some(ModelPricing {
-            input_per_m: 0.25,
-            output_per_m: 1.25,
+            input_per_m: 1.0,
+            output_per_m: 5.0,
+            cache_read_multiplier: 0.1,
         })
     } else {
         None
@@ -835,31 +853,34 @@ fn lookup_pricing_from_env(model: &str) -> Option<ModelPricing> {
     let lower_model = model.to_lowercase();
     for entry in env_val.split(',') {
         let parts: Vec<&str> = entry.trim().split(':').collect();
-        if parts.len() == 3 && lower_model.contains(&parts[0].to_lowercase()) {
+        if (parts.len() == 3 || parts.len() == 4) && lower_model.contains(&parts[0].to_lowercase())
+        {
             let input: f64 = parts[1].parse().ok()?;
             let output: f64 = parts[2].parse().ok()?;
+            let cache_read_multiplier: f64 = if parts.len() == 4 {
+                parts[3].parse().ok()?
+            } else {
+                0.1
+            };
             return Some(ModelPricing {
                 input_per_m: input,
                 output_per_m: output,
+                cache_read_multiplier,
             });
         }
     }
     None
 }
 
-/// Estimate cost in USD from a UsageSnapshot.
-/// Estimate session cost in USD.
+/// Estimate session cost in USD from a UsageSnapshot.
 ///
-/// Note: cache-read tokens are priced at ~10% of input and cache-creation
-/// tokens at ~125% of input on the Anthropic API.  We approximate by
-/// subtracting the cached portion from full-price input and adding it back
-/// at the discounted rate.  When cache breakdown is unavailable the flat
-/// input rate is used (slight overestimate for cache-heavy sessions).
-pub fn estimate_cost(usage: &UsageSnapshot) -> f64 {
-    let pricing = match lookup_pricing(&usage.model) {
-        Some(p) => p,
-        None => return 0.0,
-    };
+/// Returns None if the model is unknown or unpriceable.
+/// Note: cache-read tokens are priced using the model's specific cache multiplier
+/// (e.g. 10% for Opus/Sonnet/Haiku, 2.5% for Fable/Mythos) and cache-creation
+/// tokens at ~125% of input on the Anthropic API. When cache breakdown is
+/// unavailable the flat input rate is used.
+pub fn estimate_cost(usage: &UsageSnapshot) -> Option<f64> {
+    let pricing = lookup_pricing(&usage.model)?;
 
     // Cache-aware input cost: full-price tokens + discounted cache tokens
     let cache_read = usage.cache_read_tokens;
@@ -867,10 +888,10 @@ pub fn estimate_cost(usage: &UsageSnapshot) -> f64 {
     let full_price_input = usage.input_tokens.saturating_sub(cache_read + cache_create);
 
     let input_cost = (full_price_input as f64 / 1_000_000.0) * pricing.input_per_m
-        + (cache_read as f64 / 1_000_000.0) * pricing.input_per_m * 0.1
+        + (cache_read as f64 / 1_000_000.0) * pricing.input_per_m * pricing.cache_read_multiplier
         + (cache_create as f64 / 1_000_000.0) * pricing.input_per_m * 1.25;
     let output_cost = (usage.output_tokens as f64 / 1_000_000.0) * pricing.output_per_m;
-    input_cost + output_cost
+    Some(input_cost + output_cost)
 }
 
 pub(crate) fn render_blocking_section(project_id: &str) -> Option<String> {
@@ -1836,7 +1857,7 @@ mod tests {
             output_tokens: 100_000,
             ..Default::default()
         };
-        let cost = estimate_cost(&usage);
+        let cost = estimate_cost(&usage).expect("sonnet should be priceable");
         // input: 1M * $3/M = $3.00, output: 0.1M * $15/M = $1.50 -> $4.50
         assert!((cost - 4.50).abs() < 0.01, "cost={cost}");
     }
@@ -1844,14 +1865,59 @@ mod tests {
     #[test]
     fn estimate_cost_opus() {
         let usage = UsageSnapshot {
-            model: "claude-opus-4-20250514".into(),
+            model: "claude-opus-5-20250514".into(),
             input_tokens: 500_000,
             output_tokens: 50_000,
             ..Default::default()
         };
-        let cost = estimate_cost(&usage);
-        // input: 0.5M * $15/M = $7.50, output: 0.05M * $75/M = $3.75 -> $11.25
-        assert!((cost - 11.25).abs() < 0.01, "cost={cost}");
+        let cost = estimate_cost(&usage).expect("opus should be priceable");
+        // Opus 5 rates: input 5/M, output 25/M
+        // input: 0.5M * $5/M = $2.50, output: 0.05M * $25/M = $1.25 -> $3.75
+        assert!((cost - 3.75).abs() < 0.01, "cost={cost}");
+    }
+
+    #[test]
+    fn estimate_cost_haiku() {
+        let usage = UsageSnapshot {
+            model: "claude-haiku-4-5".into(),
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            ..Default::default()
+        };
+        let cost = estimate_cost(&usage).expect("haiku should be priceable");
+        // Haiku 4.5 rates: input 1/M, output 5/M
+        // input: 1M * $1/M = $1.00, output: 0.1M * $5/M = $0.50 -> $1.50
+        assert!((cost - 1.50).abs() < 0.01, "cost={cost}");
+    }
+
+    #[test]
+    fn estimate_cost_fable_and_mythos_cache_multiplier() {
+        let usage_fable = UsageSnapshot {
+            model: "claude-fable-5-1".into(),
+            // 1M total input, 600k are cache-read, 100k are cache-create
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            cache_read_tokens: 600_000,
+            cache_creation_tokens: 100_000,
+            ..Default::default()
+        };
+        let cost_fable = estimate_cost(&usage_fable).expect("fable should be priceable");
+        // full-price input: (1M - 600k - 100k) = 300k * $10/M = $3.00
+        // cache-read: 600k * $10/M * 0.025 = $0.15
+        // cache-create: 100k * $10/M * 1.25 = $1.25
+        // output: 100k * $50/M = $5.00
+        // total = $9.40
+        assert!((cost_fable - 9.40).abs() < 0.01, "cost={cost_fable}");
+
+        let usage_mythos = UsageSnapshot {
+            model: "claude-mythos-5-1".into(),
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            ..Default::default()
+        };
+        let cost_mythos = estimate_cost(&usage_mythos).expect("mythos should be priceable");
+        // input: 1M * $10/M = $10.00, output: 0.1M * $50/M = $5.00 -> $15.00
+        assert!((cost_mythos - 15.00).abs() < 0.01, "cost={cost_mythos}");
     }
 
     #[test]
@@ -1865,7 +1931,7 @@ mod tests {
             cache_creation_tokens: 100_000,
             ..Default::default()
         };
-        let cost = estimate_cost(&usage);
+        let cost = estimate_cost(&usage).expect("sonnet should be priceable");
         // full-price input: (1M - 600k - 100k) = 300k * $3/M = $0.90
         // cache-read: 600k * $3/M * 0.1 = $0.18
         // cache-create: 100k * $3/M * 1.25 = $0.375
@@ -1883,7 +1949,33 @@ mod tests {
             ..Default::default()
         };
         let cost = estimate_cost(&usage);
-        assert_eq!(cost, 0.0, "unknown model should return 0");
+        assert_eq!(cost, None, "unknown model should return None");
+    }
+
+    #[test]
+    fn lookup_pricing_fable_and_mythos_return_rates() {
+        let fable = lookup_pricing("claude-fable-5-1").expect("fable pricing");
+        assert_eq!(fable.input_per_m, 10.0);
+        assert_eq!(fable.output_per_m, 50.0);
+        assert_eq!(fable.cache_read_multiplier, 0.025);
+
+        let mythos = lookup_pricing("claude-mythos-5-1").expect("mythos pricing");
+        assert_eq!(mythos.input_per_m, 10.0);
+        assert_eq!(mythos.output_per_m, 50.0);
+        assert_eq!(mythos.cache_read_multiplier, 0.025);
+    }
+
+    #[test]
+    fn lookup_pricing_env_override_supported() {
+        crate::with_env_guard(
+            &[("EDDA_MODEL_PRICING", Some("custom-model:2.0:8.0:0.05"))],
+            || {
+                let pricing = lookup_pricing("custom-model-v1").expect("custom model pricing");
+                assert_eq!(pricing.input_per_m, 2.0);
+                assert_eq!(pricing.output_per_m, 8.0);
+                assert_eq!(pricing.cache_read_multiplier, 0.05);
+            },
+        );
     }
 
     #[test]

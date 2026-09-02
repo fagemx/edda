@@ -149,10 +149,10 @@ pub(super) fn now_rfc3339() -> String {
         .expect("RFC3339 formatting should not fail")
 }
 
-/// Honest cost for a usage snapshot (GH-585): `None` when the session has
-/// no usage data (unmeasured), `Some(estimate)` when a usage observation
-/// exists — including `Some(0.0)` when every counter is zero (measured
-/// zero, round-2 P1-1).
+/// Honest cost for a usage snapshot (GH-585, GH-677): `None` when the session has
+/// no usage data (unmeasured) or when the model is unpriceable, `Some(estimate)`
+/// when a usage observation exists and can be priced — including `Some(0.0)` when
+/// every counter is zero (measured zero, round-2 P1-1).
 ///
 /// Measuredness comes from the presence flag the scanner sets exactly when
 /// a `message.usage` record appeared — never inferred from magnitudes.
@@ -165,5 +165,80 @@ pub(super) fn measured_cost(usage: &crate::signals::UsageSnapshot) -> Option<f64
         || usage.output_tokens > 0
         || usage.cache_read_tokens > 0
         || usage.cache_creation_tokens > 0;
-    observed.then(|| crate::signals::estimate_cost(usage))
+    if !observed {
+        return None;
+    }
+    crate::signals::estimate_cost(usage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unpriceable_observed_usage_yields_none_not_measured_zero() {
+        let usage = crate::signals::UsageSnapshot {
+            model: "unknown-vendor-model-xyz".into(),
+            usage_observed: true,
+            input_tokens: 1000,
+            ..Default::default()
+        };
+        assert_eq!(
+            measured_cost(&usage),
+            None,
+            "unpriceable model must return None, not Some(0.0)"
+        );
+    }
+
+    #[test]
+    fn known_model_with_all_zero_counters_yields_some_zero() {
+        let usage = crate::signals::UsageSnapshot {
+            model: "claude-sonnet-4-20250514".into(),
+            usage_observed: true,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+        assert_eq!(
+            measured_cost(&usage),
+            Some(0.0),
+            "known model with all zero counters must return Some(0.0) when observed"
+        );
+    }
+
+    #[test]
+    fn known_model_unobserved_yields_none() {
+        let usage = crate::signals::UsageSnapshot {
+            model: "claude-sonnet-4-20250514".into(),
+            usage_observed: false,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+        };
+        assert_eq!(
+            measured_cost(&usage),
+            None,
+            "unobserved usage with zero counters must return None"
+        );
+    }
+
+    #[test]
+    fn fable_model_with_observed_usage_computes_cost() {
+        let usage = crate::signals::UsageSnapshot {
+            model: "claude-fable-5-1".into(),
+            usage_observed: true,
+            input_tokens: 1_000_000,
+            output_tokens: 100_000,
+            cache_read_tokens: 500_000,
+            cache_creation_tokens: 0,
+        };
+        let cost = measured_cost(&usage).expect("fable should be priceable");
+        // full price in: (1M - 500k) = 500k * $10/M = $5.00
+        // cache read: 500k * $10/M * 0.025 = $0.125
+        // output: 100k * $50/M = $5.00
+        // total = 10.125
+        assert!((cost - 10.125).abs() < 1e-6, "cost={cost}");
+    }
 }
