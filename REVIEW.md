@@ -42,7 +42,7 @@ the citation wins and this file is the bug.
 | `ladder` | `.claude/CLAUDE.md` § "Verification ladder" and § "Verification cost" | which gates a reviewer READs versus RANs, the CI Windows 7-crate subset, over-verification as a process finding |
 | `wiring` | issue #629 (merged) — the four-question slot, now §5.5; machine aid `scripts/wiring-scan.sh` | every new surface in the diff |
 | `brief-v1` | `docs/superpowers/specs/2026-09-02-reviewer-brief-template-v1.md` | zero-discretion rule, `[判斷]` tag, evidence threshold, read-only constraint, verdict fields |
-| `design` | `docs/superpowers/specs/2026-09-02-substitutable-reviewer-design.md` §1.1 | the mechanical path rule for classification, conservative up-classing |
+| `design` | `docs/superpowers/specs/2026-09-02-substitutable-reviewer-design.md` §1 table row 1 (path rule text), §4 step 1 (the classify step) | the mechanical path rule for classification, conservative up-classing |
 | `canaries` | `tests/canaries/` | the known-answer diffs that calibrate an engine against these rules |
 | `verb` | `docs/superpowers/specs/2026-09-02-edda-review-design.md` §5.1, landed in PR #654; decision `review.brief-source` | the front matter schema above, and how the planned `edda review` verb will consume this file |
 
@@ -130,7 +130,8 @@ each prior blocking finding is resolved. Do not re-review the whole PR
 
 ## 3. Step 3 — classify it
 
-Classification is **mechanical, from the changed-file list** (`design` §1.1).
+Classification is **mechanical, from the changed-file list**
+(`design` §1 table row 1).
 The router is the marked block below: it reads the `--name-only` list on stdin
 and prints the classes the PR belongs to plus the canonical class of §3.2.
 
@@ -204,7 +205,8 @@ The other three classes:
 A mixed diff carries **every** class it matches and runs every matching
 section. You may **up-class** and must state why — a docs diff that instructs a
 reader to run a destructive command is reviewed as `code-risk` too (`design`
-§1.1, canary `c4-merge-authority-contradiction`). You may never down-class.
+§1 table row 1, canary `c4-merge-authority-contradiction`). You may never
+down-class.
 
 ### 3.2 The class you report
 
