@@ -1,3 +1,21 @@
+---
+edda_review: 1
+gates:
+  - "cargo fmt --all --check"
+  - "cargo clippy --workspace --all-targets -- -D warnings"
+  - "cargo test --workspace"
+  - "sh scripts/lint-markdown-content.sh"
+ran_allowlist:
+  - "edda "
+  - "gh "
+  - "git "
+  - "sh scripts/"
+independence: session
+classes:
+  code-risk: ["crates/**", "scripts/**", "*.sh", "*.ps1", ".github/**", "install.sh", "Cargo.toml", "Cargo.lock", "*.rs"]
+  docs-skills: ["docs/**", "*.md", ".claude/**", "skills/**", "*.txt"]
+---
+
 # REVIEW.md — the executable review spec
 
 - Spec version: `review-spec-v1`
@@ -26,6 +44,15 @@ the citation wins and this file is the bug.
 | `brief-v1` | `docs/superpowers/specs/2026-09-02-reviewer-brief-template-v1.md` | zero-discretion rule, `[判斷]` tag, evidence threshold, read-only constraint, verdict fields |
 | `design` | `docs/superpowers/specs/2026-09-02-substitutable-reviewer-design.md` §1.1 | the mechanical path rule for classification, conservative up-classing |
 | `canaries` | `tests/canaries/` | the known-answer diffs that calibrate an engine against these rules |
+| `verb` | `docs/superpowers/specs/2026-09-02-edda-review-design.md` §5.1; decision `review.brief-source` | the front matter schema above, and how `edda review` consumes this file |
+
+**This file is read at the base SHA, never at the head** (`verb`). A PR that
+changes `REVIEW.md` is reviewed under the *previous* version of these rules,
+the change itself adds `docs-skills` to the PR's classes, and the verdict's
+`escalations:` field carries one entry — `REVIEW.md changed in this diff` — so
+a PR cannot quietly rewrite the rules it is judged by. The front matter is the
+machine half (gate set, RAN allowlist, class globs, independence policy); the
+body below is injected verbatim and is never parsed.
 
 ## 0. The read-only contract
 
@@ -463,6 +490,9 @@ The escalation rule:
 5. A non-trivial diff reviewed with zero findings is escalated the same way —
    write "zero findings" explicitly with the list of what you checked, never an
    empty section (`brief-v1` §5).
+6. A diff that changes `REVIEW.md` itself always adds the escalation
+   `REVIEW.md changed in this diff`, and is reviewed under the base version of
+   this file (`verb`).
 
 Engine self-labelling is not evidence. `model_observed` is read from the system
 — for `pi`, the session file's `model` field; for `claude -p --output-format
@@ -580,7 +610,9 @@ mechanical.
 - `review-spec-v1` (2026-09-02, issue #633): first collection. Merges the
   review-fix loop (`.claude/CLAUDE.md`), the wiring verdict (#629) and brief
   template v1 (#618) into one runnable sequence, adds the mechanical class
-  router and the enumerated risk surface, and fixes the output format.
+  router and the enumerated risk surface, and fixes the output format. Carries
+  the `edda_review: 1` front matter defined by `review.brief-source` and
+  `verb` §5.1, so `edda review` and `scripts/review-pr.sh` read the same file.
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
