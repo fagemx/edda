@@ -480,14 +480,16 @@ edda index verify    # verify index entries match store records
 ### `edda checkpoint`
 
 Record portable reasoning state in the ledger. Hypotheses, rejected paths, and
-open questions are repeatable; `--next` is required.
+open questions are repeatable; `--next` is required and `--role` defaults to
+`agent`.
 
 ```bash
 edda checkpoint \
   --hypothesis "The registry is stale" \
   --rejected "README typo|crates.io reports 0.2.1" \
   --open "Is the publish token available?" \
-  --next "Package every workspace crate"
+  --next "Package every workspace crate" \
+  [--role <ROLE>]
 ```
 
 ### `edda ratify`
@@ -543,14 +545,37 @@ prompt is read verbatim from a file; the caller owns any outer loop.
 ```bash
 edda dispatch \
   --agent <claude|pi|codex> \
-  --prompt-file <PATH> \
+  [--prompt-file <PATH>] \
   [--session-id <ID>] \
   [--cwd <DIR>] \
   [--budget-usd <USD>] \
   [--timeout-sec <SECONDS>] \
   [--permission-mode <MODE>] \
+  [--model <MODEL>] \
+  [--thinking <LEVEL>] \
+  [--tools <ALLOWLIST>] \
+  [--exclude-tools <DENYLIST>] \
+  [--session-dir <DIR>] \
+  [--list-models [SEARCH]] \
   [--json]
 ```
+
+`--prompt-file` is required for a normal turn and may be omitted only with
+`--list-models`. Backend-specific controls are validated instead of silently
+ignored:
+
+| Option | Claude | Pi | Codex |
+|--------|--------|----|-------|
+| `--permission-mode` | Supported | Explicit value refused | Explicit value refused |
+| `--model` | Supported | Supported | Refused |
+| `--thinking` | Refused | Supported | Refused |
+| `--tools`, `--exclude-tools` | Supported | Supported | Refused |
+| `--session-dir` | Refused | Supported | Refused |
+| `--list-models [SEARCH]` | Refused | Supported | Refused |
+
+Tool allowlists and denylists are passed to supported backends as structural
+capability restrictions. Model listing prints text and cannot be combined with
+`--json`.
 
 Omitting `--session-id` generates and prints one for later continuation. Claude,
 Pi, and Codex persist continuity through their own backend mechanisms; Codex
@@ -566,9 +591,11 @@ when available but cannot enforce `--budget-usd`.
 | `4` | Maximum turns reached |
 
 With `--json`, a dispatched turn renders exactly one stdout object containing
-`outcome`, `result_text`, `cost_usd`, `session_id`, and `error`. A pre-dispatch
-failure, such as an unreadable prompt file, exits `1` and reports to stderr
-before JSON rendering begins.
+`outcome`, `result_text`, `cost_usd`, `session_id`, `error`, `model_requested`,
+and `model_observed`. `model_requested` is the requested model or `inherited`;
+`model_observed` is the backend's in-band report or `unknown`. A pre-dispatch
+failure, such as an unreadable prompt file or an unsupported backend-specific
+flag, exits `1` and reports to stderr before JSON rendering begins.
 
 ### `edda verdict` and `edda phase`
 
@@ -617,11 +644,13 @@ Multi-phase AI plan conductor.
 
 ```bash
 edda conduct run <PLAN.yaml> [--agent <claude|pi|codex>]
-edda conduct status              # show running/completed plans
-edda conduct retry <PLAN>        # reset a failed phase
-edda conduct skip <PLAN>         # skip a phase
-edda conduct abort <PLAN>        # abort a running plan
+edda conduct status [PLAN_NAME] [--json]
+edda conduct retry <PHASE_ID> [--plan <PLAN>]
+edda conduct skip <PHASE_ID> [--reason <TEXT>] [--plan <PLAN>]
+edda conduct abort [PLAN_NAME]
 ```
 
 `--agent` selects the backend for every phase and defaults to `claude`. Use
 `--dry-run` to inspect the phase graph and any operator gates before execution.
+When only one plan exists, the status, retry, skip, and abort commands can
+auto-detect it.

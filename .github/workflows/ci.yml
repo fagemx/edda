@@ -98,10 +98,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: rustup toolchain install stable --profile minimal --component rustfmt
+      - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: sh -n install.sh scripts/lint-markdown-content.sh
       - name: Lint Markdown content
         run: sh scripts/lint-markdown-content.sh
+      - name: Verify CLI reference coverage
+        run: python3 scripts/check_cli_reference.py
       - name: Verify installer latest-version stdout
         shell: bash
         run: |
@@ -163,9 +166,6 @@ jobs:
       - run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
       - run: cargo test ${{ matrix.args }}
-      - name: Verify CLI reference coverage
-        if: runner.os == 'Linux'
-        run: python3 scripts/check_cli_reference.py
 
   # Aggregate gate: the single check the branch ruleset will pin instead of
   # enumerating the seven individual jobs. `if: always()` keeps it running even
