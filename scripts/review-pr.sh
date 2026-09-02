@@ -61,16 +61,30 @@ PREV=""
 DRY=0
 SHA_GIVEN=""
 
-# Offline helper: map verdict text (stdin) to a review:* label; the LAST
-# verdict keyword in the text wins. No network, no state.
+# Offline helper: map verdict text (stdin) to a review:* label. No network, no
+# state.
+#
+# The label is read from the FIRST verdict line under the `### Verdict` heading
+# REVIEW.md §7 mandates — never from the last verdict keyword in the text.
+# "Last keyword wins" inverted the label on PR #655, whose Verdict line said
+# `Changes Requested, P0=1, P1=1` and whose prose ended "that alone should
+# carry this to LGTM": the PR was labelled `review:lgtm` while carrying an open
+# P0 (issue #697). "not yet LGTM", "re-review for LGTM once fixed" and "would
+# carry this to LGTM" are all ordinary reviewer prose and every one of them
+# inverted it. The verdict is a specific line in a specific section.
+#
+# Input is one round's verdict text; the first `### Verdict` heading is the one
+# read. No Verdict line at all is NOT an LGTM: emit nothing and exit 0, and let
+# the caller decide (the watcher labels `review:unreviewed` / `review:post-
+# failed` rather than guessing). `Changes Requested` is tested first so a line
+# naming both resolves to the blocking side.
 if [ "${1:-}" = "verdict-label" ]; then
-  v=$(cat)
-  lcs=$(printf '%s\n' "$v" | grep -bo "Changes Requested" | tail -1 | cut -d: -f1)
-  llg=$(printf '%s\n' "$v" | grep -bo "LGTM" | tail -1 | cut -d: -f1)
-  if [ -n "$lcs" ] && [ -n "$llg" ] && [ "$llg" -gt "$lcs" ]; then echo "review:lgtm"
-  elif [ -n "$lcs" ]; then echo "review:changes-requested"
-  elif [ -n "$llg" ]; then echo "review:lgtm"
-  fi
+  vline=$(sed -n '/^#\{1,\}[[:space:]]*Verdict/,$p' | sed '1d' \
+          | grep -m1 -E 'LGTM|Changes Requested') || vline=""
+  case "$vline" in
+    *"Changes Requested"*) echo "review:changes-requested" ;;
+    *LGTM*)                echo "review:lgtm" ;;
+  esac
   exit 0
 fi
 
@@ -132,10 +146,35 @@ BASE_SHA=$(gh pr view "$PR" --repo "$REPO" --json baseRefOid --jq .baseRefOid)
 TITLE=$(gh pr view "$PR" --repo "$REPO" --json title --jq .title)
 BODY=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body)
 
-# Issue numbers from the PR body's "Issue: #N" lines.
-ISSUES=$(printf '%s\n' "$BODY" \
-  | awk 'tolower($0) ~ /^issue[[:space:]]*:/ || tolower($0) ~ /^issues[[:space:]]*:/' \
-  | grep -Eo '#[0-9]+' | tr -d '#' | sort -u)
+# Issue numbers — the acceptance ceiling (REVIEW.md §1). Collected from three
+# sources, because collecting from only the repo's `Issue: #N` convention made
+# the contract fail open: PR #670's body opened `Closes #650.` — the form
+# GitHub itself recognises — no line matched, and the brief was generated with
+# no doneWhen at all while still telling the reviewer to judge against one
+# (issue #683).
+#
+#   1. the repo's own `Issue:` / `Issues:` lines;
+#   2. GitHub's closing keywords anywhere in the body;
+#   3. GitHub's own linkage (closingIssuesReferences), which also catches an
+#      issue linked from the sidebar with nothing in the body.
+#
+# Bare `#N` prose references are deliberately NOT mined. A body's "Related:
+# #641 and #632" names a sibling PR and a tracking issue, not this PR's
+# acceptance ceiling; pulling their doneWhen into the brief would hand the
+# reviewer the wrong ceiling, which is worse than handing it none.
+CLOSING_KW='closes|closed|close|fixes|fixed|fix|resolves|resolved|resolve'
+ISSUES=$(
+  {
+    printf '%s\n' "$BODY" \
+      | awk 'tolower($0) ~ /^issue[[:space:]]*:/ || tolower($0) ~ /^issues[[:space:]]*:/' \
+      | grep -Eo '#[0-9]+' | tr -d '#'
+    printf '%s\n' "$BODY" \
+      | grep -Eio "($CLOSING_KW)[[:space:]]+[a-z0-9_.-]*(/[a-z0-9_.-]+)?#[0-9]+" \
+      | grep -Eo '#[0-9]+' | tr -d '#'
+    gh pr view "$PR" --repo "$REPO" --json closingIssuesReferences \
+      --jq '.closingIssuesReferences[].number' 2>/dev/null
+  } | grep -E '^[0-9]+$' | sort -un
+)
 # Allowed surface = the PR's changed files.
 FILES=$(gh pr diff "$PR" --repo "$REPO" --name-only)
 SURFACE=$(printf '%s\n' "$FILES" | paste -sd, - | sed 's/,$//')
@@ -222,12 +261,23 @@ SID="review-pr$PR"
   echo "- \`spec:\` field for the verdict: **$SPEC_VERSION**"
   echo "- Allowed surface (rule U1): \`${SURFACE:-<empty>}\` — a changed file outside it is a P0."
   echo "- Read-only (REVIEW.md §0): no edits, no pushes, no GitHub posts, no cargo, no merge. Budget ~6 minutes."
-  for i in $ISSUES; do
+  if [ -z "$ISSUES" ]; then
+    # The contract must never reference a section that is not there. An empty
+    # ceiling is stated, not omitted: a silently missing doneWhen makes a review
+    # look complete when it judged against nothing at all (issue #683).
     echo
-    echo "### Issue #$i doneWhen (the acceptance ceiling, REVIEW.md §1)"
-    gh issue view "$i" --repo "$REPO" --json body --jq .body 2>/dev/null \
-      | awk '/^## doneWhen/{f=1;next} /^## /{f=0} f' || echo "(issue #$i could not be read)"
-  done
+    echo "### No acceptance criteria found — this PR links no issue (REVIEW.md §1)"
+    echo "This PR's body carries no \`Issue: #N\` line, no closing keyword, and GitHub reports no linked issue, so **no doneWhen was supplied to you**."
+    echo "The acceptance ceiling REVIEW.md §1 tells you to judge against is MISSING, not empty. Do not read its absence as \"there is nothing to check\", and do not record a doneWhen row as PASS."
+    echo "Obtain the issue and its doneWhen if you can. If you cannot, say so in the verdict and add \`no doneWhen available\` to \`escalations:\` — a review run without the ceiling is not a complete review."
+  else
+    for i in $ISSUES; do
+      echo
+      echo "### Issue #$i doneWhen (the acceptance ceiling, REVIEW.md §1)"
+      gh issue view "$i" --repo "$REPO" --json body --jq .body 2>/dev/null \
+        | awk '/^## doneWhen/{f=1;next} /^## /{f=0} f' || echo "(issue #$i could not be read)"
+    done
+  fi
   echo
   echo "## Output"
   echo "Print the REVIEW.md §7 verdict — every field, the Rules table with one row per routed rule, the Wiring table — between the markers below, with this header line filled in:"
@@ -251,6 +301,23 @@ echo "classes=${CLASSES:-code-plain}"
 echo "canonical_class=$CANON_CLASS"
 echo "spec=$SPEC_SOURCE ($SPEC_VERSION)"
 echo "base=$BASE_SHA"
+
+# ---- the lane script and the exact -File argument the task will get ---------
+# Resolved before the dry-run exit so the path can be inspected without
+# launching anything: a POSIX -File argument is the #683 failure, and Task
+# Scheduler reports it only as LastTaskResult=64 with no log to read.
+LANE="$SCRATCH/review-pr$PR-r$ROUND-lane.ps1"
+LANE_FILE_ARG=$LANE
+if [ "$IS_WIN" = "1" ]; then
+  if command -v cygpath >/dev/null 2>&1; then
+    LANE_FILE_ARG=$(cygpath -w "$LANE")
+  fi
+  echo "lane_file_arg=$LANE_FILE_ARG"
+fi
+
+if [ -z "$ISSUES" ]; then
+  echo "review-pr.sh: WARNING: PR #$PR links no issue — the brief carries NO doneWhen, so this review has no acceptance ceiling (issue #683). The brief states this; obtain the issue before trusting the verdict." >&2
+fi
 
 if [ "$DRY" = "1" ]; then
   echo "dry-run: brief generated; nothing launched, no worktree, no scheduled task."
@@ -284,7 +351,11 @@ if [ "$IS_WIN" = "1" ]; then
   DONEW=$(cygpath -w "$SCRATCH\\review-pr$PR-r$ROUND.done")
   TASK="edda-review-pr$PR-r$ROUND"
 
-  cat > "$SCRATCH/review-pr$PR-r$ROUND-lane.ps1" <<PS
+  # LANE_FILE_ARG (resolved above) is the cygpath -w form of $LANE. Building the
+  # task's -File argument from the raw $SCRATCH instead — the one path here that
+  # used not to be converted — yields "/c/Users/<user>/.edda/fleet\review-...ps1"
+  # under Git Bash, which pwsh.exe cannot resolve (issue #683).
+  cat > "$LANE" <<PS
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 \$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
@@ -298,7 +369,7 @@ PS
   cat > "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" <<PS
 foreach (\$f in @("$LOGW", "$DONEW")) { if (Test-Path \$f) { [System.IO.File]::Delete(\$f) } }
 Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue
-\$action = New-ScheduledTaskAction -Execute "pwsh.exe" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$SCRATCH\\review-pr$PR-r$ROUND-lane.ps1\`"" -WorkingDirectory '$WTW'
+\$action = New-ScheduledTaskAction -Execute "pwsh.exe" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$LANE_FILE_ARG\`"" -WorkingDirectory '$WTW'
 \$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited | Out-Null
 Start-ScheduledTask -TaskName '$TASK'
@@ -308,7 +379,8 @@ for (\$i = 0; \$i -lt 20; \$i++) {
   \$st = (Get-ScheduledTask -TaskName '$TASK').State
   if (\$st -eq 'Running') { break }
 }
-"task=$TASK state=\$st"
+\$info = Get-ScheduledTaskInfo -TaskName '$TASK'
+"task=$TASK state=\$st lastTaskResult=\$(\$info.LastTaskResult)"
 PS
 
   out=$(pwsh -NoProfile -ExecutionPolicy Bypass -File "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" 2>&1); rc=$?
@@ -316,7 +388,22 @@ PS
   [ $rc -eq 0 ] || exit 1
   case "$out" in
     *state=Running*) : ;;
-    *) echo "review-pr.sh: scheduled task did not reach Running" >&2; exit 1 ;;
+    *)
+      # Task Scheduler says nothing useful about why. LastTaskResult=64 has now
+      # been observed from three unrelated path faults on two machines, and the
+      # lane script that everyone reads next was never reached, so name the one
+      # thing only this process knows: whether the -File argument it generated
+      # resolves for the pwsh that Task Scheduler starts (issue #683).
+      echo "review-pr.sh: scheduled task did not reach Running" >&2
+      if pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+           -Command "if (Test-Path -LiteralPath '$LANE_FILE_ARG') { exit 0 } else { exit 1 }" \
+           >/dev/null 2>&1; then
+        echo "review-pr.sh: the task's -File argument resolves for pwsh: $LANE_FILE_ARG — the fault is inside the lane script or its environment, not the path. Read $SCRATCH/review-pr$PR-r$ROUND.log" >&2
+      else
+        echo "review-pr.sh: the task's -File argument does NOT resolve for pwsh: $LANE_FILE_ARG — this is the LastTaskResult=64 failure of issue #683: the task registers and starts, then exits before writing any log or .done file. Check that \$EDDA_FLEET_SCRATCH is Windows-resolvable" >&2
+      fi
+      exit 1
+      ;;
   esac
 else
   # Linux: no job-object trap, plain nohup is enough.

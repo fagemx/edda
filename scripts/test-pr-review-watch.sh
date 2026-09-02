@@ -267,21 +267,27 @@ SKIP 9 review-unreviewed' \
     '7\tcccccc\t\t2026-09-02T00:00:00Z\n8\tbeefff\t\t2026-09-02T00:00:00Z\n9\tdddddd\treview:unreviewed\t2026-09-02T00:00:00Z'
 
 # --- verdict-label ------------------------------------------------------------
+# The label comes from the Verdict line of REVIEW.md §7, not from the last
+# verdict keyword in the text: "last keyword wins" labelled PR #655 review:lgtm
+# on an open P0 because the prose ended "should carry this to LGTM" (#697). The
+# bodies below therefore carry the §7 `### Verdict` heading, and the both-appear
+# case now asserts the Verdict line beats the prose rather than the reverse.
+# scripts/test-review-pr.sh covers the rule itself, PR #655 fixture included.
 
 expect_label \
     'Changes Requested verdict maps to review:changes-requested' \
     'review:changes-requested' \
-    '## Code Review: Round 1\n\nblocking P1: scripts/x.sh:12 — input Y crashes.\n\n結論：Changes Requested\n'
+    '## Code Review: Round 1\n\nblocking P1: scripts/x.sh:12 — input Y crashes.\n\n### Verdict\nChanges Requested, P0=0, P1=1\n'
 
 expect_label \
     'LGTM verdict maps to review:lgtm' \
     'review:lgtm' \
-    '## Code Review: Round 1\n\nP0=0, P1=0.\n\n結論：LGTM\n'
+    '## Code Review: Round 1\n\nP0=0, P1=0.\n\n### Verdict\nLGTM (P0=0, P1=0)\n'
 
 expect_label \
-    'when both verdicts appear, the last one wins' \
-    'review:lgtm' \
-    'Round 1 結論：Changes Requested\n\nRound 2（fix 後）：P0=0, P1=0。結論：LGTM\n'
+    'when both verdicts appear, the Verdict line wins over the prose' \
+    'review:changes-requested' \
+    '## Code Review: Round 2\n\n### Verdict\nChanges Requested, P0=1, P1=0\n\n修掉這一項就可以 LGTM。\n'
 
 expect_label \
     'no verdict keyword maps to no label' \
