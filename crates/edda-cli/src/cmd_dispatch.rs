@@ -450,7 +450,7 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
             // --session-id must resume the conversation a previous dispatch
             // recorded.
             persistent_codex_threads: true,
-            session_dir: args.session_dir.map(std::path::PathBuf::from),
+            session_dir: args.session_dir.as_ref().map(std::path::PathBuf::from),
         },
     )?;
     let phase = build_phase(
@@ -485,8 +485,45 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         }
     }
 
+    // GH-577: Ingest Pi session transcripts after the turn completes.
+    // Observation surface cannot kill work surface (GH-566/GH-577): errors degrade to warnings.
+    if args.agent == AgentKind::Pi {
+        if let Err(e) = ingest_pi_session_post_dispatch(
+            &cwd,
+            &session_id,
+            args.session_dir.as_deref().map(std::path::Path::new),
+        ) {
+            eprintln!("Warning: failed to ingest pi session: {e}");
+        }
+    }
+
     let code = output.exit_code();
     Ok(code)
+}
+
+/// Ingest Pi session transcripts after a dispatch turn and emit `#session_digest`.
+pub fn ingest_pi_session_post_dispatch(
+    cwd: &std::path::Path,
+    session_id: &str,
+    session_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    let project_id = edda_store::project_id(cwd);
+    let project_dir = edda_store::project_dir(&project_id);
+    let _ = edda_store::ensure_dirs(&project_id);
+
+    let session_file = match edda_transcript::find_pi_session_file(cwd, session_id, session_dir) {
+        Some(f) => f,
+        None => return Ok(()),
+    };
+
+    let _stats =
+        edda_transcript::ingest_pi_transcript_delta(&project_dir, session_id, cwd, &session_file)?;
+
+    let cwd_str = cwd.to_string_lossy();
+    let _ =
+        edda_bridge_claude::digest::digest_session_manual(&project_id, session_id, &cwd_str, true);
+
+    Ok(())
 }
 
 /// One turn through the launcher with an empty plan context. Split out from
@@ -1394,5 +1431,15 @@ mod tests {
         assert_eq!(out.outcome, Outcome::Timeout);
         assert_eq!(out.exit_code(), 2);
         assert!(out.render_text().contains("Session: sess-y"));
+    }
+
+    #[test]
+    fn ingest_pi_session_post_dispatch_missing_file_returns_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let res = ingest_pi_session_post_dispatch(tmp.path(), "nonexistent-sess", None);
+        assert!(
+            res.is_ok(),
+            "missing pi session file returns Ok(()) gracefully"
+        );
     }
 }
