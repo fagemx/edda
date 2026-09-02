@@ -226,7 +226,7 @@ classes:                    # 類別路由；glob 對 diff 檔案清單
 | claude（Claude Code） | `--tools Read,Grep,Glob`——#574 round 2 查明 `--allowedTools` 只是 permission-prompt 規則、**從不被 spawn**，能力限制旗標是 `--tools`；沒有任何 `Bash` | `hard` |
 | codex（app-server） | 無工具政策可設 | `none` → 判決不合格 |
 
-接線事實（#574 分支 `feat/gh574-dispatch-model-thinking-tools`）：能力欄位在
+接線事實（#574 切片 1 已於 2026-09-02 由 PR #627 合併進 main，以下皆為 main 的現況）：能力欄位在
 `Phase { tools, exclude_tools, model, thinking }`（YAML 舊拼法 `allowed_tools` 仍可解析），
 `cmd_dispatch::build_phase(prompt, budget, timeout, permission_mode, CapabilityOptions { model,
 thinking, tools, exclude_tools })` 把它們放上 phase；`LauncherOptions { verbose, transcript_dir,
@@ -248,7 +248,7 @@ persistent_codex_threads, session_dir }`（review 只設前兩個，其餘 `Defa
 
 ### 6.2 `model_observed`（in-band，來自 launcher，不讀 session 檔或設定）
 
-#574 切片 1（分支 `feat/gh574-dispatch-model-thinking-tools`）已把觀測做進 launcher：
+#574 切片 1（PR #627，已合併進 main）已把觀測做進 launcher：
 `AgentLauncher::last_observed_model(&self) -> Option<String>`，pi 由 RPC `get_state` 回的
 `data.model.{provider,id}` 取得、claude 由 stream-json 的 `system/init` 訊息取得、codex 無。
 這是 backend **自己在管道內報的值**，不是 edda 從設定檔或 session 檔推的；`edda review`
@@ -487,7 +487,7 @@ PR body 裡的散文 L1 receipt 不解析；fleet 在一個迭代內改用 `edda
 
 | 切片 | 內容 | 相依 |
 |---|---|---|
-| **切片 1（#652）** | §3–§10 全部（⑤ 的 claims 除外，見該列）；`edda bundle` 印 deprecation 指向 `edda review`（不刪碼）；`docs/reference/cli.md` 一節；unstable 標示：COMPATIBILITY.md 若已由 #651 落地就加一列，否則寫在 cli.md 該節並在 #651 留言；runbook 一句「fleet 用 `edda run` 鋪收據，reviewer 不重跑」；金絲雀 v0 各跑一次 glm 與 sol，結果表貼 PR。實作計畫：[2026-09-02-edda-review-slice1.md](../plans/2026-09-02-edda-review-slice1.md) | **blocked by #574 切片 1 合併**（分支 `feat/gh574-dispatch-model-thinking-tools` 提供 `cmd_dispatch::CapabilityOptions { model, thinking, tools, exclude_tools }`、五參數 `build_phase`、`Phase { tools, exclude_tools, model, thinking }`、`AgentLauncher::last_observed_model()`）；`REVIEW.md`（#633）可缺席 |
+| **切片 1（#652）** | §3–§10 全部（⑤ 的 claims 除外，見該列）；`edda bundle` 印 deprecation 指向 `edda review`（不刪碼）；`docs/reference/cli.md` 一節；unstable 標示：COMPATIBILITY.md 若已由 #651 落地就加一列，否則寫在 cli.md 該節並在 #651 留言；runbook 一句「fleet 用 `edda run` 鋪收據，reviewer 不重跑」；金絲雀 v0 各跑一次 glm 與 sol，結果表貼 PR。實作計畫：[2026-09-02-edda-review-slice1.md](../plans/2026-09-02-edda-review-slice1.md) | **前置已滿足**：#574 切片 1 於 2026-09-02 由 PR #627 合併進 main，提供 `cmd_dispatch::CapabilityOptions { model, thinking, tools, exclude_tools }`、五參數 `build_phase`、`agent_kind::{DispatchOptions, validate_dispatch_options, LauncherOptions}`（四欄，不 derive `Default`）、`Phase { tools, exclude_tools, model, thinking }`、`AgentLauncher::last_observed_model()`。`REVIEW.md`（#633）可缺席 |
 | 切片 2 | `--post`（Round 留言渲染，取代 fleet-review skill 第 4、5 步）、label、`--incremental`（只審 `supersedes.head..head`，`coverage = incremental`） | 切片 1 |
 | 第二層（各自 spec） | finding 物件（#602）；reject → postmortem 規則；`edda report cost` 的審查視角（#582）；`[判斷]` 升級（#618 §4.6）；profile / 引擎池（#593） | 切片 1 累積資料 |
 | 第三層 | #632 watcher、#580 合併閘（讀 `qualified`）、MCP 工具、pre-push | 第二層 |
