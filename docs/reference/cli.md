@@ -542,6 +542,48 @@ make implicit identity ambiguous.
 Run exactly one agent turn without a plan file or conductor state machine. The
 prompt is read verbatim from a file; the caller owns any outer loop.
 
+#### v0.4.0 (current crates.io release)
+
+The version installed by `cargo install edda` currently supports:
+
+```bash
+edda dispatch \
+  --agent <claude|pi|codex> \
+  --prompt-file <PATH> \
+  [--session-id <ID>] \
+  [--cwd <DIR>] \
+  [--budget-usd <USD>] \
+  [--timeout-sec <SECONDS>] \
+  [--permission-mode <MODE>] \
+  [--json]
+```
+
+In v0.4.0, `--permission-mode` defaults to `bypassPermissions`; Claude consumes
+it, while Pi and Codex ignore it. Codex reports cost when available but cannot
+enforce `--budget-usd`.
+
+Omitting `--session-id` generates and prints one for later continuation. Claude,
+Pi, and Codex persist continuity through their own backend mechanisms; Codex
+stores the session-to-thread map in Edda's per-user store.
+
+| Exit | Outcome |
+|------|---------|
+| `0` | Agent completed |
+| `1` | Crash, pre-dispatch error, or other failure |
+| `2` | Timeout |
+| `3` | Budget exceeded |
+| `4` | Maximum turns reached |
+
+With `--json`, a dispatched v0.4.0 turn renders one stdout object containing
+`outcome`, `result_text`, `cost_usd`, `session_id`, and `error`. A pre-dispatch
+failure, such as an unreadable prompt file, exits `1` and reports to stderr
+before JSON rendering begins.
+
+#### Unreleased (main branch)
+
+The following controls were added after the v0.4.0 tag. They are available in
+source builds from `main` but are not part of the current crates.io release:
+
 ```bash
 edda dispatch \
   --agent <claude|pi|codex> \
@@ -560,7 +602,7 @@ edda dispatch \
   [--json]
 ```
 
-`--prompt-file` is required for a normal turn and may be omitted only with
+`--prompt-file` remains required for a normal turn and may be omitted only with
 `--list-models`. Backend-specific controls are validated instead of silently
 ignored:
 
@@ -577,25 +619,11 @@ Tool allowlists and denylists are passed to supported backends as structural
 capability restrictions. Model listing prints text and cannot be combined with
 `--json`.
 
-Omitting `--session-id` generates and prints one for later continuation. Claude,
-Pi, and Codex persist continuity through their own backend mechanisms; Codex
-stores the session-to-thread map in Edda's per-user store. Codex reports cost
-when available but cannot enforce `--budget-usd`.
-
-| Exit | Outcome |
-|------|---------|
-| `0` | Agent completed |
-| `1` | Crash, pre-dispatch error, or other failure |
-| `2` | Timeout |
-| `3` | Budget exceeded |
-| `4` | Maximum turns reached |
-
-With `--json`, a dispatched turn renders exactly one stdout object containing
-`outcome`, `result_text`, `cost_usd`, `session_id`, `error`, `model_requested`,
-and `model_observed`. `model_requested` is the requested model or `inherited`;
-`model_observed` is the backend's in-band report or `unknown`. A pre-dispatch
-failure, such as an unreadable prompt file or an unsupported backend-specific
-flag, exits `1` and reports to stderr before JSON rendering begins.
+For a dispatched turn, the JSON object adds `model_requested` and
+`model_observed`. `model_requested` is the requested model or `inherited`;
+`model_observed` is the backend's in-band report or `unknown`. Unsupported
+backend-specific flags are pre-dispatch failures: they exit `1` on stderr before
+JSON rendering begins.
 
 ### `edda verdict` and `edda phase`
 
