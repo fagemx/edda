@@ -137,9 +137,64 @@ impl EddaPaths {
     /// whether `.edda/` exists there.
     ///
     /// Returns `None` if not found by either method.
+    ///
+    /// Note: the walk has no upper bound — it can climb past the user's
+    /// home directory to the drive root. Tests that need the walk confined
+    /// to a directory they control must use [`EddaPaths::find_root_bounded`]
+    /// instead (GH-646): an unbounded walk inherits whatever workspace the
+    /// environment happens to have above the start path.
     pub fn find_root(start: &Path) -> Option<PathBuf> {
+        Self::find_root_walk(start, None)
+    }
+
+    /// Test-facing bounded variant of [`EddaPaths::find_root`] (GH-646).
+    ///
+    /// Phase 1 climbs from `start` up to and including `ceiling` and never
+    /// above it, so "there is / is not a workspace here" is a premise the
+    /// caller establishes in its own tree instead of inheriting from the
+    /// environment (e.g. the fleet coordination workspace in `$HOME`).
+    /// `ceiling` must be `start` itself or an ancestor of it.
+    ///
+    /// Phase 2 (the git worktree fallback) is unchanged: it only fires when
+    /// the caller's own fixture contains a git repository, so it resolves
+    /// to a root the test created, never to an environment workspace.
+    ///
+    /// `pub` only because tests in other crates call it; it is not part of
+    /// the crate's production surface. Production code resolves a workspace
+    /// with [`EddaPaths::find_root`].
+    #[doc(hidden)]
+    pub fn find_root_bounded(start: &Path, ceiling: &Path) -> Option<PathBuf> {
+        // Both sides of the bound check must be spelled the same way or the
+        // bound is inert: `Path::starts_with` compares path *components*, and
+        // on Windows `canonicalize` returns a `\\?\`-verbatim path whose
+        // `Prefix::VerbatimDisk('C')` never equals a raw path's
+        // `Prefix::Disk('C')`. A caller that canonicalized only `start` would
+        // therefore leave the ceiling region on its first `pop()` and stop
+        // before climbing anywhere. Normalising both sides here takes that
+        // failure out of the caller's hands.
+        // Canonicalize both or neither: a per-side fallback would reintroduce
+        // the very mismatch this guards against whenever one path exists and
+        // the other does not.
+        let (clean_start, clean_ceiling) = match (start.canonicalize(), ceiling.canonicalize()) {
+            (Ok(s), Ok(c)) => (clean_unc_path(&s), clean_unc_path(&c)),
+            _ => (start.to_path_buf(), ceiling.to_path_buf()),
+        };
+        debug_assert!(
+            clean_start.starts_with(&clean_ceiling),
+            "start must be within ceiling: start={:?}, ceiling={:?}",
+            clean_start,
+            clean_ceiling
+        );
+        Self::find_root_walk(&clean_start, Some(&clean_ceiling))
+    }
+
+    fn find_root_walk(start: &Path, ceiling: Option<&Path>) -> Option<PathBuf> {
         let home = dirs::home_dir();
 
+        // Normalisation belongs to `find_root_bounded`, not here: the
+        // unbounded `find_root` is production API and this PR does not
+        // change what it returns for a given `start`.
+        //
         // Walk up looking for `.edda/` or `.git`.
         let mut cur = start.to_path_buf();
         loop {
@@ -179,6 +234,11 @@ impl EddaPaths {
             }
 
             if is_home || !cur.pop() {
+                break;
+            }
+            if ceiling.is_some_and(|c| !cur.starts_with(c)) {
+                // Left the ceiling region (the ceiling itself was just
+                // checked on the previous iteration) — stop climbing.
                 break;
             }
         }
@@ -311,13 +371,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// GH-646 regression guard.
+    ///
+    /// The unbounded [`EddaPaths::find_root`] climbs to the drive root, so
+    /// the premise "no `.edda/` anywhere above" can only be made true by
+    /// the environment — and the fleet coordination workspace in `$HOME`
+    /// makes it false (that is the non-hermeticity this issue fixes). A
+    /// test that asserts "no workspace here" must therefore anchor the
+    /// climb with [`EddaPaths::find_root_bounded`] and create that premise
+    /// inside its own tree. The ceiling here is the test's own directory;
+    /// a workspace placed ABOVE it simulates the environment and must stay
+    /// invisible to the bounded walk.
     #[test]
-    fn find_root_non_git_no_edda_returns_none() {
-        let tmp = unique_tmp("no_git");
+    fn find_root_bounded_stops_at_ceiling_and_ignores_workspace_above_it() {
+        let tmp = unique_tmp("bounded");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let ceiling = tmp.join("ceiling");
+        let leaf = ceiling.join("leaf");
+        std::fs::create_dir_all(&leaf).unwrap();
+        // Hostile environment: a workspace above the test's own region.
+        std::fs::create_dir_all(tmp.join(".edda")).unwrap();
 
-        assert!(EddaPaths::find_root(&tmp).is_none());
+        // Nothing within [leaf..=ceiling] is a workspace, and the climb may
+        // not leave the ceiling — so the environment workspace is invisible.
+        assert!(EddaPaths::find_root_bounded(&leaf, &ceiling).is_none());
+
+        // A workspace AT the ceiling is still found (the anchor is inclusive).
+        //
+        // Compare canonically on both sides: `find_root_bounded` normalises its
+        // inputs, so it returns a canonical path, and on macOS the temp dir is
+        // reached through a symlink (`/var/...` -> `/private/var/...`) that
+        // makes the canonical and raw spellings of the same directory differ.
+        std::fs::create_dir_all(ceiling.join(".edda")).unwrap();
+        let found =
+            EddaPaths::find_root_bounded(&leaf, &ceiling).expect("workspace at the ceiling");
+        assert_eq!(
+            clean_unc_path(&found.canonicalize().unwrap()),
+            clean_unc_path(&ceiling.canonicalize().unwrap())
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_root_bounded_handles_canonical_start_with_raw_ceiling() {
+        let tmp = unique_tmp("bounded_canonical");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let ceiling = tmp.join("ceiling");
+        let sub = ceiling.join("sub");
+        let leaf = sub.join("leaf");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::create_dir_all(sub.join(".edda")).unwrap();
+
+        // start canonicalized (which produces \\?\ verbatim prefix on Windows),
+        // ceiling uncanonicalized.
+        let canonical_leaf = leaf.canonicalize().unwrap();
+        let found = EddaPaths::find_root_bounded(&canonical_leaf, &ceiling);
+        assert!(
+            found.is_some(),
+            "must find .edda when start is canonicalized"
+        );
+        assert_eq!(
+            clean_unc_path(&found.unwrap().canonicalize().unwrap()),
+            clean_unc_path(&sub.canonicalize().unwrap())
+        );
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
