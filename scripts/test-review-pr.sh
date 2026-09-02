@@ -88,17 +88,20 @@ cat >"$STUBBIN/uname" <<'EOF'
 echo "MINGW64_NT-10.0-26200"
 EOF
 
-# cygpath -w: /c/foo/bar -> C:\foo\bar, the conversion the real one performs.
+# cygpath -w: /c/foo/bar -> C:\foo\bar. Like the real one, every absolute POSIX
+# path comes back drive-rooted — a mount point such as /tmp included, which is
+# why the fallback arm still prefixes a drive rather than returning \tmp\...
 cat >"$STUBBIN/cygpath" <<'EOF'
 #!/bin/sh
 p=$2
 case "$p" in
   /[a-zA-Z]/*)
-    d=$(printf '%s' "$p" | cut -c2)
-    rest=$(printf '%s' "$p" | cut -c3-)
-    printf '%s:%s\n' "$(printf '%s' "$d" | tr 'a-z' 'A-Z')" "$(printf '%s' "$rest" | tr '/' '\\')"
+    d=$(printf '%s' "$p" | cut -c2 | tr 'a-z' 'A-Z')
+    rest=$(printf '%s' "$p" | cut -c3- | tr '/' '\\')
+    printf '%s:%s\n' "$d" "$rest"
     ;;
-  *) printf '%s\n' "$(printf '%s' "$p" | tr '/' '\\')" ;;
+  /*) printf 'C:%s\n' "$(printf '%s' "$p" | tr '/' '\\')" ;;
+  *)  printf '%s\n' "$(printf '%s' "$p" | tr '/' '\\')" ;;
 esac
 EOF
 
