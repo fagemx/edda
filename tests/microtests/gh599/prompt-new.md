@@ -1,3 +1,6 @@
+You are executing the following skill.
+
+=== SKILL BEGIN ===
 ---
 name: fleet-epic-split
 description: Use when refilling the Fleet feature queue — accepts four input shapes (epic issue, planning doc, ledger decision key, pasted planning summary), then recon → decompose (independence three-question) → dedupe → confirmation table → batch fleet:pending create → cross-references → provenance report. Never writes implementation code.
@@ -100,3 +103,12 @@ doneWhen → Wiring audit（四問槽）→ Relation to existing issues`
 你不撕 ready、不寫實作碼、不 merge、不在確認表之前建單。你的產出是「待簽的
 提案」，下游有測試閘門兜底，但錯的**方向**沒有閘門攔得住——所以寧可少拆、
 標清依賴，也不硬湊數量。
+=== SKILL END ===
+
+INPUT:
+**Stage 2 — event-driven delivery:**
+phase terminal-state notifications through edda-notify channels (filed), with
+#545 (gate-entry routing) as sibling. Acceptance: a controller reacts to
+phase/gate events without polling stdout.
+
+Dry run: do not create issues. Recon is unavailable here — treat every item in the input as not yet done. Print exactly what this skill would output at each step.
