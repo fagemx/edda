@@ -10,7 +10,7 @@ use std::process::Command;
 #[derive(Debug, Clone, Args)]
 pub struct CheckMergeArgs {
     /// PR number to evaluate (queries GitHub via `gh` CLI)
-    #[arg(value_name = "PR")]
+    #[arg(value_name = "PR", conflicts_with = "input")]
     pub pr: Option<u64>,
 
     /// Explicit head commit SHA
@@ -79,11 +79,25 @@ pub struct MergeGateResult {
     pub reasons: Vec<String>,
 }
 
+/// Check if string is a valid 40-character hex commit SHA.
+pub fn is_valid_40_hex_sha(sha: &str) -> bool {
+    let s = sha.trim();
+    s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Pure evaluation function without host or network dependencies.
 pub fn evaluate_merge_preconditions(input: &MergeGateInput) -> MergeGateResult {
     let mut reasons = Vec::new();
 
-    // 1. Verdict presence & state
+    // 1. Validate head SHA shape
+    let h_clean = input.head_sha.trim();
+    if !is_valid_40_hex_sha(h_clean) {
+        reasons.push(format!(
+            "head_sha '{h_clean}' is not a valid 40-character hex commit SHA"
+        ));
+    }
+
+    // 2. Verdict presence & state
     match &input.verdict {
         None => {
             reasons.push("no review verdict found on PR".to_string());
@@ -98,7 +112,7 @@ pub fn evaluate_merge_preconditions(input: &MergeGateInput) -> MergeGateResult {
         }
     }
 
-    // 2. Blocking findings (P0=0 and P1=0)
+    // 3. Blocking findings (P0=0 and P1=0)
     if input.p0_count > 0 || input.p1_count > 0 {
         reasons.push(format!(
             "blocking findings present: {} P0, {} P1 (both must be 0)",
@@ -106,17 +120,14 @@ pub fn evaluate_merge_preconditions(input: &MergeGateInput) -> MergeGateResult {
         ));
     }
 
-    // 3. SHA window check (verdict SHA must match current PR head)
+    // 4. SHA window check (verdict SHA must match current PR head exactly)
     if let Some(v_sha) = &input.verdict_sha {
         let v_clean = v_sha.trim();
-        let h_clean = input.head_sha.trim();
-        let matches = if v_clean.len() >= 7 && h_clean.len() >= 7 {
-            v_clean == h_clean || v_clean.starts_with(h_clean) || h_clean.starts_with(v_clean)
-        } else {
-            v_clean == h_clean
-        };
-
-        if !matches {
+        if !is_valid_40_hex_sha(v_clean) {
+            reasons.push(format!(
+                "verdict_sha '{v_clean}' is not a valid 40-character hex commit SHA"
+            ));
+        } else if !v_clean.eq_ignore_ascii_case(h_clean) {
             reasons.push(format!(
                 "SHA window mismatch: verdict pinned to '{v_clean}' but current head is '{h_clean}' (new commits pushed after review)"
             ));
@@ -125,7 +136,7 @@ pub fn evaluate_merge_preconditions(input: &MergeGateInput) -> MergeGateResult {
         reasons.push("review verdict is not pinned to any commit SHA".to_string());
     }
 
-    // 4. Required CI checks
+    // 5. Required CI checks
     if !input.required_ci_green {
         if input.failed_checks.is_empty() {
             reasons.push("required CI check(s) are not green".to_string());
@@ -154,6 +165,7 @@ pub fn evaluate_merge_preconditions(input: &MergeGateInput) -> MergeGateResult {
 struct GhViewPr {
     #[serde(rename = "headRefOid")]
     head_ref_oid: String,
+    author: GhAuthor,
     #[serde(default)]
     comments: Vec<GhComment>,
     #[serde(default)]
@@ -161,18 +173,25 @@ struct GhViewPr {
 }
 
 #[derive(Debug, Deserialize)]
+struct GhAuthor {
+    login: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct GhComment {
     body: String,
+    author: Option<GhAuthor>,
     #[serde(rename = "createdAt")]
-    _created_at: Option<String>,
+    created_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct GhReviewItem {
     state: String,
+    author: Option<GhAuthor>,
     body: Option<String>,
     #[serde(rename = "submittedAt")]
-    _submitted_at: Option<String>,
+    submitted_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +199,23 @@ struct GhCheckItem {
     name: String,
     state: Option<String>,
     bucket: Option<String>,
+}
+
+/// Determines if a comment is a structured review verdict, preventing casual comments from triggering a verdict.
+pub fn is_structured_review_comment(body: &str) -> bool {
+    body.contains("## Code Review:")
+        || body.contains("### Verdict")
+        || body.contains("<<<VERDICT")
+        || body.contains("Verdict as of the ruling:")
+        || (body.contains("Verdict")
+            && (body.contains("LGTM") || body.contains("Changes Requested")))
+}
+
+fn parse_count(line: &str, prefix: &str) -> Option<usize> {
+    let idx = line.find(prefix)?;
+    let rest = line[idx + prefix.len()..].trim_start_matches([':', '=', ' ']);
+    let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    num_str.parse::<usize>().ok()
 }
 
 /// Extract verdict info (verdict, verdict_sha, p0, p1) from comment or review body text
@@ -208,45 +244,21 @@ pub fn parse_verdict_text(text: &str) -> (Option<String>, Option<String>, usize,
     }
 
     for line in text.lines() {
-        if let Some(idx) = line.find("P0=") {
-            let rest = &line[idx + 3..];
-            if let Some(digit) = rest.chars().next().and_then(|c| c.to_digit(10)) {
-                p0 = digit as usize;
-            }
-        } else if let Some(idx) = line.find("P0:") {
-            let rest = line[idx + 3..].trim();
-            if let Some(digit) = rest.chars().next().and_then(|c| c.to_digit(10)) {
-                p0 = digit as usize;
-            }
+        if let Some(val) = parse_count(line, "P0") {
+            p0 = p0.max(val);
+        } else if let Some(val) = parse_count(line, "p0") {
+            p0 = p0.max(val);
         }
 
-        if let Some(idx) = line.find("P1=") {
-            let rest = &line[idx + 3..];
-            if let Some(digit) = rest.chars().next().and_then(|c| c.to_digit(10)) {
-                p1 = digit as usize;
-            }
-        } else if let Some(idx) = line.find("P1:") {
-            let rest = line[idx + 3..].trim();
-            if let Some(digit) = rest.chars().next().and_then(|c| c.to_digit(10)) {
-                p1 = digit as usize;
-            }
+        if let Some(val) = parse_count(line, "P1") {
+            p1 = p1.max(val);
+        } else if let Some(val) = parse_count(line, "p1") {
+            p1 = p1.max(val);
         }
     }
 
     for word in text.split_whitespace() {
-        let clean = word.trim_matches(|c: char| {
-            c == '*'
-                || c == '`'
-                || c == '('
-                || c == ')'
-                || c == '.'
-                || c == ','
-                || c == ':'
-                || c == '"'
-                || c == '\''
-                || c == '['
-                || c == ']'
-        });
+        let clean = word.trim_matches(['*', '`', '(', ')', '.', ',', ':', '"', '\'', '[', ']']);
         if clean.len() == 40 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
             verdict_sha = Some(clean.to_string());
             break;
@@ -256,6 +268,15 @@ pub fn parse_verdict_text(text: &str) -> (Option<String>, Option<String>, usize,
     (verdict, verdict_sha, p0, p1)
 }
 
+#[derive(Debug)]
+struct ReviewTimelineEvent {
+    timestamp: String,
+    verdict: String,
+    verdict_sha: Option<String>,
+    p0_count: usize,
+    p1_count: usize,
+}
+
 fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput> {
     let view_output = Command::new("gh")
         .args([
@@ -263,7 +284,7 @@ fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput>
             "view",
             &pr.to_string(),
             "--json",
-            "headRefOid,comments,reviews",
+            "headRefOid,author,comments,reviews",
         ])
         .current_dir(repo_root)
         .output()
@@ -278,51 +299,84 @@ fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput>
         serde_json::from_slice(&view_output.stdout).context("parse gh pr view json output")?;
 
     let head_sha = gh_view.head_ref_oid;
+    let pr_author = gh_view.author.login.as_str();
 
-    let mut verdict = None;
-    let mut verdict_sha = None;
-    let mut p0 = 0;
-    let mut p1 = 0;
+    let mut timeline: Vec<ReviewTimelineEvent> = Vec::new();
 
-    for r in gh_view.reviews.iter().rev() {
-        if r.state == "APPROVED" {
-            verdict = Some("LGTM".to_string());
-            if let Some(body) = &r.body {
-                let (_, sha, parsed_p0, parsed_p1) = parse_verdict_text(body);
-                if sha.is_some() {
-                    verdict_sha = sha;
-                }
-                p0 = parsed_p0;
-                p1 = parsed_p1;
+    // 1. Process GitHub review approvals / changes_requested
+    for r in &gh_view.reviews {
+        if let Some(reviewer) = &r.author {
+            if reviewer.login == pr_author {
+                continue; // Author cannot review their own PR
             }
-            break;
-        } else if r.state == "CHANGES_REQUESTED" {
-            verdict = Some("Changes Requested".to_string());
-            if let Some(body) = &r.body {
-                let (_, sha, parsed_p0, parsed_p1) = parse_verdict_text(body);
-                if sha.is_some() {
-                    verdict_sha = sha;
-                }
-                p0 = parsed_p0;
-                p1 = parsed_p1;
-            }
-            break;
+        }
+
+        let verdict_opt = match r.state.as_str() {
+            "APPROVED" => Some("LGTM".to_string()),
+            "CHANGES_REQUESTED" => Some("Changes Requested".to_string()),
+            _ => None,
+        };
+
+        if let Some(v) = verdict_opt {
+            let (body_v, sha, parsed_p0, parsed_p1) = if let Some(body) = &r.body {
+                parse_verdict_text(body)
+            } else {
+                (None, None, 0, 0)
+            };
+
+            let final_v = body_v.unwrap_or(v);
+            let ts = r.submitted_at.clone().unwrap_or_default();
+
+            timeline.push(ReviewTimelineEvent {
+                timestamp: ts,
+                verdict: final_v,
+                verdict_sha: sha,
+                p0_count: parsed_p0,
+                p1_count: parsed_p1,
+            });
         }
     }
 
-    for comment in gh_view.comments.iter().rev() {
+    // 2. Process structured review comments from non-authors
+    for comment in &gh_view.comments {
+        if let Some(author) = &comment.author {
+            if author.login == pr_author {
+                continue; // Ignore comments from PR author (e.g. implementer review response)
+            }
+        }
+
+        if !is_structured_review_comment(&comment.body) {
+            continue;
+        }
+
         let (v, sha, parsed_p0, parsed_p1) = parse_verdict_text(&comment.body);
         if let Some(found_v) = v {
-            verdict = Some(found_v);
-            if sha.is_some() {
-                verdict_sha = sha;
-            }
-            p0 = parsed_p0;
-            p1 = parsed_p1;
-            break;
+            let ts = comment.created_at.clone().unwrap_or_default();
+            timeline.push(ReviewTimelineEvent {
+                timestamp: ts,
+                verdict: found_v,
+                verdict_sha: sha,
+                p0_count: parsed_p0,
+                p1_count: parsed_p1,
+            });
         }
     }
 
+    // Sort timeline chronologically (oldest to newest) so the newest review event wins
+    timeline.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    let (verdict, verdict_sha, p0, p1) = if let Some(latest) = timeline.pop() {
+        (
+            Some(latest.verdict),
+            latest.verdict_sha,
+            latest.p0_count,
+            latest.p1_count,
+        )
+    } else {
+        (None, None, 0, 0)
+    };
+
+    // 3. Fetch PR checks
     let checks_output = Command::new("gh")
         .args([
             "pr",
@@ -346,6 +400,7 @@ fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput>
 
         if let Some(ci_gate) = ci_gate_item {
             let pass = ci_gate.bucket.as_deref() == Some("pass")
+                || ci_gate.bucket.as_deref() == Some("skipping")
                 || ci_gate.state.as_deref() == Some("SUCCESS");
             if !pass {
                 required_ci_green = false;
@@ -356,8 +411,9 @@ fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput>
             }
         } else if !checks.is_empty() {
             for c in &checks {
-                let pass =
-                    c.bucket.as_deref() == Some("pass") || c.state.as_deref() == Some("SUCCESS");
+                let pass = c.bucket.as_deref() == Some("pass")
+                    || c.bucket.as_deref() == Some("skipping")
+                    || c.state.as_deref() == Some("SUCCESS");
                 if !pass {
                     required_ci_green = false;
                     failed_checks.push(format!(
@@ -389,6 +445,10 @@ fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput>
 
 /// Execute the merge precondition check CLI entrypoint.
 pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result<()> {
+    if args.merge && (args.pr.is_none() || args.input.is_some()) {
+        anyhow::bail!("--merge requires a live PR number and cannot be used with '--input'");
+    }
+
     let input = if let Some(input_source) = &args.input {
         let raw = if input_source == "-" {
             let mut buf = String::new();
@@ -447,18 +507,15 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
 
     if args.merge {
         if result.can_merge {
-            if let Some(pr_number) = args.pr {
-                println!("Executing merge: gh pr merge {pr_number} --squash");
-                let status = Command::new("gh")
-                    .args(["pr", "merge", &pr_number.to_string(), "--squash"])
-                    .current_dir(repo_root)
-                    .status()
-                    .context("execute gh pr merge")?;
-                if !status.success() {
-                    anyhow::bail!("gh pr merge failed with status {}", status);
-                }
-            } else {
-                anyhow::bail!("--merge requires a PR number positional argument");
+            let pr_number = args.pr.expect("checked above");
+            println!("Executing merge: gh pr merge {pr_number} --squash");
+            let status = Command::new("gh")
+                .args(["pr", "merge", &pr_number.to_string(), "--squash"])
+                .current_dir(repo_root)
+                .status()
+                .context("execute gh pr merge")?;
+            if !status.success() {
+                anyhow::bail!("gh pr merge failed with status {}", status);
             }
         } else {
             eprintln!("Error: Cannot merge because preconditions failed.");
@@ -477,10 +534,13 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
 mod tests {
     use super::*;
 
+    const VALID_SHA_A: &str = "1234567890abcdef1234567890abcdef12345678";
+    const VALID_SHA_B: &str = "abcdef1234567890abcdef1234567890abcdef12";
+
     #[test]
     fn test_refuse_when_no_verdict() {
         let input = MergeGateInput {
-            head_sha: "abc1234567890123456789012345678901234567".into(),
+            head_sha: VALID_SHA_A.into(),
             verdict: None,
             verdict_sha: None,
             p0_count: 0,
@@ -499,9 +559,9 @@ mod tests {
     #[test]
     fn test_refuse_when_verdict_stale_new_push() {
         let input = MergeGateInput {
-            head_sha: "new1234567890123456789012345678901234567".into(),
+            head_sha: VALID_SHA_B.into(),
             verdict: Some("LGTM".into()),
-            verdict_sha: Some("old1234567890123456789012345678901234567".into()),
+            verdict_sha: Some(VALID_SHA_A.into()),
             p0_count: 0,
             p1_count: 0,
             required_ci_green: true,
@@ -516,12 +576,30 @@ mod tests {
     }
 
     #[test]
-    fn test_refuse_when_ci_not_green() {
-        let sha = "1234567890123456789012345678901234567890";
+    fn test_refuse_when_sha_is_invalid() {
         let input = MergeGateInput {
-            head_sha: sha.into(),
+            head_sha: "short".into(),
             verdict: Some("LGTM".into()),
-            verdict_sha: Some(sha.into()),
+            verdict_sha: Some("short".into()),
+            p0_count: 0,
+            p1_count: 0,
+            required_ci_green: true,
+            failed_checks: vec![],
+        };
+        let result = evaluate_merge_preconditions(&input);
+        assert!(!result.can_merge);
+        assert!(result
+            .reasons
+            .iter()
+            .any(|r| r.contains("not a valid 40-character hex commit SHA")));
+    }
+
+    #[test]
+    fn test_refuse_when_ci_not_green() {
+        let input = MergeGateInput {
+            head_sha: VALID_SHA_A.into(),
+            verdict: Some("LGTM".into()),
+            verdict_sha: Some(VALID_SHA_A.into()),
             p0_count: 0,
             p1_count: 0,
             required_ci_green: false,
@@ -534,12 +612,11 @@ mod tests {
 
     #[test]
     fn test_refuse_when_blocking_findings_or_changes_requested() {
-        let sha = "1234567890123456789012345678901234567890";
         // Case A: Changes Requested
         let input_cr = MergeGateInput {
-            head_sha: sha.into(),
+            head_sha: VALID_SHA_A.into(),
             verdict: Some("Changes Requested".into()),
-            verdict_sha: Some(sha.into()),
+            verdict_sha: Some(VALID_SHA_A.into()),
             p0_count: 0,
             p1_count: 0,
             required_ci_green: true,
@@ -549,28 +626,25 @@ mod tests {
         assert!(!res_cr.can_merge);
         assert!(res_cr.reasons.iter().any(|r| r.contains("not LGTM")));
 
-        // Case B: P0 > 0
+        // Case B: P0 > 0 (e.g. 12)
         let input_p0 = MergeGateInput {
-            head_sha: sha.into(),
+            head_sha: VALID_SHA_A.into(),
             verdict: Some("LGTM".into()),
-            verdict_sha: Some(sha.into()),
-            p0_count: 1,
+            verdict_sha: Some(VALID_SHA_A.into()),
+            p0_count: 12,
             p1_count: 0,
             required_ci_green: true,
             failed_checks: vec![],
         };
         let res_p0 = evaluate_merge_preconditions(&input_p0);
         assert!(!res_p0.can_merge);
-        assert!(res_p0
-            .reasons
-            .iter()
-            .any(|r| r.contains("blocking findings present")));
+        assert!(res_p0.reasons.iter().any(|r| r.contains("12 P0")));
 
         // Case C: P1 > 0
         let input_p1 = MergeGateInput {
-            head_sha: sha.into(),
+            head_sha: VALID_SHA_A.into(),
             verdict: Some("LGTM".into()),
-            verdict_sha: Some(sha.into()),
+            verdict_sha: Some(VALID_SHA_A.into()),
             p0_count: 0,
             p1_count: 2,
             required_ci_green: true,
@@ -586,11 +660,10 @@ mod tests {
 
     #[test]
     fn test_approve_when_all_preconditions_met() {
-        let sha = "fa208a3ab4911d3fa9f2dcd60fb332a8575f5b69";
         let input = MergeGateInput {
-            head_sha: sha.into(),
+            head_sha: VALID_SHA_A.into(),
             verdict: Some("LGTM".into()),
-            verdict_sha: Some(sha.into()),
+            verdict_sha: Some(VALID_SHA_A.to_uppercase()), // case-insensitive equality
             p0_count: 0,
             p1_count: 0,
             required_ci_green: true,
@@ -602,19 +675,94 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_verdict_text_extraction() {
+    fn test_parse_verdict_text_multi_digits() {
         let comment = r#"
 ### Verdict
-LGTM (P0=0, P1=0) at `fa208a3ab4911d3fa9f2dcd60fb332a8575f5b69`
-CI is all green.
+Changes Requested, P0=12, P1=3
+Commit: 1234567890abcdef1234567890abcdef12345678
 "#;
         let (verdict, sha, p0, p1) = parse_verdict_text(comment);
-        assert_eq!(verdict.as_deref(), Some("LGTM"));
+        assert_eq!(verdict.as_deref(), Some("Changes Requested"));
         assert_eq!(
             sha.as_deref(),
-            Some("fa208a3ab4911d3fa9f2dcd60fb332a8575f5b69")
+            Some("1234567890abcdef1234567890abcdef12345678")
         );
-        assert_eq!(p0, 0);
-        assert_eq!(p1, 0);
+        assert_eq!(p0, 12);
+        assert_eq!(p1, 3);
+    }
+
+    #[test]
+    fn test_is_structured_review_comment() {
+        assert!(is_structured_review_comment(
+            "## Code Review: Round 1\nLGTM"
+        ));
+        assert!(is_structured_review_comment(
+            "### Verdict\nChanges Requested"
+        ));
+        assert!(is_structured_review_comment("<<<VERDICT\nLGTM\nVERDICT>>>"));
+        // Casual comments must NOT match
+        assert!(!is_structured_review_comment("ready for LGTM review"));
+        assert!(!is_structured_review_comment(
+            "I fixed the bug, please LGTM"
+        ));
+    }
+
+    #[test]
+    fn test_run_check_merge_input_file_report_only() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let input_file = temp_dir.path().join("input.json");
+        let valid_input = MergeGateInput {
+            head_sha: VALID_SHA_A.into(),
+            verdict: Some("LGTM".into()),
+            verdict_sha: Some(VALID_SHA_A.into()),
+            p0_count: 0,
+            p1_count: 0,
+            required_ci_green: true,
+            failed_checks: vec![],
+        };
+        fs::write(&input_file, serde_json::to_string(&valid_input).unwrap()).unwrap();
+
+        let args = CheckMergeArgs {
+            pr: None,
+            head_sha: None,
+            verdict_sha: None,
+            verdict: None,
+            p0: 0,
+            p1: 0,
+            ci_green: false,
+            input: Some(input_file.to_str().unwrap().into()),
+            merge: false,
+            json: true,
+        };
+
+        let res = run_check_merge(args, temp_dir.path());
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_run_check_merge_rejects_merge_with_input_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let input_file = temp_dir.path().join("input.json");
+        fs::write(&input_file, "{}").unwrap();
+
+        let args = CheckMergeArgs {
+            pr: None,
+            head_sha: None,
+            verdict_sha: None,
+            verdict: None,
+            p0: 0,
+            p1: 0,
+            ci_green: false,
+            input: Some(input_file.to_str().unwrap().into()),
+            merge: true,
+            json: false,
+        };
+
+        let res = run_check_merge(args, temp_dir.path());
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be used with '--input'"));
     }
 }
