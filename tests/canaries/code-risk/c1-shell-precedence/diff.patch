@@ -1,0 +1,18 @@
+diff --git a/canaries-fixture/c1-shell-precedence/deploy.sh b/canaries-fixture/c1-shell-precedence/deploy.sh
+new file mode 100644
+index 0000000..c1a1105
+--- /dev/null
++++ b/canaries-fixture/c1-shell-precedence/deploy.sh
+@@ -0,0 +1,12 @@
++#!/bin/sh
++set -eu
++
++# Deploy helper. Fast path first; on failure, clean the temp dir and
++# fall back to the slow path.
++
++TMP=$(mktemp -d)
++
++fast_build "$TMP" || cleanup "$TMP" && git rm -rf . --quiet
++slow_build "$TMP"
++
++echo "deploy ok"
