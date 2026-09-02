@@ -51,8 +51,10 @@ jobs:
               base=$MG_BASE head=$MG_HEAD ;;
             push)
               head=$PUSH_HEAD
+              # An EMPTY or all-zero `before` (new branch, or unknown previous
+              # commit) forces code=true; a valid `before` is diffed normally.
               if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "$zero" ]; then
-                base=   # unknown previous commit: assume code changed
+                base=
               else
                 base=$PUSH_BEFORE
               fi
@@ -61,25 +63,33 @@ jobs:
               base= head= ;;  # unknown event: assume code changed
           esac
           code=true
-          files='(diff computation failed)'
           if [ -n "$base" ] \
             && git cat-file -e "$base" 2>/dev/null \
-            && git cat-file -e "$head" 2>/dev/null \
-            && files=$(git diff --name-only "$base..$head"); then
-            code=false
-            while IFS= read -r f; do
-              [ -n "$f" ] || continue
-              # Whitelist: any match means code changed (err on running more).
-              case "$f" in
-                crates/*|Cargo.toml|Cargo.lock|rust-toolchain*|.cargo/*|.github/workflows/*|scripts/*|install.sh|build.rs)
-                  code=true ;;
-              esac
-            done <<< "$files"
+            && git cat-file -e "$head" 2>/dev/null; then
+            diffout=$(mktemp)
+            # -z: NUL-delimited output, so git's C-quoting of non-ASCII or
+            # control characters ("crates/\303\251.rs") and embedded newlines
+            # in pathnames cannot corrupt the matcher.
+            # --no-renames: a crates/ -> docs/ rename lists BOTH sides, so the
+            # deleted code path still trips the whitelist.
+            if git diff --name-only -z --no-renames "$base" "$head" > "$diffout"; then
+              code=false
+              echo "--- changed files ($base..$head) ---"
+              while IFS= read -r -d '' f; do
+                printf '%s\n' "$f"
+                # Whitelist: any match means code changed (err on running more).
+                case "$f" in
+                  crates/*|Cargo.toml|Cargo.lock|rust-toolchain*|.cargo/*|.github/workflows/*|scripts/*|install.sh|build.rs)
+                    code=true ;;
+                esac
+              done < "$diffout"
+            else
+              echo "git diff failed; assuming code changed."
+            fi
+            rm -f "$diffout"
           else
             echo "Diff could not be computed (base: '${base:-none}'); assuming code changed."
           fi
-          echo "--- changed files ($base..$head) ---"
-          printf '%s\n' "$files"
           echo "code=$code" | tee -a "$GITHUB_OUTPUT"
 
   fmt:
