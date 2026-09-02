@@ -335,9 +335,11 @@ maintainer}` 時）spec 的 `verify` 段逐行。在臨時 worktree **逐字**�
 duration_ms / stdout 尾段 blob`。總時長 `--max-ran-sec` 是**硬期限**：每條閘門以剩餘時間
 spawn、輪詢 `try_wait`，到期就砍**整棵程序樹**——Unix 用 `CommandExt::process_group(0)` 開
 新 process group 並 `kill -9 -- -<pgid>`；Windows 用 `taskkill /PID <pid> /T /F`；只殺 `sh`
-本身不算兌現期限。被殺的閘門記 exit `-1` 與 `timed_out`，剩下的閘門記「未跑」，
-`gates.status = unverified`，`notes` 說明。stdout 尾段寫 blob 失敗是**大聲的**：該 RAN 條目
-`stdout_blob = null`、`notes` 記一行，而且這條 RAN 不能讓 `gates.status` 變 `verified`。
+本身不算兌現期限。被殺的閘門記 exit `-1` 與 `timed_out`，剩下的閘門記「未跑」；RAN 對
+未跑完的閘門沉默（回報 `None`）、對實際失敗回報 `red`，狀態依 §8 的格合成——既有的
+`verified` 不會被降級——`notes` 說明。stdout 尾段寫 blob 失敗是**大聲的**：該 RAN 條目
+`stdout_blob = null`、`notes` 記一行，而且這條 RAN 條目不作為 `verified` 的證據（它對該
+閘門不回報 `green`），最終狀態仍由格合成。
 
 - 白名單裡**沒有** `git *`；edda 自己需要的 git 都是程序內固定子命令。
 - cargo 類閘門（指令以 `cargo ` 開頭）只在環境有 `CARGO_TARGET_DIR` 時執行；沒有就跳過並記
@@ -474,8 +476,9 @@ CI 對本 head 沒有任何主張，直接不貢獻（**不可**退回「所有 
 
 要求兩者同時 verified 會讓「CI 全綠但作者沒在本機留收據」的 PR 讀成 unverified，那是把
 證據當儀式（Round 5 P1）；而讓跳過的 RAN 把 verified 降成 unverified 是同一個錯誤的另一面
-（Round 6 P1）。實作上這條規則寫成**單一函式** `combine_gate_status(current, incoming)`，
-三個來源都呼叫它——這條規則被分別重述兩次，就被破壞了兩次。
+（Round 6 P1）。實作上這條規則寫成**單一函式** `combine_gate_status(current, incoming)`——
+本地 READ 是 accumulator 的**初值**（`read_gates` 直接回傳起始 status），CI 與 RAN 各呼叫
+它一次——這條規則被分別重述兩次，就被破壞了兩次。
 
 PR body 裡的散文 L1 receipt 不解析；fleet 在一個迭代內改用 `edda run -- <gate>` 產收據。
 
@@ -496,8 +499,8 @@ PR body 裡的散文 L1 receipt 不解析；fleet 在一個迭代內改用 `edda
 | `model_observed` 拿不到 | 照審，`unknown`，不合格 |
 | 同模型不同 session | 照審，`same-model`；預設政策合格，`model` 政策不合格 |
 | 模型寫法對照表不認得 | 該來源 `unverified`；絕不記 `verified`；只在 `model` 政策下不合格 |
-| `--run-gates` 但 cargo 閘門而無 `CARGO_TARGET_DIR` | 該閘門跳過並說明，`unverified` |
-| RAN 超時 | 未跑完的閘門 `unverified`，說明哪些沒跑 |
+| `--run-gates` 但 cargo 閘門而無 `CARGO_TARGET_DIR` | 該閘門跳過並說明（RAN 對它沉默，回報 `None`），狀態依 §8 的格合成 |
+| RAN 超時 | RAN 對未跑完的閘門沉默（回報 `None`），狀態依 §8 的格合成，既有的 `verified` 不會被降級；說明哪些沒跑 |
 | spec 來自 `untrusted` issue | 照審；`verify` 欄不執行 |
 | 臨時 worktree 移除失敗 | 警告＋`notes`，判決不受影響 |
 
