@@ -15,12 +15,15 @@
 # usage:
 #   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> `
 #        -Cwd <worktree> [-Agent pi|codex|claude] [-BudgetUsd <n>] [-TimeoutSec <s>] `
-#        [-SessionId <id>] [-LogDir <dir>] [-CargoTargetDir <dir>] [-DryRun]
+#        [-SessionId <id>] [-LogDir <dir>] [-BuildLane <lane>] [-DryRun]
 #
-# -CargoTargetDir defaults to $env:LOCALAPPDATA\fleet-workstation\lanes\<Name>
-# and is ALWAYS emitted into the wrapper (fleet.lane-launch requires it to be
-# explicit in the task environment); Rust lanes with an assigned build lane
-# pass it explicitly (worker-1|worker-2|verifier|verifier-2).
+# -BuildLane is optional and accepts exactly the ratified build lanes
+# worker-1|worker-2|verifier|verifier-2 (verification.cost-discipline); when
+# given, the wrapper sets CARGO_TARGET_DIR to <lane root>\<BuildLane> (lane
+# root = $env:LOCALAPPDATA\fleet-workstation\lanes unless FLEET_LANE_ROOT is
+# set). When omitted, the wrapper sets NO CARGO_TARGET_DIR at all — the
+# launcher never synthesizes a build lane; docs lanes compile nothing and
+# pass none.
 #
 # Prints, one line each: task name, state, wrapper path, log path, done path.
 # Poll with scripts/fleet/lane-status.ps1; the done-file appears (containing
@@ -41,7 +44,7 @@ param(
   [int]$TimeoutSec = 1800,
   [string]$SessionId = '',
   [string]$LogDir = "$env:TEMP\edda-lanes",
-  [string]$CargoTargetDir = '',
+  [string]$BuildLane = '',
   [switch]$DryRun
 )
 
@@ -63,6 +66,10 @@ function PsQuote([string]$s) {
 if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
   Fail "-Name '$Name' may contain only letters, digits, dot, underscore, hyphen"
 }
+$allowedBuildLanes = @('worker-1', 'worker-2', 'verifier', 'verifier-2')
+if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {
+  Fail "-BuildLane '$BuildLane' is not an allowed build lane (verification.cost-discipline allows only: $($allowedBuildLanes -join ', ')); omit the parameter for lanes that compile nothing"
+}
 $TaskName = "edda-lane-$Name"
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existing -and $existing.State -eq 'Running') {
@@ -79,7 +86,10 @@ $Cwd = (Resolve-Path -LiteralPath $Cwd).Path
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $LogDir = (Resolve-Path -LiteralPath $LogDir).Path
 if (-not $SessionId) { $SessionId = "lane-$Name" }
-if (-not $CargoTargetDir) { $CargoTargetDir = "$env:LOCALAPPDATA\fleet-workstation\lanes\$Name" }
+if ($BuildLane) {
+  $laneRoot = if ($env:FLEET_LANE_ROOT) { $env:FLEET_LANE_ROOT } else { "$env:LOCALAPPDATA\fleet-workstation\lanes" }
+  $CargoTargetDir = Join-Path $laneRoot $BuildLane
+}
 $Log = Join-Path $LogDir "$Name.log"
 $Done = Join-Path $LogDir "$Name.done"
 $Wrapper = Join-Path $LogDir "$Name.wrapper.ps1"
@@ -122,7 +132,12 @@ if ($DryRun) {
 
   "dry-run real command line (verbatim, as a real lane would run it):"
   "  edda $argLine"
-  $wrapperText.Replace('__CARGO__', (PsQuote $CargoTargetDir)).Replace('__CWD__', (PsQuote $Cwd)).Replace('__RUN__', $runDry).Replace('__DONE__', (PsQuote $Done)) |
+  if ($BuildLane) {
+    $wrapperText = $wrapperText.Replace('__CARGO__', (PsQuote $CargoTargetDir))
+  } else {
+    $wrapperText = $wrapperText -replace '(?m)^.*__CARGO__.*\r?\n', ''
+  }
+  $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__RUN__', $runDry).Replace('__DONE__', (PsQuote $Done)) |
     Set-Content -LiteralPath $Wrapper -Encoding utf8
   "dry-run wrapper=$Wrapper (identical to the real wrapper except __RUN__ runs the trivial process)"
 
@@ -174,7 +189,12 @@ $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
 
-$wrapperText.Replace('__CARGO__', (PsQuote $CargoTargetDir)).Replace('__CWD__', (PsQuote $Cwd)).Replace('__RUN__', $runReal).Replace('__DONE__', (PsQuote $Done)) |
+if ($BuildLane) {
+  $wrapperText = $wrapperText.Replace('__CARGO__', (PsQuote $CargoTargetDir))
+} else {
+  $wrapperText = $wrapperText -replace '(?m)^.*__CARGO__.*\r?\n', ''
+}
+$wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__RUN__', $runReal).Replace('__DONE__', (PsQuote $Done)) |
   Set-Content -LiteralPath $Wrapper -Encoding utf8
 
 Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue  # stale done-file from a previous run must not masquerade as this run
