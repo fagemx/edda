@@ -117,8 +117,10 @@ pub struct SessionStats {
     pub cache_read_tokens: u64,
     /// Total cache-creation input tokens.
     pub cache_creation_tokens: u64,
-    /// Estimated cost in USD.
-    pub estimated_cost_usd: f64,
+    /// Estimated cost in USD. `None` means unmeasured — the session has no
+    /// usage data. `Some(0.0)` is a measured zero (e.g. zero pricing),
+    /// never conflated with unmeasured (GH-585).
+    pub estimated_cost_usd: Option<f64>,
     /// Activity classification for this session.
     pub activity: ActivityType,
 }

@@ -3023,3 +3023,238 @@ fn hand_edited_cache_with_correct_hash_cannot_suppress_unnoted_session() {
         "the re-digest must cover the Edit the hand-edited cache claimed consumed"
     );
 }
+
+// ── GH-585: estimated_cost_usd must not conflate unmeasured with zero ──
+
+#[test]
+fn digest_cost_is_null_when_session_has_no_usage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lines = vec![make_envelope("PostToolUse", "Read", serde_json::json!({}))];
+    let path = write_session_ledger(tmp.path(), &lines);
+
+    let event = extract_session_digest(&path, "sess-nousage", "main", None).unwrap();
+    let cost = &event.payload["session_stats"]["estimated_cost_usd"];
+    assert!(
+        cost.is_null(),
+        "a session with no usage data must record null (unmeasured), got {cost}"
+    );
+}
+
+#[test]
+fn digest_text_omits_cost_when_unmeasured() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lines = vec![make_envelope("PostToolUse", "Read", serde_json::json!({}))];
+    let path = write_session_ledger(tmp.path(), &lines);
+
+    let event = extract_session_digest(&path, "sess-nousage", "main", None).unwrap();
+    let text = event.payload["text"].as_str().unwrap();
+    assert!(
+        !text.contains('$'),
+        "unmeasured cost must not render a dollar amount, got: {text}"
+    );
+}
+
+fn legacy_prev_digest_json(cost_field: serde_json::Value) -> String {
+    let mut v = serde_json::json!({
+        "session_id": "sess-legacy",
+        "completed_at": "2026-02-14T10:00:00Z",
+        "outcome": "completed",
+        "duration_minutes": 3,
+        "completed_tasks": [],
+        "pending_tasks": [],
+        "commits": [],
+        "files_modified_count": 0,
+        "total_edits": 0,
+    });
+    if !cost_field.is_null() {
+        v["estimated_cost_usd"] = cost_field;
+    }
+    serde_json::to_string(&v).unwrap()
+}
+
+#[test]
+fn prev_digest_legacy_zero_cost_reads_as_unmeasured() {
+    // Old digests wrote 0.0 for unmeasured sessions. Reading them must not
+    // fail, and the value must be treated as unmeasured (null), not as a
+    // measured zero.
+    let json = legacy_prev_digest_json(serde_json::json!(0.0));
+    let digest: PrevDigest = serde_json::from_str(&json).expect("legacy 0.0 must not fail to read");
+    let round = serde_json::to_value(&digest).unwrap();
+    assert!(
+        round["estimated_cost_usd"].is_null(),
+        "legacy 0.0 must be treated as unmeasured, got {}",
+        round["estimated_cost_usd"]
+    );
+}
+
+#[test]
+fn prev_digest_missing_cost_field_reads_as_unmeasured() {
+    let json = legacy_prev_digest_json(serde_json::Value::Null);
+    let digest: PrevDigest = serde_json::from_str(&json).expect("missing field must not fail");
+    let round = serde_json::to_value(&digest).unwrap();
+    assert!(round["estimated_cost_usd"].is_null());
+}
+
+#[test]
+fn prev_digest_measured_cost_survives_round_trip() {
+    let json = legacy_prev_digest_json(serde_json::json!(0.0125));
+    let digest: PrevDigest = serde_json::from_str(&json).expect("measured cost must not fail");
+    let round = serde_json::to_value(&digest).unwrap();
+    assert_eq!(
+        round["estimated_cost_usd"], 0.0125,
+        "a measured cost must not be rewritten to unmeasured"
+    );
+}
+
+// ── GH-585 round 2: measuredness must be carried by presence, not magnitude ──
+
+fn write_usage_json(pid: &str, usage: serde_json::Value) {
+    let usage_json = serde_json::json!({
+        "session_id": "sess-zero",
+        "updated_at": "2026-02-14T10:00:00Z",
+        "usage": usage,
+    });
+    let path = edda_store::project_dir(pid)
+        .join("state")
+        .join("usage.json");
+    let _ = std::fs::create_dir_all(path.parent().unwrap());
+    std::fs::write(&path, serde_json::to_string_pretty(&usage_json).unwrap()).unwrap();
+}
+
+#[test]
+fn measured_cost_true_zero_usage_state_is_measured_zero() {
+    // The transcript scanner KNOWS whether a `message.usage` record appeared.
+    // A usage observation with all-zero counters (e.g. zero pricing) is a
+    // measured zero and must yield Some(0.0) — not None. Presence must be
+    // carried independently of the counter magnitudes (round-2 P1-1).
+    let _env = env_guard();
+    let pid = "test_gh585_zero_usage_state";
+    let _ = edda_store::ensure_dirs(pid);
+
+    write_usage_json(
+        pid,
+        serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "usage_observed": true
+        }),
+    );
+
+    let usage = crate::signals::read_usage_state(pid);
+    assert_eq!(
+        measured_cost(&usage),
+        Some(0.0),
+        "usage observed with all-zero counters is a measured zero, not unmeasured"
+    );
+
+    let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn prev_digest_measured_zero_usage_writes_measured_zero_cost() {
+    // End to end: usage.json says usage was observed but every counter is
+    // zero; the snapshot written for the next session must carry the
+    // measured zero, not null (round-2 P1-1).
+    let _env = env_guard();
+    let pid = "test_gh585_prev_zero_usage";
+    let _ = edda_store::ensure_dirs(pid);
+
+    let store_dir = edda_store::project_dir(pid).join("ledger");
+    let _ = std::fs::create_dir_all(&store_dir);
+    let envelope = make_envelope("PostToolUse", "Read", serde_json::json!({}));
+    std::fs::write(
+        store_dir.join("sess-zero.jsonl"),
+        serde_json::to_string(&envelope).unwrap(),
+    )
+    .unwrap();
+
+    write_usage_json(
+        pid,
+        serde_json::json!({
+            "model": "claude-sonnet-4-20250514",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "usage_observed": true
+        }),
+    );
+
+    let cwd = tempfile::tempdir().unwrap();
+    write_prev_digest_from_store(pid, "sess-zero", cwd.path().to_str().unwrap(), 0, 0, 0);
+
+    let digest = read_prev_digest(pid).expect("should read prev_digest");
+    assert_eq!(
+        digest.estimated_cost_usd,
+        Some(0.0),
+        "measured zero must reach the snapshot, not be written as unmeasured"
+    );
+
+    let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn prev_digest_measured_zero_cost_round_trips() {
+    // This version writes measured zero as a distinguishable wire form
+    // (round-2 P1-2); it must read back as Some(0.0), never be swallowed by
+    // the legacy bare-0.0 rule.
+    let _env = env_guard();
+    let pid = "test_gh585_zero_roundtrip";
+    let _ = edda_store::ensure_dirs(pid);
+
+    let stats = SessionStats {
+        estimated_cost_usd: Some(0.0),
+        ..Default::default()
+    };
+    write_prev_digest(pid, "test-zero-rt", &stats, vec![], vec![]);
+
+    let path = edda_store::project_dir(pid)
+        .join("state")
+        .join("prev_digest.json");
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        on_disk.contains("measured_usd"),
+        "measured zero must be written in marker form, got: {on_disk}"
+    );
+
+    let digest = read_prev_digest(pid).expect("should read prev_digest");
+    assert_eq!(
+        digest.estimated_cost_usd,
+        Some(0.0),
+        "a measured zero written by this version must read back as measured zero"
+    );
+
+    let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn prev_digest_measured_zero_marker_deserializes() {
+    let json = legacy_prev_digest_json(serde_json::json!({"measured_usd": 0.0}));
+    let digest: PrevDigest = serde_json::from_str(&json).expect("marker form must deserialize");
+    assert_eq!(
+        digest.estimated_cost_usd,
+        Some(0.0),
+        "the marker form carries a measured zero"
+    );
+}
+
+#[test]
+fn prev_digest_measured_nonzero_cost_round_trips() {
+    let _env = env_guard();
+    let pid = "test_gh585_nonzero_roundtrip";
+    let _ = edda_store::ensure_dirs(pid);
+
+    let stats = SessionStats {
+        estimated_cost_usd: Some(0.0125),
+        ..Default::default()
+    };
+    write_prev_digest(pid, "test-nonzero-rt", &stats, vec![], vec![]);
+
+    let digest = read_prev_digest(pid).expect("should read prev_digest");
+    assert_eq!(digest.estimated_cost_usd, Some(0.0125));
+
+    let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+}

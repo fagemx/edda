@@ -9,6 +9,56 @@ use super::SessionStats;
 
 // ── Previous Session Digest Snapshot ──
 
+/// Wire form of `PrevDigest.estimated_cost_usd` (GH-585).
+///
+/// Three shapes appear on disk and each decodes unambiguously —
+/// measuredness is carried by the form, never guessed from the number:
+///
+/// - `null` / missing — unmeasured (no usage data).
+/// - `{"measured_usd": <f64>}` — this version's measured value; the marker
+///   object cannot be produced by any older version, so a measured zero
+///   (`{"measured_usd": 0.0}`) survives the round trip (round-2 P1-2).
+/// - bare number — legacy digest (pre-GH-585), which wrote `0.0` to mean
+///   "unmeasured": bare `0.0` normalizes to `None`, any other bare number
+///   is a measured cost.
+///
+/// The bare-number form is kept for nonzero measured costs because legacy
+/// wire format expresses them unambiguously, so digests written by this
+/// version still read cleanly in an older binary.
+mod cost_repr {
+    use serde::ser::SerializeMap;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(cost: &Option<f64>, s: S) -> Result<S::Ok, S::Error> {
+        match cost {
+            None => s.serialize_none(),
+            // Bare 0.0 is reserved for legacy "unmeasured"; a measured zero
+            // needs the marker form to round-trip.
+            Some(c) if *c == 0.0 => {
+                let mut map = s.serialize_map(Some(1))?;
+                map.serialize_entry("measured_usd", c)?;
+                map.end()
+            }
+            Some(c) => s.serialize_f64(*c),
+        }
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+        let value = Option::<serde_json::Value>::deserialize(d)?;
+        Ok(match value {
+            None | Some(serde_json::Value::Null) => None,
+            // Current-format measured value (including measured zero).
+            Some(serde_json::Value::Object(map)) => {
+                map.get("measured_usd").and_then(|v| v.as_f64())
+            }
+            // Legacy wire format: bare 0.0 meant "unmeasured" (GH-585).
+            Some(serde_json::Value::Number(n)) => n.as_f64().filter(|c| *c != 0.0),
+            // Unknown shape: treat like the rest of this best-effort reader.
+            _ => None,
+        })
+    }
+}
+
 /// Snapshot of a completed session, persisted for next session's context injection.
 /// Written at SessionEnd, read at next SessionStart, deleted at that session's end.
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,9 +114,12 @@ pub struct PrevDigest {
     /// Total cache-creation input tokens.
     #[serde(default)]
     pub cache_creation_tokens: u64,
-    /// Estimated cost in USD.
-    #[serde(default)]
-    pub estimated_cost_usd: f64,
+    /// Estimated cost in USD (GH-585). `None` = unmeasured (no usage data);
+    /// `Some(0.0)` is a measured zero (e.g. zero pricing), never conflated
+    /// with unmeasured. Wire form: see [`cost_repr`] — legacy digests wrote
+    /// a bare `0.0` for unmeasured sessions and still read back as `None`.
+    #[serde(default, with = "cost_repr")]
+    pub estimated_cost_usd: Option<f64>,
     /// Activity classification for this session.
     #[serde(default)]
     pub activity: String,
@@ -286,7 +339,7 @@ pub fn write_prev_digest_from_store(
         stats.output_tokens = usage.output_tokens;
         stats.cache_read_tokens = usage.cache_read_tokens;
         stats.cache_creation_tokens = usage.cache_creation_tokens;
-        stats.estimated_cost_usd = crate::signals::estimate_cost(&usage);
+        stats.estimated_cost_usd = super::helpers::measured_cost(&usage);
     }
     // Collect decisions + notes from workspace ledger before writing
     let (decisions, notes) = collect_session_ledger_extras(cwd, stats.first_ts.as_deref());
