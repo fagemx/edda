@@ -1,4 +1,8 @@
+#[cfg(test)]
+use crate::check::engine::CheckEngine;
 use crate::check::{mask_secrets, output_tail, CheckOutput};
+#[cfg(test)]
+use crate::plan::schema::CheckSpec;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -289,6 +293,138 @@ mod tests {
         assert!(
             !out.environmental,
             "a bare LNK1104 mention is not a linker fault"
+        );
+    }
+
+    /// GH-558: a non-passing check result must record the exact shell line
+    /// the harness executed, so a harness-side invocation difference is
+    /// visible in the captured output (doneWhen 1). Before the fix the
+    /// failure detail carried only the child's output — when cargo-fmt
+    /// prints its usage block, there is no way to tell what argv actually
+    /// reached it.
+    #[tokio::test]
+    async fn failure_detail_records_executed_shell_line() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(not(windows))]
+        let cmd = "exit 1";
+        #[cfg(windows)]
+        let cmd = "exit 1";
+        let out = check_cmd_succeeds(cmd, 10, dir.path()).await;
+        assert!(!out.passed);
+        let detail = out.detail.unwrap();
+        assert!(
+            detail.contains("executed:"),
+            "failure detail must record the executed shell line, got: {detail}"
+        );
+        assert!(
+            detail.contains(cmd),
+            "executed line must contain the literal command, got: {detail}"
+        );
+    }
+
+    /// GH-558: the observed failure was cargo-fmt printing its help/usage
+    /// block — which it does for ANY internal io failure, with the actual
+    /// REASON line printed BEFORE the block. A tail-only capture keeps the
+    /// block and drops the reason, turning a diagnosable failure into the
+    /// mystery this issue was filed as. The capture must keep the HEAD of a
+    /// stream too, not only the tail.
+    #[tokio::test]
+    async fn failure_keeps_head_of_stream_when_output_exceeds_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        // Diagnostic at the START of stderr, then >2000 chars of filler: a
+        // tail-only capture keeps only filler.
+        #[cfg(not(windows))]
+        let cmd = concat!(
+            "echo 'fatal: the real reason is at the head' 1>&2 ; ",
+            "yes x | head -c 4000 1>&2 ; ",
+            "exit 1"
+        );
+        #[cfg(windows)]
+        let cmd = concat!(
+            "[Console]::Error.WriteLine('fatal: the real reason is at the head') ; ",
+            "[Console]::Error.WriteLine(('x' * 4000)) ; ",
+            "exit 1"
+        );
+        let out = check_cmd_succeeds(cmd, 10, dir.path()).await;
+        assert!(!out.passed);
+        let detail = out.detail.unwrap();
+        assert!(
+            detail.contains("the real reason is at the head"),
+            "head of the stream must be kept, got: {detail}"
+        );
+        assert!(
+            detail.chars().count() < 5200,
+            "capture must stay bounded, got {} chars",
+            detail.chars().count()
+        );
+    }
+
+    /// GH-558 doneWhen 3: a multi-flag command must pass through the check
+    /// runner from a REAL git worktree cwd (`.git` is a file, not a
+    /// directory) — the cwd shape reported in the issue. Witness test: the
+    /// harness passes the literal spec string regardless of cwd, verified to
+    /// run green here both before and after the fix (the bug itself was not
+    /// reproducible — see the PR for the full reproduction record).
+    #[tokio::test]
+    async fn multi_flag_cmd_succeeds_from_real_worktree_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // A tiny standalone cargo project, independent of this workspace.
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::write(
+            proj.join("Cargo.toml"),
+            "[package]\nname = \"gh558diag\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(proj.join("src/main.rs"), "fn main() {}\n").unwrap();
+
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&proj)
+                .output()
+                .expect("git must be available");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-m", "init"]);
+
+        // The worktree: cwd shape whose .git is a FILE.
+        let wt = tmp.path().join("proj-wt");
+        git(&[
+            "worktree",
+            "add",
+            wt.to_str().unwrap(),
+            "-b",
+            "gh558-witness",
+        ]);
+        assert!(
+            wt.join(".git").is_file(),
+            "worktree .git must be a file — that is the cwd shape from GH-558"
+        );
+
+        let engine = CheckEngine::new(wt);
+        let checks = vec![CheckSpec::CmdSucceeds {
+            cmd: "cargo fmt --all --check".into(),
+            timeout_sec: 300,
+        }];
+        let result = engine.run_all(&checks, None).await;
+        assert!(
+            result.all_passed,
+            "multi-flag command must pass from a worktree cwd: {:?}",
+            result
+                .results
+                .iter()
+                .map(|r| (&r.status, &r.detail))
+                .collect::<Vec<_>>()
         );
     }
 }
