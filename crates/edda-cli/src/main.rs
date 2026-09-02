@@ -1135,8 +1135,9 @@ fn main() -> anyhow::Result<()> {
             }
             None => match label {
                 Some(label) => cmd_bridge::claim(&repo_root, &label, &paths, session.as_deref()),
-                // No label and no `check` subcommand: invalid usage, exactly
-                // like the pre-GH-562 "missing <LABEL>" clap error.
+                // No label and no `check` subcommand: invalid usage.
+                // Declared contract for GH-589 (cli.claim-diagnostics-contract=explicit-mode-dispatch):
+                // require an explicit scope label or the `check` subcommand, exiting with code 2.
                 None => {
                     eprintln!(
                         "error: 'edda claim' requires a label (e.g. 'edda claim auth --paths src/auth/*') or the 'check' subcommand"
