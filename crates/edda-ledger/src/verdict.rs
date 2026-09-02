@@ -64,25 +64,30 @@ fn parse_rfc3339(s: &str) -> Option<time::OffsetDateTime> {
 /// parsed instants, not string order (mixed-precision RFC3339 does not sort
 /// chronologically).
 ///
-/// An unparsable `not_before` imposes no bound (the caller always writes it
-/// via the same well-formed formatter). A verdict whose own `ts` cannot be
-/// parsed never satisfies a bounded query — it must not resurrect itself
-/// through a formatting defect.
+/// `None` for `not_before` is an unbounded query (freshness not in force) —
+/// the latest matching verdict wins. A **present but unparsable** bound
+/// fails CLOSED (GH-541): no verdict satisfies, because admitting every
+/// verdict regardless of age is the loop-prone direction D6 exists to kill
+/// — the opposite of the sibling rule below, where an unparsable verdict
+/// timestamp never satisfies a bounded query. The bound reaches this
+/// predicate from a JSON state file on disk; a corrupt or hand-edited value
+/// must degrade to "gate stays shut", not "gate admits anything".
 pub fn latest_verdict_fresh<'a>(
     verdicts: &'a [VerdictRecord],
     subject: &str,
     sha: &str,
     not_before: Option<&str>,
 ) -> Option<&'a VerdictRecord> {
-    let bound = not_before.and_then(parse_rfc3339);
+    let Some(raw_bound) = not_before else {
+        // Unbounded query: same semantics as [`latest_verdict`].
+        return latest_verdict(verdicts, subject, sha);
+    };
+    // Fail closed on an unparsable bound (GH-541): no verdict satisfies.
+    let bound = parse_rfc3339(raw_bound)?;
     verdicts.iter().rev().find(|v| {
-        if v.payload.subject != subject || v.payload.sha != sha {
-            return false;
-        }
-        match bound {
-            None => true,
-            Some(bound) => parse_rfc3339(&v.ts).is_some_and(|ts| ts > bound),
-        }
+        v.payload.subject == subject
+            && v.payload.sha == sha
+            && parse_rfc3339(&v.ts).is_some_and(|ts| ts > bound)
     })
 }
 
@@ -263,8 +268,11 @@ mod tests {
         assert!(latest_verdict_fresh(&verdicts, "s", &sha, Some("2026-01-01T12:00:01Z")).is_none());
     }
 
+    /// GH-541: a present-but-unparsable bound fails CLOSED — no verdict
+    /// satisfies, even one that matches (subject, sha). Admitting every
+    /// verdict regardless of age is the loop-prone direction D6 kills.
     #[test]
-    fn fresh_query_unparsable_not_before_imposes_no_bound() {
+    fn fresh_query_unparsable_not_before_fails_closed() {
         let sha = "2".repeat(40);
         let verdicts = vec![VerdictRecord {
             event_id: "ev".into(),
@@ -277,6 +285,27 @@ mod tests {
                 actor: "tester".into(),
             },
         }];
-        assert!(latest_verdict_fresh(&verdicts, "s", &sha, Some("not-a-timestamp")).is_some());
+        assert!(latest_verdict_fresh(&verdicts, "s", &sha, Some("not-a-timestamp")).is_none());
+    }
+
+    /// GH-541: `None` remains the unbounded query — freshness not in force,
+    /// the latest matching verdict wins (no regression in the no-bound case).
+    #[test]
+    fn fresh_query_none_bound_stays_unbounded() {
+        let sha = "3".repeat(40);
+        let verdicts = vec![VerdictRecord {
+            event_id: "ev".into(),
+            ts: "not-a-timestamp-either".into(),
+            payload: VerdictPayload {
+                subject: "s".into(),
+                decision: VerdictDecision::Approved,
+                sha: sha.clone(),
+                comment: None,
+                actor: "tester".into(),
+            },
+        }];
+        let found = latest_verdict_fresh(&verdicts, "s", &sha, None)
+            .expect("unbounded query must find the matching verdict");
+        assert_eq!(found.payload.decision, VerdictDecision::Approved);
     }
 }

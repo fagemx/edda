@@ -29,3 +29,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# GH-541: gate read-error tests use tokio::time::start_paused.
+tokio = { version = "1", features = ["process", "time", "rt-multi-thread", "io-util", "macros", "test-util"] }
+# GH-541: the gate's read-error tracker classifies SQLite busy/lock errors
+# as transient; tests construct those errors directly.
+rusqlite = { version = "0.32", features = ["bundled"] }

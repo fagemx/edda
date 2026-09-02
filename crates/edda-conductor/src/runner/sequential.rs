@@ -546,6 +546,65 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         ))
                         .await;
                 }
+                GateVerdict::LedgerUnreadable(err) => {
+                    // GH-541: the gate could not read the ledger persistently
+                    // (not lock contention). Failing with the diagnostic is
+                    // the only honest outcome — the printed `edda verdict`
+                    // command writes to a ledger this gate cannot read, so
+                    // the wait was unrescuable from the start.
+                    let msg = format!(
+                        "gate aborted: ledger unreadable for \"{subject}\" (sha {gate_sha}): {err}"
+                    );
+                    transition(
+                        state,
+                        &gated_id,
+                        PhaseStatus::AwaitingVerdict,
+                        PhaseStatus::Failed,
+                        Some(PhaseUpdate {
+                            error: Some(ErrorInfo {
+                                error_type: ErrorType::LedgerUnreadable,
+                                message: msg.clone(),
+                                retryable: false,
+                                check_index: None,
+                                timestamp: now_rfc3339(),
+                            }),
+                            ..Default::default()
+                        }),
+                    )?;
+                    println!("  ⚠ Phase \"{gated_id}\" {msg}");
+                    if let Some(tmux) = tmux_session {
+                        let _ = tmux.update_phase_status(&gated_id, "Failed");
+                    }
+                    let gate_cost = state.get_phase(&gated_id).ok().and_then(|p| p.cost_usd);
+                    edda::record_phase_failed_with_plan(
+                        cwd,
+                        Some(&plan.name),
+                        &gated_id,
+                        gate_cost,
+                        &msg,
+                    );
+                    let gate_ps = state.get_phase(&gated_id)?;
+                    event_log.record(Event::PhaseFailed {
+                        phase_id: gated_id.clone(),
+                        attempt: gate_ps.attempts,
+                        duration_ms: 0,
+                        error: msg,
+                        error_type: Some(ErrorType::LedgerUnreadable.tag().to_string()),
+                        env_retries: gate_ps.env_retries,
+                        attempt_charged: true,
+                    });
+                    let final_output = load_gate_output(cwd, &plan.name, &gated_id);
+                    clear_gate_output(cwd, &plan.name, &gated_id);
+                    notifier
+                        .notify_phase_terminal(phase_terminal_event(
+                            &plan.name,
+                            &gated_id,
+                            "Failed",
+                            gate_ps.attempts,
+                            final_output.as_deref(),
+                        ))
+                        .await;
+                }
                 GateVerdict::Cancelled => {
                     // The loop top sees the cancelled token and shuts down;
                     // the phase stays AWAITING_VERDICT so a later
@@ -710,6 +769,73 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
 /// Ledger poll interval while a gate waits for a verdict.
 const GATE_POLL_SEC: u64 = 2;
 
+/// GH-541: first report of a persistent ledger read failure goes out
+/// immediately; repeats follow this interval, doubling up to the cap.
+const GATE_READ_ERROR_REPORT_SECS: u64 = 30;
+const GATE_READ_ERROR_REPORT_CAP_SECS: u64 = 300;
+/// GH-541: consecutive persistent (non-lock) ledger read failures after
+/// which the gate fails with the diagnostic instead of waiting silently.
+/// At the 2s poll this is ~30s of a persistently broken ledger — an
+/// operator-fixable fault (corrupt db, permissions, wrong workspace root)
+/// must not consume the whole gate budget unnoticed.
+const GATE_MAX_PERSISTENT_READ_ERRORS: u32 = 15;
+
+/// GH-541: tracks persistent (non-lock) ledger read failures while a gate
+/// waits. Busy/lock contention is transient and never counts. A healthy
+/// poll resets the budget. Reports the error on the first failure and then
+/// on a decaying interval; returns `LedgerUnreadable` when the budget
+/// expires.
+struct ReadErrorTracker {
+    consecutive: u32,
+    report_backoff_secs: u64,
+    next_report: Option<Instant>,
+}
+
+impl Default for ReadErrorTracker {
+    fn default() -> Self {
+        Self {
+            consecutive: 0,
+            report_backoff_secs: GATE_READ_ERROR_REPORT_SECS,
+            next_report: None,
+        }
+    }
+}
+
+impl ReadErrorTracker {
+    /// Observe a poll error. Returns `Some(GateVerdict::LedgerUnreadable)`
+    /// when the persistent-failure budget is exhausted.
+    fn observe(&mut self, err: &anyhow::Error) -> Option<GateVerdict> {
+        if edda_ledger::lock::is_busy_error(err) {
+            // Transient lock contention: degrade quietly, as before.
+            return None;
+        }
+        self.consecutive += 1;
+        if self.consecutive == 1 || self.next_report.is_some_and(|t| Instant::now() >= t) {
+            eprintln!(
+                "  ⚠ verdict gate: ledger read failed (attempt {}): {err:#}",
+                self.consecutive
+            );
+            self.next_report = Some(Instant::now() + Duration::from_secs(self.report_backoff_secs));
+            self.report_backoff_secs =
+                (self.report_backoff_secs * 2).min(GATE_READ_ERROR_REPORT_CAP_SECS);
+        }
+        if self.consecutive >= GATE_MAX_PERSISTENT_READ_ERRORS {
+            return Some(GateVerdict::LedgerUnreadable(format!(
+                "{} consecutive failed ledger reads: {err:#}",
+                self.consecutive
+            )));
+        }
+        None
+    }
+
+    /// A healthy poll (the ledger opened and the query answered) resets the
+    /// persistent-failure budget.
+    fn reset(&mut self) {
+        self.consecutive = 0;
+        self.next_report = None;
+    }
+}
+
 /// D6: bound gate redispatch cycles with their own persisted counter, NOT
 /// `attempt` (which D3 forbids incrementing on redispatch). A redispatch
 /// turn is not guaranteed to produce a commit, so a re-entered gate can
@@ -760,6 +886,12 @@ enum GateVerdict {
     /// `gate_timeout_sec` elapsed with no matching verdict — NOT silent,
     /// NOT auto-approve (D3).
     TimedOut,
+    /// The ledger stayed unreadable (NOT SQLite busy/lock contention) for
+    /// the whole error budget (GH-541): fail the gate with the diagnostic
+    /// instead of polling in silence forever. In this state the printed
+    /// `edda verdict` command could never satisfy the gate anyway — it
+    /// writes to a ledger this gate cannot read.
+    LedgerUnreadable(String),
     /// The CancellationToken fired while waiting. The phase stays
     /// AWAITING_VERDICT so a later resume re-enters the wait (D3 restart).
     Cancelled,
@@ -800,19 +932,39 @@ async fn wait_for_verdict(
     }
     let mut last_heartbeat = Instant::now();
 
+    // GH-541: a failed ledger read is not the same event as "no verdict yet".
+    // SQLite busy/lock contention degrades quietly (transient); every other
+    // error (corrupt database, permission, missing workspace) is persistent,
+    // is reported at least once and then on a decaying interval, and fails
+    // the gate after the error budget — the one response that cannot be
+    // right here is silence (the operator runs the printed approve command
+    // and nothing happens, with no diagnostic anywhere).
+    let mut read_errors = ReadErrorTracker::default();
+
     loop {
         // Poll BEFORE the deadline check: a verdict recorded during this
         // wait (e.g. right after the gate_entered event) must be observed
         // at the last poll, not skipped by a deadline that fires first.
-        // Poll the ledger. Best-effort: an unreadable or locked ledger simply
-        // means "no verdict observed yet" this round.
-        if let Ok(ledger) = edda_ledger::Ledger::open(cwd) {
-            if let Ok(Some(record)) = ledger.latest_verdict_fresh(subject, gate_sha, entered_at) {
-                return match record.payload.decision {
-                    edda_core::VerdictDecision::Approved => GateVerdict::Approved(record),
-                    edda_core::VerdictDecision::Rejected => GateVerdict::Rejected(record),
-                };
+        match edda_ledger::Ledger::open(cwd) {
+            Err(e) => {
+                if let Some(v) = read_errors.observe(&e) {
+                    return v;
+                }
             }
+            Ok(ledger) => match ledger.latest_verdict_fresh(subject, gate_sha, entered_at) {
+                Ok(Some(record)) => {
+                    return match record.payload.decision {
+                        edda_core::VerdictDecision::Approved => GateVerdict::Approved(record),
+                        edda_core::VerdictDecision::Rejected => GateVerdict::Rejected(record),
+                    };
+                }
+                Ok(None) => read_errors.reset(),
+                Err(e) => {
+                    if let Some(v) = read_errors.observe(&e) {
+                        return v;
+                    }
+                }
+            },
         }
         if let Some(deadline) = deadline {
             if time::OffsetDateTime::now_utc() >= deadline {
@@ -4321,6 +4473,88 @@ phases:
         )
         .await;
         assert!(matches!(verdict, GateVerdict::TimedOut));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-541 §2: a healthy poll resets the persistent-error budget — tested
+    /// directly on the tracker: 14 persistent errors, a reset, then more
+    /// errors must NOT fail the gate.
+    #[test]
+    fn read_error_tracker_budget_resets_on_healthy_poll() {
+        let mut t = ReadErrorTracker::default();
+        let err = anyhow::anyhow!("corrupt database");
+        for _ in 0..(GATE_MAX_PERSISTENT_READ_ERRORS - 1) {
+            assert!(t.observe(&err).is_none());
+        }
+        t.reset();
+        for _ in 0..(GATE_MAX_PERSISTENT_READ_ERRORS - 1) {
+            assert!(t.observe(&err).is_none(), "reset must clear the budget");
+        }
+    }
+
+    /// GH-541 §2: SQLite busy/lock contention is transient — it never
+    /// counts toward the persistent-error budget and never fails the gate.
+    #[test]
+    fn read_error_tracker_ignores_busy_errors() {
+        let busy = anyhow::Error::new(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked".into()),
+        ));
+        let mut t = ReadErrorTracker::default();
+        for _ in 0..(GATE_MAX_PERSISTENT_READ_ERRORS * 3) {
+            assert!(t.observe(&busy).is_none(), "busy errors are transient");
+        }
+    }
+
+    /// GH-541 §2: persistent errors exhaust the budget exactly at the limit
+    /// and the diagnostic names the failure mode and the count.
+    #[test]
+    fn read_error_tracker_fails_at_budget() {
+        let mut t = ReadErrorTracker::default();
+        let err = anyhow::anyhow!("disk I/O error");
+        for _ in 0..(GATE_MAX_PERSISTENT_READ_ERRORS - 1) {
+            assert!(t.observe(&err).is_none());
+        }
+        match t.observe(&err) {
+            Some(GateVerdict::LedgerUnreadable(msg)) => {
+                assert!(msg.contains("consecutive failed ledger reads"), "{msg}");
+                assert!(msg.contains("disk I/O error"), "{msg}");
+            }
+            other => panic!("expected LedgerUnreadable, got {other:?}"),
+        }
+    }
+
+    /// GH-541 §2: a persistently unreadable ledger must fail the gate with
+    /// a diagnostic after the error budget — not poll in silence forever.
+    /// A bare directory has no `.edda` workspace, so every `Ledger::open`
+    /// fails with a persistent (non-lock) error.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_verdict_fails_after_persistent_read_errors() {
+        let root =
+            std::env::temp_dir().join(format!("edda_gate_unreadable_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let cancel = CancellationToken::new();
+        let verdict = wait_for_verdict(
+            &root,
+            "plan/phase",
+            &"d".repeat(40),
+            None, // no timeout: without the error budget this would hang forever
+            Some(&now_rfc3339()),
+            &cancel,
+            None,
+        )
+        .await;
+        match verdict {
+            GateVerdict::LedgerUnreadable(msg) => {
+                assert!(
+                    msg.contains("consecutive failed ledger reads"),
+                    "diagnostic must name the failure mode: {msg}"
+                );
+            }
+            other => panic!("expected LedgerUnreadable, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

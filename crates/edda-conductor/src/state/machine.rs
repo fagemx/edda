@@ -141,6 +141,11 @@ pub enum ErrorType {
     /// Windows LNK1104): not the agent's work, so retrying is worthwhile —
     /// but the retry is never charged to `max_attempts`.
     Environmental,
+    /// The verdict gate aborted because the ledger stayed unreadable for
+    /// the whole error budget (GH-541): infrastructure, not the agent's
+    /// work — the gate cannot observe verdicts written to a ledger it
+    /// cannot read.
+    LedgerUnreadable,
 }
 
 impl ErrorType {
@@ -157,6 +162,7 @@ impl ErrorType {
             ErrorType::UserAbort => "user_abort",
             ErrorType::GateRejected => "gate_rejected",
             ErrorType::Environmental => "environmental",
+            ErrorType::LedgerUnreadable => "ledger_unreadable",
         }
     }
 }

@@ -898,6 +898,7 @@ dependencies = [
  "edda-notify",
  "edda-store",
  "regex",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yml",
