@@ -82,4 +82,4 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo "check-cli-docs: OK — all $(grep -qx . <<<"$verbs" && wc -l <<<"$verbs") verbs documented in $DOC"
+echo "check-cli-docs: OK — all $(printf '%s\n' "$verbs" | wc -l) verbs documented in $DOC"
