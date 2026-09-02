@@ -749,7 +749,6 @@ fn digest_state_round_trip() {
                 prefix_hash: String::new(),
                 event_id: "evt_abc".to_string(),
                 digested_at: "2026-02-14T10:00:00Z".to_string(),
-                zero_call: false,
             },
         )]),
         digested: Vec::new(),
@@ -2855,96 +2854,87 @@ fn rolled_back_ledger_cannot_be_suppressed_by_cache() {
     );
 }
 
-// The stated fast-path skip condition, proven: a fully-consumed
-// zero-call watermark may skip the ledger scan because its claim ("these
-// proof-validated bytes contained no tool calls and no failures") is a
-// pure function of the bytes themselves — no ledger state can make the
-// skip wrong, and content appended later is still digested.
+// Round-4 P1 (ruling
+// `digest.zero-call-sessions=re-read-every-time-no-cache-authority`):
+// a zero-call watermark is NOT a ledger-independent semantic authority.
+// The reviewer's reproduction: digest a real Edit prefix, append a
+// zero-call prompt tail, digest again so the cache legitimately advances
+// to EOF — then roll the authoritative ledger back past the Edit note
+// while preserving that cache. The cache fact described only the tail,
+// so it must not be trusted for the whole prefix: the session MUST be
+// reported pending and the Edit work MUST be re-emitted.
 #[test]
-fn zero_call_cache_skip_is_provable_and_loses_no_content() {
+fn rolled_back_ledger_with_zero_call_cache_must_re_report_and_re_emit() {
     let _env = env_guard();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
+    let session_id = "sess-zc-rollback";
 
     write_store_session_ledger(
         &project_id,
-        "sess-zc-proof",
+        session_id,
         &[make_envelope("PostToolUse", "Edit", serde_json::json!({}))],
     );
-    digest_session_manual(
-        &project_id,
-        "sess-zc-proof",
-        workspace.to_str().unwrap(),
-        true,
-    )
-    .unwrap();
 
-    // Zero-call tail: chat-only lines advance the watermark but write no
-    // note (GH-578: zero-call deltas must not cost a ledger event).
+    // Snapshot the workspace ledger BEFORE any digest note exists.
+    let edda_dir = workspace.join(".edda");
+    let snapshot = tmp.path().join(".edda.snapshot");
+    copy_dir_all(&edda_dir, &snapshot);
+
+    // 1. Digest the real Edit prefix: exactly one note.
+    digest_session_manual(&project_id, session_id, workspace.to_str().unwrap(), true).unwrap();
+
+    // 2. Append a zero-call (chat-only) tail and digest again: the watermark
+    //    cache advances to EOF, GH-578 still forbids a second event.
     let path = edda_store::project_dir(&project_id)
         .join("ledger")
-        .join("sess-zc-proof.jsonl");
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    for ts in ["2026-02-14T11:00:00Z", "2026-02-14T11:01:00Z"] {
-        let e = make_envelope_at("UserPromptSubmit", "", ts, serde_json::json!({}));
-        writeln!(f, "{}", serde_json::to_string(&e).unwrap()).unwrap();
+        .join(format!("{session_id}.jsonl"));
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        for ts in ["2026-02-14T11:00:00Z", "2026-02-14T11:01:00Z"] {
+            let e = make_envelope_at("UserPromptSubmit", "", ts, serde_json::json!({}));
+            writeln!(f, "{}", serde_json::to_string(&e).unwrap()).unwrap();
+        }
     }
-    drop(f);
+    digest_session_manual(&project_id, session_id, workspace.to_str().unwrap(), true).unwrap();
+    {
+        let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+        let count = ledger
+            .iter_events()
+            .unwrap()
+            .iter()
+            .filter(|e| e.payload["source"] == "bridge:session_digest")
+            .count();
+        assert_eq!(
+            count, 1,
+            "a zero-call delta must still write no event (GH-578)"
+        );
+    }
 
-    digest_session_manual(
-        &project_id,
-        "sess-zc-proof",
-        workspace.to_str().unwrap(),
-        true,
-    )
-    .unwrap();
-    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
-    let count = ledger
-        .iter_events()
-        .unwrap()
-        .iter()
-        .filter(|e| e.payload["source"] == "bridge:session_digest")
-        .count();
-    assert_eq!(count, 1, "a zero-call delta must not write an event");
+    // 3. Roll the authoritative ledger back past the Edit note. The digest
+    //    state cache lives in the per-user store, outside the workspace, so
+    //    it survives with its EOF watermark.
+    std::fs::remove_dir_all(&edda_dir).unwrap();
+    copy_dir_all(&snapshot, &edda_dir);
 
-    // The zero-call watermark (cache-only, unconfirmable by the ledger)
-    // may suppress the pending scan: skipping cannot change the answer.
+    // 4. The session MUST be reported pending — no cache fact may suppress
+    //    it, because the ledger contains no note covering the Edit.
     let pending = find_all_pending_sessions(&project_id);
     assert!(
-        !pending.contains(&"sess-zc-proof".to_string()),
-        "a fully-consumed zero-call watermark is provably content-free: skipping it cannot change the answer"
+        pending.contains(&session_id.to_string()),
+        "a zero-call cache watermark is not ledger authority: with no note in the ledger the session must be reported pending"
     );
-
-    // ...and the skip loses nothing: new real work re-opens the digest
-    // and is covered from the authoritative note.
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .unwrap();
-    let e = make_envelope_at(
-        "PostToolUse",
-        "Edit",
-        "2026-02-14T12:00:00Z",
-        serde_json::json!({}),
-    );
-    writeln!(f, "{}", serde_json::to_string(&e).unwrap()).unwrap();
-    drop(f);
-
-    let pending2 = find_all_pending_sessions(&project_id);
+    let result =
+        digest_previous_sessions(&project_id, "current", workspace.to_str().unwrap(), 2000);
     assert!(
-        pending2.contains(&"sess-zc-proof".to_string()),
-        "appended real work must re-open the digest"
+        matches!(result, DigestResult::Written { .. }),
+        "digest_previous_sessions must re-digest the session (got {result:?}), never report NoPending"
     );
-    digest_session_manual(
-        &project_id,
-        "sess-zc-proof",
-        workspace.to_str().unwrap(),
-        true,
-    )
-    .unwrap();
+
+    // 5. The Edit work must be emitted: exactly one covering note.
     let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
     let notes: Vec<_> = ledger
         .iter_events()
@@ -2952,9 +2942,84 @@ fn zero_call_cache_skip_is_provable_and_loses_no_content() {
         .into_iter()
         .filter(|e| e.payload["source"] == "bridge:session_digest")
         .collect();
-    assert_eq!(notes.len(), 2);
     assert_eq!(
-        notes[1].payload["session_stats"]["tool_call_breakdown"]["Edit"], 1,
-        "the appended Edit must be digested (the zero-call skip lost nothing)"
+        notes.len(),
+        1,
+        "the ledger had zero notes for this session; the Edit work must be re-emitted"
+    );
+    assert_eq!(
+        notes[0].payload["session_stats"]["tool_call_breakdown"]["Edit"], 1,
+        "the re-digest must cover the Edit prefix the rolled-back ledger no longer records"
+    );
+}
+
+// Round-4 P1, second probe: a HAND-EDITED state file claiming a consumed
+// prefix with the CORRECT content hash must not be able to suppress a
+// session the ledger has no note for. An unsigned mutable cache is not a
+// semantic authority.
+#[test]
+fn hand_edited_cache_with_correct_hash_cannot_suppress_unnoted_session() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let (workspace, project_id) = setup_digest_workspace(tmp.path());
+    let session_id = "sess-hand-edited";
+
+    write_store_session_ledger(
+        &project_id,
+        session_id,
+        &[make_envelope("PostToolUse", "Edit", serde_json::json!({}))],
+    );
+    let path = edda_store::project_dir(&project_id)
+        .join("ledger")
+        .join(format!("{session_id}.jsonl"));
+    let len = std::fs::metadata(&path).unwrap().len();
+    let correct_hash = hash_prefix(&path, len).unwrap();
+
+    // Hand-edit the state file: a fully-consumed watermark with the correct
+    // identity proof (and the legacy zero_call flag), but NO ledger note.
+    let state = serde_json::json!({
+        "session_id": session_id,
+        "event_id": "",
+        "sessions": {
+            session_id: {
+                "offset": len,
+                "prefix_hash": correct_hash,
+                "event_id": "",
+                "digested_at": "2026-02-14T10:00:00Z",
+                "zero_call": true,
+            }
+        },
+    });
+    let state_dir = edda_store::project_dir(&project_id).join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(
+        state_dir.join("last_digested_session.json"),
+        serde_json::to_string_pretty(&state).unwrap(),
+    )
+    .unwrap();
+
+    let pending = find_all_pending_sessions(&project_id);
+    assert!(
+        pending.contains(&session_id.to_string()),
+        "a hand-edited cache with a correct content hash is not ledger authority: the session must be reported pending"
+    );
+    let result =
+        digest_previous_sessions(&project_id, "current", workspace.to_str().unwrap(), 2000);
+    assert!(
+        matches!(result, DigestResult::Written { .. }),
+        "digest_previous_sessions must re-digest the session (got {result:?}), never report NoPending"
+    );
+
+    let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
+    let notes: Vec<_> = ledger
+        .iter_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.payload["source"] == "bridge:session_digest")
+        .collect();
+    assert_eq!(notes.len(), 1, "the Edit work must be emitted");
+    assert_eq!(
+        notes[0].payload["session_stats"]["tool_call_breakdown"]["Edit"], 1,
+        "the re-digest must cover the Edit the hand-edited cache claimed consumed"
     );
 }
