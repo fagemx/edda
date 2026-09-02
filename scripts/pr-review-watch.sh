@@ -1,9 +1,11 @@
 #!/bin/sh
 # pr-review-watch.sh — local watcher: for every open non-draft PR whose head SHA
 # has not been reviewed yet, launch the read-only reviewer (scripts/review-pr.sh),
-# post the SHA-pinned verdict as a PR comment, and set review:* labels.
+# post `review: started on <sha>` as an acknowledgement, then post the
+# SHA-pinned verdict when the reviewer finishes, and set review:* labels.
 #
 # usage: pr-review-watch.sh [--once] [--dry-run]
+#        pr-review-watch.sh decide            (offline helper; JSON on stdin)
 #
 # Environment:
 #   EDDA_REPO                  owner/repo            (default fagemx/edda)
@@ -11,17 +13,25 @@
 #   EDDA_FLEET_SCRATCH         state/log dir         (default $HOME/.edda/fleet)
 #   EDDA_REVIEW_MODEL          review model          (default openai-codex/gpt-5.6-sol)
 #   EDDA_REVIEW_POLL_SECONDS   poll interval         (default 60)
+#   PR_REVIEW_WATCH_STATE      state file override   (used by tests)
 #
 # State (under $EDDA_FLEET_SCRATCH, not in git):
 #   review-state.tsv     pr<TAB>reviewed_sha<TAB>round
-#   review-pending.tsv   pr<TAB>round<TAB>sha<TAB>attempts<TAB>launched_epoch
+#   review-pending.tsv   pr<TAB>round<TAB>sha<TAB>attempts<TAB>launched_epoch<TAB>postfails
+#   review-fails.tsv     pr<TAB>sha<TAB>consecutive launch failures
 #   watch.log            everything the watcher did
 #
-# Provider-overload rule (fleet.review-provider-overload — change transport,
-# never the model): on a dead/empty verdict, retry pi once, then
-# `edda dispatch --agent codex`; if that also yields no verdict, label the PR
-# `review:unreviewed` and stop for that head. An unreviewed PR is an honest
-# state; a cheap-model verdict is not.
+# Provider-overload rule, v1 (no Codex fallback — it cannot be made read-only):
+# on a dead/empty verdict, retry pi once with the same model; if that also
+# yields no verdict, label the PR `review:unreviewed`, log it, and stop for
+# that head. An unreviewed PR is an honest state; a cheap-model verdict is not.
+# model_observed and cost are read from the pi session file and are NEVER
+# fabricated — a missing session file is reported as unknown.
+#
+# A failed comment post or label update does NOT mark the head reviewed: the
+# verdict is kept and posting retries on the next poll; after 5 failed
+# attempts the PR is labeled `review:post-failed` (verdict file kept in
+# $EDDA_FLEET_SCRATCH for manual posting).
 #
 # The watcher NEVER merges. Merge stays behind operator authorization
 # (pr.merge-policy).
@@ -32,6 +42,7 @@ MODEL=${EDDA_REVIEW_MODEL:-openai-codex/gpt-5.6-sol}
 POLL=${EDDA_REVIEW_POLL_SECONDS:-60}
 SCRATCH=${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}
 STALE=${EDDA_REVIEW_STALE_SECONDS:-2700}   # 45 min: pi task limit is 30 min
+POSTFAIL_CAP=5
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 REVIEW_PR="$SCRIPT_DIR/review-pr.sh"
@@ -39,6 +50,58 @@ REVIEW_PR="$SCRIPT_DIR/review-pr.sh"
 ONCE=0
 DRY=0
 TAB=$(printf '\t')   # literal tab; "\t" inside quotes is backslash-t in POSIX sh
+
+# ---- offline helper: decide which PRs to review ------------------------------
+# Reads `gh pr list --json number,headRefOid,isDraft,labels` JSON on stdin and
+# prints one decision line per PR: "REVIEW <pr> <sha>" or "SKIP <pr> <reason>".
+# Pure: no network, no state mutation; the state file is read-only here.
+decide() {
+  state=${PR_REVIEW_WATCH_STATE:-$SCRATCH/review-state.tsv}
+  # Pass the state path via the environment, not -v: gawk processes escape
+  # sequences in -v values, which mangles Windows paths (C:\Users\...).
+  EDDA_REVIEW_STATE_TMP="$state" awk '
+    { raw = raw $0 }
+    function jval(o, k,   s, v) {
+      if (!match(o, "\"" k "\"[ ]*:[ ]*")) return ""
+      v = substr(o, RSTART + RLENGTH)
+      if (substr(v, 1, 1) == "\"") {
+        v = substr(v, 2)
+        if (match(v, /^[^"]*/)) return substr(v, RSTART, RLENGTH)
+        return ""
+      }
+      if (match(v, /^[^,}\]]*/)) return substr(v, RSTART, RLENGTH)
+      return ""
+    }
+    END {
+      statefile = ENVIRON["EDDA_REVIEW_STATE_TMP"]
+      while ((getline line < statefile) > 0) {
+        split(line, f, "\t")
+        rev[f[1]] = f[2]
+      }
+      close(statefile)
+      rest = raw
+      while (match(rest, /\{[ \t\n]*"(number|headRefOid)"/)) {
+        obj = substr(rest, RSTART)
+        rest = substr(rest, RSTART + RLENGTH)
+        num = jval(obj, "number")
+        if (num == "") continue
+        if (jval(obj, "isDraft") == "true") { print "SKIP " num " draft"; continue }
+        sha = jval(obj, "headRefOid")
+        if (sha == "") { print "SKIP " num " missing-head"; continue }
+        if (obj ~ /"labels"[ ]*:[ ]*\[[^]]*review:unreviewed/) {
+          print "SKIP " num " review-unreviewed"; continue
+        }
+        if (rev[num] == sha) { print "SKIP " num " already-reviewed"; continue }
+        print "REVIEW " num " " sha
+      }
+    }
+  '
+}
+
+case "${1:-}" in
+  decide) decide; exit 0 ;;
+esac
+
 for a in "$@"; do
   case "$a" in
     --once) ONCE=1 ;;
@@ -51,15 +114,17 @@ done
 mkdir -p "$SCRATCH"
 STATE="$SCRATCH/review-state.tsv"
 PENDING="$SCRATCH/review-pending.tsv"
+FAILS="$SCRATCH/review-fails.tsv"
 WATCHLOG="$SCRATCH/watch.log"
-touch "$STATE" "$PENDING"
+touch "$STATE" "$PENDING" "$FAILS"
 
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >> "$WATCHLOG"; }
 
 ensure_labels() {
-  gh label create "review:lgtm"             --repo "$REPO" --color 0e8a16 --description "Automatic review verdict: LGTM (P0=0, P1=0)"            --force >/dev/null 2>&1 || true
+  gh label create "review:lgtm"              --repo "$REPO" --color 0e8a16 --description "Automatic review verdict: LGTM (P0=0, P1=0)"            --force >/dev/null 2>&1 || true
   gh label create "review:changes-requested" --repo "$REPO" --color d93f0b --description "Automatic review verdict: Changes Requested"            --force >/dev/null 2>&1 || true
   gh label create "review:unreviewed"        --repo "$REPO" --color d4c5f9 --description "Review provider exhausted; verdict pending human/retry" --force >/dev/null 2>&1 || true
+  gh label create "review:post-failed"       --repo "$REPO" --color b60205 --description "Verdict could not be posted; see watcher scratch dir"   --force >/dev/null 2>&1 || true
 }
 
 state_field() { # $1=pr  $2=field index (2=sha,3=round)
@@ -68,9 +133,9 @@ state_field() { # $1=pr  $2=field index (2=sha,3=round)
 
 pending_has() { awk -F'\t' -v pr="$1" '$1==pr{found=1} END{exit !found}' "$PENDING" 2>/dev/null; }
 
-pending_update() { # $1=pr $2=round $3=sha $4=attempts $5=launched
+pending_update() { # $1=pr $2=round $3=sha $4=attempts $5=launched $6=postfails
   awk -F'\t' -v pr="$1" '$1!=pr' "$PENDING" > "$PENDING.tmp"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" >> "$PENDING.tmp"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" >> "$PENDING.tmp"
   mv "$PENDING.tmp" "$PENDING"
 }
 
@@ -83,6 +148,20 @@ state_set() { # $1=pr $2=sha $3=round
   awk -F'\t' -v pr="$1" '$1!=pr' "$STATE" > "$STATE.tmp"
   printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$STATE.tmp"
   mv "$STATE.tmp" "$STATE"
+}
+
+fail_clear() { # $1=pr
+  awk -F'\t' -v pr="$1" '$1!=pr' "$FAILS" > "$FAILS.tmp"
+  mv "$FAILS.tmp" "$FAILS"
+}
+
+fail_bump() { # $1=pr $2=sha — exits 0 when the cap is reached
+  c=$(awk -F'\t' -v pr="$1" '$1==pr{print $3; found=1} END{if(!found) print 0}' "$FAILS")
+  c=$((c + 1))
+  awk -F'\t' -v pr="$1" '$1!=pr' "$FAILS" > "$FAILS.tmp"
+  printf '%s\t%s\t%s\n' "$1" "$2" "$c" >> "$FAILS.tmp"
+  mv "$FAILS.tmp" "$FAILS"
+  [ "$c" -ge 3 ]
 }
 
 # Extract the LAST verdict block between the fixed markers from a transcript.
@@ -100,7 +179,7 @@ verdict_ok() { # $1=verdict file
 }
 
 # Model observed + cost, read from the pi session files (never from what the
-# brief asked for).
+# brief asked for). Missing session file => explicitly "unknown", never made up.
 session_model_cost() { # $1=session id -> sets OBSERVED, COST
   files=$(find "$HOME/.pi/agent/sessions" -name "*_$1.jsonl" 2>/dev/null)
   if [ -n "$files" ]; then
@@ -119,44 +198,17 @@ pr_is_open() { # $1=pr
   [ "$(gh pr view "$1" --repo "$REPO" --json state --jq .state 2>/dev/null)" = "OPEN" ]
 }
 
-pr_labels() { # $1=pr
-  gh pr view "$1" --repo "$REPO" --json labels --jq '[.labels[].name] | join(",")' 2>/dev/null
-}
-
-pr_head() { # $1=pr
-  gh pr view "$1" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null
-}
-
-# Post a verdict (or the honest unreviewed outcome) and update state.
-post_verdict() { # $1=pr $2=round $3=sha $4=verdict file $5=transport note
-  COMMENT="$SCRATCH/review-pr$1-r$2-comment.md"
-  {
-    echo "> **Round $2 review** — automatic watcher (\`scripts/pr-review-watch.sh\`): $5, read-only, detached worktree at \`$3\`. Model observed in the pi session file: \`$OBSERVED\`. Cost: \$$COST. Reviewed head SHA: \`$3\`."
-    echo
-    cat "$4"
-  } > "$COMMENT"
+ack_comment() { # $1=pr $2=sha — the ≤3-minute acknowledgement
   if [ "$DRY" = "1" ]; then
-    echo "dry-run: would post $COMMENT to PR #$1 and set a review:* label"
+    echo "dry-run: would post 'review: started on $2' to PR #$1"
     return 0
   fi
-  gh pr comment "$1" --repo "$REPO" --body-file "$COMMENT" >/dev/null &&
-    log "pr$1 r$2 posted verdict comment ($4)"
-  if pr_is_open "$1" && [ "$(pr_head "$1")" = "$3" ]; then
-    if grep -q '^LGTM' "$4"; then
-      gh pr edit "$1" --repo "$REPO" --add-label "review:lgtm" >/dev/null 2>&1 &&
-        log "pr$1 labeled review:lgtm"
-      gh pr edit "$1" --repo "$REPO" --remove-label "review:changes-requested" >/dev/null 2>&1 || true
-      gh pr edit "$1" --repo "$REPO" --remove-label "review:unreviewed" >/dev/null 2>&1 || true
-    else
-      gh pr edit "$1" --repo "$REPO" --add-label "review:changes-requested" >/dev/null 2>&1 &&
-        log "pr$1 labeled review:changes-requested"
-      gh pr edit "$1" --repo "$REPO" --remove-label "review:lgtm" >/dev/null 2>&1 || true
-      gh pr edit "$1" --repo "$REPO" --remove-label "review:unreviewed" >/dev/null 2>&1 || true
-    fi
+  if printf 'review: started on %s\n' "$2" \
+      | gh pr comment "$1" --repo "$REPO" --body-file - >/dev/null 2>&1; then
+    log "pr$1 ack posted: review: started on $2"
   else
-    log "pr$1 head moved or PR closed; verdict stays pinned to $3, label skipped"
+    log "pr$1 ack comment failed (non-fatal; verdict still follows)"
   fi
-  state_set "$1" "$3" "$2"
 }
 
 mark_unreviewed() { # $1=pr $2=sha $3=round $4=reason
@@ -169,11 +221,21 @@ mark_unreviewed() { # $1=pr $2=sha $3=round $4=reason
   state_set "$1" "$2" "$3"
 }
 
+mark_post_failed() { # $1=pr $2=sha $3=round $4=verdict file
+  log "pr$1 posting failed $POSTFAIL_CAP times — labeling review:post-failed; verdict kept at $4"
+  if [ "$DRY" = "1" ]; then
+    echo "dry-run: would label PR #$1 review:post-failed"
+    return 0
+  fi
+  gh pr edit "$1" --repo "$REPO" --add-label "review:post-failed" >/dev/null 2>&1 || true
+  state_set "$1" "$2" "$3"
+}
+
 # ---- in-flight handling ------------------------------------------------------
 settle_pending() {
   [ -s "$PENDING" ] || return 0
   now=$(date +%s)
-  while IFS="$TAB" read -r pr round sha attempts launched < "$PENDING"; do
+  while IFS="$TAB" read -r pr round sha attempts launched postfails < "$PENDING"; do
     [ -n "${pr:-}" ] || continue
 
     if ! pr_is_open "$pr"; then
@@ -185,7 +247,38 @@ settle_pending() {
     DONE="$SCRATCH/review-pr$pr-r$round.done"
     LOG="$SCRATCH/review-pr$pr-r$round.log"
     VERDICT="$SCRATCH/review-pr$pr-r$round-verdict.md"
-    CODEXLOG="$SCRATCH/review-pr$pr-r$round-codex.log"
+    POSTED="$VERDICT.posted"
+
+    # Comment already posted; only labels + state remain.
+    if [ -f "$POSTED" ]; then
+      vl=$(sh "$REVIEW_PR" verdict-label < "$POSTED")
+      if [ "$DRY" = "1" ]; then
+        echo "dry-run: would set label '$vl' on PR #$pr and record it reviewed"
+        continue
+      fi
+      if [ -n "$vl" ] && gh pr edit "$pr" --repo "$REPO" --add-label "$vl" >/dev/null 2>&1; then
+        gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed"   >/dev/null 2>&1 || true
+        gh pr edit "$pr" --repo "$REPO" --remove-label "review:post-failed"  >/dev/null 2>&1 || true
+        if [ "$vl" = "review:lgtm" ]; then
+          gh pr edit "$pr" --repo "$REPO" --remove-label "review:changes-requested" >/dev/null 2>&1 || true
+        else
+          gh pr edit "$pr" --repo "$REPO" --remove-label "review:lgtm" >/dev/null 2>&1 || true
+        fi
+        log "pr$pr r$round labeled $vl and recorded reviewed at $sha"
+        state_set "$pr" "$sha" "$round"
+        pending_drop "$pr"
+      else
+        postfails=$((postfails + 1))
+        log "pr$pr r$round label update failed (attempt $postfails)"
+        if [ "$postfails" -ge "$POSTFAIL_CAP" ]; then
+          mark_post_failed "$pr" "$sha" "$round" "$POSTED"
+          pending_drop "$pr"
+        else
+          pending_update "$pr" "$round" "$sha" "$attempts" "$launched" "$postfails"
+        fi
+      fi
+      continue
+    fi
 
     is_done=0
     is_stale=0
@@ -198,47 +291,55 @@ settle_pending() {
     if [ "$is_done" = "1" ] || [ "$is_stale" = "1" ]; then
       if extract_verdict "$LOG" "$VERDICT" && verdict_ok "$VERDICT"; then
         session_model_cost "review-pr$pr"
-        post_verdict "$pr" "$round" "$sha" "$VERDICT" \
-          "pi -p --model $MODEL --thinking high --exclude-tools edit,write --session-id review-pr$pr"
-        pending_drop "$pr"
+        if [ "$COST" = "?" ]; then costline='cost: unknown'; else costline='cost: $'"$COST"; fi
+        COMMENT="$SCRATCH/review-pr$pr-r$round-comment.md"
+        {
+          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): pi -p --model $MODEL --thinking high --exclude-tools edit,write --session-id review-pr$pr, read-only, detached worktree at \`$sha\`. Model observed in the pi session file: \`$OBSERVED\`. $costline. Reviewed head SHA: \`$sha\`."
+          echo
+          cat "$VERDICT"
+        } > "$COMMENT"
+        if [ "$DRY" = "1" ]; then
+          echo "dry-run: would post $COMMENT to PR #$pr and set a review:* label"
+          continue
+        fi
+        if gh pr comment "$pr" --repo "$REPO" --body-file "$COMMENT" >/dev/null 2>&1; then
+          log "pr$pr r$round posted verdict comment"
+          mv "$VERDICT" "$POSTED"
+          pending_update "$pr" "$round" "$sha" "$attempts" "$launched" 0
+        else
+          postfails=$((postfails + 1))
+          log "pr$pr r$round comment post failed (attempt $postfails); verdict kept at $VERDICT"
+          if [ "$postfails" -ge "$POSTFAIL_CAP" ]; then
+            mark_post_failed "$pr" "$sha" "$round" "$VERDICT"
+            pending_drop "$pr"
+          else
+            pending_update "$pr" "$round" "$sha" "$attempts" "$launched" "$postfails"
+          fi
+        fi
       else
         case "$attempts" in
           0)
-            log "pr$pr r$round dead/empty verdict (attempt 0) — retrying once with pi (same model, fleet.review-provider-overload)"
+            log "pr$pr r$round dead/empty verdict — retrying once with pi (same model, fleet.review-provider-overload)"
             if [ "$DRY" = "1" ]; then
               echo "dry-run: would retry PR #$pr r$round with pi"
               pending_drop "$pr"
             else
-              "$REVIEW_PR" "$pr" "$round" "$sha" >> "$WATCHLOG" 2>&1 &&
+              if "$REVIEW_PR" "$pr" "$round" "$sha" --sha "$sha" >> "$WATCHLOG" 2>&1; then
                 log "pr$pr r$round pi retry launched"
-              pending_update "$pr" "$round" "$sha" 1 "$(date +%s)"
-            fi
-            ;;
-          1)
-            log "pr$pr r$round pi retry also dead (attempt 1) — switching transport: edda dispatch --agent codex (same subscribed model)"
-            if [ "$DRY" = "1" ]; then
-              echo "dry-run: would run edda dispatch --agent codex for PR #$pr r$round"
-              pending_drop "$pr"
-            else
-              WT="$SCRATCH/wt-review-pr$pr"
-              BRIEF="$SCRATCH/review-pr$pr-r$round-brief.md"
-              rm -f "$CODEXLOG"
-              if edda dispatch --agent codex --prompt-file "$BRIEF" --cwd "$WT" > "$CODEXLOG" 2>&1; then
-                if extract_verdict "$CODEXLOG" "$VERDICT" && verdict_ok "$VERDICT"; then
-                  OBSERVED="via edda dispatch --agent codex (pi session unavailable)"
-                  COST="?"
-                  post_verdict "$pr" "$round" "$sha" "$VERDICT" \
-                    "edda dispatch --agent codex (transport fallback after pi overload)"
-                  pending_drop "$pr"
-                  continue
+                pending_update "$pr" "$round" "$sha" 1 "$(date +%s)" "$postfails"
+              else
+                rc=$?
+                if [ "$rc" = "3" ]; then
+                  log "pr$pr head moved before pi retry; dropping pending entry (rescan will re-review)"
+                else
+                  log "pr$pr r$round pi retry launch failed (rc=$rc)"
                 fi
+                pending_drop "$pr"
               fi
-              mark_unreviewed "$pr" "$sha" "$round" "pi retry and codex dispatch both yielded no verdict"
-              pending_drop "$pr"
             fi
             ;;
           *)
-            mark_unreviewed "$pr" "$sha" "$round" "no verdict after pi retry and codex dispatch"
+            mark_unreviewed "$pr" "$sha" "$round" "no verdict after one pi retry (v1 has no codex fallback)"
             pending_drop "$pr"
             ;;
         esac
@@ -249,41 +350,48 @@ settle_pending() {
 
 # ---- open-PR scan ------------------------------------------------------------
 scan_open_prs() {
-  rows=$(gh pr list --state open --repo "$REPO" --json number,headRefOid,isDraft,labels \
-    --jq '.[] | select(.isDraft|not) | [.number, .headRefOid, ([.labels[].name] | join(","))] | @tsv' 2>/dev/null) || {
+  rows_json=$(gh pr list --state open --repo "$REPO" --json number,headRefOid,isDraft,labels 2>/dev/null) || {
     log "gh pr list failed; skipping this cycle"
     return 0
   }
-  printf '%s\n' "$rows" | while IFS="$TAB" read -r pr sha labels; do
+  decisions=$(printf '%s\n' "$rows_json" | decide) || {
+    log "decide failed; skipping this cycle"
+    return 0
+  }
+  printf '%s\n' "$decisions" | while read -r verb pr sha; do
+    [ "${verb:-}" = "REVIEW" ] || continue
     [ -n "${pr:-}" ] || continue
     pending_has "$pr" && continue
 
-    reviewed=$(state_field "$pr" 2)
+    prev=$(state_field "$pr" 2)
     round=$(state_field "$pr" 3)
     [ -n "$round" ] || round=0
-
-    [ "$sha" = "$reviewed" ] && continue
-    case ",$labels," in
-      *,review:unreviewed,*)
-        # unreviewed blocks only the head it was recorded for (per-head stop)
-        if [ "$sha" = "$reviewed" ]; then continue; fi
-        if [ "$DRY" != "1" ]; then
-          gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed" >/dev/null 2>&1 || true
-        fi
-        ;;
-    esac
-
     newround=$((round + 1))
+
     if [ "$DRY" = "1" ]; then
-      prev=$(state_field "$pr" 2)
-      [ -n "$prev" ] || prev=""
-      echo "dry-run: would launch review for PR #$pr round $newround (head $sha${prev:+, prev $prev}): $REVIEW_PR $pr $newround $prev"
+      echo "dry-run: would launch review for PR #$pr round $newround (head $sha${prev:+, prev $prev}): $REVIEW_PR $pr $newround $prev --sha $sha"
       log "dry-run: would launch review for pr$pr r$newround (head $sha)"
+      continue
+    fi
+
+    log "pr$pr new head $sha (reviewed: '${prev:-none}') — launching review r$newround"
+    out=$("$REVIEW_PR" "$pr" "$newround" "$prev" --sha "$sha" 2>&1); rc=$?
+    [ -n "$out" ] && printf '%s\n' "$out" >> "$WATCHLOG"
+    if [ "$rc" -eq 0 ]; then
+      fail_clear "$pr"
+      log "pr$pr r$newround launched and confirmed running (task edda-review-pr$pr-r$newround)"
+      pending_update "$pr" "$newround" "$sha" 0 "$(date +%s)" 0
+      ack_comment "$pr" "$sha"
+    elif [ "$rc" = "3" ]; then
+      log "pr$pr head moved between scan and launch ($sha); will rescan"
     else
-      log "pr$pr head $sha differs from reviewed '${reviewed:-none}' — launching review r$newround"
-      "$REVIEW_PR" "$pr" "$newround" "$reviewed" >> "$WATCHLOG" 2>&1 &&
-        log "pr$pr r$newround launched (task edda-review-pr$pr-r$newround)"
-      pending_update "$pr" "$newround" "$sha" 0 "$(date +%s)"
+      log "pr$pr r$newround launch failed (rc=$rc)"
+      if fail_bump "$pr" "$sha"; then
+        mark_unreviewed "$pr" "$sha" "$newround" "reviewer launch failed 3 times in a row"
+        fail_clear "$pr"
+      else
+        log "pr$pr launch failure recorded; will retry next poll"
+      fi
     fi
   done
 }

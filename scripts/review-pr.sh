@@ -3,7 +3,8 @@
 # fleet.lane-launch (Task Scheduler, hidden), fleet.review-brief-framing
 # (validation-checklist brief) and fleet.agent-model-split (review model is fixed).
 #
-# usage: review-pr.sh <PR> [round] [prev-sha] [--dry-run]
+# usage: review-pr.sh <PR> [round] [prev-sha] [--sha <full-sha>] [--dry-run]
+#        review-pr.sh verdict-label < verdict-text        (offline helper)
 #
 # Environment:
 #   EDDA_REPO              owner/repo              (default fagemx/edda)
@@ -35,22 +36,44 @@ PR=""
 ROUND=1
 PREV=""
 DRY=0
-for a in "$@"; do
-  case "$a" in
+SHA_GIVEN=""
+
+# Offline helper: map verdict text (stdin) to a review:* label; the LAST
+# verdict keyword in the text wins. No network, no state.
+if [ "${1:-}" = "verdict-label" ]; then
+  v=$(cat)
+  lcs=$(printf '%s\n' "$v" | grep -bo "Changes Requested" | tail -1 | cut -d: -f1)
+  llg=$(printf '%s\n' "$v" | grep -bo "LGTM" | tail -1 | cut -d: -f1)
+  if [ -n "$lcs" ] && [ -n "$llg" ] && [ "$llg" -gt "$lcs" ]; then echo "review:lgtm"
+  elif [ -n "$lcs" ]; then echo "review:changes-requested"
+  elif [ -n "$llg" ]; then echo "review:lgtm"
+  fi
+  exit 0
+fi
+
+while [ $# -gt 0 ]; do
+  case "$1" in
     --dry-run) DRY=1 ;;
+    --sha) SHA_GIVEN=${2:-}; shift ;;
     -h|--help) usage; exit 0 ;;
     *)
-      if [ -z "$PR" ]; then PR=$a
-      elif [ "$ROUND" = "1" ] && [ -z "${ROUND_SET:-}" ]; then ROUND=$a; ROUND_SET=1
-      elif [ -z "$PREV" ]; then PREV=$a
-      else echo "review-pr.sh: unexpected argument '$a'" >&2; usage; exit 1; fi
+      if [ -z "$PR" ]; then PR=$1
+      elif [ "$ROUND" = "1" ] && [ -z "${ROUND_SET:-}" ]; then ROUND=$1; ROUND_SET=1
+      elif [ -z "$PREV" ]; then PREV=$1
+      else echo "review-pr.sh: unexpected argument '$1'" >&2; usage; exit 1; fi
       ;;
   esac
+  shift
 done
 if [ -z "$PR" ]; then usage; exit 1; fi
 case "$PR$ROUND" in
   *[!0-9]*) echo "review-pr.sh: PR and round must be numeric" >&2; exit 1 ;;
 esac
+if [ -n "$SHA_GIVEN" ]; then
+  printf '%s\n' "$SHA_GIVEN" | grep -qE '^[0-9a-f]{40}$' || {
+    echo "review-pr.sh: --sha must be a full 40-hex SHA" >&2; exit 1;
+  }
+fi
 
 # ---- platform ---------------------------------------------------------------
 IS_WIN=0
@@ -66,9 +89,20 @@ if [ -z "$ROOT" ]; then
 fi
 
 # ---- PR facts ---------------------------------------------------------------
-gh_ok() { gh "$@" >/dev/null 2>&1; }
-SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) ||
-  { echo "review-pr.sh: cannot read PR #$PR (repo $REPO)" >&2; exit 1; }
+# The reviewed SHA is pinned by the caller (--sha from the watcher's scan); a
+# second head read is used ONLY to refuse a stale pin (head moved), never to
+# pick what gets reviewed.
+if [ -n "$SHA_GIVEN" ]; then
+  SHA=$SHA_GIVEN
+  CUR=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null) || CUR=""
+  if [ "$CUR" != "$SHA" ]; then
+    echo "review-pr.sh: head moved — refusing to review pinned $SHA; PR head is ${CUR:-unknown}" >&2
+    exit 3
+  fi
+else
+  SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) ||
+    { echo "review-pr.sh: cannot read PR #$PR (repo $REPO)" >&2; exit 1; }
+fi
 BR=$(gh pr view "$PR" --repo "$REPO" --json headRefName --jq .headRefName)
 TITLE=$(gh pr view "$PR" --repo "$REPO" --json title --jq .title)
 BODY=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body)
@@ -178,11 +212,22 @@ Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction Silentl
 \$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited | Out-Null
 Start-ScheduledTask -TaskName '$TASK'
-Start-Sleep -Seconds 6
-"task=$TASK state=\$((Get-ScheduledTask -TaskName '$TASK').State)"
+\$st = ""
+for (\$i = 0; \$i -lt 20; \$i++) {
+  Start-Sleep -Seconds 1
+  \$st = (Get-ScheduledTask -TaskName '$TASK').State
+  if (\$st -eq 'Running') { break }
+}
+"task=$TASK state=\$st"
 PS
 
-  pwsh -NoProfile -ExecutionPolicy Bypass -File "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1"
+  out=$(pwsh -NoProfile -ExecutionPolicy Bypass -File "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" 2>&1); rc=$?
+  echo "$out"
+  [ $rc -eq 0 ] || exit 1
+  case "$out" in
+    *state=Running*) : ;;
+    *) echo "review-pr.sh: scheduled task did not reach Running" >&2; exit 1 ;;
+  esac
 else
   # Linux: no job-object trap, plain nohup is enough.
   RUNNER="$SCRATCH/review-pr$PR-r$ROUND-run.sh"
@@ -197,7 +242,14 @@ RUN
   chmod +x "$RUNNER"
   rm -f "$SCRATCH/review-pr$PR-r$ROUND.log" "$SCRATCH/review-pr$PR-r$ROUND.done"
   nohup "$RUNNER" >/dev/null 2>&1 &
-  echo "task=nohup pid=$! log=$SCRATCH/review-pr$PR-r$ROUND.log"
+  pid=$!
+  sleep 1
+  if kill -0 "$pid" 2>/dev/null; then
+    echo "task=nohup pid=$pid state=Running"
+  else
+    echo "review-pr.sh: nohup process $pid died immediately" >&2
+    exit 1
+  fi
 fi
 
 echo "log=$SCRATCH/review-pr$PR-r$ROUND.log"
