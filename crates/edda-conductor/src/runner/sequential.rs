@@ -3995,6 +3995,61 @@ phases:
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Round-2 review blocking P1: a gate-approved phase is a terminal
+    /// state like any other — the workspace ledger must carry exactly one
+    /// structured `conductor_phase` event, attributed to the plan, with
+    /// status "passed" and the measured agent-turn cost parked on the
+    /// phase at gate entry.
+    #[tokio::test]
+    async fn e2e_gate_approve_writes_plan_id_status_passed_and_measured_cost() {
+        let root = fresh_root("ledgerapprove");
+        init_git_repo(&root);
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: Some(0.42),
+                result_text: Some("gated work".into()),
+            }],
+        );
+        let yaml = r#"
+name: gated
+phases:
+  - id: a
+    prompt: "do it"
+    gate: verdict
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let state = PlanState::from_plan(&plan, "test.yaml");
+        let handle = spawn_runner(yaml, root.clone(), launcher, state);
+
+        let shas = wait_for_gate_events(&root, "gated", 1).await;
+        record_verdict(&root, "gated/a", &shas[0], VerdictDecision::Approved, None);
+
+        let (_state, _notifier, _launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+            .await
+            .expect("gate test exceeded 30s")
+            .unwrap()
+            .unwrap();
+
+        let events = read_structured_notes(&root, "conductor_phase");
+        assert_eq!(
+            events.len(),
+            1,
+            "gate approval must produce exactly one phase terminal event"
+        );
+        let payload = &events[0].payload["conductor_phase"];
+        assert_eq!(payload["plan_id"], "gated");
+        assert_eq!(payload["phase_id"], "a");
+        assert_eq!(payload["status"], "passed");
+        assert_eq!(
+            payload["cost_usd"],
+            serde_json::json!(0.42),
+            "the measured agent-turn cost must survive gate approval"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn gate_reject_respects_max_attempts_bound() {
         let root = fresh_root("bound");
