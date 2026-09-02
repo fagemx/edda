@@ -161,37 +161,44 @@ pub fn evaluate_merge_preconditions(input: &MergeGateInput) -> MergeGateResult {
 }
 
 // GitHub API / `gh` structures
-#[derive(Debug, Deserialize)]
-struct GhViewPr {
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct GhViewPr {
     #[serde(rename = "headRefOid")]
-    head_ref_oid: String,
-    author: GhAuthor,
+    pub head_ref_oid: String,
     #[serde(default)]
-    comments: Vec<GhComment>,
+    pub author: Option<GhAuthor>,
     #[serde(default)]
-    reviews: Vec<GhReviewItem>,
+    pub comments: Vec<GhComment>,
+    #[serde(default)]
+    pub reviews: Vec<GhReviewItem>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GhAuthor {
-    login: String,
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct GhAuthor {
+    pub login: String,
 }
 
-#[derive(Debug, Deserialize)]
-struct GhComment {
-    body: String,
-    author: Option<GhAuthor>,
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct GhComment {
+    pub body: String,
+    #[serde(default)]
+    pub author: Option<GhAuthor>,
     #[serde(rename = "createdAt")]
-    created_at: Option<String>,
+    pub created_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct GhReviewItem {
-    state: String,
-    author: Option<GhAuthor>,
-    body: Option<String>,
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct GhReviewItem {
+    pub state: String,
+    #[serde(default)]
+    pub author: Option<GhAuthor>,
+    pub body: Option<String>,
     #[serde(rename = "submittedAt")]
-    submitted_at: Option<String>,
+    pub submitted_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,8 +214,7 @@ pub fn is_structured_review_comment(body: &str) -> bool {
         || body.contains("### Verdict")
         || body.contains("<<<VERDICT")
         || body.contains("Verdict as of the ruling:")
-        || (body.contains("Verdict")
-            && (body.contains("LGTM") || body.contains("Changes Requested")))
+        || body.contains("**Verdict as of the ruling:")
 }
 
 fn parse_count(line: &str, prefix: &str) -> Option<usize> {
@@ -277,6 +283,75 @@ struct ReviewTimelineEvent {
     p1_count: usize,
 }
 
+/// Pure timeline extractor: processes reviews and structured comments into the final verdict.
+pub fn extract_timeline_verdict(
+    gh_view: &GhViewPr,
+) -> (Option<String>, Option<String>, usize, usize) {
+    let mut timeline: Vec<ReviewTimelineEvent> = Vec::new();
+
+    // 1. Process GitHub formal reviews (APPROVED / CHANGES_REQUESTED)
+    // The formal review state is strictly authoritative for the verdict (cannot be overridden by prose)
+    for r in &gh_view.reviews {
+        let verdict_opt = match r.state.as_str() {
+            "APPROVED" => Some("LGTM".to_string()),
+            "CHANGES_REQUESTED" => Some("Changes Requested".to_string()),
+            _ => None,
+        };
+
+        if let Some(formal_verdict) = verdict_opt {
+            // Parse body only for SHA, p0, p1 (formal review state is NOT overridden by prose)
+            let (_, sha, parsed_p0, parsed_p1) = if let Some(body) = &r.body {
+                parse_verdict_text(body)
+            } else {
+                (None, None, 0, 0)
+            };
+
+            let ts = r.submitted_at.clone().unwrap_or_default();
+            timeline.push(ReviewTimelineEvent {
+                timestamp: ts,
+                verdict: formal_verdict,
+                verdict_sha: sha,
+                p0_count: parsed_p0,
+                p1_count: parsed_p1,
+            });
+        }
+    }
+
+    // 2. Process structured review comments
+    // Comments must meet is_structured_review_comment to ensure casual comments are ignored
+    for comment in &gh_view.comments {
+        if !is_structured_review_comment(&comment.body) {
+            continue;
+        }
+
+        let (v, sha, parsed_p0, parsed_p1) = parse_verdict_text(&comment.body);
+        if let Some(found_v) = v {
+            let ts = comment.created_at.clone().unwrap_or_default();
+            timeline.push(ReviewTimelineEvent {
+                timestamp: ts,
+                verdict: found_v,
+                verdict_sha: sha,
+                p0_count: parsed_p0,
+                p1_count: parsed_p1,
+            });
+        }
+    }
+
+    // Sort timeline chronologically (oldest to newest) so the newest review event wins
+    timeline.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    if let Some(latest) = timeline.pop() {
+        (
+            Some(latest.verdict),
+            latest.verdict_sha,
+            latest.p0_count,
+            latest.p1_count,
+        )
+    } else {
+        (None, None, 0, 0)
+    }
+}
+
 fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput> {
     let view_output = Command::new("gh")
         .args([
@@ -298,85 +373,10 @@ fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput>
     let gh_view: GhViewPr =
         serde_json::from_slice(&view_output.stdout).context("parse gh pr view json output")?;
 
-    let head_sha = gh_view.head_ref_oid;
-    let pr_author = gh_view.author.login.as_str();
+    let head_sha = gh_view.head_ref_oid.clone();
+    let (verdict, verdict_sha, p0, p1) = extract_timeline_verdict(&gh_view);
 
-    let mut timeline: Vec<ReviewTimelineEvent> = Vec::new();
-
-    // 1. Process GitHub review approvals / changes_requested
-    for r in &gh_view.reviews {
-        if let Some(reviewer) = &r.author {
-            if reviewer.login == pr_author {
-                continue; // Author cannot review their own PR
-            }
-        }
-
-        let verdict_opt = match r.state.as_str() {
-            "APPROVED" => Some("LGTM".to_string()),
-            "CHANGES_REQUESTED" => Some("Changes Requested".to_string()),
-            _ => None,
-        };
-
-        if let Some(v) = verdict_opt {
-            let (body_v, sha, parsed_p0, parsed_p1) = if let Some(body) = &r.body {
-                parse_verdict_text(body)
-            } else {
-                (None, None, 0, 0)
-            };
-
-            let final_v = body_v.unwrap_or(v);
-            let ts = r.submitted_at.clone().unwrap_or_default();
-
-            timeline.push(ReviewTimelineEvent {
-                timestamp: ts,
-                verdict: final_v,
-                verdict_sha: sha,
-                p0_count: parsed_p0,
-                p1_count: parsed_p1,
-            });
-        }
-    }
-
-    // 2. Process structured review comments from non-authors
-    for comment in &gh_view.comments {
-        if let Some(author) = &comment.author {
-            if author.login == pr_author {
-                continue; // Ignore comments from PR author (e.g. implementer review response)
-            }
-        }
-
-        if !is_structured_review_comment(&comment.body) {
-            continue;
-        }
-
-        let (v, sha, parsed_p0, parsed_p1) = parse_verdict_text(&comment.body);
-        if let Some(found_v) = v {
-            let ts = comment.created_at.clone().unwrap_or_default();
-            timeline.push(ReviewTimelineEvent {
-                timestamp: ts,
-                verdict: found_v,
-                verdict_sha: sha,
-                p0_count: parsed_p0,
-                p1_count: parsed_p1,
-            });
-        }
-    }
-
-    // Sort timeline chronologically (oldest to newest) so the newest review event wins
-    timeline.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-
-    let (verdict, verdict_sha, p0, p1) = if let Some(latest) = timeline.pop() {
-        (
-            Some(latest.verdict),
-            latest.verdict_sha,
-            latest.p0_count,
-            latest.p1_count,
-        )
-    } else {
-        (None, None, 0, 0)
-    };
-
-    // 3. Fetch PR checks
+    // Fetch PR checks
     let checks_output = Command::new("gh")
         .args([
             "pr",
@@ -507,7 +507,10 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
 
     if args.merge {
         if result.can_merge {
-            let pr_number = args.pr.expect("checked above");
+            let pr_number = match args.pr {
+                Some(num) => num,
+                None => anyhow::bail!("--merge requires a PR number positional argument"),
+            };
             println!("Executing merge: gh pr merge {pr_number} --squash");
             let status = Command::new("gh")
                 .args(["pr", "merge", &pr_number.to_string(), "--squash"])
@@ -700,11 +703,76 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             "### Verdict\nChanges Requested"
         ));
         assert!(is_structured_review_comment("<<<VERDICT\nLGTM\nVERDICT>>>"));
+        assert!(is_structured_review_comment(
+            "Verdict as of the ruling: LGTM"
+        ));
+        assert!(is_structured_review_comment(
+            "**Verdict as of the ruling: LGTM**"
+        ));
         // Casual comments must NOT match
         assert!(!is_structured_review_comment("ready for LGTM review"));
         assert!(!is_structured_review_comment(
             "I fixed the bug, please LGTM"
         ));
+        assert!(!is_structured_review_comment("Not an LGTM yet"));
+    }
+
+    #[test]
+    fn test_formal_review_state_not_overridden_by_prose() {
+        let gh_view = GhViewPr {
+            head_ref_oid: VALID_SHA_A.into(),
+            author: Some(GhAuthor {
+                login: "fagemx".into(),
+            }),
+            comments: vec![],
+            reviews: vec![GhReviewItem {
+                state: "CHANGES_REQUESTED".into(),
+                author: Some(GhAuthor {
+                    login: "reviewer".into(),
+                }),
+                body: Some(format!(
+                    "Not an LGTM yet - see inline notes. @ {VALID_SHA_A}"
+                )),
+                submitted_at: Some("2026-09-02T10:00:00Z".into()),
+            }],
+        };
+
+        let (verdict, sha, p0, p1) = extract_timeline_verdict(&gh_view);
+        assert_eq!(verdict.as_deref(), Some("Changes Requested"));
+        assert_eq!(sha.as_deref(), Some(VALID_SHA_A));
+        assert_eq!(p0, 0);
+        assert_eq!(p1, 0);
+    }
+
+    #[test]
+    fn test_timeline_chronological_order() {
+        let gh_view = GhViewPr {
+            head_ref_oid: VALID_SHA_A.into(),
+            author: Some(GhAuthor {
+                login: "fagemx".into(),
+            }),
+            comments: vec![GhComment {
+                body: format!(
+                    "## Code Review: Round 1\n\n### Verdict\nLGTM (P0=0, P1=0) at `{VALID_SHA_A}`"
+                ),
+                author: Some(GhAuthor {
+                    login: "fagemx".into(),
+                }),
+                created_at: Some("2026-09-02T08:00:00Z".into()),
+            }],
+            reviews: vec![GhReviewItem {
+                state: "CHANGES_REQUESTED".into(),
+                author: Some(GhAuthor {
+                    login: "fagemx".into(),
+                }),
+                body: Some(format!("blocking findings @ {VALID_SHA_A}")),
+                submitted_at: Some("2026-09-02T09:00:00Z".into()),
+            }],
+        };
+
+        // Newer CHANGES_REQUESTED review (09:00) wins over older LGTM comment (08:00)
+        let (verdict, _, _, _) = extract_timeline_verdict(&gh_view);
+        assert_eq!(verdict.as_deref(), Some("Changes Requested"));
     }
 
     #[test]
