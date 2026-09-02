@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::BufRead;
+use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::helpers::{
@@ -9,6 +9,113 @@ use super::helpers::{
 use super::{ActivityType, DigestTaskSnapshot, FailedCommand, SessionOutcome, SessionStats};
 
 pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats> {
+    Ok(extract_stats_from(session_ledger_path, 0)?.0)
+}
+
+/// Tool-call event names across the bridges that persist session ledgers
+/// (round-1 P1-1): Claude Code `PostToolUse`, OpenClaw `after_tool_call`
+/// (tool data nested under `event_data`), Cursor `postToolUse`, Hermes
+/// `post_tool_call`. Without these, sessions from three of the five bridges
+/// did real work but were classified zero-call and silently dropped.
+fn is_tool_call_event(name: &str) -> bool {
+    matches!(
+        name,
+        "PostToolUse" | "after_tool_call" | "postToolUse" | "post_tool_call"
+    )
+}
+
+/// User-prompt event names across bridges: Claude Code `UserPromptSubmit`,
+/// Cursor `beforeSubmitPrompt`, OpenClaw `before_agent_start`.
+fn is_user_prompt_event(name: &str) -> bool {
+    matches!(
+        name,
+        "UserPromptSubmit" | "beforeSubmitPrompt" | "before_agent_start"
+    )
+}
+
+/// OpenClaw has no separate failure event: a failed tool call is an
+/// `after_tool_call` with a non-empty `event_data.error` string or
+/// `event_data.success: false`.
+fn openclaw_tool_failed(envelope: &serde_json::Value) -> bool {
+    let data = envelope.get("event_data");
+    if data
+        .and_then(|d| d.get("success"))
+        .and_then(|v| v.as_bool())
+        == Some(false)
+    {
+        return true;
+    }
+    data.and_then(|d| d.get("error"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty())
+}
+
+/// Normalize lower-case bridge tool names (OpenClaw/Hermes) to the Claude
+/// equivalents the digest breakdown and per-tool extraction expect.
+fn normalize_tool_name(name: &str) -> &str {
+    match name {
+        "bash" | "terminal" | "shell" => "Bash",
+        "edit_file" | "file_edit" => "Edit",
+        "write_file" | "file_write" => "Write",
+        other => other,
+    }
+}
+
+/// Extract the tool name from an envelope in any bridge's shape:
+/// top-level `tool_name`, `raw.toolName`/`raw.tool_name`, or OpenClaw's
+/// `event_data.tool_name`.
+fn tool_name_of(envelope: &serde_json::Value) -> String {
+    let raw = envelope
+        .get("tool_name")
+        .or_else(|| {
+            envelope
+                .get("raw")
+                .and_then(|r| r.get("toolName").or_else(|| r.get("tool_name")))
+        })
+        .or_else(|| envelope.get("event_data").and_then(|d| d.get("tool_name")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    normalize_tool_name(raw).to_string()
+}
+
+/// Byte offset just past the last complete (newline-terminated) line.
+///
+/// A ledger that ends mid-line (truncated or concurrently-written final
+/// line, round-1 P0-2) is only ever consumed up to its last complete line.
+fn complete_prefix_len(file: &mut std::fs::File) -> std::io::Result<u64> {
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(0);
+    }
+    const CHUNK: u64 = 8192;
+    let mut pos = len;
+    loop {
+        let start = pos.saturating_sub(CHUNK);
+        let size = (pos - start) as usize;
+        file.seek(SeekFrom::Start(start))?;
+        let mut buf = vec![0u8; size];
+        file.read_exact(&mut buf)?;
+        if let Some(i) = buf.iter().rposition(|&b| b == b'\n') {
+            return Ok(start + i as u64 + 1);
+        }
+        if start == 0 {
+            return Ok(0);
+        }
+        pos = start;
+    }
+}
+
+/// Extract statistics from the delta of a session ledger starting at
+/// `start_offset` (the digest watermark) up to the end of the last complete
+/// line. Returns the stats and the consumed byte offset.
+///
+/// A trailing unterminated line is NOT consumed: the producer may still be
+/// writing it. Only complete, newline-terminated lines count as consumed,
+/// so a line is digested exactly once, once its write completes.
+pub fn extract_stats_from(
+    session_ledger_path: &Path,
+    start_offset: u64,
+) -> anyhow::Result<(SessionStats, u64)> {
     let mut stats = SessionStats::default();
     let mut files_set: BTreeSet<String> = BTreeSet::new();
     let mut file_edit_map: BTreeMap<String, u64> = BTreeMap::new();
@@ -24,20 +131,46 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
     let mut last_seen: Option<time::OffsetDateTime> = None;
 
     if !session_ledger_path.exists() {
-        return Ok(stats);
+        return Ok((stats, start_offset));
     }
 
-    let file = std::fs::File::open(session_ledger_path)?;
-    let reader = std::io::BufReader::new(file);
+    let mut file = std::fs::File::open(session_ledger_path)?;
+    let end = complete_prefix_len(&mut file)?;
+    if start_offset >= end {
+        // Nothing new (complete) since the watermark.
+        return Ok((stats, start_offset));
+    }
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    file.seek(SeekFrom::Start(start_offset))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut consumed = start_offset;
+    let mut line_buf: Vec<u8> = Vec::new();
+    let mut malformed: u64 = 0;
+
+    loop {
+        line_buf.clear();
+        let n = reader.read_until(b'\n', &mut line_buf)?;
+        if n == 0 {
+            break;
+        }
+        if line_buf.last() != Some(&b'\n') {
+            // Unterminated tail: the producer is (or was) mid-write.
+            // Not consumed — it will be picked up once complete.
+            break;
+        }
+        consumed += n as u64;
+
+        let line = String::from_utf8_lossy(&line_buf);
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
-        let envelope: serde_json::Value = match serde_json::from_str(&line) {
+        let envelope: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => continue, // skip malformed lines
+            Err(_) => {
+                malformed += 1;
+                continue; // skip malformed lines
+            }
         };
 
         let ts = envelope.get("ts").and_then(|v| v.as_str()).unwrap_or("");
@@ -54,89 +187,82 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
+        // Failure classification: Claude Code has a dedicated failure event;
+        // OpenClaw reports failures inline on after_tool_call.
+        let is_failure = event_name == "PostToolUseFailure"
+            || (event_name == "after_tool_call" && openclaw_tool_failed(&envelope));
+        let is_call = !is_failure && is_tool_call_event(event_name);
+
         // Track trailing failures for outcome detection
-        if event_name == "PostToolUseFailure" {
+        if is_failure {
             trailing_failures += 1;
-        } else if event_name == "PostToolUse" {
+        } else if is_call {
             trailing_failures = 0;
         }
         if !event_name.is_empty() {
             last_event_name = event_name.to_string();
         }
 
-        match event_name {
-            "PostToolUse" => {
-                stats.tool_calls += 1;
-                // Extract tool_name and accumulate per-tool breakdown
-                let tool_name = envelope
-                    .get("tool_name")
-                    .or_else(|| {
-                        envelope
-                            .get("raw")
-                            .and_then(|r| r.get("toolName").or_else(|| r.get("tool_name")))
-                    })
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if !tool_name.is_empty() {
-                    *stats
-                        .tool_call_breakdown
-                        .entry(tool_name.to_string())
-                        .or_insert(0) += 1;
+        if is_failure {
+            stats.tool_failures += 1;
+            // Extract failed Bash commands
+            let tool_name = tool_name_of(&envelope);
+            if tool_name == "Bash" {
+                if let Some(cmd) = extract_bash_command(&envelope) {
+                    let cwd_val = extract_envelope_cwd(&envelope);
+                    let exit_code = extract_exit_code(&envelope);
+                    stats.failed_cmds_detail.push(FailedCommand {
+                        command: cmd.clone(),
+                        cwd: cwd_val,
+                        exit_code,
+                    });
+                    stats.failed_commands.push(cmd);
                 }
-                if tool_name == "Edit" || tool_name == "Write" {
-                    if let Some(fp) = extract_file_path(&envelope) {
-                        if !crate::signals::is_noise_file(&fp) {
-                            files_set.insert(fp.clone());
-                            *file_edit_map.entry(fp).or_insert(0) += 1;
-                        }
+            }
+        } else if is_call {
+            stats.tool_calls += 1;
+            // Extract tool_name and accumulate per-tool breakdown
+            let tool_name = tool_name_of(&envelope);
+            if !tool_name.is_empty() {
+                *stats
+                    .tool_call_breakdown
+                    .entry(tool_name.to_string())
+                    .or_insert(0) += 1;
+            }
+            if tool_name == "Edit" || tool_name == "Write" {
+                if let Some(fp) = extract_file_path(&envelope) {
+                    if !crate::signals::is_noise_file(&fp) {
+                        files_set.insert(fp.clone());
+                        *file_edit_map.entry(fp).or_insert(0) += 1;
                     }
                 }
-                if tool_name == "Bash" {
-                    if let Some(cmd) = extract_bash_command(&envelope) {
-                        if cmd.contains("git commit") {
-                            let msg = extract_git_commit_msg(&cmd);
-                            if !msg.is_empty() {
-                                stats.commits_made.push(msg);
-                            }
+            }
+            if tool_name == "Bash" {
+                if let Some(cmd) = extract_bash_command(&envelope) {
+                    if cmd.contains("git commit") {
+                        let msg = extract_git_commit_msg(&cmd);
+                        if !msg.is_empty() {
+                            stats.commits_made.push(msg);
                         }
-                        if let Some(pkg) = crate::nudge::extract_dependency_add(&cmd) {
-                            if !stats.deps_added.contains(&pkg) {
-                                stats.deps_added.push(pkg);
-                            }
+                    }
+                    if let Some(pkg) = crate::nudge::extract_dependency_add(&cmd) {
+                        if !stats.deps_added.contains(&pkg) {
+                            stats.deps_added.push(pkg);
                         }
                     }
                 }
             }
-            "PostToolUseFailure" => {
-                stats.tool_failures += 1;
-                // Extract failed Bash commands
-                let tool_name = envelope
-                    .get("tool_name")
-                    .or_else(|| {
-                        envelope
-                            .get("raw")
-                            .and_then(|r| r.get("toolName").or_else(|| r.get("tool_name")))
-                    })
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if tool_name == "Bash" {
-                    if let Some(cmd) = extract_bash_command(&envelope) {
-                        let cwd_val = extract_envelope_cwd(&envelope);
-                        let exit_code = extract_exit_code(&envelope);
-                        stats.failed_cmds_detail.push(FailedCommand {
-                            command: cmd.clone(),
-                            cwd: cwd_val,
-                            exit_code,
-                        });
-                        stats.failed_commands.push(cmd);
-                    }
-                }
-            }
-            "UserPromptSubmit" => {
-                stats.user_prompts += 1;
-            }
-            _ => {}
+        } else if is_user_prompt_event(event_name) {
+            stats.user_prompts += 1;
         }
+    }
+
+    if malformed > 0 {
+        tracing::debug!(
+            malformed,
+            path = %session_ledger_path.display(),
+            "skipped malformed lines in session ledger (never destroyed)"
+        );
     }
 
     stats.files_modified = files_set.into_iter().collect();
@@ -146,7 +272,7 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
     // Determine session outcome
     stats.outcome = if trailing_failures >= 3 {
         SessionOutcome::ErrorStuck
-    } else if last_event_name == "UserPromptSubmit" {
+    } else if is_user_prompt_event(&last_event_name) {
         SessionOutcome::Interrupted
     } else {
         SessionOutcome::Completed
@@ -155,7 +281,7 @@ pub fn extract_stats(session_ledger_path: &Path) -> anyhow::Result<SessionStats>
     // Classify activity based on tool patterns
     stats.activity = classify_activity(&stats);
 
-    Ok(stats)
+    Ok((stats, consumed))
 }
 
 /// Load tasks snapshot from state/active_tasks.json for a project.

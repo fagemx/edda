@@ -131,11 +131,11 @@ mod prev;
 mod render;
 
 // Re-export all public items to preserve API
-pub use extract::{extract_stats, load_tasks_for_digest, render_digest_text};
+pub use extract::{extract_stats, extract_stats_from, load_tasks_for_digest, render_digest_text};
 pub use orchestrate::{
     digest_previous_sessions, digest_previous_sessions_with_opts, digest_session_manual,
-    find_all_pending_sessions, load_digest_state, pending_failure_warning, save_digest_state,
-    DigestResult, DigestState,
+    find_all_pending_sessions, load_digest_state, migrate_legacy_state, pending_failure_warning,
+    save_digest_state, DigestResult, DigestState, DigestedSession,
 };
 pub use prev::{
     collect_session_ledger_extras, read_prev_digest, write_prev_digest,

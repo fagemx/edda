@@ -11,9 +11,18 @@ pub(super) fn extract_file_path(envelope: &serde_json::Value) -> Option<String> 
         return Some(normalize_path(fp));
     }
     // Try top-level tool_input (when raw is flattened)
-    envelope
+    if let Some(fp) = envelope
         .get("tool_input")
         .and_then(|ti| ti.get("file_path"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(normalize_path(fp));
+    }
+    // OpenClaw nests tool data under event_data (round-1 P1-1)
+    envelope
+        .get("event_data")
+        .and_then(|d| d.get("tool_input").or_else(|| d.get("toolInput")))
+        .and_then(|ti| ti.get("file_path").or_else(|| ti.get("filePath")))
         .and_then(|v| v.as_str())
         .map(normalize_path)
 }
@@ -67,8 +76,18 @@ pub(super) fn extract_bash_command(envelope: &serde_json::Value) -> Option<Strin
     {
         return Some(cmd.to_string());
     }
-    envelope
+    // Try top-level tool_input (when raw is flattened)
+    if let Some(cmd) = envelope
         .get("tool_input")
+        .and_then(|ti| ti.get("command"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(cmd.to_string());
+    }
+    // OpenClaw nests tool data under event_data (round-1 P1-1)
+    envelope
+        .get("event_data")
+        .and_then(|d| d.get("tool_input").or_else(|| d.get("toolInput")))
         .and_then(|ti| ti.get("command"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
