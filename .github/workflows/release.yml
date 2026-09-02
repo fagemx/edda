@@ -10,6 +10,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  GH_REPO: ${{ github.repository }}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   create-release:
@@ -18,10 +23,34 @@ jobs:
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
       - name: Get tag
         id: tag
         run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+      - name: Validate release metadata
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag must use vMAJOR.MINOR.PATCH, got ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+
+          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
+          mismatches="$(jq -r --arg version "$version" '
+            .workspace_members as $members
+            | .packages[]
+            | select(.id as $id | $members | index($id))
+            | select(.version != $version)
+            | "\(.name)=\(.version)"
+          ' <<<"$metadata")"
+          if [ -n "$mismatches" ]; then
+            echo "::error::Workspace package versions do not match tag $version"
+            printf '%s\n' "$mismatches"
+            exit 1
+          fi
       - name: Prepare release notes
         shell: bash
         run: |
@@ -37,11 +66,20 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$release_notes" > "$RUNNER_TEMP/release-notes.md"
-      - name: Create draft release
-        run: >-
-          gh release create "$GITHUB_REF_NAME" --draft --verify-tag
-          --title "$GITHUB_REF_NAME" --generate-notes
-          --notes "$(cat "$RUNNER_TEMP/release-notes.md")"
+      - name: Create or reuse draft release
+        shell: bash
+        run: |
+          if existing="$(gh release view "$GITHUB_REF_NAME" --json isDraft 2>/dev/null)"; then
+            if [ "$(jq -r '.isDraft' <<<"$existing")" != "true" ]; then
+              echo "::error::Release $GITHUB_REF_NAME is already published"
+              exit 1
+            fi
+            echo "Reusing existing draft release $GITHUB_REF_NAME"
+          else
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+              --fail-on-no-commits --title "$GITHUB_REF_NAME" --generate-notes \
+              --notes "$(cat "$RUNNER_TEMP/release-notes.md")"
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -75,7 +113,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Linux native deps
         if: contains(matrix.target, 'linux-gnu')
@@ -91,7 +129,7 @@ jobs:
           key: release-${{ matrix.target }}
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} -p edda
+        run: cargo build --locked --release --target ${{ matrix.target }} -p edda
 
       - name: Prepare archive (unix)
         if: matrix.archive == 'tar.gz'
@@ -120,8 +158,15 @@ jobs:
           "$hash  ${ARCHIVE}.zip" | Out-File -Encoding ASCII "${ARCHIVE}.zip.sha256"
           echo "ASSET=${ARCHIVE}.zip" >> $env:GITHUB_ENV
 
-      - name: Upload assets
-        run: gh release upload "${{ needs.create-release.outputs.tag }}" "${{ env.ASSET }}" "${{ env.ASSET }}.sha256"
+      - name: Verify draft release and upload assets
+        shell: bash
+        run: |
+          tag="${{ needs.create-release.outputs.tag }}"
+          if [ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" != "true" ]; then
+            echo "::error::Release $tag is no longer a draft; refusing to replace assets"
+            exit 1
+          fi
+          gh release upload "$tag" "${{ env.ASSET }}" "${{ env.ASSET }}.sha256" --clobber
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -130,8 +175,77 @@ jobs:
     needs: [create-release, build-release]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Verify release assets
+        shell: bash
+        run: |
+          tag="${{ needs.create-release.outputs.tag }}"
+          expected=(
+            "edda-${tag}-x86_64-unknown-linux-gnu.tar.gz"
+            "edda-${tag}-x86_64-unknown-linux-gnu.tar.gz.sha256"
+            "edda-${tag}-aarch64-unknown-linux-gnu.tar.gz"
+            "edda-${tag}-aarch64-unknown-linux-gnu.tar.gz.sha256"
+            "edda-${tag}-x86_64-apple-darwin.tar.gz"
+            "edda-${tag}-x86_64-apple-darwin.tar.gz.sha256"
+            "edda-${tag}-aarch64-apple-darwin.tar.gz"
+            "edda-${tag}-aarch64-apple-darwin.tar.gz.sha256"
+            "edda-${tag}-x86_64-pc-windows-msvc.zip"
+            "edda-${tag}-x86_64-pc-windows-msvc.zip.sha256"
+          )
+
+          printf '%s\n' "${expected[@]}" | sort > "$RUNNER_TEMP/expected-assets.txt"
+          gh release view "$tag" --json assets --jq '.assets[].name' \
+            | sort > "$RUNNER_TEMP/actual-assets.txt"
+          if ! diff -u "$RUNNER_TEMP/expected-assets.txt" "$RUNNER_TEMP/actual-assets.txt"; then
+            echo "::error::Release asset set is incomplete or unexpected"
+            exit 1
+          fi
+
+          empty_assets="$(gh release view "$tag" --json assets \
+            --jq '.assets[] | select(.size == 0) | .name')"
+          if [ -n "$empty_assets" ]; then
+            echo "::error::Release contains empty assets"
+            printf '%s\n' "$empty_assets"
+            exit 1
+          fi
+
+          if [ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" != "true" ]; then
+            echo "::error::Release $tag is no longer a draft; refusing to publish"
+            exit 1
+          fi
+
+          asset_dir="$RUNNER_TEMP/release-assets"
+          mkdir -p "$asset_dir"
+          gh release download "$tag" --dir "$asset_dir" --pattern 'edda-*'
+          (
+            cd "$asset_dir"
+            for checksum in *.sha256; do
+              archive="${checksum%.sha256}"
+              expected_hash="$(awk '{ print tolower($1) }' "$checksum" | tr -d '\r\n')"
+              actual_hash="$(sha256sum "$archive" | awk '{ print $1 }')"
+              if [[ ! "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || [ "$actual_hash" != "$expected_hash" ]; then
+                echo "::error::Checksum mismatch for $archive"
+                exit 1
+              fi
+            done
+
+          )
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run native asset canary without repository credentials
+        shell: bash
+        run: |
+          tag="${{ needs.create-release.outputs.tag }}"
+          cd "$RUNNER_TEMP/release-assets"
+          native_dir="edda-${tag}-x86_64-unknown-linux-gnu"
+          tar -xzf "${native_dir}.tar.gz"
+          actual_version="$(env -u GH_TOKEN -u GITHUB_TOKEN "./${native_dir}/edda" --version)"
+          if [ "$actual_version" != "edda ${tag#v}" ]; then
+            echo "::error::Native asset reports '$actual_version', expected 'edda ${tag#v}'"
+            exit 1
+          fi
       - name: Publish release
-        run: gh release edit "${{ needs.create-release.outputs.tag }}" --draft=false
+        run: >-
+          gh release edit "${{ needs.create-release.outputs.tag }}"
+          --draft=false --latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
