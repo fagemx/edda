@@ -126,6 +126,15 @@ fn claim_with_subject_records_on_board() {
         board.contains("\"label\":\"review-pr570\""),
         "board: {board}"
     );
+
+    // GH-581 / Round 1 & Round 2 P1: Verify edda peers formats the claimed subject
+    env.write_heartbeat("reviewer-1", 0);
+    let (p_code, p_stdout, p_stderr) = env.run_edda(&["peers"]);
+    assert_eq!(p_code, 0, "peers failed: {p_stderr}");
+    assert!(
+        p_stdout.contains("[pr:570]"),
+        "edda peers output should contain [pr:570], got: {p_stdout}"
+    );
 }
 
 #[test]
@@ -341,4 +350,33 @@ fn check_merge_refuses_claimed_pr_unless_force() {
     );
     assert_eq!(code_mask, 1, "live claim must not be masked by stale claim");
     assert!(stderr_mask.contains("z-live-sess"), "stderr: {stderr_mask}");
+
+    // Case 7: Unparseable claim glob on board fails closed (refuses merge with error)
+    let env_bad = TestEnv::new();
+    env_bad.write_heartbeat("bad-reviewer", 0);
+    env_bad.run_edda(&[
+        "claim",
+        "review-bad",
+        "--subject",
+        "pr:57[0-",
+        "--session",
+        "bad-reviewer",
+    ]);
+    let input_path_bad = env_bad.repo.join("input.json");
+    std::fs::write(&input_path_bad, input_json.to_string()).expect("write input.json");
+    let (code_bad, _, stderr_bad) = env_bad.run_edda_with_env(
+        &[
+            "prs",
+            "check-merge",
+            "570",
+            "--input",
+            input_path_bad.to_str().unwrap(),
+        ],
+        &[("EDDA_SESSION_ID", "other-worker")],
+    );
+    assert_ne!(code_bad, 0, "unparseable glob must fail closed");
+    assert!(
+        stderr_bad.contains("failed to parse claim subject") || stderr_bad.contains("error"),
+        "stderr: {stderr_bad}"
+    );
 }

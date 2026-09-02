@@ -595,7 +595,7 @@ fn normalize_token(token: &str) -> String {
     s
 }
 
-fn has_wildcard(pattern: &str) -> bool {
+pub(crate) fn has_wildcard(pattern: &str) -> bool {
     pattern.contains('*') || pattern.contains('?') || pattern.contains('[') || pattern.contains('{')
 }
 

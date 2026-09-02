@@ -663,35 +663,53 @@ pub fn format_merge_report(result: &MergeGateResult) -> (String, String) {
 ///
 /// Filters for live sessions and excludes `current_session_id`.
 /// Matches using `subjects_intersect` so glob subjects (e.g. `pr:57*`) are honoured.
-pub fn check_active_pr_claim(
+/// Fails closed (returns `Err`) if a claim subject glob cannot be parsed soundly.
+pub(crate) fn check_active_pr_claim(
     repo_root: &Path,
     pr_number: u64,
     current_session_id: Option<&str>,
-) -> Option<String> {
+) -> anyhow::Result<Option<String>> {
     let project_id = edda_store::project_id(repo_root);
     let target_subject = format!("pr:{pr_number}");
     let board = edda_bridge_claude::peers::compute_board_state(&project_id);
 
-    board.claims.into_iter().find_map(|c| {
-        let sub = c.subject.as_deref()?;
-        if !crate::cmd_claim::subjects_intersect(&target_subject, sub).unwrap_or(false) {
-            return None;
+    // Validate all claim subject globs up front so a corrupted/unparseable glob fails closed
+    for c in &board.claims {
+        if let Some(sub) = c.subject.as_deref() {
+            if crate::cmd_claim::has_wildcard(sub) {
+                globset::GlobBuilder::new(sub)
+                    .case_insensitive(true)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("invalid claim subject glob '{sub}': {e}"))?;
+            }
+        }
+    }
+
+    for c in board.claims {
+        let Some(sub) = c.subject.as_deref() else {
+            continue;
+        };
+        let matches = crate::cmd_claim::subjects_intersect(&target_subject, sub)
+            .map_err(|e| anyhow::anyhow!("failed to parse claim subject: {e}"))?;
+        if !matches {
+            continue;
         }
         let is_live = matches!(
             edda_bridge_claude::peers::classify_session_liveness(&project_id, &c.session_id),
             edda_bridge_claude::peers::SessionLiveness::Live { .. }
         );
         if !is_live {
-            return None;
+            continue;
         }
-        if current_session_id.is_some() && current_session_id == Some(&c.session_id) {
-            return None;
+        if current_session_id == Some(&c.session_id) {
+            continue;
         }
-        Some(format!(
+        return Ok(Some(format!(
             "{} (label: '{}', subject: '{}')",
             c.session_id, c.label, sub
-        ))
-    })
+        )));
+    }
+    Ok(None)
 }
 
 /// Execute the merge precondition check CLI entrypoint.
@@ -715,7 +733,7 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
     } else if let Some(head_sha) = args.head_sha {
         MergeGateInput {
             head_sha,
-            pr: args.pr,
+            pr: None,
             pr_author: None,
             verdict: args.verdict,
             verdict_sha: args.verdict_sha,
@@ -741,7 +759,7 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
     if let Some(pr_number) = target_pr {
         if input.claimed_by.is_none() {
             let my_sid = std::env::var("EDDA_SESSION_ID").ok();
-            input.claimed_by = check_active_pr_claim(repo_root, pr_number, my_sid.as_deref());
+            input.claimed_by = check_active_pr_claim(repo_root, pr_number, my_sid.as_deref())?;
         }
     }
 
@@ -1214,7 +1232,7 @@ Commit: 1234567890abcdef1234567890abcdef12345678
         let _store = crate::test_support::isolated_store();
 
         // Initially no claims
-        assert_eq!(check_active_pr_claim(repo.path(), 570, None), None);
+        assert_eq!(check_active_pr_claim(repo.path(), 570, None).unwrap(), None);
 
         // Claim with subject pr:570 by session s1 (live)
         edda_bridge_claude::peers::write_heartbeat_minimal(&project_id, "s1", "reviewer", "/tmp");
@@ -1227,16 +1245,22 @@ Commit: 1234567890abcdef1234567890abcdef12345678
         );
 
         // Live claim by s1 is detected for another session
-        let res = check_active_pr_claim(repo.path(), 570, Some("s2"));
+        let res = check_active_pr_claim(repo.path(), 570, Some("s2")).unwrap();
         assert!(res.is_some());
         assert!(res.as_ref().unwrap().contains("s1"));
         assert!(res.as_ref().unwrap().contains("pr:570"));
 
         // Same session (s1) is permitted
-        assert_eq!(check_active_pr_claim(repo.path(), 570, Some("s1")), None);
+        assert_eq!(
+            check_active_pr_claim(repo.path(), 570, Some("s1")).unwrap(),
+            None
+        );
 
         // Different PR (571) is clear
-        assert_eq!(check_active_pr_claim(repo.path(), 571, Some("s2")), None);
+        assert_eq!(
+            check_active_pr_claim(repo.path(), 571, Some("s2")).unwrap(),
+            None
+        );
 
         // Glob matching: a claim on pr:57* matches PR 570 (Round 1 P1-2)
         edda_bridge_claude::peers::write_heartbeat_minimal(
@@ -1252,8 +1276,20 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             &[],
             Some("pr:57*"),
         );
-        let res_glob = check_active_pr_claim(repo.path(), 570, Some("s1")); // s1 is allowed for s1's claim, but s_glob also claims it!
+        let res_glob = check_active_pr_claim(repo.path(), 570, Some("s1")).unwrap(); // s1 is allowed for s1's claim, but s_glob also claims it!
         assert!(res_glob.is_some());
         assert!(res_glob.as_ref().unwrap().contains("s_glob"));
+
+        // Unparseable glob (Round 2 P1): fails closed with Err
+        edda_bridge_claude::peers::write_heartbeat_minimal(&project_id, "s_bad", "bad_rev", "/tmp");
+        edda_bridge_claude::peers::write_claim_with_subject(
+            &project_id,
+            "s_bad",
+            "rev-bad",
+            &[],
+            Some("pr:57[0-"),
+        );
+        let res_bad = check_active_pr_claim(repo.path(), 570, Some("s2"));
+        assert!(res_bad.is_err(), "unparseable claim glob must fail closed");
     }
 }
