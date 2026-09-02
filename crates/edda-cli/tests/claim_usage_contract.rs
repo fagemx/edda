@@ -1,25 +1,25 @@
-//! Regression tests for the non-check dda claim usage diagnostics contract (GH-589).
+//! Regression tests for the non-check `edda claim` usage diagnostics contract (GH-589).
 //!
-//! GH-562 introduced dda claim check as a subcommand while preserving
-//! dda claim <LABEL> for scope claims. The diagnostics contract for
-//! non-check usage errors is:
+//! GH-562 introduced `edda claim check` as a subcommand while preserving
+//! `edda claim <LABEL>` for scope claims. The diagnostics contract for
+//! non-`check` usage errors is:
 //!
-//! 1. Missing label and no subcommand (dda claim):
+//! 1. Missing label and no subcommand (`edda claim`):
 //!    - Exit code 2.
-//!    - Stderr specifies that dda claim requires a label or the check subcommand.
+//!    - Stderr specifies that `edda claim` requires a label or the `check` subcommand.
 //!    - No claim is written to the coordination board.
 //!
-//! 2. Extra positional arguments on plain claim (dda claim auth extra --session probe):
+//! 2. Extra positional arguments on plain claim (`edda claim auth extra --session probe`):
 //!    - Exit code 2.
-//!    - Stderr reports subcommand conflict (cannot be used with).
+//!    - Stderr reports subcommand conflict (`cannot be used with`).
 //!    - No claim is written to the coordination board.
 //!
-//! 3. Check-only flag on plain claim (dda claim auth --json):
+//! 3. Check-only flag on plain claim (`edda claim auth --json`):
 //!    - Exit code 2.
-//!    - Stderr reports unexpected argument --json.
+//!    - Stderr reports unexpected argument `--json`.
 //!    - No claim is written to the coordination board.
 //!
-//! 4. Valid plain claim (dda claim auth --paths src/auth/* --session probe):
+//! 4. Valid plain claim (`edda claim auth --paths src/auth/* --session probe`):
 //!    - Exit code 0.
 //!    - Claim is written to the coordination board with paths and session.
 
@@ -100,7 +100,7 @@ fn plain_claim_rejects_extra_positional_arguments() {
 
     assert_eq!(code, 2, "stdout={stdout:?} stderr={stderr:?}");
     assert!(
-        stderr.contains("cannot be used with") || stderr.contains("unexpected argument"),
+        stderr.contains("cannot be used with"),
         "stderr should report argument conflict, got: {stderr:?}"
     );
     assert!(
