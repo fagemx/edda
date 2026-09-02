@@ -110,7 +110,18 @@ fn append_ledger_note(
         // or the append rejects the event as hash-invalid.
         edda_core::event::finalize_event(&mut event).context("re-finalizing note event")?;
     }
-    ledger.append_event(&event).context("appending note event")
+    ledger
+        .append_event(&event)
+        .context("appending note event")?;
+
+    // GH-584 review round 2 P1-5: parity with `edda note` (cmd_note.rs) —
+    // refresh the derived markdown views so an operator reading
+    // `.edda/views/<branch>/log.md` sees the note immediately, not only
+    // after the next rebuild. Same best-effort pattern: a failed refresh
+    // never blocks a successful write.
+    let _ = edda_derive::rebuild_branch(&ledger, &branch);
+
+    Ok(())
 }
 
 /// Best-effort wrapper (GH-584 problem 2): a failed ledger write is never
@@ -210,16 +221,20 @@ pub fn record_phase_done_with_plan(
 /// See [`record_phase_failed_with_plan`] — this is the plan-less wrapper
 /// kept for call sites that do not have the plan in scope (GH-584).
 pub fn record_phase_failed(cwd: &Path, phase_id: &str, error: &str) {
-    record_phase_failed_with_plan(cwd, None, phase_id, error);
+    record_phase_failed_with_plan(cwd, None, phase_id, None, error);
 }
 
-/// [`record_phase_failed`] with the plan name, so the structured ledger
-/// payload carries `plan_id`. Call sites that have the plan in scope should
-/// prefer this variant (GH-584).
+/// [`record_phase_failed`] with the plan name and the phase's measured cost,
+/// so the structured ledger payload carries `plan_id` and an honest
+/// `cost_usd`. Call sites that have the plan in scope should prefer this
+/// variant (GH-584). `cost_usd: None` (unmeasured) serializes as JSON null —
+/// never the 0.0 sentinel (#533 discipline); a measured failure keeps its
+/// cost instead of being rewritten as unmeasured.
 pub fn record_phase_failed_with_plan(
     cwd: &Path,
     plan_id: Option<&str>,
     phase_id: &str,
+    cost_usd: Option<f64>,
     error: &str,
 ) {
     let error_str = if error.len() > 200 {
@@ -227,14 +242,15 @@ pub fn record_phase_failed_with_plan(
     } else {
         error.to_string()
     };
-    let text = format!("Phase \"{phase_id}\" failed: {error_str}");
+    let cost_str = cost_usd.map(|c| format!(" [${c:.3}]")).unwrap_or_default();
+    let text = format!("Phase \"{phase_id}\" failed{cost_str}: {error_str}");
     let mut tags = vec!["conductor".to_string(), format!("phase:{phase_id}")];
     tags.push("failure".to_string());
     let payload = serde_json::json!({
         "plan_id": plan_id,
         "phase_id": phase_id,
         "status": "failed",
-        "cost_usd": None::<f64>,
+        "cost_usd": cost_usd,
     });
     append_ledger_note_best_effort(
         &format!("phase \"{phase_id}\" failed"),
@@ -248,10 +264,6 @@ pub fn record_phase_failed_with_plan(
 /// Record plan completion in the workspace ledger with the honest total
 /// cost: `total_cost_usd: None` (unmeasured — no phase ever recorded a
 /// measured cost) serializes as JSON null, never 0.0 (#533 discipline).
-///
-/// Wiring note (GH-584): the runner's plan-completion path currently only
-/// writes the plan-local event log; handing this to the lane that owns
-/// `runner/sequential.rs`.
 pub fn record_plan_completed(cwd: &Path, plan_id: &str, total_cost_usd: Option<f64>) {
     let cost_str = total_cost_usd
         .map(|c| format!(" [${c:.3}]"))
@@ -611,7 +623,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         edda_ledger::Ledger::ensure_initialized(dir.path()).expect("init workspace ledger");
 
-        record_note(dir.path(), "gate approved politely", &["conductor", "verdict"]);
+        record_note(
+            dir.path(),
+            "gate approved politely",
+            &["conductor", "verdict"],
+        );
 
         let ledger = edda_ledger::Ledger::open(dir.path()).expect("open ledger");
         let branch = ledger.head_branch().expect("head branch");

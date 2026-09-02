@@ -105,6 +105,16 @@ pub struct PhaseState {
     /// accounting stays exact across a manual retry.
     #[serde(default)]
     pub env_retries: u32,
+    /// GH-584 review round 2: measured cost accumulated by THIS phase's agent
+    /// turns. `None` = no turn ever reported a measured cost (#533: 0.0 ≠
+    /// unmeasured). Failure writers read it so a later failure in the same
+    /// phase (failed checks, gate rejection, gate timeout) reaches the
+    /// workspace ledger with its cost instead of being flattened into
+    /// unmeasured null. Redispatch turns accumulate; a fresh attempt resets
+    /// it at attempt start. Serialized for persistence across restarts — a
+    /// gate rejection after a resume must still find the cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +324,7 @@ impl PlanState {
                 verdict_actor: None,
                 verdict_comment: None,
                 env_retries: 0,
+                cost_usd: None,
             })
             .collect();
 

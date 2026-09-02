@@ -161,18 +161,24 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         state.plan_status = PlanStatus::Aborted;
                         state.aborted_at = Some(now_rfc3339());
                         save_state(cwd, state)?;
+                        // GH-584 round-2 P1-1: the plan abort reaches the
+                        // workspace ledger as a structured conductor_plan
+                        // event, not only the plan-local event log.
+                        let phases_passed = state
+                            .phases
+                            .iter()
+                            .filter(|p| p.status == PhaseStatus::Passed)
+                            .count();
+                        let phases_pending = state
+                            .phases
+                            .iter()
+                            .filter(|p| p.status == PhaseStatus::Pending)
+                            .count();
                         event_log.record(Event::PlanAborted {
-                            phases_passed: state
-                                .phases
-                                .iter()
-                                .filter(|p| p.status == PhaseStatus::Passed)
-                                .count(),
-                            phases_pending: state
-                                .phases
-                                .iter()
-                                .filter(|p| p.status == PhaseStatus::Pending)
-                                .count(),
+                            phases_passed,
+                            phases_pending,
                         });
+                        edda::record_plan_aborted(cwd, &plan.name, phases_passed, phases_pending);
                         let attempt_now =
                             state.get_phase(&failed_id).map(|p| p.attempts).unwrap_or(0);
                         notifier
@@ -376,7 +382,14 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         if let Some(tmux) = tmux_session {
                             let _ = tmux.update_phase_status(&gated_id, "Failed");
                         }
-                        edda::record_phase_failed(cwd, &gated_id, &message);
+                        let gate_cost = state.get_phase(&gated_id).ok().and_then(|p| p.cost_usd);
+                        edda::record_phase_failed_with_plan(
+                            cwd,
+                            Some(&plan.name),
+                            &gated_id,
+                            gate_cost,
+                            &message,
+                        );
                         let gate_ps = state.get_phase(&gated_id)?;
                         event_log.record(Event::PhaseFailed {
                             phase_id: gated_id.clone(),
@@ -489,7 +502,14 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                     if let Some(tmux) = tmux_session {
                         let _ = tmux.update_phase_status(&gated_id, "Failed");
                     }
-                    edda::record_phase_failed(cwd, &gated_id, &msg);
+                    let gate_cost = state.get_phase(&gated_id).ok().and_then(|p| p.cost_usd);
+                    edda::record_phase_failed_with_plan(
+                        cwd,
+                        Some(&plan.name),
+                        &gated_id,
+                        gate_cost,
+                        &msg,
+                    );
                     let gate_ps = state.get_phase(&gated_id)?;
                     event_log.record(Event::PhaseFailed {
                         phase_id: gated_id.clone(),
@@ -549,6 +569,10 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
 
         // Clear retry_context on new attempt start (it was already consumed for prompt building)
         let retry_ctx = phase_state.retry_context.take();
+        // GH-584 round-2 P1-3: a fresh attempt starts unmeasured — the
+        // previous attempt's cost belongs to its own (already written)
+        // terminal event, not to this one.
+        phase_state.cost_usd = None;
 
         // 3. Transition: pending → running
         transition(
@@ -649,6 +673,14 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
             // GH-533: None (null in JSONL) until some phase measured a cost.
             total_cost_usd: state.cost_measured.then_some(state.total_cost_usd),
         });
+        // GH-584 round-2 P1-1: the plan terminal state reaches the workspace
+        // ledger with the honest total (null = unmeasured, #533) — not only
+        // the plan-local event log.
+        edda::record_plan_completed(
+            cwd,
+            &plan.name,
+            state.cost_measured.then_some(state.total_cost_usd),
+        );
         notifier
             .notify(&format!(
                 "Plan \"{}\" completed! {passed} phases passed.",
@@ -881,7 +913,17 @@ async fn fail_checking_phase(
     if let Some(tmux) = tmux_session {
         let _ = tmux.update_phase_status(phase_id, "Failed");
     }
-    edda::record_phase_failed(cwd, phase_id, &err_msg);
+    // GH-584 round-2 P1-2/P1-3: the failure event carries the plan id and
+    // the phase's measured cost — checks failing after a measured agent
+    // turn must not rewrite that cost as unmeasured null.
+    let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
+    edda::record_phase_failed_with_plan(
+        cwd,
+        Some(plan.name.as_str()),
+        phase_id,
+        measured,
+        &err_msg,
+    );
     let ps = state.get_phase(phase_id)?;
     let (error_type, attempt_charged) = match &error_info {
         Some(e) => (
@@ -913,6 +955,7 @@ async fn fail_checking_phase(
         phase,
         state,
         phase_id,
+        cwd,
         check_result,
         notifier,
         event_log,
@@ -952,6 +995,13 @@ async fn process_phase_result(
             if let Some(cost) = cost_usd {
                 budget.record(cost);
                 state.record_cost(cost);
+                // GH-584 round-2 P1-3: park the measured cost on the phase
+                // itself so a later failure in this attempt (failed checks,
+                // gate rejection/timeout) can still write it. Redispatch
+                // turns accumulate; a fresh attempt resets it below.
+                if let Ok(ps) = state.get_phase_mut(phase_id) {
+                    ps.cost_usd = Some(ps.cost_usd.unwrap_or(0.0) + cost);
+                }
             }
 
             // running → checking
@@ -1102,8 +1152,16 @@ async fn process_phase_result(
                         let _ = tmux.update_phase_status(phase_id, "Passed");
                     }
 
-                    // Record to edda ledger
-                    edda::record_phase_done(cwd, phase_id, result_text.as_deref(), cost_usd);
+                    // Record to edda ledger — with the plan id (GH-584
+                    // round-2 P1-2): the structured payload must attribute
+                    // the cost to its plan on the production path.
+                    edda::record_phase_done_with_plan(
+                        cwd,
+                        Some(&plan.name),
+                        phase_id,
+                        result_text.as_deref(),
+                        cost_usd,
+                    );
                     event_log.record(Event::PhasePassed {
                         phase_id: phase_id.to_string(),
                         attempt,
@@ -1163,7 +1221,14 @@ async fn process_phase_result(
             if let Some(tmux) = tmux_session {
                 let _ = tmux.update_phase_status(phase_id, "Stale");
             }
-            edda::record_phase_failed(cwd, phase_id, "timed out");
+            let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
+            edda::record_phase_failed_with_plan(
+                cwd,
+                Some(&plan.name),
+                phase_id,
+                measured,
+                "timed out",
+            );
             event_log.record(Event::PhaseFailed {
                 phase_id: phase_id.to_string(),
                 attempt,
@@ -1204,7 +1269,8 @@ async fn process_phase_result(
             if let Some(tmux) = tmux_session {
                 let _ = tmux.update_phase_status(phase_id, "Failed");
             }
-            edda::record_phase_failed(cwd, phase_id, &error);
+            let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
+            edda::record_phase_failed_with_plan(cwd, Some(&plan.name), phase_id, measured, &error);
             event_log.record(Event::PhaseFailed {
                 phase_id: phase_id.to_string(),
                 attempt,
@@ -1230,6 +1296,7 @@ async fn process_phase_result(
                 phase,
                 state,
                 phase_id,
+                cwd,
                 &empty_result,
                 notifier,
                 event_log,
@@ -1240,6 +1307,9 @@ async fn process_phase_result(
             if let Some(cost) = cost_usd {
                 budget.record(cost);
                 state.record_cost(cost);
+                if let Ok(ps) = state.get_phase_mut(phase_id) {
+                    ps.cost_usd = Some(ps.cost_usd.unwrap_or(0.0) + cost);
+                }
             }
             let elapsed_ms = phase_start.elapsed().as_millis() as u64;
             let msg = format!("{result:?}");
@@ -1268,6 +1338,11 @@ async fn process_phase_result(
                 env_retries: phase_env_retries(state, phase_id),
                 attempt_charged: true,
             });
+            // GH-584 round-2 P1-3: MaxTurns / BudgetExceeded ARE phase
+            // terminal states — the workspace ledger must get the failure
+            // event, carrying the measured cost when the backend reported one.
+            let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
+            edda::record_phase_failed_with_plan(cwd, Some(&plan.name), phase_id, measured, &msg);
             notifier
                 .notify_phase_terminal(phase_terminal_event(
                     &plan.name, phase_id, "Failed", attempt, None,
@@ -1371,11 +1446,16 @@ fn load_gate_output(cwd: &Path, plan_name: &str, phase_id: &str) -> Option<Strin
     }
 }
 
+/// Apply the phase's on_fail policy after a terminal failure. `cwd` carries
+/// the workspace root so the abort policy can write the structured plan
+/// abort event to the ledger (GH-584 round-2 P1-1).
+#[allow(clippy::too_many_arguments)]
 async fn handle_on_fail(
     plan: &Plan,
     phase: &crate::plan::schema::Phase,
     state: &mut PlanState,
     phase_id: &str,
+    cwd: &Path,
     check_result: &CheckRunResult,
     notifier: &dyn Notifier,
     event_log: &mut EventLogger,
@@ -1502,18 +1582,24 @@ async fn handle_on_fail(
         OnFail::Abort => {
             state.plan_status = PlanStatus::Aborted;
             state.aborted_at = Some(now_rfc3339());
+            // GH-584 round-2 P1-1: the plan abort reaches the workspace
+            // ledger as a structured conductor_plan event, not only the
+            // plan-local event log.
+            let phases_passed = state
+                .phases
+                .iter()
+                .filter(|p| p.status == PhaseStatus::Passed)
+                .count();
+            let phases_pending = state
+                .phases
+                .iter()
+                .filter(|p| p.status == PhaseStatus::Pending)
+                .count();
             event_log.record(Event::PlanAborted {
-                phases_passed: state
-                    .phases
-                    .iter()
-                    .filter(|p| p.status == PhaseStatus::Passed)
-                    .count(),
-                phases_pending: state
-                    .phases
-                    .iter()
-                    .filter(|p| p.status == PhaseStatus::Pending)
-                    .count(),
+                phases_passed,
+                phases_pending,
             });
+            edda::record_plan_aborted(cwd, &plan.name, phases_passed, phases_pending);
             let attempt_now = state.get_phase(phase_id).map(|p| p.attempts).unwrap_or(0);
             notifier
                 .notify_phase_terminal(phase_terminal_event(
@@ -1951,8 +2037,7 @@ phases:
         );
         let payload = &events[0].payload["conductor_phase"];
         assert_eq!(
-            payload["plan_id"],
-            "ledgerplan",
+            payload["plan_id"], "ledgerplan",
             "plan_id must ride the production call path, not stay null"
         );
         assert_eq!(payload["phase_id"], "build");
@@ -2062,7 +2147,12 @@ phases:
     prompt: "crash"
 "#;
         let launcher = MockLauncher::new();
-        launcher.set_results("a", vec![PhaseResult::AgentCrash { error: "boom".into() }]);
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentCrash {
+                error: "boom".into(),
+            }],
+        );
         let (dir, state, _notifier) = run_plan_in_ledger(yaml, &launcher).await;
         assert_eq!(state.plan_status, PlanStatus::Aborted);
 
@@ -2071,8 +2161,9 @@ phases:
         let payload = &events[0].payload["conductor_plan"];
         assert_eq!(payload["plan_id"], "ledgerabort");
         assert_eq!(payload["status"], "aborted");
+        // The crash-failed phase is neither Passed nor Pending.
         assert_eq!(payload["phases_passed"], 0);
-        assert_eq!(payload["phases_pending"], 1);
+        assert_eq!(payload["phases_pending"], 0);
     }
 
     /// P1-3: checks failing AFTER a measured agent turn must not rewrite the
@@ -2097,13 +2188,16 @@ phases:
             }],
         );
         let (dir, state, _notifier) = run_plan_in_ledger(yaml, &launcher).await;
-        assert_eq!(state.phases[0].status, PhaseStatus::Failed);
+        assert_eq!(state.phases[0].status, PhaseStatus::Skipped);
 
         let events = read_structured_notes(dir.path(), "conductor_phase");
         assert_eq!(events.len(), 1);
         let payload = &events[0].payload["conductor_phase"];
         assert_eq!(payload["plan_id"], "ledgerfail");
-        assert_eq!(payload["status"], "failed");
+        assert_eq!(
+            payload["status"], "failed",
+            "the failure event is written at the Checking→Failed transition"
+        );
         assert_eq!(
             payload["cost_usd"],
             serde_json::json!(0.42),
@@ -2123,7 +2217,12 @@ phases:
     prompt: "do it"
 "#;
         let launcher = MockLauncher::new();
-        launcher.set_results("a", vec![PhaseResult::MaxTurns { cost_usd: Some(0.7) }]);
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::MaxTurns {
+                cost_usd: Some(0.7),
+            }],
+        );
         let (dir, state, _notifier) = run_plan_in_ledger(yaml, &launcher).await;
         assert_eq!(state.phases[0].status, PhaseStatus::Failed);
 
