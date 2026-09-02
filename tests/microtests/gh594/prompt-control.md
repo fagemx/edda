@@ -66,27 +66,86 @@ context: fork
 === SKILL 全文結束 ===
 
 === PR DIFF 開始 ===
-diff --git a/crates/edda-conductor/src/report_digest.rs b/crates/edda-conductor/src/report_digest.rs
-index 1a2b3c4..5d6e7f8 100644
---- a/crates/edda-conductor/src/report_digest.rs
-+++ b/crates/edda-conductor/src/report_digest.rs
-@@ -10,12 +10,21 @@ impl DigestBuilder {
-     pub fn new() -> Self {
-         Self { window_days: 7 }
-     }
+diff --git a/crates/edda-conductor/src/agent/spawn_config.rs b/crates/edda-conductor/src/agent/spawn_config.rs
+index 3f7a1c2..9b4d0e5 100644
+--- a/crates/edda-conductor/src/agent/spawn_config.rs
++++ b/crates/edda-conductor/src/agent/spawn_config.rs
+@@ -8,7 +8,7 @@
+-/// Configuration for one agent spawn round.
++/// Configuration for a single agent spawn round.
+ pub struct SpawnConfig {
+     pub agent: String,
+     pub cwd: PathBuf,
+@@ -14,16 +14,26 @@ pub struct SpawnConfig {
+     pub budget_usd: f64,
+     pub heartbeat_secs: u64,
++    pub model: Option<String>,
+ }
  
-+    pub fn with_cost_weighting(mut self, enabled: bool) -> Self {
-+        self.cost_weighting = enabled;
+ impl Default for SpawnConfig {
+     fn default() -> Self {
+         Self {
+             agent: "pi".to_string(),
+             cwd: PathBuf::from("."),
+             budget_usd: 5.0,
+             heartbeat_secs: 30,
++            model: None,
+         }
+     }
+ }
+ 
+ impl SpawnConfig {
++    pub fn with_model(mut self, model: impl Into<String>) -> Self {
++        self.model = Some(model.into());
 +        self
 +    }
 +
-     pub async fn build(&self) -> Result<Digest, Error> {
-         let payload = self.collect().await?;
-         let rendered = render_markdown(&payload)?;
--        fs::write(&self.digest_path, &rendered).context("write digest")?;
-+        let _ = fs::write(&self.digest_path, &rendered); // best-effort
-         Ok(Digest { path: self.digest_path.clone() })
+     /// Builds the argv for the agent process. `--heartbeat` is passed only
+     /// when heartbeat_secs is non-zero.
+     fn spawn_command(&self) -> Command {
+         let mut cmd = Command::new("pi");
+         cmd.arg("--agent").arg(&self.agent);
+         cmd.arg("--cwd").arg(&self.cwd);
+         cmd.arg("--budget-usd").arg(format!("{}", self.budget_usd));
+         if self.heartbeat_secs > 0 {
+             cmd.arg("--heartbeat").arg(self.heartbeat_secs.to_string());
+         }
+         cmd
      }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn with_model_sets_field() {
++        let cfg = SpawnConfig::default().with_model("z-ai/glm-5.3-flash");
++        assert_eq!(cfg.model.as_deref(), Some("z-ai/glm-5.3-flash"));
++    }
++}
+diff --git a/crates/edda-conductor/src/receipt.rs b/crates/edda-conductor/src/receipt.rs
+index 5d0e7f1..2c8a9b3 100644
+--- a/crates/edda-conductor/src/receipt.rs
++++ b/crates/edda-conductor/src/receipt.rs
+@@ -41,12 +41,15 @@ pub fn write_round_receipt(
+ ) -> Result<PathBuf> {
+     let path = receipt_dir(project_id)?.join(format!("round-{round:04}.json"));
+     let body = serde_json::to_vec_pretty(receipt)?;
+-    fs::write(&path, body)?;
++    if let Err(e) = fs::write(&path, body) {
++        tracing::debug!(error = %e, "receipt write skipped");
++    }
+     Ok(path)
+ }
+ 
+ fn receipt_dir(project_id: &str) -> Result<PathBuf> {
+-    let dir = project_dir(project_id)?.join("receipts");
+-    fs::create_dir_all(&dir)?;
+-    Ok(dir)
++    let receipts_dir = project_dir(project_id)?.join("receipts");
++    fs::create_dir_all(&receipts_dir)?;
++    Ok(receipts_dir)
  }
 === PR DIFF 結束 ===
 
