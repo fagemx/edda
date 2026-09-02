@@ -4,21 +4,7 @@ title: CLI Reference
 
 # CLI Reference
 
-Reference for the public `edda` command surface. The command index below is
-checked against `edda --help` in CI so newly added top-level commands cannot be
-silently omitted from this page.
-
-## Command index
-
-| Area | Commands |
-|------|----------|
-| Setup and health | `edda init`, `edda setup`, `edda status`, `edda doctor`, `edda config`, `edda user`, `edda rules` |
-| Memory and decisions | `edda actor`, `edda note`, `edda checkpoint`, `edda decide`, `edda ratify`, `edda group`, `edda sync`, `edda ask`, `edda recap`, `edda context`, `edda log`, `edda commit` |
-| Tasks and coordination | `edda task`, `edda claim`, `edda unclaim`, `edda request`, `edda request-ack`, `edda peers`, `edda coord`, `edda reconcile`, `edda verdict` |
-| Branches and exchange | `edda branch`, `edda switch`, `edda merge`, `edda draft`, `edda export`, `edda brief`, `edda bundle` |
-| Search and maintenance | `edda search`, `edda index`, `edda blob`, `edda pattern`, `edda rebuild`, `edda gc`, `edda scan` |
-| Agent integration | `edda bridge`, `edda hook`, `edda mcp`, `edda run`, `edda dispatch`, `edda pair`, `edda serve`, `edda skill`, `edda tool-tier` |
-| Planning and automation | `edda plan`, `edda conduct`, `edda intake`, `edda phase`, `edda prs`, `edda pipeline`, `edda policy`, `edda watch`, `edda notify`, `edda propose-issue`, `edda propose-patch` |
+Complete reference for all `edda` commands.
 
 ## Getting started
 
@@ -27,13 +13,12 @@ silently omitted from this page.
 Initialize a new `.edda/` workspace in the current directory.
 
 ```bash
-edda init [--no-hooks] [--force-skills]
+edda init [--no-hooks]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--no-hooks` | Skip auto-detection and installation of bridge hooks |
-| `--force-skills` | Refresh generated `coord-*` skills, overwriting local edits to those generated files |
 
 Creates `.edda/` with an empty ledger. If `.claude/` is detected, automatically installs Claude Code hooks and adds decision-tracking instructions to `CLAUDE.md`.
 
@@ -158,9 +143,7 @@ edda note "switching to Redis for pub/sub support" --tag decision
 
 ### `edda decide`
 
-Record a decision in the workspace ledger and coordination layer. Agent and
-system decisions remain unratified until an operator explicitly runs
-`edda ratify`.
+Record a binding decision. Writes to both the workspace ledger and the coordination layer.
 
 ```bash
 edda decide <DECISION> [OPTIONS]
@@ -473,185 +456,31 @@ Index operations.
 edda index verify    # verify index entries match store records
 ```
 
----
+### `edda verify`
 
-## Reasoning, tasks & coordination (0.3–0.4)
-
-### `edda checkpoint`
-
-Record portable reasoning state in the ledger. Hypotheses, rejected paths, and
-open questions are repeatable; `--next` is required and `--role` defaults to
-`agent`.
+Verify the ledger hash chain — the tamper-evidence check over all events in
+`.edda/ledger.db` (parent linkage + canonical hashes). Read-only: the command
+never creates, migrates, or writes to the ledger — a missing or unreadable
+`.edda/ledger.db` is reported, never silently rebuilt as an empty one.
 
 ```bash
-edda checkpoint \
-  --hypothesis "The registry is stale" \
-  --rejected "README typo|crates.io reports 0.2.1" \
-  --open "Is the publish token available?" \
-  --next "Package every workspace crate" \
-  [--role <ROLE>]
+edda verify          # human-readable one-line report
+edda verify --json   # {"ok": ..., "events": ..., "first_bad_event": ...}
 ```
 
-### `edda ratify`
+Exit codes (same convention as `edda claim check`):
 
-Confer operator authority on the currently active decision for a key. `--by`
-is audit metadata and is self-asserted; it is not an identity check.
+- `0` — chain intact (an empty ledger is OK, not an error)
+- `1` — chain broken; the report names the first broken event (including a
+  row whose payload is no longer valid JSON — the unreadable row is named)
+- `2` — the ledger could not be opened or read (not an edda workspace, or
+  `.edda/ledger.db` missing/unreadable)
 
-```bash
-edda ratify <KEY> [--note <NOTE>] [--by <ACTOR>] [--session <SESSION>]
+Example output on a tampered ledger:
+
 ```
-
-### `edda task`
-
-Create and execute dependency-aware, hash-chained tasks.
-
-```bash
-edda task new <TITLE> [--assignee <LABEL>] [--agent <KIND>] \
-  [--after <TASK_ID>]... [--path <PATH>]... [--plan <PLAN>] \
-  [--work-unit <UNIT>] [--brief <BRIEF>] [--key <IDEMPOTENCY_KEY>]
-edda task start <ID> [--lease-ttl <SECONDS>]
-edda task done <ID> --receipt <RECEIPT> [--evidence <PATH>]...
-edda task fail <ID> --reason <REASON>
-edda task list [--assignee <LABEL>] [--status <STATUS>] [--json] [--fleet]
-edda task show <ID> [--json]
+ledger chain BROKEN at event evt_01J… (3 event(s) scanned): event evt_01J… has invalid hash or digest
 ```
-
-A completed task requires a receipt. Task status is derived from ledger events;
-`--after` dependencies keep a task blocked until its predecessors finish.
-
-### Claims and peer state
-
-Claim write scope before editing, inspect intersections without mutating state,
-then release the claim during teardown.
-
-```bash
-edda claim <LABEL> --paths <PATH_OR_GLOB> [--session <SESSION>]
-edda claim check <PATH_OR_GLOB>... [--json]
-edda unclaim [--session <SESSION>] [--if-claimed]
-edda peers [--json]
-edda coord [--session <SESSION>]
-```
-
-`edda claim check` exits `0` when scopes are disjoint, `1` for a conflict, and
-`2` for a usage or runtime error. `--if-claimed` makes teardown idempotent once
-session attribution is unambiguous; pass `--session` when multiple live sessions
-make implicit identity ambiguous.
-
-### `edda dispatch`
-
-Run exactly one agent turn without a plan file or conductor state machine. The
-prompt is read verbatim from a file; the caller owns any outer loop.
-
-#### v0.4.0 (current crates.io release)
-
-The version installed by `cargo install edda` currently supports:
-
-```bash
-edda dispatch \
-  --agent <claude|pi|codex> \
-  --prompt-file <PATH> \
-  [--session-id <ID>] \
-  [--cwd <DIR>] \
-  [--budget-usd <USD>] \
-  [--timeout-sec <SECONDS>] \
-  [--permission-mode <MODE>] \
-  [--json]
-```
-
-In v0.4.0, `--permission-mode` defaults to `bypassPermissions`; Claude consumes
-it, while Pi and Codex ignore it. Codex reports cost when available but cannot
-enforce `--budget-usd`.
-
-Omitting `--session-id` generates and prints one for later continuation. Claude,
-Pi, and Codex persist continuity through their own backend mechanisms; Codex
-stores the session-to-thread map in Edda's per-user store.
-
-| Exit | Outcome |
-|------|---------|
-| `0` | Agent completed |
-| `1` | Crash, pre-dispatch error, or other failure |
-| `2` | Timeout |
-| `3` | Budget exceeded |
-| `4` | Maximum turns reached |
-
-With `--json`, a dispatched v0.4.0 turn renders one stdout object containing
-`outcome`, `result_text`, `cost_usd`, `session_id`, and `error`. A pre-dispatch
-failure, such as an unreadable prompt file, exits `1` and reports to stderr
-before JSON rendering begins.
-
-#### Unreleased (main branch)
-
-The following controls were added after the v0.4.0 tag. They are available in
-source builds from `main` but are not part of the current crates.io release:
-
-```bash
-edda dispatch \
-  --agent <claude|pi|codex> \
-  [--prompt-file <PATH>] \
-  [--session-id <ID>] \
-  [--cwd <DIR>] \
-  [--budget-usd <USD>] \
-  [--timeout-sec <SECONDS>] \
-  [--permission-mode <MODE>] \
-  [--model <MODEL>] \
-  [--thinking <LEVEL>] \
-  [--tools <ALLOWLIST>] \
-  [--exclude-tools <DENYLIST>] \
-  [--session-dir <DIR>] \
-  [--list-models [SEARCH]] \
-  [--json]
-```
-
-`--prompt-file` remains required for a normal turn and may be omitted only with
-`--list-models`. Backend-specific controls are validated instead of silently
-ignored:
-
-| Option | Claude | Pi | Codex |
-|--------|--------|----|-------|
-| `--permission-mode` | Supported | Explicit value refused | Explicit value refused |
-| `--model` | Supported | Supported | Refused |
-| `--thinking` | Refused | Supported | Refused |
-| `--tools`, `--exclude-tools` | Supported | Supported | Refused |
-| `--session-dir` | Refused | Supported | Refused |
-| `--list-models [SEARCH]` | Refused | Supported | Refused |
-
-Tool allowlists and denylists are passed to supported backends as structural
-capability restrictions. Model listing prints text and cannot be combined with
-`--json`.
-
-For a dispatched turn, the JSON object adds `model_requested` and
-`model_observed`. `model_requested` is the requested model or `inherited`;
-`model_observed` is the backend's in-band report or `unknown`. Unsupported
-backend-specific flags are pre-dispatch failures: they exit `1` on stderr before
-JSON rendering begins.
-
-### `edda verdict` and `edda phase`
-
-Verdicts are append-only operator decisions pinned to a full Git SHA.
-
-```bash
-edda verdict approve <SUBJECT> --sha <FULL_SHA> [--comment <TEXT>] \
-  [--session <SESSION>]
-edda verdict reject <SUBJECT> --sha <FULL_SHA> --comment <TEXT> \
-  [--session <SESSION>]
-```
-
-For a live conductor gate, `edda phase` resolves the gate SHA and session from
-persisted conductor state. Explicit `--sha` and `--session` overrides remain
-available.
-
-```bash
-edda phase [--json]
-edda phase approve <PLAN>/<PHASE> [--comment <TEXT>] \
-  [--sha <FULL_SHA>] [--session <SESSION>]
-edda phase reject <PLAN>/<PHASE> --comment <TEXT> \
-  [--sha <FULL_SHA>] [--session <SESSION>]
-```
-
-With the default `on_reject: redispatch`, a rejection comment becomes the next
-prompt while attempt and redispatch bounds remain. With `on_reject: halt`, or
-after those bounds are exhausted, the phase fails instead of launching another
-turn.
 
 ---
 
@@ -671,14 +500,9 @@ edda plan scan     # scan codebase and suggest a plan
 Multi-phase AI plan conductor.
 
 ```bash
-edda conduct run <PLAN.yaml> [--agent <claude|pi|codex>]
-edda conduct status [PLAN_NAME] [--json]
-edda conduct retry <PHASE_ID> [--plan <PLAN>]
-edda conduct skip <PHASE_ID> [--reason <TEXT>] [--plan <PLAN>]
-edda conduct abort [PLAN_NAME]
+edda conduct run <PLAN.yaml>     # run a plan
+edda conduct status              # show running/completed plans
+edda conduct retry <PLAN>        # reset a failed phase
+edda conduct skip <PLAN>         # skip a phase
+edda conduct abort <PLAN>        # abort a running plan
 ```
-
-`--agent` selects the backend for every phase and defaults to `claude`. Use
-`--dry-run` to inspect the phase graph and any operator gates before execution.
-When only one plan exists, the status, retry, skip, and abort commands can
-auto-detect it.
