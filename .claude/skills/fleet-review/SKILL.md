@@ -26,7 +26,7 @@ context: fork
    再 **RAN** 只跑上述沒蓋到的——
    - 該 issue 的 `verify` 指令
    - 針對 P0/P1 疑點的 focused／adversarial 檢查
-   - Windows 未涵蓋 crate 的執行期測試（CI Windows 子集外的 16 個 crate 的測試目標）
+   - Windows 的 focused 檢查：找出這張 PR 實際改到的 crate；若有 crate 在 CI Windows 子集外（子集清單見 `.claude/CLAUDE.md`「Verification ladder」），就在 Windows 跑 `cargo test -p <該 crate>`——涵蓋缺口只換來針對該缺口的 focused 檢查，不跑全部未涵蓋的 crate；改到的 crate 都在子集內 → READ CI 即可。docs-only PR 不跑任何 Cargo gate。
    全套本地重跑需要**陳述理由並記在該輪**（無收據、CI 紅或缺失、或收據不可信）；涵蓋缺口只換來針對該缺口的 focused 檢查，不是全套重跑。
    紅燈分類：**確定性紅 CI 已擋住該 SHA** → 直接 audit 並 Changes Requested，不花全套重跑；**環境性紅**（LNK1104、SQLITE_BUSY 之類 flake）→ 只重跑該失敗的 job。分類寫進 RAN/READ 紀錄。把你**實際看到**的結果（測試通過數等）與成本記下來，寫進回覆。
 
