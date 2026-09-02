@@ -53,9 +53,11 @@ pub struct Phase {
     #[serde(default)]
     pub budget_usd: Option<f64>,
     /// Tool allowlist, passed to the backend verbatim (pi `--tools`, claude
-    /// `--allowedTools`). The historical YAML spelling `allowed_tools` still
-    /// parses (GH-574 compatibility); both spellings in one phase is a
-    /// deserialization error, not a merge.
+    /// `--tools` — the capability-restricting flag; `--allowedTools` is only
+    /// a permission-prompt rule and is never spawned, GH-574 round 2). The
+    /// historical YAML spelling `allowed_tools` still parses (GH-574
+    /// compatibility); both spellings in one phase is a deserialization
+    /// error, not a merge.
     #[serde(
         default,
         alias = "allowed_tools",

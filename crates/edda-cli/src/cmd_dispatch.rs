@@ -50,11 +50,12 @@ pub struct DispatchArgs {
     /// Turn timeout in seconds (default: 1800, like a conduct phase)
     #[arg(long)]
     pub timeout_sec: Option<u64>,
-    /// Permission mode carried on the synthetic phase verbatim (default:
-    /// bypassPermissions). Only the claude backend consumes this today;
-    /// pi and codex ignore it (a non-default value prints a warning).
-    #[arg(long, default_value = "bypassPermissions")]
-    pub permission_mode: String,
+    /// Permission mode for the claude backend (`claude --permission-mode`,
+    /// default bypassPermissions). pi and codex have no permission-mode
+    /// concept; an explicitly passed value is refused, never accepted and
+    /// silently dropped (GH-574).
+    #[arg(long)]
+    pub permission_mode: Option<String>,
     /// Model selection passed to the backend verbatim (GH-574): pi gets
     /// `--model <pattern>` (e.g. `openai-codex/gpt-5.6-sol`), claude gets
     /// `--model`. codex has no verifiable selection path and refuses the
@@ -66,9 +67,9 @@ pub struct DispatchArgs {
     #[arg(long)]
     pub thinking: Option<String>,
     /// Tool allowlist, comma-separated (GH-574): pi `--tools`, claude
-    /// `--allowedTools`. An allowlist replaces the backend's default tool
-    /// set — e.g. `--tools read,grep,find,ls` makes the turn structurally
-    /// read-only. codex refuses it.
+    /// `--tools`. Both restrict capabilities — the listed tools are the
+    /// only ones the backend can use — so e.g. `--tools read,grep,find,ls`
+    /// makes the turn structurally read-only. codex refuses it.
     #[arg(long, value_delimiter = ',')]
     pub tools: Option<Vec<String>>,
     /// Tool denylist, comma-separated (GH-574): pi `--exclude-tools`, claude
@@ -84,6 +85,8 @@ pub struct DispatchArgs {
     /// List available provider/model pairs for the backend and exit, instead
     /// of dispatching. Optional search term filters the listing (pi
     /// `--list-models [search]`); other backends refuse it. Requires --agent.
+    /// The listing is text: combining it with --json is an explicit
+    /// conflict error, because --json promises exactly one JSON object.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub list_models: Option<String>,
     /// Print one JSON object to stdout instead of text lines
@@ -352,6 +355,15 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
     // and exit 0 (GH-574 — callers look up patterns instead of guessing a
     // provider prefix).
     if let Some(search) = args.list_models.as_deref() {
+        // GH-574 round 2 (P1-3): the listing is text, but --json promises
+        // "exactly one object" on stdout. Refuse the combination instead of
+        // printing a text table that breaks every JSON consumer.
+        if args.json {
+            bail!(
+                "--json cannot be combined with --list-models: the model listing is \
+                 text, and --json promises exactly one JSON object on stdout"
+            );
+        }
         if !args.agent.supports_model_listing() {
             bail!(
                 "--list-models is only available for the pi backend; agent \"{}\" \
@@ -372,7 +384,10 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         .with_context(|| format!("--prompt-file not readable: {prompt_file}"))?;
 
     // GH-574 honesty gate: refuse unsupported backend/option combinations
-    // instead of accepting them and silently doing nothing.
+    // instead of accepting them and silently doing nothing. An explicitly
+    // passed --permission-mode on a backend with no permission concept is
+    // refused here too (GH-574 round 2, P1-2) — there is no clap default,
+    // so an absent flag claims nothing and drops nothing.
     validate_dispatch_options(
         args.agent,
         &DispatchOptions {
@@ -381,6 +396,7 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
             tools: args.tools.as_deref(),
             exclude_tools: args.exclude_tools.as_deref(),
             session_dir: args.session_dir.as_deref(),
+            permission_mode: args.permission_mode.as_deref(),
         },
     )?;
 
@@ -402,14 +418,12 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         eprintln!("{warning}");
     }
 
-    // A non-default permission mode is only consumed by claude (GH-574
-    // audit): warn rather than let the caller believe it is enforced.
-    if args.permission_mode != "bypassPermissions" && args.agent != AgentKind::Claude {
-        eprintln!(
-            "Warning: agent \"{}\" ignores --permission-mode; only claude consumes it.",
-            args.agent.as_str()
-        );
-    }
+    // Permission mode is a claude-only contract (refused above for the
+    // other backends); an absent flag falls back to claude's default.
+    let permission_mode = args
+        .permission_mode
+        .clone()
+        .unwrap_or_else(|| "bypassPermissions".to_owned());
 
     let launcher = build_launcher(
         args.agent,
@@ -427,7 +441,7 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         &prompt,
         args.budget_usd,
         args.timeout_sec,
-        &args.permission_mode,
+        &permission_mode,
         CapabilityOptions {
             model: args.model,
             thinking: args.thinking,
@@ -1184,9 +1198,11 @@ mod tests {
     // ── --permission-mode flag ──
 
     #[test]
-    fn dispatch_defaults_permission_mode_to_bypass() {
+    fn dispatch_permission_mode_is_none_when_not_passed() {
+        // No clap default: an absent flag claims nothing, so backends that
+        // ignore permission modes drop nothing silently (GH-574 round 2).
         let args = parse(&["edda", "--agent", "claude", "--prompt-file", "p.txt"]);
-        assert_eq!(args.permission_mode, "bypassPermissions");
+        assert_eq!(args.permission_mode, None);
     }
 
     #[test]
@@ -1200,7 +1216,40 @@ mod tests {
             "--permission-mode",
             "default",
         ]);
-        assert_eq!(args.permission_mode, "default");
+        assert_eq!(args.permission_mode.as_deref(), Some("default"));
+    }
+
+    /// The P1-2 repro, at the run_inner level: an explicit --permission-mode
+    /// on codex is refused before any launcher is built. (The cross-process
+    /// form lives in tests/dispatch_permission_mode.rs; this in-process form
+    /// needs no fake binary because the refusal fires first.)
+    #[test]
+    fn run_inner_refuses_permission_mode_on_backends_without_a_permission_concept() {
+        let dir = std::env::temp_dir().join(format!(
+            "edda-dispatch-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let prompt = dir.join("prompt.txt");
+        std::fs::write(&prompt, "p").expect("prompt written");
+        let prompt = prompt.to_string_lossy().into_owned();
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "codex",
+            "--permission-mode",
+            "bypassPermissions",
+            "--prompt-file",
+            &prompt,
+        ]);
+        let error = run_inner(args)
+            .expect_err("codex has no permission-mode concept; the value must be refused");
+        assert!(error.to_string().contains("--permission-mode"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── End-to-end-ish run through MockLauncher ──

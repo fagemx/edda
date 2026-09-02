@@ -137,9 +137,14 @@ impl ClaudeCodeLauncher {
             cmd.arg("--model").arg(model);
         }
 
-        // Optional: tool allowlist / denylist
+        // Optional: tool allowlist / denylist. The allowlist must be the
+        // capability-restricting flag: claude's `--tools` sets "the list of
+        // available tools from the built-in set", while `--allowedTools` is
+        // only a permission-prompt rule and leaves Write/Edit/Bash reachable
+        // under bypassPermissions — the fake allowlist GH-574 round 2
+        // (P1-1) called out. `--disallowedTools` is a genuine deny rule.
         if let Some(tools) = &phase.tools {
-            cmd.arg("--allowedTools").arg(tools.join(","));
+            cmd.arg("--tools").arg(tools.join(","));
         }
         if let Some(tools) = &phase.exclude_tools {
             cmd.arg("--disallowedTools").arg(tools.join(","));

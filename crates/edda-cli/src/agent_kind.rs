@@ -53,9 +53,20 @@ impl AgentKind {
     }
 
     /// Whether the backend takes tool allow/deny lists
-    /// (`pi --tools/--exclude-tools`, `claude --allowedTools/--disallowedTools`).
+    /// (`pi --tools/--exclude-tools`, `claude --tools/--disallowedTools`).
+    /// Both are capability restrictions: claude's `--allowedTools` is only
+    /// a permission-prompt rule and is never spawned (GH-574 round 2,
+    /// P1-1) — the restricting flag is `--tools`.
     pub fn supports_tool_policy(self) -> bool {
         matches!(self, AgentKind::Claude | AgentKind::Pi)
+    }
+
+    /// Whether the backend consumes a permission-mode contract
+    /// (`claude --permission-mode`). pi and codex have no permission-mode
+    /// concept at all, so an explicitly passed value is refused rather
+    /// than accepted and silently dropped (GH-574 round 2, P1-2).
+    pub fn supports_permission_mode(self) -> bool {
+        matches!(self, AgentKind::Claude)
     }
 
     /// Whether the backend takes a session-storage directory (`pi
@@ -82,6 +93,10 @@ pub(crate) struct DispatchOptions<'a> {
     pub tools: Option<&'a [String]>,
     pub exclude_tools: Option<&'a [String]>,
     pub session_dir: Option<&'a str>,
+    /// An explicitly passed permission mode. `None` means the flag was
+    /// absent — there is no clap default masking explicitness, so nothing
+    /// is claimed or dropped for backends that ignore the concept.
+    pub permission_mode: Option<&'a str>,
 }
 
 /// Reject unsupported backend/option combinations with an explicit error.
@@ -116,6 +131,11 @@ pub(crate) fn validate_dispatch_options(
             "--session-dir",
             options.session_dir.map(|d| format!("{d:?}")),
             agent.supports_session_dir(),
+        ),
+        (
+            "--permission-mode",
+            options.permission_mode.map(|m| format!("{m:?}")),
+            agent.supports_permission_mode(),
         ),
     ];
     let refused: Vec<String> = unsupported
@@ -220,6 +240,7 @@ mod tests {
         tools: Option<&'a [String]>,
         exclude_tools: Option<&'a [String]>,
         session_dir: Option<&'a str>,
+        permission_mode: Option<&'a str>,
     ) -> DispatchOptions<'a> {
         DispatchOptions {
             model,
@@ -227,6 +248,7 @@ mod tests {
             tools,
             exclude_tools,
             session_dir,
+            permission_mode,
         }
     }
 
@@ -241,10 +263,13 @@ mod tests {
         assert!(!Claude.supports_thinking());
         assert!(Pi.supports_thinking());
         assert!(!Codex.supports_thinking());
-        // tool policy: claude + pi
+        // tool policy: claude + pi; permission mode: claude only
         assert!(Claude.supports_tool_policy());
         assert!(Pi.supports_tool_policy());
         assert!(!Codex.supports_tool_policy());
+        assert!(Claude.supports_permission_mode());
+        assert!(!Pi.supports_permission_mode());
+        assert!(!Codex.supports_permission_mode());
         // session-dir and model listing: pi only
         assert!(Pi.supports_session_dir());
         assert!(!Claude.supports_session_dir());
@@ -260,7 +285,14 @@ mod tests {
         for (agent, opts) in [
             (
                 AgentKind::Claude,
-                options_for(Some("m"), None, Some(&tools), Some(&tools), None),
+                options_for(
+                    Some("m"),
+                    None,
+                    Some(&tools),
+                    Some(&tools),
+                    None,
+                    Some("bypassPermissions"),
+                ),
             ),
             (
                 AgentKind::Pi,
@@ -270,9 +302,13 @@ mod tests {
                     Some(&tools),
                     Some(&tools),
                     Some("d"),
+                    None,
                 ),
             ),
-            (AgentKind::Codex, options_for(None, None, None, None, None)),
+            (
+                AgentKind::Codex,
+                options_for(None, None, None, None, None, None),
+            ),
         ] {
             validate_dispatch_options(agent, &opts)
                 .unwrap_or_else(|e| panic!("{agent:?} combination should pass: {e}"));
@@ -288,6 +324,9 @@ mod tests {
             Some(&tools),
             Some(&tools),
             Some("dir"),
+            // The exact P1-2 repro: the value that used to be the clap
+            // default, silently dropped by every non-claude backend.
+            Some("bypassPermissions"),
         );
         let error = validate_dispatch_options(AgentKind::Codex, &codex_all)
             .expect_err("codex supports none of these");
@@ -298,13 +337,14 @@ mod tests {
             "--tools",
             "--exclude-tools",
             "--session-dir",
+            "--permission-mode",
         ] {
             assert!(text.contains(flag), "must name {flag}: {text}");
         }
         assert!(text.contains("silently ignore"), "{text}");
 
-        // claude: thinking and session-dir only.
-        let claude_partial = options_for(Some("m"), Some("high"), None, None, Some("d"));
+        // claude: thinking, session-dir and pi's session storage only.
+        let claude_partial = options_for(Some("m"), Some("high"), None, None, Some("d"), None);
         let error = validate_dispatch_options(AgentKind::Claude, &claude_partial)
             .expect_err("claude refuses thinking + session-dir");
         let text = error.to_string();
@@ -313,8 +353,15 @@ mod tests {
             "{text}"
         );
         assert!(
-            !text.contains("--model"),
-            "supported flag must not be refused: {text}"
+            !text.contains("--model") && !text.contains("--permission-mode"),
+            "supported flags must not be refused: {text}"
         );
+
+        // pi: no permission-mode concept; an explicit value is refused
+        // even the default-looking one (GH-574 round 2, P1-2).
+        let pi_pm = options_for(None, None, None, None, None, Some("bypassPermissions"));
+        let error = validate_dispatch_options(AgentKind::Pi, &pi_pm)
+            .expect_err("pi has no permission-mode concept");
+        assert!(error.to_string().contains("--permission-mode"), "{error}");
     }
 }
