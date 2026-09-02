@@ -348,11 +348,17 @@ Ignoring these rules causes merge conflicts and duplicated work.
 
 ### PR review-fix loop
 
-Before merging any GitHub PR, the PR itself must show the complete loop:
+**How to review is `REVIEW.md` at the repo root — run it top to bottom.** It is
+the single executable spec: fetch, diff, mechanical class routing, per-rule
+severity and check command, `[判斷]` escalation, the wiring verdict slot, and
+the fixed output format. Do not restate its procedure anywhere else; point at
+it, as this section does.
 
-This is a bounded complete review, never a minimal review. It governs sessions
-invoking the coordination review/orchestration skills; it is not an Edda
-runtime rule imposed on every project.
+This section states the **contract** that procedure serves — the loop a PR must
+show before it is merged, and the source `REVIEW.md` cites for it. It is a
+bounded complete review, never a minimal review. It governs sessions invoking
+the coordination review/orchestration skills; it is not an Edda runtime rule
+imposed on every project.
 
 1. Each handoff freezes `IN SCOPE`: changed behavior/paths, direct
    callers/consumers, issue/spec acceptance, security/data-loss regressions
@@ -364,9 +370,9 @@ runtime rule imposed on every project.
    blocking P0/P1. Later-round blockers must be fix-caused or previously
    unobservable; otherwise route follow-up. The issue/spec is the acceptance
    ceiling, except evidence needed to prove a required fact or safety boundary.
-3. `Code Review: Round N` is pinned to the reviewed full SHA and records
-   `IN SCOPE`, `FOLLOW-UP ISSUE`, blocking P0/P1, `RAN` versus `READ` evidence,
-   available elapsed/token/tool cost, and `Changes Requested` or `LGTM`.
+3. `Code Review: Round N` is pinned to the reviewed full SHA. Its fields and
+   table shape are fixed by `REVIEW.md` §7, and the verdict rule by §8 — any
+   P0 or P1 is `Changes Requested`.
    Gate selection follows code/product-blob, base, and toolchain changes;
    docs/evidence-only pushes reuse applicable code gates and run only relevant
    validation plus exact-head CI.
