@@ -66,7 +66,20 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
     // GH-564 P1-2: each Running/Checking → Stale transition on resume is a
     // terminal transition — notify so the controller reacts instead of
     // polling stdout tails.
-    for (phase_id, attempts) in detect_stale_phases(state, plan) {
+    // GH-564 Round-2 P1-2 (exactly-once): persist the transitions BEFORE
+    // notifying. The stale mutation otherwise lives only in memory until
+    // some later save — a real resume (plan already started) that hits the
+    // non-interactive blocked branch never saves, so the next run would
+    // re-detect the same orphan transition and send a duplicate Stale
+    // notification. Persisting first makes each transition's notification
+    // exactly-once across repeated `edda conduct run` invocations.
+    let stale_transitions = detect_stale_phases(state, plan);
+    if !stale_transitions.is_empty() {
+        save_state(cwd, state)?;
+        event_log::write_runner_status(cwd, state, None);
+        write_brief(cwd, state, None);
+    }
+    for (phase_id, attempts) in stale_transitions {
         notifier
             .notify_phase_terminal(phase_terminal_event(
                 &plan.name, &phase_id, "Stale", attempts, None,
@@ -296,8 +309,10 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                     // GH-564 P1-3: the approved phase's agent final output
                     // (last line = PR URL by convention) was parked at gate
                     // entry and survives restarts — restore it, never drop
-                    // it to null.
+                    // it to null. GH-564 Round-2 P1: consume the sidecar —
+                    // its lifecycle ends with this verdict.
                     let final_output = load_gate_output(cwd, &plan.name, &gated_id);
+                    clear_gate_output(cwd, &plan.name, &gated_id);
                     notifier
                         .notify_phase_terminal(phase_terminal_event(
                             &plan.name,
@@ -374,8 +389,10 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         });
                         // GH-564 P1-3: same parked output as the approved
                         // branch — the agent did produce a final line before
-                        // the gate rejected it.
+                        // the gate rejected it. Consume the sidecar with the
+                        // verdict (GH-564 Round-2 P1).
                         let final_output = load_gate_output(cwd, &plan.name, &gated_id);
+                        clear_gate_output(cwd, &plan.name, &gated_id);
                         notifier
                             .notify_phase_terminal(phase_terminal_event(
                                 &plan.name,
@@ -484,7 +501,9 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         attempt_charged: true,
                     });
                     // GH-564 P1-3: same parked output as the approved branch.
+                    // Consume the sidecar with the verdict (GH-564 Round-2 P1).
                     let final_output = load_gate_output(cwd, &plan.name, &gated_id);
+                    clear_gate_output(cwd, &plan.name, &gated_id);
                     notifier
                         .notify_phase_terminal(phase_terminal_event(
                             &plan.name,
@@ -967,6 +986,41 @@ async fn process_phase_result(
                     // notifier message, then wait (the loop's gate-wait branch).
                     match capture_git_head(phase_cwd) {
                         Ok(gate_sha) => {
+                            // GH-564 P1-3 / Round-2 P1: park the agent's final
+                            // output BEFORE the phase enters AWAITING_VERDICT.
+                            // Every gate entry atomically rewrites the sidecar
+                            // — the last non-empty agent line when there is
+                            // one, an empty file when there is none — so it
+                            // always represents THIS entry's output and a
+                            // previous cycle's value can never be read back.
+                            // The error is NOT swallowed: a failed write would
+                            // leave the previous cycle's file in place, which
+                            // the verdict site could read back as this
+                            // entry's output — fail the entry instead.
+                            if let Err(e) = persist_gate_output(
+                                cwd,
+                                &plan.name,
+                                phase_id,
+                                final_output_line(result_text.as_deref()).as_deref(),
+                            ) {
+                                let msg = format!("failed to persist gate final output: {e}");
+                                fail_checking_phase(
+                                    plan,
+                                    phase,
+                                    state,
+                                    phase_id,
+                                    cwd,
+                                    &check_result,
+                                    Some(&msg),
+                                    phase_start.elapsed(),
+                                    final_output_line(result_text.as_deref()).as_deref(),
+                                    notifier,
+                                    event_log,
+                                    tmux_session,
+                                )
+                                .await?;
+                                return Ok(());
+                            }
                             let subject = gate_subject(&plan.name, phase_id);
                             transition(
                                 state,
@@ -980,15 +1034,6 @@ async fn process_phase_result(
                                     ..Default::default()
                                 }),
                             )?;
-                            // GH-564 P1-3: park the agent's final output so
-                            // the verdict site can still report it after a
-                            // restart.
-                            persist_gate_output(
-                                cwd,
-                                &plan.name,
-                                phase_id,
-                                final_output_line(result_text.as_deref()).as_deref(),
-                            );
                             println!("\n  ⏸ Phase \"{phase_id}\" AWAITING_VERDICT — waiting for an external verdict");
                             println!("    subject:  {subject}");
                             println!("    gate_sha: {gate_sha}");
@@ -1286,19 +1331,33 @@ fn gate_output_path(cwd: &Path, plan_name: &str, phase_id: &str) -> PathBuf {
         .join(format!("{phase_id}.gate_output"))
 }
 
-/// GH-564 P1-3: persist the agent's final output line when the phase enters
-/// AWAITING_VERDICT. Overwritten on every gate (re-)entry, so a redispatch
-/// cycle always leaves the latest output here. Best-effort: a failed write
-/// degrades to the previous (null) behavior, never to a wrong output.
-fn persist_gate_output(cwd: &Path, plan_name: &str, phase_id: &str, final_output: Option<&str>) {
-    let Some(output) = final_output else {
-        return;
-    };
+/// GH-564 P1-3 / Round-2 P1: park the agent's final output when the phase
+/// enters AWAITING_VERDICT. EVERY gate entry atomically rewrites the sidecar
+/// so it represents THIS entry's output and only this entry's: the last
+/// non-empty agent line when there is one, an EMPTY file when there is none
+/// (`load_gate_output` maps empty to `None`). A previous redispatch cycle's
+/// value can therefore never be read back as the current output.
+///
+/// Errors are NOT swallowed: a failed write would leave the previous cycle's
+/// file in place, which the verdict site could read back as this entry's
+/// output — the caller must fail the gate entry instead of waiting on a
+/// verdict against a possibly wrong payload.
+fn persist_gate_output(
+    cwd: &Path,
+    plan_name: &str,
+    phase_id: &str,
+    final_output: Option<&str>,
+) -> anyhow::Result<()> {
     let path = gate_output_path(cwd, plan_name, phase_id);
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = edda_store::write_atomic(&path, output.as_bytes());
+    edda_store::write_atomic(&path, final_output.unwrap_or("").as_bytes())
+}
+
+/// GH-564 Round-2 P1: consume the parked output at the verdict site, so the
+/// sidecar only exists between a gate entry and its verdict. Best-effort: a
+/// failed removal cannot produce a wrong payload because every gate entry
+/// rewrites the sidecar atomically before any verdict is waited on.
+fn clear_gate_output(cwd: &Path, plan_name: &str, phase_id: &str) {
+    let _ = std::fs::remove_file(gate_output_path(cwd, plan_name, phase_id));
 }
 
 /// GH-564 P1-3: read back the parked final output at the gate verdict site.
@@ -3266,13 +3325,7 @@ phases:
 
         // Second gate: approve.
         let shas = wait_for_gate_events(&root, "gated", 2).await;
-        record_verdict(
-            &root,
-            "gated/a",
-            &shas[1],
-            VerdictDecision::Approved,
-            None,
-        );
+        record_verdict(&root, "gated/a", &shas[1], VerdictDecision::Approved, None);
 
         let (state, notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
             .await
