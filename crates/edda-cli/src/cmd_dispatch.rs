@@ -228,10 +228,20 @@ impl DispatchOutput {
             .unwrap_or_else(|| NO_USAGE_COST_TEXT.to_owned())
     }
 
-    /// Text-mode stdout: result text, then `Cost:`, then the model story
+    /// Text-mode stdout: an `Outcome:` line whenever the turn did not
+    /// finish, then result text, then `Cost:`, then the model story
     /// (GH-574), then `Session:`.
+    ///
+    /// A failed turn used to render exactly like a successful one — same
+    /// `Cost:`/`Session:` summary, nothing naming the failure (GH-669) — so
+    /// a reader of stdout alone could not tell the two apart. The marker
+    /// leads the output and is emitted only for non-`done` outcomes, so a
+    /// successful turn's shape is unchanged.
     pub fn render_text(&self) -> String {
         let mut out = String::new();
+        if self.outcome != Outcome::Done {
+            out.push_str(&format!("Outcome: {}\n", self.outcome.as_str()));
+        }
         if let Some(text) = &self.result_text {
             out.push_str(text);
             if !text.ends_with('\n') {
@@ -845,6 +855,53 @@ mod tests {
         let args = parse(&["edda", "--agent", "pi", "--list-models", "--json"]);
         let error = run_inner(args).expect_err("--json + --list-models must be refused");
         assert!(error.to_string().contains("--json"), "{error}");
+    }
+
+    // ── GH-669: a backend authentication failure is not a done turn ──
+
+    #[test]
+    fn backend_auth_failure_reports_crash_exit_1_and_non_null_error() {
+        // The whole caller-facing contract for the observed failure: claude
+        // answers a revoked/invalid OAuth token with a result message whose
+        // `subtype` is "success" and whose `is_error` is true. Dispatch must
+        // read that as a failed turn — exit 1, `outcome` not "done", `error`
+        // a non-null string — instead of exit 0 with the reason parked in
+        // `result_text`.
+        use edda_conductor::agent::stream::{classify_result, MonitorResult, ResultInfo};
+        let reason = "Failed to authenticate. API Error: 401 OAuth access token is invalid.";
+        let monitor = MonitorResult {
+            total_cost_usd: 0.0,
+            result: Some(ResultInfo {
+                subtype: "success".into(),
+                total_cost_usd: Some(0.0),
+                error: None,
+                is_error: true,
+                result_text: Some(reason.into()),
+            }),
+            result_text: Some(reason.into()),
+            model: Some("claude-opus-5[1m]".into()),
+        };
+        let out = DispatchOutput::from_result(
+            classify_result(&monitor, Some(1)),
+            "0e92629d-1f2e-597e-90ec-662e206efcde".into(),
+            "inherited".into(),
+            "claude-opus-5[1m]".into(),
+        );
+
+        assert_eq!(out.exit_code(), 1, "{out:?}");
+        let value: serde_json::Value = serde_json::from_str(&out.to_json()).unwrap();
+        assert_ne!(value["outcome"].as_str(), Some("done"));
+        assert_eq!(value["outcome"].as_str(), Some("crash"));
+        assert!(
+            value["error"].as_str().is_some_and(|e| e.contains("401")),
+            "error must describe the failure, got {}",
+            value["error"]
+        );
+
+        // And the human-readable turn must not read like a successful one.
+        let text = out.render_text();
+        assert!(text.contains("Outcome: crash"), "{text}");
+        assert!(!text.contains("Cost: $0.00"), "{text}");
     }
 
     // ── Outcome → exit-code mapping (all five PhaseResult variants) ──
