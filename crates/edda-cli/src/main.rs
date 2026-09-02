@@ -1,4 +1,5 @@
 mod agent_kind;
+mod claim_guard;
 mod cmd_actor;
 mod cmd_ask;
 mod cmd_blob;
@@ -476,16 +477,19 @@ enum Command {
     /// Exit codes by outcome class:
     ///   0 = agent done
     ///   1 = agent crash or any other failure (including pre-dispatch errors)
-    ///   2 = timeout
+    ///   2 = timeout or cross-machine claim refusal (distinguished by outcome)
     ///   3 = budget exceeded
     ///   4 = max turns
     ///
     /// With --json, exactly one object is printed to stdout:
-    ///   {"outcome":"done|crash|timeout|max_turns|budget_exceeded",
+    ///   {"outcome":"done|crash|timeout|max_turns|budget_exceeded|claim_refused",
     ///    "result_text":string|null,"cost_usd":number|null,
     ///    "session_id":string,"error":string|null,
     ///    "model_requested":string,"model_observed":string,
     ///    "session_observed":string}
+    /// When refused by the cross-machine claim guard (outcome "claim_refused"),
+    /// a reduced shape is emitted:
+    ///   {"outcome":"claim_refused","error":string,"issue":number,"machine":string}
     /// model_requested is the --model value or "inherited"; model_observed
     /// is what the backend reported in-band or "unknown". session_id is the
     /// id edda asked for; session_observed is the one the backend reported

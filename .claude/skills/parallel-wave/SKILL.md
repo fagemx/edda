@@ -43,6 +43,12 @@ against the crate map. Pairwise intersect:
   gates assume an attached controller — wave1 timed out 2 of 3). This also makes
   the GH-543 worktree-ledger trap inapplicable.
 - Record `edda claim --paths` per lane.
+- Cross-machine claim before dispatch (GH-656): for each bundle run
+  `scripts/fleet-claim-issue.sh <issue> <machine>` — machine label from the
+  lane brief, never a hostname guess. Exit 1 (another machine's `taking:`
+  comment or `lane:*` label) means that lane does not dispatch;
+  `edda dispatch --issue <N> --machine <machine>` enforces the same check at
+  dispatch time and refuses with exit 2.
 
 ## Layer 3 — post-hoc net (before merge)
 
