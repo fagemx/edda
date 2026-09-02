@@ -6,6 +6,12 @@ title: CLI Reference
 
 Complete reference for all `edda` commands.
 
+> Documented for edda 0.4 — the surface below was re-derived from the 0.4.0
+> binary, not copied from an older release. `scripts/check-cli-docs.sh`
+> enforces that every verb the binary exposes is documented here, either as a
+> full section or as a row in the [Internal / experimental](#internal--experimental-commands)
+> table.
+
 ## Getting started
 
 ### `edda init`
@@ -160,6 +166,66 @@ edda decide "db.engine=sqlite" --reason "embedded, zero-config"
 edda decide "auth.strategy=JWT" --reason "stateless, scales horizontally"
 ```
 
+### `edda ratify`
+
+Ratify an active decision — confer operator authority (GH-401). An
+agent-authored decision from `edda decide` is unratified; ratification is
+what makes it binding.
+
+```bash
+edda ratify [OPTIONS] <KEY>
+```
+
+| Argument / Option | Description |
+|-------------------|-------------|
+| `KEY` | Decision key to ratify (e.g. `"db.engine"`) |
+| `--note TEXT` | Optional note recorded with the ratification |
+| `--by TEXT` | Who ratified — recorded for audit; self-asserted, not verified (identity enforcement is a policy-layer concern). Defaults to the resolved session label |
+| `--session ID` | Session ID (uses `EDDA_SESSION_ID`; `--session` required when identity is ambiguous) |
+
+```bash
+edda ratify "demo.engine" --note "confirmed after load test" --by operator
+```
+
+Output:
+
+```
+Ratified 'demo.engine' (by operator) — now binding.
+  note: confirmed after load test
+```
+
+### `edda checkpoint`
+
+Record a vendor-neutral reasoning checkpoint — current hypotheses, rejected
+hypotheses with reasons, open questions, and the next action. Use it to make
+an investigation resumable by any agent, not only the one that wrote it.
+
+```bash
+edda checkpoint [OPTIONS] --next <NEXT>
+```
+
+| Option | Description |
+|--------|-------------|
+| `--next TEXT` | Next checkpoint action (required) |
+| `--hypothesis TEXT` | Current hypotheses (repeatable) |
+| `--rejected HYPOTHESIS\|REASON` | Rejected hypothesis and reason, separated by `\|` (repeatable) |
+| `--open TEXT` | Open questions (repeatable) |
+| `--role ROLE` | Author role (default: `agent`) |
+
+```bash
+edda checkpoint \
+  --hypothesis "lock contention on the ledger" \
+  --rejected "sqlite busy_timeout|already configured" \
+  --open "does fs2 lock survive fork?" \
+  --next "profile the write path under 4 workers"
+```
+
+Output (the event id differs per run):
+
+```
+Wrote CHECKPOINT evt_01m1h59pn7nn115e3pqvz9cpc8
+```
+
 ### `edda commit`
 
 Create a commit event in the ledger.
@@ -261,6 +327,30 @@ Rendering a request into an agent's context is delivery, not acknowledgement:
 the request keeps appearing until it is acked here, and the ack covers only the
 messages outstanding at that moment — later ones from the same peer still
 arrive.
+
+### `edda peers`
+
+Show active peer sessions — the read-only view of who else is live, what
+each session has claimed, and which requests are outstanding. Shortcut for
+`bridge claude peers`.
+
+```bash
+edda peers [--json]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--json` | Output sessions, claims, requests, and acknowledgements as JSON |
+
+```bash
+edda peers
+```
+
+Output (empty workspace):
+
+```
+No active sessions.
+```
 
 ### `edda watch`
 
@@ -484,6 +574,191 @@ ledger chain BROKEN at event evt_01J… (3 event(s) scanned): event evt_01J… h
 
 ---
 
+## Task rail, dispatch & gates
+
+### `edda task`
+
+Task rail — create, hand off, and track tasks on the ledger. Agent verbs
+(`new`, `start`, `done`, `fail`) mutate tasks; user verbs (`list`, `show`)
+are read-only.
+
+```bash
+edda task new <TITLE> [OPTIONS]          # create a task (agent verb)
+edda task start <ID> [--lease-ttl S]     # take the lease, mark running (agent verb)
+edda task done <ID> --receipt TEXT       # complete: done + receipt; successors become ready
+edda task fail <ID> --reason TEXT        # mark failed (agent verb)
+edda task list [--status S] [--assignee L] [--json] [--fleet]
+edda task show <ID> [--json]
+```
+
+`edda task new` options:
+
+| Option | Description |
+|--------|-------------|
+| `--assignee LABEL` | Agent label this task is assigned to (e.g. `worker-1`) |
+| `--agent KIND` | Agent transport kind (e.g. `claude-acp`, `codex-acp`) |
+| `--after ID` | Task id that must be done first (repeatable — dependencies) |
+| `--path PATTERN` | Paths this task may write (repeatable — scope) |
+| `--plan PLAN` | Plan this task belongs to |
+| `--work-unit UNIT` | Work unit this task delivers |
+| `--brief REF` | Brief reference (path or free text) for whoever picks this up |
+| `--key KEY` | Idempotency key — the same key never creates a twin task |
+
+`edda task done` requires `--receipt` ("no receipt, no done") and accepts
+repeatable `--evidence` paths. `edda task start` records a lease (default
+TTL 3600 s, enforced by the P2 reconciler).
+
+```bash
+edda task new "Wire up rate limiter" --assignee worker-1 \
+  --brief "docs/briefs/rate-limit.md" --key demo-001
+```
+
+Output:
+
+```
+Created task #1 'Wire up rate limiter' [ready]
+```
+
+```bash
+edda task list
+```
+
+Output:
+
+```
+#1 [ready] Wire up rate limiter (assignee: worker-1)
+```
+
+```bash
+edda task show 1
+```
+
+Output:
+
+```
+Task #1: Wire up rate limiter
+  status:   ready
+  assignee: worker-1
+  brief:    docs/briefs/rate-limit.md
+  created:  2026-09-02T13:35:22.9345246Z
+  updated:  2026-09-02T13:35:22.9345246Z
+```
+
+### `edda dispatch`
+
+Run one agent turn with no plan file, DAG, or state machine. Reads the
+prompt from `--prompt-file` and runs exactly one turn through the selected
+backend; loop control stays with the caller.
+
+```bash
+edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--agent AGENT` | Backend that runs the turn: `claude` (default), `pi`, or `codex` |
+| `--prompt-file FILE` | Prompt file, read verbatim (required unless `--list-models`) |
+| `--session-id ID` | Session id passed to the backend verbatim; generated and printed when omitted so the caller can reuse it on the next call |
+| `--cwd DIR` | Working directory for the agent (default: current directory) |
+| `--budget-usd N` | Per-turn budget in USD (codex cannot enforce budgets) |
+| `--timeout-sec S` | Turn timeout in seconds (default: 1800, like a conduct phase) |
+| `--permission-mode MODE` | claude only (default `bypassPermissions`); pi and codex refuse the flag |
+| `--model MODEL` | Passed to the backend verbatim (e.g. pi `openai-codex/gpt-5.6-sol`); codex refuses it. `--list-models` looks up valid patterns |
+| `--thinking LEVEL` | pi only (`off\|minimal\|low\|medium\|high\|xhigh\|max`); claude and codex refuse it |
+| `--tools LIST` | Comma-separated tool allowlist (pi `--tools`, claude `--tools`) — structural restriction, not prompt discipline; codex refuses it |
+| `--exclude-tools LIST` | Comma-separated tool denylist (pi `--exclude-tools`, claude `--disallowedTools`); codex refuses it |
+| `--session-dir DIR` | pi only (`--session-dir`); claude and codex manage their own session storage and refuse it |
+| `--list-models [TERM]` | List available provider/model pairs for the backend and exit (pi only) |
+| `--json` | Print exactly one JSON object to stdout instead of text lines; cannot be combined with `--list-models` |
+
+With `--json` the object has the shape
+`{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded", "result_text":…, "cost_usd":…, "session_id":…, "error":…, "model_requested":…, "model_observed":…}`.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| `0` | agent done |
+| `1` | agent crash or any other failure (including pre-dispatch errors) |
+| `2` | timeout |
+| `3` | budget exceeded |
+| `4` | max turns |
+
+```bash
+edda dispatch --agent pi --list-models
+```
+
+Output (truncated; the model list is whatever the backend currently serves):
+
+```
+provider      model                                               context  max-out  thinking  images
+openai-codex  gpt-5.3-codex-spark                                 128K     128K     yes       no
+openai-codex  gpt-5.4                                             272K     128K     yes       yes
+openrouter    ~anthropic/claude-opus-latest                       1M       128K     yes       yes
+```
+
+### `edda verdict`
+
+Issue a verdict on a gated subject (approve/reject) — GH-519. The subject is
+free-form; for conductor gates it is `<plan-name>/<phase-id>`. Approving a
+gate may resume the waiting agent; rejecting feeds the comment back into the
+gated agent session as its next turn.
+
+```bash
+edda verdict approve [OPTIONS] --sha <SHA> <SUBJECT>
+edda verdict reject --sha <SHA> --comment <COMMENT> <SUBJECT>
+```
+
+| Argument / Option | Description |
+|-------------------|-------------|
+| `SUBJECT` | Gated subject (argument); `<plan>/<phase>` for conductor gates |
+| `--sha SHA` | Full 40-hex git SHA the verdict applies to |
+| `--comment TEXT` | Optional for approve; **required** for reject (fed back to the agent) |
+| `--session ID` | Session ID (uses `EDDA_SESSION_ID`; `--session` required when identity is ambiguous) |
+
+```bash
+edda verdict approve "demo/phase-1" \
+  --sha 0000000000000000000000000000000000000000 --comment "sanity"
+```
+
+Output:
+
+```
+Verdict recorded: approved demo/phase-1 @ 0000000000000000000000000000000000000000
+  event: evt_01m1h59q2exp6xm7h2jyv9ks4r
+  comment: sanity
+```
+
+### `edda phase`
+
+Agent phase map, plus approve/reject sugar over `edda verdict` (GH-547).
+The status view shows per-plan/per-phase agent state; `phase approve` and
+`phase reject` resolve `gate_sha` and session from the persisted conductor
+state instead of requiring `--sha` (both remain available as explicit
+overrides).
+
+```bash
+edda phase [--json]                          # status view
+edda phase approve <plan>/<phase> [--comment TEXT]
+edda phase reject <plan>/<phase> --comment TEXT
+```
+
+`phase reject --comment` is mandatory: the comment becomes the redispatch
+prompt for the gated agent session.
+
+```bash
+edda phase
+```
+
+Output (no conductor state in this workspace):
+
+```
+No agent phase data found.
+Phase detection runs automatically during Claude Code hook dispatch.
+```
+
+---
+
 ## Orchestration
 
 ### `edda plan`
@@ -506,3 +781,42 @@ edda conduct retry <PLAN>        # reset a failed phase
 edda conduct skip <PLAN>         # skip a phase
 edda conduct abort <PLAN>        # abort a running plan
 ```
+
+---
+
+## Internal / experimental commands
+
+The verbs below exist in the binary but are not part of the recommended
+daily surface. Each is either internal plumbing — meant to be invoked by
+hooks, schedulers, or other verbs rather than by hand — or experimental,
+with semantics that may still change. They are listed here so the
+documented surface cannot silently drift from the binary;
+`scripts/check-cli-docs.sh` enforces the same invariant.
+
+| Command | What it does | Why not for direct use |
+|---------|--------------|------------------------|
+| `actor` | Manage project actors (add, remove, list, grant, revoke) | Identity grants are policy-layer plumbing; manage access through operator workflow, not ad-hoc CLI calls |
+| `group` | Manage project groups for cross-project sync | Experimental multi-repo grouping; semantics not settled |
+| `sync` | Pull shared decisions from group members | Depends on the experimental `group` setup |
+| `unclaim` | Release this session's coordination scope | Counterpart of `edda claim`; hooks and reconciliation release scopes, so manual use is rarely needed |
+| `coord` | Show coordination state | Shortcut for `bridge claude render-coordination`; rendering plumbing meant for hooks |
+| `setup` | Setup a bridge integration | Shortcut for `bridge <platform> install`; use `edda init` or `edda bridge` instead |
+| `recap` | Chronicle synthesis — cognitive zoom across sessions | Experimental; output shape may change |
+| `export` | Export the ledger as human-readable Markdown (read-only projection; SQLite stays authoritative) | A convenience projection; automation should query the ledger or `edda log`, not parse exports |
+| `hook` | Hook entrypoint (called by supported coding-agent hooks) | Internal: expects a hook payload on stdin; hand-invocation writes events with wrong attribution |
+| `intake` | Task intake — ingest external tasks into the ledger | Experimental ingest surface |
+| `prs` | Scan and record PR events from GitHub | Needs network and a token; normally driven by the scheduler or `edda watch` |
+| `pipeline` | Auto-execution pipeline — skill chain with approval gates | Experimental orchestration layer; prefer `edda plan` / `edda conduct` for reviewed plans |
+| `bundle` | Create and manage review bundles for rapid approval | Experimental review packaging |
+| `brief` | View task engineering briefs (materialized from ledger events) | Read-only viewer normally consumed via `edda task` workflows |
+| `policy` | Approval policy management (show, check, init) | Changes gate semantics; edit policy deliberately, not ad hoc |
+| `notify` | Push notification management | Plumbing for other verbs; needs a configured channel |
+| `pair` | Device pairing and token management | Security-sensitive: tokens grant access; manage from the pairing device |
+| `serve` | Start HTTP API server | Long-running process; run it as a managed service, not ad hoc in a shell |
+| `user` | User-level aggregation (cross-repo queries, rollup, config) | Experimental cross-project surface |
+| `rules` | L3 post-mortem learned rules management | Written by post-mortem runs; hand edits can break TTL-decay semantics |
+| `scan` | Capability scanner — identify gaps via LLM analysis | Costs tokens; experimental |
+| `propose-issue` | Issue proposal workflow — draft, review, and create GitHub issues | Experimental; requires `gh` authentication |
+| `propose-patch` | Controls patch workflow — evaluate quality rules and propose Karvi controls adjustments | Niche governance surface, experimental (references the retired Karvi workflow) |
+| `skill` | Manage skill registry (scan, list, show, search) | Experimental registry |
+| `tool-tier` | Tool tier governance — query and manage tool risk classifications | Governance plumbing consumed by other tools |
