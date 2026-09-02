@@ -4,11 +4,18 @@
 # (validation-checklist brief) and fleet.agent-model-split (review model is fixed).
 #
 # The brief is BUILT BY READING REVIEW.md, the repo's executable review spec.
-# This script contributes only the PR's facts (head SHA, surface, class, the
-# linked issue's doneWhen); every review rule, severity, check command and the
-# output format come from REVIEW.md, which is inlined verbatim into the brief.
-# A missing REVIEW.md is a hard error — a brief without the spec would silently
-# review against nothing.
+# This script contributes only the PR's facts (head SHA, surface, the linked
+# issue's doneWhen); every review rule, severity, check command, the class
+# router and the output format come from REVIEW.md, which is inlined verbatim
+# into the brief. A missing REVIEW.md is a hard error — a brief without the
+# spec would silently review against nothing.
+#
+# REVIEW.md is read AT THE PR'S BASE SHA, never at the head (decision
+# review.brief-source; docs/superpowers/specs/2026-09-02-edda-review-design.md
+# §5), so a PR cannot rewrite the rules it is judged by. The class router is
+# not reimplemented here either: it is extracted from the spec's
+# "# review-spec:classifier" block and run as-is, so REVIEW.md §3 stays the
+# only copy.
 #
 # usage: review-pr.sh <PR> [round] [prev-sha] [--sha <full-sha>] [--dry-run]
 #        review-pr.sh verdict-label < verdict-text        (offline helper)
@@ -18,7 +25,8 @@
 #   EDDA_FLEET_ROOT        main checkout path      (default: derived from git)
 #   EDDA_FLEET_SCRATCH     state/log dir           (default $HOME/.edda/fleet)
 #   EDDA_REVIEW_MODEL      review model            (default openai-codex/gpt-5.6-sol)
-#   EDDA_REVIEW_SPEC       path to REVIEW.md       (default: repo root beside this script)
+#   EDDA_REVIEW_SPEC       explicit REVIEW.md path (override; default: read
+#                                                  REVIEW.md at the PR base SHA)
 #
 # Outputs (under $EDDA_FLEET_SCRATCH):
 #   review-pr<N>-r<R>-brief.md     the review brief fed to the reviewer
@@ -40,11 +48,12 @@ MODEL=${EDDA_REVIEW_MODEL:-openai-codex/gpt-5.6-sol}
 MODEL_SHORT=${MODEL##*/}
 SCRATCH=${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}
 
-# The review spec lives at the repo root, beside this script's parent. Resolve
-# it from the script's own location so a detached worktree, a scheduled task or
-# any cwd still finds the same file.
+# The spec is read out of git, not off the working tree. Resolve the checkout
+# from this script's own location so a detached worktree, a scheduled task or
+# any cwd still reaches the same object database.
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-SPEC=${EDDA_REVIEW_SPEC:-$SELF_DIR/../REVIEW.md}
+SELF_REPO=$(CDPATH= cd -- "$SELF_DIR/.." && pwd)
+SPEC_OVERRIDE=${EDDA_REVIEW_SPEC:-}
 
 PR=""
 ROUND=1
@@ -118,6 +127,8 @@ else
     { echo "review-pr.sh: cannot read PR #$PR (repo $REPO)" >&2; exit 1; }
 fi
 BR=$(gh pr view "$PR" --repo "$REPO" --json headRefName --jq .headRefName)
+BASE_REF=$(gh pr view "$PR" --repo "$REPO" --json baseRefName --jq .baseRefName)
+BASE_SHA=$(gh pr view "$PR" --repo "$REPO" --json baseRefOid --jq .baseRefOid)
 TITLE=$(gh pr view "$PR" --repo "$REPO" --json title --jq .title)
 BODY=$(gh pr view "$PR" --repo "$REPO" --json body --jq .body)
 
@@ -129,47 +140,64 @@ ISSUES=$(printf '%s\n' "$BODY" \
 FILES=$(gh pr diff "$PR" --repo "$REPO" --name-only)
 SURFACE=$(printf '%s\n' "$FILES" | paste -sd, - | sed 's/,$//')
 
-# ---- class routing (REVIEW.md §3, mechanical path rule) ---------------------
-# Same case arms as REVIEW.md §3; a mixed diff carries every class it matches
-# and an unrecognised path defaults to code-plain (never to prose).
-classify() {
-  risk=""; plain=""; skills=""; docs=""
-  while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    case "$f" in
-      *.sh|*.ps1|*.bash|scripts/*|.github/*|lefthook.yml) risk=" code-risk" ;;
-      Cargo.toml|Cargo.lock|*/Cargo.toml|install.sh|.gitignore|.gitattributes) risk=" code-risk" ;;
-      crates/edda-ledger/*|crates/edda-store/*|crates/edda-core/*) risk=" code-risk" ;;
-      crates/edda-conductor/*|crates/edda-cli/src/cmd_dispatch.rs) risk=" code-risk" ;;
-      *.rs|*.toml|*.lock) plain=" code-plain" ;;
-      */SKILL.md|.claude/skills/*|skills/*) skills=" skills" ;;
-      .claude/CLAUDE.md|AGENTS.md|CLAUDE.md|REVIEW.md) skills=" skills" ;;
-      *.md|docs/*|*.txt|LICENSE*) docs=" docs" ;;
-      *) plain=" code-plain" ;;
-    esac
-  done
-  printf '%s\n' "${risk}${plain}${skills}${docs}" | sed 's/^ //'
-}
-CLASSES=$(printf '%s\n' "$FILES" | classify)
-# REVIEW.md §3.2: calibration data is keyed on the two canonical classes.
-case "$CLASSES" in
-  *code-risk*|*code-plain*) CANON_CLASS="code-risk" ;;
-  *)                        CANON_CLASS="docs-skills" ;;
-esac
-
-# ---- brief: PR facts + REVIEW.md verbatim (fleet.review-brief-framing) ------
-# REVIEW.md is the whole rule set. Refuse rather than emit a spec-less brief.
-if [ ! -f "$SPEC" ]; then
-  echo "review-pr.sh: review spec not found at $SPEC (set EDDA_REVIEW_SPEC)" >&2
-  exit 1
+# ---- the spec, read at the BASE SHA -----------------------------------------
+# review.brief-source: REVIEW.md is always the base_sha version, never the head,
+# so a PR cannot rewrite the rules it will be judged by. EDDA_REVIEW_SPEC is an
+# explicit file override (offline tests, a spec under development).
+mkdir -p "$SCRATCH"
+SPEC="$SCRATCH/review-pr$PR-r$ROUND-spec.md"
+if [ -n "$SPEC_OVERRIDE" ]; then
+  if [ ! -f "$SPEC_OVERRIDE" ]; then
+    echo "review-pr.sh: review spec not found at $SPEC_OVERRIDE (EDDA_REVIEW_SPEC)" >&2
+    exit 1
+  fi
+  SPEC=$SPEC_OVERRIDE
+  SPEC_SOURCE="$SPEC_OVERRIDE (EDDA_REVIEW_SPEC override)"
+else
+  # The base commit must be in this object database before it can be read.
+  git -C "$SELF_REPO" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null ||
+    git -C "$SELF_REPO" fetch -q origin "$BASE_REF" 2>/dev/null || true
+  if git -C "$SELF_REPO" show "$BASE_SHA:REVIEW.md" > "$SPEC" 2>/dev/null; then
+    SPEC_SOURCE="REVIEW.md@$BASE_SHA (base of $BASE_REF)"
+  elif [ -f "$SELF_REPO/REVIEW.md" ]; then
+    # The base predates REVIEW.md (or the object is unreachable). Fall back to
+    # the checkout's copy, loudly — never emit a spec-less brief, and never let
+    # the substitution pass unnoticed.
+    cp "$SELF_REPO/REVIEW.md" "$SPEC"
+    SPEC_SOURCE="$SELF_REPO/REVIEW.md (FALLBACK: no REVIEW.md at base $BASE_SHA)"
+    echo "review-pr.sh: no REVIEW.md at base $BASE_SHA; falling back to the checkout copy" >&2
+  else
+    echo "review-pr.sh: no REVIEW.md at base $BASE_SHA and none in $SELF_REPO (set EDDA_REVIEW_SPEC)" >&2
+    exit 1
+  fi
 fi
 SPEC_VERSION=$(sed -n 's/^- Spec version: `\(.*\)`$/\1/p' "$SPEC" | head -1)
 if [ -z "$SPEC_VERSION" ]; then
-  echo "review-pr.sh: $SPEC has no '- Spec version: \`...\`' line" >&2
+  echo "review-pr.sh: $SPEC_SOURCE has no '- Spec version: \`...\`' line" >&2
   exit 1
 fi
 
-mkdir -p "$SCRATCH"
+# ---- class routing: REVIEW.md §3's own router, extracted and run ------------
+# Not reimplemented here. The block between the two marker lines is the single
+# copy of the router; it reads the file list on stdin and prints classes= and
+# canonical_class= (REVIEW.md §3 and §3.2).
+CLASSIFIER=$(awk '/^# review-spec:classifier$/{f=1;next} /^# review-spec:classifier-end$/{exit} f' "$SPEC")
+if [ -z "$CLASSIFIER" ]; then
+  echo "review-pr.sh: $SPEC_SOURCE has no '# review-spec:classifier' block" >&2
+  exit 1
+fi
+ROUTED=$(printf '%s\n' "$FILES" | sh -c "$CLASSIFIER") || {
+  echo "review-pr.sh: the REVIEW.md §3 classifier failed to run" >&2
+  exit 1
+}
+CLASSES=$(printf '%s\n' "$ROUTED" | sed -n 's/^classes=//p')
+CANON_CLASS=$(printf '%s\n' "$ROUTED" | sed -n 's/^canonical_class=//p')
+if [ -z "$CLASSES" ] || [ -z "$CANON_CLASS" ]; then
+  echo "review-pr.sh: the REVIEW.md §3 classifier printed no classes" >&2
+  exit 1
+fi
+
+# ---- brief: PR facts + REVIEW.md verbatim (fleet.review-brief-framing) ------
 BRIEF="$SCRATCH/review-pr$PR-r$ROUND-brief.md"
 SID="review-pr$PR"
 {
@@ -183,6 +211,12 @@ SID="review-pr$PR"
   echo "## The spec you run"
   echo "This review is **REVIEW.md ($SPEC_VERSION)**, reproduced verbatim in the SPEC section at the end of this brief. Run it top to bottom. It is the only source of review rules, severities, check commands and output format; everything above and below it in this brief is only this PR's facts."
   echo
+  echo "- Spec source: \`$SPEC_SOURCE\` — read at the PR's **base** SHA, not at the head (decision \`review.brief-source\`), so this PR's own version of the rules is not the one judging it."
+  case "$FILES" in
+    *REVIEW.md*)
+      echo "- **This diff changes \`REVIEW.md\`.** Per REVIEW.md §6.6 that adds the escalation \`REVIEW.md changed in this diff\` to your verdict, and you review under the base version above."
+      ;;
+  esac
   echo "- Classification (REVIEW.md §3 router, already run on the changed files): **${CLASSES:-code-plain}** — run every rule section §4 routes those classes to. You may up-class with a stated reason; never down-class."
   echo "- Canonical \`class:\` field for the verdict (REVIEW.md §3.2): **$CANON_CLASS**"
   echo "- \`spec:\` field for the verdict: **$SPEC_VERSION**"
@@ -204,7 +238,7 @@ SID="review-pr$PR"
   echo
   echo "---"
   echo
-  echo "# SPEC — REVIEW.md ($SPEC_VERSION), verbatim"
+  echo "# SPEC — REVIEW.md ($SPEC_VERSION), verbatim, from $SPEC_SOURCE"
   echo
   cat "$SPEC"
 } > "$BRIEF"
@@ -215,7 +249,8 @@ echo "issues=${ISSUES:-none}"
 echo "surface=${SURFACE:-none}"
 echo "classes=${CLASSES:-code-plain}"
 echo "canonical_class=$CANON_CLASS"
-echo "spec=$SPEC ($SPEC_VERSION)"
+echo "spec=$SPEC_SOURCE ($SPEC_VERSION)"
+echo "base=$BASE_SHA"
 
 if [ "$DRY" = "1" ]; then
   echo "dry-run: brief generated; nothing launched, no worktree, no scheduled task."
