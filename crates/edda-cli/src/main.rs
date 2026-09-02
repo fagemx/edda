@@ -48,6 +48,7 @@ mod cmd_task;
 mod cmd_tool_tier;
 mod cmd_user;
 mod cmd_verdict;
+mod cmd_verify;
 mod cmd_watch;
 mod fleet;
 mod pipeline_templates;
@@ -402,6 +403,12 @@ enum Command {
         /// Include a notes.md file in addition to decisions/
         #[arg(long = "include-notes")]
         include_notes: bool,
+    },
+    /// Verify the ledger hash chain (tamper-evidence check; GH-647)
+    Verify {
+        /// Output a machine-readable JSON report
+        #[arg(long)]
+        json: bool,
     },
     /// Bridge operations (install/uninstall hooks for supported coding agents)
     Bridge {
@@ -1269,6 +1276,7 @@ fn main() -> anyhow::Result<()> {
             }
             cmd_export::execute(&repo_root, &out, include_notes)
         }
+        Command::Verify { json } => cmd_verify::execute(&repo_root, json),
         Command::Bridge { cmd } => cmd_bridge::run_bridge(cmd, &repo_root),
         Command::Hook { cmd } => cmd_bridge::run_hook(cmd),
         Command::Doctor { cmd } => cmd_bridge::run_doctor(cmd, &repo_root),

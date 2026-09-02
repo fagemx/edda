@@ -456,6 +456,32 @@ Index operations.
 edda index verify    # verify index entries match store records
 ```
 
+### `edda verify`
+
+Verify the ledger hash chain — the tamper-evidence check over all events in
+`.edda/ledger.db` (parent linkage + canonical hashes). Read-only: the command
+never creates, migrates, or writes to the ledger — a missing or unreadable
+`.edda/ledger.db` is reported, never silently rebuilt as an empty one.
+
+```bash
+edda verify          # human-readable one-line report
+edda verify --json   # {"ok": ..., "events": ..., "first_bad_event": ...}
+```
+
+Exit codes (same convention as `edda claim check`):
+
+- `0` — chain intact (an empty ledger is OK, not an error)
+- `1` — chain broken; the report names the first broken event (including a
+  row whose payload is no longer valid JSON — the unreadable row is named)
+- `2` — the ledger could not be opened or read (not an edda workspace, or
+  `.edda/ledger.db` missing/unreadable)
+
+Example output on a tampered ledger:
+
+```
+ledger chain BROKEN at event evt_01J… (3 event(s) scanned): event evt_01J… has invalid hash or digest
+```
+
 ---
 
 ## Orchestration
