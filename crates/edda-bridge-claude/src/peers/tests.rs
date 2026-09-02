@@ -3511,5 +3511,22 @@ fn claim_with_process_subject_roundtrips_to_board_and_peer_summary() {
     assert_eq!(peers[0].claimed_subject.as_deref(), Some("pr:570"));
     assert_eq!(peers[0].claimed_paths, vec!["docs/spec.md".to_string()]);
 
+    // GH-581 / Round 1 P1-4: Verify Off-limits rendering contains the claimed subject
+    let rendered = render_coordination_protocol(pid, "other-agent", "/path/to/repo")
+        .expect("renders protocol");
+    assert!(
+        rendered.contains("- pr:570, docs/spec.md → Agent review-pr570"),
+        "rendered: {rendered}"
+    );
+
+    // Also verify subject-only rendering without paths
+    write_claim_with_subject(pid, sid, "review-pr570", &[], Some("pr:570"));
+    let rendered_sub_only = render_coordination_protocol(pid, "other-agent", "/path/to/repo")
+        .expect("renders protocol");
+    assert!(
+        rendered_sub_only.contains("- pr:570 → Agent review-pr570"),
+        "rendered_sub_only: {rendered_sub_only}"
+    );
+
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }

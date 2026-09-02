@@ -143,50 +143,36 @@ fn claim_check_detects_matching_process_subject() {
     assert_eq!(code, 0, "stdout={stdout:?} stderr={stderr:?}");
 
     // Conflict check on pr:570 -> exit 1
-    let (code_conflict, stdout_conflict, stderr_conflict) =
-        env.run_edda(&["claim", "check", "pr:570"]);
-    assert_eq!(
-        code_conflict, 1,
-        "stdout={stdout_conflict:?} stderr={stderr_conflict:?}"
-    );
-    assert!(
-        stdout_conflict.contains("CONFLICT with claim \"review-pr570\""),
-        "stdout: {stdout_conflict}"
-    );
+    let (code_conflict, stdout_conflict, _) = env.run_edda(&["claim", "check", "pr:570"]);
+    assert_eq!(code_conflict, 1);
+    assert!(stdout_conflict.contains("CONFLICT with claim \"review-pr570\""));
     assert!(stdout_conflict.contains("session reviewer-1"));
 
     // Disjoint check on pr:571 -> exit 0
-    let (code_clear, stdout_clear, stderr_clear) = env.run_edda(&["claim", "check", "pr:571"]);
-    assert_eq!(
-        code_clear, 0,
-        "stdout={stdout_clear:?} stderr={stderr_clear:?}"
-    );
-    assert!(
-        stdout_clear.contains("No conflicts") || stdout_clear.contains("surface is clear"),
-        "stdout: {stdout_clear}"
-    );
+    let (code_clear, stdout_clear, _) = env.run_edda(&["claim", "check", "pr:571"]);
+    assert_eq!(code_clear, 0);
+    assert!(stdout_clear.contains("No conflicts"));
 }
 
 #[test]
 fn claim_check_on_stale_session_subject_reports_clear() {
     let env = TestEnv::new();
-    // Stale session (e.g. 500s ago, heartbeat expired)
-    env.write_heartbeat("reviewer-old", 500);
+    env.write_heartbeat("reviewer-1", 600); // 10 minutes ago = stale
     let (code, _, _) = env.run_edda(&[
         "claim",
         "review-pr570",
         "--subject",
         "pr:570",
         "--session",
-        "reviewer-old",
+        "reviewer-1",
     ]);
     assert_eq!(code, 0);
 
-    // Stale session claim must not conflict (exit 0)
+    // Because session is stale, claim check ignores it and reports clear (exit 0)
     let (code_check, stdout_check, _) = env.run_edda(&["claim", "check", "pr:570"]);
     assert_eq!(code_check, 0);
     assert!(
-        stdout_check.contains("surface is clear") || stdout_check.contains("No conflicts"),
+        stdout_check.contains("No conflicts"),
         "stdout: {stdout_check}"
     );
 }
@@ -205,9 +191,11 @@ fn check_merge_refuses_claimed_pr_unless_force() {
     ]);
     assert_eq!(code, 0);
 
-    // Prepare a valid MergeGateInput json file
+    // Prepare a valid MergeGateInput json file WITHOUT claimed_by.
+    // The gate will resolve the claim live from the coordination board for PR 570.
     let input_json = serde_json::json!({
         "head_sha": "1234567890abcdef1234567890abcdef12345678",
+        "pr": 570,
         "pr_author": "worker-1",
         "verdict": "LGTM",
         "verdict_sha": "1234567890abcdef1234567890abcdef12345678",
@@ -220,15 +208,14 @@ fn check_merge_refuses_claimed_pr_unless_force() {
     let input_path = env.repo.join("input.json");
     std::fs::write(&input_path, input_json.to_string()).expect("write input.json");
 
-    // Case 1: Same session holding claim is allowed to merge
+    // Case 1: Same session holding claim is allowed to merge (exit 0)
     let (code_same, stdout_same, _) = env.run_edda_with_env(
         &[
             "prs",
             "check-merge",
+            "570",
             "--input",
             input_path.to_str().unwrap(),
-            "--head-sha",
-            "1234567890abcdef1234567890abcdef12345678",
         ],
         &[("EDDA_SESSION_ID", "active-reviewer")],
     );
@@ -238,31 +225,15 @@ fn check_merge_refuses_claimed_pr_unless_force() {
     );
     assert!(stdout_same.contains("PASS: Merge preconditions satisfied"));
 
-    // Now test with PR argument in run_check_merge
-    // We can simulate input with claimed_by set to verify evaluate_merge_preconditions and formatting
-    let claimed_input_json = serde_json::json!({
-        "head_sha": "1234567890abcdef1234567890abcdef12345678",
-        "pr_author": "worker-1",
-        "verdict": "LGTM",
-        "verdict_sha": "1234567890abcdef1234567890abcdef12345678",
-        "verdict_author": "authorized-reviewer",
-        "p0_count": 0,
-        "p1_count": 0,
-        "required_ci_green": true,
-        "failed_checks": [],
-        "claimed_by": "active-reviewer (label: 'review-pr570', subject: 'pr:570')"
-    });
-    let claimed_input_path = env.repo.join("claimed_input.json");
-    std::fs::write(&claimed_input_path, claimed_input_json.to_string())
-        .expect("write claimed_input.json");
-
-    // Case 2: Claimed by other session -> REFUSED (exit 1)
+    // Case 2: Other session trying to merge without --force -> REFUSED (exit 1)
+    // Board claim is detected directly by check-merge
     let (code_refused, _stdout_refused, stderr_refused) = env.run_edda_with_env(
         &[
             "prs",
             "check-merge",
+            "570",
             "--input",
-            claimed_input_path.to_str().unwrap(),
+            input_path.to_str().unwrap(),
         ],
         &[("EDDA_SESSION_ID", "other-worker")],
     );
@@ -278,8 +249,9 @@ fn check_merge_refuses_claimed_pr_unless_force() {
         &[
             "prs",
             "check-merge",
+            "570",
             "--input",
-            claimed_input_path.to_str().unwrap(),
+            input_path.to_str().unwrap(),
             "--force",
         ],
         &[("EDDA_SESSION_ID", "other-worker")],
@@ -290,4 +262,83 @@ fn check_merge_refuses_claimed_pr_unless_force() {
     );
     assert!(stdout_force.contains("PASS: Merge preconditions satisfied"));
     assert!(stdout_force.contains("Claim Notice: Overriding process claim held by 'active-reviewer (label: 'review-pr570', subject: 'pr:570')' (--force specified)"));
+
+    // Case 4: Another PR (571) is not claimed -> PASS without Claim Notice (exit 0)
+    let (code_571, stdout_571, _) = env.run_edda_with_env(
+        &[
+            "prs",
+            "check-merge",
+            "571",
+            "--input",
+            input_path.to_str().unwrap(),
+        ],
+        &[("EDDA_SESSION_ID", "other-worker")],
+    );
+    assert_eq!(code_571, 0, "unclaimed PR passes");
+    assert!(stdout_571.contains("PASS: Merge preconditions satisfied"));
+    assert!(!stdout_571.contains("Claim Notice"));
+
+    // Case 5: Glob claim (pr:57*) on board also protects PR 570 (Round 1 P1-2)
+    let env_glob = TestEnv::new();
+    env_glob.write_heartbeat("glob-reviewer", 0);
+    let (code_g, _, _) = env_glob.run_edda(&[
+        "claim",
+        "review-glob",
+        "--subject",
+        "pr:57*",
+        "--session",
+        "glob-reviewer",
+    ]);
+    assert_eq!(code_g, 0);
+    let input_path_glob = env_glob.repo.join("input.json");
+    std::fs::write(&input_path_glob, input_json.to_string()).expect("write input.json");
+    let (code_glob_refused, _, stderr_glob) = env_glob.run_edda_with_env(
+        &[
+            "prs",
+            "check-merge",
+            "570",
+            "--input",
+            input_path_glob.to_str().unwrap(),
+        ],
+        &[("EDDA_SESSION_ID", "other-worker")],
+    );
+    assert_eq!(code_glob_refused, 1, "glob claim must protect PR 570");
+    assert!(stderr_glob.contains("PR is claimed by active session 'glob-reviewer (label: 'review-glob', subject: 'pr:57*')' — use --force to override"));
+
+    // Case 6: Live claim is not masked by an earlier stale claim (Round 1 P1-1)
+    let env_mask = TestEnv::new();
+    // Stale session with label sorting before 'z-live'
+    env_mask.write_heartbeat("a-stale-sess", 600); // 600 seconds old = stale
+    env_mask.run_edda(&[
+        "claim",
+        "a-stale-label",
+        "--subject",
+        "pr:570",
+        "--session",
+        "a-stale-sess",
+    ]);
+    // Live session with label sorting after 'a-stale-label'
+    env_mask.write_heartbeat("z-live-sess", 0); // live
+    env_mask.run_edda(&[
+        "claim",
+        "z-live-label",
+        "--subject",
+        "pr:570",
+        "--session",
+        "z-live-sess",
+    ]);
+    let input_path_mask = env_mask.repo.join("input.json");
+    std::fs::write(&input_path_mask, input_json.to_string()).expect("write input.json");
+    let (code_mask, _, stderr_mask) = env_mask.run_edda_with_env(
+        &[
+            "prs",
+            "check-merge",
+            "570",
+            "--input",
+            input_path_mask.to_str().unwrap(),
+        ],
+        &[("EDDA_SESSION_ID", "other-worker")],
+    );
+    assert_eq!(code_mask, 1, "live claim must not be masked by stale claim");
+    assert!(stderr_mask.contains("z-live-sess"), "stderr: {stderr_mask}");
 }

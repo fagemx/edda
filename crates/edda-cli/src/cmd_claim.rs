@@ -362,6 +362,16 @@ pub fn check(
             globset::Glob::new(&token).map_err(|e| format!("invalid glob {token:?}: {e}"))?;
         }
     }
+    for c in claims {
+        if let Some(sub) = &c.subject {
+            if has_wildcard(sub) {
+                globset::GlobBuilder::new(sub)
+                    .case_insensitive(true)
+                    .build()
+                    .map_err(|e| format!("invalid claim subject glob {sub:?}: {e}"))?;
+            }
+        }
+    }
 
     let mut conflicts = Vec::new();
     for c in claims {
@@ -371,7 +381,7 @@ pub fn check(
         let mut intersections = Vec::new();
         for q in query {
             if let Some(sub) = &c.subject {
-                if subjects_intersect(q, sub) {
+                if subjects_intersect(q, sub)? {
                     intersections.push(PathIntersection {
                         query: q.to_string(),
                         claim_path: sub.clone(),
@@ -404,27 +414,32 @@ pub fn check(
 /// Whether a query token and a claim subject token name the same process object.
 ///
 /// Compares case-insensitively and allows glob matching if either side has wildcards.
-fn subjects_intersect(query: &str, subject: &str) -> bool {
+/// Fails closed with an error if a wildcard pattern cannot be parsed.
+pub fn subjects_intersect(query: &str, subject: &str) -> Result<bool, String> {
     let q = query.trim();
     let s = subject.trim();
     if q.eq_ignore_ascii_case(s) {
-        return true;
+        return Ok(true);
     }
     if has_wildcard(q) {
-        if let Ok(glob) = globset::GlobBuilder::new(q).case_insensitive(true).build() {
-            if glob.compile_matcher().is_match(s) {
-                return true;
-            }
+        let glob = globset::GlobBuilder::new(q)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| format!("invalid query glob {q:?}: {e}"))?;
+        if glob.compile_matcher().is_match(s) {
+            return Ok(true);
         }
     }
     if has_wildcard(s) {
-        if let Ok(glob) = globset::GlobBuilder::new(s).case_insensitive(true).build() {
-            if glob.compile_matcher().is_match(q) {
-                return true;
-            }
+        let glob = globset::GlobBuilder::new(s)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| format!("invalid claim subject glob {s:?}: {e}"))?;
+        if glob.compile_matcher().is_match(q) {
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
 /// Whether a query token and a claim token can name the same file.
@@ -1661,6 +1676,21 @@ mod tests {
         assert!(surfaces_intersect("src/[oops", "src/fine.rs").is_err());
         let claims = vec![claim("g", "s", &["src/[oops"])];
         assert!(check(&claims, &["src/fine.rs"]).is_err());
+    }
+
+    #[test]
+    fn invalid_subject_glob_is_an_error_not_a_clear() {
+        // GH-581 / Round 1 P1-3: unparseable subject glob must fail closed (exit 2),
+        // never fall through to false ("surface is clear").
+        assert!(subjects_intersect("pr:570", "pr:57[0-").is_err());
+        let mut bad_claim = claim("g", "s", &[]);
+        bad_claim.subject = Some("pr:57[0-".to_string());
+        assert!(check(&[bad_claim], &["pr:570"]).is_err());
+
+        // Valid globs match as expected
+        assert!(subjects_intersect("pr:570", "pr:57*").unwrap());
+        assert!(!subjects_intersect("pr:570", "pr:58*").unwrap());
+        assert!(subjects_intersect("pr:57*", "pr:570").unwrap());
     }
 
     #[test]

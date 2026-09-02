@@ -228,7 +228,9 @@ pub fn render_coordination_protocol_with(
                 (Some(sub), false) => format!("{sub}, {}", p.claimed_paths.join(", ")),
                 (Some(sub), true) => sub.clone(),
                 (None, false) => p.claimed_paths.join(", "),
-                (None, true) => String::new(),
+                (None, true) => {
+                    unreachable!("peers without paths or subject are filtered out above")
+                }
             };
             lines.push(format!("- {} → Agent {} ({age})", target, p.label));
         }

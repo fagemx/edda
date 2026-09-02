@@ -10,7 +10,7 @@ use std::process::Command;
 #[derive(Debug, Clone, Args, Default)]
 pub struct CheckMergeArgs {
     /// PR number to evaluate (queries GitHub via `gh` CLI)
-    #[arg(value_name = "PR", conflicts_with = "input")]
+    #[arg(value_name = "PR")]
     pub pr: Option<u64>,
 
     /// Explicit head commit SHA
@@ -63,9 +63,11 @@ pub struct CheckMergeArgs {
 }
 
 /// Host-agnostic input for evaluating merge preconditions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeGateInput {
     pub head_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_author: Option<String>,
     pub verdict: Option<String>,
@@ -589,6 +591,7 @@ fn fetch_pr_from_gh(
 
     Ok(MergeGateInput {
         head_sha,
+        pr: Some(pr),
         pr_author: gh_view.author.as_ref().map(|a| a.login.clone()),
         verdict,
         verdict_sha,
@@ -656,6 +659,41 @@ pub fn format_merge_report(result: &MergeGateResult) -> (String, String) {
     (stdout_buf, stderr_buf)
 }
 
+/// Query the coordination board for an active process claim on `pr:<pr_number>`.
+///
+/// Filters for live sessions and excludes `current_session_id`.
+/// Matches using `subjects_intersect` so glob subjects (e.g. `pr:57*`) are honoured.
+pub fn check_active_pr_claim(
+    repo_root: &Path,
+    pr_number: u64,
+    current_session_id: Option<&str>,
+) -> Option<String> {
+    let project_id = edda_store::project_id(repo_root);
+    let target_subject = format!("pr:{pr_number}");
+    let board = edda_bridge_claude::peers::compute_board_state(&project_id);
+
+    board.claims.into_iter().find_map(|c| {
+        let sub = c.subject.as_deref()?;
+        if !crate::cmd_claim::subjects_intersect(&target_subject, sub).unwrap_or(false) {
+            return None;
+        }
+        let is_live = matches!(
+            edda_bridge_claude::peers::classify_session_liveness(&project_id, &c.session_id),
+            edda_bridge_claude::peers::SessionLiveness::Live { .. }
+        );
+        if !is_live {
+            return None;
+        }
+        if current_session_id.is_some() && current_session_id == Some(&c.session_id) {
+            return None;
+        }
+        Some(format!(
+            "{} (label: '{}', subject: '{}')",
+            c.session_id, c.label, sub
+        ))
+    })
+}
+
 /// Execute the merge precondition check CLI entrypoint.
 pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result<()> {
     if args.merge && (args.pr.is_none() || args.input.is_some()) {
@@ -677,6 +715,7 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
     } else if let Some(head_sha) = args.head_sha {
         MergeGateInput {
             head_sha,
+            pr: args.pr,
             pr_author: None,
             verdict: args.verdict,
             verdict_sha: args.verdict_sha,
@@ -686,7 +725,7 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
             required_ci_green: args.ci_green,
             failed_checks: Vec::new(),
             claimed_by: None,
-            force: args.force,
+            force: false,
         }
     } else {
         anyhow::bail!(
@@ -698,34 +737,11 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
         input.force = true;
     }
 
-    if let Some(pr_number) = args.pr {
+    let target_pr = args.pr.or(input.pr);
+    if let Some(pr_number) = target_pr {
         if input.claimed_by.is_none() {
-            let project_id = edda_store::project_id(repo_root);
-            let target_subject = format!("pr:{pr_number}");
-            let board = edda_bridge_claude::peers::compute_board_state(&project_id);
-            if let Some(c) = board.claims.iter().find(|c| {
-                c.subject
-                    .as_deref()
-                    .map(|s| s.eq_ignore_ascii_case(&target_subject))
-                    .unwrap_or(false)
-            }) {
-                let is_live = matches!(
-                    edda_bridge_claude::peers::classify_session_liveness(
-                        &project_id,
-                        &c.session_id,
-                    ),
-                    edda_bridge_claude::peers::SessionLiveness::Live { .. }
-                );
-                if is_live {
-                    let my_sid = std::env::var("EDDA_SESSION_ID").ok();
-                    if my_sid.as_deref() != Some(&c.session_id) {
-                        input.claimed_by = Some(format!(
-                            "{} (label: '{}', subject: '{target_subject}')",
-                            c.session_id, c.label
-                        ));
-                    }
-                }
-            }
+            let my_sid = std::env::var("EDDA_SESSION_ID").ok();
+            input.claimed_by = check_active_pr_claim(repo_root, pr_number, my_sid.as_deref());
         }
     }
 
@@ -779,19 +795,29 @@ mod tests {
     const VALID_SHA_A: &str = "1234567890abcdef1234567890abcdef12345678";
     const VALID_SHA_B: &str = "abcdef1234567890abcdef1234567890abcdef12";
 
-    #[test]
-    fn test_refuse_when_no_verdict() {
-        let input = MergeGateInput {
+    fn base_input() -> MergeGateInput {
+        MergeGateInput {
             head_sha: VALID_SHA_A.into(),
+            pr: None,
             pr_author: None,
-            verdict: None,
-            verdict_sha: None,
+            verdict: Some("LGTM".into()),
+            verdict_sha: Some(VALID_SHA_A.into()),
             verdict_author: None,
             p0_count: 0,
             p1_count: 0,
             required_ci_green: true,
             failed_checks: vec![],
-            ..Default::default()
+            claimed_by: None,
+            force: false,
+        }
+    }
+
+    #[test]
+    fn test_refuse_when_no_verdict() {
+        let input = MergeGateInput {
+            verdict: None,
+            verdict_sha: None,
+            ..base_input()
         };
         let result = evaluate_merge_preconditions(&input);
         assert!(!result.can_merge);
@@ -805,15 +831,8 @@ mod tests {
     fn test_refuse_when_verdict_stale_new_push() {
         let input = MergeGateInput {
             head_sha: VALID_SHA_B.into(),
-            pr_author: None,
-            verdict: Some("LGTM".into()),
             verdict_sha: Some(VALID_SHA_A.into()),
-            verdict_author: None,
-            p0_count: 0,
-            p1_count: 0,
-            required_ci_green: true,
-            failed_checks: vec![],
-            ..Default::default()
+            ..base_input()
         };
         let result = evaluate_merge_preconditions(&input);
         assert!(!result.can_merge);
@@ -827,15 +846,8 @@ mod tests {
     fn test_refuse_when_sha_is_invalid() {
         let input = MergeGateInput {
             head_sha: "short".into(),
-            pr_author: None,
-            verdict: Some("LGTM".into()),
             verdict_sha: Some("short".into()),
-            verdict_author: None,
-            p0_count: 0,
-            p1_count: 0,
-            required_ci_green: true,
-            failed_checks: vec![],
-            ..Default::default()
+            ..base_input()
         };
         let result = evaluate_merge_preconditions(&input);
         assert!(!result.can_merge);
@@ -848,16 +860,9 @@ mod tests {
     #[test]
     fn test_refuse_when_ci_not_green() {
         let input = MergeGateInput {
-            head_sha: VALID_SHA_A.into(),
-            pr_author: None,
-            verdict: Some("LGTM".into()),
-            verdict_sha: Some(VALID_SHA_A.into()),
-            verdict_author: None,
-            p0_count: 0,
-            p1_count: 0,
             required_ci_green: false,
             failed_checks: vec!["CI Gate (fail)".into()],
-            ..Default::default()
+            ..base_input()
         };
         let result = evaluate_merge_preconditions(&input);
         assert!(!result.can_merge);
@@ -868,16 +873,8 @@ mod tests {
     fn test_refuse_when_blocking_findings_or_changes_requested() {
         // Case A: Changes Requested
         let input_cr = MergeGateInput {
-            head_sha: VALID_SHA_A.into(),
-            pr_author: None,
             verdict: Some("Changes Requested".into()),
-            verdict_sha: Some(VALID_SHA_A.into()),
-            verdict_author: None,
-            p0_count: 0,
-            p1_count: 0,
-            required_ci_green: true,
-            failed_checks: vec![],
-            ..Default::default()
+            ..base_input()
         };
         let res_cr = evaluate_merge_preconditions(&input_cr);
         assert!(!res_cr.can_merge);
@@ -885,16 +882,8 @@ mod tests {
 
         // Case B: P0 > 0 (e.g. 12)
         let input_p0 = MergeGateInput {
-            head_sha: VALID_SHA_A.into(),
-            pr_author: None,
-            verdict: Some("LGTM".into()),
-            verdict_sha: Some(VALID_SHA_A.into()),
-            verdict_author: None,
             p0_count: 12,
-            p1_count: 0,
-            required_ci_green: true,
-            failed_checks: vec![],
-            ..Default::default()
+            ..base_input()
         };
         let res_p0 = evaluate_merge_preconditions(&input_p0);
         assert!(!res_p0.can_merge);
@@ -902,16 +891,8 @@ mod tests {
 
         // Case C: P1 > 0
         let input_p1 = MergeGateInput {
-            head_sha: VALID_SHA_A.into(),
-            pr_author: None,
-            verdict: Some("LGTM".into()),
-            verdict_sha: Some(VALID_SHA_A.into()),
-            verdict_author: None,
-            p0_count: 0,
             p1_count: 2,
-            required_ci_green: true,
-            failed_checks: vec![],
-            ..Default::default()
+            ..base_input()
         };
         let res_p1 = evaluate_merge_preconditions(&input_p1);
         assert!(!res_p1.can_merge);
@@ -924,16 +905,9 @@ mod tests {
     #[test]
     fn test_approve_when_all_preconditions_met() {
         let input = MergeGateInput {
-            head_sha: VALID_SHA_A.into(),
-            pr_author: None,
-            verdict: Some("LGTM".into()),
             verdict_sha: Some(VALID_SHA_A.to_uppercase()), // case-insensitive equality
             verdict_author: Some("opus-reviewer".into()),
-            p0_count: 0,
-            p1_count: 0,
-            required_ci_green: true,
-            failed_checks: vec![],
-            ..Default::default()
+            ..base_input()
         };
         let result = evaluate_merge_preconditions(&input);
         assert!(result.can_merge);
@@ -1122,18 +1096,7 @@ Commit: 1234567890abcdef1234567890abcdef12345678
     fn test_run_check_merge_input_file_report_only() {
         let temp_dir = tempfile::tempdir().unwrap();
         let input_file = temp_dir.path().join("input.json");
-        let valid_input = MergeGateInput {
-            head_sha: VALID_SHA_A.into(),
-            pr_author: None,
-            verdict: Some("LGTM".into()),
-            verdict_sha: Some(VALID_SHA_A.into()),
-            verdict_author: Some("reviewer".into()),
-            p0_count: 0,
-            p1_count: 0,
-            required_ci_green: true,
-            failed_checks: vec![],
-            ..Default::default()
-        };
+        let valid_input = base_input();
         fs::write(&input_file, serde_json::to_string(&valid_input).unwrap()).unwrap();
 
         let args = CheckMergeArgs {
@@ -1240,5 +1203,57 @@ Commit: 1234567890abcdef1234567890abcdef12345678
         assert!(stderr.contains("  - review verdict is not LGTM"));
         assert!(stderr.contains("  - blocking findings present: 1 P0, 1 P1"));
         assert!(stderr.contains("  - required CI check(s) are not green"));
+    }
+
+    #[test]
+    fn test_check_active_pr_claim_semantics() {
+        let repo = tempfile::tempdir().expect("repo");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("edda");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("git");
+        let project_id = edda_store::project_id(repo.path());
+        let _store = crate::test_support::isolated_store();
+
+        // Initially no claims
+        assert_eq!(check_active_pr_claim(repo.path(), 570, None), None);
+
+        // Claim with subject pr:570 by session s1 (live)
+        edda_bridge_claude::peers::write_heartbeat_minimal(&project_id, "s1", "reviewer", "/tmp");
+        edda_bridge_claude::peers::write_claim_with_subject(
+            &project_id,
+            "s1",
+            "rev-570",
+            &[],
+            Some("pr:570"),
+        );
+
+        // Live claim by s1 is detected for another session
+        let res = check_active_pr_claim(repo.path(), 570, Some("s2"));
+        assert!(res.is_some());
+        assert!(res.as_ref().unwrap().contains("s1"));
+        assert!(res.as_ref().unwrap().contains("pr:570"));
+
+        // Same session (s1) is permitted
+        assert_eq!(check_active_pr_claim(repo.path(), 570, Some("s1")), None);
+
+        // Different PR (571) is clear
+        assert_eq!(check_active_pr_claim(repo.path(), 571, Some("s2")), None);
+
+        // Glob matching: a claim on pr:57* matches PR 570 (Round 1 P1-2)
+        edda_bridge_claude::peers::write_heartbeat_minimal(
+            &project_id,
+            "s_glob",
+            "glob_rev",
+            "/tmp",
+        );
+        edda_bridge_claude::peers::write_claim_with_subject(
+            &project_id,
+            "s_glob",
+            "rev-glob",
+            &[],
+            Some("pr:57*"),
+        );
+        let res_glob = check_active_pr_claim(repo.path(), 570, Some("s1")); // s1 is allowed for s1's claim, but s_glob also claims it!
+        assert!(res_glob.is_some());
+        assert!(res_glob.as_ref().unwrap().contains("s_glob"));
     }
 }
