@@ -43,6 +43,12 @@ pub struct UsageSnapshot {
     pub cache_read_tokens: u64,
     #[serde(default)]
     pub cache_creation_tokens: u64,
+    /// Whether at least one `message.usage` record was observed in the
+    /// transcript (GH-585 round 2). Presence is recorded independently of
+    /// the token counters so a measured all-zero usage (e.g. zero pricing)
+    /// stays distinguishable from a session with no usage data at all.
+    #[serde(default)]
+    pub usage_observed: bool,
 }
 
 impl UsageSnapshot {
@@ -124,6 +130,10 @@ pub(crate) fn extract_session_signals(transcript_store_path: &Path) -> SessionSi
             "assistant" => {
                 // Accumulate usage from assistant messages
                 if let Some(u) = record.get("message").and_then(|m| m.get("usage")) {
+                    // Record presence independently of the counters (GH-585
+                    // round 2): a usage record with all-zero tokens is a
+                    // measured zero, not an unmeasured session.
+                    usage.usage_observed = true;
                     usage.input_tokens +=
                         u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                     usage.output_tokens +=
@@ -1853,6 +1863,7 @@ mod tests {
             output_tokens: 100_000,
             cache_read_tokens: 600_000,
             cache_creation_tokens: 100_000,
+            ..Default::default()
         };
         let cost = estimate_cost(&usage);
         // full-price input: (1M - 600k - 100k) = 300k * $3/M = $0.90
@@ -1918,6 +1929,64 @@ mod tests {
         assert_eq!(signals.usage.cache_read_tokens, 300);
         assert_eq!(signals.usage.cache_creation_tokens, 50);
         assert_eq!(signals.usage.total_tokens(), 4300);
+        assert!(
+            signals.usage.usage_observed,
+            "usage records were present in the transcript"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn signals_usage_presence_recorded_independently_of_counters() {
+        // GH-585 round 2 P1-1: presence must not be inferred from the token
+        // counters. A usage record with all-zero tokens still sets the flag.
+        let records = vec![serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "model": "claude-sonnet-4-20250514",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0
+                },
+                "content": [{ "type": "text", "text": "Hello" }]
+            }
+        })];
+        let path = make_transcript(&records);
+        let signals = extract_session_signals(&path);
+        assert_eq!(signals.usage.input_tokens, 0);
+        assert_eq!(signals.usage.output_tokens, 0);
+        assert!(
+            signals.usage.usage_observed,
+            "a usage record with all-zero counters is still a usage observation"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn signals_no_usage_record_means_no_presence() {
+        let records = vec![
+            serde_json::json!({
+                "type": "system",
+                "model": "claude-sonnet-4-20250514"
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-20250514",
+                    "content": [{ "type": "text", "text": "Hello" }]
+                }
+            }),
+        ];
+        let path = make_transcript(&records);
+        let signals = extract_session_signals(&path);
+        assert!(
+            !signals.usage.usage_observed,
+            "no message.usage record in the transcript"
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -1933,6 +2002,7 @@ mod tests {
                 output_tokens: 2000,
                 cache_read_tokens: 100,
                 cache_creation_tokens: 50,
+                usage_observed: true,
             },
             ..Default::default()
         };
@@ -1944,6 +2014,33 @@ mod tests {
         assert_eq!(loaded.output_tokens, 2000);
         assert_eq!(loaded.cache_read_tokens, 100);
         assert_eq!(loaded.cache_creation_tokens, 50);
+        assert!(loaded.usage_observed, "presence must survive usage.json");
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn usage_state_round_trips_measured_zero_presence() {
+        // GH-585 round 2 P1-1: a usage snapshot with usage_observed=true and
+        // all-zero counters must survive usage.json unchanged — that is the
+        // measured-zero case the magnitude-based check used to lose.
+        let pid = "test_usage_zero_rt";
+        let _ = edda_store::ensure_dirs(pid);
+
+        let signals = SessionSignals {
+            usage: UsageSnapshot {
+                model: "claude-sonnet-4-20250514".into(),
+                usage_observed: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        save_session_signals(pid, "test-session", &signals);
+
+        let loaded = read_usage_state(pid);
+        assert!(loaded.usage_observed);
+        assert_eq!(loaded.input_tokens, 0);
+        assert_eq!(loaded.output_tokens, 0);
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }

@@ -13,6 +13,34 @@
 > 依決策 `coord.session-identity`，需要身分的動詞要帶 `--session <id>` 或在環境設 `EDDA_SESSION_ID`；`edda status` 與 `edda peers` 不需要身分，照常可用（2026-09-02 實跑確認）。
 > 控制層的 `watch` / `report` / `promote` / `intake` 是**概念動詞**（定義在 `docs/superpowers/specs/2026-09-02-control-layer-and-l2-shapes-design.md` §2.1）；§五列的是**現有指令**，其中 `edda watch`（TUI）與 `edda intake github` 與概念動詞同名但範圍不同，勿混用。
 
+## START HERE：控制者開場
+
+1. **先確認這個 checkout 在 `main` 上**。控制者 session 若開在過時或 feature-branch 的
+   checkout，runbook、fleet skills、`scripts/fleet/` 全都不在樹裡，後面每一步都會落空
+   （2026-09-02 就有一個 session 這樣燒掉）。驗證（先 `git fetch`——本地追蹤的
+   `origin/main` ref 可能過時，不 fetch 就比會對舊 ref 誤報 0）：
+   ```bash
+   git fetch -q origin                     # 先刷新 origin/main 追蹤 ref
+   git status                              # 乾淨、on branch main
+   git rev-list --count HEAD..origin/main  # 0 = 沒落後
+   ```
+2. **接單**：`gh issue edit <N> --add-label fleet:claimed --remove-label fleet:ready --add-assignee @me`，
+   並在 issue 留 lease 留言。
+3. **派 lane**（開 worktree 後）：
+   ```bash
+   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> -Cwd <worktree>
+   ```
+   脚本不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`
+   （決策 `verification.cost-discipline`），給了就在 wrapper 設
+   `CARGO_TARGET_DIR = <lane root>\<BuildLane>`（lane root =
+   `$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）；
+   Rust lane 要明確傳，如 `-BuildLane worker-1`；docs lane 只寫文件不編譯，
+   不傳 build lane，wrapper 就不設 `CARGO_TARGET_DIR`（見 §六）。
+4. **盯進度**（不用再翻檔案時間戳）：
+   ```bash
+   pwsh -NoProfile -File scripts/fleet/lane-status.ps1
+   ```
+
 ---
 
 ## 一、三個角色
@@ -60,14 +88,17 @@
    ```
    plan YAML 放 scratchpad 或 `.tmp/plans/`，不進 repo。Rust lane 設 `CARGO_TARGET_DIR` 為
    `$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1|worker-2`（verifier 用 `verifier|verifier-2`）。
-   lane 的**啟動方式**見 §六（Task Scheduler，不是 nohup）。
-4. **PR 一開就派審**（不是等整批）。574 落地前的做法：
-   ```bash
-   pi -p --model openai-codex/gpt-5.6-sol --thinking high --exclude-tools edit,write \
-      --session-id review-prNNN "讀 <brief 路徑> 並照它審 PR #NNN"
-   ```
-   審查 brief 照 `/fleet-review`；round 記錄照 CLAUDE.md 的 review-fix loop（IN SCOPE／FOLLOW-UP ISSUE／P0-P1／RAN vs READ／cost／verdict），貼在 PR 上。
-   provider 過載時**改運輸不降模型**（§六）。
+   lane 的**啟動方式**用 `scripts/fleet/lane-launch.ps1`（見 START HERE；Task Scheduler，不是 nohup，規則見 §六）。
+4. **PR 一開就派審（自動，不用人手）**：本機 watcher（`scripts/pr-review-watch.sh`，由
+   `scripts/pr-review-launch.ps1` 註冊成隱藏排程任務 `edda-pr-review-watcher`）每 60 秒掃 open PR：
+   非 draft、head 沒審過的 PR 在 **3 分鐘內**自動起唯讀審查者（gpt-5.6-sol，Task Scheduler 隱藏視窗，
+   worktree 在 `$EDDA_FLEET_SCRATCH/wt-review-prN`）並貼確認留言 `review: started on <full sha>`；
+   判決（含 observed model、cost、釘死的 head SHA）在審查者跑完後（約 5–15 分鐘）自動貼上 PR，
+   並加 label `review:lgtm`／`review:changes-requested`；push 後 head 變了自動再審一輪。
+   檢查方式：`Get-ScheduledTask edda-pr-review-watcher`、`tail ~/.edda/fleet/watch.log`、PR 留言與 label。
+   provider 過載時：pi 重試一次，仍沒有判決就標 `review:unreviewed` 並對該 head 停手
+   （v1 無 codex 後備——它做不到唯讀；§六 `fleet.review-provider-overload` 的決策全文仍可 `edda ask` 查）。
+   啟停、狀態檔與疑難排解見 `docs/guides/pr-review-watcher.md`。watcher **不合併**——合併仍在第 6 步、要授權。
 5. **收斂**：`/fleet-pr-loop` 的 bash driver 吐 `ACTION: REVIEW | FIX | DONE | BLOCKED`，照做到 LGTM；driver 不合併。
 6. **合併**（有授權時）：`git diff <LGTM 的 SHA>..origin/<branch>` 必須為空（判決還在），`gh pr checks` 7 綠，才合。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 7. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
@@ -76,6 +107,13 @@
 ---
 
 ## 四、Lane 的三件事
+
+開工先裝 hooks（每個 worktree 一次）：`sh scripts/githooks/install.sh`——之後 L0 的
+fmt／clippy／lint／size 閘由 pre-commit（bash 腳本；commit-msg 為 POSIX sh）／commit-msg 機器擋（1 MB 上限、staged `*.rs`/`Cargo.*` 跑
+`cargo fmt --all --check`、touched `crates/*` 跑 clippy、staged `*.md` 跑 markdown lint、
+conventional commit 格式；`SKIP_CLIPPY=1` 跳過 clippy 並自動在訊息尾巴補 `[skip-clippy]`）。
+`cargo test -p <crate>` 不在 hook 裡——仍是手動 L0 步驟，CI 也會跑。`--no-verify` 全跳；
+CI 只在 PR 與 push 到 main 時跑，feature branch 靠 PR 的 CI Gate。
 
 1. 在指定 worktree 與分支上做 brief 說的那一件事——不 checkout main、不 pull、不開別的分支。
 2. L0 閘（`cargo fmt --all --check`；`cargo clippy -p <crate> --all-targets -- -D warnings`；`cargo test -p <crate>`），
@@ -92,7 +130,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 |---|---|---|
 | 觀測 | `edda watch`、`edda peers`、`edda conduct status`、`gh pr checks`、`edda status` | dispatch lane 不在 peers（#569）；統一狀態面（#567）；孤兒回收（#573）；freshness（#604） |
 | 進度追蹤 | issue 標籤（pending → ready → PR → merged）；`edda task new <title> --after <id> --assignee <label>`、`edda task start <id>`、`edda task done <id> --receipt "<可驗的話>" --evidence <path>`；PR 上的審查輪 | 成本與模型不進帳本（#582、#574） |
-| 派發 | `edda dispatch --agent <claude|pi|codex> --prompt-file <f> [--session-id] [--cwd] [--budget-usd] [--timeout-sec] [--permission-mode] [--json]`；`edda conduct run <plan> --agent <x> [--cwd] [--dry-run] [--tmux] [--json]`；審查手動起 pi | 選模型／思考深度／工具（#574）；角色 profile（#593）；批次發射（`edda wave`，等 #576 與 #599） |
+| 派發 | `edda dispatch --agent <claude|pi|codex> --prompt-file <f> [--session-id] [--cwd] [--budget-usd] [--timeout-sec] [--permission-mode] [--json]`；`edda conduct run <plan> --agent <x> [--cwd] [--dry-run] [--tmux] [--json]`；審查由本機 watcher 自動起並貼判決（`scripts/pr-review-watch.sh`，#632） | 選模型/思考深度/工具(#574);角色 profile(#593);批次發射(`edda wave`,等 #576 與 #599) |
 | 討論提問 | 你 ↔ 控制者對話；控制者 ↔ 其他 Claude session 用跨 session 訊息；對 lane 用 `edda request "<label>" "<msg>"`（門鈴；lane 沒心跳時要 `--force` 排隊）；耐久的寫 issue／PR 留言 | 事件驅動門鈴（#545）；lane 心跳（#569） |
 | 決策 | `edda ask "<domain>"` → `edda decide "k=v" --reason "…"`（agent，unratified）→ `edda ratify <key>`（你） | 簽章身分（#609） |
 | 開單 | `/issue-intake`、`/issue-create`（四問接線審計必填） | 批次進料與確認表（#599）；驗收端 wiring verdict（#594） |
@@ -108,8 +146,8 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 規則 | 決策 key |
 |---|---|
 | 執行用便宜模型（pi 預設 glm-5.3-flash）；**審查一律 gpt-5.6-sol**（codex／pi 皆是） | `fleet.agent-model-split` |
-| 審查 provider 過載：**改運輸不降模型**——(1) 同 `--model` 先用 `--thinking minimal` 探測再重試 pi；(2) `edda dispatch --agent codex`；(3) 都不行就把 PR 標為**未審查**並停——未審查是誠實狀態，便宜模型的判決不是 | `fleet.review-provider-overload` |
-| **lane 啟動走 Task Scheduler，不走 nohup／Start-Process**：Claude Code 的工具 shell 在 Windows Job Object 裡，nohup 的子程序仍隨 session 死。`Register-ScheduledTask` + `Start-ScheduledTask`（父程序是 svchost）；該環境 `CARGO_TARGET_DIR` 與 `HOME` 為空，lane wrapper 必須顯式設；`Get-ScheduledTaskInfo` 可輪詢，`Unregister-ScheduledTask` 清理。重派前先讀 worktree／branch／PR 狀態，不信任 live handle | `fleet.lane-launch`、`fleet.lane-dispatch` |
+| 審查 provider 過載：**改運輸不降模型**——(1) 同 `--model` 先用 `--thinking minimal` 探測，通了才重試 pi 一次；(2) 仍沒有判決就對該 head 標 `review:unreviewed` 並停——未審查是誠實狀態，便宜模型的判決不是。watcher 無 Codex 路線（superseding 決策 `…codex-route-withdrawn-for-automated-watcher`：Codex 對 watcher 做不到唯讀；人類控制者仍可手動用 Codex） | `fleet.review-provider-overload` |
+| **lane 啟動走 Task Scheduler，不走 nohup／Start-Process**：Claude Code 的工具 shell 在 Windows Job Object 裡，nohup 的子程序仍隨 session 死。`Register-ScheduledTask` + `Start-ScheduledTask`（父程序是 svchost）；該環境 `HOME` 為空，lane wrapper 必須顯式設；`CARGO_TARGET_DIR` 只在 `-BuildLane` 指名四個允許 build lane 之一時設（不編譯的 session 沒有 build lane——`.claude/CLAUDE.md`、`verification.cost-discipline`；要編譯的必須給四擇一，launcher 拒絕其他名字）。`lane-launch.ps1` 不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`，設 `CARGO_TARGET_DIR`＝lane root（`$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）\`<BuildLane>`；docs lane 不傳，wrapper 不設。`Get-ScheduledTaskInfo` 可輪詢，`Unregister-ScheduledTask` 清理。重派前先讀 worktree／branch／PR 狀態，不信任 live handle。**手續已脚本化**：用 `scripts/fleet/lane-launch.ps1` 註冊起 lane、`scripts/fleet/lane-status.ps1` 盯狀態（用法見 START HERE），不要再手寫 wrapper | `fleet.lane-launch`、`fleet.lane-dispatch` |
 | 一 issue ＝ 一單 phase plan ＝ 一 worktree ＝ 一 build lane；並行在 plan 之間；plan 裡不寫沒理由的 `depends_on`；並行 plan 不用 verdict gate | `cleanup.parallel-exec`、`cleanup.review-gate` |
 | build lane 只用 `worker-1|worker-2|verifier|verifier-2`；永不建 ad-hoc `CARGO_TARGET_DIR`；L1 與 verifier 設 `CARGO_INCREMENTAL=0` | `verification.cost-discipline` |
 | 審查釘 full SHA；**每次 push 使前一個判決失效**；一個 PR 一個審查者身分 | `fleet.review-protocol` |

@@ -1,0 +1,46 @@
+#!/bin/sh
+# Git-native commit-msg gate (zero external dependencies; POSIX sh).
+#
+# Rejects subjects that do not match <type>(<scope>): <description>
+# (types: feat fix docs refactor test chore ci perf style build).
+# Merge commits and `wip(` lane checkpoints are allowed.
+#
+# Consumes the SKIP_CLIPPY marker left by pre-commit and appends
+# `[skip-clippy]` to the message tail so reviewers can see the skip.
+
+set -eu
+
+msg_file=$1
+
+skip_marker=$(git rev-parse --git-path SKIP_CLIPPY)
+if [ -f "$skip_marker" ]; then
+    printf '\n[skip-clippy]\n' >> "$msg_file"
+    rm -f "$skip_marker"
+fi
+
+subject=$(head -n 1 "$msg_file")
+
+# Merge commits are exempt, but only while a merge is actually in progress:
+# a plain commit that merely starts with "Merge ..." is still rejected.
+if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+    exit 0
+fi
+case "$subject" in
+    "wip("*) exit 0 ;;
+esac
+
+if ! printf '%s\n' "$subject" | grep -qE \
+    '^(feat|fix|docs|refactor|test|chore|ci|perf|style|build)\([A-Za-z0-9_./-]+\): .+'; then
+    cat >&2 <<'EOF'
+commit-msg: rejected — the subject must match <type>(<scope>): <description>
+
+  allowed types: feat fix docs refactor test chore ci perf style build
+  examples:
+    feat(edda-core): add DecisionScope enum
+    fix(edda-ledger): hash chain verification edge case
+    chore(repo): apply cargo fmt across workspace
+
+  merge commits and `wip(...)` lane checkpoints are allowed.
+EOF
+    exit 1
+fi

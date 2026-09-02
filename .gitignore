@@ -2,9 +2,9 @@
 .edda/
 .agents/
 /CLAUDE.md
-docs/archive/
 /tmp/
 .tmp/
+.deep-dive/
 push.log
 .env
 

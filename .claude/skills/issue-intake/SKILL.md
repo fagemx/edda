@@ -8,7 +8,10 @@ description: Use when the ready-issue queue is low or a delivery wave is closing
 Keep the delivery queue fed with issues that are worth doing and machine-ready
 — without the operator. Every issue this engine ships is born in the format
 parallel-wave Layer 1 judges: **named surface + machine-checkable doneWhen**.
-Composes with fleet-orchestrate (discovery rail) and parallel-wave (delivery).
+The body contract lives once in [templates.md](templates.md) — issue-create
+and fleet-epic-split emit the same shape and only point here; no parallel
+body formats. Composes with fleet-orchestrate (discovery rail) and
+parallel-wave (delivery).
 
 ## Sources — check in this order
 

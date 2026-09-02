@@ -117,10 +117,25 @@ pub struct SessionStats {
     pub cache_read_tokens: u64,
     /// Total cache-creation input tokens.
     pub cache_creation_tokens: u64,
-    /// Estimated cost in USD.
-    pub estimated_cost_usd: f64,
+    /// Estimated cost in USD. `None` means unmeasured — the session has no
+    /// usage data. `Some(0.0)` is a measured zero (e.g. zero pricing),
+    /// never conflated with unmeasured (GH-585).
+    pub estimated_cost_usd: Option<f64>,
     /// Activity classification for this session.
     pub activity: ActivityType,
+}
+
+/// The watermark a digest note stamps into its payload (round-2 ruling:
+/// "the ledger is durable truth; the side state file is a cache"). The
+/// note records what it consumed — the byte offset plus a hash of the
+/// consumed prefix — so idempotency is derivable from the workspace
+/// ledger itself: losing the cache costs a re-scan, never a duplicate.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct DigestWatermark {
+    /// Byte offset just past the last consumed complete line.
+    pub offset: u64,
+    /// Hash of the first `offset` bytes of the session ledger.
+    pub prefix_hash: String,
 }
 
 /// Extract statistics from a session ledger file.
@@ -131,11 +146,11 @@ mod prev;
 mod render;
 
 // Re-export all public items to preserve API
-pub use extract::{extract_stats, load_tasks_for_digest, render_digest_text};
+pub use extract::{extract_stats, extract_stats_delta, load_tasks_for_digest, render_digest_text};
 pub use orchestrate::{
     digest_previous_sessions, digest_previous_sessions_with_opts, digest_session_manual,
-    find_all_pending_sessions, load_digest_state, pending_failure_warning, save_digest_state,
-    DigestResult, DigestState,
+    find_all_pending_sessions, load_digest_state, migrate_legacy_state, pending_failure_warning,
+    save_digest_state, DigestResult, DigestState, DigestedSession,
 };
 pub use prev::{
     collect_session_ledger_extras, read_prev_digest, write_prev_digest,

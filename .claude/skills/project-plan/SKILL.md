@@ -42,7 +42,7 @@ project-plan validate
 - Starting a new project or major feature that spans multiple modules
 - The work needs more than ~5 tasks and has dependency ordering
 - You want agents to execute independently with clear boundaries
-- You're about to use Karvi to dispatch parallel tracks
+- You're about to dispatch parallel tracks as lanes with `edda dispatch`
 
 **Do NOT use this for**: single-feature issues, bug fixes, refactors, or anything that fits in one PR.
 
@@ -93,7 +93,7 @@ Break the scope into **Tracks** (feature groups) and **Tasks** (implementable un
 - Each Track should have 1-4 Tasks (not more, unless it's a complex integration track — max 5)
 - Each Task should be completable in one agent session (~1-2 hours of work)
 - Tasks within a track are sequential; tracks at the same layer can be parallel
-- Every task must have a concrete DoD (Definition of Done) with verifiable checks
+- Every task must have concrete `doneWhen` (machine-checkable conditions) with verifiable checks
 
 **Step Decomposition Patterns** — use these to decide how to break a track into tasks:
 
@@ -350,7 +350,7 @@ After generating all files, present a summary:
 
 ### Next Steps
 - Review the plan, then dispatch Track A
-- Or use Karvi: `POST /api/project` with tasks from each track
+- Or dispatch each track as a lane with `edda dispatch`
 ```
 
 ---

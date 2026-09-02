@@ -86,4 +86,4 @@ PR 已 LGTM＋掛 `fleet:reviewed`。停。回報操作者：可以 merge 了（
 ## 界線
 `MAX` 預設 3 輪 fix，到頂不硬跑——掛 `fleet:blocked` 喊人。
 merge 永遠是操作者：你把 PR 推到 `fleet:reviewed` 就停，把「可以 merge 了」交回給人。
-每一輪的 review 與 fix 都是**換 fresh context 的獨立 fork**——這是本迴圈比 karvi/edda「單 agent 自審自修」更硬的地方。
+每一輪的 review 與 fix 都是**換 fresh context 的獨立 fork**——這是本迴圈比單一 agent 自審自修更硬的地方。

@@ -34,6 +34,13 @@ phases:
       based on origin/main (<basis short SHA>). Do NOT run git checkout main,
       do NOT pull, do NOT create another branch. Work here.
 
+      First run `sh scripts/githooks/install.sh` to enable the git-native
+      pre-commit / commit-msg hooks — they enforce the commit-hook subset of
+      the L0 gates (fmt, touched-crate clippy, markdown lint, 1 MB cap,
+      conventional commits) at every commit, so you do not have to remember
+      them. `cargo test -p <crate>` stays a manual L0 step; CI runs it as
+      well.
+
       Its doneWhen is the ceiling — do not exceed it:
         - <doneWhen items verbatim>
 

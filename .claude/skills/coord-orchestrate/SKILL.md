@@ -113,8 +113,12 @@ Request: audit the whole scoped surface; publish no self-verdict from the implem
    `<lane root>/<lane name>` will invent a directory — the exact failure the
    lane rule exists to prevent), verification budget (focused gates on touched
    units while iterating; the full gate set once per frozen SHA with a receipt;
-   READ receipts before any RAN), cleanup authority (lane build cache is
-   disposable; worktrees, branches, and sources are never deleted), done =
+   READ receipts before any RAN), cleanup authority (lane build output is
+   disposable; per `fleet.merged-artifact-cleanup` the branch and lane worktree
+   of a **merged** PR may be reclaimed — the squash commit is on main and
+   GitHub keeps refs/pull/N/head — anything unmerged stays untouched: open or
+   closed-unmerged branches, worktrees with uncommitted work, another
+   session's active branch or worktree, and sources), done =
    GitHub PR when available,
    otherwise a frozen local branch plus durable review carrier (never invent a
    PR); never merge + `edda task done --receipt`. Include the receiver tie-break

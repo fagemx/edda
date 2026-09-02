@@ -147,6 +147,7 @@ mod tests {
                 verdict_actor: None,
                 verdict_comment: None,
                 env_retries: 0,
+                cost_usd: None,
             })
             .collect()
     }

@@ -11,9 +11,18 @@ pub(super) fn extract_file_path(envelope: &serde_json::Value) -> Option<String> 
         return Some(normalize_path(fp));
     }
     // Try top-level tool_input (when raw is flattened)
-    envelope
+    if let Some(fp) = envelope
         .get("tool_input")
         .and_then(|ti| ti.get("file_path"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(normalize_path(fp));
+    }
+    // OpenClaw nests tool data under event_data (round-1 P1-1)
+    envelope
+        .get("event_data")
+        .and_then(|d| d.get("tool_input").or_else(|| d.get("toolInput")))
+        .and_then(|ti| ti.get("file_path").or_else(|| ti.get("filePath")))
         .and_then(|v| v.as_str())
         .map(normalize_path)
 }
@@ -67,8 +76,18 @@ pub(super) fn extract_bash_command(envelope: &serde_json::Value) -> Option<Strin
     {
         return Some(cmd.to_string());
     }
-    envelope
+    // Try top-level tool_input (when raw is flattened)
+    if let Some(cmd) = envelope
         .get("tool_input")
+        .and_then(|ti| ti.get("command"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(cmd.to_string());
+    }
+    // OpenClaw nests tool data under event_data (round-1 P1-1)
+    envelope
+        .get("event_data")
+        .and_then(|d| d.get("tool_input").or_else(|| d.get("toolInput")))
         .and_then(|ti| ti.get("command"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
@@ -97,24 +116,54 @@ pub(super) fn normalize_path(path: &str) -> String {
     path.to_string()
 }
 
-pub(super) fn compute_duration_minutes(first: &Option<String>, last: &Option<String>) -> u64 {
-    let (Some(first), Some(last)) = (first.as_deref(), last.as_deref()) else {
-        return 0;
-    };
+/// Idle-gap cap for session duration (GH-578): a gap longer than this
+/// between consecutive session events is idle time, not work, and only
+/// contributes this many seconds to the session's active duration.
+pub(super) const MAX_IDLE_GAP_SECS: i64 = 30 * 60;
+
+/// Accumulate active duration across consecutive event timestamps.
+///
+/// Gaps longer than [`MAX_IDLE_GAP_SECS`] are treated as idle and capped,
+/// so an idle-for-ten-days session does not report 14287 minutes of work./// Negative deltas (clock skew) contribute nothing.
+pub(super) fn accumulate_active_secs(
+    active_secs: &mut i64,
+    last_seen: &mut Option<time::OffsetDateTime>,
+    ts: &str,
+) {
     let fmt = &time::format_description::well_known::Rfc3339;
-    let Ok(t1) = time::OffsetDateTime::parse(first, fmt) else {
-        return 0;
+    let Ok(t) = time::OffsetDateTime::parse(ts, fmt) else {
+        return;
     };
-    let Ok(t2) = time::OffsetDateTime::parse(last, fmt) else {
-        return 0;
-    };
-    let diff: time::Duration = t2 - t1;
-    let secs = diff.whole_seconds().unsigned_abs();
-    secs / 60
+    if let Some(prev) = *last_seen {
+        let delta = (t - prev).whole_seconds();
+        if delta > 0 {
+            *active_secs += delta.min(MAX_IDLE_GAP_SECS);
+        }
+    }
+    *last_seen = Some(t);
 }
 
 pub(super) fn now_rfc3339() -> String {
     let now = time::OffsetDateTime::now_utc();
     now.format(&time::format_description::well_known::Rfc3339)
         .expect("RFC3339 formatting should not fail")
+}
+
+/// Honest cost for a usage snapshot (GH-585): `None` when the session has
+/// no usage data (unmeasured), `Some(estimate)` when a usage observation
+/// exists — including `Some(0.0)` when every counter is zero (measured
+/// zero, round-2 P1-1).
+///
+/// Measuredness comes from the presence flag the scanner sets exactly when
+/// a `message.usage` record appeared — never inferred from magnitudes.
+/// Nonzero counters also imply observation (they are only accumulated
+/// inside a usage record), which keeps `usage.json` files written before
+/// the flag existed working.
+pub(super) fn measured_cost(usage: &crate::signals::UsageSnapshot) -> Option<f64> {
+    let observed = usage.usage_observed
+        || usage.input_tokens > 0
+        || usage.output_tokens > 0
+        || usage.cache_read_tokens > 0
+        || usage.cache_creation_tokens > 0;
+    observed.then(|| crate::signals::estimate_cost(usage))
 }

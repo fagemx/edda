@@ -32,6 +32,12 @@ Orchestrate multi-phase AI plans using `edda conduct`. Each phase spawns a Claud
 edda conduct run plan.yaml
 
 # Background (for unattended execution)
+# WARNING (decision fleet.lane-launch, edda repo): on Windows, nohup and
+# Start-Process do NOT escape the session's Windows Job Object — the child
+# still dies with the session. Launch unattended runs via Task Scheduler
+# instead (e.g. the tracked `scripts/fleet/lane-launch.ps1`). The nohup form
+# below is POSIX-only: there is no Job Object on Linux/macOS, so detaching
+# with nohup is enough there.
 nohup edda conduct run plan.yaml --quiet > /dev/null 2>&1 &
 ```
 

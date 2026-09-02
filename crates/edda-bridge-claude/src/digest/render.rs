@@ -5,7 +5,7 @@ use edda_core::types::{Event, Provenance, Refs, SCHEMA_VERSION};
 
 use super::extract::{compute_tool_ratios, extract_stats, render_digest_text};
 use super::helpers::now_rfc3339;
-use super::{FailedCommand, SessionStats};
+use super::{DigestWatermark, FailedCommand, SessionStats};
 
 pub fn build_digest_event(
     session_id: &str,
@@ -13,6 +13,7 @@ pub fn build_digest_event(
     branch: &str,
     parent_hash: Option<&str>,
     notes: &[String],
+    watermark: Option<&DigestWatermark>,
 ) -> anyhow::Result<Event> {
     let text = render_digest_text(session_id, stats);
 
@@ -54,6 +55,20 @@ pub fn build_digest_event(
         }
     });
 
+    // Stamp the watermark into the note: the ledger itself must be able to
+    // answer "was this already digested?" (round-2, ledger-authoritative
+    // idempotency) without trusting the side state file.
+    let payload = if let Some(wm) = watermark {
+        let mut p = payload;
+        p["digest_watermark"] = serde_json::json!({
+            "offset": wm.offset,
+            "prefix_hash": wm.prefix_hash,
+        });
+        p
+    } else {
+        payload
+    };
+
     let event_id = format!("evt_{}", ulid::Ulid::new().to_string().to_lowercase());
     let ts = now_rfc3339();
 
@@ -94,7 +109,7 @@ pub fn extract_session_digest(
     parent_hash: Option<&str>,
 ) -> anyhow::Result<Event> {
     let stats = extract_stats(session_ledger_path)?;
-    build_digest_event(session_id, &stats, branch, parent_hash, &[])
+    build_digest_event(session_id, &stats, branch, parent_hash, &[], None)
 }
 
 /// Build a `cmd` milestone event for a failed Bash command.

@@ -319,6 +319,35 @@ impl SqliteStore {
         events.into_iter().map(row_to_event).collect()
     }
 
+    /// Read all events in insertion order, keeping per-row deserialization
+    /// failures attached to the failing row's `event_id`.
+    ///
+    /// [`Self::iter_events`] aborts the whole iteration when any row cannot
+    /// be deserialized, so a single tampered payload hides *which* event is
+    /// broken. Verification (`edda verify`, GH-647) needs the failing row's
+    /// identity, so this variant returns `Err((event_id, reason))` for
+    /// unreadable rows instead of failing the whole scan.
+    pub fn iter_events_reporting(&self) -> anyhow::Result<Vec<Result<Event, (String, String)>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT event_id, ts, event_type, branch, parent_hash, hash,
+                    payload, refs_blobs, refs_events, refs_provenance,
+                    schema_version, digests, event_family, event_level
+             FROM events ORDER BY rowid",
+        )?;
+
+        let rows = stmt
+            .query_map([], map_event_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let event_id = row.event_id.clone();
+                row_to_event(row).map_err(|err| (event_id, format!("{err:#}")))
+            })
+            .collect())
+    }
+
     /// Get all events of a given type, filtered at the SQL level using `idx_events_type`.
     pub fn iter_events_by_type(&self, event_type: &str) -> anyhow::Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(

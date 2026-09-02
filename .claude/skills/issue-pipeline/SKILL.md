@@ -28,7 +28,7 @@ This skill depends on these sub-skills being installed in `.claude/skills/`:
 - `issue-action` — Implementation from plan to PR
 - `pr-review-loop` — Iterative review with auto-fix
 
-If any are missing, inform the user and suggest installing them from the karvi starter-kit.
+If any are missing, inform the user — all three ship in this repo's `.claude/skills/`.
 
 ## Pipeline Phases
 
@@ -89,7 +89,11 @@ For each PR meeting every precondition:
 gh pr merge {pr_number} --squash
 ```
 
-Never pass `--delete-branch` — branches and worktrees are never deleted (see
+Pass `--delete-branch` only when the PR is being merged — per
+`fleet.merged-artifact-cleanup`, a merged PR's branch and lane worktree may be
+reclaimed (squash commit on main, GitHub keeps `refs/pull/N/head`); anything
+unmerged — open or closed-unmerged branches, worktrees with uncommitted work,
+another session's active branch or worktree, and sources — stays untouched (see
 `.claude/CLAUDE.md`). If a PR does not meet the preconditions, do not merge it;
 route it back through the `pr-review-loop` skill and report that it is blocked.
 
@@ -103,9 +107,13 @@ Report final status table.
 4. **Wait for ALL agents in a phase before starting the next phase**
 5. **Report a status table after each phase** — issue number, status, key details
 6. **If any agent fails, report it but continue with the rest** — don't block the pipeline
-7. **Never delete branches or worktrees** — worktrees, branches, and sources are
-   never deleted (see `.claude/CLAUDE.md`); `git worktree remove` and
-   `git worktree prune` are forbidden; leave cleanup to the operator
+7. **Never delete anything unmerged** — per `fleet.merged-artifact-cleanup`,
+   only the branch and lane worktree of a **merged** PR may be reclaimed (the
+   squash commit is on main and GitHub keeps `refs/pull/N/head`); anything
+   unmerged — open or closed-unmerged branches, worktrees with uncommitted
+   work, another session's active branch or worktree, and sources — stays
+   untouched; `git worktree remove` and `git worktree prune` are for that
+   reclaim only; otherwise leave cleanup to the operator
 
 ## Status Table Format
 

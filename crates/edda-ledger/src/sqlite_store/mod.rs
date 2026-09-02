@@ -52,6 +52,30 @@ impl SqliteStore {
         Ok(store)
     }
 
+    /// Open an existing ledger.db without creating or migrating anything.
+    ///
+    /// Fails when the file does not exist. Unlike [`SqliteStore::open_or_create`],
+    /// this never creates the database file, never applies the schema, and
+    /// never runs migrations; the connection is opened `query_only`, so a
+    /// read-only integrity consumer (`edda verify`, GH-647) cannot repair,
+    /// migrate, or otherwise write to the ledger it is checking.
+    pub fn open_existing(db_path: &Path) -> anyhow::Result<Self> {
+        if !db_path.is_file() {
+            anyhow::bail!(
+                "ledger database not found: {} (run `edda init` to create a workspace)",
+                db_path.display()
+            );
+        }
+        let conn = Connection::open(db_path)?;
+        let store = Self { conn };
+        // Connection-level settings only, and `query_only` last: no schema
+        // application, no `journal_mode` write, no checkpoint-on-drop write.
+        store
+            .conn
+            .execute_batch("PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;")?;
+        Ok(store)
+    }
+
     fn apply_pragmas(&self) -> anyhow::Result<()> {
         self.conn.execute_batch(
             "PRAGMA journal_mode = WAL;
