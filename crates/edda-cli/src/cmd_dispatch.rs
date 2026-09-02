@@ -502,26 +502,28 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
 }
 
 /// Ingest Pi session transcripts after a dispatch turn and emit `#session_digest`.
-pub fn ingest_pi_session_post_dispatch(
+pub(crate) fn ingest_pi_session_post_dispatch(
     cwd: &std::path::Path,
     session_id: &str,
     session_dir: Option<&std::path::Path>,
 ) -> Result<()> {
     let project_id = edda_store::project_id(cwd);
     let project_dir = edda_store::project_dir(&project_id);
-    let _ = edda_store::ensure_dirs(&project_id);
+    edda_store::ensure_dirs(&project_id)?;
 
     let session_file = match edda_transcript::find_pi_session_file(cwd, session_id, session_dir) {
         Some(f) => f,
-        None => return Ok(()),
+        None => {
+            eprintln!("Warning: pi session file not found for session {session_id}");
+            return Ok(());
+        }
     };
 
     let _stats =
         edda_transcript::ingest_pi_transcript_delta(&project_dir, session_id, cwd, &session_file)?;
 
     let cwd_str = cwd.to_string_lossy();
-    let _ =
-        edda_bridge_claude::digest::digest_session_manual(&project_id, session_id, &cwd_str, true);
+    edda_bridge_claude::digest::digest_session_manual(&project_id, session_id, &cwd_str, true)?;
 
     Ok(())
 }
@@ -1441,5 +1443,123 @@ mod tests {
             res.is_ok(),
             "missing pi session file returns Ok(()) gracefully"
         );
+    }
+
+    #[test]
+    fn ingest_pi_session_post_dispatch_wired_produces_digest() {
+        let tmp_ws = tempfile::tempdir().unwrap();
+        let tmp_store = tempfile::tempdir().unwrap();
+        let tmp_sessions = tempfile::tempdir().unwrap();
+
+        std::env::set_var("EDDA_STORE_ROOT", tmp_store.path());
+
+        let ws_path = tmp_ws.path();
+        let ledger = edda_ledger::Ledger::open_or_init(ws_path).unwrap();
+
+        let session_id = "test-wired-pi-577";
+        let session_file = tmp_sessions
+            .path()
+            .join(format!("2026-09-02T12-00-00-000Z_{session_id}.jsonl"));
+        let lines = vec![
+            serde_json::json!({
+                "type": "session",
+                "version": 3,
+                "id": session_id,
+                "timestamp": "2026-09-02T12:00:00.000Z",
+                "cwd": ws_path.to_string_lossy(),
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "m1",
+                "timestamp": "2026-09-02T12:00:05.000Z",
+                "message": {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "Run tests" }]
+                }
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "m2",
+                "timestamp": "2026-09-02T12:01:30.000Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "toolCall",
+                            "id": "c1",
+                            "name": "bash",
+                            "arguments": { "command": "cargo check" }
+                        }
+                    ],
+                    "model": "gpt-5.6-sol",
+                    "usage": {
+                        "input": 500,
+                        "output": 100,
+                        "cacheRead": 0,
+                        "cacheWrite": 0,
+                        "totalTokens": 600,
+                        "cost": { "total": 0.02 }
+                    }
+                }
+            }),
+            serde_json::json!({
+                "type": "message",
+                "id": "m3",
+                "timestamp": "2026-09-02T12:01:35.000Z",
+                "message": {
+                    "role": "toolResult",
+                    "toolCallId": "c1",
+                    "toolName": "bash",
+                    "content": [{ "type": "text", "text": "ok" }],
+                    "isError": false
+                }
+            }),
+        ];
+
+        let mut content = String::new();
+        for l in lines {
+            content.push_str(&serde_json::to_string(&l).unwrap());
+            content.push('\n');
+        }
+        std::fs::write(&session_file, content).unwrap();
+
+        // Exercise the wired entry point directly
+        let res = ingest_pi_session_post_dispatch(ws_path, session_id, Some(tmp_sessions.path()));
+        assert!(
+            res.is_ok(),
+            "wired post-dispatch ingest should succeed: {:?}",
+            res.err()
+        );
+
+        // Verify that #session_digest note was appended to ledger
+        let events = ledger.iter_events().unwrap();
+        let digests: Vec<_> = events
+            .iter()
+            .filter(|e| {
+                e.payload
+                    .get("tags")
+                    .and_then(|t| t.as_array())
+                    .is_some_and(|arr| arr.iter().any(|tag| tag == "session_digest"))
+            })
+            .collect();
+        assert_eq!(digests.len(), 1, "exactly one session_digest note emitted");
+        let text = digests[0]
+            .payload
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        assert!(
+            text.contains("1 tool calls"),
+            "text should contain '1 tool calls': {text}"
+        );
+        assert!(
+            text.contains("Bash:1"),
+            "text should contain 'Bash:1': {text}"
+        );
+        assert!(
+            text.contains("gpt-5.6-sol"),
+            "text should contain model: {text}"
+        );
+        assert!(text.contains("$0.02"), "text should contain cost: {text}");
     }
 }

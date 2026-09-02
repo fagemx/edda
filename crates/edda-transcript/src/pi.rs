@@ -428,7 +428,19 @@ pub fn ingest_pi_transcript_delta(
 
     // Update usage state file for the digest reader
     if usage_observed || !model_seen.is_empty() {
-        let prev_u = current_usage.get("usage").cloned().unwrap_or_default();
+        // GH-577 round 2 (P1-3): usage.json is project-scoped. If it records
+        // a DIFFERENT session_id, do NOT accumulate into it — reset to zero
+        // so one session's digest never reports another session's tokens.
+        // Only accumulate if resuming the same session.
+        let is_same_session =
+            current_usage.get("session_id").and_then(|s| s.as_str()) == Some(session_id);
+
+        let prev_u = if is_same_session {
+            current_usage.get("usage").cloned().unwrap_or_default()
+        } else {
+            serde_json::Value::Null
+        };
+
         let prev_in = prev_u
             .get("input_tokens")
             .and_then(|v| v.as_u64())
@@ -459,15 +471,26 @@ pub fn ingest_pi_transcript_delta(
                 "output_tokens": prev_out + total_output,
                 "cache_read_tokens": prev_cr + total_cache_read,
                 "cache_creation_tokens": prev_cw + total_cache_write,
+                "cost_usd": if usage_observed { Some(total_cost) } else { None },
                 "usage_observed": true,
             }
         });
-        let _ = fs::write(&usage_path, serde_json::to_string_pretty(&usage_obj)?);
+        fs::write(&usage_path, serde_json::to_string_pretty(&usage_obj)?)?;
     }
 
     // Save updated cursor
     cursor.offset = to_offset;
     cursor.file_size = file_size;
+    cursor.mtime_unix = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    cursor.updated_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     let data = serde_json::to_string_pretty(&cursor)?;
     edda_store::write_atomic(&cursor_path, data.as_bytes())?;
 

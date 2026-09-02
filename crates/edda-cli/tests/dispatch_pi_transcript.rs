@@ -137,6 +137,7 @@ fn test_pi_transcript_ingested_and_idempotent() {
     assert_eq!(stats.model, "gpt-5.6-sol");
     assert_eq!(stats.input_tokens, 1000);
     assert_eq!(stats.output_tokens, 200);
+    assert_eq!(stats.cost_usd, Some(0.05));
 
     // Trigger digest manual
     let cwd_str = ws_path.to_string_lossy();
@@ -174,6 +175,10 @@ fn test_pi_transcript_ingested_and_idempotent() {
         "digest text should contain '2 tool calls': {text}"
     );
     assert!(
+        text.contains("1 min"),
+        "digest text should contain duration '1 min': {text}"
+    );
+    assert!(
         text.contains("Bash:1"),
         "digest text should contain 'Bash:1': {text}"
     );
@@ -184,6 +189,10 @@ fn test_pi_transcript_ingested_and_idempotent() {
     assert!(
         text.contains("gpt-5.6-sol"),
         "digest text should contain model: {text}"
+    );
+    assert!(
+        text.contains("$0.05"),
+        "digest text should contain measured cost '$0.05': {text}"
     );
 
     // Second ingestion should be idempotent (0 new bytes read, no duplicate note)
