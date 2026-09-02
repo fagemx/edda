@@ -3114,7 +3114,9 @@ fn write_usage_json(pid: &str, usage: serde_json::Value) {
         "updated_at": "2026-02-14T10:00:00Z",
         "usage": usage,
     });
-    let path = edda_store::project_dir(pid).join("state").join("usage.json");
+    let path = edda_store::project_dir(pid)
+        .join("state")
+        .join("usage.json");
     let _ = std::fs::create_dir_all(path.parent().unwrap());
     std::fs::write(&path, serde_json::to_string_pretty(&usage_json).unwrap()).unwrap();
 }
@@ -3209,7 +3211,9 @@ fn prev_digest_measured_zero_cost_round_trips() {
     };
     write_prev_digest(pid, "test-zero-rt", &stats, vec![], vec![]);
 
-    let path = edda_store::project_dir(pid).join("state").join("prev_digest.json");
+    let path = edda_store::project_dir(pid)
+        .join("state")
+        .join("prev_digest.json");
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(
         on_disk.contains("measured_usd"),
@@ -3229,8 +3233,7 @@ fn prev_digest_measured_zero_cost_round_trips() {
 #[test]
 fn prev_digest_measured_zero_marker_deserializes() {
     let json = legacy_prev_digest_json(serde_json::json!({"measured_usd": 0.0}));
-    let digest: PrevDigest =
-        serde_json::from_str(&json).expect("marker form must deserialize");
+    let digest: PrevDigest = serde_json::from_str(&json).expect("marker form must deserialize");
     assert_eq!(
         digest.estimated_cost_usd,
         Some(0.0),

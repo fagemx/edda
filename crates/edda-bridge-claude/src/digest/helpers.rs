@@ -150,12 +150,20 @@ pub(super) fn now_rfc3339() -> String {
 }
 
 /// Honest cost for a usage snapshot (GH-585): `None` when the session has
-/// no usage data (unmeasured), `Some(estimate)` only when tokens were
-/// actually consumed. Never returns `Some(0.0)` for a no-usage session.
+/// no usage data (unmeasured), `Some(estimate)` when a usage observation
+/// exists — including `Some(0.0)` when every counter is zero (measured
+/// zero, round-2 P1-1).
+///
+/// Measuredness comes from the presence flag the scanner sets exactly when
+/// a `message.usage` record appeared — never inferred from magnitudes.
+/// Nonzero counters also imply observation (they are only accumulated
+/// inside a usage record), which keeps `usage.json` files written before
+/// the flag existed working.
 pub(super) fn measured_cost(usage: &crate::signals::UsageSnapshot) -> Option<f64> {
-    let measured = usage.input_tokens > 0
+    let observed = usage.usage_observed
+        || usage.input_tokens > 0
         || usage.output_tokens > 0
         || usage.cache_read_tokens > 0
         || usage.cache_creation_tokens > 0;
-    measured.then(|| crate::signals::estimate_cost(usage))
+    observed.then(|| crate::signals::estimate_cost(usage))
 }
