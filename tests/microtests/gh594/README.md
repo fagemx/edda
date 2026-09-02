@@ -2,10 +2,37 @@
 
 Control vs variant review of the same fake diff (`fake.diff`), prompts
 identical except the review-skill text: control embeds fleet-review from
-`origin/main` (`git show origin/main:.claude/skills/fleet-review/SKILL.md`),
-variant embeds this branch's (`git show HEAD:.claude/skills/fleet-review/SKILL.md`,
-content-identical to the worktree file modulo line endings). Model
-`z-ai/glm-5.3-flash`, read-only (`--exclude-tools edit,write`), N=3 runs per
+`origin/main`, variant embeds this branch's (`git show HEAD:.claude/skills/fleet-review/SKILL.md`,
+content-identical to the worktree file modulo line endings). The committed
+prompt files were generated from those blobs. Portable invocation of the
+`<rev>:<path>` form:
+
+- Linux/WSL `sh`: `git show origin/main:.claude/skills/fleet-review/SKILL.md`
+- Git Bash (this workstation): MSYS path conversion rewrites the
+  `:`-separated argument, so prefix with `MSYS_NO_PATHCONV=1`:
+  `MSYS_NO_PATHCONV=1 git show origin/main:.claude/skills/fleet-review/SKILL.md`
+
+Verified here (Git Bash):
+
+```text
+$ git show origin/main:.claude/skills/fleet-review/SKILL.md
+fatal: ambiguous argument 'origin\main;.claude\skills\fleet-review\SKILL.md': unknown revision or path not in the working tree.
+Use '--' to separate paths from revisions, like this:
+'git <command> [<revision>...] -- [<file>...]'
+(exit code 128)
+
+$ MSYS_NO_PATHCONV=1 git show origin/main:.claude/skills/fleet-review/SKILL.md | head -1
+---
+(exit code 0)
+```
+
+`run.sh` does NOT invoke `git show` at all — it reads the committed
+`prompt-control.md` / `prompt-variant.md`, so the portability issue does not
+affect replay. It runs under `sh`; all six runs of `20260902-151034` were
+executed as `sh tests/microtests/gh594/run.sh` under Git Bash's `sh` and the
+script passed `sh -n`.
+
+Model `z-ai/glm-5.3-flash`, read-only (`--exclude-tools edit,write`), N=3 runs per
 arm, session ids `microtest-control-<ts>-<i>` / `microtest-variant-<ts>-<i>`.
 
 Replay: `sh tests/microtests/gh594/run.sh` — overwrites
