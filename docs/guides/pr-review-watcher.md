@@ -21,8 +21,9 @@
      session 的 Job Object 牽連）；Linux 上退化成 `nohup`。
 2. **確認**：排程任務確認進入 `Running` 之後（起不來就不記 pending、下一輪重試），貼確認留言
    `review: started on <full sha>`（SHA-pinned）。ack **不是 best-effort**：貼失敗會記在
-   `review-acks.tsv`（"launched, ack pending"），每一輪重試，3 次都失敗就 label
-   `review:post-failed` 並記 log；成功才從 acks 檔移除。判決留言等審查者跑完
+   `review-acks.tsv`（"launched, ack pending"），每一輪重試；3 次都失敗就加 label
+   `review:post-failed`，且 **acks 條目不會被默默丟掉**——label 加成功才把條目標記為
+   `post-failed`（終態）；label 呼叫也失敗的話，條目保留、下一輪再試。判決留言等審查者跑完
    （典型 5–15 分鐘）才貼。
 3. 判決出現後（log 裡 `<<<VERDICT ... VERDICT>>>` 區塊），貼 PR 留言：表頭一行含
    **model_observed（從 pi session 檔讀，不是從 brief 宣稱；session 檔不存在就明寫
@@ -38,7 +39,9 @@
 
 判決死掉或空白（log 沒有 verdict 區塊、zero-byte log、或超過 45 分鐘沒有 `.done`）時：
 
-1. **pi 重試一次**（同一個 `--model`，session 續用）；
+1. **pi 重試一次**（同一個 `--model`，session 續用）；重試**之前**先跑帳本決策指定的探測：
+   `pi -p --model $EDDA_REVIEW_MODEL --thinking minimal "reply OK"`（60 秒逾時）——
+   探測失敗就直接對該 head 標 `review:unreviewed` 並停，不浪費第二次完整審查；探測通過才重試；
 2. 還是拿不到判決：label `review:unreviewed`，**該 head 停手**。
    未審查是誠實的狀態，便宜模型的判決不是。
    （`edda dispatch --agent codex` 這條運輸在 v1 移除：Codex 設定為
@@ -93,7 +96,7 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 |---|---|
 | `review-state.tsv` | `pr<TAB>reviewed_sha<TAB>round`——每張 PR 已審到哪個 head |
 | `review-pending.tsv` | `pr<TAB>round<TAB>sha<TAB>attempts<TAB>launched<TAB>postfails`——在途審查（attempts 0=首次 pi，1=pi 重試；postfails=判決貼文失敗次數）；**只在排程任務確認 Running 後才會寫入** |
-| `review-acks.tsv` | `pr<TAB>sha<TAB>attempts`——已啟動但 ack 未貼出的 head；成功即移除，3 次失敗 → `review:post-failed` |
+| `review-acks.tsv` | `pr<TAB>sha<TAB>attempts<TAB>status`——已啟動但 ack 未貼出的 head；成功即移除；3 次失敗 → 加 `review:post-failed`，條目標記 `post-failed`（終態）；label 呼叫也失敗則條目保留、下一輪重試 |
 | `review-fails.tsv` | `pr<TAB>sha<TAB>count`——連續啟動失敗次數（連續 3 次 → `review:unreviewed` 並停） |
 | `watch.log` | watcher 每一步的時間戳紀錄 |
 | `review-prN-rR-brief.md` / `.log` / `.done` / `-verdict.md`（`.posted`） / `-comment.md` | 每輪審查的 brief、pi 轉錄、結束旗標、抽出來的判決（`.posted` = 留言已貼出）、貼出的留言 |
@@ -110,9 +113,23 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 
 ## 離線測試
 
-`sh scripts/test-pr-review-watch.sh`（移植自 PR #639）：用 fixture 的 `gh pr list`
-JSON 驗證「新 PR → 審；同 SHA 已審 → 跳過；push 新 head → 再審；draft → 跳過；
-`review:unreviewed` → 跳過」的決策，以及判決文字 → label 的映射（後者贏）。
+`sh scripts/test-pr-review-watch.sh`（移植自 PR #639，Round 2/3 擴充）：**完全離線**——
+`gh`／`pi`／review-pr 全是 stub，狀態目錄與 `PR_REVIEW_WATCH_LOG` 都指向暫存目錄，
+並守住「真實 `~/.edda/fleet/watch.log` 在整輪測試前後大小不變」；每個場景都包
+`timeout`，卡住＝FAIL，不會吊住呼叫端。實況：
+
+- `decide` 子命令吃的是 `gh pr list --jq '… \| @tsv'` 產出的 **TSV** 行（draft 在
+  `--jq` 的 `select(.isDraft\|not)` 就被濾掉，套件中沒有 draft fixture）：新 PR → 審、
+  同 SHA 已審 → 跳過、push 新 head → 再審、label 逐 PR 判讀（無 label 的 PR 1 不被
+  PR 2 的 `review:unreviewed` 壓住）、`review:unreviewed` per head（同 head 擋、
+  新 head 摘 label 重審、無記錄 head 保守擋）、空佇列、缺 head SHA。
+- `verdict-label`：判決文字 → label，後者贏。
+- `label-verdict`：verdict label 只在「目前 head == 被審 SHA」時套用；head 未知也跳過。
+- `ack-try`（stub gh）：失敗記 "launched, ack pending" → 成功才清；3 次都失敗且
+  `review:post-failed` 也加不上 → 條目保留、下一輪重試；label 加成功 → 條目標記 `post-failed` 終態。
+- live 迴圈（stub gh/pi + stub review-pr，一次 `--once`）：head 查詢失敗 → 判決留在
+  pending、不記 reviewed、不加 label、log `head unknown, retry`；provider 探測失敗 →
+  不發第二次審查、直接 `review:unreviewed`；探測通過 → 恰好一次 pi 重試。
 
 ## 它不做什麼
 

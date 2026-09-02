@@ -111,7 +111,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 規則 | 決策 key |
 |---|---|
 | 執行用便宜模型（pi 預設 glm-5.3-flash）；**審查一律 gpt-5.6-sol**（codex／pi 皆是） | `fleet.agent-model-split` |
-| 審查 provider 過載：**改運輸不降模型**——(1) 同 `--model` 先用 `--thinking minimal` 探測再重試 pi；(2) `edda dispatch --agent codex`；(3) 都不行就把 PR 標為**未審查**並停——未審查是誠實狀態，便宜模型的判決不是 | `fleet.review-provider-overload` |
+| 審查 provider 過載：**改運輸不降模型**——(1) 同 `--model` 先用 `--thinking minimal` 探測，通了才重試 pi 一次；(2) 仍沒有判決就對該 head 標 `review:unreviewed` 並停——未審查是誠實狀態，便宜模型的判決不是。watcher 無 Codex 路線（superseding 決策 `…codex-route-withdrawn-for-automated-watcher`：Codex 對 watcher 做不到唯讀；人類控制者仍可手動用 Codex） | `fleet.review-provider-overload` |
 | **lane 啟動走 Task Scheduler，不走 nohup／Start-Process**：Claude Code 的工具 shell 在 Windows Job Object 裡，nohup 的子程序仍隨 session 死。`Register-ScheduledTask` + `Start-ScheduledTask`（父程序是 svchost）；該環境 `CARGO_TARGET_DIR` 與 `HOME` 為空，lane wrapper 必須顯式設；`Get-ScheduledTaskInfo` 可輪詢，`Unregister-ScheduledTask` 清理。重派前先讀 worktree／branch／PR 狀態，不信任 live handle | `fleet.lane-launch`、`fleet.lane-dispatch` |
 | 一 issue ＝ 一單 phase plan ＝ 一 worktree ＝ 一 build lane；並行在 plan 之間；plan 裡不寫沒理由的 `depends_on`；並行 plan 不用 verdict gate | `cleanup.parallel-exec`、`cleanup.review-gate` |
 | build lane 只用 `worker-1|worker-2|verifier|verifier-2`；永不建 ad-hoc `CARGO_TARGET_DIR`；L1 與 verifier 設 `CARGO_INCREMENTAL=0` | `verification.cost-discipline` |

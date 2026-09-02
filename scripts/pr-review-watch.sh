@@ -60,7 +60,8 @@ POSTFAIL_CAP=5
 ACK_CAP=3
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-REVIEW_PR="$SCRIPT_DIR/review-pr.sh"
+REVIEW_PR=${PR_REVIEW_WATCH_REVIEW_PR:-$SCRIPT_DIR/review-pr.sh}   # overridable for offline tests
+LABEL_PR="$SCRIPT_DIR/review-pr.sh"   # always the real script (verdict-label is offline-safe)
 
 ONCE=0
 DRY=0
@@ -115,9 +116,9 @@ label_verdict() { # $1=reviewed sha  $2=current head
 
 # ---- acknowledgement (retried, bounded; never best-effort) -------------------
 
-ack_register() { # $1=pr $2=sha $3=attempts — record "launched, ack pending"
+ack_register() { # $1=pr $2=sha $3=attempts $4=status(""=pending, "post-failed"=terminal)
   awk -F'\t' -v pr="$1" '$1!=pr' "$ACKS" > "$ACKS.tmp"
-  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$ACKS.tmp"
+  printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${4:-}" >> "$ACKS.tmp"
   mv "$ACKS.tmp" "$ACKS"
 }
 
@@ -128,7 +129,10 @@ ack_drop() { # $1=pr
 
 ack_try() { # $1=pr $2=sha $3=attempts — one attempt.
   # exit 0 = posted (pending entry cleared); 1 = failed, retries remain;
-  # 2 = failed after the bound (entry dropped, review:post-failed label).
+  # 2 = failed after the bound. The entry is a durable record: after the bound
+  # it is only marked "post-failed" once review:post-failed is APPLIED; if the
+  # label call fails too, the entry stays for the next poll (no silent
+  # terminal state).
   if printf 'review: started on %s\n' "$2" \
       | gh pr comment "$1" --repo "$REPO" --body-file - >/dev/null 2>&1; then
     ack_drop "$1"
@@ -137,12 +141,16 @@ ack_try() { # $1=pr $2=sha $3=attempts — one attempt.
   fi
   attempts=$((${3:-0} + 1))
   if [ "$attempts" -ge "$ACK_CAP" ]; then
-    ack_drop "$1"
-    log "pr$1 ack failed $ACK_CAP times — labeling review:post-failed"
-    gh pr edit "$1" --repo "$REPO" --add-label "review:post-failed" >/dev/null 2>&1 || true
+    if gh pr edit "$1" --repo "$REPO" --add-label "review:post-failed" >/dev/null 2>&1; then
+      ack_register "$1" "$2" "$attempts" "post-failed"
+      log "pr$1 ack failed $ACK_CAP times — review:post-failed applied; ack entry marked post-failed"
+    else
+      ack_register "$1" "$2" "$attempts" ""
+      log "pr$1 ack failed $ACK_CAP times AND review:post-failed label failed — ack entry kept for next poll"
+    fi
     return 2
   fi
-  ack_register "$1" "$2" "$attempts"
+  ack_register "$1" "$2" "$attempts" ""
   log "pr$1 ack failed (attempt $attempts/$ACK_CAP); will retry next poll"
   return 1
 }
@@ -176,7 +184,7 @@ STATE=${PR_REVIEW_WATCH_STATE:-$SCRATCH/review-state.tsv}
 ACKS=${PR_REVIEW_WATCH_ACKS:-$SCRATCH/review-acks.tsv}
 PENDING="$SCRATCH/review-pending.tsv"
 FAILS="$SCRATCH/review-fails.tsv"
-WATCHLOG="$SCRATCH/watch.log"
+WATCHLOG=${PR_REVIEW_WATCH_LOG:-$SCRATCH/watch.log}
 touch "$STATE" "$ACKS" "$PENDING" "$FAILS"
 
 
@@ -262,14 +270,29 @@ pr_head() { # $1=pr
   gh pr view "$1" --repo "$REPO" --json headRefOid --jq .headRefOid 2>/dev/null
 }
 
+# Trivial probe from the superseding fleet.review-provider-overload decision:
+# before spending a full retry, check the review provider answers at
+# --thinking minimal with the SAME --model (never a cheaper model).
+probe_review_provider() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 60 pi -p --model "$MODEL" --thinking minimal "reply OK" >/dev/null 2>&1
+  else
+    pi -p --model "$MODEL" --thinking minimal "reply OK" >/dev/null 2>&1
+  fi
+}
+
 
 process_acks() {
   [ -s "$ACKS" ] || return 0
   [ "$DRY" = "1" ] && return 0
-  while IFS="$TAB" read -r pr sha attempts < "$ACKS"; do
+  # NOTE: the redirect belongs on `done`, not on `read` — on `read` it re-opens
+  # the file every iteration and a kept entry (unknown head, retrying ack)
+  # spins forever.
+  while IFS="$TAB" read -r pr sha attempts status; do
     [ -n "${pr:-}" ] || continue
+    [ "${status:-}" = "post-failed" ] && continue   # terminal, already labeled
     ack_try "$pr" "$sha" "$attempts" || true
-  done
+  done < "$ACKS"
 }
 
 mark_unreviewed() { # $1=pr $2=sha $3=round $4=reason
@@ -296,7 +319,7 @@ mark_post_failed() { # $1=pr $2=sha $3=round $4=verdict file
 settle_pending() {
   [ -s "$PENDING" ] || return 0
   now=$(date +%s)
-  while IFS="$TAB" read -r pr round sha attempts launched postfails < "$PENDING"; do
+  while IFS="$TAB" read -r pr round sha attempts launched postfails; do
     [ -n "${pr:-}" ] || continue
 
     if ! pr_is_open "$pr"; then
@@ -316,13 +339,19 @@ settle_pending() {
     # round.
     finish_verdict() { # $1=SRC verdict file (already posted)
       cur=$(pr_head "$pr")
+      if [ -z "$cur" ]; then
+        # A failed/empty head query is NOT evidence the head moved: keep the
+        # verdict pending and retry on the next poll.
+        log "pr$pr head unknown, retry — head query failed after posting the verdict; pending entry kept"
+        return 0
+      fi
       if [ "$(label_verdict "$sha" "$cur")" != "apply" ]; then
         log "pr$pr head moved: reviewed $sha current ${cur:-unknown} — verdict comment stays pinned, no label; rescan will launch the next round"
         state_set "$pr" "$sha" "$round"
         pending_drop "$pr"
         return 0
       fi
-      vl=$(sh "$REVIEW_PR" verdict-label < "$1")
+      vl=$(sh "$LABEL_PR" verdict-label < "$1")
       if [ -n "$vl" ] && gh pr edit "$pr" --repo "$REPO" --add-label "$vl" >/dev/null 2>&1; then
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed"  >/dev/null 2>&1 || true
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:post-failed" >/dev/null 2>&1 || true
@@ -396,23 +425,28 @@ settle_pending() {
       else
         case "$attempts" in
           0)
-            log "pr$pr r$round dead/empty verdict — retrying once with pi (same model, fleet.review-provider-overload)"
             if [ "$DRY" = "1" ]; then
-              echo "dry-run: would retry PR #$pr r$round with pi"
+              echo "dry-run: would probe the provider and retry PR #$pr r$round with pi"
               pending_drop "$pr"
+              continue
+            fi
+            if ! probe_review_provider; then
+              mark_unreviewed "$pr" "$sha" "$round" "provider probe (--thinking minimal) failed before the pi retry"
+              pending_drop "$pr"
+              continue
+            fi
+            log "pr$pr r$round provider probe OK — retrying once with pi (same model, fleet.review-provider-overload)"
+            if "$REVIEW_PR" "$pr" "$round" "$sha" --sha "$sha" >> "$WATCHLOG" 2>&1; then
+              log "pr$pr r$round pi retry launched"
+              pending_update "$pr" "$round" "$sha" 1 "$(date +%s)" "$postfails"
             else
-              if "$REVIEW_PR" "$pr" "$round" "$sha" --sha "$sha" >> "$WATCHLOG" 2>&1; then
-                log "pr$pr r$round pi retry launched"
-                pending_update "$pr" "$round" "$sha" 1 "$(date +%s)" "$postfails"
+              rc=$?
+              if [ "$rc" = "3" ]; then
+                log "pr$pr head moved before pi retry; dropping pending entry (rescan will re-review)"
               else
-                rc=$?
-                if [ "$rc" = "3" ]; then
-                  log "pr$pr head moved before pi retry; dropping pending entry (rescan will re-review)"
-                else
-                  log "pr$pr r$round pi retry launch failed (rc=$rc)"
-                fi
-                pending_drop "$pr"
+                log "pr$pr r$round pi retry launch failed (rc=$rc)"
               fi
+              pending_drop "$pr"
             fi
             ;;
           *)
@@ -422,7 +456,7 @@ settle_pending() {
         esac
       fi
     fi
-  done
+  done < "$PENDING"
 }
 
 # ---- open-PR scan ------------------------------------------------------------
