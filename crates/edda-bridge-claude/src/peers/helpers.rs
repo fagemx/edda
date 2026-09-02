@@ -1,5 +1,5 @@
 use super::board::{compute_board_state, partition_requests_for_session};
-use super::heartbeat::read_heartbeat;
+use super::read_heartbeat;
 use super::{BoardState, RequestEntry};
 use crate::signals::SessionSignals;
 

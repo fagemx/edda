@@ -324,6 +324,13 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
 
 /// One turn through the launcher with an empty plan context. Split out from
 /// [`run`] so tests can drive it with MockLauncher or a recording stub.
+///
+/// GH-566/GH-569: the turn runs through the conductor runner's
+/// `run_phase_with_heartbeat`, so a dispatched lane (any backend, no Claude
+/// hooks) periodically refreshes the session heartbeat and is visible to
+/// `edda peers` while it works. The write lives in the conductor runner;
+/// dispatch stays stateless — the heartbeat is an observation surface, not a
+/// control surface, and ages out through the normal staleness threshold.
 pub async fn run_with_launcher(
     launcher: &dyn AgentLauncher,
     phase: &PhaseSchema,
@@ -331,9 +338,25 @@ pub async fn run_with_launcher(
     cwd: &std::path::Path,
     cancel: CancellationToken,
 ) -> Result<DispatchOutput> {
-    let result = launcher
-        .run_phase(phase, &phase.prompt, "", session_id, cwd, cancel)
-        .await?;
+    let result = {
+        let hb = edda_conductor::runner::heartbeat::LaneHeartbeat {
+            cwd: cwd.to_path_buf(),
+            session_id: session_id.to_string(),
+            plan: "dispatch".to_string(),
+            phase: phase.id.clone(),
+            attempt: 1,
+        };
+        edda_conductor::runner::heartbeat::run_phase_with_heartbeat(
+            launcher,
+            phase,
+            &phase.prompt,
+            "",
+            cwd,
+            &cancel,
+            &hb,
+        )
+        .await?
+    };
     Ok(DispatchOutput::from_result(result, session_id.to_owned()))
 }
 
@@ -646,6 +669,57 @@ mod tests {
         assert_eq!(recorded.len(), 2);
         assert_eq!(recorded[0], "fixed-id");
         assert_eq!(recorded[1], "fixed-id");
+    }
+
+    /// P0 regression (review round 1): the user-controlled `--session-id`
+    /// reaches the heartbeat writer; a traversal id (`x\..\..\..\escaped`
+    /// was the reviewed repro that wrote `store/projects/escaped.json`)
+    /// must be contained by the store's path funnel, not escape the state
+    /// directory.
+    #[tokio::test]
+    // isolated_store() takes the shared test-support lock, so the process-global
+    // EDDA_STORE_ROOT stays ours for the whole test, including the await below —
+    // that is the point, not an accidental hold. A private lock here is what
+    // broke Windows CI (PR #588, round 2): this test relocated the root under a
+    // lock no other test knew about, so a concurrent cmd_bridge test that held
+    // the shared lock had its writes land in one store and its reads in another.
+    #[allow(clippy::await_holding_lock)]
+    async fn hostile_session_id_cannot_escape_the_state_directory() {
+        let _store = crate::test_support::isolated_store();
+
+        let launcher = RecordingLauncher {
+            session_ids: Mutex::new(Vec::new()),
+        };
+        let phase = build_phase("prompt", None, None, "bypassPermissions");
+        let sid = "x\\..\\..\\..\\escaped";
+        run_with_launcher(
+            &launcher,
+            &phase,
+            sid,
+            Path::new("."),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        let project_id = edda_store::project_id(Path::new("."));
+        let project = edda_store::project_dir(&project_id);
+        let state = project.join("state");
+        assert!(
+            edda_store::read_heartbeat(&project_id, sid).is_some(),
+            "heartbeat written under the sanitized in-state-dir path"
+        );
+        // Nothing escaped to the project dir, the projects/ level or the
+        // store root.
+        assert!(!project.join("escaped.json").exists());
+        assert!(!state.join("escaped.json").exists());
+        if let Some(projects) = project.parent() {
+            assert!(!projects.join("escaped.json").exists());
+            if let Some(root) = projects.parent() {
+                assert!(!root.join("escaped.json").exists());
+            }
+        }
+        // _store (the IsolatedStore guard) restores EDDA_STORE_ROOT on drop.
     }
 
     // ── Synthetic phase parity with conduct ──

@@ -1699,6 +1699,11 @@ fn suggest_claim_command_from_focus_files() {
         branch: Some("feat/issue-131".into()),
         current_phase: None,
         parent_session_id: None,
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
     let result = suggest_claim_command("worker", &Some(hb));
     assert!(result.contains("edda claim"), "should contain edda claim");
@@ -1723,6 +1728,11 @@ fn suggest_claim_command_from_branch() {
         branch: Some("feat/auth-refactor".into()),
         current_phase: None,
         parent_session_id: None,
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
     let result = suggest_claim_command("", &Some(hb));
     assert!(
@@ -1842,6 +1852,11 @@ fn protocol_nudge_uses_branch_context() {
         branch: Some("feat/billing-v2".into()),
         current_phase: None,
         parent_session_id: None,
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
     let hb_path = heartbeat_path(pid, "s2");
     let _ = fs::create_dir_all(hb_path.parent().unwrap());
@@ -2266,6 +2281,90 @@ fn write_subagent_heartbeat_sets_parent() {
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
+/// P1 regression (review round 2): `update_teammate_phase` must ride the
+/// sidecar lock like every other producer. The reviewed interleaving was:
+/// TeammateIdle reads a pre-lane record, the runner writes lane fields
+/// under the sidecar lock, TeammateIdle atomically restores its stale copy
+/// and erases those fields. Here the runner's window is held open
+/// deterministically: while the sidecar lock is held, the teammate write
+/// must NOT land (the old unlocked writer wrote straight through it), and
+/// after the runner's refresh lands first, the unblocked teammate write
+/// must preserve the lane fields it re-reads.
+#[test]
+fn teammate_idle_update_waits_for_the_sidecar_lock_and_preserves_lane_fields() {
+    // No EDDA_STORE_ROOT redirect: a redirect here races every concurrent
+    // store-writing test in this process that doesn't hold ENV_LOCK (the
+    // exact cross-store hazard this round is closing). Peers tests use
+    // unique pids against the default store instead.
+    let pid = "test_teammate_phase_lock";
+    let sid = "lane-1";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    edda_store::ensure_dirs(pid).unwrap();
+
+    // Pre-lane record: hook telemetry only, no lane fields.
+    let _ = edda_store::update_heartbeat(pid, sid, |hb| {
+        hb.started_at = crate::parse::now_rfc3339();
+        hb.last_heartbeat = crate::parse::now_rfc3339();
+        hb.label = "worker".into();
+        hb.branch = Some("main".into());
+    });
+
+    // Hold the sidecar lock — the runner's read-to-write window.
+    let mut lock_path = edda_store::heartbeat_path(pid, sid).into_os_string();
+    lock_path.push(".lock");
+    let guard =
+        edda_store::lock_file(std::path::Path::new(&lock_path)).expect("acquire sidecar lock");
+
+    let writer = {
+        let pid = pid.to_string();
+        let sid = sid.to_string();
+        std::thread::spawn(move || update_teammate_phase(&pid, &sid, "idle"))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // While the lock is held, no teammate write may have landed on disk.
+    let on_disk = std::fs::read_to_string(edda_store::heartbeat_path(pid, sid)).unwrap();
+    let on_disk: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
+    assert_eq!(
+        on_disk["current_phase"],
+        serde_json::Value::Null,
+        "TeammateIdle must not write while the sidecar lock is held"
+    );
+
+    // The runner's locked refresh lands in that window.
+    let hb_now = edda_store::read_heartbeat(pid, sid).expect("record exists");
+    let mut refreshed = hb_now;
+    refreshed.plan = Some("fleet-pr-loop".into());
+    refreshed.phase = Some("fix".into());
+    refreshed.attempt = Some(1);
+    refreshed.stage = Some("running".into());
+    refreshed.pid = Some(4242);
+    edda_store::write_heartbeat(pid, &refreshed).expect("runner refresh");
+    drop(guard);
+    writer.join().unwrap();
+
+    let hb = read_heartbeat(pid, sid).expect("heartbeat exists");
+    assert_eq!(
+        hb.current_phase.as_deref(),
+        Some("idle"),
+        "TeammateIdle phase must land after the lock frees"
+    );
+    assert_eq!(
+        hb.plan.as_deref(),
+        Some("fleet-pr-loop"),
+        "lane fields must survive the teammate write"
+    );
+    assert_eq!(hb.stage.as_deref(), Some("running"));
+    assert_eq!(hb.pid, Some(4242));
+    assert_eq!(
+        hb.branch.as_deref(),
+        Some("main"),
+        "hook fields survive too"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
 #[test]
 fn cleanup_subagent_heartbeats_selective() {
     let pid = "test_cleanup_subagent";
@@ -2349,6 +2448,11 @@ fn subagent_stale_threshold_extended() {
         branch: None,
         current_phase: None,
         parent_session_id: Some("parent-session".to_string()),
+        plan: None,
+        phase: None,
+        attempt: None,
+        stage: None,
+        pid: None,
     };
     let path = heartbeat_path(pid, "sub-stale");
     let _ = fs::create_dir_all(path.parent().unwrap());
@@ -3201,5 +3305,66 @@ fn legacy_ack_comparison_keeps_subsecond_order() {
         "an earlier same-second ack must not retire a later request"
     );
 
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+/// GH-569/GH-566: a lane that fires no bridge hooks (e.g. `edda dispatch
+/// --agent pi`) must still become a discoverable peer. The conductor runner
+/// writes the shared session heartbeat through the store-level writer
+/// (`edda-store`), NOT through any bridge API — that decoupling is the fix.
+/// Before it, the only production writer sat inside the Claude hook path, so
+/// such a lane never appeared in `edda peers` at all.
+#[test]
+fn lane_heartbeat_written_without_bridge_is_discovered_then_goes_stale() {
+    let pid = "test_lane_hb_discovery";
+    let sid = "lane-sess-001";
+    let _ = edda_store::ensure_dirs(pid);
+
+    let fmt = |t: time::OffsetDateTime| {
+        t.format(&time::format_description::well_known::Rfc3339)
+            .unwrap()
+    };
+    let now = time::OffsetDateTime::now_utc();
+    let make = |last: String| edda_store::SessionHeartbeat {
+        session_id: sid.into(),
+        started_at: fmt(now),
+        last_heartbeat: last,
+        label: "a".into(),
+        focus_files: vec![],
+        active_tasks: vec![],
+        files_modified_count: 0,
+        total_edits: 0,
+        recent_commits: vec![],
+        branch: None,
+        current_phase: Some("running".into()),
+        parent_session_id: None,
+        plan: Some("hbplan".into()),
+        phase: Some("a".into()),
+        attempt: Some(1),
+        stage: Some("running".into()),
+        pid: Some(4242),
+    };
+
+    edda_store::write_heartbeat(pid, &make(fmt(now))).expect("lane heartbeat write");
+
+    let peers = discover_active_peers(pid, "observer");
+    assert_eq!(
+        peers.len(),
+        1,
+        "a no-hook lane with a fresh heartbeat must be a peer"
+    );
+    assert_eq!(peers[0].label, "a");
+    assert_eq!(peers[0].current_phase.as_deref(), Some("running"));
+
+    // The lane stops: backdate beyond the stale threshold; discovery must
+    // drop it without any explicit removal call.
+    let stale = fmt(now - time::Duration::new(3600, 0));
+    edda_store::write_heartbeat(pid, &make(stale)).expect("stale heartbeat write");
+    assert!(
+        discover_active_peers(pid, "observer").is_empty(),
+        "a stopped lane goes stale naturally"
+    );
+
+    remove_heartbeat(pid, sid);
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }

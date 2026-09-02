@@ -48,8 +48,12 @@ pub fn discover_active_peers(project_id: &str, current_session_id: &str) -> Vec<
         let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
         let age = now.saturating_sub(hb_epoch);
 
-        // Sub-agents can't touch_heartbeat (no hook events fire during execution),
-        // so use a much longer stale threshold (15x = ~30min at default 120s).
+        // Sub-agent heartbeats (Claude Code Task tool) still have no in-flight
+        // writer: no hook events fire during their execution, so a fresh
+        // heartbeat written once at spawn would otherwise age out mid-run.
+        // GH-569 narrowed this exception: conductor/dispatch lanes now write
+        // real periodic heartbeats (runner/heartbeat.rs) and use the standard
+        // threshold — only parented sub-agents keep the 15x multiplier.
         let effective_threshold = if hb.parent_session_id.is_some() {
             stale_threshold * 15
         } else {

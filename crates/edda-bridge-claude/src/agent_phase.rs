@@ -323,9 +323,11 @@ fn detect_pr_from_tasks(tasks: &[String]) -> Option<u64> {
 }
 
 fn heartbeat_age_secs(project_id: &str, session_id: &str, now_epoch: u64) -> u64 {
-    let path = edda_store::project_dir(project_id)
-        .join("state")
-        .join(format!("session.{session_id}.json"));
+    // Resolve through the one funnel: `heartbeat_path` sanitizes the id,
+    // so this reader sees the exact file every writer produced. Raw
+    // interpolation of the raw id reads a name the writer never wrote for
+    // any id that needs encoding (e.g. `x/reader`).
+    let path = edda_store::heartbeat_path(project_id, session_id);
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
         Err(_) => return u64::MAX, // No heartbeat -> stale
@@ -397,6 +399,45 @@ mod tests {
     fn detect_pr_from_tasks_found() {
         let tasks = vec!["Review PR #53".to_string()];
         assert_eq!(detect_pr_from_tasks(&tasks), Some(53));
+    }
+
+    /// P1 regression (review round 2): the age reader must resolve through
+    /// `heartbeat_path`, not raw interpolation. A fresh heartbeat written
+    /// for an id that needs encoding (`x/reader`) used to be read at the
+    /// raw name, not found, and reported stale (u64::MAX) while the session
+    /// was alive. The safe-id control guards against the test passing for
+    /// the wrong reason (e.g. env not isolated).
+    #[test]
+    fn heartbeat_age_secs_reads_through_the_sanitized_funnel() {
+        // No EDDA_STORE_ROOT redirect: a redirect here races every concurrent
+        // store-writing test in this process that doesn't hold ENV_LOCK (the
+        // exact cross-store hazard this round is closing). Peers tests use
+        // unique pids against the default store instead.
+        let pid = "test_agent_phase_age";
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+        let now = now_rfc3339();
+        for sid in ["x/reader", "reader-control"] {
+            let mut hb = edda_store::SessionHeartbeat::blank(sid);
+            hb.started_at = now.clone();
+            hb.last_heartbeat = now.clone();
+            hb.label = "reader".into();
+            edda_store::write_heartbeat(pid, &hb).expect("write fresh heartbeat");
+        }
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let age = heartbeat_age_secs(pid, "x/reader", now_epoch);
+        assert!(
+            age < 60,
+            "fresh encoded-id heartbeat must read as active, got age {age} (stale sentinel is u64::MAX)"
+        );
+        let control = heartbeat_age_secs(pid, "reader-control", now_epoch);
+        assert!(
+            control < 60,
+            "safe-id control must stay active, got {control}"
+        );
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }
 
     #[test]

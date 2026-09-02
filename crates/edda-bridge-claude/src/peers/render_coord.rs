@@ -3,10 +3,10 @@ use crate::signals::FileEditCount;
 use super::autoclaim::derive_scope_from_files;
 use super::board::{compute_board_state, partition_requests_for_session};
 use super::discovery::discover_active_peers;
-use super::heartbeat::read_heartbeat;
 use super::helpers::{
     self, format_age, format_peer_suffix, session_label_from_board, truncate_to_budget,
 };
+use super::read_heartbeat;
 use super::{
     protocol_budget, BoardState, PeerSummary, RequestEntry, SessionHeartbeat, PEER_UPDATES_BUDGET,
 };
