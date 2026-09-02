@@ -42,20 +42,12 @@ rm -f "$skip_marker"
 # NUL-terminated raw path — never C-quoted, never re-split on LF. The blob
 # sha comes straight out of the metadata record, so the size gate needs no
 # pathspec round-trip. Paths containing LF, quotes or non-ASCII bytes stay
-# ONE record from git to the gates.
-#
-# Test seam (used only by scripts/githooks/test.sh): PRE_COMMIT_STAGED_LIST_Z
-# points at a synthetic raw -z listing file, because Windows cannot stage a
-# filename containing a real newline (NTFS forbids control characters and
-# `git update-index` refuses them), so the LF-path scenario can only be
-# exercised by injecting the listing at this boundary.
-if [ -n "${PRE_COMMIT_STAGED_LIST_Z:-}" ]; then
-    staged_z=$PRE_COMMIT_STAGED_LIST_Z
-else
-    staged_z=$(mktemp)
-    trap 'rm -f "$staged_z"' EXIT
-    git diff --cached --raw -z --no-renames --diff-filter=ACMR >"$staged_z"
-fi
+# ONE record from git to the gates. This listing is the staged list's only
+# source: no environment variable or other override can hide staged paths
+# from the gates.
+staged_z=$(mktemp)
+trap 'rm -f "$staged_z"' EXIT
+git diff --cached --raw -z --no-renames --diff-filter=ACMR >"$staged_z"
 [ -s "$staged_z" ] || exit 0
 
 fail() {

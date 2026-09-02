@@ -233,33 +233,43 @@ else
 fi
 git reset -q --hard "$prev"
 
-# --- fix 6 (R2): a path containing LF stays ONE record end to end -----------
-# pre-commit must iterate the -z listing without ever converting NUL to LF;
-# a valid POSIX filename with an embedded newline must not be split into two
-# records that both dodge the size gate. Windows cannot stage such a file
-# (NTFS forbids control chars; update-index refuses them), so this drives
-# the hook's documented test seam PRE_COMMIT_STAGED_LIST_Z with a synthetic
-# raw -z listing — the reviewer's probe, but at the hook boundary.
-bigcontent="$repo/bigcontent.bin"
-head -c 1048577 /dev/zero > "$bigcontent"
-bigsha=$(git hash-object -w "$bigcontent")
-zero40=0000000000000000000000000000000000000000
-synth="$repo/synthetic-raw-list.bin"
-printf ':000000 100644 %s %s A\0large\nfile.bin\0' "$zero40" "$bigsha" >"$synth"
-out=$(PRE_COMMIT_STAGED_LIST_Z="$synth" bash "$hooks_dir/pre-commit" 2>&1) && {
-    report FAIL "reject: staged 1 MB+ 'large<LF>file.bin' as ONE record (NUL-safe)" \
-        "expected rejection, got success: $out"
-} || {
-    case "$out" in
-    *"the limit is 1 MB"*)
-        report PASS "reject: staged 1 MB+ 'large<LF>file.bin' as ONE record (NUL-safe)"
-        ;;
-    *)
-        report FAIL "reject: staged 1 MB+ 'large<LF>file.bin' as ONE record (NUL-safe)" "$out"
-        ;;
-    esac
-}
-rm -f "$bigcontent"
+# --- R3: a newline-named staged path stays ONE record, staged for real ------
+# Windows cannot store a real newline in a filename (NTFS forbids control
+# characters and `git update-index` refuses them), so git-for-windows encodes
+# it as the PUA character U+F00A on disk and keeps those bytes in the index.
+# The scenario therefore stages a REAL file via git add — the newline appears
+# as U+F00A — and the hook must see ONE NUL-terminated record and reject it
+# on size. (On Linux the same hook path handles a real-LF name identically:
+# there is no tr / line-splitting anywhere in the listing.)
+lfname="$(printf 'large\357\200\212file.bin')"
+head -c 1048577 /dev/zero > "$lfname"
+git add -- "$lfname"
+prev=$(git rev-parse HEAD)
+expect_reject "reject: staged 1 MB+ newline-named file as ONE record (real index)" \
+    "the limit is 1 MB" \
+    git commit -m "feat(test): newline-named oversized file"
+git reset -q --hard "$prev"
+rm -f "$lfname"
+
+# --- R3: no environment override can hide staged paths from the gates -------
+prev=$(git rev-parse HEAD)
+head -c 1048577 /dev/zero > hidden.bin
+git add hidden.bin
+empty_list="$repo/empty-list"
+: > "$empty_list"
+expect_reject "reject: PRE_COMMIT_STAGED_LIST_Z=/dev/null cannot hide the 1 MB blob" \
+    "the limit is 1 MB" \
+    env PRE_COMMIT_STAGED_LIST_Z=/dev/null git commit -m "test(scope): oversize"
+expect_reject "reject: PRE_COMMIT_STAGED_LIST_Z=<empty file> cannot hide the 1 MB blob" \
+    "the limit is 1 MB" \
+    env PRE_COMMIT_STAGED_LIST_Z="$empty_list" git commit -m "test(scope): oversize"
+if [ "$(git rev-parse HEAD)" = "$prev" ]; then
+    report PASS "blob not committed after the override attempts"
+else
+    report FAIL "blob not committed after the override attempts" "HEAD moved"
+fi
+git reset -q --hard "$prev"
+rm -f hidden.bin
 
 # --- fix 7 (R2): package name from [package], single quotes, other tables ---
 # The manifest parser must accept 'literal' as well as "double" names and
