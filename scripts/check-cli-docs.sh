@@ -8,19 +8,34 @@
 #
 # Exit codes:
 #   0 — every verb is documented
-#   1 — at least one verb is undocumented (each missing verb printed on stderr)
-#   2 — the edda binary could not be found (build it or set EDDA_BIN)
+#   1 — at least one verb is undocumented, or the documented version does not
+#       match the binary (each problem printed on stderr)
+#   2 — the edda binary could not be found (build it, install it on PATH, or
+#       set EDDA_BIN)
 #
 # EDDA_BIN is honoured so CI can point at a freshly built binary:
 #   EDDA_BIN=target/debug/edda bash scripts/check-cli-docs.sh
 set -u
 
 DOC="docs/reference/cli.md"
-EDDA_BIN="${EDDA_BIN:-target/debug/edda}"
 
-if ! command -v "$EDDA_BIN" >/dev/null 2>&1; then
-  echo "error: edda binary not found: '$EDDA_BIN'" >&2
-  echo "       build it first (cargo build -p edda) or point EDDA_BIN at an existing binary." >&2
+# Binary resolution order: explicit EDDA_BIN override, then target/debug/edda
+# (a local build), then `edda` on PATH. CI always sets EDDA_BIN to the freshly
+# built binary; the PATH fallback keeps the bare `bash scripts/check-cli-docs.sh`
+# working on machines with an installed edda but no local build. The version
+# check below guards against a PATH binary older than the documented surface.
+if [ -n "${EDDA_BIN:-}" ]; then
+  if ! command -v "$EDDA_BIN" >/dev/null 2>&1; then
+    echo "error: EDDA_BIN points at a non-existent or non-executable binary: '$EDDA_BIN'" >&2
+    exit 2
+  fi
+elif [ -x "target/debug/edda" ]; then
+  EDDA_BIN="target/debug/edda"
+elif command -v edda >/dev/null 2>&1; then
+  EDDA_BIN="edda"
+else
+  echo "error: edda binary not found" >&2
+  echo "       build it first (cargo build -p edda), install edda on PATH, or point EDDA_BIN at an existing binary." >&2
   exit 2
 fi
 
@@ -58,6 +73,8 @@ internal=$(awk '
 
 # The doc must state the version it was derived from, matching the binary.
 # Doc convention: a line `> Documented for edda <major.minor>` near the top.
+fail=0
+missing=""
 bin_version=$("$EDDA_BIN" --version | awk '{ print $2 }')
 bin_mm=${bin_version%.*}
 if ! grep -qE "^> Documented for edda ${bin_mm//./\\.}\b" "$DOC"; then
@@ -65,8 +82,6 @@ if ! grep -qE "^> Documented for edda ${bin_mm//./\\.}\b" "$DOC"; then
   fail=1
 fi
 
-fail=0
-missing=""
 for verb in $verbs; do
   if grep -qx "$verb" <<<"$sections" || grep -qx "$verb" <<<"$internal"; then
     :
@@ -78,7 +93,11 @@ for verb in $verbs; do
 done
 
 if [ "$fail" -ne 0 ]; then
-  echo "check-cli-docs: FAIL —$missing" >&2
+  if [ -n "$missing" ]; then
+    echo "check-cli-docs: FAIL —$missing" >&2
+  else
+    echo "check-cli-docs: FAIL" >&2
+  fi
   exit 1
 fi
 
