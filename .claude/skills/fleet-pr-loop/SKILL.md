@@ -1,6 +1,6 @@
 ---
 name: fleet-pr-loop
-description: Use when driving a fleet PR to LGTM hands-off — a deterministic bash driver alternates an independent fleet-review (gate) and an independent fix pass until LGTM or a round cap, posting each verdict to the PR, then stops for the operator to merge. Never merges (GATE-01). Orchestrates fleet-review + a fix pass; reads conventions from fleet-ops.
+description: Use when driving a fleet PR to LGTM hands-off — a deterministic bash driver alternates an independent fleet-review (gate) and an independent fix pass until LGTM or a round cap, posting each verdict to the PR, then stops for the operator to merge. Never merges (GATE-01). Orchestrates fleet-review + a fix pass; reads conventions from the repo's own CLAUDE.md / AGENTS.md.
 ---
 
 # Fleet PR Loop（PR 收斂編排器）
@@ -9,7 +9,7 @@ description: Use when driving a fleet PR to LGTM hands-off — a deterministic b
 
 **控制流是確定性 bash driver，不是你的記憶**——你每步都照 driver 吐的 `ACTION` 走。
 審與修**永遠是兩個獨立 fork subagent**：審的不修、修的不審、誰都不 merge（GATE-01）。
-你（編排器）只排程、不自己審也不自己修。慣例正典見 `fleet-playbook/internal/fleet-ops.md`。
+你（編排器）只排程、不自己審也不自己修。慣例正典見 repo 自身的 `CLAUDE.md`／`AGENTS.md`（本 repo：`.claude/CLAUDE.md`）。
 
 ## 開工前檢查
 1. **kill switch**：repo 根有 `FLEET_PAUSE` → idle 退出，不動任何狀態。
