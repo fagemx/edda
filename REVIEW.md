@@ -44,7 +44,7 @@ the citation wins and this file is the bug.
 | `brief-v1` | `docs/superpowers/specs/2026-09-02-reviewer-brief-template-v1.md` | zero-discretion rule, `[判斷]` tag, evidence threshold, read-only constraint, verdict fields |
 | `design` | `docs/superpowers/specs/2026-09-02-substitutable-reviewer-design.md` §1.1 | the mechanical path rule for classification, conservative up-classing |
 | `canaries` | `tests/canaries/` | the known-answer diffs that calibrate an engine against these rules |
-| `verb` | `docs/superpowers/specs/2026-09-02-edda-review-design.md` §5.1; decision `review.brief-source` | the front matter schema above, and how `edda review` consumes this file |
+| `verb` | `docs/superpowers/specs/2026-09-02-edda-review-design.md` §5.1; decision `review.brief-source` | the front matter schema above, and how the `edda review` verb — designed there, implemented in issue #652, not shipped yet — consumes this file |
 
 **This file is read at the base SHA, never at the head** (`verb`). A PR that
 changes `REVIEW.md` is reviewed under the *previous* version of these rules,
@@ -283,9 +283,12 @@ non-product cycles without useful progress and route the finding instead
 
 **D1 — every command named must exist. P1.** Zero discretion (`brief-v1` §1):
 for every backticked CLI invocation the diff adds, run its `--help` and report
-the exit code. A non-zero exit is a finding. You may not conclude anything
-about a command you did not run, and "the document says it does X" is not a
-measurement.
+the exit code. A non-zero exit is a finding **unless the added text that names
+the command either names the issue that will implement it, or already states
+that non-zero exit itself** — a documented future verb and a cited failure are
+both allowed; an undocumented one is the `c3-nonexistent-flag` failure. You may
+not conclude anything about a command you did not run, and "the document says
+it does X" is not a measurement.
 
 ```sh
 git diff "origin/$BASE..$SHA" | grep '^+' \
@@ -478,7 +481,10 @@ one (`brief-v1` §2).
 The escalation rule:
 
 1. A checklist-type engine that hits a `[判斷]` item marks it **需升級 (needs
-   escalation)** and **may not adjudicate it itself**.
+   escalation)** and **may not adjudicate it itself**. Whether you are one is
+   not yours to decide: **you are a checklist-type engine unless the brief
+   names you as qualified for this class** in the current calibration table. If
+   the brief is silent, you are one — mark 需升級 and move on.
 2. Every escalated item is listed in the verdict's `escalations:` field.
    Silently treating a `[判斷]` item as RAN is itself a P1.
 3. Escalated items go to an engine qualified for that class — today the anchor,
@@ -496,9 +502,10 @@ The escalation rule:
 
 Engine self-labelling is not evidence. `model_observed` is read from the system
 — for `pi`, the session file's `model` field; for `claude -p --output-format
-json`, the top-level `modelUsage` key (there is no top-level `model` key). If it
-cannot be obtained, write `unverified`; never copy `model_requested` and never
-invent it (`brief-v1` §7).
+json`, the top-level `modelUsage` key (there is no top-level `model` key). An
+environment variable such as `PI_MODEL` is **not** a system observation and may
+not be used. If it cannot be obtained, write `unverified`; never copy
+`model_requested` and never invent it (`brief-v1` §7).
 
 ## 7. Output — the fixed format
 
@@ -587,7 +594,7 @@ mechanical.
 | U5 | RAN | exit 0 on this worktree |
 | U6 | RAN | `gh pr checks 664` — `CI Gate pass`, clippy/test `skipping` |
 | U7 | canonical | `loop` items 1–2 and 6; procedural, no command |
-| D1 | RAN | `edda wave --help` → exit 2 (the #616 P1); `edda ask --help` → exit 0 |
+| D1 | RAN | `edda wave --help` → exit 2 (the #616 P1); `edda ask --help` → exit 0; run against this spec's own diff it caught `edda review --help` → exit 2, which is why the rule carries the documented-future-verb clause |
 | D2 | RAN | `edda ask fleet.review-engine` |
 | D3 | RAN | 7 paths on a real docs range, 0 false positives after the trailing-argument strip |
 | D4 | RAN | 2 candidates on a real docs range, both carrying the authority caveat |
@@ -612,7 +619,8 @@ mechanical.
   template v1 (#618) into one runnable sequence, adds the mechanical class
   router and the enumerated risk surface, and fixes the output format. Carries
   the `edda_review: 1` front matter defined by `review.brief-source` and
-  `verb` §5.1, so `edda review` and `scripts/review-pr.sh` read the same file.
+  `verb` §5.1, so `scripts/review-pr.sh` today — and the `edda review` verb
+  when issue #652 ships it — read the same file.
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
