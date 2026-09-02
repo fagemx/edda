@@ -52,8 +52,7 @@ today is `scripts/review-pr.sh`.
 
 Decisions are cited by key and resolved with `edda ask <key>` **from the repo
 checkout** — the ledger is workspace-scoped and answers `No results found.`
-elsewhere (see `D2`). Each one also has a durable non-ledger carrier named
-beside it, so a reviewer who cannot reach the ledger can still check the claim.
+elsewhere, which is an unreachable ledger and not a false claim (see `D2`).
 
 **This file is read at the base SHA, never at the head** (`verb`). A PR that
 changes `REVIEW.md` is reviewed under the *previous* version of these rules,
@@ -364,9 +363,10 @@ project whose recorded repo path is not on this machine, and says so on the line
 above its answer. **`No results` is an unreachable ledger, not a false claim.**
 Run the query from the repo checkout before reporting a D2 finding; if the
 ledger is still unreachable, report the rule as
-`N.A.(ledger unreachable from this worktree)` and check the claim against the PR
-or issue that carries it instead — every decision this file cites also names one
-in the Canonical sources table or in the rule's own text.
+`N.A.(ledger unreachable from this worktree)` and check the claim against
+whatever durable carrier the decision names — the PR or issue in its own text,
+or the `.claude/CLAUDE.md` section that quotes it. An unreachable ledger is
+reported as unreachable, never as a P1.
 
 **D3 — every path and link resolves. P1.** Enumerate the repo-anchored paths
 the diff adds and open each one. `MISSING` lines are the findings (canary
