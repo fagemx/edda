@@ -512,10 +512,12 @@ pub fn render_digest_text(session_id: &str, stats: &SessionStats) -> String {
             stats.model.clone()
         };
         let total = stats.input_tokens + stats.output_tokens;
-        let cost_str = if stats.estimated_cost_usd > 0.0 {
-            format!(", ${:.4}", stats.estimated_cost_usd)
-        } else {
-            String::new()
+        // GH-585: unmeasured (None) and a measured zero both render no
+        // dollar amount — same behavior as before, but now the distinction
+        // is preserved in the payload instead of flattened into 0.0.
+        let cost_str = match stats.estimated_cost_usd {
+            Some(cost) if cost > 0.0 => format!(", ${cost:.4}"),
+            _ => String::new(),
         };
         lines.push(format!(
             "Usage: {model_label} -- {total} tokens (in:{} out:{}){cost_str}",

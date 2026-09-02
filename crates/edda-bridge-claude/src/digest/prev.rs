@@ -9,6 +9,18 @@ use super::SessionStats;
 
 // ── Previous Session Digest Snapshot ──
 
+/// Deserialize `estimated_cost_usd` with legacy compatibility (GH-585): old
+/// digests wrote a bare `0.0` to mean "unmeasured". Reading one must not
+/// fail, and the value must be treated as unmeasured — so a deserialized
+/// `0.0` is normalized to `None` instead of a measured zero.
+fn deserialize_legacy_cost<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<f64>::deserialize(deserializer)?;
+    Ok(value.filter(|cost| *cost != 0.0))
+}
+
 /// Snapshot of a completed session, persisted for next session's context injection.
 /// Written at SessionEnd, read at next SessionStart, deleted at that session's end.
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,9 +76,12 @@ pub struct PrevDigest {
     /// Total cache-creation input tokens.
     #[serde(default)]
     pub cache_creation_tokens: u64,
-    /// Estimated cost in USD.
-    #[serde(default)]
-    pub estimated_cost_usd: f64,
+    /// Estimated cost in USD. `None` = unmeasured (no usage data), never a
+    /// true zero (GH-585). Legacy digests wrote `0.0` for unmeasured
+    /// sessions; those still deserialize without failure but are normalized
+    /// to `None` (unmeasured) on read.
+    #[serde(default, deserialize_with = "deserialize_legacy_cost")]
+    pub estimated_cost_usd: Option<f64>,
     /// Activity classification for this session.
     #[serde(default)]
     pub activity: String,
@@ -286,7 +301,7 @@ pub fn write_prev_digest_from_store(
         stats.output_tokens = usage.output_tokens;
         stats.cache_read_tokens = usage.cache_read_tokens;
         stats.cache_creation_tokens = usage.cache_creation_tokens;
-        stats.estimated_cost_usd = crate::signals::estimate_cost(&usage);
+        stats.estimated_cost_usd = super::helpers::measured_cost(&usage);
     }
     // Collect decisions + notes from workspace ledger before writing
     let (decisions, notes) = collect_session_ledger_extras(cwd, stats.first_ts.as_deref());

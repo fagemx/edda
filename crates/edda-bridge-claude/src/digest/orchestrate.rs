@@ -724,7 +724,7 @@ fn digest_one_session(
         stats.output_tokens = usage.output_tokens;
         stats.cache_read_tokens = usage.cache_read_tokens;
         stats.cache_creation_tokens = usage.cache_creation_tokens;
-        stats.estimated_cost_usd = crate::signals::estimate_cost(&usage);
+        stats.estimated_cost_usd = super::helpers::measured_cost(&usage);
     }
 
     // Collect session notes and decisions from workspace ledger

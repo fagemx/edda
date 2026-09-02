@@ -148,3 +148,14 @@ pub(super) fn now_rfc3339() -> String {
     now.format(&time::format_description::well_known::Rfc3339)
         .expect("RFC3339 formatting should not fail")
 }
+
+/// Honest cost for a usage snapshot (GH-585): `None` when the session has
+/// no usage data (unmeasured), `Some(estimate)` only when tokens were
+/// actually consumed. Never returns `Some(0.0)` for a no-usage session.
+pub(super) fn measured_cost(usage: &crate::signals::UsageSnapshot) -> Option<f64> {
+    let measured = usage.input_tokens > 0
+        || usage.output_tokens > 0
+        || usage.cache_read_tokens > 0
+        || usage.cache_creation_tokens > 0;
+    measured.then(|| crate::signals::estimate_cost(usage))
+}
