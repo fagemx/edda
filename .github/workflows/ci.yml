@@ -19,8 +19,8 @@ env:
 jobs:
   # Path-aware triage (#631): decide once whether the diff touches code. If it
   # does not (docs-only), clippy/test are skipped and the CI Gate treats those
-  # skips as a pass. When in doubt — any diff-computation error, unknown base,
-  # or non-empty push `before` — we set code=true and run everything.
+  # skips as a pass. When in doubt — any diff-computation error or unknown
+  # base — we set code=true and run everything.
   detect:
     name: Detect code changes
     runs-on: ubuntu-latest
