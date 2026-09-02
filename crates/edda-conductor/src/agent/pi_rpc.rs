@@ -463,6 +463,17 @@ impl PiRpcSession {
 
                     match msg.get("type").and_then(Value::as_str) {
                         Some("agent_settled") => settled = true,
+                        // pi reports a failed turn in band and settles
+                        // normally afterwards (GH-669): `turn_end` carries
+                        // `stopReason: "error"` with the reason in
+                        // `errorMessage`, and an authentication failure
+                        // reaches `agent_settled` with no text and zero
+                        // cost. Reading settlement alone reported that turn
+                        // as done — `edda dispatch` exit 0. Only `turn_end`
+                        // is read, never the per-message `message_end`: it
+                        // is the turn's last word, so a recovered
+                        // mid-turn error does not fail the phase.
+                        Some("turn_end") => state.error = turn_error(&msg),
                         Some("message_update") => {
                             state.observe_message_update(&msg);
                             if over_budget(state.cost, budget_usd) {
@@ -492,6 +503,10 @@ impl PiRpcSession {
                     });
                 }
             }
+        }
+
+        if let Some(error) = state.error.take() {
+            return Ok(PhaseResult::AgentCrash { error });
         }
 
         // After settlement, `get_session_stats` gives the authoritative
@@ -714,11 +729,29 @@ fn extension_ui_cancellation(msg: &Value) -> Option<Value> {
     Some(json!({ "type": "extension_ui_response", "id": id, "cancelled": true }))
 }
 
-/// Accumulates result text and cost from `message_update` events.
+/// The reason a `turn_end` event reports, when pi ended the turn on an
+/// error rather than an answer (GH-669). `None` for a turn that ended
+/// normally, so a settled turn stays a completed one.
+fn turn_error(msg: &Value) -> Option<String> {
+    if msg.pointer("/message/stopReason").and_then(Value::as_str) != Some("error") {
+        return None;
+    }
+    let detail = msg
+        .pointer("/message/errorMessage")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+        .unwrap_or("pi ended the turn on an error without a reason");
+    Some(detail.to_owned())
+}
+
+/// Accumulates result text and cost from `message_update` events, plus the
+/// reason a `turn_end` gave for a failed turn.
 #[derive(Default)]
 struct TurnState {
     result_text: String,
     cost: Option<f64>,
+    error: Option<String>,
 }
 
 impl TurnState {
@@ -753,6 +786,11 @@ mod tests {
     const STATE_GPT56: &str = r#"{"id":"req-3","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"openai-codex","id":"gpt-5.6-sol"},"thinkingLevel":"high"}}"#;
     const STATE_NULL: &str = r#"{"id":"req-3","type":"response","command":"get_state","success":true,"data":{"model":null}}"#;
     const STARTUP_DIAGNOSTIC: &str = "pi: no API key configured for provider openrouter";
+    /// The `turn_end` pi emits when the provider rejects its credentials,
+    /// captured 2026-09-02 from `pi --mode rpc --model openai/gpt-4o-mini`
+    /// with an invalid `OPENAI_API_KEY` (`content`, `usage` and the nested
+    /// provider JSON elided). pi follows it with `agent_settled`.
+    const TURN_END_AUTH_ERROR: &str = r#"{"type":"turn_end","message":{"role":"assistant","content":[],"provider":"openai","model":"gpt-4o-mini","stopReason":"error","errorMessage":"OpenAI API error (401): Incorrect API key provided"}}"#;
 
     fn delta_line(usage_cost: &str, text: &str) -> String {
         format!(
@@ -775,6 +813,9 @@ mod tests {
         Utf8Framing,
         /// Writes a startup diagnostic to stderr and dies before settling.
         StderrThenDie,
+        /// Answers the prompt, then ends the turn on a provider
+        /// authentication error and settles normally (GH-669).
+        TurnEndAuthError,
         /// Closes stdout while staying alive: stdout EOF with a live child.
         #[cfg(unix)]
         CloseStdoutAndLive,
@@ -797,6 +838,13 @@ mod tests {
             FakeScenario::BudgetMidRun => format!(
                 "read_cmd\nwrite_line '{PROMPT_OK}'\nwrite_line '{}'\nsleep 60",
                 delta_line("5.0", "x")
+            ),
+            FakeScenario::TurnEndAuthError => format!(
+                "read_cmd
+write_line '{PROMPT_OK}'
+write_line '{TURN_END_AUTH_ERROR}'
+write_line '{SETTLED}'
+sleep 60"
             ),
             FakeScenario::PromptRejected => {
                 format!("read_cmd\nwrite_line '{PROMPT_REJECTED}'\nsleep 60")
@@ -930,6 +978,48 @@ mod tests {
         assert!(matches!(result, PhaseResult::AgentDone { .. }));
         assert!(observed.is_none(), "null model must render as unknown");
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn turn_ended_on_provider_auth_error_is_a_crash_not_done() -> Result<()> {
+        // GH-669: pi settles normally after a failed turn, so reading
+        // `agent_settled` alone reported an authentication failure as a
+        // completed turn — `edda dispatch` exit 0 with a null error.
+        let phase = phase_from_yaml(
+            "  - id: a
+    prompt: x
+",
+        );
+        let (result, _observed) = run_fake(FakeScenario::TurnEndAuthError, &phase).await?;
+        match result {
+            PhaseResult::AgentCrash { error } => {
+                assert!(error.contains("401"), "{error}");
+                assert!(error.contains("Incorrect API key"), "{error}");
+            }
+            other => panic!("expected AgentCrash, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn turn_error_reads_only_a_failed_turn_end() {
+        let settled_ok: Value = serde_json::from_str(
+            r#"{"type":"turn_end","message":{"role":"assistant","stopReason":"stop"}}"#,
+        )
+        .unwrap();
+        assert_eq!(turn_error(&settled_ok), None);
+
+        let failed: Value = serde_json::from_str(TURN_END_AUTH_ERROR).unwrap();
+        assert_eq!(
+            turn_error(&failed).as_deref(),
+            Some("OpenAI API error (401): Incorrect API key provided")
+        );
+
+        // A failed turn with no reason still fails, with a stated one.
+        let bare: Value =
+            serde_json::from_str(r#"{"type":"turn_end","message":{"stopReason":"error"}}"#)
+                .unwrap();
+        assert!(turn_error(&bare).is_some_and(|e| !e.is_empty()));
     }
 
     #[tokio::test]

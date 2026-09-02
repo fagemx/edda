@@ -36,6 +36,13 @@ pub enum StreamMessage {
         total_cost_usd: Option<f64>,
         #[serde(default)]
         error: Option<String>,
+        /// claude's own verdict on the turn, independent of `subtype`: a
+        /// turn that failed on an API error is still labelled
+        /// `subtype: "success"` and marked here (GH-669). Absent means
+        /// false — an older backend that never sends the field reports no
+        /// failure, which is the pre-GH-669 reading.
+        #[serde(default)]
+        is_error: bool,
         #[serde(default, rename = "result")]
         result_text: Option<String>,
     },
@@ -50,6 +57,8 @@ pub struct ResultInfo {
     pub subtype: String,
     pub total_cost_usd: Option<f64>,
     pub error: Option<String>,
+    /// claude's `is_error` flag for the turn — see [`StreamMessage::Result`].
+    pub is_error: bool,
     pub result_text: Option<String>,
 }
 
@@ -152,11 +161,13 @@ impl StreamMonitor {
                 subtype,
                 total_cost_usd,
                 error,
+                is_error,
                 result_text,
             } => Some(ResultInfo {
                 subtype: subtype.clone(),
                 total_cost_usd: *total_cost_usd,
                 error: error.clone(),
+                is_error: *is_error,
                 result_text: result_text.clone(),
             }),
             _ => None,
@@ -278,6 +289,22 @@ fn truncate(s: &str, max_len: usize) -> String {
 pub fn classify_result(monitor: &MonitorResult, exit_code: Option<i32>) -> PhaseResult {
     match &monitor.result {
         Some(info) => match info.subtype.as_str() {
+            // A turn claude itself marked failed is a crash however its
+            // subtype reads (GH-669): an authentication failure arrives as
+            // `subtype: "success"` with `is_error: true` and the reason in
+            // `result`, and reading only the subtype reported a turn that
+            // did nothing as done — `edda dispatch` exit 0. The override is
+            // scoped to "success" on purpose: `error_max_turns` and
+            // `error_max_budget_usd` carry `is_error` too and keep their own
+            // outcome classes below.
+            "success" if info.is_error => PhaseResult::AgentCrash {
+                error: info
+                    .error
+                    .clone()
+                    .or_else(|| info.result_text.clone())
+                    .filter(|detail| !detail.trim().is_empty())
+                    .unwrap_or_else(|| "agent reported a failed turn without a reason".to_owned()),
+            },
             "success" => PhaseResult::AgentDone {
                 cost_usd: info.total_cost_usd,
                 result_text: monitor.result_text.clone(),
@@ -381,6 +408,7 @@ mod tests {
                 subtype: "success".into(),
                 total_cost_usd: Some(0.5),
                 error: None,
+                is_error: false,
                 result_text: None,
             }),
             result_text: None,
@@ -400,6 +428,7 @@ mod tests {
                 subtype: "error_max_turns".into(),
                 total_cost_usd: Some(1.0),
                 error: None,
+                is_error: false,
                 result_text: None,
             }),
             result_text: None,
@@ -417,6 +446,7 @@ mod tests {
                 subtype: "error_max_budget_usd".into(),
                 total_cost_usd: Some(2.0),
                 error: None,
+                is_error: false,
                 result_text: None,
             }),
             result_text: None,
@@ -434,6 +464,7 @@ mod tests {
                 subtype: "error_during_execution".into(),
                 total_cost_usd: Some(0.1),
                 error: Some("tool crashed".into()),
+                is_error: false,
                 result_text: None,
             }),
             result_text: None,
@@ -446,6 +477,125 @@ mod tests {
         }
     }
 
+    // ── GH-669: a failed turn claude still labels `subtype: "success"` ──
+
+    /// The verbatim result line claude emits when its OAuth token is
+    /// rejected (captured 2026-09-02 from `claude -p --verbose
+    /// --output-format stream-json` with an invalid
+    /// `CLAUDE_CODE_OAUTH_TOKEN`; `usage`, `modelUsage` and the uuid/session
+    /// fields elided, every field below is byte-for-byte as claude printed
+    /// it). The subtype says "success" and `is_error` says otherwise.
+    const AUTH_FAILURE_RESULT_LINE: &str = r#"{"duration_api_ms":0,"stop_reason":"stop_sequence","total_cost_usd":0,"permission_denials":[],"terminal_reason":"api_error","is_error":true,"num_turns":1,"subtype":"success","api_error_status":401,"result":"Failed to authenticate. API Error: 401 OAuth access token is invalid.","type":"result","duration_ms":2266}"#;
+
+    /// Rebuild a [`ResultInfo`] from one raw stream line exactly the way
+    /// [`StreamMonitor::run`] does, so these tests exercise the same fields
+    /// the monitor actually carries out of the stream.
+    fn result_info_from_line(line: &str) -> ResultInfo {
+        match serde_json::from_str::<StreamMessage>(line).expect("parse result line") {
+            StreamMessage::Result {
+                subtype,
+                total_cost_usd,
+                error,
+                is_error,
+                result_text,
+            } => ResultInfo {
+                subtype,
+                total_cost_usd,
+                error,
+                is_error,
+                result_text,
+            },
+            other => panic!("expected Result, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_result_carries_is_error() {
+        let info = result_info_from_line(AUTH_FAILURE_RESULT_LINE);
+        assert_eq!(info.subtype, "success");
+        assert!(info.is_error, "claude reported is_error: true");
+        // The reason travels in `result`, not `error`, on this shape.
+        assert!(info.error.is_none());
+        assert_eq!(
+            info.result_text.as_deref(),
+            Some("Failed to authenticate. API Error: 401 OAuth access token is invalid.")
+        );
+    }
+
+    #[test]
+    fn classify_errored_success_is_crash_not_done() {
+        // GH-669: classifying on `subtype` alone reported an authentication
+        // failure as a completed turn, which `edda dispatch` turned into
+        // exit 0 — a turn that did nothing, indistinguishable from success.
+        let info = result_info_from_line(AUTH_FAILURE_RESULT_LINE);
+        let monitor = MonitorResult {
+            total_cost_usd: 0.0,
+            result_text: info.result_text.clone(),
+            result: Some(info),
+            model: Some("claude-opus-5[1m]".into()),
+        };
+        match classify_result(&monitor, Some(1)) {
+            PhaseResult::AgentCrash { error } => {
+                assert!(error.contains("401"), "{error}");
+                assert!(error.contains("Failed to authenticate"), "{error}");
+            }
+            other => panic!("expected AgentCrash, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn classify_errored_success_without_detail_still_crashes() {
+        // No `result` text and no `error` field: the outcome must still be a
+        // crash, with a stated reason rather than an empty one.
+        let monitor = MonitorResult {
+            total_cost_usd: 0.0,
+            result: Some(ResultInfo {
+                subtype: "success".into(),
+                total_cost_usd: Some(0.0),
+                error: None,
+                is_error: true,
+                result_text: None,
+            }),
+            result_text: None,
+            model: None,
+        };
+        match classify_result(&monitor, Some(1)) {
+            PhaseResult::AgentCrash { error } => assert!(!error.is_empty()),
+            other => panic!("expected AgentCrash, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn is_error_does_not_swallow_the_other_terminal_classes() {
+        // The `is_error` override is scoped to "success": the budget and
+        // max-turns subtypes carry it too, and each keeps its own exit
+        // class (3 and 4) instead of collapsing into crash.
+        for (subtype, expected) in [
+            ("error_max_turns", "max_turns"),
+            ("error_max_budget_usd", "budget_exceeded"),
+        ] {
+            let monitor = MonitorResult {
+                total_cost_usd: 1.0,
+                result: Some(ResultInfo {
+                    subtype: subtype.into(),
+                    total_cost_usd: Some(1.0),
+                    error: None,
+                    is_error: true,
+                    result_text: None,
+                }),
+                result_text: None,
+                model: None,
+            };
+            let classified = classify_result(&monitor, Some(1));
+            let ok = matches!(
+                (expected, &classified),
+                ("max_turns", PhaseResult::MaxTurns { .. })
+                    | ("budget_exceeded", PhaseResult::BudgetExceeded { .. })
+            );
+            assert!(ok, "{subtype} classified as {classified:?}");
+        }
+    }
+
     #[test]
     fn classify_unknown_subtype() {
         let monitor = MonitorResult {
@@ -454,6 +604,7 @@ mod tests {
                 subtype: "new_error_type".into(),
                 total_cost_usd: None,
                 error: None,
+                is_error: false,
                 result_text: None,
             }),
             result_text: None,
