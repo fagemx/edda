@@ -83,10 +83,11 @@ FOLLOW-UP ISSUE，不擴大本輪。
 
 ## Code Review: Round N
 - model_requested: <dispatch 指定的模型>
-- model_observed: <由系統取得：pi session 檔或 claude -p --output-format json
-  的 model 欄位。禁止照抄 model_requested，禁止引用引擎對自己的標示
-  （#616 實證：glm 曾照模板寫 gpt-5.6-sol）。若無法從系統取得，寫
-  "unverified"，不得編造>
+- model_observed: <由系統取得：pi 讀 session 檔的 "model" 欄；claude 讀
+  `claude -p --output-format json` 的頂層 **modelUsage** 鍵（其 key 就是模型 id，
+  例如 claude-opus-5）——**沒有頂層 model 鍵**。禁止照抄 model_requested，
+  禁止引用引擎對自己的標示（#616 實證：glm 曾照模板寫 gpt-5.6-sol）；
+  環境變數身分（如 PI_MODEL）不算數。若無法從系統取得，寫 "unverified"，不得編造>
 - brief: reviewer-brief-template-v1
 - class: <code-risk | docs-skills | …>
 - escalations: <[判斷] 需升級項列表；無則 none>
@@ -131,12 +132,18 @@ sol 抓到而他人漏掉的 finding 會固化為新清單項或新金絲雀，�
 ## 7. 判決欄位與 #574 S5 的對齊
 
 `model_observed` 的長期來源是 #574 S5（dispatch 收據自動附帶）；
-在那之前由控制者從系統取得：pi 讀 session 檔的 model 欄位、
-claude 讀 `--output-format json` 的 `model` 欄位。合併政策讀**欄位**不讀標頭
-（裁定 `fleet.review-engine`）——引擎自我標示與模板照抄都不是證據。
+在那之前由控制者從系統取得：pi 讀 session 檔的 `"model"` 欄位、
+claude 讀 `--output-format json` 的 **`modelUsage`** 鍵（RAN 2026-09-02：
+`claude -p --model opus --output-format json "reply with OK" | jq 'has("model"), has("modelUsage")'`
+→ `false` / `true`；`.modelUsage | keys[]` → `"claude-opus-5"`。頂層鍵名有
+`total_cost_usd`、`usage`、`modelUsage`、`session_id` … 但**沒有** `model`）。
+合併政策讀**欄位**不讀標頭（裁定 `fleet.review-engine`）——引擎自我標示與模板照抄都不是證據。
 
 ## 8. 版本
 
 - v1（2026-09-02）：初版。零裁量規則、`[判斷]` 規則、判決格式、兩類清單。
+- v1.1（2026-09-02，#638 R1 修正）：`model_observed` 的 claude 來源由不存在的
+  頂層 `model` 鍵更正為 `modelUsage`（RAN 實測見 §7），並明說環境變數身分
+  （`PI_MODEL`）不算系統觀察值。
 - 變更紀錄會附在每次判決的 `brief:` 欄（如 `reviewer-brief-template-v1.2`），
   讓抓取率可以對著 brief 版本解讀。
