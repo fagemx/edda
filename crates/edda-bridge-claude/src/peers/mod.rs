@@ -226,6 +226,7 @@ mod board;
 mod discovery;
 mod heartbeat;
 mod helpers;
+pub mod liveness;
 mod render_coord;
 mod render_fleet;
 
@@ -249,6 +250,10 @@ pub use heartbeat::{
 pub use helpers::format_age;
 pub(crate) use helpers::{format_peer_suffix, pending_requests_for_session};
 pub use helpers::{resolve_session_label, session_label_from_board, timestamp_at_or_after};
+pub use liveness::{
+    classify_session_liveness, classify_session_liveness_at, liveness_from_heartbeat,
+    SessionLiveness,
+};
 pub(crate) use render_coord::{render_coord_diff, render_peer_updates_with};
 pub use render_coord::{render_coordination_protocol, render_coordination_protocol_with};
 pub use render_fleet::fleet_section;

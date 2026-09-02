@@ -4,6 +4,7 @@ use crate::parse::now_rfc3339;
 
 use super::board::compute_board_state;
 use super::helpers::parse_rfc3339_to_epoch;
+use super::liveness::{liveness_from_heartbeat, SessionLiveness};
 use super::{stale_secs, PeerSummary, SessionHeartbeat};
 
 // ── Peer Discovery ──
@@ -11,7 +12,6 @@ use super::{stale_secs, PeerSummary, SessionHeartbeat};
 /// Discover active peer sessions (excluding current session and stale ones).
 pub fn discover_active_peers(project_id: &str, current_session_id: &str) -> Vec<PeerSummary> {
     let state_dir = edda_store::project_dir(project_id).join("state");
-    let stale_threshold = stale_secs();
     let now = parse_rfc3339_to_epoch(&now_rfc3339()).unwrap_or(0);
 
     let board = compute_board_state(project_id);
@@ -45,23 +45,14 @@ pub fn discover_active_peers(project_id: &str, current_session_id: &str) -> Vec<
             Err(_) => continue,
         };
 
-        let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
-        let age = now.saturating_sub(hb_epoch);
-
-        // Sub-agent heartbeats (Claude Code Task tool) still have no in-flight
-        // writer: no hook events fire during their execution, so a fresh
-        // heartbeat written once at spawn would otherwise age out mid-run.
-        // GH-569 narrowed this exception: conductor/dispatch lanes now write
-        // real periodic heartbeats (runner/heartbeat.rs) and use the standard
-        // threshold — only parented sub-agents keep the 15x multiplier.
-        let effective_threshold = if hb.parent_session_id.is_some() {
-            stale_threshold * 15
-        } else {
-            stale_threshold
+        // The GH-617 shared liveness criterion — the same verdict `edda
+        // claim check` applies, so the two verbs can never disagree about
+        // who is dead. The sub-agent 15x multiplier lives inside the
+        // criterion (see `liveness::liveness_from_heartbeat`).
+        let age = match liveness_from_heartbeat(&hb, now) {
+            SessionLiveness::Live { age_secs } => age_secs,
+            _ => continue,
         };
-        if age > effective_threshold {
-            continue;
-        }
 
         let claimed_paths = board
             .claims
