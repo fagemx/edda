@@ -142,11 +142,25 @@ impl ClaudeCodeLauncher {
         // available tools from the built-in set", while `--allowedTools` is
         // only a permission-prompt rule and leaves Write/Edit/Bash reachable
         // under bypassPermissions — the fake allowlist GH-574 round 2
-        // (P1-1) called out. `--disallowedTools` is a genuine deny rule.
+        // (P1-1) called out. Round 3: `--tools` restricts only the built-in
+        // set and leaves every MCP tool reachable (e.g.
+        // `mcp__filesystem__write_file` under bypassPermissions), so an
+        // allowlist claim also denies all unlisted MCP tools via the
+        // genuine deny rule `--disallowedTools "mcp__*"`, merged with any
+        // explicit exclude_tools entries into one flag. A denylist-only
+        // phase claims nothing about MCP tools and keeps its exact list.
         if let Some(tools) = &phase.tools {
             cmd.arg("--tools").arg(tools.join(","));
-        }
-        if let Some(tools) = &phase.exclude_tools {
+            let mut denied: Vec<&str> = phase
+                .exclude_tools
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(String::as_str)
+                .collect();
+            denied.push("mcp__*");
+            cmd.arg("--disallowedTools").arg(denied.join(","));
+        } else if let Some(tools) = &phase.exclude_tools {
             cmd.arg("--disallowedTools").arg(tools.join(","));
         }
 
@@ -458,7 +472,21 @@ mod tests {
             .iter()
             .position(|a| a == "--disallowedTools")
             .expect("--disallowedTools");
-        assert_eq!(args[deny + 1], "Write,Edit");
+        assert_eq!(args[deny + 1], "Write,Edit,mcp__*");
+    }
+
+    /// GH-574 round 3: a denylist-only phase claims nothing about MCP
+    /// tools, so no mcp__* entry appears — the list keeps its exact value.
+    #[test]
+    fn claude_denylist_without_allowlist_keeps_its_exact_value() {
+        let args = args_of(&claude_command_for(
+            "  - id: a\n    prompt: x\n    exclude_tools: [Write]\n",
+        ));
+        let deny = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("--disallowedTools");
+        assert_eq!(args[deny + 1], "Write");
     }
 
     /// GH-574 round 3 (P1-1): claude's `--tools` restricts only the built-in
@@ -482,7 +510,8 @@ mod tests {
             .position(|a| a == "--disallowedTools")
             .expect("an allowlist phase must also deny unlisted MCP tools");
         assert_eq!(
-            args[deny + 1], "mcp__*",
+            args[deny + 1],
+            "mcp__*",
             "the allowlist claim must hold against MCP tools too: {args:?}"
         );
     }

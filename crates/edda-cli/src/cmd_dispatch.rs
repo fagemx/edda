@@ -69,7 +69,10 @@ pub struct DispatchArgs {
     /// Tool allowlist, comma-separated (GH-574): pi `--tools`, claude
     /// `--tools`. Both restrict capabilities — the listed tools are the
     /// only ones the backend can use — so e.g. `--tools read,grep,find,ls`
-    /// makes the turn structurally read-only. codex refuses it.
+    /// makes the turn structurally read-only. claude's `--tools` covers
+    /// only the built-in set, so the spawn also denies all unlisted MCP
+    /// tools (`--disallowedTools "mcp__*"`); pi's has no MCP leak. codex
+    /// refuses the flag.
     #[arg(long, value_delimiter = ',')]
     pub tools: Option<Vec<String>>,
     /// Tool denylist, comma-separated (GH-574): pi `--exclude-tools`, claude
@@ -351,6 +354,25 @@ pub fn run(args: DispatchArgs) -> Result<()> {
 }
 
 fn run_inner(args: DispatchArgs) -> Result<i32> {
+    // GH-574 honesty gate: refuse unsupported backend/option combinations
+    // instead of accepting them and silently doing nothing. An explicitly
+    // passed --permission-mode on a backend with no permission concept is
+    // refused here too (GH-574 round 2, P1-2) — there is no clap default,
+    // so an absent flag claims nothing and drops nothing. Round 3 (P1-2):
+    // this gate runs before EVERY short-circuit, including --list-models —
+    // listing mode must not accept and drop a permission contract either.
+    validate_dispatch_options(
+        args.agent,
+        &DispatchOptions {
+            model: args.model.as_deref(),
+            thinking: args.thinking.as_deref(),
+            tools: args.tools.as_deref(),
+            exclude_tools: args.exclude_tools.as_deref(),
+            session_dir: args.session_dir.as_deref(),
+            permission_mode: args.permission_mode.as_deref(),
+        },
+    )?;
+
     // --list-models short-circuits dispatch: print the provider/model table
     // and exit 0 (GH-574 — callers look up patterns instead of guessing a
     // provider prefix).
@@ -382,23 +404,6 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         .context("--prompt-file is required unless --list-models is given")?;
     let prompt = std::fs::read_to_string(prompt_file)
         .with_context(|| format!("--prompt-file not readable: {prompt_file}"))?;
-
-    // GH-574 honesty gate: refuse unsupported backend/option combinations
-    // instead of accepting them and silently doing nothing. An explicitly
-    // passed --permission-mode on a backend with no permission concept is
-    // refused here too (GH-574 round 2, P1-2) — there is no clap default,
-    // so an absent flag claims nothing and drops nothing.
-    validate_dispatch_options(
-        args.agent,
-        &DispatchOptions {
-            model: args.model.as_deref(),
-            thinking: args.thinking.as_deref(),
-            tools: args.tools.as_deref(),
-            exclude_tools: args.exclude_tools.as_deref(),
-            session_dir: args.session_dir.as_deref(),
-            permission_mode: args.permission_mode.as_deref(),
-        },
-    )?;
 
     let session_id = args.session_id.clone().unwrap_or_else(generate_session_id);
 

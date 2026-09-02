@@ -56,7 +56,9 @@ impl AgentKind {
     /// (`pi --tools/--exclude-tools`, `claude --tools/--disallowedTools`).
     /// Both are capability restrictions: claude's `--allowedTools` is only
     /// a permission-prompt rule and is never spawned (GH-574 round 2,
-    /// P1-1) — the restricting flag is `--tools`.
+    /// P1-1) — the restricting flag is `--tools`, which covers only the
+    /// built-in set, so claude allowlist spawns also deny all unlisted MCP
+    /// tools via `--disallowedTools "mcp__*"` (GH-574 round 3, P1-1).
     pub fn supports_tool_policy(self) -> bool {
         matches!(self, AgentKind::Claude | AgentKind::Pi)
     }
