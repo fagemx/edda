@@ -3123,6 +3123,281 @@ phases:
         );
     }
 
+    /// GH-564 Round-2 P1-2 (exactly-once): a REAL persisted resume — the
+    /// plan already started, an expired Running phase sits on disk — must
+    /// notify Stale exactly once across repeated `edda conduct run`
+    /// invocations. The transition must be persisted before the
+    /// notification fires, so run 2 (a fresh conductor reloading the
+    /// persisted state) finds no orphan Running phase and sends nothing.
+    #[tokio::test]
+    async fn resume_stale_notifies_exactly_once_across_reruns() {
+        let yaml = r#"
+name: resumestale
+timeout_sec: 1
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = MockLauncher::new();
+
+        // A conductor died mid-run: the persisted state has an expired
+        // Running phase and the plan already started (real resume — NOT a
+        // fresh PlanState::from_plan whose started_at is None).
+        let mut persisted = PlanState::from_plan(&plan, "test.yaml");
+        persisted.started_at = Some(now_rfc3339());
+        persisted.plan_status = PlanStatus::Running;
+        persisted.phases[0].status = PhaseStatus::Running;
+        persisted.phases[0].started_at = Some(
+            (time::OffsetDateTime::now_utc() - time::Duration::seconds(3600))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        );
+        save_state(dir.path(), &persisted).unwrap();
+
+        // Run 1: a fresh conductor process loads the persisted state.
+        let mut state = crate::state::persist::load_state(dir.path(), &plan.name)
+            .unwrap()
+            .expect("persisted resume state");
+        let notifier1 = CollectNotifier::new();
+        let engine = CheckEngine::new(dir.path().to_path_buf());
+        let mut budget = BudgetTracker::new(plan.budget_usd);
+        run_plan(
+            &plan,
+            &mut state,
+            RunContext {
+                launcher: &launcher,
+                check_engine: &engine,
+                notifier: &notifier1,
+                budget: &mut budget,
+                cancel: CancellationToken::new(),
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+                tmux_session: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.phases[0].status, PhaseStatus::Stale);
+        let tv1 = terminal_view(&notifier1.terminal_events());
+        let stale1 = tv1.iter().filter(|e| e.1 == "a" && e.2 == "Stale").count();
+        assert_eq!(
+            stale1, 1,
+            "run 1 notifies the Stale transition exactly once: {tv1:?}"
+        );
+
+        // Run 2: ANOTHER fresh conductor process re-reads the disk state.
+        let mut state2 = crate::state::persist::load_state(dir.path(), &plan.name)
+            .unwrap()
+            .expect("state must survive run 1");
+        assert_eq!(
+            state2.phases[0].status,
+            PhaseStatus::Stale,
+            "the Stale transition must be PERSISTED by run 1, not left in memory"
+        );
+        let notifier2 = CollectNotifier::new();
+        let engine2 = CheckEngine::new(dir.path().to_path_buf());
+        let mut budget2 = BudgetTracker::new(plan.budget_usd);
+        run_plan(
+            &plan,
+            &mut state2,
+            RunContext {
+                launcher: &launcher,
+                check_engine: &engine2,
+                notifier: &notifier2,
+                budget: &mut budget2,
+                cancel: CancellationToken::new(),
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+                tmux_session: None,
+            },
+        )
+        .await
+        .unwrap();
+        let tv2 = terminal_view(&notifier2.terminal_events());
+        assert!(
+            tv2.iter().all(|e| !(e.1 == "a" && e.2 == "Stale")),
+            "run 2 must NOT re-notify the already-persisted Stale transition: {tv2:?}"
+        );
+    }
+
+    /// GH-564 Round-2 new P1: after a redispatch cycle, the SECOND gate
+    /// entry's output (here: none — the redispatched turn produced no final
+    /// text) must replace the first cycle's parked output. Approving the
+    /// regate must never deliver the PREVIOUS cycle's PR URL as the final
+    /// output.
+    #[tokio::test]
+    async fn gate_redispatch_none_output_never_reuses_previous_cycles_output() {
+        let root = fresh_root("redispatch-none");
+        init_git_repo(&root);
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: Some(
+                        "opened pull request\nPR: https://github.com/x/y/pull/100".into(),
+                    ),
+                },
+                // The redispatched turn produced NO final text at all.
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+            ],
+        );
+        let plan = parse_plan(GATED_YAML).unwrap();
+        let state = PlanState::from_plan(&plan, "test.yaml");
+        let handle = spawn_runner(GATED_YAML, root.clone(), launcher, state);
+
+        // First gate: reject with a comment → redispatch.
+        let shas = wait_for_gate_events(&root, "gated", 1).await;
+        record_verdict(
+            &root,
+            "gated/a",
+            &shas[0],
+            VerdictDecision::Rejected,
+            Some("redo it"),
+        );
+
+        // Second gate: approve.
+        let shas = wait_for_gate_events(&root, "gated", 2).await;
+        record_verdict(
+            &root,
+            "gated/a",
+            &shas[1],
+            VerdictDecision::Approved,
+            None,
+        );
+
+        let (state, notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+            .await
+            .expect("gate test exceeded 30s")
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.phases[0].status, PhaseStatus::Passed);
+        assert_eq!(launcher.call_count("a"), 2);
+        let tv = terminal_view(&notifier.terminal_events());
+        let passed = tv
+            .iter()
+            .find(|e| e.1 == "a" && e.2 == "Passed")
+            .expect("approved gate must emit a Passed terminal event");
+        assert_eq!(
+            passed.4, None,
+            "a redispatch turn with no output must NOT inherit the previous cycle's parked PR URL"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-564 Round-2 new P1: when a gate entry CANNOT persist its output
+    /// (here the atomic write fails because a directory blocks the sidecar
+    /// path), the entry must fail the phase instead of silently waiting on a
+    /// verdict whose approve branch would read back the PREVIOUS cycle's
+    /// parked output.
+    #[tokio::test]
+    async fn gate_redispatch_write_failure_fails_instead_of_stale_output() {
+        let root = fresh_root("redispatch-writefail");
+        init_git_repo(&root);
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some(
+                    "opened pull request\nPR: https://github.com/x/y/pull/100".into(),
+                ),
+            }],
+            // The redispatched turn falls through to the mock default.
+        );
+        let yaml = r#"
+name: gated
+phases:
+  - id: a
+    prompt: "do it"
+    gate: verdict
+    gate_timeout_sec: 1
+    on_fail: abort
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let state = PlanState::from_plan(&plan, "test.yaml");
+        let handle = spawn_runner(yaml, root.clone(), launcher, state);
+
+        // Gate entry 1 parks its output successfully.
+        let shas = wait_for_gate_events(&root, "gated", 1).await;
+        let sidecar = root
+            .join(".edda")
+            .join("conductor")
+            .join("gated")
+            .join("a.gate_output");
+        assert_eq!(
+            std::fs::read_to_string(&sidecar).unwrap(),
+            "PR: https://github.com/x/y/pull/100",
+            "entry 1 must have parked its output"
+        );
+        // Sabotage the NEXT atomic write: a directory where the file must go.
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::create_dir(&sidecar).unwrap();
+
+        // Reject → redispatch → gate entry 2 hits the write failure.
+        record_verdict(
+            &root,
+            "gated/a",
+            &shas[0],
+            VerdictDecision::Rejected,
+            Some("redo it"),
+        );
+
+        let (state, _notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+            .await
+            .expect("gate test exceeded 30s")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            launcher.call_count("a"),
+            2,
+            "reject still redispatches one turn"
+        );
+        assert_eq!(
+            state.phases[0].status,
+            PhaseStatus::Failed,
+            "a gate entry that cannot persist its output must fail, not wait on a verdict against a stale sidecar"
+        );
+        let err = state.phases[0]
+            .error
+            .as_ref()
+            .expect("Failed phase carries an error");
+        assert!(
+            err.message.contains("failed to persist gate final output"),
+            "the persist failure must surface as the phase error, got: {}",
+            err.message
+        );
+        // The sabotaged entry never reaches AWAITING_VERDICT: still exactly
+        // one gate_entered event.
+        let events_path = root
+            .join(".edda")
+            .join("conductor")
+            .join("gated")
+            .join("events.jsonl");
+        let content = std::fs::read_to_string(&events_path).unwrap();
+        let gate_enters = content
+            .lines()
+            .filter(|l| {
+                serde_json::from_str::<serde_json::Value>(l)
+                    .map(|v| v["type"] == "gate_entered")
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            gate_enters, 1,
+            "the failed entry must not enter the gate again"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn gate_reject_redispatches_same_session_then_regates() {
         let root = fresh_root("redispatch");
