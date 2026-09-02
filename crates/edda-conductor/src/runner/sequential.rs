@@ -716,6 +716,14 @@ const GATE_POLL_SEC: u64 = 2;
 /// wait on the same `(subject, gate_sha)` forever while `max_attempts`
 /// never trips — this counter is the real loop bound. Exhausting it fails
 /// the phase like `on_reject: halt`, with a distinct error naming the bound.
+///
+/// Fixed at 3 rather than plan-configurable, on purpose: this bound exists
+/// to kill loop-shaped defects (the D6 loop measured 176 cycles before the
+/// fix), and a plan-author-tunable ceiling would let the same optimism that
+/// wrote an unbounded gate re-open the loop from inside the plan file. Three
+/// covers the multi-round review cycles this repo actually ships (e.g. the
+/// three-round review of GH-534); a phase that genuinely needs more review
+/// rounds should be split into smaller phases instead of raising the bound.
 const MAX_GATE_REDISPATCHES: u32 = 3;
 
 /// `<plan-name>/<phase-id>` — the subject an `edda verdict` targets (D1/D3).
@@ -1092,6 +1100,19 @@ async fn process_phase_result(
                                 Some(PhaseUpdate {
                                     checks: Some(check_result.results),
                                     gate_sha: Some(gate_sha.clone()),
+                                    // D6 LOAD-BEARING: `gate_entered_at` is
+                                    // REWRITTEN on every gate entry, including
+                                    // redispatch re-entry. Verdict freshness
+                                    // compares the verdict timestamp against
+                                    // this bound, so re-entry stales every
+                                    // earlier verdict for the same
+                                    // (subject, gate_sha) — including the
+                                    // rejection that triggered this
+                                    // redispatch — and that is what kills the
+                                    // re-approval loop. Hoisting, caching, or
+                                    // reusing the original bound here silently
+                                    // reintroduces the 176-cycle D6 loop
+                                    // while the happy path still passes.
                                     gate_entered_at: Some(now_rfc3339()),
                                     ..Default::default()
                                 }),
@@ -3851,7 +3872,13 @@ phases:
             Some("fix the flaky test"),
         );
 
-        // Redispatch re-enters the gate with a fresh gate_sha; approve it.
+        // Redispatch re-enters the gate with the SAME gate_sha, NOT a fresh
+        // one: the redispatch turn here produces no new commit, so HEAD (and
+        // therefore the sha a verdict must match) is unchanged. The D6
+        // freshness rule still blocks the first rejection from re-satisfying
+        // the re-entered gate, because re-entry rewrote gate_entered_at and
+        // the rejection now predates it. Approving that same sha works
+        // because it is recorded after the second gate_entered_at.
         let shas = wait_for_gate_events(&root, "gated", 2).await;
         record_verdict(
             &root,
