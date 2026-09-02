@@ -1,7 +1,7 @@
 # 策略：五參數，與 edda 的表達方式
 
 - 日期：2026-09-02
-- 狀態：操作者同意落檔（Tim：「可以 請改」）；框架為控制者提案，帳本 `product.strategy=data-not-code-five-parameters`（unratified）。
+- 狀態：操作者同意落檔（Tim：「可以 請改」）；框架為控制者提案，帳本 `product.strategy=data-not-code-five-parameters`，**2026-09-02 由操作者 ratify**（`edda ask "product.strategy"` 可查 ratify 事件）。
 - 姊妹篇：[控制層與非 coding 形狀的執行層](2026-09-02-control-layer-and-l2-shapes-design.md)。
   那篇定義**形狀**（單一 lane 的契約）；本篇定義**策略**（形狀之上的組合），並回頭修改 #602、#603 的設計問題。
 - 起點：操作者提到一位開發者自行設計「群狼」策略——用多個代理的多種組合去量測模型的極限——

@@ -6,6 +6,11 @@
 >
 > 每一條指令都在 2026-09-02 於這台工作站核對過旗標。標「缺」的欄位對應到已開的 issue——
 > 那些就是今天還要人手做的地方，也是這頁之所以還不夠短的原因。
+>
+> **路徑是這台工作站的**（`C:\ai_agent\edda`、`~/.codex/hooks.json`、lane root）。換機器時把它們換成該機的路徑；
+> 帳本（`.edda/`）不進 git，另一台機器是一本新帳，binding 決策要照 handoff issue 重記。
+> 觀測指令若在**沒有 session 身分的程序**裡跑（例如排程任務），`edda status` 會要求 `--session <id>` 或 `EDDA_SESSION_ID`。
+> §五提到的 `watch` / `report` / `promote` / `intake` 是控制層的**概念動詞**；現有 `edda watch`（TUI）與 `edda intake github` 範圍不同，勿混用。
 
 ---
 
@@ -42,7 +47,9 @@
    第 1–2 步：定目標、排除、證據門檻、開單與合併授權、停止條件；看 revision、dirty state、peers、claims、issue/PR 狀態。
 2. **判併行**：`/parallel-wave`——每張 ready issue 推 predicted write surface，兩兩交集：
    disjoint → 一起派；同檔不同符號 → 兩邊 brief 寫 FORBIDDEN 符號清單；同符號 → 串成一條；scope 太糊 → 退回佇列。
-   `edda claim check`（#576 合併後）把這步變成機器判。
+   `edda claim check`（#576，2026-09-02 已合進 main）把這步變成機器判——**但要用從 main 重建的二進位**：
+   PATH 上的 `edda.exe` 可能比 #576 舊，`edda claim --help` 沒列出 `check` 就是舊的（它會把 `check` 當成 claim 的 label）。
+   重建：`cargo install --path crates/edda-cli --force`，再 `edda claim --help` 確認。
 3. **每張一個 plan、一個 worktree、一條 lane**：
    ```bash
    git worktree add C:/ai_agent/edda-wt-ghNNN -b <branch> origin/main
@@ -108,7 +115,8 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 合併＝final current-head LGTM、P0=0/P1=0、7 格 required CI 綠（Format＋三平台 Clippy／Test）、SHA 窗檢查為空 | `pr.merge-policy`、`ci.merge-gate` |
 | worktree／branch／source 永不刪；build cache 可清、按年齡回收 | CLAUDE.md Build lanes |
 | 決策 recorded ≠ ratified；agent 不 ratify 自己的決策 | README 兩層授權 |
-| brief 要先自己跑過一輪才交付（探索場 31 號第零條，coding 同理：`fleet.review-brief-framing`） | `fleet.review-brief-framing` |
+| 審查 brief 用「驗證清單」框架（契約＋要確認的輸入形狀），不用攻擊計畫框架——後者會被 provider 拒收、燒掉一輪 | `fleet.review-brief-framing` |
+| brief 要先自己跑過一輪才交付（**非帳本決策**：來源是探索場 31 號第零條；edda 側尚無對應決策，要立法先開單） | — |
 
 ---
 
