@@ -1,0 +1,22 @@
+diff --git a/crates/edda-conductor/src/report_digest.rs b/crates/edda-conductor/src/report_digest.rs
+index 1a2b3c4..5d6e7f8 100644
+--- a/crates/edda-conductor/src/report_digest.rs
++++ b/crates/edda-conductor/src/report_digest.rs
+@@ -10,12 +10,21 @@ impl DigestBuilder {
+     pub fn new() -> Self {
+         Self { window_days: 7 }
+     }
+ 
++    pub fn with_cost_weighting(mut self, enabled: bool) -> Self {
++        self.cost_weighting = enabled;
++        self
++    }
++
+     pub async fn build(&self) -> Result<Digest, Error> {
+         let payload = self.collect().await?;
+         let rendered = render_markdown(&payload)?;
+-        fs::write(&self.digest_path, &rendered).context("write digest")?;
++        let _ = fs::write(&self.digest_path, &rendered); // best-effort
+         Ok(Digest { path: self.digest_path.clone() })
+     }
+ }

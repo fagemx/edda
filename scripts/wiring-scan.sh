@@ -25,17 +25,34 @@ fi
 BASE=$1
 HEAD=$2
 
+# Fail loudly on unknown revisions — a mistyped review range must never
+# false-green with "no new pub surfaces".
+for ref in "$BASE" "$HEAD"; do
+  if ! git rev-parse --verify --quiet "${ref}^{commit}" >/dev/null 2>&1; then
+    echo "error: unknown revision $ref" >&2
+    exit 2
+  fi
+done
+
 echo "== New pub surfaces (${BASE}..${HEAD}) =="
 
 # "<file>\t<kind>\t<name>" for each added pub declaration, deduped.
+# Visibility: pub | pub(crate) | pub(super) | pub(in path::to::mod).
+# Modifiers: any sequence of async / unsafe / const / extern "C" between
+# visibility and the item keyword (e.g. pub(crate) async fn, pub const fn,
+# pub unsafe extern "C" fn). Item keywords: fn struct enum trait type const
+# static mod union. Fields (pub <name>: Type) handled separately below.
 surfaces=$(git diff "$BASE" "$HEAD" --unified=0 -- crates/ | awk '
   /^diff --git / { file = $NF; sub(/^b\//, "", file); next }
   /^\+\+\+/ { next }
   /^\+/ {
     line = substr($0, 2)
-    if (match(line, /pub[[:space:]]+(fn|struct|enum|trait|const|static|type|mod)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
+    if (match(line, /pub([[:space:]]*\((crate|super|in[[:space:]]+[A-Za-z0-9_:]+)\))?([[:space:]]+(async|unsafe|const|extern([[:space:]]+"[^"]*")))*[[:space:]]+(fn|struct|enum|trait|type|const|static|mod|union)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/)) {
       decl = substr(line, RSTART, RLENGTH)
-      sub(/^pub[[:space:]]+/, "", decl)
+      sub(/^pub/, "", decl)
+      sub(/^[[:space:]]*\((crate|super|in[[:space:]]+[A-Za-z0-9_:]+)\)/, "", decl)
+      while (sub(/^[[:space:]]+(async|unsafe|const|extern([[:space:]]+"[^"]*"))/, "", decl)) { }
+      sub(/^[[:space:]]+/, "", decl)
       split(decl, parts, /[[:space:]]+/)
       print file "\t" parts[1] "\t" parts[2]
     } else if (match(line, /pub[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:/)) {
