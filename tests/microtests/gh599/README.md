@@ -1,83 +1,99 @@
-# gh599 micro-test — fleet-epic-split rewrite (old vs new), dry run
+# gh599 micro-test — fleet-epic-split rewrite (old vs new), attributable text-only run
 
 Old vs new decomposition of the same input, prompts identical except the
-embedded skill text: old arm embeds fleet-epic-split from `origin/main`
-(the 38-line pre-absorption text), new arm embeds this branch's HEAD text
-(`git show HEAD:.claude/skills/fleet-epic-split/SKILL.md`). Input is the
-Stage 2 section of epic #560 (`input-stage2.md`, extracted verbatim via
-`gh issue view 560 --repo fagemx/edda --json body -q .body`). Every run is a
-**dry run**: the prompt forbids creating/editing/commenting on issues and
-requires the confirmation table plus every would-be issue body.
+embedded skill text. Redesigned after PR #653 review round 1 so the
+differential can only come from the skill text:
 
-The new skill points at `.claude/skills/issue-intake/templates.md` for the
-single body contract; the run happens inside the repo worktree, so the
-pointer must resolve for the new arm to emit bodies — the pointer wiring is
-part of what is tested.
+- **(a) Isolated cwd**: `run.sh` runs both arms from an empty `mktemp -d`
+  directory, so no tool can read this repo's files — the old arm cannot
+  import the new conventions from the worktree (round-1 finding).
+- **(b) Byte-identical shared frame, no added requirements**: the frame is
+  the first line before `=== SKILL BEGIN ===`, everything from
+  `=== SKILL END ===` on, and nothing else. It adds no confirmation-table
+  demand and no body-shape demand; its only rule is the dry-run/isolation
+  sentence quoted below.
+- **(c) Embedded input and skill text**: input is the Stage 2 section of
+  epic #560 (`input-stage2.md`, extracted verbatim from
+  `gh issue view 560 --repo fagemx/edda --json body -q .body`); old arm
+  embeds the `origin/main` blob of `.claude/skills/fleet-epic-split/SKILL.md`
+  (38 lines), new arm embeds the HEAD blob.
+- **(d) N=1 per arm** (per issue #599), dry run only — no issue is created.
 
-Model `z-ai/glm-5.3-flash`, read-only (`--exclude-tools edit,write`), **N=1
-run per arm** (per the lane brief: one run each, no more). Session ids
-`microtest-gh599-old-<ts>` / `microtest-gh599-new-<ts>`. Committed outputs
-are from run `20260902-160921`.
+The shared frame in full (identical in both prompts):
 
-Portable invocation of the `<rev>:<path>` form on this workstation (Git Bash)
-needs `MSYS_NO_PATHCONV=1` — see ../gh594/README.md. `run.sh` does not invoke
-`git show` at all; it reads the committed prompt files.
+> Dry run: do not create issues. Recon is unavailable here — treat every
+> item in the input as not yet done. Print exactly what this skill would
+> output at each step.
+
+Model `z-ai/glm-5.3-flash`, read-only (`--exclude-tools edit,write`), session
+ids `microtest-gh599-old-<ts>` / `microtest-gh599-new-<ts>`. Committed
+outputs are from run `20260902-164626`.
+
+## Workstation command probes (Git Bash, `MSYS_NO_PATHCONV` unset/empty)
+
+Observed on this workstation while writing this README — exit codes only:
+
+```text
+$ git show HEAD:.claude/skills/fleet-epic-split/SKILL.md >/dev/null 2>&1; echo $?
+0
+$ git show origin/main:.claude/skills/fleet-epic-split/SKILL.md >/dev/null 2>&1; echo $?
+128
+```
+
+The `origin/main:` invocation fails with `fatal: ambiguous argument
+'origin\main;.claude\skills\fleet-epic-split\SKILL.md'` — the argument is
+mangled. An earlier version of this README generalized this into a
+"prefix with `MSYS_NO_PATHCONV=1`" claim; that generalization is deleted.
+`run.sh` does not invoke `git show` at all — it reads the committed prompt
+files — so replay is unaffected either way.
 
 Replay: `sh tests/microtests/gh599/run.sh` — overwrites
 `out-old-1.md` / `out-new-1.md`.
 
 ## Scoring rule (applied verbatim to every run)
 
-- **Confirmation table**: the run passes if it prints a confirmation table
-  (one row per proposed issue, plus the skip list of duplicates) BEFORE any
-  issue creation, and stops there (dry run — no `gh issue create`).
-- **Surface fields**: the run passes if every would-be issue body it prints
-  contains both a `Suspected surface` section and a `Predicted surface`
-  section. Zero would-be bodies makes this vacuously true — reported as
-  such, never counted as a positive demonstration.
-- **Old is the control**: the old text has no dedupe procedure over open
-  issues and no operator-confirmation gate; its expected failure mode is
-  proposing issues that duplicate already-open ones.
+- A run **catches** if it prints a confirmation table AND every proposed
+  issue body has a `Suspected surface` field AND a `Predicted surface`
+  field. Zero proposed bodies is a miss for the arm that proposes them
+  (a finding about that arm's skill text, not the prompt).
+- Both arms are scored the same way; no criterion favors either arm.
 
-## Result (run 20260902-160921, quoted lines scored on)
+## Result (run 20260902-164626)
 
-| Run | Confirmation table (dry-run stop) | Surface fields in would-be bodies | Dedupe over open issues |
-|---|---|---|---|
-| old-1 | table printed, 4 proposed — "## ③ Propose — 確認表 … | A | feat(edda-notify): 新增 conductor plan 事件變體與三格式渲染 |…" | n/a — old text has no such step; its only dedupe note is "dedupe 來源：operator-runbook 缺口表全列（operator-runbook.md:94-99），無重複單" — a docs gap table, never `gh issue list` |
-| new-1 | table printed, 0 proposed — "## ④ 確認表（dry run — 停在此步）… | — | **（無擬建單）** |…" plus skip list "Stage 2 phase terminal-state 通知 → **#564** … Stage 2 gate-entry routing（sibling）→ **#545**" | vacuous (0 bodies) — reported as such | four procedures run with named queries — "候選A phase terminal-state notify | queries: 文件内引用→…; edda ask "notify"→命中 epic560.stage1-slice…; edda search "terminal-state notification"→…; gh issue list 模糊比對→#564 標題逐字相符 | verdict: duplicate of #564" |
+| Run | Confirmation table | `Suspected surface` in proposed bodies | `Predicted surface` in proposed bodies | Verdict |
+|---|---|---|---|---|
+| old-1 | none — the old text has no pre-create operator gate; it flows ①recon → ②decompose → ③propose straight to would-be `gh issue create` commands ("以下為兩張 issue body 草稿與**將會執行**（dry run 不執行）的建單指令") | absent — both bodies use the old format `## 背景 / ## 改哪裡 / ## doneWhen / ## verify / ## 獨立性 / ## 尺寸`; no surface section exists in either | absent — same | **miss** (0 of 2 criteria; no dedupe step exists in the old text) |
+| new-1 | printed — "## ④ 確認表（dry run → 停在本步，不建任何 issue）" with 2 rows (擬建-1, 擬建-2) + skip list ("gate-entry routing → skip… #545") | present — "## Suspected surface / Phase 生命週期／終態判定所在的元件…" (擬建-1) and "## Suspected surface / Controller 的事件處理／訂閱端…" (擬建-2) | present — "## Predicted surface / phase 終態發射點…" (擬建-1) and "## Predicted surface / controller 訂閱端…" (擬建-2) | **catch** (3 of 3) |
 
-Provenance (new arm only — the old text has no provenance requirement):
-"provenance：epic issue #560「Stage 2 — event-driven delivery」節；決策 key
-`epic560.stage1-slice`".
+**Old 0/3 · New 3/3 (N=1 per arm).**
 
-**Old: 4 would-be issues proposed, duplicates of open #564/#545 among them
-(overlap verified at scoring time via `gh issue view 564` / `gh issue view
-545` — both OPEN, titles "feat(conductor): phase terminal-state notifications
-through edda-notify channels" / "feat(conductor): route the gate-entry
-notification through edda-notify channels instead of hardcoded stdout").
-New: 0 would-be issues, both Stage 2 items caught by dedupe with a query
-trail, confirmation table + skip list printed, provenance back-linked.**
+Additional observed behavior, quoted:
+
+- New arm ran the four dedupe procedures and, finding no repo/ledger in the
+  isolated cwd, recorded them per the skill's isolation clause: "2. `edda
+  ask`…：`unavailable（無 repo/ledger 環境）` … 4. open-issue 模糊比對…：
+  `unavailable`" — and marked both rows "new（**unverified**）" for the
+  operator to re-check. It also honored the in-document `#N` rule: "#545 …
+  gate-entry routing 本身**不生單**（已存在 #545）" (skip list).
+- New arm could not read `issue-intake/templates.md` in isolation and
+  emitted all sections from the skill's fixed section order instead:
+  "templates.md 讀不到（啟用隔離環境的固定節順序 fallback）".
+- New arm emitted provenance footers ("Provenance: operator 對話 2026-09-02
+  — …逐字引述"); the old text has no provenance requirement and emitted none.
 
 ## Honest reading
 
-1. **Same input, opposite outcomes — and the difference is the absorbed
-   capability.** The old arm proposed four issues, three of which
-   substantially duplicate open #564/#545 (it never ran an open-issue
-   check; the old text has no such step). The new arm ran all four dedupe
-   procedures, matched both Stage 2 items to open issues, and proposed
-   zero — exactly the "done things get no issue" behavior the rewrite
-   requires. This is direct evidence for the dedupe + confirmation-table +
-   provenance absorption, on an input whose items were already filed.
-2. **The run does NOT demonstrate the emitted body contract.** The new arm
-   printed zero bodies, so the `Suspected surface`/`Predicted surface`
-   criterion is vacuously satisfied for it; no claim is made that the new
-   skill's body output was observed, and the templates.md pointer was
-   never exercised (with zero bodies the model had no reason to read it).
-3. **Environment leak into the control.** The old arm's bodies contained
-   `Predicted surface` and Wiring-audit sections even though the old skill
-   text never mentions them — with read tools available, the model picked
-   the convention up from repo files. So this run cannot attribute any
-   body-format difference to the skill text.
-4. **One run per arm.** No repeatability claim is made; a single cheap-model
-   run is evidence of what happened, not of a stable behavioral
-   differential.
+- The round-1 confounds are removed by construction: both arms ran in the
+  same empty temp dir (no repo files to leak conventions), and the frame
+  demanded no table and no body shape. What differs is the skill text, and
+  the outputs differ exactly on the dimensions the rewrite owns (operator
+  gate, dedupe, surface fields, provenance) while matching on what both
+  texts share (recon-first posture, independence three-question, 30-cap,
+  two-candidate split, dry-run obedience).
+- `N=1 per arm`. No repeatability or generalization claim is made: one
+  cheap-model run shows what happened, not a stable differential. The new
+  arm's isolation fallbacks (`unverified` dedupe, fixed-section bodies) are
+  exercised here for the first time and were scored as observed.
+- The proposed bodies' `Predicted surface` values are necessarily
+  placeholder-shaped ("paths 待 recon 後補") — recon was unavailable by
+  design; no quality claim is made about surface prediction.

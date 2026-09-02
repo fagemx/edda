@@ -1,4 +1,4 @@
-You are executing the skill reproduced below verbatim. Follow its workflow.
+You are executing the following skill.
 
 === SKILL BEGIN ===
 ---
@@ -41,13 +41,10 @@ description: Use when refilling the Fleet feature queue — decompose one signed
 但錯的**方向**沒有閘門攔得住——所以寧可少拆、標清依賴，也不硬湊數量。
 === SKILL END ===
 
-INPUT (an excerpt from epic issue #560 of fagemx/edda — its Stage 2 section):
-
+INPUT:
 **Stage 2 — event-driven delivery:**
 phase terminal-state notifications through edda-notify channels (filed), with
 #545 (gate-entry routing) as sibling. Acceptance: a controller reacts to
 phase/gate events without polling stdout.
 
-RULES FOR THIS RUN:
-- This is a DRY RUN: do NOT create, edit, or comment on any GitHub issue, and do not run any command that writes or modifies anything. Read-only inspection is allowed; you are in the edda repo worktree.
-- Produce the outputs the skill requires up to the step immediately before issue creation: print the confirmation table (one row per proposed issue) and the complete proposed body of EVERY would-be issue.
+Dry run: do not create issues. Recon is unavailable here — treat every item in the input as not yet done. Print exactly what this skill would output at each step.

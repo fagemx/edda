@@ -50,6 +50,9 @@ provenance 是 ⑦ 回報與每張單 Relation/footer 的回連目標——輸�
 4. **open-issue 模糊比對** — `gh issue list --state open --limit 200 --json number,title`
    對標題模糊比對；疑似重複在確認表標 `possible duplicate? #N` 交操作者裁。
 每張候選一行：`<候選> | queries: … | verdict: new / duplicate of #N / merge with 候選k`。
+沒有目標 repo／帳本可查的環境（例如純文字的隔離 dry run）：程序 2–4 記
+`unavailable（無 repo/ledger 環境）`，確認表的 dedupe 欄標 `unverified`，
+補查交給操作者在裁決時做。
 
 ### ④ 確認表（建單前必經）→ 產出：一張確認表
 **操作者沒看過這張表，不准建任何 issue。** 一張擬建單一列：
@@ -80,7 +83,9 @@ issue 號＋標題＋獨立性＋surface 一覽。每張單的 `Relation to exis
 ## Body 契約（唯一定義處）
 
 **唯一定義在 [`issue-intake/templates.md`](../issue-intake/templates.md)**——
-本檔不複製全文；寫單前先讀該檔，逐節照填。節順序固定：
+本檔不複製全文；寫單前先讀該檔，逐節照填。讀不到該檔的環境（隔離／純文字）：
+仍須按下列固定的節順序逐節產出——節名與順序如下，內容自填，缺一節不准發。
+節順序固定：
 
 `What happened → Why it matters → Suspected surface → Predicted surface →
 doneWhen → Wiring audit（四問槽）→ Relation to existing issues`

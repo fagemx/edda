@@ -45,10 +45,11 @@ This operation transforms organic development discussions into trackable issues 
 - Capture relevant context and decisions
 - Preserve important details from the discussion
 
-**Flexible and adaptive:**
-- No rigid templates or categories
-- Adapt to the conversation's natural structure
-- Let content determine organization
+**Flexible in gathering, fixed in format:**
+- Adapt to the conversation's natural structure when extracting content
+- The issue BODY itself is never free-form: it is always the ready-bar
+  template in [.claude/skills/issue-intake/templates.md](../issue-intake/templates.md),
+  with its sections filled from the conversation
 - Focus on clarity and usefulness
 
 ## Workflow
@@ -96,13 +97,13 @@ Ask 2-4 focused questions that help create a complete, accurate issue.
 
 Synthesize the conversation into a clear issue:
 
-**Structure naturally based on content:**
-- Start with clear context and background
-- Explain what needs to happen or what's wrong
-- Include relevant details from the conversation
-- Reference code, files, or technical specifics when relevant
-- Note decisions, constraints, or requirements
-- Capture any open questions or next steps
+**Body = the canonical template:**
+- Fill the ready-bar sections from
+  [.claude/skills/issue-intake/templates.md](../issue-intake/templates.md):
+  What happened / Why it matters / Suspected surface / Predicted surface /
+  doneWhen / Wiring audit / Relation to existing issues
+- Use the conversation content you extracted to fill each section; do not
+  invent other sections
 
 **Guidelines:**
 - Write clearly and concisely
@@ -137,7 +138,7 @@ Create the issue:
 ```bash
 gh issue create \
   --title "[type]: [clear, descriptive description]" \
-  --body "[Synthesized content]" \
+  --body "[body per the canonical template — issue-intake/templates.md]" \
   --label "[appropriate-labels]" \
   --assignee @me
 ```
@@ -204,7 +205,10 @@ Keep questions focused (3-5 max per round) and specific.
 
 ### Step 3: Create Issue
 
-Organize information to enable quick reproduction and diagnosis:
+Gather the content below, then fill the canonical body template
+([.claude/skills/issue-intake/templates.md](../issue-intake/templates.md))
+with it — reproduction details go in `What happened`, acceptance in
+`doneWhen`:
 
 **Essential elements:**
 - Clear description of the problem
@@ -232,7 +236,7 @@ Create the issue directly with:
 ```bash
 gh issue create \
   --title "bug: [concise description]" \
-  --body "[Organized content]" \
+  --body "[body per the canonical template — issue-intake/templates.md]" \
   --label "bug" \
   --assignee @me
 ```
@@ -294,7 +298,10 @@ Keep questions focused (2-4 per round) and specific.
 
 ### Step 3: Create Issue
 
-Organize information in a clear, logical way that includes:
+Gather the content below, then fill the canonical body template
+([.claude/skills/issue-intake/templates.md](../issue-intake/templates.md))
+with it — background goes in `What happened`/`Why it matters`, the acceptance
+list in `doneWhen`:
 
 **Essential elements:**
 - Background/context (why this is needed)
@@ -319,7 +326,7 @@ Create the issue directly with:
 ```bash
 gh issue create \
   --title "feat: [clear, concise description]" \
-  --body "[Organized content]" \
+  --body "[body per the canonical template — issue-intake/templates.md]" \
   --label "enhancement" \
   --assignee @me
 ```
@@ -340,6 +347,7 @@ Let the content flow naturally based on the specific feature:
 - Some features need detailed scenarios, others don't
 - Some need scope definition, others are self-contained
 - Adapt structure to what makes the feature clear
-- Focus on communicating effectively, not following templates
+- Focus on communicating effectively; the body format stays the canonical
+  template ([.claude/skills/issue-intake/templates.md](../issue-intake/templates.md))
 
 The goal is a clear issue that helps implementers understand what users need.
