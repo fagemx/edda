@@ -2,16 +2,24 @@
 # Git-native pre-commit gate (zero external dependencies; POSIX sh).
 # Enable with: sh scripts/githooks/install.sh   (sets core.hooksPath)
 #
-# L0 gates from .claude/CLAUDE.md, enforced on staged paths:
+# The commit-hook subset of the L0 gates from .claude/CLAUDE.md, enforced on
+# staged paths (the hooks do NOT run cargo test — that stays a manual L0
+# step, and CI runs it as well):
 #   - any staged file > 1 MB       -> reject
 #   - staged *.rs / Cargo.*        -> cargo fmt --all --check
-#   - staged crates/<crate>/...    -> cargo clippy -p <crate> --all-targets -- -D warnings
+#   - staged crates/<dir>/...      -> cargo clippy -p <package> --all-targets
+#                                     -- -D warnings  (package name read from
+#                                     that directory's Cargo.toml, not the
+#                                     directory name)
 #   - staged *.md                  -> sh scripts/lint-markdown-content.sh
 #
-# Bypass everything with `git commit --no-verify` (CI still gates every push).
-# Skip only clippy with `SKIP_CLIPPY=1 git commit ...`: pre-commit leaves a
-# marker and commit-msg appends `[skip-clippy]` to the message tail so that
-# reviewers can see the skip.
+# Bypass everything with `git commit --no-verify`. CI runs on pull requests
+# and on pushes to main (.github/workflows/ci.yml), so a feature branch is
+# gated through its PR's CI Gate.
+# Skip only clippy with `SKIP_CLIPPY=1 git commit ...` (any other value,
+# including SKIP_CLIPPY=0, runs clippy): pre-commit leaves a marker and
+# commit-msg appends `[skip-clippy]` to the message tail so that reviewers
+# can see the skip.
 
 set -eu
 
@@ -22,8 +30,13 @@ skip_marker=$(git rev-parse --git-path SKIP_CLIPPY)
 # Drop any stale marker from an aborted commit before deciding fresh.
 rm -f "$skip_marker"
 
-staged=$(git diff --cached --name-only --diff-filter=ACMR)
-[ -n "$staged" ] || exit 0
+# NUL-safe staged listing: with -z, git emits raw paths (never C-quoted, so
+# non-ASCII names like café.bin survive intact); tr turns the NUL separators
+# into newlines for the POSIX-sh line loop below.
+staged_list=$(mktemp)
+trap 'rm -f "$staged_list"' EXIT
+git diff --cached --name-only -z --diff-filter=ACMR | tr '\0' '\n' >"$staged_list"
+[ -s "$staged_list" ] || exit 0
 
 fail() {
     echo "pre-commit: $1" >&2
@@ -42,39 +55,35 @@ while IFS= read -r f; do
     if [ "$size" -gt "$max_bytes" ]; then
         fail "staged file '$f' is $size bytes — the limit is 1 MB ($max_bytes)"
     fi
-done <<EOF
-$staged
-EOF
+done <"$staged_list"
 
 # --- classify staged paths ------------------------------------------------
 
 fmt_needed=0
 md_needed=0
-crates=""
+dirs=""
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$f" in
-        *.rs | Cargo.toml | Cargo.lock | */Cargo.toml | */Cargo.lock)
+        *.rs | Cargo.* | */Cargo.*)
             fmt_needed=1
             ;;
     esac
     case "$f" in
-        crates/*)
-            c=${f#crates/}
-            c=${c%%/*}
-            [ -n "$c" ] || continue
-            case " $crates " in
-                *" $c "*) ;;
-                *) crates="$crates $c" ;;
+        crates/*/*)
+            d=${f#crates/}
+            d=${d%%/*}
+            [ -n "$d" ] || continue
+            case " $dirs " in
+                *" $d "*) ;;
+                *) dirs="$dirs $d" ;;
             esac
             ;;
     esac
     case "$f" in
         *.md) md_needed=1 ;;
     esac
-done <<EOF
-$staged
-EOF
+done <"$staged_list"
 
 # --- cargo fmt ------------------------------------------------------------
 
@@ -85,16 +94,31 @@ fi
 
 # --- cargo clippy (touched crates only; SKIP_CLIPPY=1 skips) ---------------
 
-if [ -n "$crates" ]; then
-    if [ -n "${SKIP_CLIPPY:-}" ]; then
+if [ -n "$dirs" ]; then
+    if [ "${SKIP_CLIPPY:-}" = "1" ]; then
         : > "$skip_marker"
-        echo "pre-commit: SKIP_CLIPPY=1 — clippy skipped for:$crates"
+        echo "pre-commit: SKIP_CLIPPY=1 — clippy skipped for:$dirs"
         echo "pre-commit: commit-msg will append [skip-clippy] to the message"
     else
-        for c in $crates; do
-            echo "pre-commit: cargo clippy -p $c --all-targets -- -D warnings"
-            cargo clippy -p "$c" --all-targets -- -D warnings \
-                || fail "cargo clippy -p $c failed (or skip with SKIP_CLIPPY=1)"
+        for d in $dirs; do
+            toml="crates/$d/Cargo.toml"
+            pkg=$(awk '
+                /^[ \t]*\[package\][ \t]*$/ { inp = 1; next }
+                /^[ \t]*\[/ { inp = 0 }
+                inp && /^[ \t]*name[ \t]*=/ {
+                    sub(/^[^"]*"/, "")
+                    sub(/".*/, "")
+                    print
+                    exit
+                }
+            ' "$toml" 2>/dev/null)
+            if [ -z "$pkg" ]; then
+                echo "pre-commit: no package name found in $toml — clippy skipped for crates/$d/" >&2
+                continue
+            fi
+            echo "pre-commit: cargo clippy -p $pkg --all-targets -- -D warnings"
+            cargo clippy -p "$pkg" --all-targets -- -D warnings \
+                || fail "cargo clippy -p $pkg failed (or skip with SKIP_CLIPPY=1)"
         done
     fi
 fi

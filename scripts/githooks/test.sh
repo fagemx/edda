@@ -138,6 +138,101 @@ git checkout -q "$main_branch"
 expect_accept "accept: merge commit with non-conventional subject" \
     git merge --no-ff side -m "bad merge message"
 
+# --- Round-1 review fixes: one scenario per finding -------------------------
+# Each new scenario must FAIL on the pre-fix hook; they are self-contained
+# and clean up after themselves (old-hook runs may commit where the fixed
+# hook rejects, so every scenario resets to the recorded prev HEAD).
+
+# stub cargo: logs argv to $CARGO_STUB_LOG, exits $CARGO_STUB_EXIT (default 0)
+stub_dir="$repo/stubbin"
+mkdir -p "$stub_dir"
+cat > "$stub_dir/cargo" <<'STUB'
+#!/bin/sh
+{
+    printf 'cargo'
+    for a in "$@"; do
+        printf ' %s' "$a"
+    done
+    printf '\n'
+} >> "${CARGO_STUB_LOG:?}"
+exit "${CARGO_STUB_EXIT:-0}"
+STUB
+chmod +x "$stub_dir/cargo"
+stub_log="$repo/cargo-stub.log"
+
+# --- fix 1: 'Merge ...' subject without an in-progress merge is rejected ----
+prev=$(git rev-parse HEAD)
+expect_reject "reject: 'Merge ...' subject with no MERGE_HEAD (merge bypass)" \
+    "commit-msg: rejected" \
+    git commit --allow-empty -m "Merge this is not a merge commit"
+git reset -q --hard "$prev"
+
+# --- fix 2: staged >1 MB file with a non-ASCII (Git-quoted) name rejected ---
+head -c 1048577 /dev/zero > café.bin
+git add café.bin
+expect_reject "reject: staged 1 MB+ café.bin survives Git's path quoting" \
+    "the limit is 1 MB" \
+    git commit -m "feat(test): oversized non-ascii file"
+git reset -q --hard "$prev"
+rm -f café.bin
+
+# --- fix 3: staged Cargo.custom triggers the fmt gate (Cargo.* glob) --------
+echo custom > Cargo.custom
+git add Cargo.custom
+: > "$stub_log"
+expect_reject "reject: staged Cargo.custom runs the fmt gate (Cargo.* glob)" \
+    "cargo fmt" \
+    env PATH="$stub_dir:$PATH" CARGO_STUB_LOG="$stub_log" CARGO_STUB_EXIT=1 \
+    git commit -m "feat(test): cargo custom glob"
+grep -q 'fmt --all --check' "$stub_log" \
+    && report PASS "staged Cargo.custom invoked cargo fmt" \
+    || report FAIL "staged Cargo.custom invoked cargo fmt" \
+        "stub log: $(cat "$stub_log" 2>/dev/null)"
+git reset -q --hard "$prev"
+rm -f Cargo.custom
+
+# --- fix 4: clippy -p uses the package name from Cargo.toml, not the dir ----
+mkdir -p crates/namedir/src
+cat > crates/namedir/Cargo.toml <<'EOF'
+[package]
+name = "pkgname-inside"
+version = "0.1.0"
+edition = "2021"
+EOF
+printf 'pub fn f() -> i32 {\n    1\n}\n' > crates/namedir/src/lib.rs
+git add crates/namedir/Cargo.toml
+: > "$stub_log"
+prev=$(git rev-parse HEAD)
+expect_accept "accept: stub cargo passes the package-name scenario" \
+    env PATH="$stub_dir:$PATH" CARGO_STUB_LOG="$stub_log" \
+    git commit -m "feat(test): package name from Cargo.toml"
+if grep -q 'clippy -p pkgname-inside' "$stub_log" \
+    && ! grep -q 'clippy -p namedir' "$stub_log"; then
+    report PASS "clippy -p uses the package name from crates/<dir>/Cargo.toml"
+else
+    report FAIL "clippy -p uses the package name from crates/<dir>/Cargo.toml" \
+        "stub log: $(cat "$stub_log" 2>/dev/null)"
+fi
+git reset -q --hard "$prev"
+rm -rf crates/namedir
+
+# --- fix 5: only SKIP_CLIPPY=1 skips; SKIP_CLIPPY=0 runs clippy --------------
+prev=$(git rev-parse HEAD)
+: > "$stub_log"
+echo "# l0 touch" >> crates/hooktest/src/main.rs
+git add crates/hooktest/src/main.rs
+expect_accept "accept: SKIP_CLIPPY=0 runs the clippy gate (stub passes)" \
+    env PATH="$stub_dir:$PATH" CARGO_STUB_LOG="$stub_log" SKIP_CLIPPY=0 \
+    git commit -m "feat(test): clippy zero does not skip"
+if grep -q 'clippy -p hooktest' "$stub_log" \
+    && ! git log -1 --format=%B | grep -qx '\[skip-clippy\]'; then
+    report PASS "SKIP_CLIPPY=0 invokes clippy and leaves no [skip-clippy] tag"
+else
+    report FAIL "SKIP_CLIPPY=0 invokes clippy and leaves no [skip-clippy] tag" \
+        "stub log: $(cat "$stub_log" 2>/dev/null); message: $(git log -1 --format=%B)"
+fi
+git reset -q --hard "$prev"
+
 echo
 if [ "$failed" -eq 0 ]; then
     echo "ALL SCENARIOS PASSED"

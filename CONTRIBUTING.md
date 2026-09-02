@@ -16,19 +16,25 @@ dependencies — no lefthook, no npm, nothing to install):
 sh scripts/githooks/install.sh
 ```
 
-On every commit this enforces the L0 gates from `.claude/CLAUDE.md` on the
-staged paths:
+On every commit the hooks enforce the fmt / clippy / markdown-lint / size
+gates from the L0 checklist in `.claude/CLAUDE.md` on the staged paths.
+The hooks do not run `cargo test -p <crate>` — that stays a manual L0 step,
+and CI runs it as well:
 
 - any staged file larger than 1 MB is rejected
 - staged `*.rs` or `Cargo.*` → `cargo fmt --all --check`
-- staged `crates/<crate>/…` → `cargo clippy -p <crate> --all-targets -- -D warnings` for each touched crate
+- staged `crates/<dir>/…` → `cargo clippy -p <package> --all-targets -- -D warnings` for each touched crate directory (the package name is read from that directory's `Cargo.toml`)
 - staged `*.md` → `sh scripts/lint-markdown-content.sh`
 - conventional-commit subject check (`<type>(<scope>): <description>`)
 
 Merge commits and `wip(…)` lane checkpoints pass the message check.
-`SKIP_CLIPPY=1 git commit …` skips the clippy gate; the hook then appends
+`SKIP_CLIPPY=1 git commit …` skips the clippy gate — any other value,
+including `SKIP_CLIPPY=0`, runs it — and the hook then appends
 `[skip-clippy]` to the commit message so reviewers can see the skip.
-`git commit --no-verify` bypasses all local hooks — CI still gates every push.
+`git commit --no-verify` bypasses all local hooks. CI does not gate every
+push: it runs on pull requests and on pushes to `main`
+(`.github/workflows/ci.yml`), so a feature branch is gated only through its
+PR's CI Gate.
 
 The hook scripts are POSIX sh and live in `scripts/githooks/`; a self-test
 that exercises all scenarios in a throwaway repo is `sh scripts/githooks/test.sh`.
@@ -75,7 +81,7 @@ refactor(store): simplify atomic write logic
 `style`, `build` — enforced by the `commit-msg` hook above (merge commits and
 `wip(…)` lane checkpoints are exempt)
 
-**Scope** (optional): the crate or area being changed — `cli`, `bridge`, `ledger`, `tui`, `mcp`, `search`, `store`, `core`
+**Scope** (required): the crate or area being changed — `cli`, `bridge`, `ledger`, `tui`, `mcp`, `search`, `store`, `core`
 
 ### Pull Requests
 

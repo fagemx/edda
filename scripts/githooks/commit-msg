@@ -20,13 +20,12 @@ fi
 
 subject=$(head -n 1 "$msg_file")
 
-# Merge commits are exempt (MERGE_HEAD present, or Merge-style subject such
-# as the ones produced by squash/merge tooling).
+# Merge commits are exempt, but only while a merge is actually in progress:
+# a plain commit that merely starts with "Merge ..." is still rejected.
 if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
     exit 0
 fi
 case "$subject" in
-    "Merge "*) exit 0 ;;
     "wip("*) exit 0 ;;
 esac
 
