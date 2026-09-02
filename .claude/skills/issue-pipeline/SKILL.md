@@ -1,6 +1,6 @@
 ---
 name: issue-pipeline
-description: "End-to-end issue pipeline: plan → implement → review → merge. Dispatches parallel sub-agents with worktree isolation. Usage: /issue-pipeline 566 567 568 [--skip-plan] [--skip-review] [--no-merge]"
+description: "End-to-end issue pipeline: plan → implement → review → merge. Dispatches parallel sub-agents with worktree isolation. Usage: /issue-pipeline 566 567 568 [--skip-plan] [--no-merge]"
 ---
 
 # Issue Pipeline Skill
@@ -15,8 +15,11 @@ You orchestrate the full lifecycle of GitHub issues through parallel sub-agents.
 
 **Flags:**
 - `--skip-plan` — Skip plan phase, go straight to implement (issues already have plans)
-- `--skip-review` — Skip review phase, merge after implement
 - `--no-merge` — Stop after review, don't auto-merge
+
+There is deliberately no `--skip-review` flag: review can never be skipped. Merging
+requires a final current-head LGTM (see Phase 4); work that fails or lacks review
+routes through the `pr-review-loop` skill instead.
 
 ## Prerequisites
 
@@ -74,11 +77,21 @@ prompt: |
 
 ### Phase 4: Merge
 
-For each PR with LGTM verdict:
+**Merge preconditions** (`pr.merge-policy`): a PR may be merged only when all of the
+following hold —
+- A final **current-head** LGTM from review (Phase 3, latest pushed SHA)
+- P0 = 0 and P1 = 0 blocking findings
+- All required checks green
+
+For each PR meeting every precondition:
 
 ```bash
-gh pr merge {pr_number} --squash --delete-branch
+gh pr merge {pr_number} --squash
 ```
+
+Never pass `--delete-branch` — branches and worktrees are never deleted (see
+`.claude/CLAUDE.md`). If a PR does not meet the preconditions, do not merge it;
+route it back through the `pr-review-loop` skill and report that it is blocked.
 
 Report final status table.
 
@@ -90,7 +103,9 @@ Report final status table.
 4. **Wait for ALL agents in a phase before starting the next phase**
 5. **Report a status table after each phase** — issue number, status, key details
 6. **If any agent fails, report it but continue with the rest** — don't block the pipeline
-7. **Clean up worktrees after merge phase** — `git worktree remove` + `git worktree prune`
+7. **Never delete branches or worktrees** — worktrees, branches, and sources are
+   never deleted (see `.claude/CLAUDE.md`); `git worktree remove` and
+   `git worktree prune` are forbidden; leave cleanup to the operator
 
 ## Status Table Format
 
