@@ -1,0 +1,24 @@
+edda-fixture 1.0.0
+
+Usage:
+  edda-fixture <command> [options]
+
+Commands:
+  schedule    Manage scheduled lanes
+  wave        Expand a plan into waves
+  dispatch    Dispatch one lane
+
+Options for `schedule`:
+  --list            List scheduled lanes
+  --cancel <id>     Cancel a scheduled lane
+  --dry-run         Show actions without executing
+
+Options for `wave`:
+  --plan <file>     Plan file to expand
+  --json            Machine-readable output
+
+Options for `dispatch`:
+  --lane <id>       Lane to dispatch
+
+(本檔是 fixture：合成 CLI `edda-fixture` 的完整 --help 輸出。
+ 除本檔列出的旗標外，此 CLI 不存在任何其他旗標。)

@@ -893,6 +893,7 @@ dependencies = [
  "async-trait",
  "edda-core",
  "edda-ledger",
+ "edda-notify",
  "edda-store",
  "regex",
  "serde",

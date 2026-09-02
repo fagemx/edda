@@ -17,6 +17,81 @@ env:
   CARGO_PROFILE_TEST_DEBUG: line-tables-only
 
 jobs:
+  # Path-aware triage (#631): decide once whether the diff touches code. If it
+  # does not (docs-only), clippy/test are skipped and the CI Gate treats those
+  # skips as a pass. When in doubt — any diff-computation error or unknown
+  # base — we set code=true and run everything.
+  detect:
+    name: Detect code changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so the merge-base SHAs below always resolve.
+          fetch-depth: 0
+      - name: Diff base..head against the code whitelist
+        id: diff
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD: ${{ github.event.merge_group.head_sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_HEAD: ${{ github.sha }}
+        run: |
+          set -u
+          zero=0000000000000000000000000000000000000000
+          case "$EVENT_NAME" in
+            pull_request)
+              base=$PR_BASE head=$PR_HEAD ;;
+            merge_group)
+              base=$MG_BASE head=$MG_HEAD ;;
+            push)
+              head=$PUSH_HEAD
+              # An EMPTY or all-zero `before` (new branch, or unknown previous
+              # commit) forces code=true; a valid `before` is diffed normally.
+              if [ -z "$PUSH_BEFORE" ] || [ "$PUSH_BEFORE" = "$zero" ]; then
+                base=
+              else
+                base=$PUSH_BEFORE
+              fi
+              ;;
+            *)
+              base= head= ;;  # unknown event: assume code changed
+          esac
+          code=true
+          if [ -n "$base" ] \
+            && git cat-file -e "$base" 2>/dev/null \
+            && git cat-file -e "$head" 2>/dev/null; then
+            diffout=$(mktemp)
+            # -z: NUL-delimited output, so git's C-quoting of non-ASCII or
+            # control characters ("crates/\303\251.rs") and embedded newlines
+            # in pathnames cannot corrupt the matcher.
+            # --no-renames: a crates/ -> docs/ rename lists BOTH sides, so the
+            # deleted code path still trips the whitelist.
+            if git diff --name-only -z --no-renames "$base" "$head" > "$diffout"; then
+              code=false
+              echo "--- changed files ($base..$head) ---"
+              while IFS= read -r -d '' f; do
+                printf '%s\n' "$f"
+                # Whitelist: any match means code changed (err on running more).
+                case "$f" in
+                  crates/*|Cargo.toml|Cargo.lock|rust-toolchain*|.cargo/*|.github/workflows/*|scripts/*|install.sh|build.rs)
+                    code=true ;;
+                esac
+              done < "$diffout"
+            else
+              echo "git diff failed; assuming code changed."
+            fi
+            rm -f "$diffout"
+          else
+            echo "Diff could not be computed (base: '${base:-none}'); assuming code changed."
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -37,6 +112,8 @@ jobs:
 
   clippy:
     name: Clippy (${{ matrix.os }})
+    needs: [detect]
+    if: needs.detect.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -50,6 +127,8 @@ jobs:
 
   test:
     name: Test (${{ matrix.os }})
+    needs: [detect]
+    if: needs.detect.outputs.code == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -90,24 +169,37 @@ jobs:
 
   # Aggregate gate: the single check the branch ruleset will pin instead of
   # enumerating the seven individual jobs. `if: always()` keeps it running even
-  # when an upstream job fails, so the verdict table is always printed.
-  # `skipped` counts as failure for now: no path filters exist yet, so a skip
-  # would mean misconfiguration; the path-filter change (#631) relaxes this.
+  # when an upstream job fails or is skipped, so the verdict table is always
+  # printed. #631: clippy/test being skipped is accepted only when detect
+  # decided the change was docs-only (code=false); any other skip, failure,
+  # or cancellation still fails the gate.
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
-    needs: [fmt, clippy, test]
+    needs: [detect, fmt, clippy, test]
     if: always()
     steps:
       - name: Evaluate upstream job results
+        env:
+          DETECT_RESULT: ${{ needs.detect.result }}
+          CODE: ${{ needs.detect.outputs.code }}
+          FMT_RESULT: ${{ needs.fmt.result }}
+          CLIPPY_RESULT: ${{ needs.clippy.result }}
+          TEST_RESULT: ${{ needs.test.result }}
         run: |
-          printf '%-10s -> %s\n' fmt "${{ needs.fmt.result }}"
-          printf '%-10s -> %s\n' clippy "${{ needs.clippy.result }}"
-          printf '%-10s -> %s\n' test "${{ needs.test.result }}"
-          for result in "${{ needs.fmt.result }}" "${{ needs.clippy.result }}" "${{ needs.test.result }}"; do
-            if [ "$result" != "success" ]; then
-              echo "::error::Upstream job did not succeed (result: $result). skipped/failure/cancelled all fail the gate (see #631 for future skipped handling)."
-              exit 1
-            fi
-          done
-          echo "All upstream jobs succeeded."
+          fail() { echo "::error::$1"; exit 1; }
+          printf '%-10s -> %s\n' detect "$DETECT_RESULT"
+          printf '%-10s -> %s\n' fmt "$FMT_RESULT"
+          printf '%-10s -> %s\n' clippy "$CLIPPY_RESULT"
+          printf '%-10s -> %s\n' test "$TEST_RESULT"
+          [ "$DETECT_RESULT" = "success" ] || fail "detect did not succeed (result: $DETECT_RESULT)."
+          [ "$FMT_RESULT" = "success" ] || fail "fmt did not succeed (result: $FMT_RESULT)."
+          if [ "$CLIPPY_RESULT" = "success" ] && [ "$TEST_RESULT" = "success" ]; then
+            echo "All upstream jobs succeeded."
+            exit 0
+          fi
+          if [ "$CLIPPY_RESULT" = "skipped" ] && [ "$TEST_RESULT" = "skipped" ] && [ "$CODE" = "false" ]; then
+            echo "Docs-only change (detect: code=false): clippy/test skipped, gate passes."
+            exit 0
+          fi
+          fail "clippy/test did not succeed (clippy: $CLIPPY_RESULT, test: $TEST_RESULT, detect.code: $CODE)."

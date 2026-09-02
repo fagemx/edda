@@ -260,6 +260,30 @@ impl AgentLauncher for CodexLauncher {
         cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult> {
+        // GH-574 honesty: the codex app-server exposes no model/thinking/
+        // tool-policy selection path edda can verify, so a phase declaring
+        // any of them would be silently ignored — the exact failure mode
+        // GH-574 removes. Refuse with an explicit error instead of guessing
+        // at an unverified configuration channel.
+        let declared: Vec<&str> = [
+            ("model", phase.model.is_some()),
+            ("thinking", phase.thinking.is_some()),
+            ("tools", phase.tools.is_some()),
+            ("exclude_tools", phase.exclude_tools.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, present)| *present)
+        .map(|(name, _)| name)
+        .collect();
+        if !declared.is_empty() {
+            anyhow::bail!(
+                "codex does not support phase-declared {} (the app-server exposes no \
+                 verifiable selection path); refusing to silently ignore them — \
+                 remove the declaration or dispatch with a backend that supports it",
+                declared.join(", ")
+            );
+        }
+
         // The app-server has no system-prompt channel; carry plan context
         // inline, same as the pi launcher.
         let message = if plan_context.is_empty() {
@@ -585,6 +609,40 @@ mod tests {
             .expect("fake spawned");
         (dir, server)
     }
+
+    /// GH-574: codex has no verifiable model/thinking/tool-policy selection
+    /// path, so each declared capability must be refused explicitly — never
+    /// accepted and silently ignored. The refusal fires before any server
+    /// spawn, so the test runs against a bare launcher.
+    #[tokio::test]
+    async fn codex_refuses_phase_declared_capabilities() {
+        let launcher = CodexLauncher::new();
+        for yaml in [
+            "  - id: a\n    prompt: x\n    model: anthropic/claude-opus-5\n",
+            "  - id: a\n    prompt: x\n    thinking: high\n",
+            "  - id: a\n    prompt: x\n    tools: [read]\n",
+            "  - id: a\n    prompt: x\n    exclude_tools: [write]\n",
+        ] {
+            let phase = phase_from_yaml(yaml);
+            let error = launcher
+                .run_phase(
+                    &phase,
+                    "p",
+                    "",
+                    "s",
+                    Path::new("."),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect_err("codex must refuse declared capabilities");
+            let text = error.to_string();
+            assert!(
+                text.contains("codex does not support"),
+                "expected explicit refusal, got: {text}"
+            );
+        }
+    }
+
     #[test]
     fn codex_bin_falls_back_to_the_platform_install() {
         // npm ships codex as an extensionless sh launcher plus codex.cmd on

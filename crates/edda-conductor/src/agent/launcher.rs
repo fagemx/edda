@@ -40,6 +40,17 @@ pub trait AgentLauncher: Send + Sync {
         cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult>;
+
+    /// The model the backend reported **in-band** during the most recent
+    /// turn on this launcher, if any. Observation, not inference: a
+    /// launcher reports only what the backend itself carried in its
+    /// protocol stream (claude stream-json `system/init`, pi RPC
+    /// `get_state`); `None` means the backend reported nothing and callers
+    /// must render `"unknown"`, never a guess from config or session files
+    /// (GH-574 honesty rule).
+    fn last_observed_model(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Fixed namespace UUID for conductor sessions.
@@ -67,6 +78,9 @@ pub struct ClaudeCodeLauncher {
     pub verbose: bool,
     /// If set, raw agent stdout is captured to `{transcript_dir}/{phase_id}-{session_id_prefix}.jsonl`.
     pub transcript_dir: Option<PathBuf>,
+    /// In-band model report from the most recent turn (stream-json
+    /// `system/init`), for [`AgentLauncher::last_observed_model`].
+    observed_model: std::sync::Mutex<Option<String>>,
 }
 
 impl Default for ClaudeCodeLauncher {
@@ -76,11 +90,93 @@ impl Default for ClaudeCodeLauncher {
 }
 
 impl ClaudeCodeLauncher {
+    /// Assemble the `claude -p` command line for one phase. Split out from
+    /// [`AgentLauncher::run_phase`] so tests can assert the exact spawn
+    /// arguments without launching a real backend (GH-574).
+    fn build_command(
+        &self,
+        phase: &Phase,
+        prompt: &str,
+        plan_context: &str,
+        session_id: &str,
+        cwd: &Path,
+    ) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(&self.claude_bin);
+        cmd.arg("-p")
+            .arg(prompt)
+            .arg("--verbose")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--session-id")
+            .arg(session_id)
+            .arg("--permission-mode")
+            .arg(&phase.permission_mode)
+            .current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            // Allow nesting — remove markers that prevent Claude Code from spawning
+            .env_remove("CLAUDE_CODE")
+            .env_remove("CLAUDECODE")
+            // Tell edda hooks to use conductor-optimized injection
+            .env("EDDA_CONDUCTOR_MODE", "1")
+            // Propagate session_id so agent-spawned `edda decide` etc. can resolve identity
+            .env("EDDA_SESSION_ID", session_id);
+
+        // Optional: per-phase budget
+        if let Some(budget) = phase.budget_usd {
+            cmd.arg("--max-budget-usd").arg(budget.to_string());
+        }
+
+        // Optional: plan context as system prompt
+        if !plan_context.is_empty() {
+            cmd.arg("--append-system-prompt").arg(plan_context);
+        }
+
+        // Optional: model selection, carried verbatim (GH-574)
+        if let Some(model) = &phase.model {
+            cmd.arg("--model").arg(model);
+        }
+
+        // Optional: tool allowlist / denylist. The allowlist must be the
+        // capability-restricting flag: claude's `--tools` sets "the list of
+        // available tools from the built-in set", while `--allowedTools` is
+        // only a permission-prompt rule and leaves Write/Edit/Bash reachable
+        // under bypassPermissions — the fake allowlist GH-574 round 2
+        // (P1-1) called out. Round 3: `--tools` restricts only the built-in
+        // set and leaves every MCP tool reachable (e.g.
+        // `mcp__filesystem__write_file` under bypassPermissions), so an
+        // allowlist claim also denies all unlisted MCP tools via the
+        // genuine deny rule `--disallowedTools "mcp__*"`, merged with any
+        // explicit exclude_tools entries into one flag. A denylist-only
+        // phase claims nothing about MCP tools and keeps its exact list.
+        if let Some(tools) = &phase.tools {
+            cmd.arg("--tools").arg(tools.join(","));
+            let mut denied: Vec<&str> = phase
+                .exclude_tools
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(String::as_str)
+                .collect();
+            denied.push("mcp__*");
+            cmd.arg("--disallowedTools").arg(denied.join(","));
+        } else if let Some(tools) = &phase.exclude_tools {
+            cmd.arg("--disallowedTools").arg(tools.join(","));
+        }
+
+        // Merge plan-level + phase-level env
+        for (k, v) in &phase.env {
+            cmd.env(k, v);
+        }
+        cmd
+    }
+
     pub fn new() -> Self {
         Self {
             claude_bin: PathBuf::from("claude"),
             verbose: false,
             transcript_dir: None,
+            observed_model: std::sync::Mutex::new(None),
         }
     }
 
@@ -89,6 +185,13 @@ impl ClaudeCodeLauncher {
             claude_bin,
             verbose: false,
             transcript_dir: None,
+            observed_model: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn record_observed_model(&self, model: Option<String>) {
+        if let Ok(mut slot) = self.observed_model.lock() {
+            *slot = model;
         }
     }
 
@@ -127,46 +230,17 @@ impl AgentLauncher for ClaudeCodeLauncher {
         cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult> {
-        let mut cmd = tokio::process::Command::new(&self.claude_bin);
-        cmd.arg("-p")
-            .arg(prompt)
-            .arg("--verbose")
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--session-id")
-            .arg(session_id)
-            .arg("--permission-mode")
-            .arg(&phase.permission_mode)
-            .current_dir(cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            // Allow nesting — remove markers that prevent Claude Code from spawning
-            .env_remove("CLAUDE_CODE")
-            .env_remove("CLAUDECODE")
-            // Tell edda hooks to use conductor-optimized injection
-            .env("EDDA_CONDUCTOR_MODE", "1")
-            // Propagate session_id so agent-spawned `edda decide` etc. can resolve identity
-            .env("EDDA_SESSION_ID", session_id);
-
-        // Optional: per-phase budget
-        if let Some(budget) = phase.budget_usd {
-            cmd.arg("--max-budget-usd").arg(budget.to_string());
+        if phase.thinking.is_some() {
+            // GH-574 honesty: claude's CLI exposes no thinking-level flag,
+            // so a phase that declares one would otherwise be silently
+            // ignored — exactly the failure mode this flag exists to end.
+            anyhow::bail!(
+                "claude does not support a thinking-level flag; remove `thinking: {}` from phase {:?} or dispatch with --agent pi",
+                phase.thinking.as_deref().unwrap_or(""),
+                phase.id
+            );
         }
-
-        // Optional: plan context as system prompt
-        if !plan_context.is_empty() {
-            cmd.arg("--append-system-prompt").arg(plan_context);
-        }
-
-        // Optional: allowed tools
-        if let Some(tools) = &phase.allowed_tools {
-            cmd.arg("--allowedTools").arg(tools.join(","));
-        }
-
-        // Merge plan-level + phase-level env
-        for (k, v) in &phase.env {
-            cmd.env(k, v);
-        }
+        let mut cmd = self.build_command(phase, prompt, plan_context, session_id, cwd);
 
         let mut child = cmd.spawn()?;
         let stdout = child
@@ -183,9 +257,12 @@ impl AgentLauncher for ClaudeCodeLauncher {
             .with_tee(tee_path);
         let timeout_sec = phase.timeout_sec.unwrap_or(1800);
 
-        tokio::select! {
+        let result = tokio::select! {
             result = monitor.run() => {
                 let monitor_result = result?;
+                // In-band model observation: whatever the backend itself
+                // reported, or nothing. Never inferred from config.
+                self.record_observed_model(monitor_result.model.clone());
                 let exit = child.wait().await?;
                 Ok(classify_result(&monitor_result, exit.code()))
             }
@@ -197,7 +274,15 @@ impl AgentLauncher for ClaudeCodeLauncher {
                 child.kill().await.ok();
                 Ok(PhaseResult::AgentCrash { error: "conductor shutdown".into() })
             }
-        }
+        };
+        result
+    }
+
+    fn last_observed_model(&self) -> Option<String> {
+        self.observed_model
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 }
 
@@ -317,6 +402,168 @@ mod tests {
         let id = phase_session_id("test", "phase");
         // UUID v5 has version nibble = 5
         assert_eq!(id.get_version_num(), 5);
+    }
+
+    // ── GH-574: phase-declared launcher capabilities reach the spawn line ──
+
+    fn args_of(cmd: &tokio::process::Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn claude_command_for(yaml: &str) -> tokio::process::Command {
+        let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude"));
+        let phase = phase_from_yaml(yaml);
+        launcher.build_command(&phase, "do the task", "", "sess-1", Path::new("."))
+    }
+
+    fn phase_from_yaml(yaml: &str) -> Phase {
+        parse_plan(&format!("name: t\nphases:\n{yaml}"))
+            .expect("test plan parses")
+            .phases
+            .remove(0)
+    }
+
+    #[test]
+    fn claude_phase_model_reaches_the_spawn_line() {
+        let args = args_of(&claude_command_for(
+            "  - id: a\n    prompt: x\n    model: anthropic/claude-opus-5\n",
+        ));
+        let model_pos = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("--model must appear in the claude spawn command line");
+        assert_eq!(args[model_pos + 1], "anthropic/claude-opus-5");
+    }
+
+    #[test]
+    fn claude_without_model_spawns_no_model_flag() {
+        let args = args_of(&claude_command_for("  - id: a\n    prompt: x\n"));
+        assert!(
+            !args.contains(&"--model".to_string()),
+            "no phase model must mean no --model flag: {args:?}"
+        );
+    }
+
+    #[test]
+    fn claude_tool_policy_reaches_the_spawn_line() {
+        // GH-574 round 2 (P1-1): claude's `--allowedTools` is a
+        // permission-prompt rule, not a capability restriction — under
+        // bypassPermissions Write/Edit/Bash stay reachable. The
+        // capability-restricting flag is `--tools` ("Specify the list of
+        // available tools from the built-in set"), so the phase allowlist
+        // must spawn `--tools` and must never spawn `--allowedTools` while
+        // claiming a structural allowlist.
+        let args = args_of(&claude_command_for(
+            "  - id: a\n    prompt: x\n    tools: [Read, Grep]\n    exclude_tools: [Write, Edit]\n",
+        ));
+        let allow = args
+            .iter()
+            .position(|a| a == "--tools")
+            .expect("--tools must appear in the claude spawn command line");
+        assert_eq!(args[allow + 1], "Read,Grep");
+        assert!(
+            !args.contains(&"--allowedTools".to_string()),
+            "--allowedTools does not restrict capabilities; it must not be spawned: {args:?}"
+        );
+        let deny = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("--disallowedTools");
+        assert_eq!(args[deny + 1], "Write,Edit,mcp__*");
+    }
+
+    /// GH-574 round 3: a denylist-only phase claims nothing about MCP
+    /// tools, so no mcp__* entry appears — the list keeps its exact value.
+    #[test]
+    fn claude_denylist_without_allowlist_keeps_its_exact_value() {
+        let args = args_of(&claude_command_for(
+            "  - id: a\n    prompt: x\n    exclude_tools: [Write]\n",
+        ));
+        let deny = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("--disallowedTools");
+        assert_eq!(args[deny + 1], "Write");
+    }
+
+    /// GH-574 round 3 (P1-1): claude's `--tools` restricts only the built-in
+    /// tool set and leaves every MCP tool reachable under bypassPermissions
+    /// (e.g. `mcp__filesystem__write_file`). A phase that claims a tool
+    /// allowlist must therefore also spawn the deny rule for all unlisted
+    /// MCP tools, or the "listed tools are the only ones the backend can
+    /// use" claim is false.
+    #[test]
+    fn claude_allowlist_also_denies_unlisted_mcp_tools() {
+        let args = args_of(&claude_command_for(
+            "  - id: a\n    prompt: x\n    tools: [Read]\n",
+        ));
+        let allow = args
+            .iter()
+            .position(|a| a == "--tools")
+            .expect("--tools must appear in the claude spawn command line");
+        assert_eq!(args[allow + 1], "Read");
+        let deny = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("an allowlist phase must also deny unlisted MCP tools");
+        assert_eq!(
+            args[deny + 1],
+            "mcp__*",
+            "the allowlist claim must hold against MCP tools too: {args:?}"
+        );
+    }
+
+    /// The MCP deny rule merges with an explicit exclude_tools denylist
+    /// into exactly one `--disallowedTools` flag (never two).
+    #[test]
+    fn claude_allowlist_merges_the_mcp_deny_with_the_exclude_list() {
+        let args = args_of(&claude_command_for(
+            "  - id: a\n    prompt: x\n    tools: [Read]\n    exclude_tools: [Write, Edit]\n",
+        ));
+        let deny_positions: Vec<usize> = args
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| *a == "--disallowedTools")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            deny_positions.len(),
+            1,
+            "the deny list must be a single flag, got: {args:?}"
+        );
+        assert_eq!(args[deny_positions[0] + 1], "Write,Edit,mcp__*");
+    }
+
+    /// GH-574: claude's CLI exposes no thinking-level flag, so a phase that
+    /// declares one must be refused, never silently ignored. The refusal
+    /// fires before any spawn, so a bare launcher suffices.
+    #[tokio::test]
+    async fn claude_refuses_phase_declared_thinking() {
+        let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude"));
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n    thinking: high\n");
+        let error = launcher
+            .run_phase(
+                &phase,
+                "p",
+                "",
+                "s",
+                Path::new("."),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("claude must refuse a declared thinking level");
+        assert!(error.to_string().contains("does not support"), "{error}");
+    }
+
+    /// GH-574: the in-band observation starts empty and is only filled by
+    /// what the backend itself reports — never from config or session files.
+    #[test]
+    fn claude_observed_model_starts_unknown() {
+        let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude"));
+        assert_eq!(launcher.last_observed_model(), None);
     }
 
     #[tokio::test]

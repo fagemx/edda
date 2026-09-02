@@ -23,6 +23,19 @@ machine-judgeable for parallel dispatch — do not skip it.>
 - A regression test reproduces the defect first and is verified to FAIL
   before the fix.
 
+## Wiring audit — REQUIRED whenever the issue cites or adds code
+"Exists" ≠ "wired". For EACH component the issue cites or adds, one line
+answering four questions, each backed by a `file:line` verified this session
+(same four questions as issue-create):
+
+| Component | 1. Writer & shape — who writes it, structured field or prose string? | 2. Reader — name one actual consumer, or state "no consumer". | 3. Failure signal — what happens when it fails: swallowed errors, success-only logs, best-effort writes? | 4. Layer reach — does the capability arrive at the layer the issue claims (CLI flag ↔ builder ↔ store)? |
+|---|---|---|---|---|
+| <component> | | | | |
+
+If the proposal adds a write-end, doneWhen MUST include a consumption proof
+(one test walking write → read end-to-end) and a death-visibility line
+(freshness/coverage surfaced in output).
+
 ## Relation to existing issues
 <adjacent issues and why this is distinct; or "none found" +
 which dedupe queries ran (edda ask / edda search / issue search).>

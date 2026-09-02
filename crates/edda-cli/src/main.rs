@@ -473,7 +473,11 @@ enum Command {
     /// With --json, exactly one object is printed to stdout:
     ///   {"outcome":"done|crash|timeout|max_turns|budget_exceeded",
     ///    "result_text":string|null,"cost_usd":number|null,
-    ///    "session_id":string,"error":string|null}
+    ///    "session_id":string,"error":string|null,
+    ///    "model_requested":string,"model_observed":string}
+    /// model_requested is the --model value or "inherited"; model_observed
+    /// is what the backend reported in-band or "unknown". --json cannot be
+    /// combined with --list-models (the listing is text) and is refused.
     Dispatch {
         #[command(flatten)]
         args: cmd_dispatch::DispatchArgs,

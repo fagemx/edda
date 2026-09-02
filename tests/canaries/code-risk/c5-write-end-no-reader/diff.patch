@@ -1,0 +1,32 @@
+diff --git a/canaries-fixture/c5-write-end-no-reader/lib.rs b/canaries-fixture/c5-write-end-no-reader/lib.rs
+new file mode 100644
+index 0000000..c5a5509
+--- /dev/null
++++ b/canaries-fixture/c5-write-end-no-reader/lib.rs
+@@ -0,0 +1,26 @@
++//! Quota signal helper (fixture crate — a binary, not a library).
++
++pub struct Usage {
++    pub usd_micros: u64,
++    pub calls: u32,
++}
++
++pub struct QuotaSignal {
++    pub exhausted: bool,
++}
++
++/// Recompute the quota signal from raw usage against a budget.
++pub fn recompute_quota_signal(usage: &Usage, budget_usd_micros: u64) -> QuotaSignal {
++    QuotaSignal {
++        exhausted: usage.usd_micros >= budget_usd_micros,
++    }
++}
++
++fn main() {
++    let usage = Usage {
++        usd_micros: 0,
++        calls: 0,
++    };
++    let _ = usage;
++    println!("fixture ok");
++}
