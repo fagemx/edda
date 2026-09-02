@@ -113,9 +113,11 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 
 ## 離線測試
 
-`sh scripts/test-pr-review-watch.sh`（移植自 PR #639，Round 2/3 擴充）：**完全離線**——
-`gh`／`pi`／review-pr 全是 stub，狀態目錄與 `PR_REVIEW_WATCH_LOG` 都指向暫存目錄，
-並守住「真實 `~/.edda/fleet/watch.log` 在整輪測試前後大小不變」；每個場景都包
+`sh scripts/test-pr-review-watch.sh`（移植自 PR #639，Round 2–4 擴充）：**完全離線**——
+`gh` 與 `pi` 是 stub（記錄 argv、回罐頭輸出），重試的審查發射目標也以 stub 取代；
+但 **verdict-label 場景執行的是真的 `scripts/review-pr.sh` 離線 helper**（不碰網路）。
+狀態目錄與 `PR_REVIEW_WATCH_LOG` 都指向暫存目錄，並守住「真實
+`~/.edda/fleet/watch.log` 在整輪測試前後大小不變」；每個場景都包
 `timeout`，卡住＝FAIL，不會吊住呼叫端。實況：
 
 - `decide` 子命令吃的是 `gh pr list --jq '… \| @tsv'` 產出的 **TSV** 行（draft 在

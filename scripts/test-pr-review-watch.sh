@@ -431,6 +431,10 @@ if [ "$(grep -c 'thinking minimal' "$PI_STUB_LOG")" -lt 1 ]; then
     printf 'live: the --thinking minimal probe must run before the retry\n' >&2
     exit 1
 fi
+if ! grep -q 'thinking minimal.*--exclude-tools edit,write' "$PI_STUB_LOG"; then
+    printf 'live: the provider probe must be read-only (--exclude-tools edit,write)\n' >&2
+    exit 1
+fi
 if [ "$(grep -c '^REVIEW_LAUNCH' "$REVIEW_STUB_LOG")" != "1" ]; then
     printf 'live: a passing probe must lead to exactly one pi retry, got:\n%s\n' "$(cat "$REVIEW_STUB_LOG")" >&2
     exit 1

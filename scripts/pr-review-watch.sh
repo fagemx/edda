@@ -21,9 +21,12 @@
 # State (under $EDDA_FLEET_SCRATCH, not in git):
 #   review-state.tsv     pr<TAB>reviewed_sha<TAB>round
 #   review-pending.tsv   pr<TAB>round<TAB>sha<TAB>attempts<TAB>launched_epoch<TAB>postfails
-#   review-acks.tsv      pr<TAB>sha<TAB>attempts  — heads launched but not yet acked;
-#                        the entry exists only while the ack is pending (removed on
-#                        success; after 3 failed attempts -> review:post-failed)
+#   review-acks.tsv      pr<TAB>sha<TAB>attempts<TAB>status — heads launched but not
+#                        yet acked; the entry exists while the ack is pending
+#                        (removed on success). After 3 failed attempts the entry is
+#                        RETAINED as a durable record: marked "post-failed" once the
+#                        review:post-failed label is applied; if that label call also
+#                        fails, the unmarked entry stays for the next poll.
 #   review-fails.tsv     pr<TAB>sha<TAB>consecutive launch failures
 #   watch.log            everything the watcher did
 #
@@ -275,9 +278,9 @@ pr_head() { # $1=pr
 # --thinking minimal with the SAME --model (never a cheaper model).
 probe_review_provider() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout 60 pi -p --model "$MODEL" --thinking minimal "reply OK" >/dev/null 2>&1
+    timeout 60 pi -p --model "$MODEL" --thinking minimal --exclude-tools edit,write "reply OK" >/dev/null 2>&1
   else
-    pi -p --model "$MODEL" --thinking minimal "reply OK" >/dev/null 2>&1
+    pi -p --model "$MODEL" --thinking minimal --exclude-tools edit,write "reply OK" >/dev/null 2>&1
   fi
 }
 
