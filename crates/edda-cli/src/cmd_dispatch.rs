@@ -796,6 +796,17 @@ mod tests {
         );
     }
 
+    /// GH-574 round 2 (P1-3): with --json, stdout must be exactly one JSON
+    /// object. A text model listing printed at exit 0 breaks every JSON
+    /// consumer mid-stream, so the combination must be an explicit conflict
+    /// error — never a successful listing that silently ignores --json.
+    #[test]
+    fn list_models_with_json_is_refused_as_a_conflict() {
+        let args = parse(&["edda", "--agent", "pi", "--list-models", "--json"]);
+        let error = run_inner(args).expect_err("--json + --list-models must be refused");
+        assert!(error.to_string().contains("--json"), "{error}");
+    }
+
     // ── Outcome → exit-code mapping (all five PhaseResult variants) ──
 
     #[test]

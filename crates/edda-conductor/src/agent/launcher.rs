@@ -430,14 +430,25 @@ mod tests {
 
     #[test]
     fn claude_tool_policy_reaches_the_spawn_line() {
+        // GH-574 round 2 (P1-1): claude's `--allowedTools` is a
+        // permission-prompt rule, not a capability restriction — under
+        // bypassPermissions Write/Edit/Bash stay reachable. The
+        // capability-restricting flag is `--tools` ("Specify the list of
+        // available tools from the built-in set"), so the phase allowlist
+        // must spawn `--tools` and must never spawn `--allowedTools` while
+        // claiming a structural allowlist.
         let args = args_of(&claude_command_for(
             "  - id: a\n    prompt: x\n    tools: [Read, Grep]\n    exclude_tools: [Write, Edit]\n",
         ));
         let allow = args
             .iter()
-            .position(|a| a == "--allowedTools")
-            .expect("--allowedTools");
+            .position(|a| a == "--tools")
+            .expect("--tools must appear in the claude spawn command line");
         assert_eq!(args[allow + 1], "Read,Grep");
+        assert!(
+            !args.contains(&"--allowedTools".to_string()),
+            "--allowedTools does not restrict capabilities; it must not be spawned: {args:?}"
+        );
         let deny = args
             .iter()
             .position(|a| a == "--disallowedTools")
