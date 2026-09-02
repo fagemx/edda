@@ -411,6 +411,90 @@ mod tests {
         );
     }
 
+    /// GH-558 review round 1 (P1-1): a stream of 2001–2399 chars sits in the
+    /// gap between the tail cap (2000) and the head+tail sum (2400). The old
+    /// arithmetic entered the truncation branch as soon as `total > 2000` but
+    /// computed `skipped = total - HEAD - TAIL`, which is a usize underflow —
+    /// a debug-build panic and a release-build wrap that also made head and
+    /// tail overlap. Streams no longer than HEAD+TAIL pass through unchanged.
+    #[test]
+    fn bounded_stream_keeps_boundary_lengths_whole() {
+        let boundary_lengths = [
+            OUTPUT_TAIL_CHARS,
+            OUTPUT_TAIL_CHARS + 1,
+            OUTPUT_HEAD_CHARS + OUTPUT_TAIL_CHARS - 1,
+            OUTPUT_HEAD_CHARS + OUTPUT_TAIL_CHARS,
+        ];
+        for len in boundary_lengths {
+            let s = "x".repeat(len);
+            assert_eq!(
+                bounded_stream(&s),
+                s,
+                "a stream of {len} chars must pass through unchanged"
+            );
+        }
+    }
+
+    /// GH-558 review round 1 (P1-1): above the HEAD+TAIL sum the capture is
+    /// head + explicit marker + tail, the skipped count is exact, and the
+    /// head/tail regions do not overlap. Chars are drawn from a distinct-per-
+    /// position Hangul range, so any overlap would surface as a duplicated
+    /// or out-of-place character; multibyte chars also re-check boundaries.
+    #[test]
+    fn bounded_stream_splits_above_head_tail_sum_without_overlap() {
+        let extra = 500;
+        let total = OUTPUT_HEAD_CHARS + OUTPUT_TAIL_CHARS + extra;
+        let s: String = (0..total)
+            .map(|i| char::from_u32(0xAC00 + i as u32).unwrap())
+            .collect();
+        let captured = bounded_stream(&s);
+        let head: String = s.chars().take(OUTPUT_HEAD_CHARS).collect();
+        let tail: String = s.chars().skip(total - OUTPUT_TAIL_CHARS).collect();
+        assert!(captured.starts_with(&head), "head must be kept verbatim");
+        assert!(captured.ends_with(&tail), "tail must be kept verbatim");
+        assert!(
+            captured.contains(&format!("[{extra} chars truncated]")),
+            "skipped count must be exact: {captured}"
+        );
+        // Each char is unique, so the first SKIPPED char appearing anywhere
+        // in the capture would prove head/tail overlap.
+        let first_skipped = char::from_u32(0xAC00 + OUTPUT_HEAD_CHARS as u32).unwrap();
+        assert!(
+            !captured.contains(first_skipped),
+            "head and tail regions must not overlap"
+        );
+    }
+
+    /// GH-558 review round 1 (P1-2): the timeout detail must not leak the
+    /// raw command line. The executed-line work added a masked `executed`,
+    /// but the format string still carried a raw `{cmd}` copy in front of
+    /// it — a command embedding a credential that timed out produced BOTH
+    /// the plaintext secret and the masked line, breaking the PR's
+    /// "every non-passing result masks the actual command" contract.
+    #[tokio::test]
+    async fn timeout_detail_masks_secret_in_command() {
+        let dir = tempfile::tempdir().unwrap();
+        #[cfg(not(windows))]
+        let cmd = "sleep 60 # token=abc123supersecret";
+        #[cfg(windows)]
+        let cmd = if which_exists("pwsh") || which_exists("powershell") {
+            "while ($true) { Start-Sleep -Milliseconds 100 } # token=abc123supersecret"
+        } else {
+            "rem token=abc123supersecret & ping -n 60 127.0.0.1 > nul"
+        };
+        let out = check_cmd_succeeds(cmd, 1, dir.path()).await;
+        assert!(out.timed_out, "test requires the command to time out");
+        let detail = out.detail.unwrap();
+        assert!(
+            !detail.contains("abc123supersecret"),
+            "timeout detail must not contain the plaintext secret: {detail}"
+        );
+        assert!(
+            detail.contains("token=[MASKED]"),
+            "timeout detail must keep the masked executed line: {detail}"
+        );
+    }
+
     /// GH-558 doneWhen 3: a multi-flag command must pass through the check
     /// runner from a REAL git worktree cwd (`.git` is a file, not a
     /// directory) — the cwd shape reported in the issue. Witness test: the
