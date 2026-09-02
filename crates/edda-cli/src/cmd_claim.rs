@@ -1655,6 +1655,181 @@ mod tests {
         .to_string()
     }
 
+    /// Build an RFC3339 timestamp `secs` seconds before now (UTC, `Z`).
+    /// The peers timestamp parser only reads the wall-clock digits, so any
+    /// correct UTC spelling works.
+    fn rfc3339_now_minus(secs: u64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_secs()
+            .saturating_sub(secs);
+        time::OffsetDateTime::from_unix_timestamp(now as i64)
+            .expect("unix timestamp")
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("rfc3339")
+    }
+
+    /// Write a heartbeat file for `session` whose last beat is `age_secs`
+    /// old, the same shape peer discovery reads (GH-617 consumption proof:
+    /// the test writes the liveness surface, the real binary reads it).
+    fn write_heartbeat(store_root: &Path, project_id: &str, session: &str, age_secs: u64) {
+        let dir = store_root.join("projects").join(project_id).join("state");
+        std::fs::create_dir_all(&dir).expect("state dir");
+        let hb = serde_json::json!({
+            "session_id": session,
+            "started_at": rfc3339_now_minus(age_secs),
+            "last_heartbeat": rfc3339_now_minus(age_secs),
+            "label": session,
+            "focus_files": [],
+            "active_tasks": [],
+            "files_modified_count": 0,
+            "total_edits": 0,
+            "recent_commits": [],
+        });
+        std::fs::write(dir.join(format!("session.{session}.json")), hb.to_string())
+            .expect("heartbeat file");
+    }
+
+    #[test]
+    fn e2e_stale_session_claim_is_not_a_conflict() {
+        // GH-617 consumption proof (write → read): one claim from a session
+        // whose heartbeat expired plus one from a live session, both claiming
+        // the same path. Querying that path must conflict with ONLY the live
+        // session's claim; the stale one must neither appear as a conflict
+        // nor flip the exit code.
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[
+                coord_event("dead0001", "ghost-lane", &["src/*"]),
+                coord_event("livetest", "peer-live", &["src/*"]),
+            ],
+        );
+        write_heartbeat(store.path(), &project_id, "dead0001", 3600);
+        write_heartbeat(store.path(), &project_id, "livetest", 0);
+        let (code, stdout, stderr) =
+            run_edda(&["claim", "check", "src/main.rs"], repo.path(), store.path());
+        assert_eq!(
+            code, 1,
+            "the live claim must still conflict; stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("peer-live") && stdout.contains("livetest"),
+            "the live claim must be reported as a conflict, got {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("ghost-lane"),
+            "a stale session's claim must not be reported as a conflict, got {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("dead0001"),
+            "a dead session must not appear in the conflict list, got {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_stale_claims_are_visible_and_do_not_flip_exit_code() {
+        // GH-617 death visibility: a board holding only a dead session's
+        // claim must exit 0 AND say what was filtered, so "surface is clear"
+        // stays distinguishable from "the liveness judgement broke".
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[coord_event("dead0002", "ghost-lane", &["src/*"])],
+        );
+        write_heartbeat(store.path(), &project_id, "dead0002", 3600);
+        let (code, stdout, stderr) =
+            run_edda(&["claim", "check", "src/main.rs"], repo.path(), store.path());
+        assert_eq!(
+            code, 0,
+            "stale claims must not flip the exit code; stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("stale"),
+            "output must reveal that stale claims were filtered, got {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_claim_from_session_without_heartbeat_is_not_a_conflict() {
+        // A session with no heartbeat file at all was never heard from — the
+        // same verdict `edda peers` reaches — so its claim must not conflict.
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[coord_event("lost0003", "ghost-lane", &["src/*"])],
+        );
+        let (code, stdout, stderr) =
+            run_edda(&["claim", "check", "src/main.rs"], repo.path(), store.path());
+        assert_eq!(
+            code, 0,
+            "a never-heartbeated session must not conflict; stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("stale"),
+            "output must reveal that stale claims were filtered, got {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_stale_claims_appear_in_json_report() {
+        // Machine-readable death visibility: the JSON report must carry the
+        // filtered stale claims alongside the (live-only) conflict list.
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[
+                coord_event("dead0004", "ghost-lane", &["src/*"]),
+                coord_event("livetest", "peer-live", &["src/*"]),
+            ],
+        );
+        write_heartbeat(store.path(), &project_id, "dead0004", 3600);
+        write_heartbeat(store.path(), &project_id, "livetest", 0);
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "check", "src/main.rs", "--json"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 1,
+            "the live claim must still conflict; stdout={stdout:?} stderr={stderr:?}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
+        let conflicts = parsed["conflicts"].as_array().expect("conflicts array");
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "only the live claim may conflict, got {conflicts:?}"
+        );
+        assert_eq!(conflicts[0]["session_id"], "livetest");
+        let stale = parsed["stale_claims"]
+            .as_array()
+            .expect("stale_claims array in JSON report");
+        assert_eq!(
+            stale.len(),
+            1,
+            "the filtered stale claim must be named in the report, got {parsed:?}"
+        );
+        assert_eq!(stale[0]["session_id"], "dead0004");
+    }
+
     #[test]
     fn e2e_exit_codes_conflict_and_disjoint() {
         let bin = edda_bin();
