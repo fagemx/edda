@@ -10,7 +10,7 @@
 
 - **R1 認領**：派工前在 issue 留 `taking: <machine>/<role>` 並貼 `lane:<machine>`；先寫先贏；讀到別台的 taking 就不派。來源：`fleet.cross-machine-claim`。
 - **R2 重複產物**：同一 issue 有兩份產物，留 doneWhen 覆蓋較完整的那份；另一份關閉，可用部分搬過去。不因流程錯誤丟掉真工作。來源：#613 裁定、PR #670。
-- **R3 停止的定義**：排程任務非 Running、process tree 無活程序、lane log 有 `=== EXIT ===`，三者齊備才算停；只殺 wrapper 不算。來源：#672。
+- **R3 停止的定義**：三證齊備才算停 —— 排程任務非 `Running`、**沒有 `edda.exe` 仍持有該 lane 的 briefs 路徑**、lane log 有 `=== EXIT ===`。`Ready` 單獨不代表停（#650 被宣告交還時 lane 仍在寫）。只殺 wrapper 不算停。來源：#672、`fleet.lane-stop-4090`。
 - **R4 lane 類型**：diff 需要 cargo（Rust 原始碼、測試、fixture、`Cargo.*`，或 CI 會跑 cargo）就走 4090 build lane，否則走文書機。不看 issue 標題前綴。來源：#651。
 - **R5 檔案撞車**：同一檔多方要改，改動最多且最接近推送者先做完，其餘排後 rebase；小修法以留言交持有者併入。來源：`operator-runbook.md` 三方裁示。
 - **R6 合併**：LGTM 釘的 SHA 等於 current head、`CI Gate` 綠、SHA 窗為空、P0 與 P1 都是零，就 squash 合併、不刪分支。來源：`fleet.merge-authority-4090`、`ci.merge-gate`。
@@ -22,6 +22,8 @@
 - **R12 核准的計畫步驟**：操作者已核准的設計稿步驟直接以 `fleet:ready` 開單。
 - **R13 交還**：交還必須附 R3 三證與 `git ls-remote` 結果；交還後 15 分鐘再查一次。來源：#650。
 - **R14 每日預算**：管理者自身每日 5 美元；lane 照 brief。
+- **R15 認證失敗的機器判準**：一輪 agent 回合若 `Cost: $0.00`，一律當失敗處理，不論 exit code。理由：認證失敗的回合成本必為零，而 `edda dispatch` 目前回 exit 0（#669）。#669 落地後改以 exit code 為準，本條保留為交叉檢查。
+- **R16 存活面的已知污染**：`edda peers` 在 `cargo test -p edda-bridge-claude` 執行期間會出現非 UUID 形狀的假 session（測試 fixture 寫進真實 store，#646）。判存活時忽略 session id 不是 UUID 形狀的條目。心跳判活的視窗是 120 秒（`stale_secs()`），所以兩次查詢相隔超過該視窗可能得到不同答案 —— 這是時序，不是 store 分裂。
 
 ## 管理者自訂
 
