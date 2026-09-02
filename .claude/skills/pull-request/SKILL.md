@@ -237,18 +237,24 @@ gh pr view --json title -q '.title'
 
 ### Step 3: Merge the PR
 
+**Merge preconditions** (`pr.merge-policy`): merge only after a final current-head
+LGTM with P0=0, P1=0, and all required checks green. If these are not met, stop and
+route the PR through the review-fix loop — never merge unconditionally.
+
 **Strategy**: Squash and merge
 
 ```bash
-gh pr merge --squash --delete-branch
+gh pr merge --squash
 sleep 3
 gh pr view --json state,mergedAt
 ```
 
+Never pass `--delete-branch` — branches and worktrees are never deleted (see
+`.claude/CLAUDE.md`).
+
 **Why squash merge:**
 - Keeps main branch history clean and linear
 - Combines all commits into single commit
-- Automatically deletes feature branch
 
 ### Step 4: Switch to Main and Pull Latest
 
@@ -327,9 +333,9 @@ Changes Summary:
    Deletions: -<count>
 
 Actions Completed:
-   1. CI checks validated
-   2. PR squash merged
-   3. Feature branch deleted
+   1. Merge preconditions verified (final current-head LGTM, P0=0, P1=0, required checks green)
+   2. CI checks validated
+   3. PR squash merged
    4. Switched to main
    5. Pulled latest changes
 
