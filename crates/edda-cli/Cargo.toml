@@ -38,6 +38,7 @@ edda-conductor = { path = "../edda-conductor", version = "0.3.0" }
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 clap.workspace = true
+globset.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tokio-util = "0.7"
 ctrlc = "3"

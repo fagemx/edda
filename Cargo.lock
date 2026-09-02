@@ -718,6 +718,7 @@ dependencies = [
  "edda-serve",
  "edda-store",
  "edda-transcript",
+ "globset",
  "hex",
  "ratatui",
  "serde",
