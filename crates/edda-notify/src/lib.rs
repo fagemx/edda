@@ -77,6 +77,7 @@ impl NotifyConfig {
 // ── Notification Events ──
 
 /// Notification event types mapped from edda domain events.
+#[derive(Clone)]
 pub enum NotifyEvent {
     ApprovalPending {
         draft_id: String,
@@ -111,6 +112,18 @@ pub enum NotifyEvent {
         title: String,
         assignee: String,
     },
+    /// GH-564: one notification per phase terminal transition. `state` is
+    /// the terminal status name ("Passed" | "Failed" | "Stale" | "Skipped" |
+    /// "Aborted"); "Aborted" is plan-level and names the phase that forced
+    /// the abort. `final_output` carries the agent's last output line when
+    /// the transition site has one (by convention it contains the PR URL).
+    PhaseTerminal {
+        plan: String,
+        phase: String,
+        state: String,
+        attempt: u32,
+        final_output: Option<String>,
+    },
 }
 
 impl NotifyEvent {
@@ -122,6 +135,7 @@ impl NotifyEvent {
             NotifyEvent::Anomaly { .. } => "anomaly",
             NotifyEvent::RequestPending { .. } => "request_pending",
             NotifyEvent::TaskAssigned { .. } => "task_assigned",
+            NotifyEvent::PhaseTerminal { .. } => "phase_terminal",
         }
     }
 
@@ -186,6 +200,19 @@ impl NotifyEvent {
                 "task_id": task_id,
                 "title": title,
                 "assignee": assignee,
+            }),
+            NotifyEvent::PhaseTerminal {
+                plan,
+                phase,
+                state,
+                attempt,
+                final_output,
+            } => serde_json::json!({
+                "plan": plan,
+                "phase": phase,
+                "state": state,
+                "attempt": attempt,
+                "final_output": final_output,
             }),
         }
     }
@@ -320,6 +347,29 @@ fn format_ntfy(event: &NotifyEvent) -> (String, String, String) {
             format!("#{task_id} assigned to {assignee}"),
             "default".to_string(),
         ),
+        NotifyEvent::PhaseTerminal {
+            plan,
+            phase,
+            state,
+            attempt,
+            final_output,
+        } => {
+            let priority = match state.as_str() {
+                "Failed" | "Aborted" | "Stale" => "high",
+                "Skipped" => "low",
+                _ => "default",
+            };
+            let mut body = format!("plan {plan} · attempt {attempt}");
+            if let Some(out) = final_output {
+                body.push('\n');
+                body.push_str(out);
+            }
+            (
+                format!("Phase {phase}: {state}"),
+                body,
+                priority.to_string(),
+            )
+        }
     }
 }
 
@@ -426,6 +476,26 @@ fn format_telegram(event: &NotifyEvent) -> String {
             escape_html(title),
             escape_html(assignee)
         ),
+        NotifyEvent::PhaseTerminal {
+            plan,
+            phase,
+            state,
+            attempt,
+            final_output,
+        } => {
+            let mut text = format!(
+                "<b>Phase {}: {}</b>\nplan {} · attempt {}",
+                escape_html(phase),
+                escape_html(state),
+                escape_html(plan),
+                attempt
+            );
+            if let Some(out) = final_output {
+                text.push('\n');
+                text.push_str(&escape_html(out));
+            }
+            text
+        }
     }
 }
 
@@ -534,6 +604,91 @@ mod tests {
             summary: String::new(),
         };
         assert!(ch.matches(&event));
+    }
+
+    #[test]
+    fn phase_terminal_has_stable_name_payload_and_matching() {
+        let event = NotifyEvent::PhaseTerminal {
+            plan: "gh564".into(),
+            phase: "implement".into(),
+            state: "Passed".into(),
+            attempt: 2,
+            final_output: Some("PR: https://github.com/x/y/pull/9".into()),
+        };
+        assert_eq!(event.event_name(), "phase_terminal");
+        assert_eq!(event.to_json()["state"], "Passed");
+        assert_eq!(event.to_json()["attempt"], 2);
+        assert_eq!(
+            event.to_json()["final_output"],
+            "PR: https://github.com/x/y/pull/9"
+        );
+
+        let ch: Channel = serde_json::from_value(serde_json::json!({
+            "type": "ntfy",
+            "url": "https://ntfy.sh/test",
+            "events": ["phase_terminal"]
+        }))
+        .unwrap();
+        assert!(ch.matches(&event));
+    }
+
+    #[test]
+    fn phase_terminal_none_final_output_serializes_to_null() {
+        let event = NotifyEvent::PhaseTerminal {
+            plan: "p".into(),
+            phase: "a".into(),
+            state: "Stale".into(),
+            attempt: 1,
+            final_output: None,
+        };
+        assert!(event.to_json()["final_output"].is_null());
+    }
+
+    #[test]
+    fn format_ntfy_phase_terminal_priority_by_state() {
+        let mk = |state: &str| NotifyEvent::PhaseTerminal {
+            plan: "p".into(),
+            phase: "a".into(),
+            state: state.into(),
+            attempt: 1,
+            final_output: Some("PR: https://x/1".into()),
+        };
+        let (title, body, priority) = format_ntfy(&mk("Failed"));
+        assert!(title.contains("Phase a: Failed"));
+        assert!(body.contains("PR: https://x/1"));
+        assert_eq!(priority, "high");
+        assert_eq!(format_ntfy(&mk("Passed")).2, "default");
+        assert_eq!(format_ntfy(&mk("Skipped")).2, "low");
+        assert_eq!(format_ntfy(&mk("Aborted")).2, "high");
+    }
+
+    #[test]
+    fn format_telegram_phase_terminal_escapes_html() {
+        let event = NotifyEvent::PhaseTerminal {
+            plan: "p".into(),
+            phase: "<a>".into(),
+            state: "Failed".into(),
+            attempt: 1,
+            final_output: Some("err <&>".into()),
+        };
+        let text = format_telegram(&event);
+        assert!(text.contains("Phase &lt;a&gt;: Failed"));
+        assert!(text.contains("err &lt;&amp;&gt;"));
+    }
+
+    #[test]
+    fn format_webhook_phase_terminal_payload() {
+        let event = NotifyEvent::PhaseTerminal {
+            plan: "p".into(),
+            phase: "a".into(),
+            state: "Skipped".into(),
+            attempt: 3,
+            final_output: None,
+        };
+        let payload = format_webhook(&event);
+        assert_eq!(payload["event_type"], "phase_terminal");
+        assert_eq!(payload["data"]["plan"], "p");
+        assert_eq!(payload["data"]["attempt"], 3);
     }
 
     #[test]

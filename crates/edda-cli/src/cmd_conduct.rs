@@ -6,7 +6,7 @@ use edda_conductor::agent::launcher::phase_session_id;
 use edda_conductor::check::engine::CheckEngine;
 use edda_conductor::plan::parser::load_plan;
 use edda_conductor::plan::schema::{GateKind, OnReject, Phase, Plan};
-use edda_conductor::runner::notify::StdoutNotifier;
+use edda_conductor::runner::notify::ChannelNotifier;
 use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
 use edda_conductor::state::persist::{load_state, save_state};
@@ -244,7 +244,10 @@ pub fn run(
         },
     )?;
     let engine = CheckEngine::new(cwd.clone());
-    let notifier = StdoutNotifier;
+    // GH-564 P1-1: the run notifier must deliver configured channel events —
+    // a bare StdoutNotifier silently drops every phase terminal event. With
+    // no channels configured this is behaviorally identical to stdout-only.
+    let notifier = ChannelNotifier::for_repo(&cwd);
     let mut budget = BudgetTracker::new(plan.budget_usd);
     let cancel = CancellationToken::new();
 
@@ -774,5 +777,65 @@ mod tests {
         // A backend that reported usage summing to zero measured a real $0.00;
         // the model now distinguishes it from "nobody measured anything".
         assert_eq!(cost_line(0.0, true), "$0.00");
+    }
+
+    /// GH-564 P1-1: `conduct run` builds its notifier through
+    /// `ChannelNotifier::for_repo`, so a `phase_terminal` channel configured
+    /// in `.edda/config.json` actually receives terminal events instead of
+    /// every event being dropped by a bare `StdoutNotifier`.
+    #[test]
+    fn run_notifier_delivers_phase_terminal_to_configured_channel() {
+        use edda_conductor::runner::notify::Notifier;
+        use std::io::Read;
+        use std::time::Duration;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".edda")).unwrap();
+        std::fs::write(
+            dir.path().join(".edda").join("config.json"),
+            format!(
+                r#"{{"notify_channels":[{{"type":"webhook","url":"http://127.0.0.1:{port}","events":["phase_terminal"]}}]}}"#
+            ),
+        )
+        .unwrap();
+
+        let notifier = ChannelNotifier::for_repo(dir.path());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            notifier
+                .notify_phase_terminal(edda_notify::NotifyEvent::PhaseTerminal {
+                    plan: "gh564".into(),
+                    phase: "implement".into(),
+                    state: "Passed".into(),
+                    attempt: 1,
+                    final_output: Some("PR: https://github.com/x/y/pull/620".into()),
+                })
+                .await;
+        });
+
+        // Dispatch finished before notify_phase_terminal returned; the local
+        // webhook must have received the event.
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = String::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => request.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+            if request.contains("phase_terminal") {
+                break;
+            }
+        }
+        assert!(
+            request.contains("phase_terminal")
+                && request.contains("PR: https://github.com/x/y/pull/620"),
+            "configured webhook channel must receive the terminal event, got: {request}"
+        );
     }
 }

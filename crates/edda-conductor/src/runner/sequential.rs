@@ -23,7 +23,8 @@ use anyhow::Context;
 use anyhow::Result;
 use edda_core::VerdictPayload;
 use edda_ledger::VerdictRecord;
-use std::path::Path;
+use edda_notify::NotifyEvent;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -62,7 +63,29 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
     edda::ensure_init(cwd);
 
     // Detect stale phases from previous run
-    detect_stale_phases(state, plan);
+    // GH-564 P1-2: each Running/Checking → Stale transition on resume is a
+    // terminal transition — notify so the controller reacts instead of
+    // polling stdout tails.
+    // GH-564 Round-2 P1-2 (exactly-once): persist the transitions BEFORE
+    // notifying. The stale mutation otherwise lives only in memory until
+    // some later save — a real resume (plan already started) that hits the
+    // non-interactive blocked branch never saves, so the next run would
+    // re-detect the same orphan transition and send a duplicate Stale
+    // notification. Persisting first makes each transition's notification
+    // exactly-once across repeated `edda conduct run` invocations.
+    let stale_transitions = detect_stale_phases(state, plan);
+    if !stale_transitions.is_empty() {
+        save_state(cwd, state)?;
+        event_log::write_runner_status(cwd, state, None);
+        write_brief(cwd, state, None);
+    }
+    for (phase_id, attempts) in stale_transitions {
+        notifier
+            .notify_phase_terminal(phase_terminal_event(
+                &plan.name, &phase_id, "Stale", attempts, None,
+            ))
+            .await;
+    }
 
     // Record plan start
     if state.started_at.is_none() {
@@ -120,6 +143,17 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                             phase_id: failed_id.clone(),
                             reason: "manually skipped (interactive)".into(),
                         });
+                        let attempt_now =
+                            state.get_phase(&failed_id).map(|p| p.attempts).unwrap_or(0);
+                        notifier
+                            .notify_phase_terminal(phase_terminal_event(
+                                &plan.name,
+                                &failed_id,
+                                "Skipped",
+                                attempt_now,
+                                None,
+                            ))
+                            .await;
                         println!("  ⊘ Skipped \"{failed_id}\"");
                         continue;
                     }
@@ -139,6 +173,17 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                                 .filter(|p| p.status == PhaseStatus::Pending)
                                 .count(),
                         });
+                        let attempt_now =
+                            state.get_phase(&failed_id).map(|p| p.attempts).unwrap_or(0);
+                        notifier
+                            .notify_phase_terminal(phase_terminal_event(
+                                &plan.name,
+                                &failed_id,
+                                "Aborted",
+                                attempt_now,
+                                None,
+                            ))
+                            .await;
                         println!("  ✗ Plan aborted.");
                         break;
                     }
@@ -260,6 +305,23 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         &format!("Gate \"{subject}\" approved (sha {gate_sha})"),
                         &["conductor", "verdict"],
                     );
+                    let approved_ps = state.get_phase(&gated_id)?;
+                    // GH-564 P1-3: the approved phase's agent final output
+                    // (last line = PR URL by convention) was parked at gate
+                    // entry and survives restarts — restore it, never drop
+                    // it to null. GH-564 Round-2 P1: consume the sidecar —
+                    // its lifecycle ends with this verdict.
+                    let final_output = load_gate_output(cwd, &plan.name, &gated_id);
+                    clear_gate_output(cwd, &plan.name, &gated_id);
+                    notifier
+                        .notify_phase_terminal(phase_terminal_event(
+                            &plan.name,
+                            &gated_id,
+                            "Passed",
+                            approved_ps.attempts,
+                            final_output.as_deref(),
+                        ))
+                        .await;
                 }
                 GateVerdict::Rejected(record) => {
                     let comment = record.payload.comment.clone().unwrap_or_default();
@@ -325,6 +387,21 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                             env_retries: gate_ps.env_retries,
                             attempt_charged: true,
                         });
+                        // GH-564 P1-3: same parked output as the approved
+                        // branch — the agent did produce a final line before
+                        // the gate rejected it. Consume the sidecar with the
+                        // verdict (GH-564 Round-2 P1).
+                        let final_output = load_gate_output(cwd, &plan.name, &gated_id);
+                        clear_gate_output(cwd, &plan.name, &gated_id);
+                        notifier
+                            .notify_phase_terminal(phase_terminal_event(
+                                &plan.name,
+                                &gated_id,
+                                "Failed",
+                                gate_ps.attempts,
+                                final_output.as_deref(),
+                            ))
+                            .await;
                     } else {
                         // Redispatch (D3): ONE more agent turn in the SAME
                         // session — do NOT increment attempt; the rejection
@@ -423,6 +500,19 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         env_retries: gate_ps.env_retries,
                         attempt_charged: true,
                     });
+                    // GH-564 P1-3: same parked output as the approved branch.
+                    // Consume the sidecar with the verdict (GH-564 Round-2 P1).
+                    let final_output = load_gate_output(cwd, &plan.name, &gated_id);
+                    clear_gate_output(cwd, &plan.name, &gated_id);
+                    notifier
+                        .notify_phase_terminal(phase_terminal_event(
+                            &plan.name,
+                            &gated_id,
+                            "Failed",
+                            gate_ps.attempts,
+                            final_output.as_deref(),
+                        ))
+                        .await;
                 }
                 GateVerdict::Cancelled => {
                     // The loop top sees the cancelled token and shuts down;
@@ -734,6 +824,7 @@ async fn fail_checking_phase(
     check_result: &CheckRunResult,
     err_override: Option<&str>,
     elapsed: Duration,
+    final_output: Option<&str>,
     notifier: &dyn Notifier,
     event_log: &mut EventLogger,
     tmux_session: Option<&TmuxSession>,
@@ -808,6 +899,15 @@ async fn fail_checking_phase(
         env_retries: ps.env_retries,
         attempt_charged,
     });
+    notifier
+        .notify_phase_terminal(phase_terminal_event(
+            plan.name.as_str(),
+            phase_id,
+            "Failed",
+            ps.attempts,
+            final_output,
+        ))
+        .await;
     handle_on_fail(
         plan,
         phase,
@@ -886,6 +986,41 @@ async fn process_phase_result(
                     // notifier message, then wait (the loop's gate-wait branch).
                     match capture_git_head(phase_cwd) {
                         Ok(gate_sha) => {
+                            // GH-564 P1-3 / Round-2 P1: park the agent's final
+                            // output BEFORE the phase enters AWAITING_VERDICT.
+                            // Every gate entry atomically rewrites the sidecar
+                            // — the last non-empty agent line when there is
+                            // one, an empty file when there is none — so it
+                            // always represents THIS entry's output and a
+                            // previous cycle's value can never be read back.
+                            // The error is NOT swallowed: a failed write would
+                            // leave the previous cycle's file in place, which
+                            // the verdict site could read back as this
+                            // entry's output — fail the entry instead.
+                            if let Err(e) = persist_gate_output(
+                                cwd,
+                                &plan.name,
+                                phase_id,
+                                final_output_line(result_text.as_deref()).as_deref(),
+                            ) {
+                                let msg = format!("failed to persist gate final output: {e}");
+                                fail_checking_phase(
+                                    plan,
+                                    phase,
+                                    state,
+                                    phase_id,
+                                    cwd,
+                                    &check_result,
+                                    Some(&msg),
+                                    phase_start.elapsed(),
+                                    final_output_line(result_text.as_deref()).as_deref(),
+                                    notifier,
+                                    event_log,
+                                    tmux_session,
+                                )
+                                .await?;
+                                return Ok(());
+                            }
                             let subject = gate_subject(&plan.name, phase_id);
                             transition(
                                 state,
@@ -938,6 +1073,7 @@ async fn process_phase_result(
                                 &check_result,
                                 Some(&msg),
                                 phase_start.elapsed(),
+                                final_output_line(result_text.as_deref()).as_deref(),
                                 notifier,
                                 event_log,
                                 tmux_session,
@@ -974,6 +1110,15 @@ async fn process_phase_result(
                         duration_ms: elapsed_ms,
                         cost_usd,
                     });
+                    notifier
+                        .notify_phase_terminal(phase_terminal_event(
+                            &plan.name,
+                            phase_id,
+                            "Passed",
+                            attempt,
+                            final_output_line(result_text.as_deref()).as_deref(),
+                        ))
+                        .await;
                 }
             } else {
                 fail_checking_phase(
@@ -985,6 +1130,7 @@ async fn process_phase_result(
                     &check_result,
                     None,
                     phase_start.elapsed(),
+                    final_output_line(result_text.as_deref()).as_deref(),
                     notifier,
                     event_log,
                     tmux_session,
@@ -1027,6 +1173,11 @@ async fn process_phase_result(
                 env_retries: phase_env_retries(state, phase_id),
                 attempt_charged: true,
             });
+            notifier
+                .notify_phase_terminal(phase_terminal_event(
+                    &plan.name, phase_id, "Stale", attempt, None,
+                ))
+                .await;
         }
         PhaseResult::AgentCrash { error } => {
             transition(
@@ -1063,6 +1214,11 @@ async fn process_phase_result(
                 env_retries: phase_env_retries(state, phase_id),
                 attempt_charged: true,
             });
+            notifier
+                .notify_phase_terminal(phase_terminal_event(
+                    &plan.name, phase_id, "Failed", attempt, None,
+                ))
+                .await;
             // For crash, use empty check results
             let empty_result = CheckRunResult {
                 all_passed: false,
@@ -1112,6 +1268,11 @@ async fn process_phase_result(
                 env_retries: phase_env_retries(state, phase_id),
                 attempt_charged: true,
             });
+            notifier
+                .notify_phase_terminal(phase_terminal_event(
+                    &plan.name, phase_id, "Failed", attempt, None,
+                ))
+                .await;
         }
     }
     Ok(())
@@ -1125,6 +1286,89 @@ fn phase_env_retries(state: &PlanState, phase_id: &str) -> u32 {
         .get_phase(phase_id)
         .map(|p| p.env_retries)
         .unwrap_or(0)
+}
+
+/// GH-564: build the phase terminal-state notification payload. `state` is
+/// the terminal status name ("Passed" | "Failed" | "Stale" | "Skipped" |
+/// "Aborted"); "Aborted" is plan-level and names the phase that forced the
+/// abort. `final_output` carries the agent's last output line when the
+/// transition site has one (by convention it contains the PR URL).
+fn phase_terminal_event(
+    plan_name: &str,
+    phase_id: &str,
+    state: &str,
+    attempt: u32,
+    final_output: Option<&str>,
+) -> NotifyEvent {
+    NotifyEvent::PhaseTerminal {
+        plan: plan_name.to_string(),
+        phase: phase_id.to_string(),
+        state: state.to_string(),
+        attempt,
+        final_output: final_output.map(str::to_string),
+    }
+}
+
+/// Last non-empty line of the agent's result text (GH-564: by convention it
+/// contains the PR URL).
+fn final_output_line(result_text: Option<&str>) -> Option<String> {
+    result_text?
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+}
+
+/// GH-564 P1-3: where a gated phase's agent final output is parked while the
+/// plan waits for the external verdict. `{cwd}/.edda/conductor/{plan}/{phase}.gate_output`.
+/// Survives a conductor restart, so the verdict site can restore the output
+/// into the terminal notification instead of dropping it to `null`.
+fn gate_output_path(cwd: &Path, plan_name: &str, phase_id: &str) -> PathBuf {
+    cwd.join(".edda")
+        .join("conductor")
+        .join(plan_name)
+        .join(format!("{phase_id}.gate_output"))
+}
+
+/// GH-564 P1-3 / Round-2 P1: park the agent's final output when the phase
+/// enters AWAITING_VERDICT. EVERY gate entry atomically rewrites the sidecar
+/// so it represents THIS entry's output and only this entry's: the last
+/// non-empty agent line when there is one, an EMPTY file when there is none
+/// (`load_gate_output` maps empty to `None`). A previous redispatch cycle's
+/// value can therefore never be read back as the current output.
+///
+/// Errors are NOT swallowed: a failed write would leave the previous cycle's
+/// file in place, which the verdict site could read back as this entry's
+/// output — the caller must fail the gate entry instead of waiting on a
+/// verdict against a possibly wrong payload.
+fn persist_gate_output(
+    cwd: &Path,
+    plan_name: &str,
+    phase_id: &str,
+    final_output: Option<&str>,
+) -> anyhow::Result<()> {
+    let path = gate_output_path(cwd, plan_name, phase_id);
+    edda_store::write_atomic(&path, final_output.unwrap_or("").as_bytes())
+}
+
+/// GH-564 Round-2 P1: consume the parked output at the verdict site, so the
+/// sidecar only exists between a gate entry and its verdict. Best-effort: a
+/// failed removal cannot produce a wrong payload because every gate entry
+/// rewrites the sidecar atomically before any verdict is waited on.
+fn clear_gate_output(cwd: &Path, plan_name: &str, phase_id: &str) {
+    let _ = std::fs::remove_file(gate_output_path(cwd, plan_name, phase_id));
+}
+
+/// GH-564 P1-3: read back the parked final output at the gate verdict site.
+fn load_gate_output(cwd: &Path, plan_name: &str, phase_id: &str) -> Option<String> {
+    let output = std::fs::read_to_string(gate_output_path(cwd, plan_name, phase_id)).ok()?;
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 async fn handle_on_fail(
@@ -1243,6 +1487,16 @@ async fn handle_on_fail(
                 phase_id: phase_id.to_string(),
                 reason: "auto-skipped by on_fail policy".into(),
             });
+            let attempt_now = state.get_phase(phase_id).map(|p| p.attempts).unwrap_or(0);
+            notifier
+                .notify_phase_terminal(phase_terminal_event(
+                    &plan.name,
+                    phase_id,
+                    "Skipped",
+                    attempt_now,
+                    None,
+                ))
+                .await;
             println!("  → Auto-skipped (on_fail: skip)");
         }
         OnFail::Abort => {
@@ -1260,6 +1514,16 @@ async fn handle_on_fail(
                     .filter(|p| p.status == PhaseStatus::Pending)
                     .count(),
             });
+            let attempt_now = state.get_phase(phase_id).map(|p| p.attempts).unwrap_or(0);
+            notifier
+                .notify_phase_terminal(phase_terminal_event(
+                    &plan.name,
+                    phase_id,
+                    "Aborted",
+                    attempt_now,
+                    None,
+                ))
+                .await;
             println!("  → Plan aborted (on_fail: abort)");
         }
         OnFail::Ask => {
@@ -1466,7 +1730,10 @@ pub(crate) mod tests {
     use crate::plan::parser::parse_plan;
     use crate::runner::notify::CollectNotifier;
 
-    async fn run_test_plan(yaml: &str, launcher: &dyn AgentLauncher) -> (PlanState, Vec<String>) {
+    async fn run_test_plan_notifier(
+        yaml: &str,
+        launcher: &dyn AgentLauncher,
+    ) -> (PlanState, CollectNotifier) {
         let plan = parse_plan(yaml).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let mut state = PlanState::from_plan(&plan, "test.yaml");
@@ -1493,8 +1760,234 @@ pub(crate) mod tests {
         .await
         .unwrap();
 
-        let msgs = notifier.messages();
-        (state, msgs)
+        (state, notifier)
+    }
+
+    async fn run_test_plan(yaml: &str, launcher: &dyn AgentLauncher) -> (PlanState, Vec<String>) {
+        let (state, notifier) = run_test_plan_notifier(yaml, launcher).await;
+        (state, notifier.messages())
+    }
+
+    /// GH-564: flatten the observed phase terminal events for assertions.
+    fn terminal_view(
+        events: &[edda_notify::NotifyEvent],
+    ) -> Vec<(String, String, String, u32, Option<String>)> {
+        events
+            .iter()
+            .map(|e| match e {
+                edda_notify::NotifyEvent::PhaseTerminal {
+                    plan,
+                    phase,
+                    state,
+                    attempt,
+                    final_output,
+                } => (
+                    plan.clone(),
+                    phase.clone(),
+                    state.clone(),
+                    *attempt,
+                    final_output.clone(),
+                ),
+                other => panic!(
+                    "unexpected non-terminal NotifyEvent: {}",
+                    other.event_name()
+                ),
+            })
+            .collect()
+    }
+
+    // ── GH-564: exactly one notification per phase terminal transition ──
+
+    #[tokio::test]
+    async fn terminal_notify_passed_exactly_one() {
+        let yaml = r#"
+name: notifytest
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some("worked hard\nPR: https://github.com/x/y/pull/9".into()),
+            }],
+        );
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Passed);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 1, "exactly one terminal notification: {tv:?}");
+        assert_eq!(tv[0].0, "notifytest");
+        assert_eq!(tv[0].1, "a");
+        assert_eq!(tv[0].2, "Passed");
+        assert_eq!(tv[0].3, 1);
+        assert_eq!(
+            tv[0].4.as_deref(),
+            Some("PR: https://github.com/x/y/pull/9")
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_one_per_transition_crash_retry_pass() {
+        let yaml = r#"
+name: notifytest
+max_attempts: 2
+on_fail: auto_retry
+phases:
+  - id: a
+    prompt: "crash then succeed"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![
+                PhaseResult::AgentCrash {
+                    error: "oops".into(),
+                },
+                PhaseResult::AgentDone {
+                    cost_usd: Some(0.5),
+                    result_text: Some("done".into()),
+                },
+            ],
+        );
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Passed);
+        assert_eq!(state.phases[0].attempts, 2);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 2, "one per terminal transition: {tv:?}");
+        assert_eq!(
+            (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
+            ("a", "Failed", 1)
+        );
+        assert_eq!(tv[0].4, None);
+        assert_eq!(
+            (tv[1].1.as_str(), tv[1].2.as_str(), tv[1].3),
+            ("a", "Passed", 2)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_stale_on_timeout() {
+        let yaml = r#"
+name: notifytest
+phases:
+  - id: a
+    prompt: "hang"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results("a", vec![PhaseResult::Timeout]);
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Stale);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 1, "exactly one terminal notification: {tv:?}");
+        assert_eq!(
+            (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
+            ("a", "Stale", 1)
+        );
+        assert_eq!(tv[0].4, None);
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_failed_then_skipped_on_fail_skip() {
+        let yaml = r#"
+name: notifytest
+on_fail: skip
+phases:
+  - id: a
+    prompt: "crash"
+  - id: b
+    prompt: "should still run"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentCrash {
+                error: "boom".into(),
+            }],
+        );
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Skipped);
+        assert_eq!(state.phases[1].status, PhaseStatus::Passed);
+        let tv = terminal_view(&notifier.terminal_events());
+        // Two terminal transitions for "a": the crash failure, then the
+        // on_fail re-classification to Skipped — one notification each.
+        // Phase "b" contributes its own Passed notification.
+        assert_eq!(tv.len(), 3, "one per terminal transition: {tv:?}");
+        assert_eq!(tv[0].2, "Failed");
+        assert_eq!(tv[1].2, "Skipped");
+        assert_eq!(tv[2].2, "Passed");
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_failed_then_aborted_on_fail_abort() {
+        let yaml = r#"
+name: notifytest
+on_fail: abort
+phases:
+  - id: a
+    prompt: "crash"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentCrash {
+                error: "boom".into(),
+            }],
+        );
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Failed);
+        assert_eq!(state.plan_status, PlanStatus::Aborted);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 2, "one per terminal transition: {tv:?}");
+        assert_eq!((tv[0].2.as_str(), tv[0].3), ("Failed", 1));
+        assert_eq!(
+            (tv[1].1.as_str(), tv[1].2.as_str(), tv[1].3),
+            ("a", "Aborted", 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_check_failure_carries_final_output() {
+        let yaml = r#"
+name: notifytest
+on_fail: skip
+phases:
+  - id: a
+    prompt: "make file"
+    check:
+      - file_exists: "output.txt"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some("built everything\nPR: https://github.com/x/y/pull/7".into()),
+            }],
+        );
+        let (state, notifier) = run_test_plan_notifier(yaml, &launcher).await;
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Skipped);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(
+            tv.len(),
+            2,
+            "check-fail Failed, then on_fail Skipped: {tv:?}"
+        );
+        assert_eq!((tv[0].2.as_str(), tv[0].3), ("Failed", 1));
+        assert_eq!(
+            tv[0].4.as_deref(),
+            Some("PR: https://github.com/x/y/pull/7"),
+            "check-failure notification carries the agent's final output line"
+        );
+        assert_eq!(tv[1].2, "Skipped");
+        assert_eq!(tv[1].4, None);
     }
 
     #[tokio::test]
@@ -2583,6 +3076,15 @@ phases:
         let root = fresh_root("approve");
         let head = init_git_repo(&root);
         let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some(
+                    "opened pull request\nPR: https://github.com/x/y/pull/620".into(),
+                ),
+            }],
+        );
         let plan = parse_plan(GATED_YAML).unwrap();
         let state = PlanState::from_plan(&plan, "test.yaml");
         let handle = spawn_runner(GATED_YAML, root.clone(), launcher, state);
@@ -2592,7 +3094,7 @@ phases:
         assert_eq!(shas[0], head, "gate_sha must be the phase cwd's git HEAD");
         record_verdict(&root, "gated/a", &shas[0], VerdictDecision::Approved, None);
 
-        let (state, _notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+        let (state, notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
             .await
             .expect("gate test exceeded 30s")
             .unwrap()
@@ -2606,6 +3108,346 @@ phases:
         );
         assert_eq!(launcher.call_count("a"), 1);
         assert_eq!(launcher.call_count("b"), 1);
+        // GH-564 P1-3: the gate-approved phase's agent final output (its
+        // last line, the PR URL by convention) must survive until the
+        // verdict site and ride on the Passed terminal notification.
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 2, "one per terminal transition: {tv:?}");
+        assert_eq!(
+            (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
+            ("a", "Passed", 1)
+        );
+        assert_eq!(
+            tv[0].4.as_deref(),
+            Some("PR: https://github.com/x/y/pull/620"),
+            "gate-approved Passed event must carry the agent's final output"
+        );
+        assert_eq!(
+            (tv[1].1.as_str(), tv[1].2.as_str(), tv[1].3),
+            ("b", "Passed", 1)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-564 P1-2: a phase left Running by a previous conductor run, past
+    /// its timeout, becomes Stale on resume — and that terminal transition
+    /// must reach the controller as a notification.
+    #[tokio::test]
+    async fn resume_stale_phase_notifies_terminal() {
+        let yaml = r#"
+name: resumestale
+timeout_sec: 1
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        state.phases[0].status = PhaseStatus::Running;
+        state.phases[0].started_at = Some(
+            (time::OffsetDateTime::now_utc() - time::Duration::seconds(3600))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        );
+        let engine = CheckEngine::new(dir.path().to_path_buf());
+        let notifier = CollectNotifier::new();
+        let mut budget = BudgetTracker::new(plan.budget_usd);
+        let cancel = CancellationToken::new();
+        let launcher = MockLauncher::new();
+
+        run_plan(
+            &plan,
+            &mut state,
+            RunContext {
+                launcher: &launcher,
+                check_engine: &engine,
+                notifier: &notifier,
+                budget: &mut budget,
+                cancel,
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+                tmux_session: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Stale);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert!(
+            tv.iter().any(|e| e.1 == "a" && e.2 == "Stale"),
+            "resume must notify the Running→Stale transition: {tv:?}"
+        );
+    }
+
+    /// GH-564 Round-2 P1-2 (exactly-once): a REAL persisted resume — the
+    /// plan already started, an expired Running phase sits on disk — must
+    /// notify Stale exactly once across repeated `edda conduct run`
+    /// invocations. The transition must be persisted before the
+    /// notification fires, so run 2 (a fresh conductor reloading the
+    /// persisted state) finds no orphan Running phase and sends nothing.
+    #[tokio::test]
+    async fn resume_stale_notifies_exactly_once_across_reruns() {
+        let yaml = r#"
+name: resumestale
+timeout_sec: 1
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let launcher = MockLauncher::new();
+
+        // A conductor died mid-run: the persisted state has an expired
+        // Running phase and the plan already started (real resume — NOT a
+        // fresh PlanState::from_plan whose started_at is None).
+        let mut persisted = PlanState::from_plan(&plan, "test.yaml");
+        persisted.started_at = Some(now_rfc3339());
+        persisted.plan_status = PlanStatus::Running;
+        persisted.phases[0].status = PhaseStatus::Running;
+        persisted.phases[0].started_at = Some(
+            (time::OffsetDateTime::now_utc() - time::Duration::seconds(3600))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        );
+        save_state(dir.path(), &persisted).unwrap();
+
+        // Run 1: a fresh conductor process loads the persisted state.
+        let mut state = crate::state::persist::load_state(dir.path(), &plan.name)
+            .unwrap()
+            .expect("persisted resume state");
+        let notifier1 = CollectNotifier::new();
+        let engine = CheckEngine::new(dir.path().to_path_buf());
+        let mut budget = BudgetTracker::new(plan.budget_usd);
+        run_plan(
+            &plan,
+            &mut state,
+            RunContext {
+                launcher: &launcher,
+                check_engine: &engine,
+                notifier: &notifier1,
+                budget: &mut budget,
+                cancel: CancellationToken::new(),
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+                tmux_session: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(state.phases[0].status, PhaseStatus::Stale);
+        let tv1 = terminal_view(&notifier1.terminal_events());
+        let stale1 = tv1.iter().filter(|e| e.1 == "a" && e.2 == "Stale").count();
+        assert_eq!(
+            stale1, 1,
+            "run 1 notifies the Stale transition exactly once: {tv1:?}"
+        );
+
+        // Run 2: ANOTHER fresh conductor process re-reads the disk state.
+        let mut state2 = crate::state::persist::load_state(dir.path(), &plan.name)
+            .unwrap()
+            .expect("state must survive run 1");
+        assert_eq!(
+            state2.phases[0].status,
+            PhaseStatus::Stale,
+            "the Stale transition must be PERSISTED by run 1, not left in memory"
+        );
+        let notifier2 = CollectNotifier::new();
+        let engine2 = CheckEngine::new(dir.path().to_path_buf());
+        let mut budget2 = BudgetTracker::new(plan.budget_usd);
+        run_plan(
+            &plan,
+            &mut state2,
+            RunContext {
+                launcher: &launcher,
+                check_engine: &engine2,
+                notifier: &notifier2,
+                budget: &mut budget2,
+                cancel: CancellationToken::new(),
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+                tmux_session: None,
+            },
+        )
+        .await
+        .unwrap();
+        let tv2 = terminal_view(&notifier2.terminal_events());
+        assert!(
+            tv2.iter().all(|e| !(e.1 == "a" && e.2 == "Stale")),
+            "run 2 must NOT re-notify the already-persisted Stale transition: {tv2:?}"
+        );
+    }
+
+    /// GH-564 Round-2 new P1: after a redispatch cycle, the SECOND gate
+    /// entry's output (here: none — the redispatched turn produced no final
+    /// text) must replace the first cycle's parked output. Approving the
+    /// regate must never deliver the PREVIOUS cycle's PR URL as the final
+    /// output.
+    #[tokio::test]
+    async fn gate_redispatch_none_output_never_reuses_previous_cycles_output() {
+        let root = fresh_root("redispatch-none");
+        init_git_repo(&root);
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: Some(
+                        "opened pull request\nPR: https://github.com/x/y/pull/100".into(),
+                    ),
+                },
+                // The redispatched turn produced NO final text at all.
+                PhaseResult::AgentDone {
+                    cost_usd: None,
+                    result_text: None,
+                },
+            ],
+        );
+        let plan = parse_plan(GATED_YAML).unwrap();
+        let state = PlanState::from_plan(&plan, "test.yaml");
+        let handle = spawn_runner(GATED_YAML, root.clone(), launcher, state);
+
+        // First gate: reject with a comment → redispatch.
+        let shas = wait_for_gate_events(&root, "gated", 1).await;
+        record_verdict(
+            &root,
+            "gated/a",
+            &shas[0],
+            VerdictDecision::Rejected,
+            Some("redo it"),
+        );
+
+        // Second gate: approve.
+        let shas = wait_for_gate_events(&root, "gated", 2).await;
+        record_verdict(&root, "gated/a", &shas[1], VerdictDecision::Approved, None);
+
+        let (state, notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+            .await
+            .expect("gate test exceeded 30s")
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.phases[0].status, PhaseStatus::Passed);
+        assert_eq!(launcher.call_count("a"), 2);
+        let tv = terminal_view(&notifier.terminal_events());
+        let passed = tv
+            .iter()
+            .find(|e| e.1 == "a" && e.2 == "Passed")
+            .expect("approved gate must emit a Passed terminal event");
+        assert_eq!(
+            passed.4, None,
+            "a redispatch turn with no output must NOT inherit the previous cycle's parked PR URL"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-564 Round-2 new P1: when a gate entry CANNOT persist its output
+    /// (here the atomic write fails because a directory blocks the sidecar
+    /// path), the entry must fail the phase instead of silently waiting on a
+    /// verdict whose approve branch would read back the PREVIOUS cycle's
+    /// parked output.
+    #[tokio::test]
+    async fn gate_redispatch_write_failure_fails_instead_of_stale_output() {
+        let root = fresh_root("redispatch-writefail");
+        init_git_repo(&root);
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some(
+                    "opened pull request\nPR: https://github.com/x/y/pull/100".into(),
+                ),
+            }],
+            // The redispatched turn falls through to the mock default.
+        );
+        let yaml = r#"
+name: gated
+phases:
+  - id: a
+    prompt: "do it"
+    gate: verdict
+    gate_timeout_sec: 1
+    on_fail: abort
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let state = PlanState::from_plan(&plan, "test.yaml");
+        let handle = spawn_runner(yaml, root.clone(), launcher, state);
+
+        // Gate entry 1 parks its output successfully.
+        let shas = wait_for_gate_events(&root, "gated", 1).await;
+        let sidecar = root
+            .join(".edda")
+            .join("conductor")
+            .join("gated")
+            .join("a.gate_output");
+        assert_eq!(
+            std::fs::read_to_string(&sidecar).unwrap(),
+            "PR: https://github.com/x/y/pull/100",
+            "entry 1 must have parked its output"
+        );
+        // Sabotage the NEXT atomic write: a directory where the file must go.
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::create_dir(&sidecar).unwrap();
+
+        // Reject → redispatch → gate entry 2 hits the write failure.
+        record_verdict(
+            &root,
+            "gated/a",
+            &shas[0],
+            VerdictDecision::Rejected,
+            Some("redo it"),
+        );
+
+        let (state, _notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+            .await
+            .expect("gate test exceeded 30s")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            launcher.call_count("a"),
+            2,
+            "reject still redispatches one turn"
+        );
+        assert_eq!(
+            state.phases[0].status,
+            PhaseStatus::Failed,
+            "a gate entry that cannot persist its output must fail, not wait on a verdict against a stale sidecar"
+        );
+        let err = state.phases[0]
+            .error
+            .as_ref()
+            .expect("Failed phase carries an error");
+        assert!(
+            err.message.contains("failed to persist gate final output"),
+            "the persist failure must surface as the phase error, got: {}",
+            err.message
+        );
+        // The sabotaged entry never reaches AWAITING_VERDICT: still exactly
+        // one gate_entered event.
+        let events_path = root
+            .join(".edda")
+            .join("conductor")
+            .join("gated")
+            .join("events.jsonl");
+        let content = std::fs::read_to_string(&events_path).unwrap();
+        let gate_enters = content
+            .lines()
+            .filter(|l| {
+                serde_json::from_str::<serde_json::Value>(l)
+                    .map(|v| v["type"] == "gate_entered")
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            gate_enters, 1,
+            "the failed entry must not enter the gate again"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2702,7 +3544,7 @@ phases:
             Some("wrong approach"),
         );
 
-        let (state, _notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+        let (state, notifier, launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
             .await
             .expect("gate test exceeded 30s")
             .unwrap()
@@ -2719,6 +3561,13 @@ phases:
         );
         assert_eq!(state.plan_status, PlanStatus::Blocked);
         assert_eq!(launcher.call_count("a"), 1, "no redispatch turn on halt");
+        // GH-564: the halt failure emits exactly one terminal notification.
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 1, "exactly one terminal notification: {tv:?}");
+        assert_eq!(
+            (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
+            ("a", "Failed", 1)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2854,7 +3703,7 @@ phases:
 "#;
         let plan = parse_plan(yaml).unwrap();
         let state = PlanState::from_plan(&plan, "test.yaml");
-        let (state, _notifier, _launcher) = tokio::time::timeout(
+        let (state, notifier, _launcher) = tokio::time::timeout(
             GATE_TEST_DEADLINE,
             spawn_runner(yaml, root.clone(), launcher, state),
         )
@@ -2876,6 +3725,14 @@ phases:
             err.message
         );
         assert_eq!(state.plan_status, PlanStatus::Blocked);
+        // GH-564: the gate timeout failure emits exactly one terminal
+        // notification.
+        let tv = terminal_view(&notifier.terminal_events());
+        assert_eq!(tv.len(), 1, "exactly one terminal notification: {tv:?}");
+        assert_eq!(
+            (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
+            ("a", "Failed", 1)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

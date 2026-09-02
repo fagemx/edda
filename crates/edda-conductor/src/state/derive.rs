@@ -47,8 +47,12 @@ pub fn is_plan_blocked(state: &PlanState) -> bool {
 
 /// Detect stale phases: phases marked Running/Checking whose start time
 /// exceeds the timeout. Called on plan resume to handle orphaned states.
-pub fn detect_stale_phases(state: &mut PlanState, plan: &Plan) {
+/// Returns `(phase_id, attempts)` for every phase transitioned to Stale so
+/// the caller can notify the terminal transition (GH-564 P1-2: resume-time
+/// Running/Checking → Stale is a terminal transition and must be reported).
+pub fn detect_stale_phases(state: &mut PlanState, plan: &Plan) -> Vec<(String, u32)> {
     let now = time::OffsetDateTime::now_utc();
+    let mut stale = Vec::new();
 
     for phase_state in &mut state.phases {
         if phase_state.status != PhaseStatus::Running && phase_state.status != PhaseStatus::Checking
@@ -85,8 +89,11 @@ pub fn detect_stale_phases(state: &mut PlanState, plan: &Plan) {
                     .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_default(),
             });
+            stale.push((phase_state.id.clone(), phase_state.attempts));
         }
     }
+
+    stale
 }
 
 /// Find the next runnable phase: Pending with all dependencies satisfied.
@@ -335,6 +342,40 @@ phases:
         detect_stale_phases(&mut state, &plan);
         assert_eq!(state.get_phase("a").unwrap().status, PhaseStatus::Stale);
         assert!(state.get_phase("a").unwrap().error.is_some());
+    }
+
+    #[test]
+    fn detect_stale_reports_transitioned_phase_ids_and_attempts() {
+        // GH-564 P1-2: the caller needs (phase_id, attempts) for every
+        // Running/Checking → Stale transition so it can emit the terminal
+        // notification.
+        let yaml = r#"
+name: test
+timeout_sec: 60
+phases:
+  - id: a
+    prompt: "x"
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let mut state = PlanState::from_plan(&plan, "plan.yaml");
+
+        let old_time = (time::OffsetDateTime::now_utc() - time::Duration::hours(2))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::Pending,
+            PhaseStatus::Running,
+            Some(PhaseUpdate {
+                started_at: Some(old_time),
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+
+        let stale = detect_stale_phases(&mut state, &plan);
+        assert_eq!(stale, vec![("a".to_string(), 0)]);
     }
 
     #[test]
