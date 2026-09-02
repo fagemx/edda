@@ -61,13 +61,15 @@
    plan YAML 放 scratchpad 或 `.tmp/plans/`，不進 repo。Rust lane 設 `CARGO_TARGET_DIR` 為
    `$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1|worker-2`（verifier 用 `verifier|verifier-2`）。
    lane 的**啟動方式**見 §六（Task Scheduler，不是 nohup）。
-4. **PR 一開就派審**（不是等整批）。574 落地前的做法：
-   ```bash
-   pi -p --model openai-codex/gpt-5.6-sol --thinking high --exclude-tools edit,write \
-      --session-id review-prNNN "讀 <brief 路徑> 並照它審 PR #NNN"
-   ```
-   審查 brief 照 `/fleet-review`；round 記錄照 CLAUDE.md 的 review-fix loop（IN SCOPE／FOLLOW-UP ISSUE／P0-P1／RAN vs READ／cost／verdict），貼在 PR 上。
-   provider 過載時**改運輸不降模型**（§六）。
+4. **PR 一開就派審（自動，不用人手）**：本機 watcher（`scripts/pr-review-watch.sh`，由
+   `scripts/pr-review-launch.ps1` 註冊成隱藏排程任務 `edda-pr-review-watcher`）每 60 秒掃 open PR：
+   非 draft、head 沒審過的 PR 自動起唯讀審查者（gpt-5.6-sol，Task Scheduler 隱藏視窗，
+   worktree 在 `$EDDA_FLEET_SCRATCH/wt-review-prN`），判決（含 observed model、cost、釘死的 head SHA）
+   自動貼上 PR，並加 label `review:lgtm`／`review:changes-requested`；push 後 head 變了自動再審一輪。
+   檢查方式：`Get-ScheduledTask edda-pr-review-watcher`、`tail ~/.edda/fleet/watch.log`、PR 留言與 label。
+   provider 過載的改道規則（§六 `fleet.review-provider-overload`：pi 重試 → `edda dispatch --agent codex`
+   → 標 `review:unreviewed` 並停）內建在 watcher 裡。啟停、狀態檔與疑難排解見
+   `docs/guides/pr-review-watcher.md`。watcher **不合併**——合併仍在第 6 步、要授權。
 5. **收斂**：`/fleet-pr-loop` 的 bash driver 吐 `ACTION: REVIEW | FIX | DONE | BLOCKED`，照做到 LGTM；driver 不合併。
 6. **合併**（有授權時）：`git diff <LGTM 的 SHA>..origin/<branch>` 必須為空（判決還在），`gh pr checks` 7 綠，才合。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
 7. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
@@ -92,7 +94,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 |---|---|---|
 | 觀測 | `edda watch`、`edda peers`、`edda conduct status`、`gh pr checks`、`edda status` | dispatch lane 不在 peers（#569）；統一狀態面（#567）；孤兒回收（#573）；freshness（#604） |
 | 進度追蹤 | issue 標籤（pending → ready → PR → merged）；`edda task new <title> --after <id> --assignee <label>`、`edda task start <id>`、`edda task done <id> --receipt "<可驗的話>" --evidence <path>`；PR 上的審查輪 | 成本與模型不進帳本（#582、#574） |
-| 派發 | `edda dispatch --agent <claude|pi|codex> --prompt-file <f> [--session-id] [--cwd] [--budget-usd] [--timeout-sec] [--permission-mode] [--json]`；`edda conduct run <plan> --agent <x> [--cwd] [--dry-run] [--tmux] [--json]`；審查手動起 pi | 選模型／思考深度／工具（#574）；角色 profile（#593）；批次發射（`edda wave`，等 #576 與 #599） |
+｜ 派發 ｜ `edda dispatch --agent <claude|pi|codex> --prompt-file <f> [--session-id] [--cwd] [--budget-usd] [--timeout-sec] [--permission-mode] [--json]`；`edda conduct run <plan> --agent <x> [--cwd] [--dry-run] [--tmux] [--json]`；審查由本機 watcher 自動起並貼判決（`scripts/pr-review-watch.sh`，#632） ｜ 選模型/思考深度/工具(#574);角色 profile(#593);批次發射(`edda wave`,等 #576 與 #599) |
 | 討論提問 | 你 ↔ 控制者對話；控制者 ↔ 其他 Claude session 用跨 session 訊息；對 lane 用 `edda request "<label>" "<msg>"`（門鈴；lane 沒心跳時要 `--force` 排隊）；耐久的寫 issue／PR 留言 | 事件驅動門鈴（#545）；lane 心跳（#569） |
 | 決策 | `edda ask "<domain>"` → `edda decide "k=v" --reason "…"`（agent，unratified）→ `edda ratify <key>`（你） | 簽章身分（#609） |
 | 開單 | `/issue-intake`、`/issue-create`（四問接線審計必填） | 批次進料與確認表（#599）；驗收端 wiring verdict（#594） |
