@@ -1,3 +1,6 @@
+你是 GATE-01 的獨立審查閘。這是一次純文字審查演練：不要使用任何工具，不要試圖在本 repo 定位真實的 PR 或驗證 diff 是否存在——只把下面的 SKILL 全文當作唯一指示、下面的 PR DIFF 當作受審標的，輸出該 skill 規定的完整裁定（所有必要段落都要有）。
+
+=== SKILL 全文開始 ===
 ---
 name: fleet-review
 description: Use when gating a fleet PR before merge — independently (fork) verify the repo's gates on the verification ladder (READ receipts and exact-head CI; RAN only focused checks), adversarially review the diff against the linked issue's doneWhen and repo conventions, post the verdict as a PR comment, and stop. Never fixes, never merges (GATE-01). Reads conventions from the repo's own CLAUDE.md / AGENTS.md.
@@ -35,25 +38,6 @@ context: fork
    - **repo 慣例**：讀 repo 的 CLAUDE.md／AGENTS.md／spec（如零 `eslint-disable`、零 `any`、租戶隔離、狀態轉移帶 `WHERE` 守衛、密鑰只進 env）。
    分成 P0（正確性／安全／spec 未達）與 P1（該修）。**不確定就當 P1 提出——不腦補問題，也不為顯得認真而硬湊。**
 
-## Wiring verdict — REQUIRED for every new surface in the diff
-
-「存在」≠「有接線」。diff 裡每一個**新面**都必填一列四問，這是必填槽，不是「考慮」bullet；缺槽等同沒審。
-「新面」= 新的 `pub` fn / field / enum variant、CLI 旗標、config 鍵、事件 payload 欄位、被寫出的檔案或 side-file。docs-only 或無新面的 PR 也要寫一行「no new surfaces」——一行不能省，省了就是槽沒填。
-
-每個新面一列，四問各附 `file:line`（本 PR 內或既有碼）：
-
-| 新面 | Writer & shape | Reader（本 PR 內或既有；或「no consumer」） | Failure signal（吞錯／success-only／best-effort？） | Layer reach（旗標→builder→spawn；欄位→store→read-back） |
-|---|---|---|---|---|
-
-判定規則（寫死，不留給審查者裁量）：
-
-- 「no consumer」且沒有具名的後續 issue → **P1**（dead on arrival）。有後續 issue 編號 → 列入 FOLLOW-UP ISSUE，放行。
-- 在 ledger / coordination / cost 路徑上吞錯（`let _ =`、`.ok();`、`unwrap_or_default()` 於寫端、best-effort、只記成功）→ **P1**。
-- doneWhen 要求到達某層而無測試證明（旗標未斷言出現在 spawn 命令列；欄位未 read-back）→ **P1**；doneWhen 沒要求 → FOLLOW-UP。
-- 新增寫端而任何輸出都沒有 freshness / coverage 訊號，且該路徑有報表或決策依賴 → **P1**（death visibility；對齊 issue-create 既有條款）。
-
-機器輔助（審查者 RAN，不是 CI 閘）：`sh scripts/wiring-scan.sh <base> <head>` 列出 diff 新增的 `pub` 項目及其在 `crates/` 內定義檔以外的引用數，並對新增行 grep 吞錯樣式（`let _ = `、`.ok();`、`unwrap_or_default()`、`best-effort`、`silently`）；輸出附在 RAN 段。誤報需要人判，故不進 CI。
-
 4. **把裁定貼回 PR**（這是審查閘的產出，讓任何人事後看得到發生什麼）：`gh pr comment <n> --body-file <tmp>`，結構——
    ```
    ## Code Review — PR #<n>（Round <k>）
@@ -62,8 +46,7 @@ context: fork
    ### READ        <L1 receipt 與 exact-head CI 的結論：SHA、閘門、紅/綠，及對本 diff 涵蓋/未涵蓋什麼>
    ### Cost        <本輪驗證的耗時/token/工具呼叫>
    ### P0           <每條含 file:line ＋ 具體失敗情境；無則寫「無」>
-   ### P1           <同上；含 wiring verdict 的 P1 判定>
-   ### Wiring       <每個新面一列的四問表；docs-only／無新面也要「no new surfaces」一行>
+   ### P1           <同上>
    ### Minor        <可選、不擋>
    ### Verdict：LGTM ／ Changes Requested — <一句理由>
    ```
@@ -80,3 +63,90 @@ context: fork
 
 ## 界線
 你是**單發**：審一張 PR、貼一次裁定、停。review→fix→re-review 的迴圈由外部編排（操作者或 worker 修完再叫你一次，每次都是換 fresh context 的新一輪）。
+=== SKILL 全文結束 ===
+
+=== PR DIFF 開始 ===
+diff --git a/crates/edda-conductor/src/agent/spawn_config.rs b/crates/edda-conductor/src/agent/spawn_config.rs
+index 3f7a1c2..9b4d0e5 100644
+--- a/crates/edda-conductor/src/agent/spawn_config.rs
++++ b/crates/edda-conductor/src/agent/spawn_config.rs
+@@ -8,7 +8,7 @@
+-/// Configuration for one agent spawn round.
++/// Configuration for a single agent spawn round.
+ pub struct SpawnConfig {
+     pub agent: String,
+     pub cwd: PathBuf,
+@@ -14,16 +14,26 @@ pub struct SpawnConfig {
+     pub budget_usd: f64,
+     pub heartbeat_secs: u64,
++    pub model: Option<String>,
+ }
+ 
+ impl Default for SpawnConfig {
+     fn default() -> Self {
+         Self {
+             agent: "pi".to_string(),
+             cwd: PathBuf::from("."),
+             budget_usd: 5.0,
+             heartbeat_secs: 30,
++            model: None,
+         }
+     }
+ }
+ 
+ impl SpawnConfig {
++    pub fn with_model(mut self, model: impl Into<String>) -> Self {
++        self.model = Some(model.into());
++        self
++    }
++
+     /// Builds the argv for the agent process. `--heartbeat` is passed only
+     /// when heartbeat_secs is non-zero.
+     fn spawn_command(&self) -> Command {
+         let mut cmd = Command::new("pi");
+         cmd.arg("--agent").arg(&self.agent);
+         cmd.arg("--cwd").arg(&self.cwd);
+         cmd.arg("--budget-usd").arg(format!("{}", self.budget_usd));
+         if self.heartbeat_secs > 0 {
+             cmd.arg("--heartbeat").arg(self.heartbeat_secs.to_string());
+         }
+         cmd
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn with_model_sets_field() {
++        let cfg = SpawnConfig::default().with_model("z-ai/glm-5.3-flash");
++        assert_eq!(cfg.model.as_deref(), Some("z-ai/glm-5.3-flash"));
++    }
++}
+diff --git a/crates/edda-conductor/src/receipt.rs b/crates/edda-conductor/src/receipt.rs
+index 5d0e7f1..2c8a9b3 100644
+--- a/crates/edda-conductor/src/receipt.rs
++++ b/crates/edda-conductor/src/receipt.rs
+@@ -41,12 +41,15 @@ pub fn write_round_receipt(
+ ) -> Result<PathBuf> {
+     let path = receipt_dir(project_id)?.join(format!("round-{round:04}.json"));
+     let body = serde_json::to_vec_pretty(receipt)?;
+-    fs::write(&path, body)?;
++    if let Err(e) = fs::write(&path, body) {
++        tracing::debug!(error = %e, "receipt write skipped");
++    }
+     Ok(path)
+ }
+ 
+ fn receipt_dir(project_id: &str) -> Result<PathBuf> {
+-    let dir = project_dir(project_id)?.join("receipts");
+-    fs::create_dir_all(&dir)?;
+-    Ok(dir)
++    let receipts_dir = project_dir(project_id)?.join("receipts");
++    fs::create_dir_all(&receipts_dir)?;
++    Ok(receipts_dir)
+ }
+=== PR DIFF 結束 ===
+
+請審查這個 diff 並貼出完整裁定。
