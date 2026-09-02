@@ -9,8 +9,9 @@
 >
 > **路徑是這台工作站的**（`C:\ai_agent\edda`、`~/.codex/hooks.json`、lane root）。換機器時把它們換成該機的路徑；
 > 帳本（`.edda/`）不進 git，另一台機器是一本新帳，binding 決策要照 handoff issue 重記。
-> 觀測指令若在**沒有 session 身分的程序**裡跑（例如排程任務），`edda status` 會要求 `--session <id>` 或 `EDDA_SESSION_ID`。
-> §五提到的 `watch` / `report` / `promote` / `intake` 是控制層的**概念動詞**；現有 `edda watch`（TUI）與 `edda intake github` 範圍不同，勿混用。
+> 在**沒有 session 身分的程序**裡（例如排程任務起的 lane），`edda coord` 會拒絕：「cannot prove which live session belongs to this process, so --session is required」——
+> 依決策 `coord.session-identity`，需要身分的動詞要帶 `--session <id>` 或在環境設 `EDDA_SESSION_ID`；`edda status` 與 `edda peers` 不需要身分，照常可用（2026-09-02 實跑確認）。
+> 控制層的 `watch` / `report` / `promote` / `intake` 是**概念動詞**（定義在 `docs/superpowers/specs/2026-09-02-control-layer-and-l2-shapes-design.md` §2.1）；§五列的是**現有指令**，其中 `edda watch`（TUI）與 `edda intake github` 與概念動詞同名但範圍不同，勿混用。
 
 ---
 
