@@ -340,12 +340,13 @@ jobs:
           echo "Publish order covers all $(echo "$CRATES_PUBLISH_ORDER" | wc -w) workspace crates"
 
       - name: Publish workspace crates
+        id: publish
         shell: bash
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          tag="${{ needs.create-release.outputs.tag }}"
           failures=0
+          failed_crates=""
           for crate in $CRATES_PUBLISH_ORDER; do
             echo "::group::cargo publish -p $crate"
             if out="$(cargo publish --locked -p "$crate" 2>&1)"; then
@@ -362,18 +363,33 @@ jobs:
               if grep -Eq "already uploaded|already exists" <<<"$out"; then
                 echo "::notice::$crate is already on crates.io; treating as no-op and continuing."
               else
-                echo "::error::cargo publish -p $crate failed (exit $status)."
+                # Recorded, not fatal: the crates.io presence check below is
+                # the arbiter of final state. A reworded duplicate error, a
+                # timeout, or a rate-limit reply must not fail a run whose
+                # versions all landed, or a re-run could never converge.
+                echo "::warning::cargo publish -p $crate failed (exit $status); deferring to the crates.io presence check."
                 failures=$((failures + 1))
+                failed_crates="${failed_crates}${failed_crates:+ }$crate"
               fi
             fi
           done
+          {
+            echo "failures=$failures"
+            echo "failed-crates=$failed_crates"
+          } >> "$GITHUB_OUTPUT"
           if [ "$failures" -gt 0 ]; then
-            echo "::error::GitHub release ${tag} shipped but crates.io did not fully sync (${failures} crate(s) failed to publish). Release assets are NOT rolled back. Re-run this job after resolving the failure; crates already uploaded are treated as no-ops."
-            exit 1
+            echo "$failures crate(s) reported a publish error ($failed_crates); the verification step decides this job's outcome."
           fi
 
+      # Judges the final state by presence, as GH-648 requires, and therefore
+      # decides the job: it must run even when the publish step above failed
+      # outright, and its exit code — not cargo's — is the verdict.
       - name: Verify every crate version is on crates.io
+        if: always() && steps.publish.outcome != 'skipped'
         shell: bash
+        env:
+          PUBLISH_FAILURES: ${{ steps.publish.outputs.failures }}
+          PUBLISH_FAILED_CRATES: ${{ steps.publish.outputs.failed-crates }}
         run: |
           tag="${{ needs.create-release.outputs.tag }}"
           version="${tag#v}"
@@ -393,6 +409,9 @@ jobs:
           if [ "$missing" -gt 0 ]; then
             echo "::error::GitHub release ${tag} shipped but crates.io did not sync: ${missing} of ${total} crates missing. Release assets are NOT rolled back. Re-run this job to retry; crates already uploaded are treated as no-ops."
             exit 1
+          fi
+          if [ "${PUBLISH_FAILURES:-0}" -gt 0 ]; then
+            echo "::notice::cargo publish reported an error for ${PUBLISH_FAILURES} crate(s) (${PUBLISH_FAILED_CRATES}), but all ${total} versions are present on crates.io at ${version}. Final state is judged by presence, so this run is green."
           fi
           echo "All ${total} workspace crates are present on crates.io at ${version}"
 
