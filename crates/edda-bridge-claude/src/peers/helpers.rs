@@ -139,6 +139,27 @@ pub fn format_age(secs: u64) -> String {
     }
 }
 
+/// Coarse age for the per-turn peer block (GH-678).
+///
+/// The per-turn injection is deduped by hashing its rendered bytes
+/// (`state::is_same_as_last_inject`). `format_age` emits wall-clock distance
+/// ("11s ago"), which differs on essentially every turn while any peer is
+/// heartbeating, so the hash never matches and the block is re-injected
+/// every turn. This variant quantizes to minute/hour boundaries: a live
+/// peer's age hovers inside the same bucket across turns (identical bytes,
+/// dedup fires), while crossing a real staleness boundary still changes the
+/// block. The first-contact protocol render keeps `format_age` — it fires
+/// once per 0→N transition, so a varying age there costs nothing.
+pub fn format_age_coarse(secs: u64) -> String {
+    if secs < 60 {
+        "<1m ago".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else {
+        format!("{}h ago", secs / 3600)
+    }
+}
+
 /// Compare RFC3339 timestamps without discarding fractional seconds.
 pub fn timestamp_at_or_after(lhs: &str, rhs: &str) -> bool {
     let format = &time::format_description::well_known::Rfc3339;

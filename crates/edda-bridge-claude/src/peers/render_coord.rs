@@ -4,7 +4,8 @@ use super::autoclaim::derive_scope_from_files;
 use super::board::{compute_board_state, partition_requests_for_session};
 use super::discovery::discover_active_peers;
 use super::helpers::{
-    self, format_age, format_peer_suffix, session_label_from_board, truncate_to_budget,
+    self, format_age, format_age_coarse, format_peer_suffix, session_label_from_board,
+    truncate_to_budget,
 };
 use super::read_heartbeat;
 use super::{
@@ -341,7 +342,11 @@ pub(crate) fn render_peer_updates_with(
 
     // Peer activity (tasks → focus files → bare label)
     for p in peers.iter().take(3) {
-        let age = format_age(p.age_secs);
+        // GH-678: coarse age, not format_age. This block is deduped by hashing
+        // its rendered bytes; a wall-clock age differs every turn and defeats
+        // the dedup. format_age_coarse renders identical bytes for the same
+        // peer state while real staleness transitions still change the block.
+        let age = format_age_coarse(p.age_secs);
         let branch_suffix = format_peer_suffix(p.branch.as_deref(), p.current_phase.as_deref());
         if !p.task_subjects.is_empty() {
             for t in p.task_subjects.iter().take(1) {

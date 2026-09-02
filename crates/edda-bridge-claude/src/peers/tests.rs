@@ -197,6 +197,115 @@ fn format_age_display() {
     assert_eq!(format_age(3700), "1h ago");
 }
 
+/// GH-678: the per-turn peer block is deduped by hashing its rendered bytes.
+/// The hashed string must not carry a wall-clock-relative age ("11s ago"),
+/// which differs on essentially every turn while any peer is active.
+/// Same peer set, small age delta → the render → wrap → hash path must
+/// produce the same hash, so `is_same_as_last_inject` fires and the
+/// UserPromptSubmit hook returns an empty result.
+#[test]
+fn per_turn_peer_block_hash_stable_across_small_age_delta() {
+    let pid = "test_gh678_hash_stable";
+    let sid = "me";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    let make_peers = |age: u64| -> Vec<PeerSummary> {
+        vec![
+            PeerSummary {
+                session_id: "p1".into(),
+                label: "worker-1".into(),
+                age_secs: age,
+                last_heartbeat: now_rfc3339(),
+                focus_files: vec![],
+                task_subjects: vec!["fix bug".into()],
+                files_modified_count: 1,
+                recent_commits: vec![],
+                claimed_paths: vec!["src/a/*".into()],
+                branch: Some("main".into()),
+                current_phase: None,
+            },
+            PeerSummary {
+                session_id: "p2".into(),
+                label: "worker-2".into(),
+                age_secs: age + 7,
+                last_heartbeat: now_rfc3339(),
+                focus_files: vec!["src/b/mod.rs".into()],
+                task_subjects: vec![],
+                files_modified_count: 2,
+                recent_commits: vec![],
+                claimed_paths: vec![],
+                branch: Some("main".into()),
+                current_phase: None,
+            },
+        ]
+    };
+    let board = BoardState::default();
+
+    // Turn 1: peers at 11s / 18s.
+    let first = render_peer_updates_with(&make_peers(11), &board, pid, sid).unwrap();
+    let wrapped_first = crate::render::wrap_boundary(&first);
+    assert!(!crate::state::is_same_as_last_inject(
+        pid,
+        sid,
+        &wrapped_first
+    ));
+    crate::state::write_inject_hash(pid, sid, &wrapped_first);
+
+    // Turn 2: same peers, ages drifted to 5s / 12s — no semantic change.
+    let second = render_peer_updates_with(&make_peers(5), &board, pid, sid).unwrap();
+    let wrapped_second = crate::render::wrap_boundary(&second);
+
+    assert_eq!(
+        first, second,
+        "per-turn peer block must render identical bytes for the same peer state\n--- turn 1 ---\n{first}\n--- turn 2 ---\n{second}"
+    );
+    assert!(
+        crate::state::is_same_as_last_inject(pid, sid, &wrapped_second),
+        "dedup must fire: identical peer state must hash identically\n--- turn 1 ---\n{first}\n--- turn 2 ---\n{second}"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+/// GH-678 companion: the coarse rendering must not suppress a real
+/// transition. A peer crossing a staleness boundary (fresh → genuinely
+/// aging out) must still change the block.
+#[test]
+fn per_turn_peer_block_changes_on_real_staleness_transition() {
+    let pid = "test_gh678_stale_transition";
+    let sid = "me";
+    let _ = edda_store::ensure_dirs(pid);
+    let _ = fs::remove_file(coordination_path(pid));
+
+    let make_peers = |age: u64| -> Vec<PeerSummary> {
+        vec![PeerSummary {
+            session_id: "p1".into(),
+            label: "worker-1".into(),
+            age_secs: age,
+            last_heartbeat: now_rfc3339(),
+            focus_files: vec![],
+            task_subjects: vec!["fix bug".into()],
+            files_modified_count: 1,
+            recent_commits: vec![],
+            claimed_paths: vec![],
+            branch: Some("main".into()),
+            current_phase: None,
+        }]
+    };
+    let board = BoardState::default();
+
+    let fresh = render_peer_updates_with(&make_peers(30), &board, pid, sid).unwrap();
+    let aged = render_peer_updates_with(&make_peers(90), &board, pid, sid).unwrap();
+
+    assert_ne!(
+        fresh, aged,
+        "a peer crossing a staleness boundary must change the block\n--- fresh ---\n{fresh}\n--- aged ---\n{aged}"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
 #[test]
 fn parse_rfc3339_basic() {
     let epoch = parse_rfc3339_to_epoch("2026-02-16T10:05:23Z").unwrap();
