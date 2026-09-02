@@ -261,6 +261,41 @@ pub fn record_phase_failed_with_plan(
     );
 }
 
+/// Record a gate timeout in the workspace ledger with the honest
+/// classification (GH-552): the phase's work completed and its checks
+/// passed — nothing failed — so the note carries `status:
+/// "gate_timed_out"`, never "failed".
+pub fn record_phase_gate_timed_out(
+    cwd: &Path,
+    plan_id: Option<&str>,
+    phase_id: &str,
+    cost_usd: Option<f64>,
+    error: &str,
+) {
+    let error_str = if error.len() > 200 {
+        format!("{}...", truncate_str(error, 200))
+    } else {
+        error.to_string()
+    };
+    let cost_str = cost_usd.map(|c| format!(" [${c:.3}]")).unwrap_or_default();
+    let text = format!("Phase \"{phase_id}\" gate timed out{cost_str}: {error_str}");
+    let mut tags = vec!["conductor".to_string(), format!("phase:{phase_id}")];
+    tags.push("gate_timeout".to_string());
+    let payload = serde_json::json!({
+        "plan_id": plan_id,
+        "phase_id": phase_id,
+        "status": "gate_timed_out",
+        "cost_usd": cost_usd,
+    });
+    append_ledger_note_best_effort(
+        &format!("phase \"{phase_id}\" gate timed out"),
+        cwd,
+        &text,
+        &tags,
+        Some(("conductor_phase", payload)),
+    );
+}
+
 /// Record plan completion in the workspace ledger with the honest total
 /// cost: `total_cost_usd: None` (unmeasured — no phase ever recorded a
 /// measured cost) serializes as JSON null, never 0.0 (#533 discipline).
