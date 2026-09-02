@@ -3023,3 +3023,85 @@ fn hand_edited_cache_with_correct_hash_cannot_suppress_unnoted_session() {
         "the re-digest must cover the Edit the hand-edited cache claimed consumed"
     );
 }
+
+// ── GH-585: estimated_cost_usd must not conflate unmeasured with zero ──
+
+#[test]
+fn digest_cost_is_null_when_session_has_no_usage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lines = vec![make_envelope("PostToolUse", "Read", serde_json::json!({}))];
+    let path = write_session_ledger(tmp.path(), &lines);
+
+    let event = extract_session_digest(&path, "sess-nousage", "main", None).unwrap();
+    let cost = &event.payload["session_stats"]["estimated_cost_usd"];
+    assert!(
+        cost.is_null(),
+        "a session with no usage data must record null (unmeasured), got {cost}"
+    );
+}
+
+#[test]
+fn digest_text_omits_cost_when_unmeasured() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lines = vec![make_envelope("PostToolUse", "Read", serde_json::json!({}))];
+    let path = write_session_ledger(tmp.path(), &lines);
+
+    let event = extract_session_digest(&path, "sess-nousage", "main", None).unwrap();
+    let text = event.payload["text"].as_str().unwrap();
+    assert!(
+        !text.contains('$'),
+        "unmeasured cost must not render a dollar amount, got: {text}"
+    );
+}
+
+fn legacy_prev_digest_json(cost_field: serde_json::Value) -> String {
+    let mut v = serde_json::json!({
+        "session_id": "sess-legacy",
+        "completed_at": "2026-02-14T10:00:00Z",
+        "outcome": "completed",
+        "duration_minutes": 3,
+        "completed_tasks": [],
+        "pending_tasks": [],
+        "commits": [],
+        "files_modified_count": 0,
+        "total_edits": 0,
+    });
+    if !cost_field.is_null() {
+        v["estimated_cost_usd"] = cost_field;
+    }
+    serde_json::to_string(&v).unwrap()
+}
+
+#[test]
+fn prev_digest_legacy_zero_cost_reads_as_unmeasured() {
+    // Old digests wrote 0.0 for unmeasured sessions. Reading them must not
+    // fail, and the value must be treated as unmeasured (null), not as a
+    // measured zero.
+    let json = legacy_prev_digest_json(serde_json::json!(0.0));
+    let digest: PrevDigest = serde_json::from_str(&json).expect("legacy 0.0 must not fail to read");
+    let round = serde_json::to_value(&digest).unwrap();
+    assert!(
+        round["estimated_cost_usd"].is_null(),
+        "legacy 0.0 must be treated as unmeasured, got {}",
+        round["estimated_cost_usd"]
+    );
+}
+
+#[test]
+fn prev_digest_missing_cost_field_reads_as_unmeasured() {
+    let json = legacy_prev_digest_json(serde_json::Value::Null);
+    let digest: PrevDigest = serde_json::from_str(&json).expect("missing field must not fail");
+    let round = serde_json::to_value(&digest).unwrap();
+    assert!(round["estimated_cost_usd"].is_null());
+}
+
+#[test]
+fn prev_digest_measured_cost_survives_round_trip() {
+    let json = legacy_prev_digest_json(serde_json::json!(0.0125));
+    let digest: PrevDigest = serde_json::from_str(&json).expect("measured cost must not fail");
+    let round = serde_json::to_value(&digest).unwrap();
+    assert_eq!(
+        round["estimated_cost_usd"], 0.0125,
+        "a measured cost must not be rewritten to unmeasured"
+    );
+}
