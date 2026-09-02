@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use edda_notify::NotifyEvent;
 
 /// Notification interface for plan events.
@@ -30,10 +32,7 @@ impl Notifier for StdoutNotifier {
 /// GH-564/#545 seam: a [`Notifier`] backed by edda-notify channel dispatch.
 /// Plain messages fall through to the fallback notifier (stdout stays the
 /// always-on channel per #545); phase terminal events go to every configured
-/// channel whose `events` list matches `phase_terminal`. Channel selection
-/// (`NotifyConfig`, loaded from `.edda/config.json`) and wiring this into
-/// `conduct run` via flag/config is #545's remaining work — this type only
-/// provides the implementation behind that seam.
+/// channel whose `events` list matches `phase_terminal`.
 pub struct ChannelNotifier {
     config: edda_notify::NotifyConfig,
     fallback: Box<dyn Notifier>,
@@ -42,6 +41,19 @@ pub struct ChannelNotifier {
 impl ChannelNotifier {
     pub fn new(config: edda_notify::NotifyConfig, fallback: Box<dyn Notifier>) -> Self {
         Self { config, fallback }
+    }
+
+    /// GH-564 P1-1: build the production notifier for `conduct run`.
+    /// Loads the channel configuration from `{repo}/.edda/config.json` and
+    /// keeps stdout as the always-on fallback. With no channels configured
+    /// this behaves exactly like a bare [`StdoutNotifier`]: plain messages
+    /// print as before and terminal dispatch is a no-op over zero channels.
+    pub fn for_repo(repo_root: &Path) -> Self {
+        let paths = edda_ledger::EddaPaths::discover(repo_root);
+        Self::new(
+            edda_notify::NotifyConfig::load(&paths),
+            Box::new(StdoutNotifier),
+        )
     }
 }
 

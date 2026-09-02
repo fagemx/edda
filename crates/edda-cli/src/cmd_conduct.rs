@@ -6,7 +6,7 @@ use edda_conductor::agent::launcher::phase_session_id;
 use edda_conductor::check::engine::CheckEngine;
 use edda_conductor::plan::parser::load_plan;
 use edda_conductor::plan::schema::{GateKind, OnReject, Phase, Plan};
-use edda_conductor::runner::notify::StdoutNotifier;
+use edda_conductor::runner::notify::ChannelNotifier;
 use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
 use edda_conductor::state::persist::{load_state, save_state};
@@ -241,7 +241,10 @@ pub fn run(
         },
     )?;
     let engine = CheckEngine::new(cwd.clone());
-    let notifier = StdoutNotifier;
+    // GH-564 P1-1: the run notifier must deliver configured channel events —
+    // a bare StdoutNotifier silently drops every phase terminal event. With
+    // no channels configured this is behaviorally identical to stdout-only.
+    let notifier = ChannelNotifier::for_repo(&cwd);
     let mut budget = BudgetTracker::new(plan.budget_usd);
     let cancel = CancellationToken::new();
 
@@ -779,6 +782,7 @@ mod tests {
     /// every event being dropped by a bare `StdoutNotifier`.
     #[test]
     fn run_notifier_delivers_phase_terminal_to_configured_channel() {
+        use edda_conductor::runner::notify::Notifier;
         use std::io::Read;
         use std::time::Duration;
 
@@ -811,7 +815,9 @@ mod tests {
         // Dispatch finished before notify_phase_terminal returned; the local
         // webhook must have received the event.
         let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         let mut request = String::new();
         let mut buf = [0u8; 8192];
         loop {

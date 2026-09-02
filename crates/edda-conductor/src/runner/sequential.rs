@@ -24,7 +24,7 @@ use anyhow::Result;
 use edda_core::VerdictPayload;
 use edda_ledger::VerdictRecord;
 use edda_notify::NotifyEvent;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -63,7 +63,16 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
     edda::ensure_init(cwd);
 
     // Detect stale phases from previous run
-    detect_stale_phases(state, plan);
+    // GH-564 P1-2: each Running/Checking → Stale transition on resume is a
+    // terminal transition — notify so the controller reacts instead of
+    // polling stdout tails.
+    for (phase_id, attempts) in detect_stale_phases(state, plan) {
+        notifier
+            .notify_phase_terminal(phase_terminal_event(
+                &plan.name, &phase_id, "Stale", attempts, None,
+            ))
+            .await;
+    }
 
     // Record plan start
     if state.started_at.is_none() {
@@ -284,13 +293,18 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         &["conductor", "verdict"],
                     );
                     let approved_ps = state.get_phase(&gated_id)?;
+                    // GH-564 P1-3: the approved phase's agent final output
+                    // (last line = PR URL by convention) was parked at gate
+                    // entry and survives restarts — restore it, never drop
+                    // it to null.
+                    let final_output = load_gate_output(cwd, &plan.name, &gated_id);
                     notifier
                         .notify_phase_terminal(phase_terminal_event(
                             &plan.name,
                             &gated_id,
                             "Passed",
                             approved_ps.attempts,
-                            None,
+                            final_output.as_deref(),
                         ))
                         .await;
                 }
@@ -358,13 +372,17 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                             env_retries: gate_ps.env_retries,
                             attempt_charged: true,
                         });
+                        // GH-564 P1-3: same parked output as the approved
+                        // branch — the agent did produce a final line before
+                        // the gate rejected it.
+                        let final_output = load_gate_output(cwd, &plan.name, &gated_id);
                         notifier
                             .notify_phase_terminal(phase_terminal_event(
                                 &plan.name,
                                 &gated_id,
                                 "Failed",
                                 gate_ps.attempts,
-                                None,
+                                final_output.as_deref(),
                             ))
                             .await;
                     } else {
@@ -465,13 +483,15 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         env_retries: gate_ps.env_retries,
                         attempt_charged: true,
                     });
+                    // GH-564 P1-3: same parked output as the approved branch.
+                    let final_output = load_gate_output(cwd, &plan.name, &gated_id);
                     notifier
                         .notify_phase_terminal(phase_terminal_event(
                             &plan.name,
                             &gated_id,
                             "Failed",
                             gate_ps.attempts,
-                            None,
+                            final_output.as_deref(),
                         ))
                         .await;
                 }
@@ -960,6 +980,15 @@ async fn process_phase_result(
                                     ..Default::default()
                                 }),
                             )?;
+                            // GH-564 P1-3: park the agent's final output so
+                            // the verdict site can still report it after a
+                            // restart.
+                            persist_gate_output(
+                                cwd,
+                                &plan.name,
+                                phase_id,
+                                final_output_line(result_text.as_deref()).as_deref(),
+                            );
                             println!("\n  ⏸ Phase \"{phase_id}\" AWAITING_VERDICT — waiting for an external verdict");
                             println!("    subject:  {subject}");
                             println!("    gate_sha: {gate_sha}");
@@ -1244,6 +1273,43 @@ fn final_output_line(result_text: Option<&str>) -> Option<String> {
         .map(str::trim)
         .find(|l| !l.is_empty())
         .map(str::to_string)
+}
+
+/// GH-564 P1-3: where a gated phase's agent final output is parked while the
+/// plan waits for the external verdict. `{cwd}/.edda/conductor/{plan}/{phase}.gate_output`.
+/// Survives a conductor restart, so the verdict site can restore the output
+/// into the terminal notification instead of dropping it to `null`.
+fn gate_output_path(cwd: &Path, plan_name: &str, phase_id: &str) -> PathBuf {
+    cwd.join(".edda")
+        .join("conductor")
+        .join(plan_name)
+        .join(format!("{phase_id}.gate_output"))
+}
+
+/// GH-564 P1-3: persist the agent's final output line when the phase enters
+/// AWAITING_VERDICT. Overwritten on every gate (re-)entry, so a redispatch
+/// cycle always leaves the latest output here. Best-effort: a failed write
+/// degrades to the previous (null) behavior, never to a wrong output.
+fn persist_gate_output(cwd: &Path, plan_name: &str, phase_id: &str, final_output: Option<&str>) {
+    let Some(output) = final_output else {
+        return;
+    };
+    let path = gate_output_path(cwd, plan_name, phase_id);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = edda_store::write_atomic(&path, output.as_bytes());
+}
+
+/// GH-564 P1-3: read back the parked final output at the gate verdict site.
+fn load_gate_output(cwd: &Path, plan_name: &str, phase_id: &str) -> Option<String> {
+    let output = std::fs::read_to_string(gate_output_path(cwd, plan_name, phase_id)).ok()?;
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 async fn handle_on_fail(
@@ -2955,7 +3021,9 @@ phases:
             "a",
             vec![PhaseResult::AgentDone {
                 cost_usd: None,
-                result_text: Some("opened pull request\nPR: https://github.com/x/y/pull/620".into()),
+                result_text: Some(
+                    "opened pull request\nPR: https://github.com/x/y/pull/620".into(),
+                ),
             }],
         );
         let plan = parse_plan(GATED_YAML).unwrap();
