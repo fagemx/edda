@@ -7,17 +7,31 @@ Thanks for your interest in contributing! This guide covers how to build, test, 
 - Rust stable (1.75+)
 - Git
 
-## Git Hooks (optional)
+## Git Hooks
 
-We use [Lefthook](https://github.com/evilmartians/lefthook) for local pre-commit and pre-push checks:
+Enable the git-native pre-commit and commit-msg hooks (zero external
+dependencies — no lefthook, no npm, nothing to install):
 
 ```bash
-npm install -g @evilmartians/lefthook
-lefthook install
+sh scripts/githooks/install.sh
 ```
 
-This runs `cargo fmt --check` on commit and `cargo clippy --workspace -- -D warnings` on push.
-Lefthook is local-only and does not affect CI.
+On every commit this enforces the L0 gates from `.claude/CLAUDE.md` on the
+staged paths:
+
+- any staged file larger than 1 MB is rejected
+- staged `*.rs` or `Cargo.*` → `cargo fmt --all --check`
+- staged `crates/<crate>/…` → `cargo clippy -p <crate> --all-targets -- -D warnings` for each touched crate
+- staged `*.md` → `sh scripts/lint-markdown-content.sh`
+- conventional-commit subject check (`<type>(<scope>): <description>`)
+
+Merge commits and `wip(…)` lane checkpoints pass the message check.
+`SKIP_CLIPPY=1 git commit …` skips the clippy gate; the hook then appends
+`[skip-clippy]` to the commit message so reviewers can see the skip.
+`git commit --no-verify` bypasses all local hooks — CI still gates every push.
+
+The hook scripts are POSIX sh and live in `scripts/githooks/`; a self-test
+that exercises all scenarios in a throwaway repo is `sh scripts/githooks/test.sh`.
 
 ## Build and Test
 
@@ -52,12 +66,14 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 feat(cli): add --json flag to edda log
 fix(bridge): resolve session identity via heartbeat
 test(ledger): add hash chain integrity tests
-docs: update README quick start section
-chore: apply cargo fmt across workspace
+docs(contributing): update README quick start section
+chore(repo): apply cargo fmt across workspace
 refactor(store): simplify atomic write logic
 ```
 
-**Prefixes**: `feat`, `fix`, `test`, `docs`, `chore`, `refactor`, `perf`
+**Prefixes**: `feat`, `fix`, `test`, `docs`, `chore`, `refactor`, `ci`, `perf`,
+`style`, `build` — enforced by the `commit-msg` hook above (merge commits and
+`wip(…)` lane checkpoints are exempt)
 
 **Scope** (optional): the crate or area being changed — `cli`, `bridge`, `ledger`, `tui`, `mcp`, `search`, `store`, `core`
 

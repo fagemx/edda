@@ -1,0 +1,109 @@
+#!/bin/sh
+# Git-native pre-commit gate (zero external dependencies; POSIX sh).
+# Enable with: sh scripts/githooks/install.sh   (sets core.hooksPath)
+#
+# L0 gates from .claude/CLAUDE.md, enforced on staged paths:
+#   - any staged file > 1 MB       -> reject
+#   - staged *.rs / Cargo.*        -> cargo fmt --all --check
+#   - staged crates/<crate>/...    -> cargo clippy -p <crate> --all-targets -- -D warnings
+#   - staged *.md                  -> sh scripts/lint-markdown-content.sh
+#
+# Bypass everything with `git commit --no-verify` (CI still gates every push).
+# Skip only clippy with `SKIP_CLIPPY=1 git commit ...`: pre-commit leaves a
+# marker and commit-msg appends `[skip-clippy]` to the message tail so that
+# reviewers can see the skip.
+
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+skip_marker=$(git rev-parse --git-path SKIP_CLIPPY)
+# Drop any stale marker from an aborted commit before deciding fresh.
+rm -f "$skip_marker"
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -n "$staged" ] || exit 0
+
+fail() {
+    echo "pre-commit: $1" >&2
+    echo "pre-commit: commit blocked — fix the issue, or bypass with git commit --no-verify" >&2
+    exit 1
+}
+
+# --- 1 MB staged-size cap ------------------------------------------------
+
+max_bytes=1048576
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    blob=$(git ls-files -s -- "$f" | awk '{print $2}')
+    [ -n "$blob" ] || continue
+    size=$(git cat-file -s "$blob")
+    if [ "$size" -gt "$max_bytes" ]; then
+        fail "staged file '$f' is $size bytes — the limit is 1 MB ($max_bytes)"
+    fi
+done <<EOF
+$staged
+EOF
+
+# --- classify staged paths ------------------------------------------------
+
+fmt_needed=0
+md_needed=0
+crates=""
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+        *.rs | Cargo.toml | Cargo.lock | */Cargo.toml | */Cargo.lock)
+            fmt_needed=1
+            ;;
+    esac
+    case "$f" in
+        crates/*)
+            c=${f#crates/}
+            c=${c%%/*}
+            [ -n "$c" ] || continue
+            case " $crates " in
+                *" $c "*) ;;
+                *) crates="$crates $c" ;;
+            esac
+            ;;
+    esac
+    case "$f" in
+        *.md) md_needed=1 ;;
+    esac
+done <<EOF
+$staged
+EOF
+
+# --- cargo fmt ------------------------------------------------------------
+
+if [ "$fmt_needed" -eq 1 ]; then
+    echo "pre-commit: cargo fmt --all --check"
+    cargo fmt --all --check || fail "cargo fmt --all --check failed"
+fi
+
+# --- cargo clippy (touched crates only; SKIP_CLIPPY=1 skips) ---------------
+
+if [ -n "$crates" ]; then
+    if [ -n "${SKIP_CLIPPY:-}" ]; then
+        : > "$skip_marker"
+        echo "pre-commit: SKIP_CLIPPY=1 — clippy skipped for:$crates"
+        echo "pre-commit: commit-msg will append [skip-clippy] to the message"
+    else
+        for c in $crates; do
+            echo "pre-commit: cargo clippy -p $c --all-targets -- -D warnings"
+            cargo clippy -p "$c" --all-targets -- -D warnings \
+                || fail "cargo clippy -p $c failed (or skip with SKIP_CLIPPY=1)"
+        done
+    fi
+fi
+
+# --- markdown content lint --------------------------------------------------
+
+if [ "$md_needed" -eq 1 ]; then
+    echo "pre-commit: sh scripts/lint-markdown-content.sh"
+    sh scripts/lint-markdown-content.sh || fail "markdown content lint failed"
+fi
+
+exit 0

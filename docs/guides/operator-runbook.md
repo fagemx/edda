@@ -77,6 +77,11 @@
 
 ## 四、Lane 的三件事
 
+開工先裝 hooks（每個 worktree 一次）：`sh scripts/githooks/install.sh`——之後 L0 閘由
+pre-commit／commit-msg 機器擋（1 MB 上限、staged `*.rs`/`Cargo.*` 跑 `cargo fmt --all --check`、
+touched `crates/*` 跑 clippy、staged `*.md` 跑 markdown lint、conventional commit 格式；
+`SKIP_CLIPPY=1` 跳過 clippy 並自動在訊息尾巴補 `[skip-clippy]`；`--no-verify` 全跳，CI 仍擋）。
+
 1. 在指定 worktree 與分支上做 brief 說的那一件事——不 checkout main、不 pull、不開別的分支。
 2. L0 閘（`cargo fmt --all --check`；`cargo clippy -p <crate> --all-targets -- -D warnings`；`cargo test -p <crate>`），
    凍結 SHA 前跑一次 L1（`CARGO_INCREMENTAL=0`，workspace 全套），記 gate receipt（SHA、閘、toolchain、lane、結果）。
