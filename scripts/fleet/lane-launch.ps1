@@ -4,9 +4,13 @@
 # the controller's tool shell runs inside a Windows Job Object, so nohup /
 # Start-Process children die with the session. The lane is therefore registered
 # as a hidden Scheduled Task (parent = svchost.exe) running a generated wrapper
-# that sets UTF-8 encodings, HOME, GIT_CONFIG_PARAMETERS and CARGO_TARGET_DIR
-# explicitly (all empty or hostile in the task environment), then runs
-# `edda dispatch`.
+# that sets UTF-8 encodings, HOME and GIT_CONFIG_PARAMETERS explicitly (empty
+# or hostile in the task environment), then runs `edda dispatch`.
+#
+# CARGO_TARGET_DIR is set ONLY when -BuildLane names one of the four ratified
+# build lanes (see below): a session that compiles nothing has no build lane
+# (.claude/CLAUDE.md, verification.cost-discipline), while a compiling session
+# must be given one of the four — the launcher refuses any other name.
 #
 # Every artifact the launcher writes lives under -LogDir (resolved to an
 # absolute path before anything is written or embedded — the task runs from a
