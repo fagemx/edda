@@ -84,6 +84,9 @@ jobs:
       - run: rustup toolchain install stable --profile minimal
       - uses: Swatinem/rust-cache@v2
       - run: cargo test ${{ matrix.args }}
+      - name: Verify CLI reference coverage
+        if: runner.os == 'Linux'
+        run: python3 scripts/check_cli_reference.py
 
   # Aggregate gate: the single check the branch ruleset will pin instead of
   # enumerating the seven individual jobs. `if: always()` keeps it running even

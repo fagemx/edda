@@ -51,6 +51,50 @@ jobs:
             printf '%s\n' "$mismatches"
             exit 1
           fi
+      - name: Verify crates.io release parity
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mapfile -t crates < <(
+            cargo metadata --locked --no-deps --format-version 1 \
+              | jq -r '
+                  .workspace_members as $members
+                  | .packages[]
+                  | select(.id as $id | $members | index($id))
+                  | select(.publish != [])
+                  | .name
+                ' \
+              | tr -d '\r'
+          )
+
+          if ((${#crates[@]} == 0)); then
+            echo "::error::No publishable workspace crates found"
+            exit 1
+          fi
+
+          missing=()
+          yanked=()
+          for crate in "${crates[@]}"; do
+            response="$RUNNER_TEMP/crates-io-${crate}.json"
+            if ! curl --fail --silent --show-error \
+              --retry 3 --retry-all-errors --retry-delay 2 \
+              --user-agent "edda-release-ci/${GITHUB_REPOSITORY}" \
+              "https://crates.io/api/v1/crates/${crate}/${version}" \
+              --output "$response"; then
+              missing+=("$crate")
+            elif [ "$(jq -r '.version.yanked' "$response")" != "false" ]; then
+              yanked+=("$crate")
+            fi
+          done
+
+          if (( ${#missing[@]} || ${#yanked[@]} )); then
+            echo "::error::Publish every workspace crate to crates.io before pushing the release tag"
+            ((${#missing[@]})) && printf 'missing %s: %s\n' "$version" "${missing[*]}"
+            ((${#yanked[@]})) && printf 'yanked %s: %s\n' "$version" "${yanked[*]}"
+            exit 1
+          fi
+          printf 'crates.io parity verified for %s workspace crates at %s\n' \
+            "${#crates[@]}" "$version"
       - name: Prepare release notes
         shell: bash
         run: |

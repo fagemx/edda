@@ -4,7 +4,21 @@ title: CLI Reference
 
 # CLI Reference
 
-Complete reference for all `edda` commands.
+Reference for the public `edda` command surface. The command index below is
+checked against `edda --help` in CI so newly added top-level commands cannot be
+silently omitted from this page.
+
+## Command index
+
+| Area | Commands |
+|------|----------|
+| Setup and health | `edda init`, `edda setup`, `edda status`, `edda doctor`, `edda config`, `edda user`, `edda rules` |
+| Memory and decisions | `edda actor`, `edda note`, `edda checkpoint`, `edda decide`, `edda ratify`, `edda group`, `edda sync`, `edda ask`, `edda recap`, `edda context`, `edda log`, `edda commit` |
+| Tasks and coordination | `edda task`, `edda claim`, `edda unclaim`, `edda request`, `edda request-ack`, `edda peers`, `edda coord`, `edda reconcile`, `edda verdict` |
+| Branches and exchange | `edda branch`, `edda switch`, `edda merge`, `edda draft`, `edda export`, `edda brief`, `edda bundle` |
+| Search and maintenance | `edda search`, `edda index`, `edda blob`, `edda pattern`, `edda rebuild`, `edda gc`, `edda scan` |
+| Agent integration | `edda bridge`, `edda hook`, `edda mcp`, `edda run`, `edda dispatch`, `edda pair`, `edda serve`, `edda skill`, `edda tool-tier` |
+| Planning and automation | `edda plan`, `edda conduct`, `edda intake`, `edda phase`, `edda prs`, `edda pipeline`, `edda policy`, `edda watch`, `edda notify`, `edda propose-issue`, `edda propose-patch` |
 
 ## Getting started
 
@@ -13,12 +27,13 @@ Complete reference for all `edda` commands.
 Initialize a new `.edda/` workspace in the current directory.
 
 ```bash
-edda init [--no-hooks]
+edda init [--no-hooks] [--force-skills]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `--no-hooks` | Skip auto-detection and installation of bridge hooks |
+| `--force-skills` | Refresh generated `coord-*` skills, overwriting local edits to those generated files |
 
 Creates `.edda/` with an empty ledger. If `.claude/` is detected, automatically installs Claude Code hooks and adds decision-tracking instructions to `CLAUDE.md`.
 
@@ -143,7 +158,9 @@ edda note "switching to Redis for pub/sub support" --tag decision
 
 ### `edda decide`
 
-Record a binding decision. Writes to both the workspace ledger and the coordination layer.
+Record a decision in the workspace ledger and coordination layer. Agent and
+system decisions remain unratified until an operator explicitly runs
+`edda ratify`.
 
 ```bash
 edda decide <DECISION> [OPTIONS]
@@ -458,6 +475,125 @@ edda index verify    # verify index entries match store records
 
 ---
 
+## Reasoning, tasks & coordination (0.3–0.4)
+
+### `edda checkpoint`
+
+Record portable reasoning state in the ledger. Hypotheses, rejected paths, and
+open questions are repeatable; `--next` is required.
+
+```bash
+edda checkpoint \
+  --hypothesis "The registry is stale" \
+  --rejected "README typo|crates.io reports 0.2.1" \
+  --open "Is the publish token available?" \
+  --next "Package every workspace crate"
+```
+
+### `edda ratify`
+
+Confer operator authority on the currently active decision for a key. `--by`
+is audit metadata and is self-asserted; it is not an identity check.
+
+```bash
+edda ratify <KEY> [--note <NOTE>] [--by <ACTOR>] [--session <SESSION>]
+```
+
+### `edda task`
+
+Create and execute dependency-aware, hash-chained tasks.
+
+```bash
+edda task new <TITLE> [--assignee <LABEL>] [--agent <KIND>] \
+  [--after <TASK_ID>]... [--path <PATH>]... [--plan <PLAN>] \
+  [--work-unit <UNIT>] [--brief <BRIEF>] [--key <IDEMPOTENCY_KEY>]
+edda task start <ID> [--lease-ttl <SECONDS>]
+edda task done <ID> --receipt <RECEIPT> [--evidence <PATH>]...
+edda task fail <ID> --reason <REASON>
+edda task list [--assignee <LABEL>] [--status <STATUS>] [--json] [--fleet]
+edda task show <ID> [--json]
+```
+
+A completed task requires a receipt. Task status is derived from ledger events;
+`--after` dependencies keep a task blocked until its predecessors finish.
+
+### Claims and peer state
+
+Claim write scope before editing, inspect intersections without mutating state,
+then release the claim during teardown.
+
+```bash
+edda claim <LABEL> --paths <PATH_OR_GLOB> [--session <SESSION>]
+edda claim check <PATH_OR_GLOB>... [--json]
+edda unclaim [--session <SESSION>] [--if-claimed]
+edda peers [--json]
+edda coord [--session <SESSION>]
+```
+
+`edda claim check` exits `0` when scopes are disjoint, `1` for a conflict, and
+`2` for a usage or runtime error. `--if-claimed` makes unconditional teardown
+idempotent.
+
+### `edda dispatch`
+
+Run exactly one agent turn without a plan file or conductor state machine. The
+prompt is read verbatim from a file; the caller owns any outer loop.
+
+```bash
+edda dispatch \
+  --agent <claude|pi|codex> \
+  --prompt-file <PATH> \
+  [--session-id <ID>] \
+  [--cwd <DIR>] \
+  [--budget-usd <USD>] \
+  [--timeout-sec <SECONDS>] \
+  [--permission-mode <MODE>] \
+  [--json]
+```
+
+Omitting `--session-id` generates and prints one for later continuation. Claude,
+Pi, and Codex persist continuity through their own backend mechanisms; Codex
+stores the session-to-thread map in Edda's per-user store. Codex reports cost
+when available but cannot enforce `--budget-usd`.
+
+| Exit | Outcome |
+|------|---------|
+| `0` | Agent completed |
+| `1` | Crash, pre-dispatch error, or other failure |
+| `2` | Timeout |
+| `3` | Budget exceeded |
+| `4` | Maximum turns reached |
+
+With `--json`, stdout is exactly one object containing `outcome`, `result_text`,
+`cost_usd`, `session_id`, and `error`.
+
+### `edda verdict` and `edda phase`
+
+Verdicts are append-only operator decisions pinned to a full Git SHA.
+
+```bash
+edda verdict approve <SUBJECT> --sha <FULL_SHA> [--comment <TEXT>] \
+  [--session <SESSION>]
+edda verdict reject <SUBJECT> --sha <FULL_SHA> --comment <TEXT> \
+  [--session <SESSION>]
+```
+
+For a live conductor gate, `edda phase` resolves the gate SHA and session from
+persisted conductor state. Explicit `--sha` and `--session` overrides remain
+available.
+
+```bash
+edda phase [--json]
+edda phase approve <PLAN>/<PHASE> [--comment <TEXT>] \
+  [--sha <FULL_SHA>] [--session <SESSION>]
+edda phase reject <PLAN>/<PHASE> --comment <TEXT> \
+  [--sha <FULL_SHA>] [--session <SESSION>]
+```
+
+A rejection comment becomes the next redispatch prompt for the gated session.
+
+---
+
 ## Orchestration
 
 ### `edda plan`
@@ -474,9 +610,12 @@ edda plan scan     # scan codebase and suggest a plan
 Multi-phase AI plan conductor.
 
 ```bash
-edda conduct run <PLAN.yaml>     # run a plan
+edda conduct run <PLAN.yaml> [--agent <claude|pi|codex>]
 edda conduct status              # show running/completed plans
 edda conduct retry <PLAN>        # reset a failed phase
 edda conduct skip <PLAN>         # skip a phase
 edda conduct abort <PLAN>        # abort a running plan
 ```
+
+`--agent` selects the backend for every phase and defaults to `claude`. Use
+`--dry-run` to inspect the phase graph and any operator gates before execution.
