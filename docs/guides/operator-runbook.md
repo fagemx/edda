@@ -13,6 +13,34 @@
 > 依決策 `coord.session-identity`，需要身分的動詞要帶 `--session <id>` 或在環境設 `EDDA_SESSION_ID`；`edda status` 與 `edda peers` 不需要身分，照常可用（2026-09-02 實跑確認）。
 > 控制層的 `watch` / `report` / `promote` / `intake` 是**概念動詞**（定義在 `docs/superpowers/specs/2026-09-02-control-layer-and-l2-shapes-design.md` §2.1）；§五列的是**現有指令**，其中 `edda watch`（TUI）與 `edda intake github` 與概念動詞同名但範圍不同，勿混用。
 
+## START HERE：控制者開場
+
+1. **先確認這個 checkout 在 `main` 上**。控制者 session 若開在過時或 feature-branch 的
+   checkout，runbook、fleet skills、`scripts/fleet/` 全都不在樹裡，後面每一步都會落空
+   （2026-09-02 就有一個 session 這樣燒掉）。驗證（先 `git fetch`——本地追蹤的
+   `origin/main` ref 可能過時，不 fetch 就比會對舊 ref 誤報 0）：
+   ```bash
+   git fetch -q origin                     # 先刷新 origin/main 追蹤 ref
+   git status                              # 乾淨、on branch main
+   git rev-list --count HEAD..origin/main  # 0 = 沒落後
+   ```
+2. **接單**：`gh issue edit <N> --add-label fleet:claimed --remove-label fleet:ready --add-assignee @me`，
+   並在 issue 留 lease 留言。
+3. **派 lane**（開 worktree 後）：
+   ```bash
+   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> -Cwd <worktree>
+   ```
+   脚本不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`
+   （決策 `verification.cost-discipline`），給了就在 wrapper 設
+   `CARGO_TARGET_DIR = <lane root>\<BuildLane>`（lane root =
+   `$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）；
+   Rust lane 要明確傳，如 `-BuildLane worker-1`；docs lane 只寫文件不編譯，
+   不傳 build lane，wrapper 就不設 `CARGO_TARGET_DIR`（見 §六）。
+4. **盯進度**（不用再翻檔案時間戳）：
+   ```bash
+   pwsh -NoProfile -File scripts/fleet/lane-status.ps1
+   ```
+
 ---
 
 ## 一、三個角色
@@ -60,7 +88,7 @@
    ```
    plan YAML 放 scratchpad 或 `.tmp/plans/`，不進 repo。Rust lane 設 `CARGO_TARGET_DIR` 為
    `$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1|worker-2`（verifier 用 `verifier|verifier-2`）。
-   lane 的**啟動方式**見 §六（Task Scheduler，不是 nohup）。
+   lane 的**啟動方式**用 `scripts/fleet/lane-launch.ps1`（見 START HERE；Task Scheduler，不是 nohup，規則見 §六）。
 4. **PR 一開就派審（自動，不用人手）**：本機 watcher（`scripts/pr-review-watch.sh`，由
    `scripts/pr-review-launch.ps1` 註冊成隱藏排程任務 `edda-pr-review-watcher`）每 60 秒掃 open PR：
    非 draft、head 沒審過的 PR 在 **3 分鐘內**自動起唯讀審查者（gpt-5.6-sol，Task Scheduler 隱藏視窗，
@@ -119,7 +147,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 |---|---|
 | 執行用便宜模型（pi 預設 glm-5.3-flash）；**審查一律 gpt-5.6-sol**（codex／pi 皆是） | `fleet.agent-model-split` |
 | 審查 provider 過載：**改運輸不降模型**——(1) 同 `--model` 先用 `--thinking minimal` 探測，通了才重試 pi 一次；(2) 仍沒有判決就對該 head 標 `review:unreviewed` 並停——未審查是誠實狀態，便宜模型的判決不是。watcher 無 Codex 路線（superseding 決策 `…codex-route-withdrawn-for-automated-watcher`：Codex 對 watcher 做不到唯讀；人類控制者仍可手動用 Codex） | `fleet.review-provider-overload` |
-| **lane 啟動走 Task Scheduler，不走 nohup／Start-Process**：Claude Code 的工具 shell 在 Windows Job Object 裡，nohup 的子程序仍隨 session 死。`Register-ScheduledTask` + `Start-ScheduledTask`（父程序是 svchost）；該環境 `CARGO_TARGET_DIR` 與 `HOME` 為空，lane wrapper 必須顯式設；`Get-ScheduledTaskInfo` 可輪詢，`Unregister-ScheduledTask` 清理。重派前先讀 worktree／branch／PR 狀態，不信任 live handle | `fleet.lane-launch`、`fleet.lane-dispatch` |
+| **lane 啟動走 Task Scheduler，不走 nohup／Start-Process**：Claude Code 的工具 shell 在 Windows Job Object 裡，nohup 的子程序仍隨 session 死。`Register-ScheduledTask` + `Start-ScheduledTask`（父程序是 svchost）；該環境 `HOME` 為空，lane wrapper 必須顯式設；`CARGO_TARGET_DIR` 只在 `-BuildLane` 指名四個允許 build lane 之一時設（不編譯的 session 沒有 build lane——`.claude/CLAUDE.md`、`verification.cost-discipline`；要編譯的必須給四擇一，launcher 拒絕其他名字）。`lane-launch.ps1` 不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`，設 `CARGO_TARGET_DIR`＝lane root（`$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）\`<BuildLane>`；docs lane 不傳，wrapper 不設。`Get-ScheduledTaskInfo` 可輪詢，`Unregister-ScheduledTask` 清理。重派前先讀 worktree／branch／PR 狀態，不信任 live handle。**手續已脚本化**：用 `scripts/fleet/lane-launch.ps1` 註冊起 lane、`scripts/fleet/lane-status.ps1` 盯狀態（用法見 START HERE），不要再手寫 wrapper | `fleet.lane-launch`、`fleet.lane-dispatch` |
 | 一 issue ＝ 一單 phase plan ＝ 一 worktree ＝ 一 build lane；並行在 plan 之間；plan 裡不寫沒理由的 `depends_on`；並行 plan 不用 verdict gate | `cleanup.parallel-exec`、`cleanup.review-gate` |
 | build lane 只用 `worker-1|worker-2|verifier|verifier-2`；永不建 ad-hoc `CARGO_TARGET_DIR`；L1 與 verifier 設 `CARGO_INCREMENTAL=0` | `verification.cost-discipline` |
 | 審查釘 full SHA；**每次 push 使前一個判決失效**；一個 PR 一個審查者身分 | `fleet.review-protocol` |
