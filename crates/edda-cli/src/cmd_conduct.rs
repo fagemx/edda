@@ -380,7 +380,10 @@ pub fn retry(repo_root: &Path, phase_id: &str, plan_name: Option<&str>) -> Resul
 
     let current_status = {
         let ps = state.get_phase_mut(phase_id)?;
-        if ps.status != PhaseStatus::Failed && ps.status != PhaseStatus::Stale {
+        if ps.status != PhaseStatus::Failed
+            && ps.status != PhaseStatus::Stale
+            && ps.status != PhaseStatus::GateTimedOut
+        {
             bail!(
                 "Phase \"{}\" is {:?}, not Failed or Stale. Cannot retry.",
                 phase_id,
@@ -420,6 +423,22 @@ pub fn skip(
         .ok_or_else(|| anyhow::anyhow!("no state for plan \"{name}\""))?;
 
     let ps = state.get_phase_mut(phase_id)?;
+    if ps.status == PhaseStatus::GateTimedOut {
+        // GH-552: skipping a timed-out gate is a WAIVER — the phase ran and
+        // its checks passed, so recording `Skipped` would understate what
+        // was verified. Keep the honest status, record the waiver.
+        ps.skip_reason = Some(
+            reason
+                .unwrap_or("gate waived by operator (edda conduct skip)")
+                .to_string(),
+        );
+        if state.plan_status == PlanStatus::Blocked {
+            state.plan_status = PlanStatus::Running;
+        }
+        save_state(repo_root, &state)?;
+        println!("Phase \"{phase_id}\" gate waived (status kept as GateTimedOut).");
+        return Ok(());
+    }
     if ps.status != PhaseStatus::Failed
         && ps.status != PhaseStatus::Stale
         && ps.status != PhaseStatus::Pending
@@ -585,6 +604,7 @@ fn print_status(state: &PlanState) {
             PhaseStatus::Skipped => "\u{2298}",                         // ⊘
             PhaseStatus::Stale => "\u{23F0}",                           // ⏰
             PhaseStatus::AwaitingVerdict => "\u{23F8}",                 // ⏸
+            PhaseStatus::GateTimedOut => "\u{29D7}",                    // ⧗
             PhaseStatus::Pending => "\u{25CB}",                         // ○
         };
         let detail = match ps.status {
@@ -600,6 +620,14 @@ fn print_status(state: &PlanState) {
             PhaseStatus::Skipped => {
                 let reason = ps.skip_reason.as_deref().unwrap_or("");
                 format!("({})", reason)
+            }
+            PhaseStatus::GateTimedOut => {
+                // GH-552: honest audit line — timed-out gate, and whether
+                // it was waived (the status itself is never Skipped).
+                match ps.skip_reason.as_deref() {
+                    Some(reason) => format!("(waived: {})", reason),
+                    None => "(awaiting operator: retry or waive)".to_string(),
+                }
             }
             _ => String::new(),
         };
