@@ -1,3 +1,0 @@
-feat(approval): add approval policy engine (#120)
-
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
