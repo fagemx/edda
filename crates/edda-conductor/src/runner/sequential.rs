@@ -17,7 +17,7 @@ use crate::state::machine::{
     transition, CheckResult, CheckStatus, ErrorInfo, ErrorType, PhaseStatus, PhaseUpdate,
     PlanState, PlanStatus,
 };
-use crate::state::persist::save_state;
+use crate::state::persist::save_state_reconciled;
 use crate::tmux::TmuxSession;
 use anyhow::Context;
 use anyhow::Result;
@@ -75,7 +75,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
     // exactly-once across repeated `edda conduct run` invocations.
     let stale_transitions = detect_stale_phases(state, plan);
     if !stale_transitions.is_empty() {
-        save_state(cwd, state)?;
+        save_state_reconciled(cwd, state)?;
         event_log::write_runner_status(cwd, state, None);
         write_brief(cwd, state, None);
     }
@@ -91,7 +91,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
     if state.started_at.is_none() {
         state.started_at = Some(now_rfc3339());
         state.plan_status = PlanStatus::Running;
-        save_state(cwd, state)?;
+        save_state_reconciled(cwd, state)?;
         event_log::write_runner_status(cwd, state, None);
         write_brief(cwd, state, None);
         event_log.record(Event::PlanStart {
@@ -129,7 +129,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                             .unwrap_or(PhaseStatus::Failed);
                         let _ = transition(state, &failed_id, current, PhaseStatus::Pending, None);
                         state.plan_status = PlanStatus::Running;
-                        save_state(cwd, state)?;
+                        save_state_reconciled(cwd, state)?;
                         println!("  ↻ Retrying \"{failed_id}\"");
                         continue;
                     }
@@ -138,7 +138,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         ps.status = PhaseStatus::Skipped;
                         ps.skip_reason = Some("manually skipped (interactive)".into());
                         state.plan_status = PlanStatus::Running;
-                        save_state(cwd, state)?;
+                        save_state_reconciled(cwd, state)?;
                         event_log.record(Event::PhaseSkipped {
                             phase_id: failed_id.clone(),
                             reason: "manually skipped (interactive)".into(),
@@ -160,7 +160,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                     BlockedAction::Abort => {
                         state.plan_status = PlanStatus::Aborted;
                         state.aborted_at = Some(now_rfc3339());
-                        save_state(cwd, state)?;
+                        save_state_reconciled(cwd, state)?;
                         // GH-584 round-2 P1-1: the plan abort reaches the
                         // workspace ledger as a structured conductor_plan
                         // event, not only the plan-local event log.
@@ -445,7 +445,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                             PhaseStatus::Running,
                             None,
                         )?;
-                        save_state(cwd, state)?;
+                        save_state_reconciled(cwd, state)?;
                         println!(
                             "  ↻ Redispatching one more turn in the same session ({session_id})"
                         );
@@ -553,7 +553,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                 }
             }
 
-            save_state(cwd, state)?;
+            save_state_reconciled(cwd, state)?;
             event_log::write_runner_status(cwd, state, Some(&gated_id));
             write_brief(cwd, state, None);
             continue;
@@ -600,7 +600,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                 ..Default::default()
             }),
         )?;
-        save_state(cwd, state)?;
+        save_state_reconciled(cwd, state)?;
 
         println!("\n▶ [{phase_num}/{total_phases}] Phase \"{phase_id}\" (attempt {attempt})");
         if let Some(tmux) = tmux_session {
@@ -665,7 +665,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
         )
         .await?;
 
-        save_state(cwd, state)?;
+        save_state_reconciled(cwd, state)?;
     }
 
     // Plan completion check
@@ -673,7 +673,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
     if is_plan_complete(state) {
         state.plan_status = PlanStatus::Completed;
         state.completed_at = Some(now_rfc3339());
-        save_state(cwd, state)?;
+        save_state_reconciled(cwd, state)?;
         let passed = state
             .phases
             .iter()
@@ -1032,7 +1032,7 @@ async fn process_phase_result(
                 PhaseStatus::Checking,
                 None,
             )?;
-            save_state(cwd, state)?;
+            save_state_reconciled(cwd, state)?;
 
             // GH-566: the lane heartbeat must cover the whole phase
             // lifetime — keep it beating (stage "checking") while the
@@ -3615,7 +3615,7 @@ phases:
                 .format(&time::format_description::well_known::Rfc3339)
                 .unwrap_or_default(),
         );
-        save_state(dir.path(), &persisted).unwrap();
+        crate::state::persist::save_state(dir.path(), &persisted).unwrap();
 
         // Run 1: a fresh conductor process loads the persisted state.
         let mut state = crate::state::persist::load_state(dir.path(), &plan.name)
