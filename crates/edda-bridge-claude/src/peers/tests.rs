@@ -2281,6 +2281,90 @@ fn write_subagent_heartbeat_sets_parent() {
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
+/// P1 regression (review round 2): `update_teammate_phase` must ride the
+/// sidecar lock like every other producer. The reviewed interleaving was:
+/// TeammateIdle reads a pre-lane record, the runner writes lane fields
+/// under the sidecar lock, TeammateIdle atomically restores its stale copy
+/// and erases those fields. Here the runner's window is held open
+/// deterministically: while the sidecar lock is held, the teammate write
+/// must NOT land (the old unlocked writer wrote straight through it), and
+/// after the runner's refresh lands first, the unblocked teammate write
+/// must preserve the lane fields it re-reads.
+#[test]
+fn teammate_idle_update_waits_for_the_sidecar_lock_and_preserves_lane_fields() {
+    // No EDDA_STORE_ROOT redirect: a redirect here races every concurrent
+    // store-writing test in this process that doesn't hold ENV_LOCK (the
+    // exact cross-store hazard this round is closing). Peers tests use
+    // unique pids against the default store instead.
+    let pid = "test_teammate_phase_lock";
+    let sid = "lane-1";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    edda_store::ensure_dirs(pid).unwrap();
+
+    // Pre-lane record: hook telemetry only, no lane fields.
+    let _ = edda_store::update_heartbeat(pid, sid, |hb| {
+        hb.started_at = crate::parse::now_rfc3339();
+        hb.last_heartbeat = crate::parse::now_rfc3339();
+        hb.label = "worker".into();
+        hb.branch = Some("main".into());
+    });
+
+    // Hold the sidecar lock — the runner's read-to-write window.
+    let mut lock_path = edda_store::heartbeat_path(pid, sid).into_os_string();
+    lock_path.push(".lock");
+    let guard =
+        edda_store::lock_file(std::path::Path::new(&lock_path)).expect("acquire sidecar lock");
+
+    let writer = {
+        let pid = pid.to_string();
+        let sid = sid.to_string();
+        std::thread::spawn(move || update_teammate_phase(&pid, &sid, "idle"))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // While the lock is held, no teammate write may have landed on disk.
+    let on_disk = std::fs::read_to_string(edda_store::heartbeat_path(pid, sid)).unwrap();
+    let on_disk: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
+    assert_eq!(
+        on_disk["current_phase"],
+        serde_json::Value::Null,
+        "TeammateIdle must not write while the sidecar lock is held"
+    );
+
+    // The runner's locked refresh lands in that window.
+    let hb_now = edda_store::read_heartbeat(pid, sid).expect("record exists");
+    let mut refreshed = hb_now;
+    refreshed.plan = Some("fleet-pr-loop".into());
+    refreshed.phase = Some("fix".into());
+    refreshed.attempt = Some(1);
+    refreshed.stage = Some("running".into());
+    refreshed.pid = Some(4242);
+    edda_store::write_heartbeat(pid, &refreshed).expect("runner refresh");
+    drop(guard);
+    writer.join().unwrap();
+
+    let hb = read_heartbeat(pid, sid).expect("heartbeat exists");
+    assert_eq!(
+        hb.current_phase.as_deref(),
+        Some("idle"),
+        "TeammateIdle phase must land after the lock frees"
+    );
+    assert_eq!(
+        hb.plan.as_deref(),
+        Some("fleet-pr-loop"),
+        "lane fields must survive the teammate write"
+    );
+    assert_eq!(hb.stage.as_deref(), Some("running"));
+    assert_eq!(hb.pid, Some(4242));
+    assert_eq!(
+        hb.branch.as_deref(),
+        Some("main"),
+        "hook fields survive too"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
 #[test]
 fn cleanup_subagent_heartbeats_selective() {
     let pid = "test_cleanup_subagent";

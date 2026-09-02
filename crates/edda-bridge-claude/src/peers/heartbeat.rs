@@ -150,6 +150,10 @@ pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str, 
 
 /// Write a heartbeat for a sub-agent spawned via Claude Code's Task tool.
 /// Uses agent_id as session identifier and records parent session for cleanup.
+///
+/// Rides the shared sidecar lock via `update_heartbeat` like every other
+/// producer: a raw whole-record write here would clobber anything another
+/// producer had already written for this id instead of refreshing it.
 pub(crate) fn write_subagent_heartbeat(
     project_id: &str,
     agent_id: &str,
@@ -158,31 +162,19 @@ pub(crate) fn write_subagent_heartbeat(
     cwd: &str,
 ) {
     let now = now_rfc3339();
-    let path = heartbeat_path(project_id, agent_id);
-    let heartbeat = SessionHeartbeat {
-        session_id: agent_id.to_string(),
-        started_at: now.clone(),
-        last_heartbeat: now,
-        label: label.to_string(),
-        focus_files: Vec::new(),
-        active_tasks: Vec::new(),
-        files_modified_count: 0,
-        total_edits: 0,
-        recent_commits: Vec::new(),
-        branch: detect_git_branch_in(cwd),
-        current_phase: None,
-        parent_session_id: Some(parent_session_id.to_string()),
-        plan: None,
-        phase: None,
-        attempt: None,
-        stage: None,
-        pid: None,
-    };
-    let data = match serde_json::to_string_pretty(&heartbeat) {
-        Ok(d) => d,
-        Err(_) => return,
-    };
-    let _ = edda_store::write_atomic(&path, data.as_bytes());
+    let branch = detect_git_branch_in(cwd);
+    let _ = edda_store::update_heartbeat(project_id, agent_id, |hb| {
+        if hb.started_at.is_empty() {
+            hb.started_at = now.clone();
+        }
+        hb.last_heartbeat = now;
+        hb.label = label.to_string();
+        hb.parent_session_id = Some(parent_session_id.to_string());
+        if branch.is_some() {
+            hb.branch = branch;
+        }
+        // Signal fields and lane fields belong to other producers — preserved.
+    });
 }
 
 /// Remove all sub-agent heartbeats belonging to a parent session.
@@ -489,15 +481,22 @@ pub(crate) fn resolve_teammate_session(project_id: &str, teammate_name: &str) ->
 
 /// Update a teammate's heartbeat phase to the given value.
 /// Used to set phase to "idle" when a TeammateIdle event is received.
+///
+/// Rides the shared sidecar lock via `update_heartbeat`: an unlocked
+/// read-modify-write here raced the runner's locked refresh (read a
+/// pre-lane record, then atomically restored it after the runner wrote
+/// lane fields, erasing them).
 pub(crate) fn update_teammate_phase(project_id: &str, session_id: &str, phase: &str) {
-    let path = heartbeat_path(project_id, session_id);
-    if let Some(mut hb) = read_heartbeat(project_id, session_id) {
+    let _ = edda_store::update_heartbeat(project_id, session_id, |hb| {
+        // `update_heartbeat` seeds a blank record when no file exists; a
+        // TeammateIdle event must not create a heartbeat for a session that
+        // never had one, so leave the still-blank record unwritten.
+        if hb.started_at.is_empty() {
+            return;
+        }
         hb.current_phase = Some(phase.to_string());
         hb.last_heartbeat = now_rfc3339();
-        if let Ok(data) = serde_json::to_string_pretty(&hb) {
-            let _ = edda_store::write_atomic(&path, data.as_bytes());
-        }
-    }
+    });
 }
 
 /// Write a teammate idle event to coordination.jsonl.

@@ -75,12 +75,24 @@ pub struct SessionHeartbeat {
 /// not reserved). Chosen over rejecting: a hostile id then cannot fail a
 /// phase at an observation-plane trust boundary, and read/write stay
 /// consistent because both sides sanitize identically.
+///
+/// The encoding must also be injective **on the target filesystem**, not
+/// just on bytes: two distinct session ids must never produce the same
+/// filename. Case-insensitive filesystems (NTFS, macOS APFS, most Windows
+/// tooling) identify names differing only in letter case, and NTFS
+/// additionally folds some non-ASCII code points onto ASCII ones (e.g.
+/// U+212A KELVIN SIGN with `K`). Both collision vectors are closed by
+/// construction: the emitted alphabet is `a-z 0-9 . _ - %` — no uppercase
+/// letters, and every non-ASCII byte is percent-encoded — so two outputs
+/// that a case-insensitive filesystem considers equal must be
+/// byte-identical, and because a literal `%` is itself encoded (`%25`) the
+/// id→output mapping is a standard injective percent-encoding.
 fn sanitize_session_id(session_id: &str) -> String {
     let mut out = String::with_capacity(session_id.len());
     for b in session_id.bytes() {
         match b {
-            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-' => out.push(b as char),
-            _ => out.push_str(&format!("%{b:02X}")),
+            b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02x}")),
         }
     }
     out
@@ -237,6 +249,118 @@ mod tests {
                 Some(state_dir.as_path()),
                 "session id {sid:?} escaped the state dir: {}",
                 p.display()
+            );
+        }
+    }
+
+    /// P0 regression (review round 2): ids differing only by ASCII case must
+    /// get distinct files. The pre-fix encoder emitted `A-Z` unchanged, so on
+    /// case-insensitive NTFS `Lane` and `lane` shared one file and the first
+    /// lane's heartbeat was destroyed.
+    #[test]
+    fn session_ids_differing_only_by_case_get_distinct_files() {
+        let _lock = crate::ENV_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("EDDA_STORE_ROOT");
+        std::env::set_var("EDDA_STORE_ROOT", tmp.path());
+        write_heartbeat("proj", &sample("Lane")).expect("write Lane");
+        write_heartbeat("proj", &sample("lane")).expect("write lane");
+        let state = crate::project_dir("proj").join("state");
+        let session_files: Vec<std::path::PathBuf> = std::fs::read_dir(&state)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("session.") && n.ends_with(".json")
+            })
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(
+            session_files.len(),
+            2,
+            "two distinct case-variant ids must be two distinct files, got {session_files:?}"
+        );
+        let lane_upper = read_heartbeat("proj", "Lane").expect("Lane heartbeat survives");
+        let lane_lower = read_heartbeat("proj", "lane").expect("lane heartbeat survives");
+        assert_eq!(lane_upper.session_id, "Lane");
+        assert_eq!(lane_lower.session_id, "lane");
+        match previous {
+            Some(v) => std::env::set_var("EDDA_STORE_ROOT", v),
+            None => std::env::remove_var("EDDA_STORE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(tmp.path());
+    }
+
+    /// P0 regression (review round 2): a Unicode pair NTFS folds onto the
+    /// same name must still get two distinct files. U+212A (KELVIN SIGN)
+    /// case-folds onto ASCII `K`; the encoder emits no non-ASCII bytes, so
+    /// no folding can ever identify two of its outputs.
+    #[test]
+    fn unicode_folded_session_ids_get_distinct_files() {
+        let _lock = crate::ENV_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("EDDA_STORE_ROOT");
+        std::env::set_var("EDDA_STORE_ROOT", tmp.path());
+        let kelvin = "\u{212A}"; // KELVIN SIGN — NTFS folds onto ASCII K
+        write_heartbeat("proj", &sample(kelvin)).expect("write Kelvin sign");
+        write_heartbeat("proj", &sample("K")).expect("write K");
+        let state = crate::project_dir("proj").join("state");
+        let session_files: Vec<std::path::PathBuf> = std::fs::read_dir(&state)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("session.") && n.ends_with(".json")
+            })
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(
+            session_files.len(),
+            2,
+            "two NTFS-folded ids must be two distinct files, got {session_files:?}"
+        );
+        let a = read_heartbeat("proj", kelvin).expect("Kelvin-sign heartbeat survives");
+        let b = read_heartbeat("proj", "K").expect("K heartbeat survives");
+        assert_eq!(a.session_id, kelvin);
+        assert_eq!(b.session_id, "K");
+        match previous {
+            Some(v) => std::env::set_var("EDDA_STORE_ROOT", v),
+            None => std::env::remove_var("EDDA_STORE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(tmp.path());
+    }
+
+    /// P0 regression (review round 2), the injectivity argument as a pinned
+    /// property: the encoded filename's alphabet contains no uppercase
+    /// letters and no non-ASCII bytes, so a case-insensitive or
+    /// Unicode-folding filesystem has nothing left to identify.
+    #[test]
+    fn encoded_filenames_contain_no_case_or_folding_surface() {
+        for sid in [
+            "Lane",
+            "lane",
+            "MiXeD-Case_1.Json",
+            "\u{212A}",
+            "\u{00DF}",
+            "\u{0131}",
+            "\u{FF41}\u{FF22}",
+        ] {
+            let name = heartbeat_path("proj", sid)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            assert!(
+                name.chars().all(|c| {
+                    c.is_ascii_lowercase()
+                        || c.is_ascii_digit()
+                        || matches!(c, '.' | '_' | '-' | '%')
+                }),
+                "encoded name for {sid:?} must expose no case/Unicode folding surface, got {name:?}"
             );
         }
     }

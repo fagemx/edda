@@ -127,19 +127,62 @@ mod tests {
     /// `set_var` is process-wide, so a concurrent test that reads
     /// `EDDA_STORE_ROOT` mid-write would see a torn value. Everything here wants
     /// the same store, so serialising the spawns costs nothing worth having.
+    ///
+    /// The lock is the *shared* `CLAIM_ENV_LOCK`, not a private one (review
+    /// round 2): a second private mutex here could relocate the root while a
+    /// heartbeat test held `ClaimEnvGuard`, recreating the ordering-dependent
+    /// cross-store write/read split the Windows-CI fix closed. Reentrancy
+    /// caveat: a caller already holding `ClaimEnvGuard` must not reach this
+    /// (`std::sync::Mutex` is not reentrant). The only production-path caller
+    /// is `ensure_init`, and its test callers that run under `ClaimEnvGuard`
+    /// pre-mark the cwd with `.edda` (see `sequential::tests::make_repo`), so
+    /// `ensure_init` early-returns before the lock is taken.
     pub(super) fn isolate_store_for_this_process() -> std::sync::MutexGuard<'static, ()> {
-        use std::sync::{Mutex, Once, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        use std::sync::Once;
         static SET: Once = Once::new();
 
+        let lock = crate::runner::sequential::tests::CLAIM_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         SET.call_once(|| {
             let store = tempfile::tempdir().expect("temp store for edda-conductor tests");
             std::env::set_var("EDDA_STORE_ROOT", store.path());
             std::mem::forget(store);
         });
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        lock
+    }
+
+    /// P1 regression (review round 2): the store-isolation redirect must
+    /// serialize on the *shared* `CLAIM_ENV_LOCK`, not a private mutex. With
+    /// the old private lock, this helper could relocate `EDDA_STORE_ROOT`
+    /// while a heartbeat test held `ClaimEnvGuard`, splitting writes and
+    /// reads across two stores. Here `ClaimEnvGuard` is held while the
+    /// helper runs on another thread: it must stay blocked (no relocation,
+    /// not finished) until the guard drops.
+    #[test]
+    fn store_isolation_uses_the_shared_claim_env_lock() {
+        use crate::runner::sequential::tests::ClaimEnvGuard;
+
+        let guard = ClaimEnvGuard::new();
+        let before = std::env::var_os("EDDA_STORE_ROOT")
+            .expect("ClaimEnvGuard must have redirected the root");
+        let handle = std::thread::spawn(|| {
+            drop(super::tests::isolate_store_for_this_process());
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        // With the old private lock this thread either relocated the root
+        // under us (Once unfired) or returned immediately (Once fired).
+        assert_eq!(
+            std::env::var_os("EDDA_STORE_ROOT").as_deref(),
+            Some(before.as_os_str()),
+            "store isolation must not relocate EDDA_STORE_ROOT while ClaimEnvGuard holds the shared lock"
+        );
+        assert!(
+            !handle.is_finished(),
+            "store isolation must block on CLAIM_ENV_LOCK while ClaimEnvGuard is held"
+        );
+        drop(guard);
+        handle.join().expect("isolation helper must not panic");
     }
 
     /// GH-417: the runner shells out to the installed `edda`, and `edda init`
