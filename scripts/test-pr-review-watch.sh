@@ -4,10 +4,10 @@
 # verdict text -> review:* label mapping, per-head review:unreviewed semantics,
 # verdict label only on the reviewed head, retried acknowledgement with a
 # stubbed gh (including its terminal failure path), and the provider probe
-# before the single pi retry.
+# before the single dispatch retry.
 #
 # Everything is offline: EDDA_FLEET_SCRATCH, PR_REVIEW_WATCH_LOG and all state
-# files are redirected into a temp dir, and `gh`/`pi`/review-pr are stubs —
+# files are redirected into a temp dir, and `gh`/`edda`/review-pr are stubs —
 # the real ~/.edda/fleet/watch.log must be byte-for-byte unchanged across a
 # full run (guarded below).
 # Style follows scripts/test-lint-markdown-content.sh — no new tooling.
@@ -77,9 +77,14 @@ EOF
 cat >"$STUBBIN/pi" <<'EOF'
 #!/bin/sh
 echo "pi $*" >>"$PI_STUB_LOG"
+exit 0
+EOF
+cat >"$STUBBIN/edda" <<'EOF'
+#!/bin/sh
+echo "edda $*" >>"$EDDA_STUB_LOG"
 case "$*" in
-  *--thinking\ minimal*)
-    [ -n "${PI_FAIL_PROBE:-}" ] && exit 1
+  *--agent*claude*)
+    [ -n "${DISPATCH_FAIL_PROBE:-}" ] && exit 1
     exit 0
     ;;
 esac
@@ -90,18 +95,19 @@ cat >"$STUBBIN/review-pr-stub" <<'EOF'
 echo "REVIEW_LAUNCH $*" >>"$REVIEW_STUB_LOG"
 exit 0
 EOF
-chmod +x "$STUBBIN/gh" "$STUBBIN/pi" "$STUBBIN/review-pr-stub"
+chmod +x "$STUBBIN/gh" "$STUBBIN/pi" "$STUBBIN/edda" "$STUBBIN/review-pr-stub"
 
 export GH_STUB_LOG="$tmp/gh-stub.log"
 export PI_STUB_LOG="$tmp/pi-stub.log"
+export EDDA_STUB_LOG="$tmp/edda-stub.log"
 export REVIEW_STUB_LOG="$tmp/review-stub.log"
-: >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$REVIEW_STUB_LOG"
+: >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$EDDA_STUB_LOG"; : >"$REVIEW_STUB_LOG"
 export PATH="$STUBBIN:$PATH"
 
 reset_stubs() {
     : >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$REVIEW_STUB_LOG"
     unset GH_FAIL_COMMENT_FIRST GH_FAIL_COMMENT_ALWAYS GH_FAIL_EDIT GH_FAIL_HEAD \
-          GH_PR_LIST_FILE GH_HEAD GH_HEAD_FILE PI_FAIL_PROBE 2>/dev/null || true
+          GH_PR_LIST_FILE GH_HEAD GH_HEAD_FILE DISPATCH_FAIL_PROBE 2>/dev/null || true
     rm -f "$EDDA_FLEET_SCRATCH"/review-* 2>/dev/null || true
     : >"$EDDA_FLEET_SCRATCH/review-state.tsv"
     : >"$EDDA_FLEET_SCRATCH/review-acks.tsv"
@@ -399,7 +405,7 @@ if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
     exit 1
 fi
 
-# --- live loop: provider probe before the single pi retry (P1) -----------------
+# --- live loop: provider probe before the single dispatch retry (P1) ---------
 
 reset_stubs
 pending_set 42 1 "$sha" 0 0
@@ -407,7 +413,7 @@ printf 'PI_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 printf 'Codex error: our servers are currently overloaded, please try again later.\n' \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
 
-export PI_FAIL_PROBE=1
+export DISPATCH_FAIL_PROBE=1
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (probe fails)\n' >&2; exit 1; }
 if [ -n "$(pending_get)" ]; then
     printf 'live: failed probe should stop for that head (pending dropped), got:\n%s\n' "$(pending_get)" >&2
@@ -425,7 +431,7 @@ if ! grep -qF -- '--add-label review:unreviewed' "$GH_STUB_LOG"; then
     printf 'live: failed probe should label review:unreviewed\n' >&2
     exit 1
 fi
-unset PI_FAIL_PROBE
+unset DISPATCH_FAIL_PROBE
 
 reset_stubs
 pending_set 42 1 "$sha" 0 0
@@ -433,12 +439,16 @@ printf 'PI_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 printf 'Codex error: our servers are currently overloaded, please try again later.\n' \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (probe OK)\n' >&2; exit 1; }
-if [ "$(grep -c 'thinking minimal' "$PI_STUB_LOG")" -lt 1 ]; then
-    printf 'live: the --thinking minimal probe must run before the retry\n' >&2
+if [ "$(grep -c 'agent claude' "$EDDA_STUB_LOG")" -lt 1 ]; then
+    printf 'live: the edda dispatch probe must run before the retry\n' >&2
     exit 1
 fi
-if ! grep -q 'thinking minimal.*--exclude-tools edit,write' "$PI_STUB_LOG"; then
-    printf 'live: the provider probe must be read-only (--exclude-tools edit,write)\n' >&2
+if ! grep -q -- '--exclude-tools Edit,Write,NotebookEdit' "$EDDA_STUB_LOG"; then
+    printf 'live: the provider probe must be read-only (--exclude-tools Edit,Write,NotebookEdit)\n' >&2
+    exit 1
+fi
+if ! grep -q -- '--model claude-opus-5' "$EDDA_STUB_LOG"; then
+    printf 'live: the provider probe must pin the same review model (--model claude-opus-5)\n' >&2
     exit 1
 fi
 if [ "$(grep -c '^REVIEW_LAUNCH' "$REVIEW_STUB_LOG")" != "1" ]; then

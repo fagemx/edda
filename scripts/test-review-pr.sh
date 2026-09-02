@@ -12,6 +12,15 @@
 #             operator's browser on Windows;
 #   D4 (#697) verdict-label must read the Verdict line, not the last verdict
 #             keyword anywhere in the prose.
+#   D5 (#708) the review transport is `edda dispatch --agent claude` with the
+#             model explicitly pinned (--model) and a valid-UUID session id —
+#             the claude backend rejects non-UUID session ids — and the
+#             generated lane is written even on --dry-run so the transport is
+#             inspectable offline before anything launches;
+#   D6 (#708) EDDA_REVIEW_MODEL flows into the lane's --model verbatim;
+#   D7 (#708) the spec's closing-keyword rule is narrowed to
+#             pr.closing-keyword=only-when-all-donewhen-delivered (#699) —
+#             no blanket ban.
 #
 # Everything is offline: EDDA_FLEET_SCRATCH is a temp dir, EDDA_REVIEW_SPEC
 # points at the checkout's REVIEW.md (read, never written), and `gh`, `uname`
@@ -275,6 +284,58 @@ expect_label \
 # verdict-label must still exit 0 when it emits nothing, so the caller decides.
 printf '%b' 'no verdict at all\n' | timeout 60 sh "$root/scripts/review-pr.sh" verdict-label >/dev/null || \
     fail 'D4e: verdict-label must exit 0 when it emits no label'
+
+# --- D5 (GH-708): the shipped transport is edda dispatch --agent claude -------
+# Default model claude-opus-5, a valid UUID v4 session id, and a lane script
+# that pins the model explicitly and never calls pi.
+
+dry_run 'Issue: #650\n'
+if ! grep -q '(read-only, claude-opus-5, session ' "$brief"; then
+    fail "D5a: the default review model in the brief header is not claude-opus-5"
+fi
+sid=$(sed -n 's/.*session \([0-9a-f-]*\))/\1/p' "$brief" | head -1)
+case "$sid" in
+    ????????-????-4???-[89ab]???-????????????) : ;;
+    *) fail "D5b: the session id is not a valid UUID v4 — the claude backend rejects anything else (GH-694 second half): $sid" ;;
+esac
+lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-lane.ps1"
+if [ ! -f "$lane" ]; then
+    fail "D5c: --dry-run wrote no lane script, so the transport cannot be inspected before launch"
+else
+    grep -q 'edda dispatch --agent claude' "$lane" \
+        || fail 'D5d: the lane does not run the edda dispatch claude transport'
+    grep -q -- "--model 'claude-opus-5'" "$lane" \
+        || fail 'D5e: the lane does not pin the review model with --model (default-only is not allowed)'
+    grep -q -- "--exclude-tools 'Edit,Write,NotebookEdit'" "$lane" \
+        || fail 'D5f: the lane does not structurally deny the write tools'
+    grep -q -- "--session-id '$sid'" "$lane" \
+        || fail 'D5g: the lane does not pass the brief header session UUID'
+    if grep -q 'pi -p' "$lane"; then
+        fail 'D5h: the lane still calls pi — pi cannot reach any Anthropic model on this fleet (GH-708)'
+    fi
+    grep -q 'DISPATCH_EXIT=' "$lane" \
+        || fail 'D5i: the lane writes no DISPATCH_EXIT receipt into the .done file'
+fi
+
+# --- D6 (GH-708): EDDA_REVIEW_MODEL reaches the lane's --model verbatim --------
+
+EDDA_REVIEW_MODEL=claude-opus-5-20260101
+export EDDA_REVIEW_MODEL
+dry_run 'Issue: #650\n'
+if ! grep -q -- "--model 'claude-opus-5-20260101'" "$lane"; then
+    fail 'D6: an explicit EDDA_REVIEW_MODEL did not reach the lane as --model'
+fi
+unset EDDA_REVIEW_MODEL
+
+# --- D7 (GH-708/#699): the closing-keyword ban is narrowed, not blanket --------
+
+dry_run 'Issue: #650\n'
+if grep -q 'no closing keywords' "$brief"; then
+    fail 'D7a: the spec still blanket-bans closing keywords — pr.closing-keyword=only-when-all-donewhen-delivered narrowed it (#699)'
+fi
+if ! grep -q 'only-when-all-donewhen-delivered' "$brief"; then
+    fail 'D7b: the brief does not state the narrowed closing-keyword policy (#699)'
+fi
 
 # --- offline guarantee: the real fleet scratch carries none of our output -----
 # Only our own fixture PR is asserted, not the whole listing: a live watcher or

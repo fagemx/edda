@@ -16,7 +16,7 @@ param(
   [string]$Scratch = "$env:USERPROFILE\.edda\fleet",
   [string]$BashPath = "",
   [string]$Repo = "fagemx/edda",
-  [string]$Model = "openai-codex/gpt-5.6-sol",
+  [string]$Model = "claude-opus-5",
   [string]$TaskName = "edda-pr-review-watcher",
   [switch]$Stop,
   [switch]$DryRun

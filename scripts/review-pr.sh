@@ -1,7 +1,10 @@
 #!/bin/sh
-# review-pr.sh — launch one read-only review of a PR (gpt-5.6-sol via pi), per
-# fleet.lane-launch (Task Scheduler, hidden), fleet.review-brief-framing
-# (validation-checklist brief) and fleet.agent-model-split (review model is fixed).
+# review-pr.sh — launch one read-only review of a PR (claude-opus-5 via
+# `edda dispatch --agent claude`), per fleet.lane-launch (Task Scheduler,
+# hidden), fleet.review-brief-framing (validation-checklist brief) and
+# fleet.review-engine-model / fleet.review-backend (the review model is fixed
+# and explicitly pinned with --model; reviews run on the Claude subscription
+# because pi's openrouter routing cannot reach any Anthropic model — GH-708).
 #
 # The brief is BUILT BY READING REVIEW.md, the repo's executable review spec.
 # This script contributes only the PR's facts (head SHA, surface, the linked
@@ -24,15 +27,19 @@
 #   EDDA_REPO              owner/repo              (default fagemx/edda)
 #   EDDA_FLEET_ROOT        main checkout path      (default: derived from git)
 #   EDDA_FLEET_SCRATCH     state/log dir           (default $HOME/.edda/fleet)
-#   EDDA_REVIEW_MODEL      review model            (default openai-codex/gpt-5.6-sol)
+#   EDDA_REVIEW_MODEL      review model            (default claude-opus-5; passed
+#                                                  to `edda dispatch --model`)
 #   EDDA_REVIEW_SPEC       explicit REVIEW.md path (override; default: read
 #                                                  REVIEW.md at the PR base SHA)
 #
 # Outputs (under $EDDA_FLEET_SCRATCH):
 #   review-pr<N>-r<R>-brief.md     the review brief fed to the reviewer
-#   review-pr<N>-r<R>.log          pi console transcript (verdict is between
-#                                  <<<VERDICT and VERDICT>>> markers)
-#   review-pr<N>-r<R>.done         written when pi exits ("PI_EXIT=<code>")
+#   review-pr<N>-r<R>.log          reviewer console transcript (verdict is between
+#                                  <<<VERDICT and VERDICT>>> markers; the
+#                                  dispatch receipt's `Model requested:` /
+#                                  `Model observed:` / `Cost:` lines follow it)
+#   review-pr<N>-r<R>.done         written when the dispatch exits
+#                                  ("DISPATCH_EXIT=<code>")
 #   wt-review-pr<N>/               detached worktree at the PR head
 #
 # --dry-run generates the brief and prints what would be launched, but does not
@@ -44,7 +51,7 @@ usage() {
 }
 
 REPO=${EDDA_REPO:-fagemx/edda}
-MODEL=${EDDA_REVIEW_MODEL:-openai-codex/gpt-5.6-sol}
+MODEL=${EDDA_REVIEW_MODEL:-claude-opus-5}
 MODEL_SHORT=${MODEL##*/}
 SCRATCH=${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}
 
@@ -236,9 +243,30 @@ if [ -z "$CLASSES" ] || [ -z "$CANON_CLASS" ]; then
   exit 1
 fi
 
+# ---- session id -------------------------------------------------------------
+# The claude backend (`claude -p`) accepts only valid UUIDs: the old
+# `review-pr$PR` shape made every launch die with "Invalid session ID. Must be
+# a valid UUID." (issue #694's second half, walked into by GH-708's transport
+# switch). A fresh UUID v4 per launch; rounds are SHA-pinned independent
+# reviews, not resumed conversations.
+gen_uuid() {
+  r=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+  if [ "${#r}" -ne 32 ]; then
+    echo "review-pr.sh: cannot read 16 random bytes for a session UUID" >&2
+    exit 1
+  fi
+  # version nibble -> 4, variant nibble -> a (10xx)
+  printf '%s-%s-4%s-a%s-%s\n' \
+    "$(printf '%s' "$r" | cut -c 1-8)" \
+    "$(printf '%s' "$r" | cut -c 9-12)" \
+    "$(printf '%s' "$r" | cut -c 14-16)" \
+    "$(printf '%s' "$r" | cut -c 18-20)" \
+    "$(printf '%s' "$r" | cut -c 21-32)"
+}
+SID=$(gen_uuid)
+
 # ---- brief: PR facts + REVIEW.md verbatim (fleet.review-brief-framing) ------
 BRIEF="$SCRATCH/review-pr$PR-r$ROUND-brief.md"
-SID="review-pr$PR"
 {
   echo "# Review brief — PR #$PR, Round $ROUND (read-only, $MODEL_SHORT, session $SID)"
   echo
@@ -302,17 +330,52 @@ echo "canonical_class=$CANON_CLASS"
 echo "spec=$SPEC_SOURCE ($SPEC_VERSION)"
 echo "base=$BASE_SHA"
 
-# ---- the lane script and the exact -File argument the task will get ---------
-# Resolved before the dry-run exit so the path can be inspected without
-# launching anything: a POSIX -File argument is the #683 failure, and Task
-# Scheduler reports it only as LastTaskResult=64 with no log to read.
+# ---- what would be launched: lane script + exact -File argument -------------
+# Both launchers are GENERATED BEFORE the dry-run exit so the whole transport
+# is inspectable offline: a POSIX -File argument is the #683 failure, and since
+# GH-708 the lane body is also the receipt of which transport and model will
+# run (`edda dispatch --agent claude --model ...`, session id = a real UUID).
+# Writing the file starts nothing — a dry-run still creates no worktree,
+# registers no scheduled task and starts no process.
+WT="$SCRATCH/wt-review-pr$PR"
+LOG="$SCRATCH/review-pr$PR-r$ROUND.log"
+DONE="$SCRATCH/review-pr$PR-r$ROUND.done"
 LANE="$SCRATCH/review-pr$PR-r$ROUND-lane.ps1"
 LANE_FILE_ARG=$LANE
+RUNNER="$SCRATCH/review-pr$PR-r$ROUND-run.sh"
 if [ "$IS_WIN" = "1" ]; then
-  if command -v cygpath >/dev/null 2>&1; then
-    LANE_FILE_ARG=$(cygpath -w "$LANE")
-  fi
+  command -v cygpath >/dev/null 2>&1 || { echo "review-pr.sh: cygpath not found" >&2; exit 1; }
+  WTW=$(cygpath -w "$WT")
+  BRIEFW=$(cygpath -w "$BRIEF")
+  LOGW=$(cygpath -w "$LOG")
+  DONEW=$(cygpath -w "$DONE")
+  LANE_FILE_ARG=$(cygpath -w "$LANE")
   echo "lane_file_arg=$LANE_FILE_ARG"
+
+  # LANE_FILE_ARG (above) is the cygpath -w form of $LANE. Building the task's
+  # -File argument from the raw $SCRATCH instead — the one path here that used
+  # not to be converted — yields "/c/Users/<user>/.edda/fleet\review-...ps1"
+  # under Git Bash, which pwsh.exe cannot resolve (issue #683).
+  cat > "$LANE" <<PS
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new(\$false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
+\$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
+\$env:HOME = \$env:USERPROFILE
+Set-Location '$WTW'
+& edda dispatch --agent claude --model '$MODEL' --exclude-tools 'Edit,Write,NotebookEdit' --session-id '$SID' --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
+"DISPATCH_EXIT=\$LASTEXITCODE" | Out-File "$DONEW" -Encoding utf8
+PS
+else
+  # Linux: no job-object trap, plain nohup is enough.
+  cat > "$RUNNER" <<RUN
+#!/bin/sh
+export HOME="\${HOME:-$(getent passwd "\$(id -u)" 2>/dev/null | cut -d: -f6)}"
+cd '$WT' || exit 1
+edda dispatch --agent claude --model '$MODEL' --exclude-tools 'Edit,Write,NotebookEdit' --session-id '$SID' --prompt-file '$BRIEF' > '$LOG' 2>&1
+echo "DISPATCH_EXIT=\$?" > '$DONE'
+RUN
+  sh -n "$RUNNER" || exit 1
+  chmod +x "$RUNNER"
 fi
 
 if [ -z "$ISSUES" ]; then
@@ -320,7 +383,7 @@ if [ -z "$ISSUES" ]; then
 fi
 
 if [ "$DRY" = "1" ]; then
-  echo "dry-run: brief generated; nothing launched, no worktree, no scheduled task."
+  echo "dry-run: brief and launcher generated; nothing launched, no worktree, no scheduled task."
   exit 0
 fi
 
@@ -329,8 +392,12 @@ if [ -z "$ROOT" ]; then
   exit 1
 fi
 
+command -v edda >/dev/null 2>&1 || {
+  echo "review-pr.sh: edda not found on PATH — the review transport is 'edda dispatch --agent claude' (GH-708)" >&2
+  exit 1
+}
+
 # ---- detached worktree at the PR head ---------------------------------------
-WT="$SCRATCH/wt-review-pr$PR"
 git -C "$ROOT" fetch -q origin "$BR"
 if [ -d "$WT" ]; then
   git -C "$WT" checkout -q --detach "$SHA"
@@ -338,33 +405,18 @@ else
   git -C "$ROOT" worktree add --detach "$WT" "$SHA" >/dev/null
 fi
 
-PROMPT="Use your read tool to read $BRIEF and follow it exactly. Work read-only in the current directory (a detached worktree at PR #$PR head). Finish by printing the verdict between the <<<VERDICT and VERDICT>>> markers."
+# A .done/.log left by an earlier attempt on the same PR/round is stale the
+# moment a new launch starts. Deleted BEFORE the launch (the scheduled-task
+# wrapper deletes them again at task start; deleting after the launch would
+# race the file the running dispatch is writing).
+rm -f "$LOG" "$DONE"
 
 if [ "$IS_WIN" = "1" ]; then
   # Windows: Task Scheduler, not nohup (fleet.lane-launch). HOME and UTF-8 are
-  # empty/CP950 in the scheduled-task environment and must be set explicitly.
+  # empty/CP950 in the scheduled-task environment; the lane script generated
+  # above sets them explicitly before dispatching.
   command -v pwsh >/dev/null 2>&1 || { echo "review-pr.sh: pwsh not found" >&2; exit 1; }
-  command -v cygpath >/dev/null 2>&1 || { echo "review-pr.sh: cygpath not found" >&2; exit 1; }
-  WTW=$(cygpath -w "$WT")
-  BRIEFW=$(cygpath -w "$BRIEF")
-  LOGW=$(cygpath -w "$SCRATCH\\review-pr$PR-r$ROUND.log")
-  DONEW=$(cygpath -w "$SCRATCH\\review-pr$PR-r$ROUND.done")
   TASK="edda-review-pr$PR-r$ROUND"
-
-  # LANE_FILE_ARG (resolved above) is the cygpath -w form of $LANE. Building the
-  # task's -File argument from the raw $SCRATCH instead — the one path here that
-  # used not to be converted — yields "/c/Users/<user>/.edda/fleet\review-...ps1"
-  # under Git Bash, which pwsh.exe cannot resolve (issue #683).
-  cat > "$LANE" <<PS
-[Console]::InputEncoding = [System.Text.UTF8Encoding]::new(\$false)
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
-\$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
-\$env:HOME = \$env:USERPROFILE
-Set-Location '$WTW'
-\$prompt = "$PROMPT"
-& pi -p --model $MODEL --thinking high --exclude-tools edit,write --session-id $SID \$prompt 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
-"PI_EXIT=\$LASTEXITCODE" | Out-File "$DONEW" -Encoding utf8
-PS
 
   cat > "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" <<PS
 foreach (\$f in @("$LOGW", "$DONEW")) { if (Test-Path \$f) { [System.IO.File]::Delete(\$f) } }
@@ -405,19 +457,9 @@ PS
       exit 1
       ;;
   esac
-else
-  # Linux: no job-object trap, plain nohup is enough.
-  RUNNER="$SCRATCH/review-pr$PR-r$ROUND-run.sh"
-  cat > "$RUNNER" <<RUN
-#!/bin/sh
-export HOME="\${HOME:-$(getent passwd "\$(id -u)" 2>/dev/null | cut -d: -f6)}"
-cd '$WT' || exit 1
-pi -p --model '$MODEL' --thinking high --exclude-tools edit,write --session-id '$SID' "$PROMPT" > '$SCRATCH/review-pr$PR-r$ROUND.log' 2>&1
-echo "PI_EXIT=\$?" > '$SCRATCH/review-pr$PR-r$ROUND.done'
-RUN
-  sh -n "$RUNNER" || exit 1
-  chmod +x "$RUNNER"
-  rm -f "$SCRATCH/review-pr$PR-r$ROUND.log" "$SCRATCH/review-pr$PR-r$ROUND.done"
+fi
+
+if [ "$IS_WIN" = "0" ]; then
   nohup "$RUNNER" >/dev/null 2>&1 &
   pid=$!
   sleep 1
@@ -429,6 +471,6 @@ RUN
   fi
 fi
 
-echo "log=$SCRATCH/review-pr$PR-r$ROUND.log"
-echo "done=$SCRATCH/review-pr$PR-r$ROUND.done"
+echo "log=$LOG"
+echo "done=$DONE"
 echo "session=$SID"
