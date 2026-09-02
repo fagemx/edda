@@ -602,6 +602,26 @@ mod tests {
         );
     }
 
+    /// GH-584 round-2 P1-5: parity with `edda note` — writing through the
+    /// library must still refresh the derived markdown views. Without this,
+    /// an operator reading `.edda/views/<branch>/log.md` right after a
+    /// conductor gate/verdict/phase note silently sees stale content.
+    #[test]
+    fn record_note_refreshes_the_derived_log_view() {
+        let dir = tempfile::tempdir().unwrap();
+        edda_ledger::Ledger::ensure_initialized(dir.path()).expect("init workspace ledger");
+
+        record_note(dir.path(), "gate approved politely", &["conductor", "verdict"]);
+
+        let ledger = edda_ledger::Ledger::open(dir.path()).expect("open ledger");
+        let branch = ledger.head_branch().expect("head branch");
+        let log = std::fs::read_to_string(ledger.paths.branches_dir.join(&branch).join("log.md"))
+            .expect("derived log.md must exist after a conductor note");
+        assert!(
+            log.contains("gate approved politely"),
+            "derived log view must contain the fresh note, got:\n{log}"
+        );
+    }
     /// Plan terminal states get the same structured treatment; the honest
     /// total cost follows #533 (null = unmeasured).
     #[test]

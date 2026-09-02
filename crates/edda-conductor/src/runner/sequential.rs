@@ -1869,6 +1869,276 @@ phases:
         );
     }
 
+    // ── GH-584 round 2: workspace-ledger write → read proof ─────────
+    // P1-4: the structured payloads must have a real consumer; the reader
+    // here is the production `edda_ledger` query path, not the producer's
+    // own in-memory state. P1-1/P1-2/P1-3 are the wiring these tests pin.
+
+    /// Run a plan against a PRE-INITIALIZED workspace ledger so the runner's
+    /// library writes have a real workspace to land in, and hand the dir back
+    /// for read-back assertions. (`ensure_init` early-returns: `.edda` exists.)
+    async fn run_plan_in_ledger(
+        yaml: &str,
+        launcher: &dyn AgentLauncher,
+    ) -> (tempfile::TempDir, PlanState, CollectNotifier) {
+        let plan = parse_plan(yaml).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        edda_ledger::Ledger::ensure_initialized(dir.path()).expect("init workspace ledger");
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        let engine = CheckEngine::new(dir.path().to_path_buf());
+        let notifier = CollectNotifier::new();
+        let mut budget = BudgetTracker::new(plan.budget_usd);
+        let cancel = CancellationToken::new();
+        run_plan(
+            &plan,
+            &mut state,
+            RunContext {
+                launcher,
+                check_engine: &engine,
+                notifier: &notifier,
+                budget: &mut budget,
+                cancel,
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+                tmux_session: None,
+            },
+        )
+        .await
+        .unwrap();
+        (dir, state, notifier)
+    }
+
+    /// Read the workspace ledger back through the real `edda_ledger` query
+    /// path, returning the note events that carry a structured `key` payload.
+    fn read_structured_notes(root: &Path, key: &str) -> Vec<edda_core::Event> {
+        edda_ledger::Ledger::open(root)
+            .expect("open workspace ledger")
+            .iter_events_by_type("note")
+            .expect("query note events")
+            .into_iter()
+            .filter(|e| e.payload.get(key).is_some())
+            .collect()
+    }
+
+    /// P1-2 + P1-4 (Some case): a passing phase on the production path must
+    /// carry `plan_id` — two plans with a "build" phase must be attributable
+    /// — and its measured cost must read back as a number.
+    #[tokio::test]
+    async fn e2e_phase_passed_reaches_the_workspace_ledger_with_plan_id_and_cost() {
+        let yaml = r#"
+name: ledgerplan
+phases:
+  - id: build
+    prompt: "do it"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "build",
+            vec![PhaseResult::AgentDone {
+                cost_usd: Some(0.42),
+                result_text: Some("compiled cleanly".into()),
+            }],
+        );
+        let (dir, _state, _notifier) = run_plan_in_ledger(yaml, &launcher).await;
+
+        let events = read_structured_notes(dir.path(), "conductor_phase");
+        assert_eq!(
+            events.len(),
+            1,
+            "exactly one structured phase event, got: {:?}",
+            events.iter().map(|e| &e.payload).collect::<Vec<_>>()
+        );
+        let payload = &events[0].payload["conductor_phase"];
+        assert_eq!(
+            payload["plan_id"],
+            "ledgerplan",
+            "plan_id must ride the production call path, not stay null"
+        );
+        assert_eq!(payload["phase_id"], "build");
+        assert_eq!(payload["status"], "passed");
+        assert_eq!(payload["cost_usd"], serde_json::json!(0.42));
+    }
+
+    /// P1-4 (None case): an unmeasured phase still reaches the ledger, with
+    /// `cost_usd` reading back as JSON null (#533: null ≠ 0.0 sentinel).
+    #[tokio::test]
+    async fn e2e_unmeasured_phase_cost_reads_back_null_from_the_ledger() {
+        let yaml = r#"
+name: ledgerplan
+phases:
+  - id: probe
+    prompt: "do it"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "probe",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some("done".into()),
+            }],
+        );
+        let (dir, _state, _notifier) = run_plan_in_ledger(yaml, &launcher).await;
+
+        let events = read_structured_notes(dir.path(), "conductor_phase");
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload["conductor_phase"];
+        assert_eq!(payload["plan_id"], "ledgerplan");
+        assert!(
+            payload["cost_usd"].is_null(),
+            "unmeasured must read back null, got: {}",
+            payload["cost_usd"]
+        );
+    }
+
+    /// P1-1: plan completion must reach the workspace ledger with the honest
+    /// measured total, not only the plan-local event log.
+    #[tokio::test]
+    async fn e2e_plan_completed_writes_conductor_plan_with_measured_total() {
+        let yaml = r#"
+name: ledgerplan
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: Some(0.42),
+                result_text: None,
+            }],
+        );
+        let (dir, state, _notifier) = run_plan_in_ledger(yaml, &launcher).await;
+        assert_eq!(state.plan_status, PlanStatus::Completed);
+
+        let events = read_structured_notes(dir.path(), "conductor_plan");
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload["conductor_plan"];
+        assert_eq!(payload["plan_id"], "ledgerplan");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(
+            payload["total_cost_usd"],
+            serde_json::json!(0.42),
+            "the ledger must carry the plan's honest measured total"
+        );
+    }
+
+    /// P1-1: an unmeasured plan completion still reaches the ledger, with
+    /// `total_cost_usd` reading back null — never a 0.0 sentinel.
+    #[tokio::test]
+    async fn e2e_plan_completed_unmeasured_total_reads_back_null() {
+        let yaml = r#"
+name: ledgerplan
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: None,
+            }],
+        );
+        let (dir, state, _notifier) = run_plan_in_ledger(yaml, &launcher).await;
+        assert_eq!(state.plan_status, PlanStatus::Completed);
+
+        let events = read_structured_notes(dir.path(), "conductor_plan");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].payload["conductor_plan"]["total_cost_usd"].is_null());
+    }
+
+    /// P1-1: a plan aborted through the on_fail policy must write the
+    /// structured `conductor_plan` abort event to the workspace ledger.
+    #[tokio::test]
+    async fn e2e_plan_abort_writes_conductor_plan_to_the_workspace_ledger() {
+        let yaml = r#"
+name: ledgerabort
+on_fail: abort
+phases:
+  - id: a
+    prompt: "crash"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results("a", vec![PhaseResult::AgentCrash { error: "boom".into() }]);
+        let (dir, state, _notifier) = run_plan_in_ledger(yaml, &launcher).await;
+        assert_eq!(state.plan_status, PlanStatus::Aborted);
+
+        let events = read_structured_notes(dir.path(), "conductor_plan");
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload["conductor_plan"];
+        assert_eq!(payload["plan_id"], "ledgerabort");
+        assert_eq!(payload["status"], "aborted");
+        assert_eq!(payload["phases_passed"], 0);
+        assert_eq!(payload["phases_pending"], 1);
+    }
+
+    /// P1-3: checks failing AFTER a measured agent turn must not rewrite the
+    /// phase failure as unmeasured — the ledger failure event carries 0.42.
+    #[tokio::test]
+    async fn e2e_measured_cost_survives_a_check_failure() {
+        let yaml = r#"
+name: ledgerfail
+on_fail: skip
+phases:
+  - id: a
+    prompt: "make file"
+    check:
+      - file_exists: "output.txt"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: Some(0.42),
+                result_text: Some("made the file".into()),
+            }],
+        );
+        let (dir, state, _notifier) = run_plan_in_ledger(yaml, &launcher).await;
+        assert_eq!(state.phases[0].status, PhaseStatus::Failed);
+
+        let events = read_structured_notes(dir.path(), "conductor_phase");
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload["conductor_phase"];
+        assert_eq!(payload["plan_id"], "ledgerfail");
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(
+            payload["cost_usd"],
+            serde_json::json!(0.42),
+            "state recorded 0.42 for this phase; the ledger failure event must too"
+        );
+    }
+
+    /// P1-3: MaxTurns / BudgetExceeded are phase terminal states — the
+    /// workspace ledger must get the phase-failure event, with the cost the
+    /// backend reported.
+    #[tokio::test]
+    async fn e2e_max_turns_failure_writes_a_phase_failure_event_with_cost() {
+        let yaml = r#"
+name: ledgerturns
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results("a", vec![PhaseResult::MaxTurns { cost_usd: Some(0.7) }]);
+        let (dir, state, _notifier) = run_plan_in_ledger(yaml, &launcher).await;
+        assert_eq!(state.phases[0].status, PhaseStatus::Failed);
+
+        let events = read_structured_notes(dir.path(), "conductor_phase");
+        assert_eq!(
+            events.len(),
+            1,
+            "MaxTurns is a terminal state: the ledger must not miss the event"
+        );
+        let payload = &events[0].payload["conductor_phase"];
+        assert_eq!(payload["plan_id"], "ledgerturns");
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(payload["cost_usd"], serde_json::json!(0.7));
+    }
+
     #[tokio::test]
     async fn terminal_notify_stale_on_timeout() {
         let yaml = r#"
@@ -3567,6 +3837,61 @@ phases:
         assert_eq!(
             (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
             ("a", "Failed", 1)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// P1-2 + P1-3: a gate-reject halt is a phase terminal state reached on
+    /// the production path — the ledger failure event must carry the plan id
+    /// AND the measured cost of the agent turn that produced the gated work.
+    #[tokio::test]
+    async fn e2e_gate_reject_halt_writes_plan_id_and_measured_cost() {
+        let root = fresh_root("ledgerhalt");
+        init_git_repo(&root);
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: Some(0.42),
+                result_text: Some("gated work".into()),
+            }],
+        );
+        let yaml = r#"
+name: gated
+phases:
+  - id: a
+    prompt: "do it"
+    gate: verdict
+    on_reject: halt
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let state = PlanState::from_plan(&plan, "test.yaml");
+        let handle = spawn_runner(yaml, root.clone(), launcher, state);
+
+        let shas = wait_for_gate_events(&root, "gated", 1).await;
+        record_verdict(
+            &root,
+            "gated/a",
+            &shas[0],
+            VerdictDecision::Rejected,
+            Some("wrong approach"),
+        );
+
+        let (_state, _notifier, _launcher) = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+            .await
+            .expect("gate test exceeded 30s")
+            .unwrap()
+            .unwrap();
+
+        let events = read_structured_notes(&root, "conductor_phase");
+        assert_eq!(events.len(), 1);
+        let payload = &events[0].payload["conductor_phase"];
+        assert_eq!(payload["plan_id"], "gated");
+        assert_eq!(payload["status"], "failed");
+        assert_eq!(
+            payload["cost_usd"],
+            serde_json::json!(0.42),
+            "the measured agent-turn cost must survive the gate failure"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
