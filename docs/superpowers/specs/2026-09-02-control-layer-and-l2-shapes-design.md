@@ -188,15 +188,17 @@ epic #560 的標題寫著 "intelligence layer"——它就是控制層，只是�
 
 ---
 
-## 6. 建議的後續單（本文件不開，列給操作者）
+## 6. 後續單（操作者 2026-09-02 授權開立）
 
-1. README 三層定位：把控制層（signal / watch / report / promote / intake）與 L1/L2 並列；
+1. #601 — README 三層定位：把控制層（signal / watch / report / promote / intake）與 L1/L2 並列；
    #560 正名為 Layer 3。
-2. finding 物件：schema、狀態機、`edda finding` 動詞（或掛在 task rail 上）、與 issue-intake
-   promotion ladder 對齊。
-3. conductor 載體／check 可插設計單：PR / finding / draft 三種載體；`cmd_succeeds` /
-   `gate: verdict` / freshness 三種 check。
-4. Loop 形狀的 freshness 一等欄位（可與 #573 / #578 合併處理）。
+2. #602 — finding 物件：schema、狀態機、`edda finding` 動詞（或掛在 task rail 上）、與 issue-intake
+   promotion ladder 對齊（設計先行）。
+3. #603 — conductor 載體／check 可插：PR / finding / draft 三種載體；freshness 與 finding-verdict
+   check 並列於既有六種 check（`cmd_succeeds`、`edda_event`、`file_exists`、`file_contains`、
+   `git_clean`、`wait_until`）之旁（設計先行）。
+4. #604 — Loop 形狀的 freshness 一等訊號：writer 宣告預期節奏，staleness 不必讀 writer 即可見
+   （設計先行；可與 #573 / #578 合併處理）。
 
 ---
 
