@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# Git-native pre-commit gate (zero external dependencies).
+# Enable with: sh scripts/githooks/install.sh   (sets core.hooksPath)
+#
+# Shebang: bash, not POSIX sh. Staged paths are iterated NUL-safely with
+# `read -d ''`, because converting the -z listing to LF (tr '\0' '\n') would
+# split a valid filename that contains a newline into two records and let
+# both dodge the size/path gates. bash is present on every supported
+# platform (Git Bash on Windows, /usr/bin/env bash on Linux); commit-msg,
+# install.sh and test.sh remain POSIX sh.#
+# The commit-hook subset of the L0 gates from .claude/CLAUDE.md, enforced on
+# staged paths (the hooks do NOT run cargo test — that stays a manual L0
+# step, and CI runs it as well):
+#   - any staged file > 1 MB       -> reject
+#   - staged *.rs / Cargo.*        -> cargo fmt --all --check
+#   - staged crates/<dir>/...      -> cargo clippy -p <package> --all-targets
+#                                     -- -D warnings  (package name read from
+#                                     that directory's Cargo.toml, not the
+#                                     directory name)
+#   - staged *.md                  -> sh scripts/lint-markdown-content.sh
+#
+# Bypass everything with `git commit --no-verify`. CI runs on pull requests
+# and on pushes to main (.github/workflows/ci.yml), so a feature branch is
+# gated through its PR's CI Gate.
+# Skip only clippy with `SKIP_CLIPPY=1 git commit ...` (any other value,
+# including SKIP_CLIPPY=0, runs clippy): pre-commit leaves a marker and
+# commit-msg appends `[skip-clippy]` to the message tail so that reviewers
+# can see the skip.
+
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+
+skip_marker=$(git rev-parse --git-path SKIP_CLIPPY)
+# Drop any stale marker from an aborted commit before deciding fresh.
+rm -f "$skip_marker"
+
+# NUL-safe staged listing, end to end: `git diff --cached --raw -z`
+# (--no-renames) emits, per staged path, a NUL-terminated metadata record
+# (":<oldmode> <newmode> <oldsha> <newsha> <status>") followed by a
+# NUL-terminated raw path — never C-quoted, never re-split on LF. The blob
+# sha comes straight out of the metadata record, so the size gate needs no
+# pathspec round-trip. Paths containing LF, quotes or non-ASCII bytes stay
+# ONE record from git to the gates. This listing is the staged list's only
+# source: no environment variable or other override can hide staged paths
+# from the gates.
+staged_z=$(mktemp)
+trap 'rm -f "$staged_z"' EXIT
+git diff --cached --raw -z --no-renames --diff-filter=ACMR >"$staged_z"
+[ -s "$staged_z" ] || exit 0
+
+fail() {
+    echo "pre-commit: $1" >&2
+    echo "pre-commit: commit blocked — fix the issue, or bypass with git commit --no-verify" >&2
+    exit 1
+}
+
+# --- 1 MB staged-size cap + path classification (one NUL-safe pass) -------
+
+max_bytes=1048576
+zero40=0000000000000000000000000000000000000000
+fmt_needed=0
+md_needed=0
+dirs=""
+while IFS= read -r -d '' meta; do
+    IFS= read -r -d '' f || break
+    [ -n "$f" ] || continue
+    # meta: ":<oldmode> <newmode> <oldsha> <newsha> <status>"
+    rest=${meta#:}
+    rest=${rest#* }        # drop oldmode
+    rest=${rest#* }        # drop newmode
+    rest=${rest#* }        # drop oldsha
+    newsha=${rest%% *}     # newsha — the staged blob
+    if [ "$newsha" != "$zero40" ]; then
+        size=$(git cat-file -s "$newsha")
+        if [ "$size" -gt "$max_bytes" ]; then
+            fail "staged file '$f' is $size bytes — the limit is 1 MB ($max_bytes)"
+        fi
+    fi
+    case "$f" in
+        *.rs | Cargo.* | */Cargo.*)
+            fmt_needed=1
+            ;;
+    esac
+    case "$f" in
+        crates/*/*)
+            d=${f#crates/}
+            d=${d%%/*}
+            [ -n "$d" ] || continue
+            case " $dirs " in
+                *" $d "*) ;;
+                *) dirs="$dirs $d" ;;
+            esac
+            ;;
+    esac
+    case "$f" in
+        *.md) md_needed=1 ;;
+    esac
+done <"$staged_z"
+
+# --- cargo fmt ------------------------------------------------------------
+
+if [ "$fmt_needed" -eq 1 ]; then
+    echo "pre-commit: cargo fmt --all --check"
+    cargo fmt --all --check || fail "cargo fmt --all --check failed"
+fi
+
+# --- cargo clippy (touched crates only; SKIP_CLIPPY=1 skips) ---------------
+
+if [ -n "$dirs" ]; then
+    if [ "${SKIP_CLIPPY:-}" = "1" ]; then
+        : > "$skip_marker"
+        echo "pre-commit: SKIP_CLIPPY=1 — clippy skipped for:$dirs"
+        echo "pre-commit: commit-msg will append [skip-clippy] to the message"
+    else
+        for d in $dirs; do
+            toml="crates/$d/Cargo.toml"
+            pkg=$(awk -v dq='"' -v sq="'" '
+                /^[ \t]*\[package\][ \t]*$/ { inp = 1; next }
+                /^[ \t]*\[/ { inp = 0 }
+                inp && /^[ \t]*name[ \t]*=/ {
+                    rest = $0
+                    sub(/^[^=]*=/, "", rest)
+                    sub(/^[ \t]+/, "", rest)
+                    c = substr(rest, 1, 1)
+                    if (c == dq || c == sq) {
+                        end = index(substr(rest, 2), c)
+                        if (end > 0)
+                            print substr(rest, 2, end - 1)
+                    }
+                    exit
+                }
+            ' "$toml" 2>/dev/null)
+            if [ -z "$pkg" ]; then
+                echo "pre-commit: no package name found in $toml — clippy skipped for crates/$d/" >&2
+                continue
+            fi
+            echo "pre-commit: cargo clippy -p $pkg --all-targets -- -D warnings"
+            cargo clippy -p "$pkg" --all-targets -- -D warnings \
+                || fail "cargo clippy -p $pkg failed (or skip with SKIP_CLIPPY=1)"
+        done
+    fi
+fi
+
+# --- markdown content lint --------------------------------------------------
+
+if [ "$md_needed" -eq 1 ]; then
+    echo "pre-commit: sh scripts/lint-markdown-content.sh"
+    sh scripts/lint-markdown-content.sh || fail "markdown content lint failed"
+fi
+
+exit 0

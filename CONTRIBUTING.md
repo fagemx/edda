@@ -7,17 +7,40 @@ Thanks for your interest in contributing! This guide covers how to build, test, 
 - Rust stable (1.75+)
 - Git
 
-## Git Hooks (optional)
+## Git Hooks
 
-We use [Lefthook](https://github.com/evilmartians/lefthook) for local pre-commit and pre-push checks:
+Enable the git-native pre-commit and commit-msg hooks (zero external
+dependencies — no lefthook, no npm, nothing to install):
 
 ```bash
-npm install -g @evilmartians/lefthook
-lefthook install
+sh scripts/githooks/install.sh
 ```
 
-This runs `cargo fmt --check` on commit and `cargo clippy --workspace -- -D warnings` on push.
-Lefthook is local-only and does not affect CI.
+On every commit the hooks enforce the fmt / clippy / markdown-lint / size
+gates from the L0 checklist in `.claude/CLAUDE.md` on the staged paths.
+The hooks do not run `cargo test -p <crate>` — that stays a manual L0 step,
+and CI runs it as well:
+
+- any staged file larger than 1 MB is rejected
+- staged `*.rs` or `Cargo.*` → `cargo fmt --all --check`
+- staged `crates/<dir>/…` → `cargo clippy -p <package> --all-targets -- -D warnings` for each touched crate directory (the package name is read from that directory's `Cargo.toml`)
+- staged `*.md` → `sh scripts/lint-markdown-content.sh`
+- conventional-commit subject check (`<type>(<scope>): <description>`)
+
+Merge commits and `wip(…)` lane checkpoints pass the message check.
+`SKIP_CLIPPY=1 git commit …` skips the clippy gate — any other value,
+including `SKIP_CLIPPY=0`, runs it — and the hook then appends
+`[skip-clippy]` to the commit message so reviewers can see the skip.
+`git commit --no-verify` bypasses all local hooks. CI does not gate every
+push: it runs on pull requests and on pushes to `main`
+(`.github/workflows/ci.yml`), so a feature branch is gated only through its
+PR's CI Gate.
+
+The hook scripts live in `scripts/githooks/`; `commit-msg` is POSIX `sh`,
+while `pre-commit` is `bash` — it iterates the staged-path listing NUL-safely
+(`read -d ''`), so paths containing newlines or non-ASCII bytes stay one
+record; `bash` is present on Git Bash and on Linux. A self-test
+that exercises all scenarios in a throwaway repo is `sh scripts/githooks/test.sh`.
 
 ## Build and Test
 
@@ -52,14 +75,16 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/):
 feat(cli): add --json flag to edda log
 fix(bridge): resolve session identity via heartbeat
 test(ledger): add hash chain integrity tests
-docs: update README quick start section
-chore: apply cargo fmt across workspace
+docs(contributing): update README quick start section
+chore(repo): apply cargo fmt across workspace
 refactor(store): simplify atomic write logic
 ```
 
-**Prefixes**: `feat`, `fix`, `test`, `docs`, `chore`, `refactor`, `perf`
+**Prefixes**: `feat`, `fix`, `test`, `docs`, `chore`, `refactor`, `ci`, `perf`,
+`style`, `build` — enforced by the `commit-msg` hook above (merge commits and
+`wip(…)` lane checkpoints are exempt)
 
-**Scope** (optional): the crate or area being changed — `cli`, `bridge`, `ledger`, `tui`, `mcp`, `search`, `store`, `core`
+**Scope** (required): the crate or area being changed — `cli`, `bridge`, `ledger`, `tui`, `mcp`, `search`, `store`, `core`
 
 ### Pull Requests
 

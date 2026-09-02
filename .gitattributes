@@ -1,0 +1,4 @@
+# Hook scripts must keep LF line endings: a CRLF shebang breaks #!/bin/sh on
+# Git Bash ("bad interpreter"), and core.autocrlf=true would otherwise rewrite
+# them on Windows checkout.
+scripts/githooks/* text eol=lf
