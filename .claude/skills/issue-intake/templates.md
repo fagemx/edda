@@ -2,8 +2,10 @@
 
 ## Issue body (the ready-bar format)
 
-Shaped so parallel-wave Layer 1 can judge it without archaeology. GH-556 is a
-real example of this template.
+The **single body contract**: issue-intake, issue-create, and fleet-epic-split
+all emit this shape; no parallel body formats exist (retired formats stay
+retired). Shaped so parallel-wave Layer 1 can judge it without archaeology.
+GH-556 is a real example of this template.
 
 ```markdown
 ## What happened
@@ -17,6 +19,11 @@ Verbatim evidence: command output, log excerpt, or failing test.>
 <crate/path(s), symbols if known. This is what makes the issue
 machine-judgeable for parallel dispatch — do not skip it.>
 
+## Predicted surface
+<paths + symbols this work will create or modify — the write surface
+parallel-wave Layer 1 intersects to judge parallelism. Cannot list one?
+The scope is too vague: NOT READY, back to scope sharpening.>
+
 ## doneWhen
 - <observable, machine-checkable condition>
 - <...>
@@ -26,7 +33,8 @@ machine-judgeable for parallel dispatch — do not skip it.>
 ## Wiring audit — REQUIRED whenever the issue cites or adds code
 "Exists" ≠ "wired". For EACH component the issue cites or adds, one line
 answering four questions, each backed by a `file:line` verified this session
-(same four questions as issue-create):
+(canonical wording — issue-create and fleet-epic-split defer to this
+definition):
 
 | Component | 1. Writer & shape — who writes it, structured field or prose string? | 2. Reader — name one actual consumer, or state "no consumer". | 3. Failure signal — what happens when it fails: swallowed errors, success-only logs, best-effort writes? | 4. Layer reach — does the capability arrive at the layer the issue claims (CLI flag ↔ builder ↔ store)? |
 |---|---|---|---|---|

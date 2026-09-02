@@ -1,3 +1,6 @@
+You are executing the skill reproduced below verbatim. Follow its workflow.
+
+=== SKILL BEGIN ===
 ---
 name: fleet-epic-split
 description: Use when refilling the Fleet feature queue — accepts four input shapes (epic issue, planning doc, ledger decision key, pasted planning summary), then recon → decompose (independence three-question) → dedupe → confirmation table → batch fleet:pending create → cross-references → provenance report. Never writes implementation code.
@@ -95,3 +98,15 @@ doneWhen → Wiring audit（四問槽）→ Relation to existing issues`
 你不撕 ready、不寫實作碼、不 merge、不在確認表之前建單。你的產出是「待簽的
 提案」，下游有測試閘門兜底，但錯的**方向**沒有閘門攔得住——所以寧可少拆、
 標清依賴，也不硬湊數量。
+=== SKILL END ===
+
+INPUT (an excerpt from epic issue #560 of fagemx/edda — its Stage 2 section):
+
+**Stage 2 — event-driven delivery:**
+phase terminal-state notifications through edda-notify channels (filed), with
+#545 (gate-entry routing) as sibling. Acceptance: a controller reacts to
+phase/gate events without polling stdout.
+
+RULES FOR THIS RUN:
+- This is a DRY RUN: do NOT create, edit, or comment on any GitHub issue, and do not run any command that writes or modifies anything. Read-only inspection is allowed; you are in the edda repo worktree.
+- Produce the outputs the skill requires up to the step immediately before issue creation: print the confirmation table (one row per proposed issue) and the complete proposed body of EVERY would-be issue.

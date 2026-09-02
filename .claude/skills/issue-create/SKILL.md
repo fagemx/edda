@@ -17,29 +17,15 @@ Parse the `args` parameter to determine which operation to perform:
 
 When invoked, check the args to determine the operation and execute accordingly.
 
-## Wiring Audit — REQUIRED whenever the issue cites existing code
+## Body contract — single source
 
-"Exists" ≠ "wired" ≠ "consumed" ≠ "alive". An issue that leans on existing code
-must prove the wiring, not the existence. For EACH cited component, the issue
-body includes a wiring line answering four questions, each backed by a
-file:line verified this session:
-
-1. **Writer & shape** — who writes it, structured field or prose string?
-   (catches: designed-then-flattened)
-2. **Reader** — name one actual consumer, or state "no consumer".
-   (catches: silently unused)
-3. **Failure signal** — what happens when it fails: swallowed errors,
-   success-only logs, best-effort writes? (catches: silently dead)
-4. **Layer reach** — does the capability arrive at the layer the issue claims
-   (CLI flag ↔ builder ↔ store)? (catches: designed-but-not-connected)
-
-If the proposal adds a write-end, doneWhen/acceptance MUST include a
-consumption proof (one test walking write → read end-to-end) and a
-death-visibility line (freshness/coverage surfaced in output).
-
-Red flags — stop and verify before writing: "the parts already exist";
-"X already records this" backed only by a struct or field definition;
-counting sources without naming each one's reader.
+The issue body contract (ready-bar sections, the four-question Wiring audit
+slot, the `Predicted surface` field) is defined once in
+[.claude/skills/issue-intake/templates.md](../issue-intake/templates.md).
+Read it and follow it verbatim for every issue body you write — do not invent
+parallel body formats. Red flags — stop and verify before writing: "the parts
+already exist"; "X already records this" backed only by a struct or field
+definition; counting sources without naming each one's reader.
 
 ---
 
