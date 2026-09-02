@@ -36,7 +36,10 @@ push: it runs on pull requests and on pushes to `main`
 (`.github/workflows/ci.yml`), so a feature branch is gated only through its
 PR's CI Gate.
 
-The hook scripts are POSIX sh and live in `scripts/githooks/`; a self-test
+The hook scripts live in `scripts/githooks/`; `commit-msg` is POSIX `sh`,
+while `pre-commit` is `bash` — it iterates the staged-path listing NUL-safely
+(`read -d ''`), so paths containing newlines or non-ASCII bytes stay one
+record; `bash` is present on Git Bash and on Linux. A self-test
 that exercises all scenarios in a throwaway repo is `sh scripts/githooks/test.sh`.
 
 ## Build and Test

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Enable edda's git-native hooks (pre-commit, commit-msg) via core.hooksPath.
 # Zero external dependencies: no lefthook, no npm, nothing to download.
+# commit-msg is POSIX sh; pre-commit is bash (present on Git Bash and Linux).
 #
 # Run once per clone / worktree:
 #     sh scripts/githooks/install.sh
@@ -32,5 +33,7 @@ echo "  pre-commit : 1 MB cap; cargo fmt (staged *.rs / Cargo.*);"
 echo "               cargo clippy (touched crates/* only); markdown lint (staged *.md)"
 echo "  commit-msg : <type>(<scope>): <description>; merge + wip( pass;"
 echo "               [skip-clippy] tagging for SKIP_CLIPPY=1"
+echo "runtime   : pre-commit needs bash (Git Bash and Linux both have it);"
+echo "            commit-msg is POSIX sh"
 echo "bypass: git commit --no-verify — CI runs on pull requests and pushes to main;"
 echo "        a feature branch is gated through its PR's CI Gate"

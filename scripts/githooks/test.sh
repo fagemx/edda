@@ -233,6 +233,65 @@ else
 fi
 git reset -q --hard "$prev"
 
+# --- fix 6 (R2): a path containing LF stays ONE record end to end -----------
+# pre-commit must iterate the -z listing without ever converting NUL to LF;
+# a valid POSIX filename with an embedded newline must not be split into two
+# records that both dodge the size gate. Windows cannot stage such a file
+# (NTFS forbids control chars; update-index refuses them), so this drives
+# the hook's documented test seam PRE_COMMIT_STAGED_LIST_Z with a synthetic
+# raw -z listing — the reviewer's probe, but at the hook boundary.
+bigcontent="$repo/bigcontent.bin"
+head -c 1048577 /dev/zero > "$bigcontent"
+bigsha=$(git hash-object -w "$bigcontent")
+zero40=0000000000000000000000000000000000000000
+synth="$repo/synthetic-raw-list.bin"
+printf ':000000 100644 %s %s A\0large\nfile.bin\0' "$zero40" "$bigsha" >"$synth"
+out=$(PRE_COMMIT_STAGED_LIST_Z="$synth" bash "$hooks_dir/pre-commit" 2>&1) && {
+    report FAIL "reject: staged 1 MB+ 'large<LF>file.bin' as ONE record (NUL-safe)" \
+        "expected rejection, got success: $out"
+} || {
+    case "$out" in
+    *"the limit is 1 MB"*)
+        report PASS "reject: staged 1 MB+ 'large<LF>file.bin' as ONE record (NUL-safe)"
+        ;;
+    *)
+        report FAIL "reject: staged 1 MB+ 'large<LF>file.bin' as ONE record (NUL-safe)" "$out"
+        ;;
+    esac
+}
+rm -f "$bigcontent"
+
+# --- fix 7 (R2): package name from [package], single quotes, other tables ---
+# The manifest parser must accept 'literal' as well as "double" names and
+# must not leak name = lines from other tables like [dependencies].
+mkdir -p crates/litname/src
+cat > crates/litname/Cargo.toml <<'EOF'
+[package]
+name = 'literal-name'
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+name = "decoy"
+EOF
+printf 'pub fn f() -> i32 {\n    1\n}\n' > crates/litname/src/lib.rs
+git add crates/litname/Cargo.toml
+: > "$stub_log"
+prev=$(git rev-parse HEAD)
+expect_accept "accept: stub cargo passes the single-quote package-name scenario" \
+    env PATH="$stub_dir:$PATH" CARGO_STUB_LOG="$stub_log" \
+    git commit -m "feat(test): single-quoted package name"
+if grep -q 'clippy -p literal-name' "$stub_log" \
+    && ! grep -q 'decoy' "$stub_log" \
+    && ! grep -q 'litname' "$stub_log"; then
+    report PASS "single-quoted [package] name gives -p literal-name; other tables ignored"
+else
+    report FAIL "single-quoted [package] name gives -p literal-name; other tables ignored" \
+        "stub log: $(cat "$stub_log" 2>/dev/null)"
+fi
+git reset -q --hard "$prev"
+rm -rf crates/litname
+
 echo
 if [ "$failed" -eq 0 ]; then
     echo "ALL SCENARIOS PASSED"

@@ -78,7 +78,7 @@
 ## 四、Lane 的三件事
 
 開工先裝 hooks（每個 worktree 一次）：`sh scripts/githooks/install.sh`——之後 L0 的
-fmt／clippy／lint／size 閘由 pre-commit／commit-msg 機器擋（1 MB 上限、staged `*.rs`/`Cargo.*` 跑
+fmt／clippy／lint／size 閘由 pre-commit（bash 腳本；commit-msg 為 POSIX sh）／commit-msg 機器擋（1 MB 上限、staged `*.rs`/`Cargo.*` 跑
 `cargo fmt --all --check`、touched `crates/*` 跑 clippy、staged `*.md` 跑 markdown lint、
 conventional commit 格式；`SKIP_CLIPPY=1` 跳過 clippy 並自動在訊息尾巴補 `[skip-clippy]`）。
 `cargo test -p <crate>` 不在 hook 裡——仍是手動 L0 步驟，CI 也會跑。`--no-verify` 全跳；

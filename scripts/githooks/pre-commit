@@ -1,7 +1,13 @@
-#!/bin/sh
-# Git-native pre-commit gate (zero external dependencies; POSIX sh).
+#!/usr/bin/env bash
+# Git-native pre-commit gate (zero external dependencies).
 # Enable with: sh scripts/githooks/install.sh   (sets core.hooksPath)
 #
+# Shebang: bash, not POSIX sh. Staged paths are iterated NUL-safely with
+# `read -d ''`, because converting the -z listing to LF (tr '\0' '\n') would
+# split a valid filename that contains a newline into two records and let
+# both dodge the size/path gates. bash is present on every supported
+# platform (Git Bash on Windows, /usr/bin/env bash on Linux); commit-msg,
+# install.sh and test.sh remain POSIX sh.#
 # The commit-hook subset of the L0 gates from .claude/CLAUDE.md, enforced on
 # staged paths (the hooks do NOT run cargo test — that stays a manual L0
 # step, and CI runs it as well):
@@ -30,13 +36,27 @@ skip_marker=$(git rev-parse --git-path SKIP_CLIPPY)
 # Drop any stale marker from an aborted commit before deciding fresh.
 rm -f "$skip_marker"
 
-# NUL-safe staged listing: with -z, git emits raw paths (never C-quoted, so
-# non-ASCII names like café.bin survive intact); tr turns the NUL separators
-# into newlines for the POSIX-sh line loop below.
-staged_list=$(mktemp)
-trap 'rm -f "$staged_list"' EXIT
-git diff --cached --name-only -z --diff-filter=ACMR | tr '\0' '\n' >"$staged_list"
-[ -s "$staged_list" ] || exit 0
+# NUL-safe staged listing, end to end: `git diff --cached --raw -z`
+# (--no-renames) emits, per staged path, a NUL-terminated metadata record
+# (":<oldmode> <newmode> <oldsha> <newsha> <status>") followed by a
+# NUL-terminated raw path — never C-quoted, never re-split on LF. The blob
+# sha comes straight out of the metadata record, so the size gate needs no
+# pathspec round-trip. Paths containing LF, quotes or non-ASCII bytes stay
+# ONE record from git to the gates.
+#
+# Test seam (used only by scripts/githooks/test.sh): PRE_COMMIT_STAGED_LIST_Z
+# points at a synthetic raw -z listing file, because Windows cannot stage a
+# filename containing a real newline (NTFS forbids control characters and
+# `git update-index` refuses them), so the LF-path scenario can only be
+# exercised by injecting the listing at this boundary.
+if [ -n "${PRE_COMMIT_STAGED_LIST_Z:-}" ]; then
+    staged_z=$PRE_COMMIT_STAGED_LIST_Z
+else
+    staged_z=$(mktemp)
+    trap 'rm -f "$staged_z"' EXIT
+    git diff --cached --raw -z --no-renames --diff-filter=ACMR >"$staged_z"
+fi
+[ -s "$staged_z" ] || exit 0
 
 fail() {
     echo "pre-commit: $1" >&2
@@ -44,26 +64,28 @@ fail() {
     exit 1
 }
 
-# --- 1 MB staged-size cap ------------------------------------------------
+# --- 1 MB staged-size cap + path classification (one NUL-safe pass) -------
 
 max_bytes=1048576
-while IFS= read -r f; do
-    [ -n "$f" ] || continue
-    blob=$(git ls-files -s -- "$f" | awk '{print $2}')
-    [ -n "$blob" ] || continue
-    size=$(git cat-file -s "$blob")
-    if [ "$size" -gt "$max_bytes" ]; then
-        fail "staged file '$f' is $size bytes — the limit is 1 MB ($max_bytes)"
-    fi
-done <"$staged_list"
-
-# --- classify staged paths ------------------------------------------------
-
+zero40=0000000000000000000000000000000000000000
 fmt_needed=0
 md_needed=0
 dirs=""
-while IFS= read -r f; do
+while IFS= read -r -d '' meta; do
+    IFS= read -r -d '' f || break
     [ -n "$f" ] || continue
+    # meta: ":<oldmode> <newmode> <oldsha> <newsha> <status>"
+    rest=${meta#:}
+    rest=${rest#* }        # drop oldmode
+    rest=${rest#* }        # drop newmode
+    rest=${rest#* }        # drop oldsha
+    newsha=${rest%% *}     # newsha — the staged blob
+    if [ "$newsha" != "$zero40" ]; then
+        size=$(git cat-file -s "$newsha")
+        if [ "$size" -gt "$max_bytes" ]; then
+            fail "staged file '$f' is $size bytes — the limit is 1 MB ($max_bytes)"
+        fi
+    fi
     case "$f" in
         *.rs | Cargo.* | */Cargo.*)
             fmt_needed=1
@@ -83,7 +105,7 @@ while IFS= read -r f; do
     case "$f" in
         *.md) md_needed=1 ;;
     esac
-done <"$staged_list"
+done <"$staged_z"
 
 # --- cargo fmt ------------------------------------------------------------
 
@@ -102,13 +124,19 @@ if [ -n "$dirs" ]; then
     else
         for d in $dirs; do
             toml="crates/$d/Cargo.toml"
-            pkg=$(awk '
+            pkg=$(awk -v dq='"' -v sq="'" '
                 /^[ \t]*\[package\][ \t]*$/ { inp = 1; next }
                 /^[ \t]*\[/ { inp = 0 }
                 inp && /^[ \t]*name[ \t]*=/ {
-                    sub(/^[^"]*"/, "")
-                    sub(/".*/, "")
-                    print
+                    rest = $0
+                    sub(/^[^=]*=/, "", rest)
+                    sub(/^[ \t]+/, "", rest)
+                    c = substr(rest, 1, 1)
+                    if (c == dq || c == sq) {
+                        end = index(substr(rest, 2), c)
+                        if (end > 0)
+                            print substr(rest, 2, end - 1)
+                    }
                     exit
                 }
             ' "$toml" 2>/dev/null)
