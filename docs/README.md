@@ -16,7 +16,7 @@ pitch and install; come here when you need depth.
 
 | Section | What it answers |
 | - | - |
-| [`architecture/`](./architecture/) | How the system holds together: [overview](./architecture/overview.md), [state consistency contract](./architecture/consistency-contract.md) |
+| [`architecture/`](./architecture/) | How the system holds together: [overview](./architecture/overview.md), [state consistency contract](./architecture/consistency-contract.md), [lane privilege threat model](./architecture/lane-privilege-threat-model.md)（設計稿，未批准） |
 | [`decision/`](./decision/) | The decision-subsystem spec stack (v0 design specs): [model](./decision/decision-model/overview.md), [intake](./decision/decision-intake/overview.md), [injection](./decision/decision-injection/overview.md), [governance](./decision/decision-governance/overview.md). The code is authoritative where details differ. |
 | [`blog/`](./blog/) | Announcement and design-story posts |
 
