@@ -11,6 +11,12 @@ use tokio::process::Command;
 /// live (LNK1104's payload, `error: test failed`).
 const OUTPUT_TAIL_CHARS: usize = 2000;
 
+/// Per-stream capture cap for the HEAD (GH-558): some failure families put
+/// the fatal line FIRST — cargo-fmt prints the actual reason before its
+/// help/usage block, so tail-only capture kept the block and dropped the
+/// reason, which is exactly the shape GH-558 was filed from. Keep both ends.
+const OUTPUT_HEAD_CHARS: usize = 400;
+
 /// Output substrings that identify a machine-layer build failure (GH-540).
 /// The full linker-fatal signature — not the bare code — is required (review
 /// round 1): a bare `LNK1104` token also shows up in agent output that merely
@@ -74,6 +80,13 @@ fn which_exists(name: &str) -> bool {
 pub async fn check_cmd_succeeds(cmd: &str, timeout_sec: u64, cwd: &Path) -> CheckOutput {
     let start = Instant::now();
     let (shell, args) = shell_cmd(cmd);
+    // GH-558 doneWhen 1: record the exact shell line the harness executes, so
+    // a harness-side invocation difference is visible in the captured output
+    // instead of being inferred (wrongly, in the original report) from the
+    // child's output.
+    // mask_secrets: the spec string itself may embed a credential (caught by
+    // the GH-558 round-0 test `secrets_masked_in_output`).
+    let executed = mask_secrets(&shell_line(&shell, &args));
 
     let result = Command::new(&shell)
         .args(&args)
@@ -92,18 +105,26 @@ pub async fn check_cmd_succeeds(cmd: &str, timeout_sec: u64, cwd: &Path) -> Chec
             // link.exe puts "cannot open file '...'" at the very end of
             // stderr — so a tail of one stream reproduces the same useless
             // message the issue was filed with.
+            // GH-558: keep the HEAD of both streams too — cargo-fmt prints
+            // its failure reason BEFORE the usage block, and tail-only
+            // capture reduced the observed output to the bare usage text.
             let stderr = mask_secrets(&String::from_utf8_lossy(&output.stderr));
             let stdout = mask_secrets(&String::from_utf8_lossy(&output.stdout));
+            let stderr_cap = bounded_stream(&stderr);
+            let stdout_cap = bounded_stream(&stdout);
             let stderr_tail = output_tail(&stderr, OUTPUT_TAIL_CHARS);
             let stdout_tail = output_tail(&stdout, OUTPUT_TAIL_CHARS);
-            let mut message = format!("exit {}", output.status.code().unwrap_or(-1));
-            if !stderr_tail.trim().is_empty() {
-                message.push_str(": ");
-                message.push_str(stderr_tail.trim_end());
+            let mut message = format!(
+                "executed: {executed}\nexit {}",
+                output.status.code().unwrap_or(-1)
+            );
+            if !stderr_cap.trim().is_empty() {
+                message.push_str("\n--- stderr ---\n");
+                message.push_str(stderr_cap.trim_end());
             }
-            if !stdout_tail.trim().is_empty() {
-                message.push_str("\n--- stdout (tail) ---\n");
-                message.push_str(stdout_tail.trim_end());
+            if !stdout_cap.trim().is_empty() {
+                message.push_str("\n--- stdout ---\n");
+                message.push_str(stdout_cap.trim_end());
             }
             let detail = message.trim().to_string();
             if is_environmental(stderr_tail, stdout_tail) {
@@ -112,12 +133,43 @@ pub async fn check_cmd_succeeds(cmd: &str, timeout_sec: u64, cwd: &Path) -> Chec
                 CheckOutput::failed(detail, start.elapsed())
             }
         }
-        Ok(Err(e)) => CheckOutput::failed(format!("spawn error: {e}"), start.elapsed()),
+        Ok(Err(e)) => CheckOutput::failed(
+            format!("executed: {executed}\nspawn error: {e}"),
+            start.elapsed(),
+        ),
         Err(_) => CheckOutput::timed_out(
-            format!("command timed out after {timeout_sec}s: {cmd}"),
+            format!("command timed out after {timeout_sec}s: {cmd} (executed: {executed})"),
             start.elapsed(),
         ),
     }
+}
+
+/// Render the executed shell line for check diagnostics (GH-558).
+fn shell_line(shell: &str, args: &[String]) -> String {
+    let mut parts = vec![shell.to_string()];
+    for arg in args {
+        if arg.contains(' ') {
+            parts.push(format!("\"{arg}\""));
+        } else {
+            parts.push(arg.clone());
+        }
+    }
+    parts.join(" ")
+}
+
+/// Keep the head and the tail of a captured stream, bounded (GH-558).
+/// Short streams pass through unchanged; long ones keep the first
+/// `OUTPUT_HEAD_CHARS` and last `OUTPUT_TAIL_CHARS` characters with an
+/// explicit truncation marker between them. Char-boundary safe.
+fn bounded_stream(s: &str) -> String {
+    let total = s.chars().count();
+    if total <= OUTPUT_TAIL_CHARS {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(OUTPUT_HEAD_CHARS).collect();
+    let tail = output_tail(s, OUTPUT_TAIL_CHARS);
+    let skipped = total - OUTPUT_HEAD_CHARS - OUTPUT_TAIL_CHARS;
+    format!("{head}\n...[{skipped} chars truncated]...\n{tail}")
 }
 
 #[cfg(test)]
