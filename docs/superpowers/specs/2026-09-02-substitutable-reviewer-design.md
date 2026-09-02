@@ -185,3 +185,27 @@ edda decide fleet.review-unreviewed-state honest-label-blocked-by-merge-gate-580
 ```
 
 ---
+
+## 7. 本文件未決定的事（與後續單）
+
+操作者裁定 §6 的五個 key 之前，以下都只是紀錄，不是授權：
+
+1. **brief 模板進 fleet-review skill**——`.claude/skills/**` 在本 lane 是
+   FORBIDDEN；移入與文字收斂歸 #633（REVIEW.md），與 #598／#594 同檔。
+2. **接線**——`--model`／`--exclude-tools`／`--allowedTools` 進 `edda dispatch`、
+   `model_observed` 進收據＝#574 S1/S2/S5；池表掛進 profile 讀取路徑＝#593。
+3. **watcher／儀表接線**（抓取率表、`review:unreviewed` 狀態面、quota_signal
+   顯示）＝#632。
+4. **brief v2**——把「shell 解析樹＋觸發條件」移出 `[判斷]`（校準學習 1）；
+   `model_observed` 註記改成「以 session 檔/JSON 為準，環境變數身分不算數」
+   （校準學習：sol/glm 引用 `PI_MODEL`）。
+5. **gemini 運輸修正**——池表需要實際可達的 model id；openrouter 的 fp8
+   quantization 路由問題要查明是 pi 端參數或帳戶路由設定（校準學習 3）。
+6. **金絲雀重校的自動化**——把 §1.2 的跑法變成腳本／lane（#594 wiring-scan
+   同條 lane 候選），目前是手動程序＋README。
+
+## 8. 連結
+
+- 金絲雀集 v0（格式、跑法、評分基準）：[tests/canaries/README.md](../../../tests/canaries/README.md)
+- 審查 brief 模板 v1：[2026-09-02-reviewer-brief-template-v1.md](2026-09-02-reviewer-brief-template-v1.md)
+- 上游：#618（本單）·#560（epic）·#574／#593／#594／#580／#582／#598／#632／#633
