@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Release automation now blocks GitHub release creation until every publishable workspace crate exists at the tag version on crates.io and is not yanked
-- The CLI reference now documents the 0.3/0.4 reasoning, task, coordination, dispatch, and operator-verdict surfaces; CI compares its command index with the public `edda --help` surface
 
 ## [0.4.0] - 2026-09-02
 
