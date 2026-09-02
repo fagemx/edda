@@ -24,6 +24,8 @@
 - **R14 每日預算**：管理者自身每日 5 美元；lane 照 brief。
 - **R15 認證失敗的機器判準**：一輪 agent 回合若 `Cost: $0.00`，一律當失敗處理，不論 exit code。理由：認證失敗的回合成本必為零，而 `edda dispatch` 目前回 exit 0（#669）。#669 落地後改以 exit code 為準，本條保留為交叉檢查。
 - **R16 存活面的已知污染**：`edda peers` 在 `cargo test -p edda-bridge-claude` 執行期間會出現非 UUID 形狀的假 session（測試 fixture 寫進真實 store，#646）。判存活時忽略 session id 不是 UUID 形狀的條目。心跳判活的視窗是 120 秒（`stale_secs()`），所以兩次查詢相隔超過該視窗可能得到不同答案 —— 這是時序，不是 store 分裂。
+- **R17 心跳缺席不是死亡判決**：互動 session（Claude Code 等 hook 驅動）的心跳只在 hook 事件時寫，長工具呼叫期間零事件，120 秒後就從 `edda peers` 消失但人還活著；`edda dispatch`／`conduct` 起的 lane 由 runner 每 30 秒刷新（`crates/edda-conductor/src/runner/heartbeat.rs:25`），stale 才等於死。所以心跳缺席只是「去查 process tree」的提示，死亡判決一律走 R3。禁止把 `stale_secs` 調大來掩蓋。來源：#617、#646。
+- **R15 備註**：`Cost:` 有兩條互不相交的路徑——dispatch 輸出的 `cost_usd` 是 backend 原樣透出，bridge 的 `estimate_cost` 是定價表（#677）。R15 只看前者；成本欄位缺量測時沿 CLI 的 `cost_line` 顯示 n/a，不偽造 0.0（GH-533）。
 
 ## 管理者自訂
 
