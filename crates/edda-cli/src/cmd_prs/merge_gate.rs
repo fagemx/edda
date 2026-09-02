@@ -577,6 +577,54 @@ fn fetch_pr_from_gh(
     })
 }
 
+/// Format standard CLI output reports for merge precondition results.
+pub fn format_merge_report(result: &MergeGateResult) -> (String, String) {
+    let mut stdout_buf = String::new();
+    let mut stderr_buf = String::new();
+
+    if result.can_merge {
+        use std::fmt::Write;
+        let _ = writeln!(stdout_buf, "PASS: Merge preconditions satisfied.");
+        let _ = writeln!(stdout_buf, "  PR Head:     {}", result.head_sha);
+        if let Some(author) = &result.pr_author {
+            let _ = writeln!(stdout_buf, "  PR Author:   {author}");
+        }
+        let author_str = result
+            .verdict_author
+            .as_deref()
+            .map(|a| format!(" by {a}"))
+            .unwrap_or_default();
+        let _ = writeln!(
+            stdout_buf,
+            "  Verdict:     {}{} (pinned at {})",
+            result.verdict.as_deref().unwrap_or("none"),
+            author_str,
+            result.verdict_sha.as_deref().unwrap_or("none")
+        );
+        let _ = writeln!(
+            stdout_buf,
+            "  Findings:    P0={}, P1={}",
+            result.p0_count, result.p1_count
+        );
+        let _ = writeln!(stdout_buf, "  Required CI: green");
+    } else {
+        use std::fmt::Write;
+        let _ = writeln!(
+            stderr_buf,
+            "REFUSED: Merge preconditions not satisfied for head {}:",
+            result.head_sha
+        );
+        if let Some(author) = &result.pr_author {
+            let _ = writeln!(stderr_buf, "  PR Author:   {author}");
+        }
+        for reason in &result.reasons {
+            let _ = writeln!(stderr_buf, "  - {reason}");
+        }
+    }
+
+    (stdout_buf, stderr_buf)
+}
+
 /// Execute the merge precondition check CLI entrypoint.
 pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result<()> {
     if args.merge && (args.pr.is_none() || args.input.is_some()) {
@@ -618,37 +666,13 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
     if args.json {
         let json_out = serde_json::to_string_pretty(&result)?;
         println!("{json_out}");
-    } else if result.can_merge {
-        println!("PASS: Merge preconditions satisfied.");
-        println!("  PR Head:     {}", result.head_sha);
-        if let Some(author) = &result.pr_author {
-            println!("  PR Author:   {author}");
+    } else {
+        let (out, err) = format_merge_report(&result);
+        if !out.is_empty() {
+            print!("{out}");
         }
-        let author_str = result
-            .verdict_author
-            .as_deref()
-            .map(|a| format!(" by {a}"))
-            .unwrap_or_default();
-        println!(
-            "  Verdict:     {}{} (pinned at {})",
-            result.verdict.as_deref().unwrap_or("none"),
-            author_str,
-            result.verdict_sha.as_deref().unwrap_or("none")
-        );
-        println!(
-            "  Findings:    P0={}, P1={}",
-            result.p0_count, result.p1_count
-        );
-        println!("  Required CI: green");
-        eprintln!(
-            "REFUSED: Merge preconditions not satisfied for head {}:",
-            result.head_sha
-        );
-        if let Some(author) = &result.pr_author {
-            eprintln!("  PR Author:   {author}");
-        }
-        for reason in &result.reasons {
-            eprintln!("  - {reason}");
+        if !err.is_empty() {
+            eprint!("{err}");
         }
     }
 
@@ -1081,5 +1105,59 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             .unwrap_err()
             .to_string()
             .contains("cannot be used with '--input'"));
+    }
+
+    #[test]
+    fn test_format_merge_report_pass() {
+        let result = MergeGateResult {
+            can_merge: true,
+            head_sha: VALID_SHA_A.into(),
+            pr_author: Some("alice".into()),
+            verdict: Some("LGTM".into()),
+            verdict_sha: Some(VALID_SHA_A.into()),
+            verdict_author: Some("bob".into()),
+            p0_count: 0,
+            p1_count: 0,
+            required_ci_green: true,
+            reasons: vec![],
+        };
+
+        let (stdout, stderr) = format_merge_report(&result);
+        assert!(stderr.is_empty(), "PASS report must not write to stderr");
+        assert!(stdout.contains("PASS: Merge preconditions satisfied."));
+        assert!(stdout.contains("PR Head:     1234567890abcdef1234567890abcdef12345678"));
+        assert!(stdout.contains("PR Author:   alice"));
+        assert!(stdout.contains("Verdict:     LGTM by bob"));
+        assert!(stdout.contains("Required CI: green"));
+    }
+
+    #[test]
+    fn test_format_merge_report_refused() {
+        let result = MergeGateResult {
+            can_merge: false,
+            head_sha: VALID_SHA_A.into(),
+            pr_author: Some("alice".into()),
+            verdict: Some("Changes Requested".into()),
+            verdict_sha: Some(VALID_SHA_A.into()),
+            verdict_author: Some("bob".into()),
+            p0_count: 1,
+            p1_count: 1,
+            required_ci_green: false,
+            reasons: vec![
+                "review verdict is not LGTM (found 'Changes Requested')".into(),
+                "blocking findings present: 1 P0, 1 P1 (both must be 0)".into(),
+                "required CI check(s) are not green".into(),
+            ],
+        };
+
+        let (stdout, stderr) = format_merge_report(&result);
+        assert!(stdout.is_empty(), "REFUSED report must not write to stdout");
+        assert!(stderr.contains(
+            "REFUSED: Merge preconditions not satisfied for head 1234567890abcdef1234567890abcdef12345678:"
+        ));
+        assert!(stderr.contains("PR Author:   alice"));
+        assert!(stderr.contains("  - review verdict is not LGTM"));
+        assert!(stderr.contains("  - blocking findings present: 1 P0, 1 P1"));
+        assert!(stderr.contains("  - required CI check(s) are not green"));
     }
 }
