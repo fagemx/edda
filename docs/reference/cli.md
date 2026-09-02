@@ -743,6 +743,13 @@ Verdict recorded: approved demo/phase-1 @ 00000000000000000000000000000000000000
   comment: sanity
 ```
 
+> **Freshness (GH-519 D6):** a verdict only satisfies a waiting gate if it
+> postdates the gate's `gate_entered_at`. Pre-recording a verdict — approving
+> a known SHA *before* the gate opens — does not work: the gate ignores any
+> verdict recorded before it entered `AWAITING_VERDICT`, even for the
+> matching SHA. Wait for the gate to open, then run the `edda verdict`
+> command the conductor prints.
+
 ### `edda phase`
 
 Agent phase map, plus approve/reject sugar over `edda verdict` (GH-547).
