@@ -531,8 +531,9 @@ edda coord [--session <SESSION>]
 ```
 
 `edda claim check` exits `0` when scopes are disjoint, `1` for a conflict, and
-`2` for a usage or runtime error. `--if-claimed` makes unconditional teardown
-idempotent.
+`2` for a usage or runtime error. `--if-claimed` makes teardown idempotent once
+session attribution is unambiguous; pass `--session` when multiple live sessions
+make implicit identity ambiguous.
 
 ### `edda dispatch`
 
@@ -564,8 +565,10 @@ when available but cannot enforce `--budget-usd`.
 | `3` | Budget exceeded |
 | `4` | Maximum turns reached |
 
-With `--json`, stdout is exactly one object containing `outcome`, `result_text`,
-`cost_usd`, `session_id`, and `error`.
+With `--json`, a dispatched turn renders exactly one stdout object containing
+`outcome`, `result_text`, `cost_usd`, `session_id`, and `error`. A pre-dispatch
+failure, such as an unreadable prompt file, exits `1` and reports to stderr
+before JSON rendering begins.
 
 ### `edda verdict` and `edda phase`
 
@@ -590,7 +593,10 @@ edda phase reject <PLAN>/<PHASE> --comment <TEXT> \
   [--sha <FULL_SHA>] [--session <SESSION>]
 ```
 
-A rejection comment becomes the next redispatch prompt for the gated session.
+With the default `on_reject: redispatch`, a rejection comment becomes the next
+prompt while attempt and redispatch bounds remain. With `on_reject: halt`, or
+after those bounds are exhausted, the phase fails instead of launching another
+turn.
 
 ---
 
