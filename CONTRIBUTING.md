@@ -19,6 +19,19 @@ lefthook install
 This runs `cargo fmt --check` on commit and `cargo clippy --workspace -- -D warnings` on push.
 Lefthook is local-only and does not affect CI.
 
+### Git hooks (no extra tools)
+
+Edda also ships zero-dependency POSIX `sh` hooks that enforce the checks locally:
+
+```bash
+sh scripts/githooks/install.sh
+```
+
+This sets `git config core.hooksPath scripts/githooks` (idempotent; uninstall with `git config --unset core.hooksPath`).
+
+- `pre-commit` — from the staged paths: runs `cargo fmt --all --check` when any `*.rs` or `Cargo.toml`/`Cargo.lock` is staged; runs `cargo clippy -p <crate> --all-targets -- -D warnings` for each touched `crates/<crate>/` (set `SKIP_CLIPPY=1` to skip — the commit message is then tagged `[skip-clippy]`); runs `sh scripts/lint-markdown-content.sh` when any `*.md` is staged; rejects any staged file larger than 1 MB.
+- `commit-msg` — enforces `<type>(<scope>): <desc>` or `<type>: <desc>` (types: `feat fix docs refactor test chore ci perf style build`); merge commits, `wip(` lane checkpoints, and `Revert ` messages are allowed.
+
 ## Build and Test
 
 ```bash

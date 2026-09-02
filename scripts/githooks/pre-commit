@@ -1,0 +1,91 @@
+#!/bin/sh
+# git pre-commit hook — fmt / clippy (touched crates) / markdown lint / 1 MB cap.
+# POSIX sh only; install via scripts/githooks/install.sh. Uninstall:
+# git config --unset core.hooksPath
+set -u
+
+gitdir=$(git rev-parse --git-dir)
+marker="$gitdir/skip-clippy-marker"
+rm -f "$marker"
+
+list=$(mktemp)
+trap 'rm -f "$list"' EXIT HUP INT TERM
+git diff --cached --name-only >"$list"
+
+[ -s "$list" ] || exit 0
+
+need_fmt=0
+need_md=0
+crates=""
+
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    case "$f" in
+    *.rs) need_fmt=1 ;;
+    Cargo.toml | Cargo.lock | */Cargo.toml | */Cargo.lock) need_fmt=1 ;;
+    *.md) need_md=1 ;;
+    esac
+    case "$f" in
+    crates/*/*)
+        c=${f#crates/}
+        c=${c%%/*}
+        case ",$crates," in
+        *,"$c",*) ;;
+        *) crates="$crates,$c" ;;
+        esac
+        ;;
+    esac
+    if [ -f "$f" ]; then
+        size=$(wc -c <"$f")
+        if [ "$size" -gt 1048576 ]; then
+            echo "pre-commit: REJECT — staged file larger than 1 MB: $f ($size bytes)" >&2
+            status=1
+        fi
+    fi
+done <"$list"
+crates=${crates#,}
+
+run() {
+    label=$1
+    shift
+    printf 'pre-commit: running %s\n' "$label"
+    "$@"
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf 'pre-commit: %s — exit 0 (ok)\n' "$label"
+        return 0
+    fi
+    printf 'pre-commit: %s — exit %d (FAILED)\n' "$label" "$rc"
+    return 1
+}
+
+status=${status:-0}
+
+if [ "$need_fmt" -eq 1 ]; then
+    run "cargo fmt --all --check" cargo fmt --all --check || status=1
+fi
+
+if [ -n "$crates" ]; then
+    if [ "${SKIP_CLIPPY:-0}" = "1" ]; then
+        echo "pre-commit: *** SKIP_CLIPPY=1 — skipping cargo clippy for:$(printf '%s' "$crates" | tr ',' ' ') ***" >&2
+        echo "pre-commit: *** the commit message will be tagged [skip-clippy] for reviewers ***" >&2
+        : >"$marker"
+    else
+        for c in $(printf '%s' "$crates" | tr ',' ' '); do
+            [ -d "crates/$c" ] || continue
+            run "cargo clippy -p $c --all-targets -- -D warnings" \
+                cargo clippy -p "$c" --all-targets -- -D warnings || status=1
+        done
+    fi
+fi
+
+if [ "$need_md" -eq 1 ] && [ -f scripts/lint-markdown-content.sh ]; then
+    run "sh scripts/lint-markdown-content.sh" sh scripts/lint-markdown-content.sh || status=1
+fi
+
+if [ "$status" -ne 0 ]; then
+    echo "pre-commit: FAILED — commit aborted (fix the above or see CONTRIBUTING.md)" >&2
+    exit 1
+fi
+echo "pre-commit: all checks passed"
+exit 0

@@ -78,9 +78,10 @@
 ## 四、Lane 的三件事
 
 1. 在指定 worktree 與分支上做 brief 說的那一件事——不 checkout main、不 pull、不開別的分支。
-2. L0 閘（`cargo fmt --all --check`；`cargo clippy -p <crate> --all-targets -- -D warnings`；`cargo test -p <crate>`），
+2. 開工先 `sh scripts/githooks/install.sh`（裝 git 原生 pre-commit／commit-msg hooks，見 CONTRIBUTING.md「Git hooks」）。
+3. L0 閘（`cargo fmt --all --check`；`cargo clippy -p <crate> --all-targets -- -D warnings`；`cargo test -p <crate>`），
    凍結 SHA 前跑一次 L1（`CARGO_INCREMENTAL=0`，workspace 全套），記 gate receipt（SHA、閘、toolchain、lane、結果）。
-3. `git push -u origin <branch>`、開 PR、**停**。不合併、不刪分支、不刪 worktree。
+4. `git push -u origin <branch>`、開 PR、**停**。不合併、不刪分支、不刪 worktree。
 
 Brief 必含：assigned build lane、verification budget（L0 while iterating；L1 once per frozen SHA）、cleanup authority（build cache 可清；worktree／branch／source 不刪）。
 

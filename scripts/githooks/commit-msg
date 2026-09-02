@@ -1,0 +1,38 @@
+#!/bin/sh
+# git commit-msg hook — conventional commits + [skip-clippy] tag.
+# POSIX sh only; install via scripts/githooks/install.sh.
+set -u
+
+msg_file=$1
+subject=$(head -n 1 "$msg_file")
+
+# Allowed: <type>(<scope>): <desc> or <type>: <desc>; merge commits, "Revert ",
+# and lane checkpoint "wip(" prefixes pass as-is.
+if ! printf '%s\n' "$subject" |
+    grep -Eq '^(feat|fix|docs|refactor|test|chore|ci|perf|style|build)(\([^)]*\))?: .+'; then
+    case "$subject" in
+    Merge* | Revert\ * | wip\(* ) ;;
+    *)
+        echo "commit-msg: REJECT — '$subject'" >&2
+        echo "commit-msg: expected <type>(<scope>): <desc> or <type>: <desc>, e.g. 'feat(cli): add --json flag'" >&2
+        exit 1
+        ;;
+    esac
+fi
+
+# pre-commit sets this marker when SKIP_CLIPPY=1 skipped clippy; tag the
+# message so reviewers can see it.
+gitdir=$(git rev-parse --git-dir)
+marker="$gitdir/skip-clippy-marker"
+if [ -f "$marker" ]; then
+    rm -f "$marker"
+    case "$subject" in
+    *"[skip-clippy]"*) ;;
+    *)
+        tmp="$msg_file.skip-clippy.tmp"
+        awk 'NR == 1 { print $0 " [skip-clippy]"; next } { print }' "$msg_file" >"$tmp" &&
+            mv "$tmp" "$msg_file"
+        ;;
+    esac
+fi
+exit 0
