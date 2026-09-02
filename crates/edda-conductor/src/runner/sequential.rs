@@ -242,7 +242,19 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                 let sha = ps.gate_sha.clone().with_context(|| {
                     format!("AWAITING_VERDICT state for \"{gated_id}\" is missing gate_sha")
                 })?;
-                let at = ps.gate_entered_at.clone().unwrap_or_else(now_rfc3339);
+                // GH-541: fail CLOSED on a missing freshness bound. Substituting
+                // `now` (the previous behavior) admitted every verdict recorded
+                // after the resume instant — including the stale rejection from
+                // the previous gate entry that D6 blocks — with no diagnostic.
+                // An AWAITING_VERDICT phase must carry the persisted entry time:
+                // it is the D6 bound and the timeout anchor across restarts.
+                let at = ps.gate_entered_at.clone().with_context(|| {
+                    format!(
+                        "AWAITING_VERDICT state for \"{gated_id}\" is missing gate_entered_at — \
+                         the D6 freshness bound cannot be established, so refusing to wait; \
+                         a stale verdict could otherwise be admitted"
+                    )
+                })?;
                 (sha, at)
             };
             let phase_num = order.iter().position(|id| id == &gated_id).unwrap_or(0) + 1;
@@ -3680,6 +3692,50 @@ phases:
             (tv[1].1.as_str(), tv[1].2.as_str(), tv[1].3),
             ("b", "Passed", 1)
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-541 Round-1 P1-1: an AWAITING_VERDICT phase whose persisted state
+    /// is missing `gate_entered_at` must fail closed at resume — no
+    /// substitution with `now` (which would admit the stale rejection from
+    /// the previous gate entry), and a matching verdict already in the
+    /// ledger must NOT satisfy the gate. The run errors with a diagnostic.
+    #[tokio::test]
+    async fn resume_without_gate_entered_at_fails_closed() {
+        let root = fresh_root("missingentered");
+        let head = init_git_repo(&root);
+        let launcher = MockLauncher::new();
+        let plan = parse_plan(GATED_YAML).unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        state.phases[0].status = PhaseStatus::AwaitingVerdict;
+        state.phases[0].gate_sha = Some(head.clone());
+        state.phases[0].gate_entered_at = None; // the corruption under test
+
+        // A matching approval is already in the ledger — it must NOT be
+        // admitted without a freshness bound.
+        record_verdict(&root, "gated/a", &head, VerdictDecision::Approved, None);
+
+        let handle = spawn_runner(GATED_YAML, root.clone(), launcher, state);
+        let result = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+            .await
+            .expect("gate test exceeded 30s")
+            .unwrap();
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected run_plan to error on the missing gate_entered_at"),
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("missing gate_entered_at"),
+            "diagnostic must name the missing invariant: {msg}"
+        );
+
+        // The stale-verdict approval was not consumed: the phase is still
+        // awaiting on disk.
+        let persisted = crate::state::persist::load_state(&root, "gated")
+            .unwrap()
+            .expect("state persists");
+        assert_eq!(persisted.phases[0].status, PhaseStatus::AwaitingVerdict);
         let _ = std::fs::remove_dir_all(&root);
     }
 
