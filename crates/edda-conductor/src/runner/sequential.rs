@@ -2951,6 +2951,13 @@ phases:
         let root = fresh_root("approve");
         let head = init_git_repo(&root);
         let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some("opened pull request\nPR: https://github.com/x/y/pull/620".into()),
+            }],
+        );
         let plan = parse_plan(GATED_YAML).unwrap();
         let state = PlanState::from_plan(&plan, "test.yaml");
         let handle = spawn_runner(GATED_YAML, root.clone(), launcher, state);
@@ -2974,22 +2981,78 @@ phases:
         );
         assert_eq!(launcher.call_count("a"), 1);
         assert_eq!(launcher.call_count("b"), 1);
-        // GH-564: one terminal notification per terminal transition — the
-        // gate-approved phase and the follow-on phase. The approved phase's
-        // agent output is not retained at the verdict site, so its
-        // final_output is None.
+        // GH-564 P1-3: the gate-approved phase's agent final output (its
+        // last line, the PR URL by convention) must survive until the
+        // verdict site and ride on the Passed terminal notification.
         let tv = terminal_view(&notifier.terminal_events());
         assert_eq!(tv.len(), 2, "one per terminal transition: {tv:?}");
         assert_eq!(
             (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
             ("a", "Passed", 1)
         );
-        assert_eq!(tv[0].4, None);
+        assert_eq!(
+            tv[0].4.as_deref(),
+            Some("PR: https://github.com/x/y/pull/620"),
+            "gate-approved Passed event must carry the agent's final output"
+        );
         assert_eq!(
             (tv[1].1.as_str(), tv[1].2.as_str(), tv[1].3),
             ("b", "Passed", 1)
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-564 P1-2: a phase left Running by a previous conductor run, past
+    /// its timeout, becomes Stale on resume — and that terminal transition
+    /// must reach the controller as a notification.
+    #[tokio::test]
+    async fn resume_stale_phase_notifies_terminal() {
+        let yaml = r#"
+name: resumestale
+timeout_sec: 1
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        state.phases[0].status = PhaseStatus::Running;
+        state.phases[0].started_at = Some(
+            (time::OffsetDateTime::now_utc() - time::Duration::seconds(3600))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        );
+        let engine = CheckEngine::new(dir.path().to_path_buf());
+        let notifier = CollectNotifier::new();
+        let mut budget = BudgetTracker::new(plan.budget_usd);
+        let cancel = CancellationToken::new();
+        let launcher = MockLauncher::new();
+
+        run_plan(
+            &plan,
+            &mut state,
+            RunContext {
+                launcher: &launcher,
+                check_engine: &engine,
+                notifier: &notifier,
+                budget: &mut budget,
+                cancel,
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+                tmux_session: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.phases[0].status, PhaseStatus::Stale);
+        let tv = terminal_view(&notifier.terminal_events());
+        assert!(
+            tv.iter().any(|e| e.1 == "a" && e.2 == "Stale"),
+            "resume must notify the Running→Stale transition: {tv:?}"
+        );
     }
 
     #[tokio::test]
