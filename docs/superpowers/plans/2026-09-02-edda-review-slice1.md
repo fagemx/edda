@@ -917,7 +917,8 @@ git commit -m "feat(edda-cli): review subject resolution, base chain, detached w
     }
 
     fn fake_verdict(head: &str, round: u32, verdict: &str, pr: Option<u64>) -> edda_core::types::Event {
-        let mut ev = edda_core::event::new_note_event_for_test("main"); // helper below
+        // new_note_event(branch, parent_hash, role, text, tags) — crates/edda-core/src/event.rs:197
+        let mut ev = edda_core::event::new_note_event("main", None, "system", "fake verdict", &[]).unwrap();
         ev.event_type = "review_verdict".into();
         ev.payload = serde_json::json!({
             "subject": {"head_sha": head},
@@ -1007,7 +1008,7 @@ git commit -m "feat(edda-cli): review subject resolution, base chain, detached w
     }
 ```
 
-`new_note_event_for_test` 若 edda-core 沒有，改用 `edda_core::event::new_note_event(...)` 的既有簽名（`grep -n "pub fn new_note_event" crates/edda-core/src/event.rs` 取參數），只需一個能 append 的合法事件。
+`new_note_event` 的既有簽名是 `(branch: &str, parent_hash: Option<&str>, role: &str, text: &str, tags: &[String])`（`crates/edda-core/src/event.rs:197`）；`parent_hash: None` 的事件可以 append（`append_event` 不驗 parent 連續性的話；若驗，改傳 `ledger.last_event_hash()?.as_deref()`），測試只需要一個合法事件。
 
 - [ ] **Step 2: 跑測試確認 FAIL**
 
@@ -1117,7 +1118,7 @@ pub(crate) fn resolve_pr(repo: &Path, gh: &dyn GhClient, n: u64) -> Result<(Subj
 }
 ```
 
-`regex` 若不在 edda-cli 的依賴裡，加 `regex.workspace = true`（workspace 已有；`grep -n "^regex" Cargo.toml` 確認，沒有就加 `regex = "1"` 到 workspace deps）。
+`crates/edda-cli/Cargo.toml` 今天**沒有** `regex`（workspace `Cargo.toml:54` 有 `regex = "1"`）：在 `[dependencies]` 加一行 `regex.workspace = true`。
 
 - [ ] **Step 4: 跑測試確認 PASS**
 
@@ -1220,6 +1221,8 @@ Run: `cargo test -p edda cmd_review::brief`
 Expected: 編譯錯誤。
 
 - [ ] **Step 3: 實作**
+
+先加依賴：`crates/edda-cli/Cargo.toml` 今天**沒有** `globset`（workspace `Cargo.toml:53` 有 `globset = "0.4"`；`edda-ledger` 已用它做 `query_by_paths`）。在 `[dependencies]` 加一行 `globset.workspace = true`。
 
 ```rust
 use globset::{Glob, GlobSetBuilder};
@@ -1645,7 +1648,8 @@ mod tests {
     use crate::cmd_review::git::testrepo;
 
     fn digest(ledger: &edda_ledger::Ledger, session: &str, model: &str, commits: &[&str]) {
-        let mut ev = edda_core::event::new_note_event("main", ledger.last_event_hash().unwrap().as_deref(), "digest", &[]).unwrap();
+        // new_note_event(branch, parent_hash, role, text, tags) — crates/edda-core/src/event.rs:197
+        let mut ev = edda_core::event::new_note_event("main", ledger.last_event_hash().unwrap().as_deref(), "system", "digest", &[]).unwrap();
         ev.payload["source"] = serde_json::json!("bridge:session-digest");
         ev.payload["session_id"] = serde_json::json!(session);
         ev.payload["session_stats"] = serde_json::json!({"model": model, "commits_made": commits});
@@ -1687,8 +1691,6 @@ mod tests {
     }
 }
 ```
-
-`new_note_event` 的實際簽名以 `grep -n "pub fn new_note_event" crates/edda-core/src/event.rs` 為準；測試只需要一個合法可 append 的 note 事件。
 
 - [ ] **Step 2: 跑測試確認 FAIL**
 
@@ -1953,6 +1955,8 @@ pub(crate) fn write_event(repo_root: &Path, payload: &ReviewVerdictPayload, supe
     let parent = ledger.last_event_hash()?;
     let ev = new_review_verdict_event(&branch, parent.as_deref(), payload, supersedes, previous, blobs)?;
     ledger.append_event(&ev)?;
+    // Derived-view rebuild is best-effort here exactly as in cmd_verdict.rs:170;
+    // the append above is the write of record and propagates with `?`.
     let _ = edda_derive::rebuild_branch(&ledger, &branch);
     Ok(ev.event_id)
 }
