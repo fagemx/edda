@@ -19,7 +19,7 @@
 //!   before letting two lanes write the same file.
 
 use anyhow::Context;
-use edda_bridge_claude::peers::ClaimEntry;
+use edda_bridge_claude::peers::{classify_session_liveness, ClaimEntry, SessionLiveness};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io::ErrorKind;
@@ -42,10 +42,27 @@ pub struct ClaimConflict {
     pub intersections: Vec<PathIntersection>,
 }
 
+/// A claim that was filtered out because its session failed the shared
+/// liveness criterion (GH-617). The claim stays on the append-only board —
+/// this is query-side bookkeeping only.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct StaleClaim {
+    pub label: String,
+    pub session_id: String,
+    /// Seconds since the session's last heartbeat, or `None` when the
+    /// session has no heartbeat file at all (never heard from).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub age_secs: Option<u64>,
+}
+
 /// Machine-readable result of a claim check (`--json`).
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 pub struct CheckReport {
     pub conflicts: Vec<ClaimConflict>,
+    /// Claims filtered out because their session is dead (GH-617). Reported
+    /// for death visibility — never counted toward the exit code.
+    #[serde(default)]
+    pub stale_claims: Vec<StaleClaim>,
 }
 
 /// `edda claim check <paths|globs>...` — read-only conflict query.
@@ -72,7 +89,36 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
         }
     };
     let query_refs: Vec<&str> = query.iter().map(String::as_str).collect();
-    let report = match check(&claims, &query_refs) {
+
+    // GH-617: "active" on the board only means "that session's last claim
+    // event" — it says nothing about whether the session is still alive.
+    // Apply the ONE liveness criterion `edda peers` uses (shared via
+    // `peers::liveness`, never re-implemented here): a claim from a session
+    // that is stale (or never heartbeated) is filtered out of the conflict
+    // computation. The claim itself stays on the append-only board; only
+    // this query stops counting it. Stale claims are reported (human and
+    // JSON) so "surface is clear" stays distinguishable from "the liveness
+    // judgement broke", and they never affect the exit code.
+    let board_size = claims.len();
+    let mut live: Vec<ClaimEntry> = Vec::new();
+    let mut stale_claims: Vec<StaleClaim> = Vec::new();
+    for c in claims {
+        match classify_session_liveness(&project_id, &c.session_id) {
+            SessionLiveness::Live { .. } => live.push(c),
+            SessionLiveness::Stale { age_secs } => stale_claims.push(StaleClaim {
+                label: c.label,
+                session_id: c.session_id,
+                age_secs: Some(age_secs),
+            }),
+            SessionLiveness::NoHeartbeat => stale_claims.push(StaleClaim {
+                label: c.label,
+                session_id: c.session_id,
+                age_secs: None,
+            }),
+        }
+    }
+
+    let report = match check(&live, &query_refs) {
         Ok(report) => report,
         Err(err) => {
             eprintln!("error: {err}");
@@ -80,18 +126,24 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
         }
     };
 
+    let report = CheckReport {
+        conflicts: report.conflicts,
+        stale_claims,
+    };
+
     if json {
         let out = serde_json::to_string_pretty(&report).context("serialize claim check report")?;
         println!("{out}");
     } else if report.conflicts.is_empty() {
-        if claims.is_empty() {
+        if board_size == 0 {
             println!("No active claims on the coordination board; surface is clear.");
         } else {
             println!(
-                "No conflicts: {} active claim(s) checked against {} query path(s).",
-                claims.len(),
+                "No conflicts: {} live claim(s) checked against {} query path(s).",
+                live.len(),
                 query.len()
             );
+            print_stale_claims(&report.stale_claims);
         }
     } else {
         for conflict in &report.conflicts {
@@ -108,6 +160,7 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
             report.conflicts.len(),
             query.len()
         );
+        print_stale_claims(&report.stale_claims);
     }
 
     if exit_code_for(&report) != 0 {
@@ -117,11 +170,41 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
 }
 
 /// Exit code for a check result: 0 = disjoint, 1 = conflict.
+///
+/// Stale claims (dead sessions, GH-617) are deliberately not counted here:
+/// they are liveness-filtered bookkeeping, never a conflict signal.
 fn exit_code_for(report: &CheckReport) -> i32 {
     if report.conflicts.is_empty() {
         0
     } else {
         1
+    }
+}
+
+/// Death visibility (GH-617): reveal how many stale claims the liveness
+/// filter removed, so a human can tell "no conflicts" apart from "the
+/// liveness judgement removed everything". The count line goes to stdout
+/// as part of the human report; the per-claim detail (with labels) goes to
+/// stderr so stdout stays free of dead sessions' identifiers.
+fn print_stale_claims(stale: &[StaleClaim]) {
+    if stale.is_empty() {
+        return;
+    }
+    println!(
+        "note: {} stale claim(s) from dead session(s) not counted (--json lists them).",
+        stale.len()
+    );
+    for s in stale {
+        match s.age_secs {
+            Some(age) => eprintln!(
+                "  stale, not counted: claim \"{}\" (session {}) — heartbeat {}s ago",
+                s.label, s.session_id, age
+            ),
+            None => eprintln!(
+                "  stale, not counted: claim \"{}\" (session {}) — no heartbeat",
+                s.label, s.session_id
+            ),
+        }
     }
 }
 
@@ -299,7 +382,10 @@ pub fn check(
             });
         }
     }
-    Ok(CheckReport { conflicts })
+    Ok(CheckReport {
+        conflicts,
+        stale_claims: Vec::new(),
+    })
 }
 
 /// Whether a query token and a claim token can name the same file.
@@ -1307,6 +1393,10 @@ mod tests {
             &project_id,
             &[coord_event("sess-9", "peer-c", &["src/Ä.rs"])],
         );
+        // GH-617: the claim must come from a LIVE session for the engine's
+        // refusal path to be reachable — a dead session's claim is filtered
+        // before any surface comparison.
+        write_heartbeat(store.path(), &project_id, "sess-9", 0);
         let bin = edda_bin();
         assert!(bin.exists(), "edda binary not found at {}", bin.display());
         let out = std::process::Command::new(&bin)
@@ -1620,7 +1710,13 @@ mod tests {
                 session_id: "y".into(),
                 intersections: vec![],
             }],
+            stale_claims: vec![StaleClaim {
+                label: "ghost".into(),
+                session_id: "dead".into(),
+                age_secs: None,
+            }],
         };
+        // Stale claims never affect the exit code (GH-617).
         assert_eq!(exit_code_for(&conflict), 1);
     }
 
@@ -1712,8 +1808,11 @@ mod tests {
         );
         write_heartbeat(store.path(), &project_id, "dead0001", 3600);
         write_heartbeat(store.path(), &project_id, "livetest", 0);
-        let (code, stdout, stderr) =
-            run_edda(&["claim", "check", "src/main.rs"], repo.path(), store.path());
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "check", "src/main.rs"],
+            repo.path(),
+            store.path(),
+        );
         assert_eq!(
             code, 1,
             "the live claim must still conflict; stdout={stdout:?} stderr={stderr:?}"
@@ -1747,8 +1846,11 @@ mod tests {
             &[coord_event("dead0002", "ghost-lane", &["src/*"])],
         );
         write_heartbeat(store.path(), &project_id, "dead0002", 3600);
-        let (code, stdout, stderr) =
-            run_edda(&["claim", "check", "src/main.rs"], repo.path(), store.path());
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "check", "src/main.rs"],
+            repo.path(),
+            store.path(),
+        );
         assert_eq!(
             code, 0,
             "stale claims must not flip the exit code; stdout={stdout:?} stderr={stderr:?}"
@@ -1772,8 +1874,11 @@ mod tests {
             &project_id,
             &[coord_event("lost0003", "ghost-lane", &["src/*"])],
         );
-        let (code, stdout, stderr) =
-            run_edda(&["claim", "check", "src/main.rs"], repo.path(), store.path());
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "check", "src/main.rs"],
+            repo.path(),
+            store.path(),
+        );
         assert_eq!(
             code, 0,
             "a never-heartbeated session must not conflict; stdout={stdout:?} stderr={stderr:?}"
@@ -1847,6 +1952,9 @@ mod tests {
             &project_id,
             &[coord_event("sess-1", "peer-a", &["crates/edda-cli/src/*"])],
         );
+        // GH-617: only a LIVE session's claim conflicts — give sess-1 a
+        // fresh heartbeat.
+        write_heartbeat(store.path(), &project_id, "sess-1", 0);
         let out = std::process::Command::new(&bin)
             .args(["claim", "check", "crates/edda-cli/src/main.rs"])
             .current_dir(repo.path())
@@ -1877,6 +1985,8 @@ mod tests {
                 &["crates/edda-conductor/src/plan/**"],
             )],
         );
+        // GH-617: a live, disjoint claim must keep the surface clear.
+        write_heartbeat(store.path(), &project_id, "sess-2", 0);
         let out = std::process::Command::new(&bin)
             .args(["claim", "check", "crates/edda-cli/src/main.rs"])
             .current_dir(repo.path())
