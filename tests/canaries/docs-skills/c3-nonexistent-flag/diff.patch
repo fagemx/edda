@@ -1,0 +1,12 @@
+diff --git a/canaries-fixture/c3-nonexistent-flag/runbook.md b/canaries-fixture/c3-nonexistent-flag/runbook.md
+new file mode 100644
+index 0000000..c3a3307
+--- /dev/null
++++ b/canaries-fixture/c3-nonexistent-flag/runbook.md
+@@ -0,0 +1,6 @@
++# 清理孤兒 lane
++
++若排程器留下孤兒 lane，執行 `edda-fixture schedule --prune-orphans` 清除；
++此旗標會刪除所有 stale 的排程紀錄。
++
++建議每週跑一次。
