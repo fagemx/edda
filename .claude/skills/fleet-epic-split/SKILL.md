@@ -6,7 +6,7 @@ description: Use when refilling the Fleet feature queue — decompose one signed
 # Fleet Epic Split（出題器 A）
 
 把一顆已圈的目標（或一份既有 PLAN.md 的一節）拆成互相獨立、各自可 merge 的原子任務單。
-你**只起草提案**（fleet:pending），撕成 ready 是操作者的事。慣例見 `fleet-playbook/internal/fleet-ops.md`。
+你**只起草提案**（fleet:pending），撕成 ready 是操作者的事。慣例見 repo 自身的 `CLAUDE.md`／`AGENTS.md`（本 repo：`.claude/CLAUDE.md`）。
 
 ## 開工前
 
@@ -29,7 +29,7 @@ description: Use when refilling the Fleet feature queue — decompose one signed
 **禁止**：出「重構整個 X」這種巨單；出一個 session 做不完的單（做不完就再拆）。
 
 ### ③ propose（照模板起草）
-每張單照 fleet-ops 六欄寫成 issue body（背景/改哪裡/doneWhen/verify/獨立性/尺寸），缺欄不准發。
+每張單照六欄寫成 issue body（背景/改哪裡/doneWhen/verify/獨立性/尺寸），缺欄不准發。
 建單：`gh issue create --title "<動詞開頭>" --body-file <tmp> --label fleet:pending,lane:feature`。
 **每輪上限 30 張**。全部產完，回報清單（issue 號＋標題＋獨立性）給操作者裁決。
 

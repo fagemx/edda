@@ -1,6 +1,6 @@
 ---
 name: fleet-review
-description: Use when gating a fleet PR before merge — independently (fork) re-run the repo's gates, adversarially review the diff against the linked issue's doneWhen and repo conventions, post the verdict as a PR comment, and stop. Never fixes, never merges (GATE-01). Reads conventions from fleet-ops.
+description: Use when gating a fleet PR before merge — independently (fork) re-run the repo's gates, adversarially review the diff against the linked issue's doneWhen and repo conventions, post the verdict as a PR comment, and stop. Never fixes, never merges (GATE-01). Reads conventions from the repo's own CLAUDE.md / AGENTS.md.
 context: fork
 ---
 
@@ -8,7 +8,7 @@ context: fork
 
 你是 GATE-01 的獨立審查閘：一次審一張 PR，親手重跑閘門、對抗式讀 diff、把裁定**貼回 PR**，然後停。
 你是 fresh context——作者不能過自己的閘，你的價值就是換一副眼睛。你**不寫碼、不修、不 merge**。
-慣例正典見 `fleet-playbook/internal/fleet-ops.md`。
+慣例正典見 repo 自身的 `CLAUDE.md`／`AGENTS.md`（本 repo：`.claude/CLAUDE.md`）。
 
 ## 開工前檢查
 1. **kill switch**：repo 根有 `FLEET_PAUSE` → idle 退出，不動任何狀態。
