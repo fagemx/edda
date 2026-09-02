@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  # PR runs exercise only the crates.io packaging dry run and the token
+  # skip-gate (GH-648); every tag job below is guarded to tag pushes, so tag
+  # behavior is unchanged.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: write
@@ -11,6 +17,16 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   GH_REPO: ${{ github.repository }}
+  # Explicit topological publish order (dependencies before dependents),
+  # derived from `cargo metadata` at GH-648 review time and validated against
+  # the workspace member set by the "Validate publish order" step in both
+  # publish-crates-dry-run and publish-crates. `edda` (the CLI binary crate in
+  # crates/edda-cli) is deliberately LAST. Per-crate publishing (instead of
+  # `cargo publish --workspace`, which CI's stable toolchain would also
+  # support) is required for re-run safety: --workspace aborts on the first
+  # "already uploaded" crate and would leave the remaining crates unpublished
+  # on every subsequent re-run.
+  CRATES_PUBLISH_ORDER: "edda-core edda-ledger edda-derive edda-store edda-aggregate edda-index edda-notify edda-pack edda-postmortem edda-search-fts edda-transcript edda-bridge-claude edda-bridge-codex edda-bridge-cursor edda-bridge-hermes edda-bridge-openclaw edda-ask edda-mcp edda-conductor edda-ingestion edda-serve edda-chronicle edda"
 
 concurrency:
   group: release-${{ github.ref }}
@@ -19,6 +35,7 @@ concurrency:
 jobs:
   create-release:
     name: Create Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
@@ -86,6 +103,7 @@ jobs:
   build-release:
     name: Build (${{ matrix.name }})
     needs: create-release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -173,6 +191,7 @@ jobs:
   publish-release:
     name: Publish Release
     needs: [create-release, build-release]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - name: Verify release assets
@@ -249,3 +268,173 @@ jobs:
           --draft=false --latest
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  crates-token-gate:
+    name: Check crates.io publish token
+    needs: [create-release, publish-release]
+    if: >-
+      always() &&
+      (
+        github.event_name == 'pull_request' ||
+        (
+          github.event_name == 'push' &&
+          startsWith(github.ref, 'refs/tags/v') &&
+          needs.create-release.result == 'success' &&
+          needs.publish-release.result == 'success'
+        )
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      token-available: ${{ steps.token.outputs.available }}
+    steps:
+      - name: Check for CARGO_REGISTRY_TOKEN
+        id: token
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            if [ "${{ github.event_name }}" != "push" ]; then
+              echo "::notice::CARGO_REGISTRY_TOKEN is configured, but crates.io publishing only runs on tag pushes; publish-crates stays skipped on pull_request."
+            fi
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=crates.io publish skipped::CARGO_REGISTRY_TOKEN is not configured on this repository, so publish-crates will be SKIPPED. The GitHub release can ship without syncing crates.io. Add the secret to enable publishing."
+          fi
+
+  publish-crates:
+    name: Publish crates to crates.io
+    needs: [create-release, publish-release, crates-token-gate]
+    if: >-
+      always() &&
+      needs.create-release.result == 'success' &&
+      needs.publish-release.result == 'success' &&
+      needs.crates-token-gate.result == 'success' &&
+      needs.crates-token-gate.outputs.token-available == 'true' &&
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Show toolchain
+        run: cargo --version
+
+      - name: Validate publish order covers the workspace
+        shell: bash
+        run: |
+          members="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | sort)"
+          expected="$(printf '%s\n' $CRATES_PUBLISH_ORDER | sort)"
+          if [ "$members" != "$expected" ]; then
+            echo "::error::CRATES_PUBLISH_ORDER in release.yml no longer matches the workspace member set; update it (dependencies before dependents, edda last)"
+            diff <(echo "$expected") <(echo "$members") || true
+            exit 1
+          fi
+          echo "Publish order covers all $(echo "$CRATES_PUBLISH_ORDER" | wc -w) workspace crates"
+
+      - name: Publish workspace crates
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          tag="${{ needs.create-release.outputs.tag }}"
+          failures=0
+          for crate in $CRATES_PUBLISH_ORDER; do
+            echo "::group::cargo publish -p $crate"
+            if out="$(cargo publish --locked -p "$crate" 2>&1)"; then
+              echo "$out"
+              echo "::endgroup::"
+              echo "$crate: published"
+              # Give the crates.io index a moment to propagate the new version
+              # before a dependent crate resolves against it.
+              sleep 5
+            else
+              status=$?
+              echo "$out"
+              echo "::endgroup::"
+              if grep -Eq "already uploaded|already exists" <<<"$out"; then
+                echo "::notice::$crate is already on crates.io; treating as no-op and continuing."
+              else
+                echo "::error::cargo publish -p $crate failed (exit $status)."
+                failures=$((failures + 1))
+              fi
+            fi
+          done
+          if [ "$failures" -gt 0 ]; then
+            echo "::error::GitHub release ${tag} shipped but crates.io did not fully sync (${failures} crate(s) failed to publish). Release assets are NOT rolled back. Re-run this job after resolving the failure; crates already uploaded are treated as no-ops."
+            exit 1
+          fi
+
+      - name: Verify every crate version is on crates.io
+        shell: bash
+        run: |
+          tag="${{ needs.create-release.outputs.tag }}"
+          version="${tag#v}"
+          total="$(echo "$CRATES_PUBLISH_ORDER" | wc -w)"
+          missing=0
+          for crate in $CRATES_PUBLISH_ORDER; do
+            if curl -sf --retry 3 -H "User-Agent: edda release workflow (github.com/fagemx/edda)" \
+                "https://crates.io/api/v1/crates/$crate" \
+                | jq -e --arg v "$version" '.versions[]? | select(.num == $v)' > /dev/null; then
+              echo "$crate@$version: present"
+            else
+              echo "::error::$crate@$version not found on crates.io"
+              missing=$((missing + 1))
+            fi
+            sleep 1
+          done
+          if [ "$missing" -gt 0 ]; then
+            echo "::error::GitHub release ${tag} shipped but crates.io did not sync: ${missing} of ${total} crates missing. Release assets are NOT rolled back. Re-run this job to retry; crates already uploaded are treated as no-ops."
+            exit 1
+          fi
+          echo "All ${total} workspace crates are present on crates.io at ${version}"
+
+  publish-crates-dry-run:
+    name: Dry run crates.io publish
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Show toolchain
+        run: cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-dry-run
+
+      - name: Validate publish order covers the workspace
+        shell: bash
+        run: |
+          members="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[].name' | tr -d '\r' | sort)"
+          expected="$(printf '%s\n' $CRATES_PUBLISH_ORDER | sort)"
+          if [ "$members" != "$expected" ]; then
+            echo "::error::CRATES_PUBLISH_ORDER in release.yml no longer matches the workspace member set; update it (dependencies before dependents, edda last)"
+            diff <(echo "$expected") <(echo "$members") || true
+            exit 1
+          fi
+          echo "Publish order covers all $(echo "$CRATES_PUBLISH_ORDER" | wc -w) workspace crates"
+
+      # Runs with NO CARGO_REGISTRY_TOKEN present: packaging and verification
+      # only, nothing is uploaded. Uses --workspace (not the per-crate loop):
+      # cargo packs all members into a temporary local registry, so each crate
+      # is verified against its CURRENT workspace siblings rather than whatever
+      # stale versions happen to be on crates.io — per-crate dry runs would
+      # fail or mislead until every dependency version is actually published.
+      - name: Dry run publish for the workspace
+        shell: bash
+        run: |
+          cargo publish --workspace --dry-run --locked
+          echo "Dry run passed for all $(echo "$CRATES_PUBLISH_ORDER" | wc -w) workspace crates; nothing was uploaded."
