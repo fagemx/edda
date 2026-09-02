@@ -39,7 +39,7 @@
 |---|---|---|---|---|---|---|---|
 | gpt-5.6-sol | `openai-codex/gpt-5.6-sol` | A: `pi --model openai-codex/gpt-5.6-sol`；B: `edda dispatch --agent codex`（過載時先換這個） | 訂閱內，T$0 | $0.0798 | **全類別（錨，不被取代）** | #582 | `fleet.agent-model-split`＋`fleet.review-provider-overload` 的原裝組合；sol 抓到而他人漏的即成新金絲雀 |
 | Opus 5 | `opus`（`claude -p --model opus`） | **C: Claude Code only**——`claude -p --allowedTools "Read,Grep,Glob,Bash(git *),Bash(sh *)"`；**絕不**經 pi/openrouter | 訂閱內，T$1 | $1.4869 | code-risk + docs-skills（provisional，待操作者裁定） | 訂閱用量 | `fleet.claude-subscription-transport`：pi 顯示 ready 也不准派 |
-| gemini-3.1-pro-preview | `openrouter/google/gemini-3.1-pro-preview`——**catalogue 逐字 id**（RAN `pi --list-models gemini`，該列見 §3）。先前寫的 `google/gemini-3-pro` **不在目錄裡**，pi 會模糊解析成 `google/gemini-3-pro-image`（見 §3 的靜默替換案例） | pi/openrouter：`pi auth check --model openrouter/google/gemini-3.1-pro-preview` → **`ready`**（provider `openrouter` 亦 `ready`），但實際請求仍 `404 … quantization: fp8`（§3）；直連 google 供應商 `pi auth check --provider google` → `not_ready` | — | $0 | **none（not run，R3 實測）** | — | R3（2026-09-02）改用逐字 id 重跑：session 檔記的 `modelId` 與請求**完全一致**（沒有替換），錯的是路由。`auth check` 說 ready ≠ 路由可達——**修好 fp8 路由前不得列入候選**（錯誤原文與探測見 §3、後續見 §7.5） |
+| gemini-3.1-pro-preview——**removed**（`fleet.review-engine-pool`，2026-09-02 操作者裁定移出引擎池） | `openrouter/google/gemini-3.1-pro-preview`——**catalogue 逐字 id**（RAN `pi --list-models gemini`，該列見 §3）。先前寫的 `google/gemini-3-pro` **不在目錄裡**，pi 會模糊解析成 `google/gemini-3-pro-image`（見 §3 的靜默替換案例） | pi/openrouter：`pi auth check --model openrouter/google/gemini-3.1-pro-preview` → **`ready`**（provider `openrouter` 亦 `ready`），但實際請求仍 `404 … quantization: fp8`（§3）；直連 google 供應商 `pi auth check --provider google` → `not_ready` | — | $0 | **none（not run，R3 實測）** | — | R3（2026-09-02）改用逐字 id 重跑：session 檔記的 `modelId` 與請求**完全一致**（沒有替換），錯的是路由。`auth check` 說 ready ≠ 路由可達（錯誤原文與探測見 §3）。**removed**：`fleet.review-engine-pool` 裁定審查很少會用 Gemini，不為它改 pi 的 `openRouterRouting`；§3 的量測敘述保留為它被移出的歷史證據 |
 | glm-5.3-flash | `openrouter/z-ai/glm-5.3-flash` | pi/openrouter | 訂閱外按量，T$0 | $0.00092 | **docs-skills（provisional）**；code-risk 不合格 | #582 | code-risk 不合格的原因與 brief v1 的 `[判斷]` 標籤有關（§3 學習 1），brief v2 修正後重校，不是引擎本身判死 |
 
 成本級定義（提案）：T$0＝邊際成本 < $0.10/次；T$1＝$0.10–2.00/次。以帳本實測值滾動更新。
@@ -289,7 +289,7 @@ edda decide "fleet.review-unreviewed-state=honest-label-blocked-by-merge-gate-58
 4. **brief v2**——把「shell 解析樹＋觸發條件」移出 `[判斷]`（校準學習 1）。
    `model_observed` 註記（以 session 檔／JSON 的 `modelUsage` 為準、環境變數
    身分不算數）已在 v1.1 修掉，不必等 v2。
-5. **gemini 運輸修正**——id 已經確定：`openrouter/google/gemini-3.1-pro-preview`
+5. **gemini 運輸修正**——**已作廢**（`fleet.review-engine-pool`，2026-09-02：Gemini 移出引擎池，#618 的 Gemini 後續作廢；以下保留為歷史紀錄）——id 已經確定：`openrouter/google/gemini-3.1-pro-preview`
    在目錄裡，`pi auth check --model` 與 provider `openrouter` 都回 `ready`。
    剩下的是路由：`404 … quantization: fp8` 表示送出的請求帶著 fp8
    provider preference，而 `google/*` 沒有 fp8 endpoint（同金鑰跑 glm 正常，

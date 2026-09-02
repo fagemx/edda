@@ -32,7 +32,7 @@ Available targets:
 | macOS ARM64 | `edda-v<VERSION>-aarch64-apple-darwin.tar.gz` |
 | Windows x86_64 | `edda-v<VERSION>-x86_64-pc-windows-msvc.zip` |
 
-Each archive contains the `edda` binary, and a SHA256 checksum sidecar file.
+Each archive contains the `edda` binary and a SHA256 checksum sidecar file.
 
 ## Build from source
 
