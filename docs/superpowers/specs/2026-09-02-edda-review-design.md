@@ -461,10 +461,21 @@ exit 0 → `green`；非 0 → `red`；沒有 → 該 gate 未涵蓋。全部 gr
 CI 對本 head 沒有任何主張，直接不貢獻（**不可**退回「所有 optional check 都算」，否則沒設分支
 保護的 repo 用任何一個碰巧綠的 job 就買到 verified）。
 
-**兩條路徑擇一即可**：閘門集合非空時，本地收據與 exact-head required CI 是對同一件事的兩個
-獨立證據來源——任一 verified 即 `verified`，任一 red 即 `red`，都沒有才 `unverified`
-（`review.honesty-axes`）。要求兩者同時 verified 會讓「CI 全綠但作者沒在本機留收據」的 PR
-讀成 unverified，那是把證據當成儀式。集合為空時仍恆為 `undeclared`，CI 再綠也蓋不過去。
+**三個證據來源，一條格（lattice）**：閘門集合非空時，本地收據、exact-head required CI、
+`--run-gates` 的 RAN 是對同一件事的三個獨立來源，合成規則只有一條，三者共用：
+
+| 規則 | 說明 |
+|---|---|
+| `undeclared` 吸收一切 | 沒宣告 gate 就沒有東西可證；CI 再綠、RAN 再乾淨都蓋不過去 |
+| 任一 `red` 即 `red` | 任何一處失敗就是失敗 |
+| 否則任一 `verified` 即 `verified` | 獨立來源指向同一事實，擇一即可 |
+| 否則 `unverified` | |
+| **沉默的來源不改變狀態** | 某來源「沒話說」（RAN 因無 build lane 或期限而跳過、`--pr` 之外沒有 CI）時，狀態原封不動——**任何來源都不得把別的來源已建立的結論降級** |
+
+要求兩者同時 verified 會讓「CI 全綠但作者沒在本機留收據」的 PR 讀成 unverified，那是把
+證據當儀式（Round 5 P1）；而讓跳過的 RAN 把 verified 降成 unverified 是同一個錯誤的另一面
+（Round 6 P1）。實作上這條規則寫成**單一函式** `combine_gate_status(current, incoming)`，
+三個來源都呼叫它——這條規則被分別重述兩次，就被破壞了兩次。
 
 PR body 裡的散文 L1 receipt 不解析；fleet 在一個迭代內改用 `edda run -- <gate>` 產收據。
 

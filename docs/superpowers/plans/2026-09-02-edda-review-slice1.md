@@ -2678,6 +2678,55 @@ fn classify_crash(error: &str) -> &'static str {
     if OVERLOAD_MARKERS.iter().any(|m| e.contains(m)) { "overload" } else { "crash" }
 }
 
+/// The gate evidence lattice (spec §8), used by EVERY source — local receipts,
+/// exact-head CI, and RAN — so the rule exists once instead of being restated
+/// per source (Round 5 and Round 6 both broke it by restating it):
+///
+/// * `undeclared` is absorbing — nothing substitutes for declaring gates;
+/// * any `red` wins — a failure anywhere is a failure;
+/// * else any `verified` wins — the sources are independent paths to one fact;
+/// * else `unverified`.
+///
+/// `incoming: None` means "this source has nothing to say" and must leave the
+/// status untouched. No source may ever downgrade what another established.
+fn combine_gate_status(current: &str, incoming: Option<&str>) -> String {
+    let Some(inc) = incoming else { return current.to_string() };
+    match (current, inc) {
+        ("undeclared", _) => "undeclared".into(),
+        ("red", _) | (_, "red") => "red".into(),
+        ("verified", _) | (_, "verified") => "verified".into(),
+        _ => "unverified".into(),
+    }
+}
+
+#[cfg(test)]
+mod gate_lattice_tests {
+    use super::combine_gate_status;
+
+    #[test]
+    fn a_silent_source_never_downgrades() {
+        // Round 6 P1: a skipped RAN (no build lane) must not undo a verified receipt.
+        assert_eq!(combine_gate_status("verified", None), "verified");
+        assert_eq!(combine_gate_status("red", None), "red");
+        assert_eq!(combine_gate_status("undeclared", None), "undeclared");
+    }
+
+    #[test]
+    fn undeclared_is_absorbing_and_red_beats_verified() {
+        assert_eq!(combine_gate_status("undeclared", Some("verified")), "undeclared");
+        assert_eq!(combine_gate_status("undeclared", Some("red")), "undeclared");
+        assert_eq!(combine_gate_status("verified", Some("red")), "red");
+        assert_eq!(combine_gate_status("red", Some("verified")), "red");
+    }
+
+    #[test]
+    fn either_source_verifies() {
+        assert_eq!(combine_gate_status("unverified", Some("verified")), "verified");
+        assert_eq!(combine_gate_status("verified", Some("unverified")), "verified");
+        assert_eq!(combine_gate_status("unverified", Some("unverified")), "unverified");
+    }
+}
+
 pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn subject::GhClient, cwd: &Path) -> Result<(i32, String, serde_json::Value)> {
     // 1. author repo root + ledger, BEFORE any worktree exists (spec §4.1)
     let repo = git::repo_root_from(cwd)?;
@@ -2766,14 +2815,7 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
         // are two independent paths to the same fact — either one verifies
         // (spec §8; `review.honesty-axes`). Round 5 P1: requiring both made a
         // green-CI PR with no local receipts read as unverified.
-        if let Some(s) = ci_status {
-            gates_status = match (gates_status.as_str(), s.as_str()) {
-                ("undeclared", _) => "undeclared".into(),
-                ("red", _) | (_, "red") => "red".into(),
-                ("verified", _) | (_, "verified") => "verified".into(),
-                _ => "unverified".into(),
-            };
-        }
+        gates_status = combine_gate_status(&gates_status, ci_status.as_deref());
     }
     let diff = git::git(&repo, &["diff", &format!("{}..{}", subj.base_sha, subj.head_sha)])?;
     let bins: Vec<String> = if fm.ran_allowlist.is_empty() { vec!["edda".into()] } else { fm.ran_allowlist.iter().map(|p| p.trim().to_string()).collect() };
@@ -2799,13 +2841,22 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
         let out_dir = wt.path.join(".edda-review-ran");            // Task 7 writes ran-<i>.out here
         std::fs::create_dir_all(&out_dir)?;
         let (r, n) = evidence::ran_gates(&wt.path, &gates.cmds, args.max_ran_sec, std::env::var_os("CARGO_TARGET_DIR").is_some(), &ledger.paths, &out_dir);
-        // a RAN whose stdout could not be stored is not evidence (spec §6.4)
-        let all_usable = !r.is_empty()
+        // RAN is a THIRD evidence source under the same OR rule, not a filter on
+        // the other two. Skipped gates (no build lane, deadline) say nothing —
+        // they must not pull an already-verified status back down (Round 6 P1).
+        // A RAN whose stdout could not be stored is not evidence (spec §6.4).
+        let ran_status = if r.iter().any(|x| x.exit != 0 && !x.timed_out) {
+            Some("red")
+        } else if !r.is_empty()
             && r.len() == gates.cmds.len()
-            && r.iter().all(|x| x.exit == 0 && !x.timed_out && x.stdout_blob.is_some());
-        if r.iter().any(|x| x.exit != 0 && !x.timed_out) { gates_status = "red".into(); }
-        else if all_usable && read.iter().all(|x| x.result == "green") && n.is_empty() && gates_status != "undeclared" { gates_status = "verified".into(); }
-        else if gates_status == "verified" { gates_status = "unverified".into(); }
+            && n.is_empty()
+            && r.iter().all(|x| x.exit == 0 && !x.timed_out && x.stdout_blob.is_some())
+        {
+            Some("verified")
+        } else {
+            None
+        };
+        gates_status = combine_gate_status(&gates_status, ran_status);
         ran = r; notes.extend(n);
     }
     let evidence_text = evidence::evidence_text(&read, &uncovered, &ran, &probes, wiring.as_deref());
