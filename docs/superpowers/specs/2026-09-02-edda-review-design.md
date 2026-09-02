@@ -102,7 +102,14 @@ Exit code：
 `if edda review; then` 只在合格 LGTM 時為真；#580 合併閘讀 `qualified` 欄位，不讀
 exit code 也不讀標頭。任何前置錯誤（拒絕、空 diff、base 解析不到、`--pr` 取不到 head、
 provider 過載、無法建 worktree）都是 exit 2：`run()` 自己攔 `Err`、印一行 stderr 後
-`exit(2)`，不讓 anyhow 落到 `main` 的通用 exit 1。
+`exit(2)`，不讓 anyhow 落到 `main` 的通用 exit 1。成功路徑必須**返回**而不是 `exit(0)`，
+否則 destructor（尤其是 worktree guard）會被跳過——形狀與 `cmd_dispatch::run` 一致：
+`run_inner` 回 code，`run` 只在非 0 時 exit。
+
+界線說清楚：`main` 在 dispatch **之前**就已解析 `cwd`（`std::env::current_dir()?`）與
+`repo_root`，那一步失敗是所有指令共用的行程級前置條件，走 `main` 的通用路徑，不在
+`edda review` 的 exit-2 契約內。review 因此**不自己再呼叫一次** `current_dir()`——多一次
+呼叫就是多一個它涵蓋不到的失敗點；`cwd` 由 `main` 傳進來。
 
 ## 4. 主體解析與隔離
 
@@ -230,7 +237,9 @@ classes:                    # 類別路由；glob 對 diff 檔案清單
 `Phase { tools, exclude_tools, model, thinking }`（YAML 舊拼法 `allowed_tools` 仍可解析），
 `cmd_dispatch::build_phase(prompt, budget, timeout, permission_mode, CapabilityOptions { model,
 thinking, tools, exclude_tools })` 把它們放上 phase；`LauncherOptions { verbose, transcript_dir,
-persistent_codex_threads, session_dir }`（review 只設前兩個，其餘 `Default`）。**建 phase 之前
+persistent_codex_threads, session_dir }` **不 derive `Default`**，所以四欄都要寫（review 用
+`verbose: false`、`transcript_dir: None`、`persistent_codex_threads: false`——審查 session 是
+單發、永不 resume——`session_dir: None`）。**建 phase 之前
 必須先過 `agent_kind::validate_dispatch_options(agent, &DispatchOptions { .. })`**——這是 #574
 的 backend × option 支援矩陣，不支援的組合（claude 的 thinking、codex 的 model）會被明確拒絕
 （exit 2），而不是被 launcher 靜默丟掉。`edda review` 走同一條：驗證、建 `CapabilityOptions`，
@@ -350,6 +359,10 @@ spawn、輪詢 `try_wait`，到期就砍**整棵程序樹**——Unix 用 `Comma
 `total_cost_usd`（measured）；codex 是 `None`（`measured = false`，人讀輸出印
 `NO_USAGE_COST_TEXT`）。RAN 與探測的 `duration_ms` 另計，不折成錢。
 
+`--budget-usd` 搭 codex 時沿用 dispatch 的既有警告：開跑前呼叫
+`cmd_conduct::budget_warning_for_agent(agent, budget.is_some())`，有訊息就印到 stderr。
+codex 不回報 usage，預算閘永遠不會觸發——這件事要說出來，不能靜默跑一輪不受成本約束的審查。
+
 ## 7. `review_verdict` 事件（unstable，v0）
 
 `event_type = "review_verdict"`。在 v1 spec 之外（`spec.v1-scope`），COMPATIBILITY.md
@@ -381,8 +394,8 @@ spawn、輪詢 `try_wait`，到期就砍**整棵程序樹**——Unix 用 `Comma
   "gates": {"status": "verified | unverified | red | undeclared",
             "declared_by": ["REVIEW.md", "--gate"],
             "read": [{"kind": "cmd-event | ci", "ref": "evt_… | check-name", "cmd": "cargo test --workspace",
-                      "result": "green | red"}],
-            "ran": [{"cmd": "cargo test -p edda-core", "exit": 0, "duration_ms": 41200, "stdout_blob": "…", "timed_out": false}]},
+                      "result": "green | red | pending"}],
+            "ran": [{"cmd": "cargo test -p edda-core", "exit": 0, "duration_ms": 41200, "stdout_blob": "… | null", "timed_out": false}]},
   "probes": [{"cmd": "edda wave --help", "exit": 2}],
   "verdict": "lgtm | changes-requested | unreviewed",
   "outcome": "done | timeout | crash | budget | parse-failed | refused | overload | subject-mismatch",

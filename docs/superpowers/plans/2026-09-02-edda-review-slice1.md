@@ -55,7 +55,7 @@
 
 **Interfaces:**
 - Consumes: `crate::agent_kind::AgentKind`（既有）。
-- Produces: `cmd_review::ReviewArgs`（clap `Args`）、`cmd_review::run(args) -> Result<()>`——與 `cmd_dispatch::run` 同形：`run_inner` 回 `Result<i32>`，`run` 只在 code 非 0 時 `std::process::exit`，成功路徑正常返回讓 destructor 跑完（#574 的形狀，Round 3 P1-9）。
+- Produces: `cmd_review::ReviewArgs`（clap `Args`）、`cmd_review::run(args, cwd: &Path) -> Result<()>`——與 `cmd_dispatch::run` 同形：`run_inner` 回 `Result<i32>`，`run` 只在 code 非 0 時 `std::process::exit`，成功路徑正常返回讓 destructor 跑完（#574 的形狀，Round 3 P1-9）。`cwd` 由 `main` 傳入，review 不自己呼叫 `current_dir()`（Round 4 P1-2）。
 
 - [ ] **Step 1: 確認前置已合併**
 
@@ -134,17 +134,17 @@ pub struct ReviewArgs {
     pub json: bool,
 }
 
-pub fn run(args: ReviewArgs) -> Result<()> {
+pub fn run(args: ReviewArgs, cwd: &std::path::Path) -> Result<()> {
     // Task 10 fills this in; the shape (exit only on non-zero) is final:
     // the success path must return so destructors run.
-    match run_inner(args) {
+    match run_inner(args, cwd) {
         Ok(0) => Ok(()),
         Ok(code) => std::process::exit(code),
         Err(e) => { eprintln!("edda review: {e:#}"); std::process::exit(2); }
     }
 }
 
-fn run_inner(_args: ReviewArgs) -> Result<i32> {
+fn run_inner(_args: ReviewArgs, _cwd: &std::path::Path) -> Result<i32> {
     anyhow::bail!("edda review: not wired yet")
 }
 
@@ -196,8 +196,11 @@ Expected: 編譯錯誤或 0 tests（模組未宣告）。
 在 match 裡 `Command::Dispatch { args } => cmd_dispatch::run(args),` 之後加：
 
 ```rust
-        Command::Review { args } => cmd_review::run(args),
+        Command::Review { args } => cmd_review::run(args, &cwd),
 ```
+
+`cwd` 是 `main` 在 match 之前就解析好的那個（`main.rs`: `let cwd = std::env::current_dir()?;`）。
+review 不自己再呼叫一次——多一次就是多一個它的 exit-2 契約涵蓋不到的失敗點（spec §3）。
 
 - [ ] **Step 6: 跑測試確認 PASS**
 
@@ -817,7 +820,8 @@ mod tests {
         std::fs::write(root.join("b.txt"), "dirty\n").unwrap(); // author's dirty tree
         let dest = root.join("wt-review");
         {
-            let mut wt = git::WorktreeGuard::create(&root, &dest, &head, false).unwrap();
+            // no `mut`: this test never calls remove(), and `-D warnings` rejects unused_mut
+            let wt = git::WorktreeGuard::create(&root, &dest, &head, false).unwrap();
             assert_eq!(std::fs::read_to_string(wt.path.join("b.txt")).unwrap(), "b\n");
             std::fs::write(wt.path.join(git::SUBJECT_MARKER), &head).unwrap();
             assert_eq!(std::fs::read_to_string(wt.path.join(git::SUBJECT_MARKER)).unwrap(), head);
@@ -2400,9 +2404,9 @@ mod e2e {
     struct NoGh;
     impl subject::GhClient for NoGh {
         fn pr_view(&self, _: u64) -> anyhow::Result<subject::PrView> { anyhow::bail!("no gh in tests") }
-        fn issue_body(&self, _: u64) -> anyhow::Result<String> { anyhow::bail!("no gh") }
+        fn issue_view(&self, _: u64) -> anyhow::Result<subject::IssueView> { anyhow::bail!("no gh") }
         fn author_permission(&self, _: &str) -> anyhow::Result<String> { Ok("none".into()) }
-        fn pr_checks(&self, _: u64) -> anyhow::Result<Vec<(String, String)>> { Ok(vec![]) }
+        fn pr_checks(&self, _: u64, _head_sha: &str) -> anyhow::Result<Vec<(String, String)>> { Ok(vec![]) }
     }
 
     /// Like MockLauncher but reports an observed model and records the Phase it got.
@@ -2554,10 +2558,15 @@ Expected: 編譯錯誤（`run_with`、`scratch_dir`、`exit_code_for_error` 不�
 
 - [ ] **Step 3: 實作 `run()` 與 `run_with`（刪除 Task 0 的 `run_inner` 骨架）**
 
+> **對齊規則（Round 4 的教訓）**：本區塊是 Task 3–9 的**唯一消費端**。動了任何一個 producer
+> 的簽名，就必須回到這裡同步；Round 3→4 連續兩輪的 P1 都是這裡沒跟上。下面每個呼叫點都標了
+> 它對應的 producer 行，實作前先逐一 grep 對照。
+
 ```rust
 mod brief; mod evidence; mod git; mod identity; mod subject; mod verdict;
 
-use crate::agent_kind::{build_launcher, LauncherOptions};
+use crate::agent_kind::{build_launcher, validate_dispatch_options, DispatchOptions, LauncherOptions};
+use crate::cmd_conduct::budget_warning_for_agent;
 use crate::cmd_dispatch::{build_phase, CapabilityOptions};
 use edda_conductor::agent::launcher::{phase_session_id, AgentLauncher, PhaseResult};
 use edda_core::model_id::canonical_model_id;
@@ -2570,39 +2579,46 @@ const OVERLOAD_MARKERS: [&str; 6] = ["overloaded", "429", "rate limit", "rate_li
 
 /// Same shape as `cmd_dispatch::run` (#574): the body returns a code and only a
 /// non-zero one exits the process, so destructors (the worktree guard above all)
-/// run on the success path. Every pre-run failure is exit 2 (spec §3) — never
-/// let anyhow reach main's generic exit 1.
-pub fn run(args: ReviewArgs) -> Result<()> {
-    let code = run_inner(args);
-    match code {
+/// run on the success path. Every failure from here on is exit 2 (spec §3).
+///
+/// `cwd` comes from `main`, which already resolved it before dispatch
+/// (`main.rs`: `let cwd = std::env::current_dir()?;`). Review does not call
+/// `current_dir()` again — a second call would be a second failure point that
+/// review's exit-2 contract could not cover. A failure of main's own call is a
+/// process-level precondition shared by every command, not a review outcome.
+pub fn run(args: ReviewArgs, cwd: &Path) -> Result<()> {
+    match run_inner(args, cwd) {
         Ok(0) => Ok(()),
         Ok(code) => std::process::exit(code),
         Err(e) => { eprintln!("edda review: {e:#}"); std::process::exit(exit_code_for_error(&e)); }
     }
 }
 
-fn run_inner(args: ReviewArgs) -> Result<i32> {
-    let cwd = std::env::current_dir().context("edda review needs a working directory")?;
-    // #574's backend × option support matrix: an unsupported combination is
-    // refused here, never silently dropped by the launcher.
+fn run_inner(args: ReviewArgs, cwd: &Path) -> Result<i32> {
     let (_policy, tools) = tool_policy(args.agent);
-    crate::agent_kind::validate_dispatch_options(
+    // #574's backend × option matrix: an unsupported combination is refused
+    // here, never silently dropped by the launcher (agent_kind.rs).
+    validate_dispatch_options(
         args.agent,
-        &crate::agent_kind::DispatchOptions {
+        &DispatchOptions {
             model: args.model.as_deref(),
             thinking: args.thinking.as_deref(),
             tools: tools.as_deref(),
-            ..Default::default()   // DispatchOptions derives Default (agent_kind.rs:91)
+            ..Default::default()   // DispatchOptions derives Default
         },
     )?;
-    // LauncherOptions does NOT derive Default (#574 agent_kind.rs:166) — list all four.
+    // codex reports no usage, so a budget cannot bind — same warning dispatch prints.
+    if let Some(w) = budget_warning_for_agent(args.agent, args.budget_usd.is_some()) {
+        eprintln!("{w}");
+    }
+    // LauncherOptions does NOT derive Default (agent_kind.rs) — all four fields.
     let launcher = build_launcher(args.agent, LauncherOptions {
         verbose: false,
         transcript_dir: None,
         persistent_codex_threads: false,   // review sessions are single-shot, never resumed
         session_dir: None,
     })?;
-    let (code, human, json) = run_with(&args, launcher.as_ref(), &subject::GhCli, &cwd)?;
+    let (code, human, json) = run_with(&args, launcher.as_ref(), &subject::GhCli, cwd)?;
     if args.json { println!("{json}"); } else { print!("{human}"); }
     Ok(code)
 }
@@ -2636,7 +2652,7 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
     let started = std::time::Instant::now();
     let mut notes: Vec<String> = vec!["receipts: not structured yet (#584/#624); authors from digests and trailers only".into()];
 
-    // 2. subject (+ --pr)
+    // 2. subject (+ --pr) — subject::resolve_pr / resolve_subject / lineage / commits_in_range / subjects_in_range (Task 4, 5)
     let (subj, pr_view) = match args.pr {
         Some(n) => { let (s, v) = subject::resolve_pr(&repo, gh, n)?; (s, Some(v)) }
         None => (subject::resolve_subject(&repo, args.base.as_deref(), &args.head)?, None),
@@ -2645,16 +2661,38 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
     let commits = subject::commits_in_range(&repo, &subj)?;
     let subjects = subject::subjects_in_range(&repo, &subj)?;
 
-    // 3. spec + trust
+    // 3. spec + trust — the `verify` field belongs to the ISSUE author, so the
+    //    permission we check is the ISSUE author's, never the PR author's
+    //    (spec §5.3; a maintainer's PR may link a stranger's issue).
     let explicit_path = args.spec.as_deref().map(|s| !s.starts_with('#')).unwrap_or(false);
     let mut spec_source = "none".to_string();
+    let mut spec_author: Option<String> = None;
     let spec_text: Option<String> = match (&args.spec, &pr_view) {
-        (Some(s), _) if s.starts_with('#') => { let n: u64 = s[1..].parse()?; spec_source = format!("issue#{n}"); Some(gh.issue_body(n)?) }
+        (Some(s), _) if s.starts_with('#') => {
+            let n: u64 = s[1..].parse()?;
+            spec_source = format!("issue#{n}");
+            let iv = gh.issue_view(n)?;                      // subject.rs: fn issue_view(&self, n) -> Result<IssueView>
+            spec_author = Some(iv.author_login);
+            Some(iv.body)
+        }
         (Some(p), _) => { spec_source = p.clone(); Some(std::fs::read_to_string(p)?) }
-        (None, Some(v)) => match subject::closing_issue(&v.body) { Some(n) => { spec_source = format!("issue#{n}"); Some(gh.issue_body(n)?) } None => None },
+        (None, Some(v)) => match subject::closing_issue(&v.body) {
+            Some(n) => {
+                spec_source = format!("issue#{n}");
+                let iv = gh.issue_view(n)?;
+                spec_author = Some(iv.author_login);
+                Some(iv.body)
+            }
+            None => None,
+        },
         (None, None) => None,
     };
-    let perm = match (&pr_view, &args.spec) { (Some(v), None) => Some(gh.author_permission(&v.author_login)?), _ => None };
+    // Only an issue-derived spec has an author to check; a --spec file is the
+    // operator's own and an absent spec has no trust question.
+    let perm = match (&spec_author, explicit_path) {
+        (Some(login), false) => Some(gh.author_permission(login)?),
+        _ => None,
+    };
     let trust = evidence::spec_trust(explicit_path, args.trust_spec, perm.as_deref());
     let spec_mode = if spec_text.is_some() { "spec-backed" } else { "convention-only" };
     let trusted_verify: Vec<String> = match (trust, &spec_text) {
@@ -2662,7 +2700,7 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
         _ => Vec::new(),
     };
 
-    // 4. REVIEW.md at base
+    // 4. REVIEW.md at base (Task 6)
     let review_md = git::git(&repo, &["show", &format!("{}:REVIEW.md", subj.base_sha)]).ok();
     let review_md_sha = review_md.as_ref().and_then(|_| git::git(&repo, &["rev-parse", &format!("{}:REVIEW.md", subj.base_sha)]).ok());
     let (fm, body, fm_note) = review_md.as_deref().map(brief::parse_review_md).unwrap_or((brief::FrontMatter::default(), String::new(), None));
@@ -2676,7 +2714,7 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
         escalations_extra.push("REVIEW.md changed in this diff".to_string());
     }
 
-    // 5. ledger pack (existing path query; claims are slice 2 per spec §5 ⑤)
+    // 5. ledger pack (claims are slice 2 per spec §5 ⑤)
     let files_ref: Vec<&str> = subj.files.iter().map(String::as_str).collect();
     let branch = ledger.head_branch()?;
     let decisions = ledger.query_by_paths(&files_ref, Some(&branch), Some(50))?;
@@ -2684,13 +2722,23 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
     for d in &decisions { pack.push_str(&format!("- {}={} [{}] — {} (paths: {})\n", d.key, d.value, d.status, d.reason, d.affected_paths.join(", "))); }
     if pack.is_empty() { pack.push_str("(no decisions govern the touched paths)\n"); }
 
-    // 6. evidence: gates READ (receipts + exact-head CI), probes (verbs only), wiring-scan (BASE copy)
-    let gates = evidence::gate_set(&fm, &args.gates, &trusted_verify);
+    // 6. evidence: gate READ (receipts + SHA-pinned CI), probes, wiring-scan (BASE copy)
+    let gates = evidence::gate_set(&fm, &args.gates, &trusted_verify);   // Task 7: (fm, cli_gates, trusted_verify)
     let (mut gates_status, mut read, uncovered) = evidence::read_gates(&ledger, &subj.head_sha, &gates);
     if let Some(n) = args.pr {
-        let (ci_status, ci_read) = evidence::read_ci(&gh.pr_checks(n)?);
+        let (ci_status, ci_read) = evidence::read_ci(&gh.pr_checks(n, &subj.head_sha)?);   // pinned to head_sha
         read.extend(ci_read);
-        if let Some(s) = ci_status { if gates_status == "undeclared" || gates_status == "unverified" { gates_status = s; } else if s == "red" { gates_status = "red".into(); } }
+        // CI is evidence ABOUT declared gates, never a substitute for declaring
+        // them: an empty gate set stays `undeclared` no matter how green CI is,
+        // or a PR with no REVIEW.md and no --gate could reach qualified.
+        if let Some(s) = ci_status {
+            gates_status = match (gates_status.as_str(), s.as_str()) {
+                ("undeclared", _) => "undeclared".into(),
+                (_, "red") | ("red", _) => "red".into(),
+                ("verified", "verified") => "verified".into(),
+                _ => "unverified".into(),
+            };
+        }
     }
     let diff = git::git(&repo, &["diff", &format!("{}..{}", subj.base_sha, subj.head_sha)])?;
     let bins: Vec<String> = if fm.ran_allowlist.is_empty() { vec!["edda".into()] } else { fm.ran_allowlist.iter().map(|p| p.trim().to_string()).collect() };
@@ -2701,7 +2749,7 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
             let tmp = std::env::temp_dir().join("edda-review").join(&project_id).join(format!("wiring-scan-{}.sh", &subj.base_sha[..12]));
             std::fs::create_dir_all(tmp.parent()?).ok()?;
             std::fs::write(&tmp, script).ok()?;
-            // the BASE copy runs in the author repo; the head worktree's copy is never executed (Round 2 P0)
+            // the BASE copy runs in the author repo; the head worktree's copy is never executed
             std::process::Command::new("sh").arg(&tmp).args([&subj.base_sha, &subj.head_sha]).current_dir(&repo).output().ok()
                 .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
         })
@@ -2713,25 +2761,26 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
     let probes = evidence::run_probes(&wt.path, &probe_verbs);
     let mut ran = Vec::new();
     if args.run_gates {
-        let (r, n) = evidence::ran_gates(&wt.path, &gates.cmds, args.max_ran_sec, std::env::var_os("CARGO_TARGET_DIR").is_some(), &ledger.paths);
-        let all_green = !r.is_empty() && r.iter().all(|x| x.exit == 0) && read.iter().all(|x| x.result == "green") && n.is_empty();
+        let out_dir = wt.path.join(".edda-review-ran");            // Task 7 writes ran-<i>.out here
+        std::fs::create_dir_all(&out_dir)?;
+        let (r, n) = evidence::ran_gates(&wt.path, &gates.cmds, args.max_ran_sec, std::env::var_os("CARGO_TARGET_DIR").is_some(), &ledger.paths, &out_dir);
+        // a RAN whose stdout could not be stored is not evidence (spec §6.4)
+        let all_usable = !r.is_empty()
+            && r.len() == gates.cmds.len()
+            && r.iter().all(|x| x.exit == 0 && !x.timed_out && x.stdout_blob.is_some());
         if r.iter().any(|x| x.exit != 0 && !x.timed_out) { gates_status = "red".into(); }
-        else if all_green && r.len() == gates.cmds.len() { gates_status = "verified".into(); }
+        else if all_usable && read.iter().all(|x| x.result == "green") && n.is_empty() && gates_status != "undeclared" { gates_status = "verified".into(); }
         else if gates_status == "verified" { gates_status = "unverified".into(); }
         ran = r; notes.extend(n);
     }
     let evidence_text = evidence::evidence_text(&read, &uncovered, &ran, &probes, wiring.as_deref());
 
-    // 8. brief (contract last)
+    // 8. brief (contract last; assemble returns Result — protected chunks alone over budget is an error)
     let budget = std::env::var(DIFF_BUDGET_ENV).ok().and_then(|v| v.parse().ok()).unwrap_or(200_000usize);
     let b = brief::assemble(&brief::BriefInputs {
         core: brief::CORE_BRIEF_V1, review_md_body: review_md.as_ref().map(|_| body.as_str()), classes: &classes,
         spec: spec_text.as_deref(), spec_trust: trust, ledger_pack: &pack, evidence: &evidence_text, diff: &diff, head_sha: &subj.head_sha,
-    }, budget, &file_classes);
-    let code_risk_dropped = b.dropped_files.iter().any(|f| file_classes.get(f).map(|cs| cs.iter().any(|c| c == "code-risk")).unwrap_or(false));
-    if code_risk_dropped {
-        anyhow::bail!("code-risk files alone exceed the diff budget; review a smaller range (slice 2: --incremental)");
-    }
+    }, budget, &file_classes)?;
 
     // 9. session id (UUID, fresh per run) + independence pre-check + run
     let session_label = format!("review-{}-r{}", &subj.head_sha[..12], lineage.round);
@@ -2750,9 +2799,8 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(launcher.run_phase(&phase, &b.text, "", &session_id, &wt.path, CancellationToken::new()));
     let observed = launcher.last_observed_model();
-    // Explicit removal so a failure reaches the verdict's `notes` (spec §4.4);
-    // `Drop` stays as the fallback for the earlier `?` paths, where there is no
-    // payload to write into.
+    // Explicit removal so a failure reaches `notes` (spec §4.4); `Drop` stays as
+    // the fallback for the earlier `?` paths, where there is no payload to write into.
     if let Err(e) = wt.remove() { notes.push(format!("worktree removal failed: {e}; run `git worktree prune`")); }
     drop(wt);
 
@@ -2765,8 +2813,14 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
         Ok(PhaseResult::BudgetExceeded { cost_usd }) => ("budget".into(), cost_usd, None),
         Err(e) => { let o = classify_crash(&e.to_string()).to_string(); notes.push(e.to_string()); (o, None, None) }
     };
-    let mut blobs: Vec<String> = ran.iter().map(|r| r.stdout_blob.clone()).filter(|b| !b.is_empty()).collect();
-    if let Some(t) = &text { if let Ok(id) = edda_ledger::blob_store::blob_put(&ledger.paths, t.as_bytes()) { blobs.push(id); } }
+    // RAN stdout blobs are Option<String>; a missing one was already noted by ran_gates.
+    let mut blobs: Vec<String> = ran.iter().filter_map(|r| r.stdout_blob.clone()).collect();
+    if let Some(t) = &text {
+        match edda_ledger::blob_store::blob_put(&ledger.paths, t.as_bytes()) {
+            Ok(id) => blobs.push(id),
+            Err(e) => notes.push(format!("raw engine output could not be stored: {e}")),
+        }
+    }
     let (parsed, mut parse_ok) = match text.as_deref().map(verdict::parse_engine_output) {
         Some(Ok(p)) => (Some(p), true),
         Some(Err(e)) => { notes.push(format!("parse failed: {e}")); (None, false) }
@@ -2775,12 +2829,16 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
     let mut outcome = outcome;
     if let Some(p) = &parsed {
         if p.subject_seen.as_deref() != Some(subj.head_sha.as_str()) { outcome = "subject-mismatch".into(); parse_ok = false; }
+        if let Some(n) = &p.notes { notes.push(format!("engine notes: {n}")); }
     }
     let verdict_str = match (&parsed, outcome.as_str()) { (Some(p), "done") => p.verdict.clone(), _ => "unreviewed".into() };
     let model_observed = observed.clone().unwrap_or_else(|| "unknown".into());
     let model_requested = args.model.clone().unwrap_or_else(|| "inherited".into());
     let model_mismatch = observed.is_some() && args.model.is_some()
         && canonical_model_id(&model_requested) != canonical_model_id(&model_observed);
+    if model_mismatch {
+        notes.push(format!("INCIDENT: model_requested {model_requested} != model_observed {model_observed} — a silent downgrade; treat the verdict as unqualified"));
+    }
     let independence = identity::independence(&auth, &session_id, observed.as_deref()).unwrap_or("unverified");
     let independence_policy = if args.require_model_diversity { "model" } else { fm.independence.as_deref().unwrap_or("session") };
     let (qualified, disq) = verdict::qualify(&verdict::QualInputs {
@@ -2826,12 +2884,18 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
 fn render_human(p: &ReviewVerdictPayload, event_id: &str) -> String {
     let mut s = String::new();
     s.push_str(&format!("review_verdict {event_id} · round {} · head {} · base {}\n", p.refs.round.map(|r| r.to_string()).unwrap_or_else(|| "-".into()), &p.subject.head_sha[..12], &p.subject.base_sha[..12]));
+    if let Some(sup) = &p.refs.supersedes { s.push_str(&format!("supersedes: {sup}\n")); }
+    if let Some(prev) = &p.refs.previous { s.push_str(&format!("previous: {prev}{}\n", if p.refs.history_rewritten { " (history rewritten — round continued, chain broken)" } else { "" })); }
     s.push_str(&format!("verdict: {}   qualified: {}\n", p.verdict, if p.qualified { "yes" } else { "no" }));
     for d in &p.disqualifiers { s.push_str(&format!("  - {d:<26} → {}\n", verdict::hint(d))); }
     s.push_str(&format!("reviewer: {} · requested {} · observed {} ({}) · independence {} (policy {}) · tools {} · session {}\n", p.reviewer.agent, p.reviewer.model_requested, p.reviewer.model_observed, p.reviewer.observed_via, p.independence, p.independence_policy, p.reviewer.tool_policy, p.reviewer.session_label));
     s.push_str(&format!("gates: {}{}\n", p.gates.status, if p.gates.declared_by.is_empty() { String::new() } else { format!(" (declared by {})", p.gates.declared_by.join(", ")) }));
     for r in &p.gates.read { s.push_str(&format!("  READ `{}` → {} ({} {})\n", r.cmd, r.result, r.kind, r.r#ref)); }
-    for r in &p.gates.ran { s.push_str(&format!("  RAN  `{}` → exit {} ({} ms{})\n", r.cmd, r.exit, r.duration_ms, if r.timed_out { ", killed at deadline" } else { "" })); }
+    for r in &p.gates.ran {
+        s.push_str(&format!("  RAN  `{}` → exit {} ({} ms{}{})\n", r.cmd, r.exit, r.duration_ms,
+            if r.timed_out { ", killed at deadline" } else { "" },
+            if r.stdout_blob.is_none() { ", stdout not stored" } else { "" }));
+    }
     s.push_str(&format!("findings: {}\n", p.findings.len()));
     for f in &p.findings { s.push_str(&format!("  [{}] {}:{} — {} ({})\n", f.severity, f.file, f.line.map(|l| l.to_string()).unwrap_or_else(|| "-".into()), f.claim, f.evidence)); }
     s.push_str(&format!("cost: {} · {} ms\n", match p.cost.usd { Some(c) if p.cost.measured => format!("${c:.4} (measured)"), _ => crate::cmd_conduct::NO_USAGE_COST_TEXT.to_string() }, p.cost.duration_ms));
@@ -2840,7 +2904,9 @@ fn render_human(p: &ReviewVerdictPayload, event_id: &str) -> String {
 }
 ```
 
-`run_inner` 不再存在：`run()` 直接呼叫 `run_with`。Task 0 的 `run_inner` 骨架在本 task 刪除。
+Task 0 的 `run_inner` 骨架在本 task 被上面的實作取代；`main.rs` 的 match arm 改成
+`Command::Review { args } => cmd_review::run(args, &cwd),`（`cwd` 是 `main` 已解析好的那個）。
+
 
 - [ ] **Step 4: 跑測試確認 PASS**
 
@@ -2980,6 +3046,7 @@ PR body 必含：`Part of #652 (slice 1)`（**不寫 Closes**）、spec 與 plan
 ## Self-review（Round 3 後重跑）
 
 - **Round 3 收入對照**：P0（issue 作者信任）→ Task 5 `IssueView` ＋ Task 10 用 `issue.author_login`；P1 `LauncherOptions` 四欄／`validate_dispatch_options` → Global Constraints、Task 0、Task 10；tempfile → `ran_gates` 改寫 `out_dir`；capability validation → Task 10 步驟 9；程序樹 kill → Task 7 `kill_tree`；CI 釘 SHA → Task 5 `pr_checks(n, head_sha)`；code-risk 超預算 → Task 6 `assemble` 回 `Err`；背景 digest → Task 8 單一 source；fetch 競態 → Task 5 `resolve_pr` 重取 view；`run()` 形狀 → Task 10（`run_inner` 回 code、`run` 只在非 0 時 exit）；blob 失敗 → `stdout_blob: Option`；guard 移除失敗 → `remove()` 進 notes；`pending`／engine notes／mismatch note／supersedes → Task 3、10；stash 與 check-cli-docs → Global Constraints、Task 11。
+- **Round 4 收入對照**：Round 4 的 P0 與六條 P1 有五條同源——**Task 10 沒有跟上 Task 3–9 的簽名變更**（連續兩輪同一類）。處置不是逐點補丁而是**整段重寫 Task 10 Step 3**，對齊當下每一個 producer，並在該區塊開頭寫下對齊規則（動 producer 就回來同步）。逐條：P0 issue 作者信任 → `run_with` 改呼叫 `gh.issue_view(n)`、權限查 `spec_author`（issue 作者）而非 `pr_view.author_login`，`--spec <path>` 不查權限；P1 型別失同步（`NoGh` 舊 trait、`pr_checks` arity、`ran_gates` 少 `out_dir`、`assemble` 的 `Result`、`stdout_blob: Option`）→ 重寫後一次對齊，`NoGh` 與 Task 4 測試的 `unused_mut` 一併修；P1 `main` 前置 `current_dir()?` → `run(args, cwd)` 由 `main` 傳入，review 不再自己呼叫，spec §3 明寫這是行程級前置條件不在 review 契約內；P1 spec 誤稱 `LauncherOptions` 可用 `Default` → spec §6.1 改為四欄明列（main 沒有 derive）；P1 gate 合成 → CI 是「關於已宣告 gate 的證據」，`undeclared` 永遠不被 CI 蓋成 `verified`，且 `stdout_blob` 為 `None` 的 RAN 不算證據；P1 事件與人讀輸出 → engine `notes` 併入 payload、mismatch 寫成 INCIDENT 一行、raw blob 失敗記 note、人讀輸出印 supersedes／previous／`history_rewritten`、JSON 範例補 `pending` 與 `stdout_blob: null`；P1 codex 預算 → `run_inner` 呼叫既有 `budget_warning_for_agent`，spec §6.5 補一段。
 
 - **Spec coverage**：§3 CLI 與 exit 2 旁路（Task 0、10）；§4 主體／RAII worktree／lineage／FETCH_HEAD（Task 4、5、10）；§5 brief、front matter、多類別預算、契約在最末（Task 6）；§5.2 契約與 `subject_seen`（Task 9、10）；§5.3 trust 與 `verify`（Task 7、10）；§6.1 `Phase.tools` 經 `CapabilityOptions`（Task 10）；§6.2 in-band model（Task 10 `last_observed_model`）；§6.3 封閉家族表、digest 兩種 source、commit 標題比對（Task 2、8）；§6.4 動詞探測、硬期限 RAN、base 版 wiring-scan（Task 7、10）；§6.5 成本（Task 10）；§7 事件、taxonomy 表、`model_self_report`、RAN blobs（Task 3、9、10）；§8 收據與 CI（Task 1、7）；§9 失敗表含 overload（Task 9、10）；§10 測試含四種 exit、金絲雀（Task 10、12）；§11 deprecation／docs／COMPATIBILITY 條件（Task 11）；§12 wiring（Task 12 PR body）。**明確不在切片 1**：帳本 pack 的 active claims（spec ⑤ 排到切片 2）；結構化 phase-done 收據（等 #624）。
 - **Placeholder scan**：無 TBD／TODO；所有函式在對應 task 定義；`new_note_event` 簽名已寫死（event.rs:197）。
