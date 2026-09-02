@@ -138,7 +138,11 @@ pub async fn check_cmd_succeeds(cmd: &str, timeout_sec: u64, cwd: &Path) -> Chec
             start.elapsed(),
         ),
         Err(_) => CheckOutput::timed_out(
-            format!("command timed out after {timeout_sec}s: {cmd} (executed: {executed})"),
+            // Round-1 P1-2: only the masked `executed` line carries the
+            // command here. The raw `{cmd}` copy that used to sit in front
+            // of it leaked plaintext credentials from timed-out commands,
+            // breaking the non-passing-results masking contract.
+            format!("command timed out after {timeout_sec}s (executed: {executed})"),
             start.elapsed(),
         ),
     }
@@ -158,12 +162,16 @@ fn shell_line(shell: &str, args: &[String]) -> String {
 }
 
 /// Keep the head and the tail of a captured stream, bounded (GH-558).
-/// Short streams pass through unchanged; long ones keep the first
+/// Streams no longer than `OUTPUT_HEAD_CHARS + OUTPUT_TAIL_CHARS` pass
+/// through unchanged — that sum, not the tail cap, is the truncation
+/// threshold, because `skipped = total - HEAD - TAIL` is only defined
+/// above it (round-1 P1-1: at 2001–2399 chars the old `total > TAIL`
+/// gate produced a usize underflow). Long streams keep the first
 /// `OUTPUT_HEAD_CHARS` and last `OUTPUT_TAIL_CHARS` characters with an
 /// explicit truncation marker between them. Char-boundary safe.
 fn bounded_stream(s: &str) -> String {
     let total = s.chars().count();
-    if total <= OUTPUT_TAIL_CHARS {
+    if total <= OUTPUT_HEAD_CHARS + OUTPUT_TAIL_CHARS {
         return s.to_string();
     }
     let head: String = s.chars().take(OUTPUT_HEAD_CHARS).collect();
