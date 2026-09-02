@@ -3,7 +3,10 @@
 Status: design approved, pending implementation — this document ships no code.
 Issue: https://github.com/fagemx/edda/issues/593
 Operator ruling: issue comment 2026-09-02, six-row table.
-Recorded decision: `fleet.lane-profile = actor-is-profile` (active; `edda ask "lane-profile"`).
+Recorded decision: `fleet.lane-profile = actor-is-profile`, active in the 4090
+ledger where this was written. Ledgers are machine-local by design (#613 §2:
+`.edda/` is gitignored), so `edda ask "lane-profile"` reproduces it only there —
+the portable source, readable from any machine, is the operator ruling above.
 Verified against: `origin/main` @ `f582ef3` — every line citation below was
 re-opened in a worktree at that SHA.
 
@@ -102,9 +105,13 @@ actors:
 | `max_tier` | `Option<ToolTier>` | **reserved** | reserved — §3.4 |
 | `lifecycle` | reserved name | **reserved** | reserved — §3.5 |
 
-Every field except `runtime` is named to match the `Phase` field it resolves
-against (`plan/schema.rs:54-84`), so the precedence rule in §4 is a per-name
-merge rather than a translation table. `budget_usd` is `f64` because
+Every capability field that resolves against a phase — `model`, `thinking`,
+`tools`, `exclude_tools`, `permission_mode`, `budget_usd` — is named to match
+its `Phase` counterpart (`plan/schema.rs:54-84`), so the precedence rule in §4
+is a per-name merge rather than a translation table. Three fields are outside
+that set: `runtime` selects the backend rather than resolving against a phase
+field, and the reserved slots `max_tier` (§3.4) and `lifecycle` (§3.5) have no
+`Phase` counterpart at all. `budget_usd` is `f64` because
 `Phase.budget_usd` is (`plan/schema.rs:54`).
 
 ### 3.2 `None` is not the empty list
@@ -192,14 +199,31 @@ is deliberate rather than forgotten.
 
 > For every capability field `F`, the value edda passes to the backend is the
 > first present value in the ordered list
-> **CLI flag → phase field → profile field → (nothing)**.
-> "Nothing" is not a guess: edda spawns no flag for `F`, the backend's own
-> default applies, and every report prints the literal `inherited` for `F`.
+> **CLI flag → phase field → profile field → fallback(F)**.
+> The three-source order is universal; the fallback is not. For most fields the
+> fallback is *nothing*, and nothing is not a guess — edda spawns no flag for
+> `F`, the backend's own default applies, and every report prints the literal
+> `inherited` for `F`. Two fields deviate, and are called out immediately below.
 
 ```text
-resolve(F) = cli.F ?? phase.F ?? profile.F        // Option, never a sentinel
-None  =>  no flag on the command line
+resolve(F) = cli.F ?? phase.F ?? profile.F ?? fallback(F)   // Option, never a sentinel
+
+fallback(F) = None  for model, thinking, tools, exclude_tools
+              =>  no flag on the command line
 ```
+
+Two of the six capability fields do not take that default fallback. The table
+below is authoritative for both:
+
+- **`permission_mode`** — the fallback is not "no flag". edda supplies
+  `bypassPermissions` itself, because `Phase.permission_mode` is a `String`
+  with a serde default and cannot express "inherited" (§4.3, §8.3).
+- **`budget_usd`** — there is a fourth source beneath the profile: the
+  plan-level `budget_usd`. Only when that is absent too is there no ceiling.
+
+The table's first row, backend, is not a capability field but the backend
+selector: it resolves by the same three-source order and is then *required*
+rather than falling back — `--agent` has no default on dispatch.
 
 The `inherited` literal is not invented here; it is the existing dispatch
 contract (`cmd_dispatch.rs:148-151`, `:519-522`).
