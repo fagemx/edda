@@ -376,13 +376,13 @@ pub fn parse_verdict_text(text: &str) -> (Option<String>, Option<String>, usize,
 }
 
 #[derive(Debug, Clone)]
-pub struct ReviewTimelineEvent {
-    pub timestamp: String,
-    pub author: Option<String>,
-    pub verdict: String,
-    pub verdict_sha: Option<String>,
-    pub p0_count: usize,
-    pub p1_count: usize,
+struct ReviewTimelineEvent {
+    timestamp: String,
+    author: Option<String>,
+    verdict: String,
+    verdict_sha: Option<String>,
+    p0_count: usize,
+    p1_count: usize,
 }
 
 /// Pure timeline extractor: processes reviews and structured comments into the final verdict.
@@ -395,13 +395,12 @@ pub fn extract_timeline_verdict(
     // 1. Process GitHub formal reviews (APPROVED / CHANGES_REQUESTED)
     for r in &gh_view.reviews {
         if let Some(allowed) = allowed_reviewers {
-            if let Some(author) = &r.author {
-                if !allowed
-                    .iter()
-                    .any(|u| u.eq_ignore_ascii_case(&author.login))
-                {
-                    continue;
-                }
+            match &r.author {
+                Some(author)
+                    if allowed
+                        .iter()
+                        .any(|u| u.eq_ignore_ascii_case(&author.login)) => {}
+                _ => continue, // Fail closed: unauthenticated/unattributable events are rejected
             }
         }
 
@@ -435,13 +434,12 @@ pub fn extract_timeline_verdict(
     // 2. Process structured review comments
     for comment in &gh_view.comments {
         if let Some(allowed) = allowed_reviewers {
-            if let Some(author) = &comment.author {
-                if !allowed
-                    .iter()
-                    .any(|u| u.eq_ignore_ascii_case(&author.login))
-                {
-                    continue;
-                }
+            match &comment.author {
+                Some(author)
+                    if allowed
+                        .iter()
+                        .any(|u| u.eq_ignore_ascii_case(&author.login)) => {}
+                _ => continue, // Fail closed: unauthenticated/unattributable events are rejected
             }
         }
 
@@ -642,11 +640,13 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
             result.p0_count, result.p1_count
         );
         println!("  Required CI: green");
-    } else {
         eprintln!(
             "REFUSED: Merge preconditions not satisfied for head {}:",
             result.head_sha
         );
+        if let Some(author) = &result.pr_author {
+            eprintln!("  PR Author:   {author}");
+        }
         for reason in &result.reasons {
             eprintln!("  - {reason}");
         }
@@ -951,7 +951,10 @@ Commit: 1234567890abcdef1234567890abcdef12345678
 
     #[test]
     fn test_allowed_reviewers_filter() {
-        let gh_view = GhViewPr {
+        let allowed = vec!["authorized-reviewer".to_string()];
+
+        // Case 1: Unauthorized user comment is rejected
+        let gh_view_unauth = GhViewPr {
             head_ref_oid: VALID_SHA_A.into(),
             author: Some(GhAuthor {
                 login: "fagemx".into(),
@@ -967,10 +970,52 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             }],
             reviews: vec![],
         };
-
-        let allowed = vec!["authorized-reviewer".to_string()];
-        let (verdict, _, _, _, _) = extract_timeline_verdict(&gh_view, Some(&allowed));
+        let (verdict, _, _, _, _) = extract_timeline_verdict(&gh_view_unauth, Some(&allowed));
         assert!(verdict.is_none());
+
+        // Case 2: Unattributable (author: None) comment/review is rejected (fail closed)
+        let gh_view_none = GhViewPr {
+            head_ref_oid: VALID_SHA_A.into(),
+            author: Some(GhAuthor {
+                login: "fagemx".into(),
+            }),
+            comments: vec![GhComment {
+                body: format!(
+                    "## Code Review: Round 1\n\n### Verdict\nLGTM (P0=0, P1=0) at `{VALID_SHA_A}`"
+                ),
+                author: None,
+                created_at: Some("2026-09-02T08:00:00Z".into()),
+            }],
+            reviews: vec![GhReviewItem {
+                state: "APPROVED".into(),
+                author: None,
+                body: Some(format!("LGTM @ {VALID_SHA_A}")),
+                submitted_at: Some("2026-09-02T08:30:00Z".into()),
+            }],
+        };
+        let (verdict, _, _, _, _) = extract_timeline_verdict(&gh_view_none, Some(&allowed));
+        assert!(verdict.is_none());
+
+        // Case 3: Authorized reviewer is accepted
+        let gh_view_auth = GhViewPr {
+            head_ref_oid: VALID_SHA_A.into(),
+            author: Some(GhAuthor {
+                login: "fagemx".into(),
+            }),
+            comments: vec![GhComment {
+                body: format!(
+                    "## Code Review: Round 1\n\n### Verdict\nLGTM (P0=0, P1=0) at `{VALID_SHA_A}`"
+                ),
+                author: Some(GhAuthor {
+                    login: "authorized-reviewer".into(),
+                }),
+                created_at: Some("2026-09-02T08:00:00Z".into()),
+            }],
+            reviews: vec![],
+        };
+        let (verdict, _, author, _, _) = extract_timeline_verdict(&gh_view_auth, Some(&allowed));
+        assert_eq!(verdict.as_deref(), Some("LGTM"));
+        assert_eq!(author.as_deref(), Some("authorized-reviewer"));
     }
 
     #[test]
