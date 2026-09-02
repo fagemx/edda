@@ -121,9 +121,10 @@ provider 過載、無法建 worktree）都是 exit 2：`run()` 自己攔 `Err`�
    scratch 在系統 temp 目錄下的 `edda-review/<project_id>/`。引擎的 cwd 就是它，
    看到的檔案就是 `head_sha`。edda 在裡面放一個標記檔 `.edda-review-subject`（內容為
    `head_sha`），引擎必須 Read 它並回填 `subject_seen`（§5.2）——這是最便宜的
-   「引擎審的就是我派的」一致性檢查。worktree 由 RAII guard 持有：建立之後任何路徑
-   （成功、`?` 錯誤、拒絕）離開時都 `git worktree remove --force`（`--keep-worktree` 例外）；
-   移除失敗只警告並記在 `notes`，不影響判決（對齊 `fleet.review-worktree-cleanup`）。
+   「引擎審的就是我派的」一致性檢查。worktree 由 RAII guard 持有：正常路徑在引擎跑完後
+   **明確呼叫** `remove()`，失敗記進 `notes`（一行，判決不受影響）；任何提早離開的路徑
+   （`?` 錯誤、拒絕）由 `Drop` 兜底移除，那時沒有 payload 可寫，只印 stderr（`--keep-worktree`
+   兩者都例外）。對齊 `fleet.review-worktree-cleanup`。
 5. **round 與 supersedes**（`review.subject-key`）：在作者 repo 裡查帳本所有 `review_verdict`
    事件，候選必須滿足 `subject.head_sha ∈ (base_sha, head_sha]`——是 `head_sha` 的祖先
    **且不是** `base_sha` 的祖先（兩次 `git merge-base --is-ancestor`）。沒有這個下界，
@@ -151,8 +152,9 @@ provider 過載、無法建 worktree）都是 exit 2：`run()` 自己攔 `Err`�
 diff 預算 `EDDA_REVIEW_DIFF_BUDGET_CHARS`（預設 200000）。超過時**按類別優先再按大小**截：
 一個檔案可以同時命中多個類別（例如 `.github/x.md` 同時是 `code-risk` 與 `docs-skills`），
 **只要任一類是 `code-risk` 就全保留**；只屬 `docs-skills` 的檔由大到小砍，在檔案邊界截斷；砍掉的檔名逐一列進
-`notes`，記 `subject.coverage = partial`、判決不合格。`code-risk` 本身就超預算 → exit 2
-並提示切片 2 的 `--incremental`。**不靜默截斷。**
+`notes`，記 `subject.coverage = partial`、判決不合格。受保護的 chunk **加總本身**就超預算
+→ 組裝函式直接回錯（不是靠「有沒有砍到 code-risk」倒推，那條永遠不會成立），動詞 exit 2
+並提示切片 2 的 `--incremental`。**不靜默截斷，也不超額送出。**
 
 `REVIEW.md` 若在本 diff 中被修改：類別加入 `docs-skills`，`escalations` 加一項
 「REVIEW.md changed in this diff」，並在 brief 標明本輪仍依 base 版審。
@@ -204,8 +206,11 @@ classes:                    # 類別路由；glob 對 diff 檔案清單
 | `spec.trust` | 來源 | `verify` 欄進 RAN 白名單？ |
 |---|---|---|
 | `operator` | `--spec <path>`、`--spec #n` 加 `--trust-spec`、或 `--pr` 加 `--trust-spec` | 是 |
-| `maintainer` | `--pr` 推導的 issue，且 issue 作者在 `gh api repos/{o}/{r}/collaborators/{user}/permission` 為 `admin` / `maintain` / `write` | 是 |
+| `maintainer` | `--pr` 推導的 issue，且 **issue 作者**（不是 PR 作者——`verify` 是 issue 作者寫的，PR 作者只是用 closing keyword 選了那張 issue）在 `gh api repos/{o}/{r}/collaborators/{user}/permission` 為 `admin` / `maintain` / `write` | 是 |
 | `untrusted` | 其餘（任何人都能開 issue、任何 PR body 都能寫 `closes #n`） | **否**，`verify` 只是 READ 內容 |
+
+`GhClient::issue_view(n)` 同時回 body 與 `author_login`；信任判定用後者。維護者的 PR 連到
+陌生人開的 issue，該 issue 的 `verify` 仍是 `untrusted`（Round 3 P0）。
 
 ## 6. 執行
 
@@ -224,8 +229,12 @@ classes:                    # 類別路由；glob 對 diff 檔案清單
 接線事實（#574 分支 `feat/gh574-dispatch-model-thinking-tools`）：能力欄位在
 `Phase { tools, exclude_tools, model, thinking }`（YAML 舊拼法 `allowed_tools` 仍可解析），
 `cmd_dispatch::build_phase(prompt, budget, timeout, permission_mode, CapabilityOptions { model,
-thinking, tools, exclude_tools })` 把它們放上 phase；`LauncherOptions` 只有 `verbose` 與
-`transcript_dir`。`edda review` 走同一條：建 `CapabilityOptions`，不碰 launcher builder。
+thinking, tools, exclude_tools })` 把它們放上 phase；`LauncherOptions { verbose, transcript_dir,
+persistent_codex_threads, session_dir }`（review 只設前兩個，其餘 `Default`）。**建 phase 之前
+必須先過 `agent_kind::validate_dispatch_options(agent, &DispatchOptions { .. })`**——這是 #574
+的 backend × option 支援矩陣，不支援的組合（claude 的 thinking、codex 的 model）會被明確拒絕
+（exit 2），而不是被 launcher 靜默丟掉。`edda review` 走同一條：驗證、建 `CapabilityOptions`，
+不碰 launcher builder。
 
 - 為什麼連 `git *` 都不給引擎：臨時 worktree 與作者 repo **共用 `.git`**（`git-common-dir`），
   `git config` 或 `git -c core.hooksPath=…` 寫的是作者 repo 的 shared config，而這個 repo
@@ -258,9 +267,10 @@ thinking, tools, exclude_tools })` 把它們放上 phase；`LauncherOptions` 只
 
 作者 session 集合＝聯集：(a) 該分支上的結構化 phase-done 收據的 session id 與 model——
 **等 #584 / PR #624 落地**（今天 `record_phase_done` 寫的是散文 note，不解析；切片 1 只讀
-(b)(c)，並在 `notes` 記「receipts: not structured yet」）；(b) session digest 事件
-（`type = note`，`payload.source` 是 `"bridge:session_digest"`（transcript digest，
-`digest/render.rs`）或 `"bridge:session-digest"`（背景 digest，`bg_digest.rs`）——兩種拼法都收）：
+(b)(c)，並在 `notes` 記「receipts: not structured yet」）；(b) transcript digest 事件
+（`type = note`，`payload.source = "bridge:session_digest"`，`digest/render.rs`；背景 digest
+`bg_digest.rs` 寫的 `"bridge:session-digest"` 只是加了 `source` 的普通 note，**沒有**
+`session_id` / `session_stats`，不是來源）：
 `payload.session_stats.commits_made` 存的是 **commit 訊息主旨**（`digest/extract.rs` 從
 `git commit -m` 抽出），不是 SHA，所以用 `git log --format=%s base_sha..head_sha` 的主旨集合做
 精確字串交集（若某項是 40 hex 則改用 SHA 前綴比對）；交集非空者 `payload.session_id`
@@ -305,8 +315,11 @@ trailer `Co-Authored-By`。帳本的 `commit` 事件是 edda checkpoint，不是
 maintainer}` 時）spec 的 `verify` 段逐行。在臨時 worktree **逐字**執行：白名單字串是可信的，
 所以交給 `sh -c "<gate>"`，不做 `split_whitespace` 之類的改寫；記 `cmd / exit /
 duration_ms / stdout 尾段 blob`。總時長 `--max-ran-sec` 是**硬期限**：每條閘門以剩餘時間
-spawn、輪詢 `try_wait`、到期 `kill`，被殺的閘門記 exit `-1` 與 `timed_out`，剩下的閘門
-記「未跑」，`gates.status = unverified`，`notes` 說明。
+spawn、輪詢 `try_wait`，到期就砍**整棵程序樹**——Unix 用 `CommandExt::process_group(0)` 開
+新 process group 並 `kill -9 -- -<pgid>`；Windows 用 `taskkill /PID <pid> /T /F`；只殺 `sh`
+本身不算兌現期限。被殺的閘門記 exit `-1` 與 `timed_out`，剩下的閘門記「未跑」，
+`gates.status = unverified`，`notes` 說明。stdout 尾段寫 blob 失敗是**大聲的**：該 RAN 條目
+`stdout_blob = null`、`notes` 記一行，而且這條 RAN 不能讓 `gates.status` 變 `verified`。
 
 - 白名單裡**沒有** `git *`；edda 自己需要的 git 都是程序內固定子命令。
 - cargo 類閘門（指令以 `cargo ` 開頭）只在環境有 `CARGO_TARGET_DIR` 時執行；沒有就跳過並記
@@ -395,9 +408,12 @@ spawn、輪詢 `try_wait`、到期 `kill`，被殺的閘門記 exit `-1` 與 `ti
 - finding 在 payload 裡的 `id` 是事件內的 `fN`（事件 id 在寫入前不存在，無法內嵌）；
   全域引用寫成 `<event_id>/fN`，由讀端組合，第二層的 `edda finding reject` 用這個形式；
   切片 1 不另開事件型別（#602 之後再抬升）。
+- `notes` 是所有旁路訊息的匯流：front matter 缺、砍掉的檔名、RAN 期限、blob 寫入失敗、
+  worktree 移除失敗、`model-mismatch` 事故一行（requested vs observed）、引擎輸出裡的 `notes`。
 - 人讀輸出一頁：verdict、qualified 與 disqualifiers、**每個 disqualifier 後面一句「怎麼
-  消掉它」**、round 與 supersedes、reviewer 三欄（requested / observed / via）、independence、
-  gates 一行、findings 表、cost 一行、event id。
+  消掉它」**、round 與 supersedes（event id；rebase 時 previous ＋ history_rewritten）、
+  reviewer 三欄（requested / observed / via）、independence 與 policy、gates 一行、findings 表、
+  cost 一行、event id。
 
 ## 8. 本地收據：`cmd` 事件擴充（`review.local-receipt`）
 
@@ -414,7 +430,12 @@ vacuous verified——不然沒寫 `REVIEW.md` 的 repo 免費拿到 verified。
 exit 0 → `green`；非 0 → `red`；沒有 → 該 gate 未涵蓋。全部 green → `verified`；
 任一 red → `red`；有未涵蓋（且 `--run-gates` 沒補上）→ `unverified`，輸出印
 「run `edda run -- <gate>` at <head12> on a clean tree, or pass --run-gates」。
-`--pr` 時另讀 `gh pr checks` 的 exact-head 狀態，required 全綠等同 verified。
+`--pr` 時另讀 exact-head CI，**釘在 `head_sha`**：`gh api repos/{o}/{r}/commits/<head_sha>/check-runs`
+取該 SHA 的 check-runs（name / status / conclusion），再用 `gh pr checks <n> --required --json name`
+取 required 名單做交集；PR 在解析後被 push 也不會把新 head 的綠記到受審 SHA 上。required
+全部 `completed` + `success`（或 `skipped`）→ verified；任一 `failure` / `cancelled` / `timed_out`
+→ red；有 `in_progress` / `queued` → `pending`（`read[].result` 的合法值：`green | red | pending`），
+狀態 unverified。
 
 PR body 裡的散文 L1 receipt 不解析；fleet 在一個迭代內改用 `edda run -- <gate>` 產收據。
 

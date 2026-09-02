@@ -18,8 +18,8 @@
 - Exit code：`0` = lgtm ∧ qualified、`1` = changes-requested、`2` = unreviewed / 錯誤、`3` = lgtm ∧ ¬qualified（spec §3）。
 - `review_verdict` 是 unstable 事件（`spec.v1-scope`）；只加鍵不刪鍵。
 - Clippy zero warnings（`-D warnings`）、no `unsafe`、library 碼不 `unwrap`（`.claude/CLAUDE.md`）。
-- 每個迴歸測試先驗證在接線前 FAIL（stash、跑、還原）。
-- 前置：#574 切片 1 已合併到 main（`AgentLauncher::last_observed_model` 存在、`LauncherOptions` 有 `model / thinking / tools / exclude_tools`、`Phase` 有 `tools / exclude_tools / model / thinking`）。Task 0 驗證這件事，沒合併就停。
+- 每個迴歸測試先驗證在接線前 FAIL：各 task 的 Step 2 就是那一次，當場把 FAIL 輸出記到 scratch 的 `PR-notes.md`；不做事後 stash。
+- 前置：#574 切片 1 已合併到 main（`AgentLauncher::last_observed_model` 存在；`cmd_dispatch::CapabilityOptions { model, thinking, tools, exclude_tools }` 與五參數 `build_phase`；`agent_kind::{DispatchOptions, validate_dispatch_options, LauncherOptions { verbose, transcript_dir, persistent_codex_threads, session_dir }}`；`Phase` 有 `tools / exclude_tools / model / thinking`）。Task 0 驗證這件事，沒合併就停。
 - 提交訊息格式 `<type>(<scope>): <description>`；每個 task 一個 commit；PR body 用「Part of #652」不用 Closes（切片 2 仍開）。
 - 驗證預算：L0 while iterating（`cargo fmt --all --check`、`cargo clippy -p <crate> --all-targets -- -D warnings`、`cargo test -p <crate>`）；L1 once on the frozen SHA（`CARGO_INCREMENTAL=0`，workspace fmt / clippy / test），receipt 進 PR body。Build lane 由 brief 指定，`CARGO_TARGET_DIR` 已設就不要另建。
 
@@ -55,7 +55,7 @@
 
 **Interfaces:**
 - Consumes: `crate::agent_kind::AgentKind`（既有）。
-- Produces: `cmd_review::ReviewArgs`（clap `Args`）、`cmd_review::run(args) -> Result<()>`（呼叫 `std::process::exit`，與 `cmd_dispatch::run` 同形）。
+- Produces: `cmd_review::ReviewArgs`（clap `Args`）、`cmd_review::run(args) -> Result<()>`——與 `cmd_dispatch::run` 同形：`run_inner` 回 `Result<i32>`，`run` 只在 code 非 0 時 `std::process::exit`，成功路徑正常返回讓 destructor 跑完（#574 的形狀，Round 3 P1-9）。
 
 - [ ] **Step 1: 確認前置已合併**
 
@@ -63,9 +63,11 @@ Run:
 ```bash
 git fetch origin main && git checkout main && git pull --ff-only origin main
 grep -n "fn last_observed_model" crates/edda-conductor/src/agent/launcher.rs
-grep -n "pub tools\|pub exclude_tools\|pub model\|pub thinking" crates/edda-cli/src/agent_kind.rs crates/edda-conductor/src/plan/schema.rs
+grep -n "pub struct CapabilityOptions\|pub fn build_phase" crates/edda-cli/src/cmd_dispatch.rs
+grep -n "fn validate_dispatch_options\|pub(crate) struct DispatchOptions\|pub(crate) struct LauncherOptions\|persistent_codex_threads\|pub session_dir" crates/edda-cli/src/agent_kind.rs
+grep -n "pub tools\|pub exclude_tools\|pub model\|pub thinking" crates/edda-conductor/src/plan/schema.rs
 ```
-Expected: 三個 grep 都有命中。任一為空 → 停，回報「#574 切片 1 未合併」，不繼續。
+Expected: 四個 grep 都有命中，且 `LauncherOptions` 恰有 `verbose / transcript_dir / persistent_codex_threads / session_dir` 四欄（多或少都要回到本計畫修 Task 10 的初始化）。任一為空 → 停，回報「#574 切片 1 未合併」，不繼續。
 
 - [ ] **Step 2: 開分支**
 
@@ -133,8 +135,13 @@ pub struct ReviewArgs {
 }
 
 pub fn run(args: ReviewArgs) -> Result<()> {
-    let code = run_inner(args)?;
-    std::process::exit(code);
+    // Task 10 fills this in; the shape (exit only on non-zero) is final:
+    // the success path must return so destructors run.
+    match run_inner(args) {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code),
+        Err(e) => { eprintln!("edda review: {e:#}"); std::process::exit(2); }
+    }
 }
 
 fn run_inner(_args: ReviewArgs) -> Result<i32> {
@@ -616,12 +623,17 @@ pub struct ReviewGates {
     pub ran: Vec<ReviewGateRan>,
 }
 
+/// `result`: "green" | "red" | "pending" (pending only for CI check-runs still running).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewGateRead { pub kind: String, pub r#ref: String, pub cmd: String, pub result: String }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewGateRan {
-    pub cmd: String, pub exit: i32, pub duration_ms: u64, pub stdout_blob: String,
+    pub cmd: String, pub exit: i32, pub duration_ms: u64,
+    /// `None` when the stdout tail could not be stored — recorded loudly in
+    /// `notes`, and such a RAN never counts toward `gates.status = verified`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_blob: Option<String>,
     /// Killed at the RAN deadline (exit is -1 then).
     #[serde(default)]
     pub timed_out: bool,
@@ -805,7 +817,7 @@ mod tests {
         std::fs::write(root.join("b.txt"), "dirty\n").unwrap(); // author's dirty tree
         let dest = root.join("wt-review");
         {
-            let wt = git::WorktreeGuard::create(&root, &dest, &head, false).unwrap();
+            let mut wt = git::WorktreeGuard::create(&root, &dest, &head, false).unwrap();
             assert_eq!(std::fs::read_to_string(wt.path.join("b.txt")).unwrap(), "b\n");
             std::fs::write(wt.path.join(git::SUBJECT_MARKER), &head).unwrap();
             assert_eq!(std::fs::read_to_string(wt.path.join(git::SUBJECT_MARKER)).unwrap(), head);
@@ -813,6 +825,19 @@ mod tests {
         }
         assert!(!dest.exists());
         assert!(!testrepo::run(&root, &["worktree", "list"]).contains("wt-review"));
+    }
+
+    #[test]
+    fn worktree_guard_explicit_remove_is_idempotent_and_reports() {
+        let (_td, root) = testrepo::init();
+        let head = testrepo::run(&root, &["rev-parse", "HEAD"]);
+        let dest = root.join("wt-explicit");
+        let mut wt = git::WorktreeGuard::create(&root, &dest, &head, false).unwrap();
+        wt.remove().expect("explicit remove reports success");
+        assert!(!dest.exists());
+        wt.remove().expect("second remove is a no-op, not an error");
+        drop(wt); // Drop must not try again (would fail: already gone)
+        assert!(!testrepo::run(&root, &["worktree", "list"]).contains("wt-explicit"));
     }
 
     #[test]
@@ -891,12 +916,17 @@ pub(crate) fn resolve_base(repo: &Path, explicit: Option<&str>) -> Result<String
     bail!("cannot resolve a base ref (tried origin/HEAD, origin/main, origin/master, main, master); pass --base")
 }
 
-/// RAII holder for the temporary detached worktree. Dropping it removes the
-/// worktree (unless `keep`), so every early `?` return still cleans up.
+/// RAII holder for the temporary detached worktree.
+///
+/// The happy path calls `remove()` explicitly so a failure can be recorded in
+/// the verdict's `notes` (spec §4.4). `Drop` is the fallback for every early
+/// `?` return and refusal, where no payload exists yet — there it can only
+/// warn on stderr.
 pub(crate) struct WorktreeGuard {
     repo: PathBuf,
     pub path: PathBuf,
     keep: bool,
+    removed: bool,
 }
 
 impl WorktreeGuard {
@@ -907,13 +937,21 @@ impl WorktreeGuard {
         }
         if let Some(parent) = dest.parent() { std::fs::create_dir_all(parent)?; }
         git(repo, &["worktree", "add", "--detach", &dest.to_string_lossy(), sha])?;
-        Ok(Self { repo: repo.to_path_buf(), path: dest.to_path_buf(), keep })
+        Ok(Self { repo: repo.to_path_buf(), path: dest.to_path_buf(), keep, removed: false })
+    }
+
+    /// Remove now and report failure to the caller (which writes it into
+    /// `notes`). Idempotent: `Drop` will not try again.
+    pub(crate) fn remove(&mut self) -> Result<()> {
+        if self.keep || self.removed { return Ok(()); }
+        self.removed = true;
+        git(&self.repo, &["worktree", "remove", "--force", &self.path.to_string_lossy()]).map(|_| ())
     }
 }
 
 impl Drop for WorktreeGuard {
     fn drop(&mut self) {
-        if self.keep { return; }
+        if self.keep || self.removed { return; }
         if let Err(e) = git(&self.repo, &["worktree", "remove", "--force", &self.path.to_string_lossy()]) {
             eprintln!("edda review: worktree removal failed ({e}); run `git worktree prune`");
         }
@@ -990,7 +1028,7 @@ git commit -m "feat(edda-cli): review subject resolution, base chain, detached w
 - Modify: `crates/edda-cli/src/cmd_review/subject.rs`
 
 **Interfaces:**
-- Produces：`pub(crate) struct Lineage { pub supersedes: Option<String>, pub previous: Option<String>, pub round: u32, pub history_rewritten: bool }`；`pub(crate) fn lineage(repo: &Path, ledger: &edda_ledger::Ledger, s: &Subject, pr: Option<u64>) -> Result<Lineage>`；`pub(crate) trait GhClient { fn pr_view(&self, n: u64) -> Result<PrView>; fn issue_body(&self, n: u64) -> Result<String>; fn author_permission(&self, login: &str) -> Result<String>; }`；`pub(crate) struct PrView { pub head_oid: String, pub base_ref: String, pub body: String, pub author_login: String }`；`pub(crate) struct GhCli;`（真實實作，`gh` 子程序）；`pub(crate) fn closing_issue(body: &str) -> Option<u64>`；`pub(crate) fn resolve_pr(repo: &Path, gh: &dyn GhClient, n: u64) -> Result<(Subject, PrView)>`。
+- Produces：`pub(crate) struct Lineage { pub supersedes: Option<String>, pub previous: Option<String>, pub round: u32, pub history_rewritten: bool }`；`pub(crate) fn lineage(repo: &Path, ledger: &edda_ledger::Ledger, s: &Subject, pr: Option<u64>) -> Result<Lineage>`；`pub(crate) trait GhClient { fn pr_view(&self, n: u64) -> Result<PrView>; fn issue_view(&self, n: u64) -> Result<IssueView>; fn author_permission(&self, login: &str) -> Result<String>; fn pr_checks(&self, n: u64, head_sha: &str) -> Result<Vec<(String, String)>>; }`；`pub(crate) struct PrView { pub head_oid: String, pub base_ref: String, pub body: String, pub author_login: String }`；`pub(crate) struct IssueView { pub body: String, pub author_login: String }`（**信任看 issue 作者**，spec §5.3）；`pub(crate) struct GhCli;`（真實實作，`gh` 子程序；`pr_checks` 釘 `head_sha`：`gh api repos/{owner}/{repo}/commits/<sha>/check-runs` ∩ `gh pr checks --required --json name`）；`pub(crate) fn closing_issue(body: &str) -> Option<u64>`；`pub(crate) fn resolve_pr(repo: &Path, gh: &dyn GhClient, n: u64) -> Result<(Subject, PrView)>`（view→fetch 之間 PR 被 push 時以**重取的** view 為準）。
 - Consumes：Task 3 的 `review_verdict` 事件（`payload.subject.head_sha`、`payload.refs.round`、`payload.verdict`、`payload.refs.pr`）。
 
 - [ ] **Step 1: 寫失敗測試**
@@ -1068,14 +1106,21 @@ git commit -m "feat(edda-cli): review subject resolution, base chain, detached w
         assert_eq!(l.round, 1);
     }
 
-    struct FakeGh { head: String, base: String, body: String, login: String, perm: String }
+    struct FakeGh { heads: std::sync::Mutex<Vec<String>>, base: String, body: String, login: String, perm: String }
+    impl FakeGh {
+        fn one(head: &str, body: &str, perm: &str) -> Self {
+            Self { heads: std::sync::Mutex::new(vec![head.to_string()]), base: "main".into(), body: body.into(), login: "pr-author".into(), perm: perm.into() }
+        }
+    }
     impl GhClient for FakeGh {
         fn pr_view(&self, _n: u64) -> Result<PrView> {
-            Ok(PrView { head_oid: self.head.clone(), base_ref: self.base.clone(), body: self.body.clone(), author_login: self.login.clone() })
+            let mut h = self.heads.lock().unwrap();
+            let head = if h.len() > 1 { h.remove(0) } else { h[0].clone() }; // successive views may return successive heads
+            Ok(PrView { head_oid: head, base_ref: self.base.clone(), body: self.body.clone(), author_login: self.login.clone() })
         }
-        fn issue_body(&self, _n: u64) -> Result<String> { Ok("## doneWhen\n- x\n".into()) }
-        fn author_permission(&self, _login: &str) -> Result<String> { Ok(self.perm.clone()) }
-        fn pr_checks(&self, _n: u64) -> Result<Vec<(String, String)>> { Ok(vec![("CI Gate".into(), "pass".into())]) }
+        fn issue_view(&self, _n: u64) -> Result<IssueView> { Ok(IssueView { body: "## doneWhen\n- x\n\n## verify\ntrue\n".into(), author_login: "issue-author".into() }) }
+        fn author_permission(&self, login: &str) -> Result<String> { Ok(if login == "issue-author" { self.perm.clone() } else { "admin".into() }) }
+        fn pr_checks(&self, _n: u64, _head_sha: &str) -> Result<Vec<(String, String)>> { Ok(vec![("CI Gate".into(), "pass".into())]) }
     }
 
     #[test]
@@ -1083,7 +1128,7 @@ git commit -m "feat(edda-cli): review subject resolution, base chain, detached w
         let (_td, root) = testrepo::init();
         testrepo::run(&root, &["checkout", "-q", "-b", "feature"]);
         let head = testrepo::commit_file(&root, "b.txt", "b\n", "feat");
-        let gh = FakeGh { head: head.clone(), base: "main".into(), body: "Closes #7".into(), login: "x".into(), perm: "write".into() };
+        let gh = FakeGh::one(&head, "Closes #7", "write");
         let (s, view) = resolve_pr(&root, &gh, 42).unwrap();
         assert_eq!(s.head_sha, head);
         assert_eq!(closing_issue(&view.body), Some(7));
@@ -1092,8 +1137,21 @@ git commit -m "feat(edda-cli): review subject resolution, base chain, detached w
     #[test]
     fn pr_resolution_rejects_head_not_present_locally_after_fetch_failure() {
         let (_td, root) = testrepo::init();
-        let gh = FakeGh { head: "f".repeat(40), base: "main".into(), body: String::new(), login: "x".into(), perm: "none".into() };
+        let gh = FakeGh::one(&"f".repeat(40), "", "none");
         assert!(resolve_pr(&root, &gh, 42).is_err());
+    }
+
+    #[test]
+    fn pr_pushed_between_view_and_fetch_uses_the_refetched_view() {
+        // first view reports a head that never existed locally; the re-view reports the real one
+        let (_td, root) = testrepo::init();
+        testrepo::run(&root, &["checkout", "-q", "-b", "feature"]);
+        let real = testrepo::commit_file(&root, "b.txt", "b\n", "feat");
+        let gh = FakeGh { heads: std::sync::Mutex::new(vec!["e".repeat(40), real.clone()]), base: "main".into(), body: String::new(), login: "pr-author".into(), perm: "none".into() };
+        // fetch of pull/42/head fails in a tempfile repo (no origin); resolve_pr must fall back to the re-viewed head that IS present
+        let (s, view) = resolve_pr(&root, &gh, 42).unwrap();
+        assert_eq!(s.head_sha, real);
+        assert_eq!(view.head_oid, real);
     }
 ```
 
@@ -1150,23 +1208,28 @@ pub(crate) fn lineage(repo: &Path, ledger: &edda_ledger::Ledger, s: &Subject, pr
 }
 
 pub(crate) struct PrView { pub head_oid: String, pub base_ref: String, pub body: String, pub author_login: String }
+pub(crate) struct IssueView { pub body: String, pub author_login: String }
 
 pub(crate) trait GhClient {
     fn pr_view(&self, n: u64) -> Result<PrView>;
-    fn issue_body(&self, n: u64) -> Result<String>;
+    /// Body AND author: trust for the `verify` field is decided by the ISSUE author (spec §5.3).
+    fn issue_view(&self, n: u64) -> Result<IssueView>;
     /// "admin" | "maintain" | "write" | "read" | "none"
     fn author_permission(&self, login: &str) -> Result<String>;
-    /// Required checks on the PR head: (name, bucket) with bucket ∈ pass|fail|pending|skipping|cancel
-    fn pr_checks(&self, n: u64) -> Result<Vec<(String, String)>>;
+    /// Required check-runs pinned to `head_sha`: (name, bucket) with bucket ∈ pass|fail|pending.
+    fn pr_checks(&self, n: u64, head_sha: &str) -> Result<Vec<(String, String)>>;
+}
+
+fn gh_json(args: &[&str]) -> Result<serde_json::Value> {
+    let out = std::process::Command::new("gh").args(args).output()?;
+    if !out.status.success() { bail!("gh {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()); }
+    Ok(serde_json::from_slice(&out.stdout)?)
 }
 
 pub(crate) struct GhCli;
 impl GhClient for GhCli {
     fn pr_view(&self, n: u64) -> Result<PrView> {
-        let out = std::process::Command::new("gh")
-            .args(["pr", "view", &n.to_string(), "--json", "headRefOid,baseRefName,body,author"]).output()?;
-        if !out.status.success() { bail!("gh pr view {n} failed: {}", String::from_utf8_lossy(&out.stderr)); }
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
+        let v = gh_json(&["pr", "view", &n.to_string(), "--json", "headRefOid,baseRefName,body,author"])?;
         Ok(PrView {
             head_oid: v["headRefOid"].as_str().unwrap_or_default().to_string(),
             base_ref: v["baseRefName"].as_str().unwrap_or_default().to_string(),
@@ -1174,10 +1237,9 @@ impl GhClient for GhCli {
             author_login: v["author"]["login"].as_str().unwrap_or_default().to_string(),
         })
     }
-    fn issue_body(&self, n: u64) -> Result<String> {
-        let out = std::process::Command::new("gh").args(["issue", "view", &n.to_string(), "--json", "body", "--jq", ".body"]).output()?;
-        if !out.status.success() { bail!("gh issue view {n} failed"); }
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    fn issue_view(&self, n: u64) -> Result<IssueView> {
+        let v = gh_json(&["issue", "view", &n.to_string(), "--json", "body,author"])?;
+        Ok(IssueView { body: v["body"].as_str().unwrap_or_default().to_string(), author_login: v["author"]["login"].as_str().unwrap_or_default().to_string() })
     }
     fn author_permission(&self, login: &str) -> Result<String> {
         let out = std::process::Command::new("gh")
@@ -1185,14 +1247,24 @@ impl GhClient for GhCli {
         if !out.status.success() { return Ok("none".into()); }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
-    fn pr_checks(&self, n: u64) -> Result<Vec<(String, String)>> {
-        let out = std::process::Command::new("gh")
-            .args(["pr", "checks", &n.to_string(), "--required", "--json", "name,bucket"]).output()?;
-        if !out.status.success() { bail!("gh pr checks {n} failed: {}", String::from_utf8_lossy(&out.stderr)); }
-        let v: serde_json::Value = serde_json::from_slice(&out.stdout)?;
-        Ok(v.as_array().map(|a| a.iter().map(|c| (
-            c["name"].as_str().unwrap_or("").to_string(), c["bucket"].as_str().unwrap_or("").to_string(),
-        )).collect()).unwrap_or_default())
+    /// SHA-pinned: check-runs for `head_sha` (never the PR's current head), filtered to the
+    /// required names. A PR pushed after subject resolution cannot lend its green to the reviewed SHA.
+    fn pr_checks(&self, n: u64, head_sha: &str) -> Result<Vec<(String, String)>> {
+        let required = gh_json(&["pr", "checks", &n.to_string(), "--required", "--json", "name"])?;
+        let required: Vec<String> = required.as_array().map(|a| a.iter().filter_map(|c| c["name"].as_str().map(String::from)).collect()).unwrap_or_default();
+        let runs = gh_json(&["api", &format!("repos/{{owner}}/{{repo}}/commits/{head_sha}/check-runs"), "--jq", "[.check_runs[] | {name, status, conclusion}]"])?;
+        let mut out = Vec::new();
+        for r in runs.as_array().cloned().unwrap_or_default() {
+            let name = r["name"].as_str().unwrap_or("").to_string();
+            if !required.is_empty() && !required.contains(&name) { continue; }
+            let bucket = match (r["status"].as_str().unwrap_or(""), r["conclusion"].as_str().unwrap_or("")) {
+                ("completed", "success") | ("completed", "skipped") | ("completed", "neutral") => "pass",
+                ("completed", _) => "fail",
+                _ => "pending",
+            };
+            out.push((name, bucket.to_string()));
+        }
+        Ok(out)
     }
 }
 
@@ -1202,13 +1274,18 @@ pub(crate) fn closing_issue(body: &str) -> Option<u64> {
 }
 
 pub(crate) fn resolve_pr(repo: &Path, gh: &dyn GhClient, n: u64) -> Result<(Subject, PrView)> {
-    let view = gh.pr_view(n)?;
-    if !git_ok(repo, &["cat-file", "-e", &format!("{}^{{commit}}", view.head_oid)])? {
+    let mut view = gh.pr_view(n)?;
+    let present = |sha: &str| git_ok(repo, &["cat-file", "-e", &format!("{sha}^{{commit}}")]);
+    if !present(&view.head_oid)? {
         let _ = git(repo, &["fetch", "-q", "origin", &format!("pull/{n}/head")]);
-        let fetched = git(repo, &["rev-parse", "FETCH_HEAD"]).unwrap_or_default();
-        if fetched != view.head_oid {
+        if !present(&view.head_oid)? {
+            // the PR may have been pushed between view and fetch: re-view and continue with THAT head
             let again = gh.pr_view(n)?;
-            if again.head_oid != fetched { bail!("PR #{n} head moved between view and fetch ({} vs {}); rerun", &again.head_oid[..12.min(again.head_oid.len())], &fetched[..12.min(fetched.len())]); }
+            if again.head_oid != view.head_oid && present(&again.head_oid)? {
+                view = again;
+            } else {
+                bail!("PR #{n} head {} is not available locally after fetch; rerun", &view.head_oid[..12.min(view.head_oid.len())]);
+            }
         }
     }
     let base = format!("origin/{}", view.base_ref);
@@ -1241,7 +1318,7 @@ git commit -m "feat(edda-cli): review lineage in (base,head] and --pr resolution
 - Modify: `crates/edda-cli/src/cmd_review/mod.rs`（`mod brief;`）
 
 **Interfaces:**
-- Produces：`pub(crate) const CORE_BRIEF_VERSION: &str = "core-v1";`；`pub(crate) const CORE_BRIEF_V1: &str`（brief 模板 v1 §1–§4 ＋ 獨立性 ＋「你沒有 shell」＋ 輸出契約，全文寫在常數裡）；`pub(crate) struct FrontMatter { pub gates: Vec<String>, pub ran_allowlist: Vec<String>, pub independence: Option<String>, pub classes: BTreeMap<String, Vec<String>> }`；`pub(crate) fn parse_review_md(text: &str) -> (FrontMatter, String /*body*/, Option<String> /*note*/)`；`pub(crate) fn default_classes() -> BTreeMap<String, Vec<String>>`（#618 §1.1）；`pub(crate) fn route_classes(files: &[String], classes: &BTreeMap<String, Vec<String>>) -> Vec<String>`；`pub(crate) struct BriefInputs<'a> { pub core: &'a str, pub review_md_body: Option<&'a str>, pub classes: &'a [String], pub spec: Option<&'a str>, pub spec_trust: &'a str, pub ledger_pack: &'a str, pub evidence: &'a str, pub diff: &'a str, pub head_sha: &'a str }`；`pub(crate) struct Brief { pub text: String, pub coverage: String, pub dropped_files: Vec<String> }`；`pub(crate) fn classes_per_file(files: &[String], classes: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>>`（一檔可多類）；`pub(crate) fn assemble(inputs: &BriefInputs, budget_chars: usize, file_classes: &BTreeMap<String, Vec<String>>) -> Brief`（任一類是 `code-risk` 即受保護；輸出契約 `OUTPUT_CONTRACT_V1` 接在 diff 之後、brief 最末）；`pub(crate) const OUTPUT_CONTRACT_V1: &str`。
+- Produces：`pub(crate) const CORE_BRIEF_VERSION: &str = "core-v1";`；`pub(crate) const CORE_BRIEF_V1: &str`（brief 模板 v1 §1–§4 ＋ 獨立性 ＋「你沒有 shell」＋ 輸出契約，全文寫在常數裡）；`pub(crate) struct FrontMatter { pub gates: Vec<String>, pub ran_allowlist: Vec<String>, pub independence: Option<String>, pub classes: BTreeMap<String, Vec<String>> }`；`pub(crate) fn parse_review_md(text: &str) -> (FrontMatter, String /*body*/, Option<String> /*note*/)`；`pub(crate) fn default_classes() -> BTreeMap<String, Vec<String>>`（#618 §1.1）；`pub(crate) fn route_classes(files: &[String], classes: &BTreeMap<String, Vec<String>>) -> Vec<String>`；`pub(crate) struct BriefInputs<'a> { pub core: &'a str, pub review_md_body: Option<&'a str>, pub classes: &'a [String], pub spec: Option<&'a str>, pub spec_trust: &'a str, pub ledger_pack: &'a str, pub evidence: &'a str, pub diff: &'a str, pub head_sha: &'a str }`；`pub(crate) struct Brief { pub text: String, pub coverage: String, pub dropped_files: Vec<String> }`；`pub(crate) fn classes_per_file(files: &[String], classes: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>>`（一檔可多類）；`pub(crate) fn assemble(inputs: &BriefInputs, budget_chars: usize, file_classes: &BTreeMap<String, Vec<String>>) -> anyhow::Result<Brief>`（任一類是 `code-risk` 即受保護；受保護 chunk 加總超預算 → `Err`；輸出契約 `OUTPUT_CONTRACT_V1` 接在 diff 之後、brief 最末）；`pub(crate) const OUTPUT_CONTRACT_V1: &str`。
 - Consumes：Task 4 的 `Subject.files`。
 
 - [ ] **Step 1: 寫失敗測試**
@@ -1290,7 +1367,7 @@ mod tests {
             core: "CORE", review_md_body: Some("RMD"), classes: &["code-risk".into()], spec: Some("SPEC"),
             spec_trust: "operator", ledger_pack: "PACK", evidence: "EVID", diff: "DIFF", head_sha: "abc",
         };
-        let b = assemble(&inputs, 100_000, &Default::default());
+        let b = assemble(&inputs, 100_000, &Default::default()).unwrap();
         let pos = |s: &str| b.text.find(s).unwrap_or(usize::MAX);
         assert!(pos("CORE") < pos("RMD") && pos("RMD") < pos("SPEC") && pos("SPEC") < pos("PACK") && pos("PACK") < pos("EVID") && pos("EVID") < pos("DIFF"));
         // the output contract is the LAST section, after the untrusted diff
@@ -1308,11 +1385,21 @@ mod tests {
         fc.insert("docs/big.md".to_string(), vec!["docs-skills".to_string()]);
         fc.insert("crates/x/src/lib.rs".to_string(), vec!["code-risk".to_string()]);
         let inputs = BriefInputs { core: "", review_md_body: None, classes: &[], spec: None, spec_trust: "none", ledger_pack: "", evidence: "", diff: &diff, head_sha: "abc" };
-        let b = assemble(&inputs, 300, &fc);
+        let b = assemble(&inputs, 300, &fc).unwrap();
         assert_eq!(b.coverage, "partial");
         assert_eq!(b.dropped_files, vec!["docs/big.md".to_string()]);
         assert!(b.text.contains("crates/x/src/lib.rs"));
         assert!(!b.text.contains(&"x".repeat(500)));
+    }
+
+    #[test]
+    fn code_risk_alone_over_budget_is_an_error_not_a_full_coverage_brief() {
+        let diff = "diff --git a/crates/x/src/lib.rs b/crates/x/src/lib.rs\n+".to_string() + &"z".repeat(500) + "\n";
+        let mut fc = std::collections::BTreeMap::new();
+        fc.insert("crates/x/src/lib.rs".to_string(), vec!["code-risk".to_string()]);
+        let inputs = BriefInputs { core: "", review_md_body: None, classes: &[], spec: None, spec_trust: "none", ledger_pack: "", evidence: "", diff: &diff, head_sha: "abc" };
+        let err = assemble(&inputs, 100, &fc).unwrap_err();
+        assert!(err.to_string().contains("code-risk files alone"));
     }
 
     #[test]
@@ -1322,7 +1409,8 @@ mod tests {
         let fc = classes_per_file(&[".github/big.md".to_string()], &default_classes());
         assert!(fc[".github/big.md"].contains(&"code-risk".to_string()));
         let inputs = BriefInputs { core: "", review_md_body: None, classes: &[], spec: None, spec_trust: "none", ledger_pack: "", evidence: "", diff: &diff, head_sha: "abc" };
-        let b = assemble(&inputs, 100, &fc);
+        // budget large enough for the protected chunk itself, too small once anything else is added
+        let b = assemble(&inputs, 600, &fc).unwrap();
         assert!(b.dropped_files.is_empty());
         assert_eq!(b.coverage, "full");
         assert!(b.text.contains(&"y".repeat(500)));
@@ -1464,14 +1552,20 @@ pub(crate) fn classes_per_file(files: &[String], classes: &BTreeMap<String, Vec<
     out
 }
 
-pub(crate) fn assemble(i: &BriefInputs, budget_chars: usize, file_classes: &BTreeMap<String, Vec<String>>) -> Brief {
+/// Errors when the protected (code-risk) chunks ALONE exceed the budget: the
+/// caller exits 2 instead of sending an oversized brief with coverage=full.
+pub(crate) fn assemble(i: &BriefInputs, budget_chars: usize, file_classes: &BTreeMap<String, Vec<String>>) -> anyhow::Result<Brief> {
     let mut chunks = split_diff(i.diff);
     let mut dropped = Vec::new();
     let mut total: usize = chunks.iter().map(|(_, c)| c.len()).sum();
+    // A file is protected if ANY of its classes is code-risk (overlapping globs
+    // must never demote a code-risk file to droppable).
+    let protected = |path: &str| file_classes.get(path).map(|cs| cs.iter().any(|c| c == "code-risk")).unwrap_or(false);
+    let protected_total: usize = chunks.iter().filter(|(p, _)| protected(p)).map(|(_, c)| c.len()).sum();
+    if protected_total > budget_chars {
+        anyhow::bail!("code-risk files alone are {protected_total} chars, over the {budget_chars} budget; review a smaller range (slice 2: --incremental)");
+    }
     if total > budget_chars {
-        // Largest first; a file is protected if ANY of its classes is code-risk
-        // (overlapping globs must never demote a code-risk file to droppable).
-        let protected = |path: &str| file_classes.get(path).map(|cs| cs.iter().any(|c| c == "code-risk")).unwrap_or(false);
         let mut order: Vec<usize> = (0..chunks.len()).collect();
         order.sort_by_key(|&k| std::cmp::Reverse(chunks[k].1.len()));
         for k in order {
@@ -1496,7 +1590,7 @@ pub(crate) fn assemble(i: &BriefInputs, budget_chars: usize, file_classes: &BTre
     if !dropped.is_empty() { t.push_str(&format!("\n(dropped for budget, coverage=partial: {})\n", dropped.join(", "))); }
     // The contract is the LAST section: the final instruction position is edda's (spec §5 ⑧).
     t.push('\n'); t.push_str(OUTPUT_CONTRACT_V1);
-    Brief { text: t, coverage: coverage.into(), dropped_files: dropped }
+    Ok(Brief { text: t, coverage: coverage.into(), dropped_files: dropped })
 }
 ```
 
@@ -1521,7 +1615,7 @@ git commit -m "feat(edda-cli): review brief — core-v1, REVIEW.md front matter,
 - Modify: `crates/edda-cli/src/cmd_review/mod.rs`（`mod evidence;`）
 
 **Interfaces:**
-- Produces：`pub(crate) struct GateSet { pub cmds: Vec<String>, pub declared_by: Vec<String> }`；`pub(crate) fn gate_set(fm: &FrontMatter, cli_gates: &[String], trusted_verify: &[String]) -> GateSet`；`pub(crate) fn read_gates(ledger: &Ledger, head_sha: &str, gates: &GateSet) -> (String /*status*/, Vec<ReviewGateRead>, Vec<String> /*uncovered*/)`；`pub(crate) fn read_ci(checks: &[(String, String)]) -> (Option<String> /*status*/, Vec<ReviewGateRead>)`；`pub(crate) fn normalize_cmd(s: &str) -> String`；`pub(crate) fn extract_verify(spec: &str) -> Vec<String>`（`## verify` / `verify:` 段下的每一行指令）；`pub(crate) fn extract_probe_verbs(diff: &str, spec: Option<&str>, bins: &[String]) -> Vec<(String, String)>`（只回 `(bin, verb)` 兩個 token；其餘字元一律丟棄）；`pub(crate) fn run_probes(cwd: &Path, verbs: &[(String, String)]) -> Vec<ReviewProbe>`（只執行 `<bin> <verb> --help`）；`pub(crate) fn spec_trust(explicit_path: bool, trust_flag: bool, pr_author_perm: Option<&str>) -> &'static str`；`pub(crate) fn ran_gates(cwd: &Path, gates: &[String], deadline_secs: u64, cargo_target_dir_set: bool, paths: &edda_ledger::paths::EddaPaths) -> (Vec<ReviewGateRan>, Vec<String> /*notes*/)`（逐字 `sh -c`；硬期限：輪詢 `try_wait`、到期 `kill`）；`pub(crate) fn evidence_text(read: &[ReviewGateRead], uncovered: &[String], ran: &[ReviewGateRan], probes: &[ReviewProbe], wiring_scan: Option<&str>) -> String`。
+- Produces：`pub(crate) struct GateSet { pub cmds: Vec<String>, pub declared_by: Vec<String> }`；`pub(crate) fn gate_set(fm: &FrontMatter, cli_gates: &[String], trusted_verify: &[String]) -> GateSet`；`pub(crate) fn read_gates(ledger: &Ledger, head_sha: &str, gates: &GateSet) -> (String /*status*/, Vec<ReviewGateRead>, Vec<String> /*uncovered*/)`；`pub(crate) fn read_ci(checks: &[(String, String)]) -> (Option<String> /*status*/, Vec<ReviewGateRead>)`；`pub(crate) fn normalize_cmd(s: &str) -> String`；`pub(crate) fn extract_verify(spec: &str) -> Vec<String>`（`## verify` / `verify:` 段下的每一行指令）；`pub(crate) fn extract_probe_verbs(diff: &str, spec: Option<&str>, bins: &[String]) -> Vec<(String, String)>`（只回 `(bin, verb)` 兩個 token；其餘字元一律丟棄）；`pub(crate) fn run_probes(cwd: &Path, verbs: &[(String, String)]) -> Vec<ReviewProbe>`（只執行 `<bin> <verb> --help`）；`pub(crate) fn spec_trust(explicit_path: bool, trust_flag: bool, pr_author_perm: Option<&str>) -> &'static str`；`pub(crate) fn ran_gates(cwd: &Path, gates: &[String], deadline_secs: u64, cargo_target_dir_set: bool, paths: &edda_ledger::paths::EddaPaths, out_dir: &Path) -> (Vec<ReviewGateRan>, Vec<String> /*notes*/)`（逐字 `sh -c`；硬期限：輪詢 `try_wait`、到期砍整棵程序樹（Unix `process_group(0)` ＋ `kill -9 -- -pid`，Windows `taskkill /T /F`）；stdout 寫 `out_dir/ran-<i>.out`，不用 tempfile；blob 存不進去 → `stdout_blob = None` ＋ note）；`pub(crate) fn evidence_text(read: &[ReviewGateRead], uncovered: &[String], ran: &[ReviewGateRan], probes: &[ReviewProbe], wiring_scan: Option<&str>) -> String`。
 - Consumes：Task 1 的 `cmd` payload 鍵、Task 3 的 `ReviewGateRead / ReviewGateRan / ReviewProbe`、Task 6 的 `FrontMatter`。
 
 - [ ] **Step 1: 寫失敗測試**
@@ -1628,24 +1722,32 @@ mod tests {
     fn cargo_gate_without_target_dir_is_skipped_with_note() {
         let (_td, root) = testrepo::init();
         let ledger = edda_ledger::Ledger::open_or_init(&root).unwrap();
-        let (ran, notes) = ran_gates(&root, &["cargo test".into()], 30, false, &ledger.paths);
+        let (ran, notes) = ran_gates(&root, &["cargo test".into()], 30, false, &ledger.paths, &root);
         assert!(ran.is_empty());
         assert!(notes[0].contains("CARGO_TARGET_DIR"));
     }
 
     #[test]
-    fn ran_gate_runs_verbatim_and_is_killed_at_the_deadline() {
+    fn ran_gate_runs_verbatim_stores_stdout_and_kills_the_tree_at_the_deadline() {
         let (_td, root) = testrepo::init();
         let ledger = edda_ledger::Ledger::open_or_init(&root).unwrap();
-        // verbatim: quoting survives (sh -c), so the echo argument keeps its spaces
-        let (ran, _) = ran_gates(&root, &["echo \"a  b\"".into()], 30, true, &ledger.paths);
+        // verbatim: quoting survives (sh -c), so the echo argument keeps its spaces; stdout is stored as a blob
+        let (ran, _) = ran_gates(&root, &["echo \"a  b\"".into()], 30, true, &ledger.paths, &root);
         assert_eq!(ran[0].exit, 0);
-        // deadline: a 5 s sleep under a 1 s deadline is killed and reported, and the next gate is not started
-        let (ran, notes) = ran_gates(&root, &["sleep 5".into(), "echo after".into()], 1, true, &ledger.paths);
+        assert!(ran[0].stdout_blob.is_some());
+        // deadline: `sh -c "sleep 5"` spawns a grandchild; under a 1 s deadline the tree is killed,
+        // the gate is reported as timed_out, and the next gate is not started
+        let (ran, notes) = ran_gates(&root, &["sleep 5".into(), "echo after".into()], 1, true, &ledger.paths, &root);
         assert_eq!(ran.len(), 1);
         assert_eq!(ran[0].exit, -1);
         assert!(ran[0].timed_out);
         assert!(notes.iter().any(|n| n.contains("echo after")));
+        #[cfg(unix)]
+        {
+            // the grandchild `sleep` must be gone too (process-group kill)
+            let out = std::process::Command::new("pgrep").args(["-f", "^sleep 5$"]).output().unwrap();
+            assert!(out.stdout.is_empty(), "orphaned sleep survived the deadline");
+        }
     }
 }
 ```
@@ -1790,15 +1892,30 @@ pub(crate) fn spec_trust(explicit_path: bool, trust_flag: bool, pr_author_perm: 
     }
 }
 
+/// Kill the whole process tree of a gate, not just `sh`: Unix — the child was
+/// spawned in its own process group, so `kill -9 -- -<pid>`; Windows —
+/// `taskkill /PID <pid> /T /F`. No new crate: both are commands.
+fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id();
+    #[cfg(unix)]
+    { let _ = std::process::Command::new("kill").args(["-9", "--", &format!("-{pid}")]).status(); }
+    #[cfg(windows)]
+    { let _ = std::process::Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null()).status(); }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Opt-in RAN of declared gates: edda-executed, verbatim (`sh -c`, the gate
 /// string is trusted by construction), under a HARD deadline shared by all
-/// gates — poll `try_wait`, kill on expiry, never block past `deadline_secs`.
-pub(crate) fn ran_gates(cwd: &Path, gates: &[String], deadline_secs: u64, cargo_target_dir_set: bool, paths: &EddaPaths) -> (Vec<ReviewGateRan>, Vec<String>) {
+/// gates — poll `try_wait`, kill the process TREE on expiry, never block past
+/// `deadline_secs`. stdout goes to a file under `out_dir` (the review scratch
+/// dir), so no tempfile dependency in production code.
+pub(crate) fn ran_gates(cwd: &Path, gates: &[String], deadline_secs: u64, cargo_target_dir_set: bool, paths: &EddaPaths, out_dir: &Path) -> (Vec<ReviewGateRan>, Vec<String>) {
     let mut ran = Vec::new();
     let mut notes = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(deadline_secs);
     let mut expired = false;
-    for g in gates {
+    for (i, g) in gates.iter().enumerate() {
         if g.starts_with("cargo ") && !cargo_target_dir_set {
             notes.push(format!("skipped `{g}`: set CARGO_TARGET_DIR (a build lane) to run cargo gates; edda review does not create target dirs"));
             continue;
@@ -1808,24 +1925,29 @@ pub(crate) fn ran_gates(cwd: &Path, gates: &[String], deadline_secs: u64, cargo_
             continue;
         }
         let t0 = Instant::now();
-        let stdout_file = tempfile::NamedTempFile::new().ok();
-        let stdout_handle = stdout_file.as_ref().and_then(|f| f.reopen().ok());
-        let spawned = std::process::Command::new("sh").arg("-c").arg(g).current_dir(cwd)
-            .stdout(stdout_handle.map(Stdio::from).unwrap_or_else(Stdio::null)).stderr(Stdio::null()).spawn();
-        let mut child = match spawned { Ok(c) => c, Err(e) => { notes.push(format!("failed to spawn `{g}`: {e}")); continue; } };
+        let out_path = out_dir.join(format!("ran-{i}.out"));
+        let out_file = match std::fs::File::create(&out_path) { Ok(f) => f, Err(e) => { notes.push(format!("cannot create stdout file for `{g}`: {e}")); continue; } };
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(g).current_dir(cwd).stdout(Stdio::from(out_file)).stderr(Stdio::null());
+        #[cfg(unix)]
+        { use std::os::unix::process::CommandExt; cmd.process_group(0); }
+        let mut child = match cmd.spawn() { Ok(c) => c, Err(e) => { notes.push(format!("failed to spawn `{g}`: {e}")); continue; } };
         let (exit, timed_out) = loop {
             match child.try_wait() {
                 Ok(Some(st)) => break (st.code().unwrap_or(-1), false),
-                Ok(None) if Instant::now() >= deadline => { let _ = child.kill(); let _ = child.wait(); expired = true; break (-1, true); }
+                Ok(None) if Instant::now() >= deadline => { kill_tree(&mut child); expired = true; break (-1, true); }
                 Ok(None) => std::thread::sleep(Duration::from_millis(100)),
                 Err(e) => { notes.push(format!("wait failed for `{g}`: {e}")); break (-1, false); }
             }
         };
-        let bytes = stdout_file.as_ref().and_then(|f| std::fs::read(f.path()).ok()).unwrap_or_default();
+        let bytes = std::fs::read(&out_path).unwrap_or_default();
         let tail: Vec<u8> = bytes.iter().rev().take(4000).rev().copied().collect();
-        let blob = edda_ledger::blob_store::blob_put(paths, &tail).unwrap_or_default();
-        if timed_out { notes.push(format!("killed `{g}` at --max-ran-sec {deadline_secs}")); }
-        ran.push(ReviewGateRan { cmd: g.clone(), exit, duration_ms: t0.elapsed().as_millis() as u64, stdout_blob: blob, timed_out });
+        let stdout_blob = match edda_ledger::blob_store::blob_put(paths, &tail) {
+            Ok(id) => Some(id),
+            Err(e) => { notes.push(format!("stdout blob for `{g}` not stored: {e} — this RAN cannot count toward verified")); None }
+        };
+        if timed_out { notes.push(format!("killed `{g}` (process tree) at --max-ran-sec {deadline_secs}")); }
+        ran.push(ReviewGateRan { cmd: g.clone(), exit, duration_ms: t0.elapsed().as_millis() as u64, stdout_blob, timed_out });
     }
     (ran, notes)
 }
@@ -1838,7 +1960,7 @@ pub(crate) fn evidence_text(read: &[ReviewGateRead], uncovered: &[String], ran: 
     for u in uncovered { t.push_str(&format!("- `{u}` → not covered\n")); }
     t.push_str("### Gates RAN (edda-executed)\n");
     if ran.is_empty() { t.push_str("- none\n"); }
-    for r in ran { t.push_str(&format!("- `{}` → exit {} in {} ms (stdout tail blob {})\n", r.cmd, r.exit, r.duration_ms, r.stdout_blob)); }
+    for r in ran { t.push_str(&format!("- `{}` → exit {} in {} ms (stdout tail blob {}{})\n", r.cmd, r.exit, r.duration_ms, r.stdout_blob.as_deref().unwrap_or("NOT STORED"), if r.timed_out { "; killed at deadline" } else { "" })); }
     t.push_str("### Probes (`<cmd> --help`, edda-executed)\n");
     if probes.is_empty() { t.push_str("- none\n"); }
     for p in probes { t.push_str(&format!("- `{}` → exit {}\n", p.cmd, p.exit)); }
@@ -1869,7 +1991,7 @@ git commit -m "feat(edda-cli): review evidence — gate READ from cmd receipts, 
 
 **Interfaces:**
 - Produces：`pub(crate) struct Authors { pub sessions: Vec<String>, pub models: Vec<String> /*canonical*/, pub unverifiable: bool }`；`pub(crate) fn authors(ledger: &Ledger, commits: &[String], subjects: &[String], trailers: &[String]) -> Authors`；`pub(crate) fn independence(a: &Authors, reviewer_session: &str, model_observed: Option<&str>) -> Result<&'static str, String /*refusal*/>` → `Ok("verified" | "same-model" | "unverified")`，`Err` 表示同 session 必須拒絕。
-- Consumes：Task 2 的 `canonical_model_id`；Task 4 的 `commits_in_range` 與 `subjects_in_range`；digest 事件形狀（`type=note`；`payload.source` 是 `"bridge:session_digest"`（transcript digest，`crates/edda-bridge-claude/src/digest/render.rs:26-34`）或 `"bridge:session-digest"`（背景 digest，`bg_digest.rs:229`）——**兩種都收**；`payload.session_id`；`payload.session_stats.model`；`payload.session_stats.commits_made` 是 **commit 訊息**（`digest/extract.rs:89-93` 從 `git commit -m` 抽出），不是 SHA）。結構化 phase-done 收據（spec §6.3 (a)）等 #584 / PR #624；切片 1 在 `notes` 記 `receipts: not structured yet`。
+- Consumes：Task 2 的 `canonical_model_id`；Task 4 的 `commits_in_range` 與 `subjects_in_range`；transcript digest 事件形狀（`type=note`；`payload.source = "bridge:session_digest"`，`crates/edda-bridge-claude/src/digest/render.rs:26-34`；`payload.session_id`；`payload.session_stats.model`；`payload.session_stats.commits_made` 是 **commit 訊息**（`digest/extract.rs:89-93` 從 `git commit -m` 抽出），不是 SHA）。背景 digest（`bg_digest.rs:207-229`，`source = "bridge:session-digest"`）只是加了 `source` 的普通 note，**沒有** `session_id` / `session_stats`，不是來源。結構化 phase-done 收據（spec §6.3 (a)）等 #584 / PR #624；切片 1 在 `notes` 記 `receipts: not structured yet`。
 
 - [ ] **Step 1: 寫失敗測試**
 
@@ -1889,14 +2011,17 @@ mod tests {
     }
 
     #[test]
-    fn authors_match_digest_commit_titles_under_both_source_spellings() {
+    fn authors_match_transcript_digest_commit_titles_and_ignore_background_notes() {
         let (_td, root) = testrepo::init();
         let ledger = edda_ledger::Ledger::open_or_init(&root).unwrap();
-        // transcript digest (underscore) stores commit TITLES
+        // transcript digest stores commit TITLES
         digest(&ledger, "bridge:session_digest", "sess-A", "anthropic/claude-opus-5", &["feat: b", "chore: x"]);
-        // background digest (hyphen)
-        digest(&ledger, "bridge:session-digest", "sess-B", "openai-codex/gpt-5.6-sol", &["fix: c"]);
+        digest(&ledger, "bridge:session_digest", "sess-B", "openai-codex/gpt-5.6-sol", &["fix: c"]);
         digest(&ledger, "bridge:session_digest", "sess-C", "gpt-5.6-sol", &["unrelated"]);
+        // a background digest is a plain note with only `source`; it must be ignored even if it names a title
+        let mut bg = edda_core::event::new_note_event("main", ledger.last_event_hash().unwrap().as_deref(), "system", "fix: c", &[]).unwrap();
+        bg.payload["source"] = serde_json::json!("bridge:session-digest");
+        ledger.append_event(&bg).unwrap();
         let subjects = vec!["fix: c".to_string(), "feat: b".to_string()];
         let a = authors(&ledger, &["deadbeef".into()], &subjects, &[]);
         assert_eq!(a.sessions, vec!["sess-A".to_string(), "sess-B".to_string()]);
@@ -1952,20 +2077,23 @@ use edda_ledger::Ledger;
 
 pub(crate) struct Authors { pub sessions: Vec<String>, pub models: Vec<String>, pub unverifiable: bool }
 
-const DIGEST_SOURCES: [&str; 2] = ["bridge:session_digest", "bridge:session-digest"];
+/// Only the transcript digest carries `session_id` + `session_stats`
+/// (crates/edda-bridge-claude/src/digest/render.rs:26-34). The background
+/// digest (`bridge:session-digest`, bg_digest.rs) is a plain note with a
+/// `source` tag and is NOT an author source.
+const DIGEST_SOURCE: &str = "bridge:session_digest";
 
 fn looks_like_sha(s: &str) -> bool { s.len() >= 7 && s.chars().all(|c| c.is_ascii_hexdigit()) }
 
-/// Author sessions of `commits`/`subjects` from session digests (both source
-/// spellings). `commits_made` holds commit TITLES, so titles are matched
-/// exactly; a hex-looking entry is matched as a SHA prefix instead.
+/// Author sessions of `commits`/`subjects` from transcript digests.
+/// `commits_made` holds commit TITLES, so titles are matched exactly; a
+/// hex-looking entry is matched as a SHA prefix instead.
 pub(crate) fn authors(ledger: &Ledger, commits: &[String], subjects: &[String], trailers: &[String]) -> Authors {
     let mut sessions = Vec::new();
     let mut models = Vec::new();
     let mut unverifiable = false;
     for ev in ledger.iter_events_by_type("note").unwrap_or_default() {
-        let Some(src) = ev.payload["source"].as_str() else { continue };
-        if !DIGEST_SOURCES.contains(&src) { continue; }
+        if ev.payload["source"].as_str() != Some(DIGEST_SOURCE) { continue; }
         let made: Vec<&str> = ev.payload["session_stats"]["commits_made"].as_array()
             .map(|a| a.iter().filter_map(|v| v.as_str()).map(str::trim).collect()).unwrap_or_default();
         let hit = made.iter().any(|m| if looks_like_sha(m) {
@@ -2242,7 +2370,7 @@ git commit -m "feat(edda-cli): review verdict parsing, qualification, exit codes
 - Modify: `crates/edda-cli/src/cmd_review/mod.rs`
 
 **Interfaces:**
-- Consumes：Task 4–9 全部；`crate::agent_kind::{build_launcher, LauncherOptions}`（`LauncherOptions { verbose, transcript_dir }`，#574 分支 `agent_kind.rs:165-180`）；`crate::cmd_dispatch::{build_phase, CapabilityOptions}`（#574 分支 `cmd_dispatch.rs:271-289`：`CapabilityOptions { model: Option<String>, thinking: Option<String>, tools: Option<Vec<String>>, exclude_tools: Option<Vec<String>> }`，`build_phase(prompt, budget_usd, timeout_sec, permission_mode, capabilities) -> Phase`）；`edda_conductor::agent::launcher::{AgentLauncher, PhaseResult, phase_session_id}`（`last_observed_model()` 是 trait 方法，預設 `None`）；`edda_conductor::plan::schema::Phase`（`tools` 欄位；claude 與 pi 都由 launcher 轉成 `--tools`）；`edda_ledger::Ledger::query_by_paths`。
+- Consumes：Task 4–9 全部；`crate::agent_kind::{build_launcher, LauncherOptions, DispatchOptions, validate_dispatch_options}`（#574 分支 `agent_kind.rs:89-180`：`LauncherOptions` 四欄 `verbose / transcript_dir / persistent_codex_threads / session_dir` 且**不 derive `Default`**，四欄都要寫；`DispatchOptions<'a>` derive `Default`，六欄借用型別）；`crate::cmd_dispatch::{build_phase, CapabilityOptions}`（#574 分支 `cmd_dispatch.rs:271-289`：`CapabilityOptions { model: Option<String>, thinking: Option<String>, tools: Option<Vec<String>>, exclude_tools: Option<Vec<String>> }`，`build_phase(prompt, budget_usd, timeout_sec, permission_mode, capabilities) -> Phase`）；`edda_conductor::agent::launcher::{AgentLauncher, PhaseResult, phase_session_id}`（`last_observed_model()` 是 trait 方法，預設 `None`）；`edda_conductor::plan::schema::Phase`（`tools` 欄位；claude 與 pi 都由 launcher 轉成 `--tools`）；`edda_ledger::Ledger::query_by_paths`。
 - Produces：`pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn subject::GhClient, cwd: &Path) -> Result<(i32, String /*human*/, serde_json::Value /*json*/)>`；`run()` 把任何 `Err` 印到 stderr 並 `exit(2)`（spec §3：前置錯誤永不是 exit 1）。
 
 - [ ] **Step 1: 寫失敗測試（端到端）**
@@ -2440,22 +2568,43 @@ use tokio_util::sync::CancellationToken;
 const DIFF_BUDGET_ENV: &str = "EDDA_REVIEW_DIFF_BUDGET_CHARS";
 const OVERLOAD_MARKERS: [&str; 6] = ["overloaded", "429", "rate limit", "rate_limit", "capacity", "503"];
 
-/// Every pre-run failure is exit 2 (spec §3). Never let anyhow reach main's exit 1.
+/// Same shape as `cmd_dispatch::run` (#574): the body returns a code and only a
+/// non-zero one exits the process, so destructors (the worktree guard above all)
+/// run on the success path. Every pre-run failure is exit 2 (spec §3) — never
+/// let anyhow reach main's generic exit 1.
 pub fn run(args: ReviewArgs) -> Result<()> {
-    let cwd = std::env::current_dir()?;
-    let (_policy, tools) = tool_policy(args.agent);
-    let launcher = match build_launcher(args.agent, LauncherOptions { verbose: false, transcript_dir: None }) {
-        Ok(l) => l,
-        Err(e) => { eprintln!("edda review: {e:#}"); std::process::exit(2); }
-    };
-    let _ = tools; // applied on the Phase inside run_with
-    match run_with(&args, launcher.as_ref(), &subject::GhCli, &cwd) {
-        Ok((code, human, json)) => {
-            if args.json { println!("{json}"); } else { print!("{human}"); }
-            std::process::exit(code);
-        }
+    let code = run_inner(args);
+    match code {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(code),
         Err(e) => { eprintln!("edda review: {e:#}"); std::process::exit(exit_code_for_error(&e)); }
     }
+}
+
+fn run_inner(args: ReviewArgs) -> Result<i32> {
+    let cwd = std::env::current_dir().context("edda review needs a working directory")?;
+    // #574's backend × option support matrix: an unsupported combination is
+    // refused here, never silently dropped by the launcher.
+    let (_policy, tools) = tool_policy(args.agent);
+    crate::agent_kind::validate_dispatch_options(
+        args.agent,
+        &crate::agent_kind::DispatchOptions {
+            model: args.model.as_deref(),
+            thinking: args.thinking.as_deref(),
+            tools: tools.as_deref(),
+            ..Default::default()   // DispatchOptions derives Default (agent_kind.rs:91)
+        },
+    )?;
+    // LauncherOptions does NOT derive Default (#574 agent_kind.rs:166) — list all four.
+    let launcher = build_launcher(args.agent, LauncherOptions {
+        verbose: false,
+        transcript_dir: None,
+        persistent_codex_threads: false,   // review sessions are single-shot, never resumed
+        session_dir: None,
+    })?;
+    let (code, human, json) = run_with(&args, launcher.as_ref(), &subject::GhCli, &cwd)?;
+    if args.json { println!("{json}"); } else { print!("{human}"); }
+    Ok(code)
 }
 
 /// All errors before a verdict exists map to 2 (refusal, empty diff, base, gh, worktree).
@@ -2559,7 +2708,7 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
     };
 
     // 7. detached worktree (RAII) + marker + probes + opt-in RAN
-    let wt = git::WorktreeGuard::create(&repo, &scratch_dir(&project_id, &subj.head_sha), &subj.head_sha, args.keep_worktree)?;
+    let mut wt = git::WorktreeGuard::create(&repo, &scratch_dir(&project_id, &subj.head_sha), &subj.head_sha, args.keep_worktree)?;
     std::fs::write(wt.path.join(git::SUBJECT_MARKER), &subj.head_sha)?;
     let probes = evidence::run_probes(&wt.path, &probe_verbs);
     let mut ran = Vec::new();
@@ -2601,7 +2750,11 @@ pub(crate) fn run_with(args: &ReviewArgs, launcher: &dyn AgentLauncher, gh: &dyn
     let rt = tokio::runtime::Runtime::new()?;
     let result = rt.block_on(launcher.run_phase(&phase, &b.text, "", &session_id, &wt.path, CancellationToken::new()));
     let observed = launcher.last_observed_model();
-    drop(wt); // remove the worktree now; the guard also covers every earlier `?`
+    // Explicit removal so a failure reaches the verdict's `notes` (spec §4.4);
+    // `Drop` stays as the fallback for the earlier `?` paths, where there is no
+    // payload to write into.
+    if let Err(e) = wt.remove() { notes.push(format!("worktree removal failed: {e}; run `git worktree prune`")); }
+    drop(wt);
 
     // 10. interpret
     let (outcome, cost_usd, text) = match result {
@@ -2775,14 +2928,14 @@ runbook：在「存在但本頁未驗證」那段把 `edda bundle` 改為「`edd
 
 unstable 標示：若 `COMPATIBILITY.md` 已由 #651 落地，在其 unstable 表加一列 `review_verdict` 事件與 `edda review --json`；若還沒有，把「output format is unstable until spec v1」寫在 cli.md 這一節，並在 #651 留言提醒。
 
-- [ ] **Step 4: 驗證（三條分開跑，任一紅就是紅；不准 `|| true`）**
+- [ ] **Step 4: 驗證（三條分開跑，任一非 0 就是紅；不准 `|| true`）**
 
 ```bash
 cargo test -p edda deprecation
 sh scripts/lint-markdown-content.sh
-test -f scripts/check-cli-docs.sh && sh scripts/check-cli-docs.sh
+if [ -f scripts/check-cli-docs.sh ]; then sh scripts/check-cli-docs.sh; else echo "check-cli-docs.sh not present yet (#650): skipped"; fi
 ```
-Expected: 第一條 PASS；第二條 exit 0；第三條在 #650 合入前因檔案不存在而被 `test -f` 短路（exit 1 是 `test` 的結果，不是 lint 失敗——把這一行的輸出貼進 PR body 說明）。
+Expected: 三條都 exit 0。第三條在 #650 合入前印 `skipped`（exit 0）；合入後真的跑。把三條的輸出貼進 PR body。
 
 - [ ] **Step 5: Commit**
 
@@ -2824,8 +2977,10 @@ PR body 必含：`Part of #652 (slice 1)`（**不寫 Closes**）、spec 與 plan
 
 ---
 
-## Self-review（Round 2 後重跑）
+## Self-review（Round 3 後重跑）
+
+- **Round 3 收入對照**：P0（issue 作者信任）→ Task 5 `IssueView` ＋ Task 10 用 `issue.author_login`；P1 `LauncherOptions` 四欄／`validate_dispatch_options` → Global Constraints、Task 0、Task 10；tempfile → `ran_gates` 改寫 `out_dir`；capability validation → Task 10 步驟 9；程序樹 kill → Task 7 `kill_tree`；CI 釘 SHA → Task 5 `pr_checks(n, head_sha)`；code-risk 超預算 → Task 6 `assemble` 回 `Err`；背景 digest → Task 8 單一 source；fetch 競態 → Task 5 `resolve_pr` 重取 view；`run()` 形狀 → Task 10（`run_inner` 回 code、`run` 只在非 0 時 exit）；blob 失敗 → `stdout_blob: Option`；guard 移除失敗 → `remove()` 進 notes；`pending`／engine notes／mismatch note／supersedes → Task 3、10；stash 與 check-cli-docs → Global Constraints、Task 11。
 
 - **Spec coverage**：§3 CLI 與 exit 2 旁路（Task 0、10）；§4 主體／RAII worktree／lineage／FETCH_HEAD（Task 4、5、10）；§5 brief、front matter、多類別預算、契約在最末（Task 6）；§5.2 契約與 `subject_seen`（Task 9、10）；§5.3 trust 與 `verify`（Task 7、10）；§6.1 `Phase.tools` 經 `CapabilityOptions`（Task 10）；§6.2 in-band model（Task 10 `last_observed_model`）；§6.3 封閉家族表、digest 兩種 source、commit 標題比對（Task 2、8）；§6.4 動詞探測、硬期限 RAN、base 版 wiring-scan（Task 7、10）；§6.5 成本（Task 10）；§7 事件、taxonomy 表、`model_self_report`、RAN blobs（Task 3、9、10）；§8 收據與 CI（Task 1、7）；§9 失敗表含 overload（Task 9、10）；§10 測試含四種 exit、金絲雀（Task 10、12）；§11 deprecation／docs／COMPATIBILITY 條件（Task 11）；§12 wiring（Task 12 PR body）。**明確不在切片 1**：帳本 pack 的 active claims（spec ⑤ 排到切片 2）；結構化 phase-done 收據（等 #624）。
 - **Placeholder scan**：無 TBD／TODO；所有函式在對應 task 定義；`new_note_event` 簽名已寫死（event.rs:197）。
-- **Type consistency**：`ReviewGateRead.r#ref`（Task 3）在 Task 7／10 一致；`ReviewGateRan.timed_out`（Task 3）由 Task 7 填；`Lineage.round: u32` 對 `ReviewRefs.round: Option<u32>`（unreviewed → None）；`spec_trust` 回 `&'static str` 直接放 `ReviewSpec.trust`；`gate_set(fm, cli, trusted_verify)` 三參數在 Task 7 測試與 Task 10 一致；`classes_per_file` 回 `BTreeMap<String, Vec<String>>` 餵 `assemble`；`GhClient::pr_checks` 在 Task 5 trait、`GhCli`、`FakeGh`、Task 10 `NoGh` 四處都有；`WorktreeGuard::create(repo, dest, sha, keep)` 在 Task 4 測試與 Task 10 一致；`CapabilityOptions` 四欄位與 #574 分支 `cmd_dispatch.rs:271-276` 一致；`FakeLauncher`（Task 10 測試）實作 `run_phase` 與 `last_observed_model`。
+- **Type consistency**：`ReviewGateRead.r#ref`（Task 3）在 Task 7／10 一致；`ReviewGateRan.timed_out`（Task 3）由 Task 7 填；`Lineage.round: u32` 對 `ReviewRefs.round: Option<u32>`（unreviewed → None）；`spec_trust` 回 `&'static str` 直接放 `ReviewSpec.trust`；`gate_set(fm, cli, trusted_verify)` 三參數在 Task 7 測試與 Task 10 一致；`classes_per_file` 回 `BTreeMap<String, Vec<String>>` 餵 `assemble`；`GhClient::pr_checks` 在 Task 5 trait、`GhCli`、`FakeGh`、Task 10 `NoGh` 四處都有；`WorktreeGuard::create(repo, dest, sha, keep)` 在 Task 4 測試與 Task 10 一致，且 `remove(&mut self)` 需要 `let mut wt`（兩處都已改）；`CapabilityOptions` 四欄位與 #574 分支 `cmd_dispatch.rs:271-276` 一致；`LauncherOptions` 四欄明列（#574 `agent_kind.rs:166` **不 derive `Default`**），`DispatchOptions` 用 `..Default::default()`（`agent_kind.rs:91` 有 derive）；`run_inner` 回 `Result<i32>`、`run` 只在非 0 時 exit，Task 0 骨架與 Task 10 實作同形；`FakeLauncher`（Task 10 測試）實作 `run_phase` 與 `last_observed_model`。
