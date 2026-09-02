@@ -378,16 +378,20 @@ In the local clone of the target repo:
 
 ```bash
 cd <local-clone-path>
+stash_before=$(git stash list | wc -l)
 git stash --include-untracked 2>/dev/null
 git fetch origin
-git checkout intel 2>/dev/null || git checkout --orphan intel && git rm -rf . 2>/dev/null
+git checkout intel 2>/dev/null || { git checkout --orphan intel && git rm -rf . 2>/dev/null ; }
 mkdir -p intel/profiles intel/threads
 # ... write files ...
 git add intel/
 git commit -m "intel: scan $(date +%Y-%m-%d), PR #<from>~#<to>"
 git push origin intel
 git checkout - 2>/dev/null
-git stash pop 2>/dev/null
+# pop only if the stash above actually created an entry (never pop a pre-existing stash)
+if [ "$(git stash list | wc -l)" -gt "$stash_before" ]; then
+  git stash pop 2>/dev/null
+fi
 ```
 
 #### 5c. Update edda issue
