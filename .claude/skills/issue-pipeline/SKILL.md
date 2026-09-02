@@ -28,7 +28,7 @@ This skill depends on these sub-skills being installed in `.claude/skills/`:
 - `issue-action` — Implementation from plan to PR
 - `pr-review-loop` — Iterative review with auto-fix
 
-If any are missing, inform the user and suggest installing them from the karvi starter-kit.
+If any are missing, inform the user — all three ship in this repo's `.claude/skills/`.
 
 ## Pipeline Phases
 

@@ -14,7 +14,7 @@
 - **L1 規則層**：Constitution + Skill Registry（不可變規則 + 能力定義）
 - **L2 行為層**：Chief + Law Engine + Risk Assessor（行為人格 + 策略管理 + 風險門衛）
 - **L3 自治層**：Loop Runner（有邊界的自治迴圈）
-- **L4 整合層**：Dashboard + Karvi Bridge + Edda Bridge（UI + 外部橋接）
+- **L4 整合層**：Dashboard + Task Bridge + Edda Bridge（UI + 外部橋接）
 - **L5 擴展層**：Territory Coordinator（跨 Village 協調）
 
 ## DAG
@@ -43,7 +43,7 @@ L3 自治層
    ├──────────────┬────────────┐
    ▼              ▼            ▼
 L4 整合層
-  [T8] Dashboard  [T9] Karvi  [T10] Edda
+  [T8] Dashboard  [T9] Task   [T10] Edda
                   Bridge      Bridge
                                │
                                ▼
@@ -105,7 +105,7 @@ T6_LOOP_RUNNER/
 ### T8-T11（Phase 1/2，不拆子步驟）
 ```
 T8_DASHBOARD.md              ← 單檔，Phase 1 再展開
-T9_KARVI_BRIDGE.md           ← 單檔
+T9_TASK_BRIDGE.md            ← 單檔
 T10_EDDA_BRIDGE.md           ← 單檔
 T11_TERRITORY_COORDINATOR.md ← 單檔，Phase 2 再展開
 ```
@@ -147,7 +147,7 @@ village-manager ← constitution-store ← chief-engine ← law-engine
 
 chief-engine + law-engine + risk-assessor + constitution-store → loop-runner
 
-loop-runner → karvi-bridge
+loop-runner → task-bridge
 loop-runner → edda-bridge
 
 village-manager + loop-runner + skill-registry → territory
