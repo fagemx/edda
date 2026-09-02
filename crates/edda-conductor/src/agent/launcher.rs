@@ -40,6 +40,17 @@ pub trait AgentLauncher: Send + Sync {
         cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult>;
+
+    /// The model the backend reported **in-band** during the most recent
+    /// turn on this launcher, if any. Observation, not inference: a
+    /// launcher reports only what the backend itself carried in its
+    /// protocol stream (claude stream-json `system/init`, pi RPC
+    /// `get_state`); `None` means the backend reported nothing and callers
+    /// must render `"unknown"`, never a guess from config or session files
+    /// (GH-574 honesty rule).
+    fn last_observed_model(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Fixed namespace UUID for conductor sessions.
@@ -67,6 +78,9 @@ pub struct ClaudeCodeLauncher {
     pub verbose: bool,
     /// If set, raw agent stdout is captured to `{transcript_dir}/{phase_id}-{session_id_prefix}.jsonl`.
     pub transcript_dir: Option<PathBuf>,
+    /// In-band model report from the most recent turn (stream-json
+    /// `system/init`), for [`AgentLauncher::last_observed_model`].
+    observed_model: std::sync::Mutex<Option<String>>,
 }
 
 impl Default for ClaudeCodeLauncher {
@@ -76,11 +90,74 @@ impl Default for ClaudeCodeLauncher {
 }
 
 impl ClaudeCodeLauncher {
+    /// Assemble the `claude -p` command line for one phase. Split out from
+    /// [`AgentLauncher::run_phase`] so tests can assert the exact spawn
+    /// arguments without launching a real backend (GH-574).
+    fn build_command(
+        &self,
+        phase: &Phase,
+        prompt: &str,
+        plan_context: &str,
+        session_id: &str,
+        cwd: &Path,
+    ) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new(&self.claude_bin);
+        cmd.arg("-p")
+            .arg(prompt)
+            .arg("--verbose")
+            .arg("--output-format")
+            .arg("stream-json")
+            .arg("--session-id")
+            .arg(session_id)
+            .arg("--permission-mode")
+            .arg(&phase.permission_mode)
+            .current_dir(cwd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            // Allow nesting — remove markers that prevent Claude Code from spawning
+            .env_remove("CLAUDE_CODE")
+            .env_remove("CLAUDECODE")
+            // Tell edda hooks to use conductor-optimized injection
+            .env("EDDA_CONDUCTOR_MODE", "1")
+            // Propagate session_id so agent-spawned `edda decide` etc. can resolve identity
+            .env("EDDA_SESSION_ID", session_id);
+
+        // Optional: per-phase budget
+        if let Some(budget) = phase.budget_usd {
+            cmd.arg("--max-budget-usd").arg(budget.to_string());
+        }
+
+        // Optional: plan context as system prompt
+        if !plan_context.is_empty() {
+            cmd.arg("--append-system-prompt").arg(plan_context);
+        }
+
+        // Optional: model selection, carried verbatim (GH-574)
+        if let Some(model) = &phase.model {
+            cmd.arg("--model").arg(model);
+        }
+
+        // Optional: tool allowlist / denylist
+        if let Some(tools) = &phase.tools {
+            cmd.arg("--allowedTools").arg(tools.join(","));
+        }
+        if let Some(tools) = &phase.exclude_tools {
+            cmd.arg("--disallowedTools").arg(tools.join(","));
+        }
+
+        // Merge plan-level + phase-level env
+        for (k, v) in &phase.env {
+            cmd.env(k, v);
+        }
+        cmd
+    }
+
     pub fn new() -> Self {
         Self {
             claude_bin: PathBuf::from("claude"),
             verbose: false,
             transcript_dir: None,
+            observed_model: std::sync::Mutex::new(None),
         }
     }
 
@@ -89,6 +166,13 @@ impl ClaudeCodeLauncher {
             claude_bin,
             verbose: false,
             transcript_dir: None,
+            observed_model: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn record_observed_model(&self, model: Option<String>) {
+        if let Ok(mut slot) = self.observed_model.lock() {
+            *slot = model;
         }
     }
 
@@ -127,46 +211,17 @@ impl AgentLauncher for ClaudeCodeLauncher {
         cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult> {
-        let mut cmd = tokio::process::Command::new(&self.claude_bin);
-        cmd.arg("-p")
-            .arg(prompt)
-            .arg("--verbose")
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--session-id")
-            .arg(session_id)
-            .arg("--permission-mode")
-            .arg(&phase.permission_mode)
-            .current_dir(cwd)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            // Allow nesting — remove markers that prevent Claude Code from spawning
-            .env_remove("CLAUDE_CODE")
-            .env_remove("CLAUDECODE")
-            // Tell edda hooks to use conductor-optimized injection
-            .env("EDDA_CONDUCTOR_MODE", "1")
-            // Propagate session_id so agent-spawned `edda decide` etc. can resolve identity
-            .env("EDDA_SESSION_ID", session_id);
-
-        // Optional: per-phase budget
-        if let Some(budget) = phase.budget_usd {
-            cmd.arg("--max-budget-usd").arg(budget.to_string());
+        if phase.thinking.is_some() {
+            // GH-574 honesty: claude's CLI exposes no thinking-level flag,
+            // so a phase that declares one would otherwise be silently
+            // ignored — exactly the failure mode this flag exists to end.
+            anyhow::bail!(
+                "claude does not support a thinking-level flag; remove `thinking: {}` from phase {:?} or dispatch with --agent pi",
+                phase.thinking.as_deref().unwrap_or(""),
+                phase.id
+            );
         }
-
-        // Optional: plan context as system prompt
-        if !plan_context.is_empty() {
-            cmd.arg("--append-system-prompt").arg(plan_context);
-        }
-
-        // Optional: allowed tools
-        if let Some(tools) = &phase.allowed_tools {
-            cmd.arg("--allowedTools").arg(tools.join(","));
-        }
-
-        // Merge plan-level + phase-level env
-        for (k, v) in &phase.env {
-            cmd.env(k, v);
-        }
+        let mut cmd = self.build_command(phase, prompt, plan_context, session_id, cwd);
 
         let mut child = cmd.spawn()?;
         let stdout = child
@@ -183,9 +238,12 @@ impl AgentLauncher for ClaudeCodeLauncher {
             .with_tee(tee_path);
         let timeout_sec = phase.timeout_sec.unwrap_or(1800);
 
-        tokio::select! {
+        let result = tokio::select! {
             result = monitor.run() => {
                 let monitor_result = result?;
+                // In-band model observation: whatever the backend itself
+                // reported, or nothing. Never inferred from config.
+                self.record_observed_model(monitor_result.model.clone());
                 let exit = child.wait().await?;
                 Ok(classify_result(&monitor_result, exit.code()))
             }
@@ -197,7 +255,15 @@ impl AgentLauncher for ClaudeCodeLauncher {
                 child.kill().await.ok();
                 Ok(PhaseResult::AgentCrash { error: "conductor shutdown".into() })
             }
-        }
+        };
+        result
+    }
+
+    fn last_observed_model(&self) -> Option<String> {
+        self.observed_model
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
     }
 }
 
@@ -317,6 +383,95 @@ mod tests {
         let id = phase_session_id("test", "phase");
         // UUID v5 has version nibble = 5
         assert_eq!(id.get_version_num(), 5);
+    }
+
+    // ── GH-574: phase-declared launcher capabilities reach the spawn line ──
+
+    fn args_of(cmd: &tokio::process::Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn claude_command_for(yaml: &str) -> tokio::process::Command {
+        let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude"));
+        let phase = phase_from_yaml(yaml);
+        launcher.build_command(&phase, "do the task", "", "sess-1", Path::new("."))
+    }
+
+    fn phase_from_yaml(yaml: &str) -> Phase {
+        parse_plan(&format!("name: t\nphases:\n{yaml}"))
+            .expect("test plan parses")
+            .phases
+            .remove(0)
+    }
+
+    #[test]
+    fn claude_phase_model_reaches_the_spawn_line() {
+        let args = args_of(&claude_command_for(
+            "  - id: a\n    prompt: x\n    model: anthropic/claude-opus-5\n",
+        ));
+        let model_pos = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("--model must appear in the claude spawn command line");
+        assert_eq!(args[model_pos + 1], "anthropic/claude-opus-5");
+    }
+
+    #[test]
+    fn claude_without_model_spawns_no_model_flag() {
+        let args = args_of(&claude_command_for("  - id: a\n    prompt: x\n"));
+        assert!(
+            !args.contains(&"--model".to_string()),
+            "no phase model must mean no --model flag: {args:?}"
+        );
+    }
+
+    #[test]
+    fn claude_tool_policy_reaches_the_spawn_line() {
+        let args = args_of(&claude_command_for(
+            "  - id: a\n    prompt: x\n    tools: [Read, Grep]\n    exclude_tools: [Write, Edit]\n",
+        ));
+        let allow = args
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .expect("--allowedTools");
+        assert_eq!(args[allow + 1], "Read,Grep");
+        let deny = args
+            .iter()
+            .position(|a| a == "--disallowedTools")
+            .expect("--disallowedTools");
+        assert_eq!(args[deny + 1], "Write,Edit");
+    }
+
+    /// GH-574: claude's CLI exposes no thinking-level flag, so a phase that
+    /// declares one must be refused, never silently ignored. The refusal
+    /// fires before any spawn, so a bare launcher suffices.
+    #[tokio::test]
+    async fn claude_refuses_phase_declared_thinking() {
+        let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude"));
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n    thinking: high\n");
+        let error = launcher
+            .run_phase(
+                &phase,
+                "p",
+                "",
+                "s",
+                Path::new("."),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("claude must refuse a declared thinking level");
+        assert!(error.to_string().contains("does not support"), "{error}");
+    }
+
+    /// GH-574: the in-band observation starts empty and is only filled by
+    /// what the backend itself reports — never from config or session files.
+    #[test]
+    fn claude_observed_model_starts_unknown() {
+        let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude"));
+        assert_eq!(launcher.last_observed_model(), None);
     }
 
     #[tokio::test]
