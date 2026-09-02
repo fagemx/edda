@@ -25,6 +25,10 @@ pub struct CheckMergeArgs {
     #[arg(long)]
     pub verdict: Option<String>,
 
+    /// Optional author of the review verdict
+    #[arg(long)]
+    pub verdict_author: Option<String>,
+
     /// Count of P0 blocking findings
     #[arg(long, default_value_t = 0)]
     pub p0: usize,
@@ -36,6 +40,10 @@ pub struct CheckMergeArgs {
     /// Mark required CI checks as green
     #[arg(long)]
     pub ci_green: bool,
+
+    /// Optional list of allowed reviewer usernames
+    #[arg(long, value_delimiter = ',')]
+    pub allowed_reviewers: Option<Vec<String>>,
 
     /// Path to JSON file containing MergeGateInput (or '-' for stdin)
     #[arg(long, value_name = "FILE")]
@@ -54,8 +62,12 @@ pub struct CheckMergeArgs {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MergeGateInput {
     pub head_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_author: Option<String>,
     pub verdict: Option<String>,
     pub verdict_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_author: Option<String>,
     #[serde(default)]
     pub p0_count: usize,
     #[serde(default)]
@@ -71,8 +83,12 @@ pub struct MergeGateInput {
 pub struct MergeGateResult {
     pub can_merge: bool,
     pub head_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_author: Option<String>,
     pub verdict: Option<String>,
     pub verdict_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdict_author: Option<String>,
     pub p0_count: usize,
     pub p1_count: usize,
     pub required_ci_green: bool,
@@ -151,8 +167,10 @@ pub fn evaluate_merge_preconditions(input: &MergeGateInput) -> MergeGateResult {
     MergeGateResult {
         can_merge: reasons.is_empty(),
         head_sha: input.head_sha.clone(),
+        pr_author: input.pr_author.clone(),
         verdict: input.verdict.clone(),
         verdict_sha: input.verdict_sha.clone(),
+        verdict_author: input.verdict_author.clone(),
         p0_count: input.p0_count,
         p1_count: input.p1_count,
         required_ci_green: input.required_ci_green,
@@ -161,12 +179,10 @@ pub fn evaluate_merge_preconditions(input: &MergeGateInput) -> MergeGateResult {
 }
 
 // GitHub API / `gh` structures
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct GhViewPr {
     #[serde(rename = "headRefOid")]
     pub head_ref_oid: String,
-    #[serde(default)]
     pub author: Option<GhAuthor>,
     #[serde(default)]
     pub comments: Vec<GhComment>,
@@ -174,27 +190,22 @@ pub struct GhViewPr {
     pub reviews: Vec<GhReviewItem>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct GhAuthor {
     pub login: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct GhComment {
     pub body: String,
-    #[serde(default)]
     pub author: Option<GhAuthor>,
     #[serde(rename = "createdAt")]
     pub created_at: Option<String>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct GhReviewItem {
     pub state: String,
-    #[serde(default)]
     pub author: Option<GhAuthor>,
     pub body: Option<String>,
     #[serde(rename = "submittedAt")]
@@ -208,13 +219,46 @@ struct GhCheckItem {
     bucket: Option<String>,
 }
 
-/// Determines if a comment is a structured review verdict, preventing casual comments from triggering a verdict.
+/// Determines if a comment is a structured review verdict, preventing casual comments and
+/// implementer responses from triggering a verdict.
 pub fn is_structured_review_comment(body: &str) -> bool {
-    body.contains("## Code Review:")
-        || body.contains("### Verdict")
-        || body.contains("<<<VERDICT")
-        || body.contains("Verdict as of the ruling:")
-        || body.contains("**Verdict as of the ruling:")
+    // 1. Explicitly reject implementer review responses
+    if body.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("## Review Response") || trimmed.starts_with("# Review Response")
+    }) {
+        return false;
+    }
+
+    // 2. Must contain an anchored review header line
+    let has_review_header = body.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("## Code Review:")
+            || trimmed.starts_with("### Verdict")
+            || trimmed.starts_with("<<<VERDICT")
+            || trimmed.starts_with("## Operator ruling")
+            || trimmed.starts_with("Verdict as of the ruling:")
+            || trimmed.starts_with("**Verdict as of the ruling:")
+    });
+
+    if !has_review_header {
+        return false;
+    }
+
+    // 3. Must contain an explicit verdict indicator line
+    body.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed.starts_with("### Verdict")
+            || trimmed.starts_with("Verdict as of the ruling:")
+            || trimmed.starts_with("**Verdict as of the ruling:")
+            || trimmed.starts_with("- verdict:")
+            || trimmed.starts_with("**Verdict:")
+            || trimmed.starts_with("Verdict:")
+            || trimmed.starts_with("LGTM (")
+            || trimmed.starts_with("**LGTM")
+            || trimmed.starts_with("Changes Requested,")
+            || trimmed.starts_with("**Changes Requested")
+    })
 }
 
 fn parse_count(line: &str, prefix: &str) -> Option<usize> {
@@ -231,25 +275,80 @@ pub fn parse_verdict_text(text: &str) -> (Option<String>, Option<String>, usize,
     let mut p0 = 0;
     let mut p1 = 0;
 
-    let has_changes_requested =
-        text.contains("Changes Requested") || text.contains("changes_requested");
-    let has_lgtm = text.contains("LGTM") || text.contains("lgtm");
-
-    if has_lgtm && !has_changes_requested {
-        verdict = Some("LGTM".to_string());
-    } else if has_changes_requested && !has_lgtm {
-        verdict = Some("Changes Requested".to_string());
-    } else if has_lgtm && has_changes_requested {
-        let pos_cr = text.rfind("Changes Requested").unwrap_or(0);
-        let pos_lgtm = text.rfind("LGTM").unwrap_or(0);
-        if pos_lgtm > pos_cr {
-            verdict = Some("LGTM".to_string());
-        } else {
-            verdict = Some("Changes Requested".to_string());
+    // Look for SHA in header line first: "## Code Review: ... @ <SHA>"
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## Code Review:") || trimmed.starts_with("## Review:") {
+            if let Some(at_idx) = trimmed.rfind('@') {
+                let after = trimmed[at_idx + 1..].trim();
+                let clean =
+                    after.trim_matches(['*', '`', '(', ')', '.', ',', ':', '"', '\'', '[', ']']);
+                let sha_candidate: String = clean
+                    .chars()
+                    .take_while(|c| c.is_ascii_hexdigit())
+                    .collect();
+                if sha_candidate.len() == 40 {
+                    verdict_sha = Some(sha_candidate);
+                    break;
+                }
+            }
         }
     }
 
-    for line in text.lines() {
+    // Focus parsing on the final verdict section if present (using rfind to avoid matching earlier quotes)
+    let target_section = if let Some(idx) = text.rfind("\n### Verdict") {
+        &text[idx..]
+    } else if let Some(idx) = text.rfind("\n<<<VERDICT") {
+        &text[idx..]
+    } else if let Some(idx) = text.rfind("Verdict as of the ruling:") {
+        &text[idx..]
+    } else if let Some(idx) = text.rfind("### Verdict") {
+        &text[idx..]
+    } else {
+        text
+    };
+
+    for line in target_section.lines() {
+        let trimmed = line.trim().trim_matches('*').trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("<<<") {
+            continue;
+        }
+        let clean = if let Some(idx) = trimmed.find("Verdict as of the ruling:") {
+            trimmed[idx + "Verdict as of the ruling:".len()..]
+                .trim()
+                .trim_matches('*')
+                .trim()
+        } else if let Some(idx) = trimmed.find("Verdict:") {
+            trimmed[idx + "Verdict:".len()..]
+                .trim()
+                .trim_matches('*')
+                .trim()
+        } else {
+            trimmed
+        };
+
+        if clean.starts_with("LGTM") || clean.starts_with("Approved") {
+            verdict = Some("LGTM".to_string());
+            break;
+        } else if clean.starts_with("Changes Requested") || clean.starts_with("changes_requested") {
+            verdict = Some("Changes Requested".to_string());
+            break;
+        }
+    }
+
+    if verdict.is_none() {
+        let has_changes_requested = target_section.contains("Changes Requested")
+            || target_section.contains("changes_requested");
+        let has_lgtm = target_section.contains("LGTM") || target_section.contains("lgtm");
+
+        if has_changes_requested {
+            verdict = Some("Changes Requested".to_string());
+        } else if has_lgtm {
+            verdict = Some("LGTM".to_string());
+        }
+    }
+
+    for line in target_section.lines() {
         if let Some(val) = parse_count(line, "P0") {
             p0 = p0.max(val);
         } else if let Some(val) = parse_count(line, "p0") {
@@ -263,35 +362,49 @@ pub fn parse_verdict_text(text: &str) -> (Option<String>, Option<String>, usize,
         }
     }
 
-    for word in text.split_whitespace() {
-        let clean = word.trim_matches(['*', '`', '(', ')', '.', ',', ':', '"', '\'', '[', ']']);
-        if clean.len() == 40 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
-            verdict_sha = Some(clean.to_string());
-            break;
+    if verdict_sha.is_none() {
+        for word in target_section.split_whitespace() {
+            let clean = word.trim_matches(['*', '`', '(', ')', '.', ',', ':', '"', '\'', '[', ']']);
+            if clean.len() == 40 && clean.chars().all(|c| c.is_ascii_hexdigit()) {
+                verdict_sha = Some(clean.to_string());
+                break;
+            }
         }
     }
 
     (verdict, verdict_sha, p0, p1)
 }
 
-#[derive(Debug)]
-struct ReviewTimelineEvent {
-    timestamp: String,
-    verdict: String,
-    verdict_sha: Option<String>,
-    p0_count: usize,
-    p1_count: usize,
+#[derive(Debug, Clone)]
+pub struct ReviewTimelineEvent {
+    pub timestamp: String,
+    pub author: Option<String>,
+    pub verdict: String,
+    pub verdict_sha: Option<String>,
+    pub p0_count: usize,
+    pub p1_count: usize,
 }
 
 /// Pure timeline extractor: processes reviews and structured comments into the final verdict.
 pub fn extract_timeline_verdict(
     gh_view: &GhViewPr,
-) -> (Option<String>, Option<String>, usize, usize) {
+    allowed_reviewers: Option<&[String]>,
+) -> (Option<String>, Option<String>, Option<String>, usize, usize) {
     let mut timeline: Vec<ReviewTimelineEvent> = Vec::new();
 
     // 1. Process GitHub formal reviews (APPROVED / CHANGES_REQUESTED)
-    // The formal review state is strictly authoritative for the verdict (cannot be overridden by prose)
     for r in &gh_view.reviews {
+        if let Some(allowed) = allowed_reviewers {
+            if let Some(author) = &r.author {
+                if !allowed
+                    .iter()
+                    .any(|u| u.eq_ignore_ascii_case(&author.login))
+                {
+                    continue;
+                }
+            }
+        }
+
         let verdict_opt = match r.state.as_str() {
             "APPROVED" => Some("LGTM".to_string()),
             "CHANGES_REQUESTED" => Some("Changes Requested".to_string()),
@@ -299,7 +412,6 @@ pub fn extract_timeline_verdict(
         };
 
         if let Some(formal_verdict) = verdict_opt {
-            // Parse body only for SHA, p0, p1 (formal review state is NOT overridden by prose)
             let (_, sha, parsed_p0, parsed_p1) = if let Some(body) = &r.body {
                 parse_verdict_text(body)
             } else {
@@ -307,8 +419,11 @@ pub fn extract_timeline_verdict(
             };
 
             let ts = r.submitted_at.clone().unwrap_or_default();
+            let author = r.author.as_ref().map(|a| a.login.clone());
+
             timeline.push(ReviewTimelineEvent {
                 timestamp: ts,
+                author,
                 verdict: formal_verdict,
                 verdict_sha: sha,
                 p0_count: parsed_p0,
@@ -318,8 +433,18 @@ pub fn extract_timeline_verdict(
     }
 
     // 2. Process structured review comments
-    // Comments must meet is_structured_review_comment to ensure casual comments are ignored
     for comment in &gh_view.comments {
+        if let Some(allowed) = allowed_reviewers {
+            if let Some(author) = &comment.author {
+                if !allowed
+                    .iter()
+                    .any(|u| u.eq_ignore_ascii_case(&author.login))
+                {
+                    continue;
+                }
+            }
+        }
+
         if !is_structured_review_comment(&comment.body) {
             continue;
         }
@@ -327,8 +452,11 @@ pub fn extract_timeline_verdict(
         let (v, sha, parsed_p0, parsed_p1) = parse_verdict_text(&comment.body);
         if let Some(found_v) = v {
             let ts = comment.created_at.clone().unwrap_or_default();
+            let author = comment.author.as_ref().map(|a| a.login.clone());
+
             timeline.push(ReviewTimelineEvent {
                 timestamp: ts,
+                author,
                 verdict: found_v,
                 verdict_sha: sha,
                 p0_count: parsed_p0,
@@ -344,15 +472,20 @@ pub fn extract_timeline_verdict(
         (
             Some(latest.verdict),
             latest.verdict_sha,
+            latest.author,
             latest.p0_count,
             latest.p1_count,
         )
     } else {
-        (None, None, 0, 0)
+        (None, None, None, 0, 0)
     }
 }
 
-fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput> {
+fn fetch_pr_from_gh(
+    pr: u64,
+    allowed_reviewers: Option<&[String]>,
+    repo_root: &Path,
+) -> anyhow::Result<MergeGateInput> {
     let view_output = Command::new("gh")
         .args([
             "pr",
@@ -374,7 +507,8 @@ fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput>
         serde_json::from_slice(&view_output.stdout).context("parse gh pr view json output")?;
 
     let head_sha = gh_view.head_ref_oid.clone();
-    let (verdict, verdict_sha, p0, p1) = extract_timeline_verdict(&gh_view);
+    let (verdict, verdict_sha, verdict_author, p0, p1) =
+        extract_timeline_verdict(&gh_view, allowed_reviewers);
 
     // Fetch PR checks
     let checks_output = Command::new("gh")
@@ -434,8 +568,10 @@ fn fetch_pr_from_gh(pr: u64, repo_root: &Path) -> anyhow::Result<MergeGateInput>
 
     Ok(MergeGateInput {
         head_sha,
+        pr_author: gh_view.author.as_ref().map(|a| a.login.clone()),
         verdict,
         verdict_sha,
+        verdict_author,
         p0_count: p0,
         p1_count: p1,
         required_ci_green,
@@ -460,12 +596,14 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
         };
         serde_json::from_str::<MergeGateInput>(&raw).context("parse MergeGateInput JSON")?
     } else if let Some(pr_number) = args.pr {
-        fetch_pr_from_gh(pr_number, repo_root)?
+        fetch_pr_from_gh(pr_number, args.allowed_reviewers.as_deref(), repo_root)?
     } else if let Some(head_sha) = args.head_sha {
         MergeGateInput {
             head_sha,
+            pr_author: None,
             verdict: args.verdict,
             verdict_sha: args.verdict_sha,
+            verdict_author: args.verdict_author,
             p0_count: args.p0,
             p1_count: args.p1,
             required_ci_green: args.ci_green,
@@ -485,9 +623,18 @@ pub fn run_check_merge(args: CheckMergeArgs, repo_root: &Path) -> anyhow::Result
     } else if result.can_merge {
         println!("PASS: Merge preconditions satisfied.");
         println!("  PR Head:     {}", result.head_sha);
+        if let Some(author) = &result.pr_author {
+            println!("  PR Author:   {author}");
+        }
+        let author_str = result
+            .verdict_author
+            .as_deref()
+            .map(|a| format!(" by {a}"))
+            .unwrap_or_default();
         println!(
-            "  Verdict:     {} (pinned at {})",
+            "  Verdict:     {}{} (pinned at {})",
             result.verdict.as_deref().unwrap_or("none"),
+            author_str,
             result.verdict_sha.as_deref().unwrap_or("none")
         );
         println!(
@@ -544,8 +691,10 @@ mod tests {
     fn test_refuse_when_no_verdict() {
         let input = MergeGateInput {
             head_sha: VALID_SHA_A.into(),
+            pr_author: None,
             verdict: None,
             verdict_sha: None,
+            verdict_author: None,
             p0_count: 0,
             p1_count: 0,
             required_ci_green: true,
@@ -563,8 +712,10 @@ mod tests {
     fn test_refuse_when_verdict_stale_new_push() {
         let input = MergeGateInput {
             head_sha: VALID_SHA_B.into(),
+            pr_author: None,
             verdict: Some("LGTM".into()),
             verdict_sha: Some(VALID_SHA_A.into()),
+            verdict_author: None,
             p0_count: 0,
             p1_count: 0,
             required_ci_green: true,
@@ -582,8 +733,10 @@ mod tests {
     fn test_refuse_when_sha_is_invalid() {
         let input = MergeGateInput {
             head_sha: "short".into(),
+            pr_author: None,
             verdict: Some("LGTM".into()),
             verdict_sha: Some("short".into()),
+            verdict_author: None,
             p0_count: 0,
             p1_count: 0,
             required_ci_green: true,
@@ -601,8 +754,10 @@ mod tests {
     fn test_refuse_when_ci_not_green() {
         let input = MergeGateInput {
             head_sha: VALID_SHA_A.into(),
+            pr_author: None,
             verdict: Some("LGTM".into()),
             verdict_sha: Some(VALID_SHA_A.into()),
+            verdict_author: None,
             p0_count: 0,
             p1_count: 0,
             required_ci_green: false,
@@ -618,8 +773,10 @@ mod tests {
         // Case A: Changes Requested
         let input_cr = MergeGateInput {
             head_sha: VALID_SHA_A.into(),
+            pr_author: None,
             verdict: Some("Changes Requested".into()),
             verdict_sha: Some(VALID_SHA_A.into()),
+            verdict_author: None,
             p0_count: 0,
             p1_count: 0,
             required_ci_green: true,
@@ -632,8 +789,10 @@ mod tests {
         // Case B: P0 > 0 (e.g. 12)
         let input_p0 = MergeGateInput {
             head_sha: VALID_SHA_A.into(),
+            pr_author: None,
             verdict: Some("LGTM".into()),
             verdict_sha: Some(VALID_SHA_A.into()),
+            verdict_author: None,
             p0_count: 12,
             p1_count: 0,
             required_ci_green: true,
@@ -646,8 +805,10 @@ mod tests {
         // Case C: P1 > 0
         let input_p1 = MergeGateInput {
             head_sha: VALID_SHA_A.into(),
+            pr_author: None,
             verdict: Some("LGTM".into()),
             verdict_sha: Some(VALID_SHA_A.into()),
+            verdict_author: None,
             p0_count: 0,
             p1_count: 2,
             required_ci_green: true,
@@ -665,8 +826,10 @@ mod tests {
     fn test_approve_when_all_preconditions_met() {
         let input = MergeGateInput {
             head_sha: VALID_SHA_A.into(),
+            pr_author: None,
             verdict: Some("LGTM".into()),
             verdict_sha: Some(VALID_SHA_A.to_uppercase()), // case-insensitive equality
+            verdict_author: Some("opus-reviewer".into()),
             p0_count: 0,
             p1_count: 0,
             required_ci_green: true,
@@ -675,6 +838,7 @@ mod tests {
         let result = evaluate_merge_preconditions(&input);
         assert!(result.can_merge);
         assert!(result.reasons.is_empty());
+        assert_eq!(result.verdict_author.as_deref(), Some("opus-reviewer"));
     }
 
     #[test]
@@ -697,18 +861,26 @@ Commit: 1234567890abcdef1234567890abcdef12345678
     #[test]
     fn test_is_structured_review_comment() {
         assert!(is_structured_review_comment(
-            "## Code Review: Round 1\nLGTM"
+            "## Code Review: Round 1\n\n### Verdict\nLGTM (P0=0, P1=0) at `1234567890abcdef1234567890abcdef12345678`"
         ));
         assert!(is_structured_review_comment(
             "### Verdict\nChanges Requested"
         ));
-        assert!(is_structured_review_comment("<<<VERDICT\nLGTM\nVERDICT>>>"));
         assert!(is_structured_review_comment(
-            "Verdict as of the ruling: LGTM"
+            "<<<VERDICT\n**Verdict:** LGTM\nVERDICT>>>"
         ));
         assert!(is_structured_review_comment(
-            "**Verdict as of the ruling: LGTM**"
+            "## Operator ruling on #699\n\nVerdict as of the ruling: LGTM"
         ));
+
+        // Implementer review responses must NEVER match
+        assert!(!is_structured_review_comment(
+            "## Review Response: Round 1 — PR #711\n\n- Requires comments to be structured review verdicts via is_structured_review_comment (e.g. ## Code Review:)"
+        ));
+        assert!(!is_structured_review_comment(
+            "# Review Response: Round 2\n\nLGTM is mentioned here"
+        ));
+
         // Casual comments must NOT match
         assert!(!is_structured_review_comment("ready for LGTM review"));
         assert!(!is_structured_review_comment(
@@ -737,9 +909,10 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             }],
         };
 
-        let (verdict, sha, p0, p1) = extract_timeline_verdict(&gh_view);
+        let (verdict, sha, author, p0, p1) = extract_timeline_verdict(&gh_view, None);
         assert_eq!(verdict.as_deref(), Some("Changes Requested"));
         assert_eq!(sha.as_deref(), Some(VALID_SHA_A));
+        assert_eq!(author.as_deref(), Some("reviewer"));
         assert_eq!(p0, 0);
         assert_eq!(p1, 0);
     }
@@ -756,14 +929,14 @@ Commit: 1234567890abcdef1234567890abcdef12345678
                     "## Code Review: Round 1\n\n### Verdict\nLGTM (P0=0, P1=0) at `{VALID_SHA_A}`"
                 ),
                 author: Some(GhAuthor {
-                    login: "fagemx".into(),
+                    login: "reviewer-a".into(),
                 }),
                 created_at: Some("2026-09-02T08:00:00Z".into()),
             }],
             reviews: vec![GhReviewItem {
                 state: "CHANGES_REQUESTED".into(),
                 author: Some(GhAuthor {
-                    login: "fagemx".into(),
+                    login: "reviewer-b".into(),
                 }),
                 body: Some(format!("blocking findings @ {VALID_SHA_A}")),
                 submitted_at: Some("2026-09-02T09:00:00Z".into()),
@@ -771,8 +944,33 @@ Commit: 1234567890abcdef1234567890abcdef12345678
         };
 
         // Newer CHANGES_REQUESTED review (09:00) wins over older LGTM comment (08:00)
-        let (verdict, _, _, _) = extract_timeline_verdict(&gh_view);
+        let (verdict, _, author, _, _) = extract_timeline_verdict(&gh_view, None);
         assert_eq!(verdict.as_deref(), Some("Changes Requested"));
+        assert_eq!(author.as_deref(), Some("reviewer-b"));
+    }
+
+    #[test]
+    fn test_allowed_reviewers_filter() {
+        let gh_view = GhViewPr {
+            head_ref_oid: VALID_SHA_A.into(),
+            author: Some(GhAuthor {
+                login: "fagemx".into(),
+            }),
+            comments: vec![GhComment {
+                body: format!(
+                    "## Code Review: Round 1\n\n### Verdict\nLGTM (P0=0, P1=0) at `{VALID_SHA_A}`"
+                ),
+                author: Some(GhAuthor {
+                    login: "unauthorized-user".into(),
+                }),
+                created_at: Some("2026-09-02T08:00:00Z".into()),
+            }],
+            reviews: vec![],
+        };
+
+        let allowed = vec!["authorized-reviewer".to_string()];
+        let (verdict, _, _, _, _) = extract_timeline_verdict(&gh_view, Some(&allowed));
+        assert!(verdict.is_none());
     }
 
     #[test]
@@ -781,8 +979,10 @@ Commit: 1234567890abcdef1234567890abcdef12345678
         let input_file = temp_dir.path().join("input.json");
         let valid_input = MergeGateInput {
             head_sha: VALID_SHA_A.into(),
+            pr_author: None,
             verdict: Some("LGTM".into()),
             verdict_sha: Some(VALID_SHA_A.into()),
+            verdict_author: Some("reviewer".into()),
             p0_count: 0,
             p1_count: 0,
             required_ci_green: true,
@@ -795,9 +995,11 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             head_sha: None,
             verdict_sha: None,
             verdict: None,
+            verdict_author: None,
             p0: 0,
             p1: 0,
             ci_green: false,
+            allowed_reviewers: None,
             input: Some(input_file.to_str().unwrap().into()),
             merge: false,
             json: true,
@@ -818,9 +1020,11 @@ Commit: 1234567890abcdef1234567890abcdef12345678
             head_sha: None,
             verdict_sha: None,
             verdict: None,
+            verdict_author: None,
             p0: 0,
             p1: 0,
             ci_green: false,
+            allowed_reviewers: None,
             input: Some(input_file.to_str().unwrap().into()),
             merge: true,
             json: false,
