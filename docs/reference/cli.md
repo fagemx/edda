@@ -657,22 +657,16 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--agent AGENT` | Backend that runs the turn: `claude` (default), `pi`, or `codex` |
-| `--prompt-file FILE` | Prompt file, read verbatim (required unless `--list-models`) |
+| `--prompt-file FILE` | Path to the file containing the prompt, read verbatim (required) |
 | `--session-id ID` | Session id passed to the backend verbatim; generated and printed when omitted so the caller can reuse it on the next call |
 | `--cwd DIR` | Working directory for the agent (default: current directory) |
 | `--budget-usd N` | Per-turn budget in USD (codex cannot enforce budgets) |
 | `--timeout-sec S` | Turn timeout in seconds (default: 1800, like a conduct phase) |
-| `--permission-mode MODE` | claude only (default `bypassPermissions`); pi and codex refuse the flag |
-| `--model MODEL` | Passed to the backend verbatim (e.g. pi `openai-codex/gpt-5.6-sol`); codex refuses it. `--list-models` looks up valid patterns |
-| `--thinking LEVEL` | pi only (`off\|minimal\|low\|medium\|high\|xhigh\|max`); claude and codex refuse it |
-| `--tools LIST` | Comma-separated tool allowlist (pi `--tools`, claude `--tools`) — structural restriction, not prompt discipline; codex refuses it |
-| `--exclude-tools LIST` | Comma-separated tool denylist (pi `--exclude-tools`, claude `--disallowedTools`); codex refuses it |
-| `--session-dir DIR` | pi only (`--session-dir`); claude and codex manage their own session storage and refuse it |
-| `--list-models [TERM]` | List available provider/model pairs for the backend and exit (pi only) |
-| `--json` | Print exactly one JSON object to stdout instead of text lines; cannot be combined with `--list-models` |
+| `--permission-mode MODE` | Permission mode carried on the synthetic phase verbatim (default `bypassPermissions`); only the claude backend consumes it today, pi and codex ignore it |
+| `--json` | Print exactly one JSON object to stdout instead of text lines |
 
 With `--json` the object has the shape
-`{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded", "result_text":…, "cost_usd":…, "session_id":…, "error":…, "model_requested":…, "model_observed":…}`.
+`{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded", "result_text":string\|null, "cost_usd":number\|null, "session_id":string, "error":string\|null}`.
 
 Exit codes:
 
@@ -684,17 +678,37 @@ Exit codes:
 | `3` | budget exceeded |
 | `4` | max turns |
 
+A one-turn dispatch against the `pi` backend, where `prompt.txt` contains a
+trivial instruction (real transcript, edda 0.4.0):
+
 ```bash
-edda dispatch --agent pi --list-models
+edda dispatch --agent pi --prompt-file prompt.txt
 ```
 
-Output (truncated; the model list is whatever the backend currently serves):
+```
+pong
+Cost: $0.00
+Session: 86929af4-8f4c-58d1-9742-1ba96c1eba94
+```
+
+The same turn with `--json` prints exactly one object (real transcript):
 
 ```
-provider      model                                               context  max-out  thinking  images
-openai-codex  gpt-5.3-codex-spark                                 128K     128K     yes       no
-openai-codex  gpt-5.4                                             272K     128K     yes       yes
-openrouter    ~anthropic/claude-opus-latest                       1M       128K     yes       yes
+{"cost_usd":0.000341235,"error":null,"outcome":"done","result_text":"ok","session_id":"37b8267b-e87b-56a4-bbe6-cff142f1f427"}
+```
+
+A pre-dispatch failure exits `1` per the table above (real transcript; the
+OS-error line is locale-dependent):
+
+```bash
+edda dispatch --agent pi --prompt-file missing.txt
+```
+
+```
+Error: --prompt-file not readable: missing.txt
+
+Caused by:
+    系統找不到指定的檔案。 (os error 2)
 ```
 
 ### `edda verdict`
