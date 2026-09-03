@@ -36,7 +36,11 @@ pub trait Notifier: Send + Sync {
 }
 
 /// Single format site for the operator-visible gate progress line (GH-751).
-pub fn format_gate_progress_message(subject: &str, gate_sha: &str, wait_label: &str) -> String {
+pub(crate) fn format_gate_progress_message(
+    subject: &str,
+    gate_sha: &str,
+    wait_label: &str,
+) -> String {
     format!("Still waiting for verdict on \"{subject}\" (sha {gate_sha}) — {wait_label}")
 }
 

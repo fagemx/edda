@@ -1074,7 +1074,7 @@ async fn wait_for_verdict(
     heartbeat: Option<&LaneHeartbeat>,
     notifier: &dyn Notifier,
 ) -> GateVerdict {
-    let subject = format!("{plan_name}/{phase_id}");
+    let subject = gate_subject(plan_name, phase_id);
     let deadline = timeout_sec.map(|t| {
         let base = entered_at
             .and_then(|s| {
@@ -5411,17 +5411,14 @@ phases:
             "signal must name the true remaining budget anchored to entered_at, got: {msg}"
         );
         // P2-2: Verify structured GateProgress event fields
-        assert_eq!(
-            notifier.gate_progress_events().len(),
-            1,
-            "must record exactly 1 GateProgress event"
-        );
+        let events = notifier.gate_progress_events();
+        assert_eq!(events.len(), 1, "must record exactly 1 GateProgress event");
         if let edda_notify::NotifyEvent::GateProgress {
             plan,
             phase,
             subject,
             ..
-        } = &notifier.gate_progress_events()[0]
+        } = &events[0]
         {
             assert_eq!(plan, "plan");
             assert_eq!(phase, "phase");
