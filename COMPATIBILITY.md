@@ -94,7 +94,7 @@ is what "additive" means for them).
 
 One JSON object with exactly these keys (emitted at
 `crates/edda-cli/src/cmd_dispatch.rs:259-268`; mirrored in the long help,
-`crates/edda-cli/src/main.rs:489-495`):
+`crates/edda-cli/src/main.rs:488-494`):
 
 | Key | Type | Notes |
 |---|---|---|
@@ -174,8 +174,8 @@ Golden fixtures: `crates/edda-mcp/src/lib.rs` →
 ### `edda status --json`
 
 One JSON object with exactly these keys (emitted at
-`crates/edda-cli/src/cmd_status.rs:10-32`; flag declared at
-`crates/edda-cli/src/main.rs:290-296`, dispatched at `:1260`):
+`crates/edda-cli/src/cmd_status.rs:10-29`; flag declared at
+`crates/edda-cli/src/main.rs:290-295`, dispatched at `:1260`):
 
 | Key | Type | Notes |
 |---|---|---|
@@ -197,7 +197,7 @@ it, `edda status` produces the same exit code and the same stderr in every
 state (measured). Success is exit `0` with the object on stdout. Failures do
 not emit JSON — a newer ledger schema exits `2` (§1.2), and every other
 failure (no `.edda/`, unreadable database) takes the CLI's shared error path
-and exits `1` (`crates/edda-cli/src/main.rs:1101-1108`).
+and exits `1` (`crates/edda-cli/src/main.rs:1100-1107`).
 
 That last row differs from `edda verify --json`, which answers `2` to the
 same questions. The split is pre-existing and outside #730, but it is
