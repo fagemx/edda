@@ -14,7 +14,10 @@
 #
 # Every artifact the launcher writes lives under -LogDir (resolved to an
 # absolute path before anything is written or embedded — the task runs from a
-# different working directory); nothing is written into the repo.
+# different working directory). The one exception is the validated
+# .git/config backup taken before the lane starts (GH-715): it is written
+# beside the config it protects, inside the git common dir, and is not part
+# of the repo's tracked content.
 #
 # usage:
 #   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> `
@@ -29,7 +32,8 @@
 # launcher never synthesizes a build lane; docs lanes compile nothing and
 # pass none.
 #
-# Prints, one line each: task name, state, wrapper path, log path, done path.
+# Prints, one line each: the .git/config backup verdict (GH-715), then task
+# name, state, wrapper path, log path, done path.
 # Poll with scripts/fleet/lane-status.ps1; the done-file appears (containing
 # the exit code) when the lane finishes. The wrapper writes its end record
 # (=== EXIT === log line + done-file) no matter how the run ends; when the
@@ -88,7 +92,10 @@ if ($existing -and $existing.State -eq 'Running') {
 }
 $inside = (& git -C $Cwd rev-parse --is-inside-work-tree 2>$null)
 if ($LASTEXITCODE -ne 0 -or $inside -ne 'true') {
-  Fail "-Cwd '$Cwd' is not a git worktree (git rev-parse --is-inside-work-tree failed)"
+  # A NUL-corrupted shared .git/config fails every git command in the repo,
+  # rev-parse included (GH-715), so this gate is where that shows up first —
+  # name the repair rather than leaving "not a git worktree" as the only clue.
+  Fail "-Cwd '$Cwd' is not a git worktree (git rev-parse --is-inside-work-tree failed). If the repo was a worktree until recently, check the shared config: scripts/fleet/git-config-guard.ps1 -RepoPath '$Cwd' -Verify, then -Restore"
 }
 
 # --- resolve paths (absolute BEFORE anything is written or embedded) --------
@@ -100,10 +107,13 @@ $Cwd = (Resolve-Path -LiteralPath $Cwd).Path
 # hard kill mid-write leaves it all NULs and every worktree loses git at once.
 # Copy it now, while nothing of this lane is writing — and only if it parses,
 # which is exactly the check the two useless .bak files of 2026-09 skipped.
+# Exit 2 (unhealthy) is reachable only for shapes git still tolerates — an
+# empty config, say — because the rev-parse gate above already rejects the
+# ones git cannot read at all.
 & (Join-Path $PSScriptRoot 'git-config-guard.ps1') -RepoPath $Cwd -Backup
 $guardExit = $LASTEXITCODE
 if ($guardExit -eq 2) {
-  Fail "the shared .git/config for '$Cwd' does not parse; repair it first (scripts/fleet/git-config-guard.ps1 -RepoPath '$Cwd' -Restore) — a lane launched against it cannot run git"
+  Fail "the shared .git/config for '$Cwd' is not usable; repair it first (scripts/fleet/git-config-guard.ps1 -RepoPath '$Cwd' -Restore) — a lane launched against it cannot run git"
 }
 if ($guardExit -ne 0) {
   [Console]::Error.WriteLine("lane-launch: warning: .git/config backup not written (git-config-guard exit $guardExit); launching anyway, but lane-stop will have nothing to restore from")

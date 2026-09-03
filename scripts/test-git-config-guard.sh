@@ -154,7 +154,54 @@ grep -q 'git-config-guard.ps1' "$root/scripts/fleet/lane-stop.ps1" ||
   fail "lane-stop.ps1 kills the lane process tree but never validates .git/config afterwards (GH-715 doneWhen 2)"
 ok "lane-launch backs up before the lane runs and lane-stop validates after the kill"
 
-# --- case 9 (opt-in): lane-stop really restores after a real kill -----------
+# --- case 9: a config that cannot be READ is neither backed up nor overwritten
+# A config held open by whatever is writing it may be perfectly good. Treating
+# an unreadable file as corrupt would restore over it and destroy live state;
+# treating it as healthy would copy garbage into the backup.
+repo8=$(new_repo locked)
+guard -RepoPath "$repo8" -Backup >/dev/null 2>&1 || fail "setup: backup failed"
+cp "$repo8/.git/config" "$tmp/locked-good"
+repo8_w=$(cygpath -w "$repo8" 2>/dev/null || echo "$repo8")
+guard_w=$(cygpath -w "$GUARD" 2>/dev/null || echo "$GUARD")
+{
+  printf '$ErrorActionPreference = "Stop"\n'
+  printf '$fs = [System.IO.File]::Open("%s\\.git\\config", "Open", "Read", "None")\n' "$repo8_w"
+  printf 'try {\n'
+  printf '  & "%s" -RepoPath "%s" -Backup 2>&1 | Out-Null; "backup=$LASTEXITCODE"\n' "$guard_w" "$repo8_w"
+  printf '  & "%s" -RepoPath "%s" -Restore 2>&1 | Out-Null; "restore=$LASTEXITCODE"\n' "$guard_w" "$repo8_w"
+  printf '} finally { $fs.Close() }\n'
+} >"$tmp/locked.ps1"
+pwsh -NoProfile -NonInteractive -File "$tmp/locked.ps1" >"$tmp/out9" 2>&1 ||
+  fail "locked-config probe did not run: $(cat "$tmp/out9")"
+grep -q '^backup=3$' "$tmp/out9" ||
+  fail "-Backup on an unreadable config should exit 3 (no backup taken), got: $(cat "$tmp/out9")"
+grep -q '^restore=2$' "$tmp/out9" ||
+  fail "-Restore on an unreadable config should exit 2 and not restore, got: $(cat "$tmp/out9")"
+cmp -s "$tmp/locked-good" "$repo8/.git/config" ||
+  fail "the unreadable config was overwritten; a locked config is not a corrupt one"
+[ "$(corrupt_backups "$repo8")" -eq 0 ] || fail "a locked config was treated as corrupt and archived"
+ok "an unreadable config is neither backed up from nor restored over"
+
+# --- case 10: the backup keeps one generation, and restore falls back to it -
+# A torn write can end on a boundary that still parses; backing THAT up would
+# retire the last complete copy, so the outgoing backup is kept as .prev.
+repo9=$(new_repo rotate)
+guard -RepoPath "$repo9" -Backup >/dev/null 2>&1 || fail "setup: first backup failed"
+cp "$repo9/.git/config" "$tmp/gen1"
+printf '[core]\n\trepositoryformatversion = 0\n' >"$repo9/.git/config"
+guard -RepoPath "$repo9" -Backup >/dev/null 2>&1 || fail "setup: second backup failed"
+cmp -s "$tmp/gen1" "$repo9/.git/config.guard.bak.prev" ||
+  fail "the outgoing backup was discarded instead of kept as .prev"
+# Now lose both the config and the newest backup; .prev must still save it.
+nul_ise "$repo9/.git/config"
+nul_ise "$repo9/.git/config.guard.bak"
+guard -RepoPath "$repo9" -Restore >"$tmp/out10" 2>&1 ||
+  fail "-Restore did not fall back to the previous generation: $(cat "$tmp/out10")"
+cmp -s "$tmp/gen1" "$repo9/.git/config" || fail "-Restore used the wrong generation"
+git -C "$repo9" status >/dev/null 2>&1 || fail "git still broken after the .prev restore"
+ok "-Backup keeps one previous generation and -Restore falls back to it"
+
+# --- case 11 (opt-in): lane-stop really restores after a real kill ----------
 # Registers a scheduled task, so it is off by default; run with
 # GIT_CONFIG_GUARD_E2E=1 to exercise the whole lane-stop path end to end.
 if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
@@ -168,13 +215,22 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   # — Stop-ScheduledTask kills only the wrapper, leaving the child to be found
   # and killed by lane-stop's tree traversal (GH-672/GH-706), and a child
   # killed mid-git-write is what corrupts the config in the first place.
-  # usage: start_fake_lane <lane> <repo>
+  # The two wrapper generators write the cwd differently: lane-launch.ps1 emits
+  # `Set-Location -LiteralPath '<p>'`, while the review lanes of review-pr.sh
+  # and pr-review-launch.ps1 emit a bare `Set-Location '<p>'`. lane-stop claims
+  # to stop both families, so both shapes are exercised.
+  # usage: start_fake_lane <lane> <repo> [literal|bare]
   start_fake_lane() {
     fl_lane=$1
     fl_repo_w=$(cygpath -w "$2" 2>/dev/null || echo "$2")
+    fl_shape=${3:-literal}
     : >"$logdir/$fl_lane.brief.md"
     {
-      printf "Set-Location -LiteralPath '%s'\n" "$fl_repo_w"
+      if [ "$fl_shape" = bare ]; then
+        printf "Set-Location '%s'\n" "$fl_repo_w"
+      else
+        printf "Set-Location -LiteralPath '%s'\n" "$fl_repo_w"
+      fi
       printf "# edda dispatch --prompt-file '%s'\n" "$logdir_w\\$fl_lane.brief.md"
       printf '$c = Start-Process -PassThru -WindowStyle Hidden -FilePath "$env:SystemRoot\\System32\\cmd.exe" -ArgumentList "/c","ping -n 300 127.0.0.1"\n'
       printf 'Start-Sleep -Seconds 300\n'
@@ -214,7 +270,7 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   git -C "$repo6" status >/dev/null 2>&1 && fail "e2e precondition: git still works on the corrupt repo"
 
   # Read the status through an `if`, not `$?` on the next line: under `set -e`
-  # a non-zero exit (which case 10 expects) would end the script first.
+  # a non-zero exit (which case 12 expects) would end the script first.
   if pwsh -NoProfile -NonInteractive -File "$root/scripts/fleet/lane-stop.ps1" \
     -Name "$lane" -LogDir "$logdir_w" >"$tmp/out9" 2>&1
   then stop_status=0; else stop_status=$?; fi
@@ -234,7 +290,7 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
     fail "lane-stop wrote no done-file; lane-stop said: $(cat "$tmp/out9")"
   ok "lane-stop restores the shared .git/config after really killing a lane"
 
-  # --- case 10 (opt-in): unrepairable config is an error, not a clean stop ---
+  # --- case 12 (opt-in): unrepairable config is an error, not a clean stop --
   lane2=guard-e2e-nobak
   repo7=$(new_repo e2e-nobak)
   start_fake_lane "$lane2" "$repo7"
@@ -252,8 +308,59 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   grep -q '=== EXIT' "$logdir/$lane2.log" 2>/dev/null ||
     fail "lane-stop lost the end record on the unrepairable path: $(cat "$tmp/out10")"
   ok "lane-stop exits 1 when the config is corrupt and no backup can repair it"
+
+  # --- case 13 (opt-in): review lanes get the check too ----------------------
+  # review-pr.sh:453 and pr-review-launch.ps1:64 write a bare `Set-Location`,
+  # and lane-stop.ps1 claims to stop those tasks (GH-712).
+  lane3=guard-e2e-review
+  repo10=$(new_repo e2e-review)
+  guard -RepoPath "$repo10" -Backup >/dev/null 2>&1 || fail "e2e setup: backup failed"
+  cp "$repo10/.git/config" "$tmp/e2e-review-good"
+  start_fake_lane "$lane3" "$repo10" bare
+  nul_ise "$repo10/.git/config"
+
+  if pwsh -NoProfile -NonInteractive -File "$root/scripts/fleet/lane-stop.ps1" \
+    -Name "$lane3" -LogDir "$logdir_w" >"$tmp/out13" 2>&1
+  then stop_status3=0; else stop_status3=$?; fi
+  drop_fake_lane "$lane3"
+
+  [ "$stop_status3" -eq 0 ] || fail "lane-stop exited $stop_status3: $(cat "$tmp/out13")"
+  grep -q 'gitconfig=RESTORED' "$tmp/out13" ||
+    fail "a review-shaped wrapper skipped the config check: $(cat "$tmp/out13")"
+  cmp -s "$tmp/e2e-review-good" "$repo10/.git/config" ||
+    fail "the review lane's shared config was not repaired"
+  ok "lane-stop resolves the cwd of review lanes too, not only lane-launch ones"
+
+  # --- case 14 (opt-in): a guard exception never costs the end record --------
+  # $ErrorActionPreference is Stop in lane-stop; a config held open makes the
+  # guard's ReadAllBytes throw. That must not skip the GH-672 end record.
+  lane4=guard-e2e-throw
+  repo11=$(new_repo e2e-throw)
+  guard -RepoPath "$repo11" -Backup >/dev/null 2>&1 || fail "e2e setup: backup failed"
+  start_fake_lane "$lane4" "$repo11"
+  repo11_w=$(cygpath -w "$repo11" 2>/dev/null || echo "$repo11")
+  {
+    printf '$ErrorActionPreference = "Stop"\n'
+    printf '$fs = [System.IO.File]::Open("%s\\.git\\config", "Open", "Read", "None")\n' "$repo11_w"
+    printf 'try {\n'
+    printf '  & "%s" -Name "%s" -LogDir "%s" 2>&1 | Out-Null\n' \
+      "$(cygpath -w "$root/scripts/fleet/lane-stop.ps1")" "$lane4" "$logdir_w"
+    printf '  "stop=$LASTEXITCODE"\n'
+    printf '} finally { $fs.Close() }\n'
+  } >"$tmp/throw.ps1"
+  pwsh -NoProfile -NonInteractive -File "$tmp/throw.ps1" >"$tmp/out14" 2>&1 ||
+    fail "locked-config lane-stop probe did not run: $(cat "$tmp/out14")"
+  drop_fake_lane "$lane4"
+
+  grep -q '^stop=1$' "$tmp/out14" ||
+    fail "lane-stop should exit 1 when it cannot verify the config, got: $(cat "$tmp/out14")"
+  grep -q '=== EXIT' "$logdir/$lane4.log" 2>/dev/null ||
+    fail "a guard exception cost the lane its === EXIT === record (GH-672): $(cat "$tmp/out14")"
+  [ -f "$logdir/$lane4.done" ] ||
+    fail "a guard exception cost the lane its done-file (GH-672): $(cat "$tmp/out14")"
+  ok "a guard exception is reported but never skips the end record"
 else
-  echo "-- cases 9-10 (lane-stop end-to-end) skipped; set GIT_CONFIG_GUARD_E2E=1 to run them"
+  echo "-- cases 11-14 (lane-stop end-to-end) skipped; set GIT_CONFIG_GUARD_E2E=1 to run them"
 fi
 
 echo "all $case_number case(s) passed"
