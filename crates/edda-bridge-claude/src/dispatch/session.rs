@@ -278,7 +278,13 @@ pub(super) fn dispatch_session_end(
     let decide_count = read_counter(project_id, session_id, "decide_count");
     let signal_count = read_counter(project_id, session_id, "signal_count");
 
-    // 2c. Snapshot session digest for next session's "## Previous Session"
+    // 2c. Snapshot session digest for next session's "## Previous Session".
+    // Known undercount: hook-path writes that fail LATER in SessionEnd (the
+    // postmortem L3 stores and detect state below) are counted but not
+    // reflected in this digest, so it can disagree with the SessionEnd
+    // stderr warning by up to that phase's failure count. Nothing is
+    // invisible — the warning (and the counter it reads) is the complete
+    // record; this snapshot is an approximation for the next-session context.
     crate::digest::write_prev_digest_from_store(
         project_id,
         session_id,

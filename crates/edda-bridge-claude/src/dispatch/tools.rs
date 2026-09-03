@@ -374,6 +374,12 @@ pub(super) fn dispatch_post_tool_use(
             "ledger event (post-tool-use)",
             &format!("{e:#}"),
         );
+        // Fail fast, documented trade-off: this early return also skips the
+        // karvi write-back, the SelfRecord decide-count, the cooldown check
+        // and this turn's nudge additionalContext — a read-only ledger
+        // therefore costs the agent its nudge for this PostToolUse.
+        // `mark_nudge_sent` is skipped too, so the nudge is not permanently
+        // lost; the failure warning stays unburied in the hook output.
         return Ok(HookResult::warning(format!(
             "edda: ledger write failed: {e:#}"
         )));

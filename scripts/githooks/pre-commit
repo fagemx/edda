@@ -144,7 +144,12 @@ while IFS= read -r -d '' meta; do
             next
         }
         /^---/ || /^\+\+\+/ { next }
-        /^[ -]/ {            # context line: advance, remember text
+        /^-/ { next }        # deleted line: absent from the NEW file, so it
+                             # must not advance line (wrong file:line) and
+                             # must not set prev - a removed swallow-ok
+                             # comment would otherwise still suppress the
+                             # added line beneath it
+        /^[ ]/ {             # context line: advance, remember text
             line++
             prev = substr($0, 2)
             next
