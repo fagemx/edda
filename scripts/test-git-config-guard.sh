@@ -37,6 +37,7 @@ e2e_cleanup() {
     cl_wrapper=$(cygpath -w "$logdir/$cl_lane.wrapper.ps1" 2>/dev/null || echo "$logdir/$cl_lane.wrapper.ps1")
     # Written to a file, never passed as -Command: a query whose own command
     # line contains the pattern matches itself and kills the killer.
+
     {
       printf "Unregister-ScheduledTask -TaskName 'edda-lane-%s' -Confirm:\$false -ErrorAction SilentlyContinue\n" "$cl_lane"
       printf "\$w = '%s'\n" "$cl_wrapper"
@@ -227,7 +228,78 @@ cmp -s "$tmp/gen1" "$repo9/.git/config" || fail "-Restore used the wrong generat
 git -C "$repo9" status >/dev/null 2>&1 || fail "git still broken after the .prev restore"
 ok "-Backup keeps one previous generation and -Restore falls back to it"
 
-# --- case 11 (opt-in): lane-stop really restores after a real kill ----------
+# --- case 11: verify rejects a NUL-corrupt branch ref and names repair SHA --
+repo_ref1=$(new_repo ref-verify)
+ref1=$(git -C "$repo_ref1" symbolic-ref HEAD)
+ref1_file="$repo_ref1/.git/$ref1"
+good_sha1=$(git -C "$repo_ref1" rev-parse HEAD)
+nul_ise "$ref1_file"
+
+if guard -RepoPath "$repo_ref1" -Verify >"$tmp/out11" 2>&1; then
+  fail "-Verify exited 0 on a NUL-corrupt branch ref: $(cat "$tmp/out11")"
+fi
+grep -q 'refs UNHEALTHY' "$tmp/out11" ||
+  fail "-Verify did not report refs UNHEALTHY: $(cat "$tmp/out11")"
+grep -q "$good_sha1" "$tmp/out11" ||
+  fail "-Verify did not name the repair SHA ($good_sha1) in its output: $(cat "$tmp/out11")"
+ok "-Verify rejects a NUL-corrupted branch ref and names the repair SHA"
+
+# --- case 12: backup refuses when branch ref is NUL (protects lane dispatch) --
+if guard -RepoPath "$repo_ref1" -Backup >"$tmp/out12" 2>&1; then
+  fail "-Backup exited 0 on a repo with a NUL-corrupted branch ref"
+fi
+grep -q 'ref(s) unhealthy' "$tmp/out12" ||
+  fail "-Backup did not report ref(s) unhealthy: $(cat "$tmp/out12")"
+ok "-Backup refuses when a branch ref is NUL, preventing dispatch into broken worktree"
+
+# --- case 13: restore repairs NUL branch ref from reflog ---------------------
+if ! guard -RepoPath "$repo_ref1" -Restore >"$tmp/out13" 2>&1; then
+  fail "-Restore exited non-zero: $(cat "$tmp/out13")"
+fi
+grep -q "RESTORED ref=$ref1" "$tmp/out13" ||
+  fail "-Restore output missing RESTORED ref line: $(cat "$tmp/out13")"
+git -C "$repo_ref1" log --oneline -1 >/dev/null 2>&1 ||
+  fail "git log still broken after ref -Restore"
+git -C "$repo_ref1" fsck --connectivity-only >/dev/null 2>&1 ||
+  fail "git fsck still fails after ref -Restore"
+corrupt_ref_count=$(ls "$repo_ref1/.git/" | grep -c '^ref\.CORRUPT\.' || true)
+[ "$corrupt_ref_count" -ge 1 ] ||
+  fail "corrupt ref file was not preserved outside .git/refs"
+ok "-Restore repairs a NUL branch ref from reflog and preserves forensic backup"
+
+# --- case 14: restore with no reflog fails loudly and preserves state --------
+repo_ref2=$(new_repo ref-noreflog)
+ref2=$(git -C "$repo_ref2" symbolic-ref HEAD)
+ref2_file="$repo_ref2/.git/$ref2"
+nul_ise "$ref2_file"
+rm -rf "$repo_ref2/.git/logs"
+
+if guard -RepoPath "$repo_ref2" -RestoreRefs >"$tmp/out14" 2>&1; then
+  fail "-RestoreRefs exited 0 when no reflog was available"
+fi
+grep -q 'RESTORE FAILED' "$tmp/out14" ||
+  fail "-RestoreRefs did not report failure when reflog was missing: $(cat "$tmp/out14")"
+ok "-RestoreRefs fails loudly when no reflog is available"
+
+# --- case 15: linked worktree ref corruption is detected and repaired -------
+repo_main=$(new_repo wt-main)
+wt_dir="$tmp/wt-child"
+git -C "$repo_main" worktree add -b wt-branch "$wt_dir" -q
+wt_ref="refs/heads/wt-branch"
+wt_ref_file="$repo_main/.git/$wt_ref"
+good_wt_sha=$(git -C "$wt_dir" rev-parse HEAD)
+nul_ise "$wt_ref_file"
+
+if guard -RepoPath "$wt_dir" -Verify >"$tmp/out15a" 2>&1; then
+  fail "-Verify in linked worktree exited 0 on corrupt branch ref"
+fi
+guard -RepoPath "$wt_dir" -RestoreRefs >"$tmp/out15b" 2>&1 ||
+  fail "-RestoreRefs in linked worktree failed: $(cat "$tmp/out15b")"
+git -C "$wt_dir" log --oneline -1 >/dev/null 2>&1 ||
+  fail "git log in worktree still fails after -RestoreRefs"
+ok "linked worktree ref corruption is detected and repaired"
+
+# --- case 16 (opt-in): lane-stop really restores after a real kill ----------
 # Registers a scheduled task, so it is off by default; run with
 # GIT_CONFIG_GUARD_E2E=1 to exercise the whole lane-stop path end to end.
 if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
@@ -273,9 +345,14 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
       printf "Unregister-ScheduledTask -TaskName 'edda-lane-%s' -Confirm:\$false -ErrorAction SilentlyContinue\n" "$fl_lane"
       printf "Register-ScheduledTask -TaskName 'edda-lane-%s' -Action \$a -RunLevel Limited | Out-Null\n" "$fl_lane"
       printf "Start-ScheduledTask -TaskName 'edda-lane-%s'\n" "$fl_lane"
-      printf 'Start-Sleep -Seconds 3\n'
+      printf "\$deadline = (Get-Date).AddSeconds(10)\n"
       printf "\$t = Get-ScheduledTask -TaskName 'edda-lane-%s'\n" "$fl_lane"
+      printf "while (\$t.State -ne 'Running' -and (Get-Date) -lt \$deadline) {\n"
+      printf "  Start-Sleep -Milliseconds 500\n"
+      printf "  \$t = Get-ScheduledTask -TaskName 'edda-lane-%s'\n" "$fl_lane"
+      printf "}\n"
       printf 'if ($t.State -ne "Running") { Write-Error "fake lane state=$($t.State), expected Running"; exit 1 }\n'
+      printf 'Start-Sleep -Seconds 2\n'
       printf '"fake lane is Running"\n'
     } >"$tmp/$fl_lane-setup.ps1"
     pwsh -NoProfile -NonInteractive -File "$tmp/$fl_lane-setup.ps1" >"$tmp/$fl_lane-setup.out" 2>&1 ||
@@ -422,7 +499,7 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
     fail "a raised guard error cost the lane its done-file (GH-672): $(cat "$tmp/out15")"
   ok "a guard that raises is caught, reported, and never skips the end record"
 else
-  echo "-- cases 11-15 (lane-stop end-to-end) skipped; set GIT_CONFIG_GUARD_E2E=1 to run them"
+  echo "-- cases 16-20 (lane-stop end-to-end) skipped; set GIT_CONFIG_GUARD_E2E=1 to run them"
 fi
 
 echo "all $case_number case(s) passed"

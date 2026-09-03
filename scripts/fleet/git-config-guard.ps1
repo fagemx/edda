@@ -1,45 +1,41 @@
-# git-config-guard.ps1 — keep the shared .git/config recoverable (GH-715).
+# git-config-guard.ps1 — keep the shared .git/config and refs recoverable (GH-715, GH-797).
 #
 # The main checkout and all 30+ linked worktrees read ONE .git/config to find
-# the remote. On 2026-09-02 17:16 and 2026-09-03 01:33 that file became a run
-# of NUL bytes (27328/27328 and 2561/2561) after lanes were hard-killed while
-# git was extending it — `fatal: bad config line 1` for every worktree at once.
-# There was no restore point: the .bak sitting next to it had been copied
-# AFTER the corruption, so it was all NULs too.
+# the remote, and shared git metadata under .git/refs to resolve branches.
+# On 2026-09-02 and 2026-09-03 hard-killing lanes mid-write resulted in NUL-corrupted
+# metadata files:
+#   * .git/config became runs of NUL bytes (27328/27328 and 2561/2561), breaking
+#     every worktree at once (GH-715).
+#   * refs/heads/<branch> became 41 NUL bytes, breaking branch checkout and log
+#     while rev-parse --is-inside-work-tree silently passed (GH-797).
 #
-# The fix that makes a backup worth having is validating BEFORE copying. This
-# script never writes a backup it has not parsed, and never reports a repair it
-# did not make.
+# The defense:
+#   * .git/config has no recovery source, so it requires a validated backup taken
+#     BEFORE the lane can write, never backing up an unparsed file.
+#   * Branch refs DO have a recovery source: git's own write-ahead reflog.
+#     The detector is `git fsck --connectivity-only` (and loose ref inspection).
+#     The repair is preserving the dead ref for forensics, removing it, and
+#     restoring the SHA from the reflog via `git update-ref`.
 #
 # usage:
 #   pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <repo> -Backup
 #   pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <repo> -Verify
 #   pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <repo> -Restore
 #   pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <repo> -VerifyOrRestore
+#   pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <repo> -VerifyRefs
+#   pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <repo> -RestoreRefs
 #
 # -RepoPath may be the main checkout or any linked worktree: the target is
-# always the SHARED config (`git rev-parse --git-common-dir`), because that is
-# the single file whose loss takes down every worktree.
-#
-# -Backup keeps one generation: the outgoing backup moves to <backup>.prev
-# before the new one is written. Be precise about what that buys. The
-# AUTOMATIC fallback only fires when the newest backup is DETECTABLY broken
-# (case 10). It cannot fire for the case that motivates keeping a generation
-# at all — a torn write ending on a boundary that still parses — because
-# nothing can tell that file from a good one; there, .prev is the copy an
-# operator points -BackupPath at by hand once they know the newest is wrong.
-#
-# A config that cannot be READ (held open by whatever is writing it) is a third
-# outcome, not a synonym for corrupt: nothing is backed up from it and nothing
-# is restored over it, because it may be perfectly good.
+# always the SHARED config and refs (`git rev-parse --git-common-dir`), because that
+# is the single directory whose loss takes down every worktree.
 #
 # Exit codes:
-#   0  the config is healthy (backed up / verified / restored)
+#   0  metadata is healthy (backed up / verified / restored)
 #   1  usage or resolution error (no mode, not a git repo, git unavailable)
-#   2  the config is unhealthy — and for -Restore/-VerifyOrRestore, could not
-#      be repaired (no usable backup, or the restored file still does not parse)
+#   2  metadata is unhealthy — and for -Restore/-VerifyOrRestore, could not
+#      be repaired (no usable backup/reflog, or the restored state still does not parse)
 #   3  no backup was taken: the config is healthy but the copy failed
-#   4  the config could not be judged at all, because it could not be read.
+#   4  config could not be judged at all, because it could not be read.
 #      Distinct from 2 on purpose: nothing is known to be wrong with it
 param(
   [string]$RepoPath = '.',
@@ -47,6 +43,8 @@ param(
   [switch]$Verify,
   [switch]$Restore,
   [switch]$VerifyOrRestore,
+  [switch]$VerifyRefs,
+  [switch]$RestoreRefs,
   [string]$BackupPath = ''
 )
 
@@ -62,28 +60,30 @@ function Fail([string]$Msg, [int]$Code = 1) {
   exit $Code
 }
 
-$modes = @($Backup, $Verify, $Restore, $VerifyOrRestore) | Where-Object { $_ }
+$modes = @($Backup, $Verify, $Restore, $VerifyOrRestore, $VerifyRefs, $RestoreRefs) | Where-Object { $_ }
 if ($modes.Count -ne 1) {
-  Fail 'give exactly one of -Backup, -Verify, -Restore, -VerifyOrRestore'
+  Fail 'give exactly one of -Backup, -Verify, -Restore, -VerifyOrRestore, -VerifyRefs, -RestoreRefs'
 }
 
-# --- resolve the shared config ----------------------------------------------
+# --- resolve the shared config & worktree gitdir ----------------------------
 
 if (-not (Test-Path -LiteralPath $RepoPath)) { Fail "-RepoPath '$RepoPath' does not exist" }
 $RepoPath = (Resolve-Path -LiteralPath $RepoPath).Path
 
-# Ask git first — it is authoritative and honours GIT_DIR and friends. But the
-# case this tool exists for is exactly the one where git refuses to answer:
-# once .git/config is a run of NULs, EVERY git command in the repo fails,
-# rev-parse included. So fall back to walking the same links git would.
+$script:WorktreeGitDir = $null
+
 function Resolve-CommonDir([string]$Start) {
   # Collect the whole stream before reading $LASTEXITCODE: `Select-Object
   # -First` stops the pipeline early and leaves the exit code unset.
-  $out = @(& git -C $Start rev-parse --path-format=absolute --git-common-dir 2>$null)
-  if ($LASTEXITCODE -eq 0 -and $out.Count -gt 0) {
-    $fromGit = "$($out[0])".Trim()
-    if ($fromGit -and (Test-Path -LiteralPath $fromGit -PathType Container)) {
-      return (Resolve-Path -LiteralPath $fromGit).Path
+  $out = @(& git -C $Start rev-parse --path-format=absolute --git-common-dir --git-dir 2>$null)
+  if ($LASTEXITCODE -eq 0 -and $out.Count -ge 2) {
+    $fromGitCommon = "$($out[0])".Trim()
+    $fromGitDir = "$($out[1])".Trim()
+    if ($fromGitDir -and (Test-Path -LiteralPath $fromGitDir -PathType Container)) {
+      $script:WorktreeGitDir = (Resolve-Path -LiteralPath $fromGitDir).Path
+    }
+    if ($fromGitCommon -and (Test-Path -LiteralPath $fromGitCommon -PathType Container)) {
+      return (Resolve-Path -LiteralPath $fromGitCommon).Path
     }
   }
 
@@ -109,6 +109,7 @@ function Resolve-CommonDir([string]$Start) {
   }
   if (-not $gitDir -or -not (Test-Path -LiteralPath $gitDir -PathType Container)) { return $null }
   $gitDir = (Resolve-Path -LiteralPath $gitDir).Path
+  $script:WorktreeGitDir = $gitDir
 
   $commonFile = Join-Path $gitDir 'commondir'
   if (Test-Path -LiteralPath $commonFile -PathType Leaf) {
@@ -127,16 +128,10 @@ if (-not $commonDir) {
 }
 $ConfigPath = Join-Path $commonDir 'config'
 if (-not $BackupPath) { $BackupPath = Join-Path $commonDir 'config.guard.bak' }
+$PrevBackupPath = "$BackupPath.prev"
 
-# --- health ------------------------------------------------------------------
+# --- config health -----------------------------------------------------------
 
-# Healthy means all three: the file has content, holds no NUL byte, and git
-# itself can parse it. The NUL check is what names the failure seen twice on
-# 2026-09-03; `git config --list` is the criterion GH-715 asks a backup to meet.
-#
-# "Unreadable" is a THIRD outcome, not a synonym for unhealthy: a config held
-# open by a process that is still writing it cannot be judged, and must not be
-# overwritten from a backup on the strength of a failed read.
 function Get-ConfigHealth([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
     return @{ Healthy = $false; Reason = 'file does not exist' }
@@ -161,10 +156,7 @@ function Get-ConfigHealth([string]$Path) {
   return @{ Healthy = $true; Reason = 'parses, no NUL bytes' }
 }
 
-# Copy through a sibling temp file so a reader never observes a half-written
-# destination — the same class of hazard that produced the NUL config. The temp
-# file is never left behind: a half-written .guard-tmp is the very thing this
-# script exists to keep out of the git directory.
+# Copy through a sibling temp file so a reader never observes a half-written destination.
 function Copy-Atomic([string]$From, [string]$To) {
   $tmp = "$To.guard-tmp"
   try {
@@ -177,8 +169,6 @@ function Copy-Atomic([string]$From, [string]$To) {
   }
 }
 
-# A name no existing file holds, so a second restore inside the same second
-# cannot overwrite the first one's evidence.
 function New-UniquePath([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path)) { return $Path }
   $n = 2
@@ -186,39 +176,254 @@ function New-UniquePath([string]$Path) {
   return "$Path.$n"
 }
 
-$health = Get-ConfigHealth $ConfigPath
+# --- refs health & reflog recovery (GH-797) ----------------------------------
+
+function Resolve-RefRepairSha([string]$Repo, [string]$CommonDir, [string]$Ref) {
+  $normalizedRef = $Ref -replace '\\', '/'
+  $candidates = New-Object System.Collections.Generic.List[string]
+
+  # 1. Primary reflog: <commonDir>/logs/<ref>
+  $primaryReflog = Join-Path $CommonDir "logs\$($normalizedRef -replace '/', '\')"
+  if (Test-Path -LiteralPath $primaryReflog -PathType Leaf) {
+    $candidates.Add($primaryReflog)
+  }
+
+  # 2. Worktree HEAD reflog (if this worktree's HEAD points to this ref)
+  if ($script:WorktreeGitDir) {
+    $wtHeadPath = Join-Path $script:WorktreeGitDir 'HEAD'
+    if (Test-Path -LiteralPath $wtHeadPath -PathType Leaf) {
+      $wtHeadContent = "$(Get-Content -LiteralPath $wtHeadPath -TotalCount 1)".Trim()
+      if ($wtHeadContent -match '^\s*ref:\s*(.+?)\s*$' -and ($Matches[1] -replace '\\', '/') -eq $normalizedRef) {
+        $wtHeadLog = Join-Path $script:WorktreeGitDir 'logs\HEAD'
+        if (Test-Path -LiteralPath $wtHeadLog -PathType Leaf) {
+          $candidates.Add($wtHeadLog)
+        }
+      }
+    }
+  }
+
+  # 3. Common HEAD reflog (if common HEAD points to this ref)
+  $commonHeadPath = Join-Path $CommonDir 'HEAD'
+  if (Test-Path -LiteralPath $commonHeadPath -PathType Leaf) {
+    $commonHeadContent = "$(Get-Content -LiteralPath $commonHeadPath -TotalCount 1)".Trim()
+    if ($commonHeadContent -match '^\s*ref:\s*(.+?)\s*$' -and ($Matches[1] -replace '\\', '/') -eq $normalizedRef) {
+      $commonHeadLog = Join-Path $CommonDir 'logs\HEAD'
+      if (Test-Path -LiteralPath $commonHeadLog -PathType Leaf) {
+        $candidates.Add($commonHeadLog)
+      }
+    }
+  }
+
+  foreach ($logPath in $candidates) {
+    $lines = @(Get-Content -LiteralPath $logPath -ErrorAction SilentlyContinue)
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+      $line = $lines[$i]
+      $parts = $line -split '\s+'
+      if ($parts.Count -ge 2) {
+        $candidateSha = $parts[1]
+        if ($candidateSha -match '^[0-9a-fA-F]{40}$' -and $candidateSha -ne '0000000000000000000000000000000000000000') {
+          & git -C $Repo cat-file -e $candidateSha 2>&1 | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            return @{ Sha = $candidateSha; Source = $logPath }
+          }
+        }
+      }
+    }
+  }
+
+  return @{ Sha = $null; Source = $null }
+}
+
+function Get-RefsHealth([string]$Repo, [string]$CommonDir) {
+  $fsckRaw = @(& git -C $Repo fsck --connectivity-only 2>&1)
+  $fsckExit = $LASTEXITCODE
+  if ($fsckExit -eq 0) {
+    return @{ Healthy = $true; Reason = 'connectivity ok' }
+  }
+
+  # Parse fsck output for broken refs
+  $brokenMap = @{}
+  foreach ($line in $fsckRaw) {
+    if ($line -match 'error:\s+(refs/[^\s:]+):\s+(.*)') {
+      $r = ($Matches[1].Trim() -replace '\\', '/')
+      $msg = $Matches[2].Trim()
+      if (-not $brokenMap.ContainsKey($r)) {
+        $brokenMap[$r] = $msg
+      }
+    }
+  }
+
+  # Also inspect loose ref files under $CommonDir/refs/heads for NULs or bad length
+  $headsDir = Join-Path $CommonDir 'refs\heads'
+  if (Test-Path -LiteralPath $headsDir -PathType Container) {
+    $refFiles = Get-ChildItem -LiteralPath $headsDir -Recurse -File -ErrorAction SilentlyContinue
+    foreach ($rf in $refFiles) {
+      $relPath = ($rf.FullName.Substring($CommonDir.Length).TrimStart('\', '/') -replace '\\', '/')
+      if (-not $brokenMap.ContainsKey($relPath)) {
+        try {
+          $bytes = [System.IO.File]::ReadAllBytes($rf.FullName)
+          $hasNul = $false
+          foreach ($b in $bytes) { if ($b -eq 0) { $hasNul = $true; break } }
+          if ($hasNul) {
+            $brokenMap[$relPath] = "$($bytes.Length) bytes, contains NUL bytes (GH-797)"
+          }
+        } catch {}
+      }
+    }
+  }
+
+  if ($brokenMap.Count -eq 0) {
+    $firstLine = if ($fsckRaw.Count -gt 0) { "$($fsckRaw[0])" } else { "git fsck exit $fsckExit" }
+    return @{
+      Healthy = $false
+      BrokenRefs = @()
+      Reason = "git fsck failed: $firstLine"
+      CanRepair = $false
+    }
+  }
+
+  $brokenList = New-Object System.Collections.Generic.List[hashtable]
+  $allHaveRepairs = $true
+  $reasons = @()
+  foreach ($r in $brokenMap.Keys) {
+    $repairInfo = Resolve-RefRepairSha $Repo $CommonDir $r
+    $item = @{
+      Ref = $r
+      Error = $brokenMap[$r]
+      RepairSha = $repairInfo.Sha
+      RepairSource = $repairInfo.Source
+    }
+    $brokenList.Add($item)
+    if ($repairInfo.Sha) {
+      $reasons += "$r is broken ($($brokenMap[$r])); repair available from $($repairInfo.Source): $($repairInfo.Sha)"
+    } else {
+      $allHaveRepairs = $false
+      $reasons += "$r is broken ($($brokenMap[$r])); no repair SHA found in reflog"
+    }
+  }
+
+  return @{
+    Healthy = $false
+    BrokenRefs = @($brokenList)
+    Reason = ($reasons -join '; ')
+    CanRepair = $allHaveRepairs
+  }
+}
+
+function Restore-BrokenRefs([string]$Repo, [string]$CommonDir, $BrokenRefs) {
+  $restored = @()
+  foreach ($b in $BrokenRefs) {
+    if (-not $b.RepairSha) {
+      return @{
+        Success = $false
+        Restored = $restored
+        Reason = "no repair SHA available for ref $($b.Ref)"
+      }
+    }
+    $refName = $b.Ref
+    $sha = $b.RepairSha
+
+    # Preserve corrupt file outside .git/refs to avoid tripping git fsck
+    $targetFile = Join-Path $CommonDir ($refName -replace '/', '\')
+    $sanitized = $refName -replace '[/\\:]', '_'
+    $stamp = Get-Date -Format 'yyyy-MM-ddTHH-mm-ss'
+    $preserved = Join-Path $CommonDir "ref.CORRUPT.$sanitized.$stamp.bak"
+    $preserved = New-UniquePath $preserved
+
+    if (Test-Path -LiteralPath $targetFile) {
+      Copy-Item -LiteralPath $targetFile -Destination $preserved -Force
+      Remove-Item -LiteralPath $targetFile -Force
+    }
+
+    & git -C $Repo update-ref $refName $sha
+    if ($LASTEXITCODE -ne 0) {
+      return @{
+        Success = $false
+        Restored = $restored
+        Reason = "git update-ref $refName $sha failed with exit $LASTEXITCODE"
+      }
+    }
+    $restored += "RESTORED ref=$refName to sha=$sha from $($b.RepairSource); corrupt file preserved at $preserved"
+  }
+
+  $after = Get-RefsHealth $Repo $CommonDir
+  if (-not $after.Healthy) {
+    return @{
+      Success = $false
+      Restored = $restored
+      Reason = "refs still unhealthy after restoration: $($after.Reason)"
+    }
+  }
+
+  return @{
+    Success = $true
+    Restored = $restored
+    Reason = 'all refs restored and verified healthy'
+  }
+}
+
+# --- -VerifyRefs -------------------------------------------------------------
+
+if ($VerifyRefs) {
+  $refsHealth = Get-RefsHealth $RepoPath $commonDir
+  if (-not $refsHealth.Healthy) {
+    Fail "refs UNHEALTHY: $($refsHealth.Reason)" 2
+  }
+  "refs=healthy ($($refsHealth.Reason))"
+  exit 0
+}
+
+# --- -RestoreRefs ------------------------------------------------------------
+
+if ($RestoreRefs) {
+  $refsHealth = Get-RefsHealth $RepoPath $commonDir
+  if ($refsHealth.Healthy) {
+    "refs healthy ($($refsHealth.Reason)); nothing restored"
+    exit 0
+  }
+  [Console]::Error.WriteLine("git-config-guard: refs UNHEALTHY: $($refsHealth.Reason)")
+  $restoreResult = Restore-BrokenRefs $RepoPath $commonDir $refsHealth.BrokenRefs
+  if (-not $restoreResult.Success) {
+    Fail "RESTORE FAILED: $($restoreResult.Reason)" 2
+  }
+  foreach ($r in $restoreResult.Restored) {
+    "$r"
+  }
+  exit 0
+}
 
 # --- -Verify -----------------------------------------------------------------
 
+$configHealth = Get-ConfigHealth $ConfigPath
+
 if ($Verify) {
-  if ($health.Healthy) {
-    "config=$ConfigPath healthy ($($health.Reason))"
-    exit 0
+  if ($configHealth.Unreadable) {
+    Fail "config=$ConfigPath COULD NOT BE JUDGED: $($configHealth.Reason)" 4
   }
-  if ($health.Unreadable) {
-    Fail "config=$ConfigPath COULD NOT BE JUDGED: $($health.Reason)" 4
+  if (-not $configHealth.Healthy) {
+    Fail "config=$ConfigPath UNHEALTHY: $($configHealth.Reason)" 2
   }
-  Fail "config=$ConfigPath UNHEALTHY: $($health.Reason)" 2
+  $refsHealth = Get-RefsHealth $RepoPath $commonDir
+  if (-not $refsHealth.Healthy) {
+    Fail "refs UNHEALTHY: $($refsHealth.Reason)" 2
+  }
+  "config=$ConfigPath healthy ($($configHealth.Reason))"
+  "refs=healthy ($($refsHealth.Reason))"
+  exit 0
 }
 
 # --- -Backup -----------------------------------------------------------------
 
-# One generation back. The automatic fallback below only fires when the newest
-# backup is DETECTABLY broken; for a torn-but-parsing one nothing can tell it
-# from a good copy, and .prev is then the file an operator restores by hand
-# with -BackupPath. See the header.
-$PrevBackupPath = "$BackupPath.prev"
-
 if ($Backup) {
-  if ($health.Unreadable) {
-    # Nothing is known about the config, so nothing may be concluded from it:
-    # do not overwrite the backup, and do not claim the config is broken.
-    Fail "config could not be read, so no backup was taken ($($health.Reason)); $BackupPath left as it was" 4
+  if ($configHealth.Unreadable) {
+    Fail "config could not be read, so no backup was taken ($($configHealth.Reason)); $BackupPath left as it was" 4
   }
-  if (-not $health.Healthy) {
-    # Refusing here is the whole point: the real .bak files on this machine were
-    # copied after the corruption and were therefore useless.
-    Fail "refusing to back up an unhealthy config ($($health.Reason)); $BackupPath left as it was" 2
+  if (-not $configHealth.Healthy) {
+    Fail "refusing to back up an unhealthy config ($($configHealth.Reason)); $BackupPath left as it was" 2
+  }
+  $refsHealth = Get-RefsHealth $RepoPath $commonDir
+  if (-not $refsHealth.Healthy) {
+    Fail "ref(s) unhealthy ($($refsHealth.Reason)); cannot guarantee repo consistency — repair with scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs" 2
   }
   try {
     if ((Get-ConfigHealth $BackupPath).Healthy) { Copy-Atomic $BackupPath $PrevBackupPath }
@@ -227,46 +432,57 @@ if ($Backup) {
     Fail "config is healthy but the backup could not be written to ${BackupPath}: $($_.Exception.Message)" 3
   }
   "config=$ConfigPath healthy; backup=$BackupPath"
+  "refs=healthy ($($refsHealth.Reason))"
   exit 0
 }
 
 # --- -Restore / -VerifyOrRestore ---------------------------------------------
 
-if ($health.Healthy) {
-  "config=$ConfigPath healthy ($($health.Reason)); nothing restored"
-  exit 0
+$configRestored = $false
+if (-not $configHealth.Healthy) {
+  if ($configHealth.Unreadable) {
+    Fail "config=$ConfigPath could not be read, so it was NOT restored ($($configHealth.Reason)); check what holds it open" 4
+  }
+  [Console]::Error.WriteLine("git-config-guard: config=$ConfigPath UNHEALTHY: $($configHealth.Reason)")
+
+  $source = $null
+  foreach ($candidate in @($BackupPath, $PrevBackupPath)) {
+    $candidateHealth = Get-ConfigHealth $candidate
+    if ($candidateHealth.Healthy) { $source = $candidate; break }
+    [Console]::Error.WriteLine("git-config-guard: unusable backup ${candidate}: $($candidateHealth.Reason)")
+  }
+  if (-not $source) {
+    Fail "no usable backup to restore from (tried $BackupPath, $PrevBackupPath); config left untouched for forensics" 2
+  }
+
+  $stamp = Get-Date -Format 'yyyy-MM-ddTHH-mm-ss'
+  $preserved = New-UniquePath (Join-Path $commonDir "config.CORRUPT.$stamp.bak")
+  Copy-Item -LiteralPath $ConfigPath -Destination $preserved -Force
+  Copy-Atomic $source $ConfigPath
+
+  $after = Get-ConfigHealth $ConfigPath
+  if (-not $after.Healthy) {
+    Fail "RESTORE FAILED: config still unhealthy after copying $source ($($after.Reason))" 2
+  }
+  "RESTORED config=$ConfigPath from backup=$source; corrupt file preserved at $preserved"
+  $configRestored = $true
+} else {
+  "config=$ConfigPath healthy ($($configHealth.Reason)); nothing restored"
 }
 
-if ($health.Unreadable) {
-  # A locked config is not a corrupt one. Overwriting it here would destroy a
-  # file that may be perfectly good and is currently being written.
-  Fail "config=$ConfigPath could not be read, so it was NOT restored ($($health.Reason)); check what holds it open" 4
+# Check and restore refs
+$refsHealth = Get-RefsHealth $RepoPath $commonDir
+if (-not $refsHealth.Healthy) {
+  [Console]::Error.WriteLine("git-config-guard: refs UNHEALTHY: $($refsHealth.Reason)")
+  $restoreResult = Restore-BrokenRefs $RepoPath $commonDir $refsHealth.BrokenRefs
+  if (-not $restoreResult.Success) {
+    Fail "RESTORE FAILED: $($restoreResult.Reason)" 2
+  }
+  foreach ($r in $restoreResult.Restored) {
+    "$r"
+  }
+} else {
+  "refs healthy ($($refsHealth.Reason)); nothing restored"
 }
 
-[Console]::Error.WriteLine("git-config-guard: config=$ConfigPath UNHEALTHY: $($health.Reason)")
-
-$source = $null
-foreach ($candidate in @($BackupPath, $PrevBackupPath)) {
-  $candidateHealth = Get-ConfigHealth $candidate
-  if ($candidateHealth.Healthy) { $source = $candidate; break }
-  [Console]::Error.WriteLine("git-config-guard: unusable backup ${candidate}: $($candidateHealth.Reason)")
-}
-if (-not $source) {
-  Fail "no usable backup to restore from (tried $BackupPath, $PrevBackupPath); config left untouched for forensics" 2
-}
-
-# Keep the corrupt file: it is the only evidence of what the kill did, and the
-# name matches the ones already archived for the two 2026-09 incidents.
-$stamp = Get-Date -Format 'yyyy-MM-ddTHH-mm-ss'
-$preserved = New-UniquePath (Join-Path $commonDir "config.CORRUPT.$stamp.bak")
-Copy-Item -LiteralPath $ConfigPath -Destination $preserved -Force
-
-Copy-Atomic $source $ConfigPath
-
-$after = Get-ConfigHealth $ConfigPath
-if (-not $after.Healthy) {
-  Fail "RESTORE FAILED: config still unhealthy after copying $source ($($after.Reason))" 2
-}
-
-"RESTORED config=$ConfigPath from backup=$source; corrupt file preserved at $preserved"
 exit 0
