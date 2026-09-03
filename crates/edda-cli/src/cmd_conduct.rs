@@ -70,8 +70,9 @@ pub enum ConductCmd {
     },
     /// Abort a running plan
     Abort {
-        /// Plan name (auto-detects if only one)
-        plan_name: Option<String>,
+        /// Plan name (auto-detects if only one store holds plans)
+        #[arg(long)]
+        plan: Option<String>,
     },
 }
 
@@ -103,7 +104,7 @@ pub fn run_cmd(cmd: ConductCmd, repo_root: &Path) -> Result<()> {
             reason,
             plan,
         } => skip(repo_root, &phase_id, reason.as_deref(), plan.as_deref()),
-        ConductCmd::Abort { plan_name } => abort(repo_root, plan_name.as_deref()),
+        ConductCmd::Abort { plan } => abort(repo_root, plan.as_deref()),
     }
 }
 
@@ -345,55 +346,16 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
             None => vec![(name.to_string(), repo_root.to_path_buf())],
         }
     } else {
-        // Round-2 P2, adjusted by round-3 P1-1, adjusted by round-4 P1-1/P1-3:
-        // the unnamed listing is a READ-ONLY overview — it scans the direct
-        // worktree union AND every store registry (a scratchpad-launched plan
-        // is invisible otherwise, which is the literally-reported symptom of
-        // #557), and a corrupt state file degrades to a stderr warning + a
-        // marked entry instead of killing the overview of every healthy lane.
-        // Mutating verbs still propagate corrupt files (retarget risk).
-        let mut found: Vec<(String, PathBuf)> = Vec::new();
-        let mark = |name: &str, store: &Path, found: &mut Vec<(String, PathBuf)>| {
-            if !found.iter().any(|(n, _)| n == name) {
-                found.push((name.to_string(), store.to_path_buf()));
-            }
-        };
-        for store in plan_stores(repo_root) {
-            let conductor_dir = store.join(".edda").join("conductor");
-            if !conductor_dir.exists() {
-                continue;
-            }
-            // Registry-referenced stores first (round-4 P1-1).
-            match registry_read(&store) {
-                Ok(registry) => {
-                    for (name, referenced) in &registry {
-                        match load_state(referenced, name) {
-                            Ok(Some(_)) => mark(name, referenced, &mut found),
-                            Ok(None) => continue,
-                            Err(e) => eprintln!(
-                                "⚠ plan \"{name}\" (registry → {}) unreadable, omitted from the listing: {e}",
-                                referenced.display()
-                            ),
-                        }
-                    }
-                }
-                Err(e) => eprintln!("⚠ store registry unreadable ({}): {e}", store.display()),
-            }
-            for entry in std::fs::read_dir(&conductor_dir)? {
-                let entry = entry?;
-                if entry.file_type()?.is_dir() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        match load_state(&store, name) {
-                            Ok(Some(_)) => mark(name, &store, &mut found),
-                            Ok(None) => continue,
-                            Err(e) => eprintln!(
-                                "⚠ plan \"{name}\" state in {} unreadable, omitted from listing: {e}",
-                                store.display()
-                            ),
-                        }
-                    }
-                }
-            }
+        // Round-6: ONE discovery pass shared with the recovery verbs — the
+        // listing and the verbs can no longer disagree. A corrupt state
+        // file degrades to a stderr warning + omission on this read-only
+        // overview (mutating verbs propagate it instead).
+        let (mut found, corrupt) = discover_plans(repo_root)?;
+        for (name, store, e) in &corrupt {
+            eprintln!(
+                "⚠ plan \"{name}\" state in {} unreadable, omitted from the listing: {e:#}",
+                store.display()
+            );
         }
         found.sort_by(|a, b| a.0.cmp(&b.0));
         found
@@ -733,12 +695,14 @@ fn normalize_store_path(p: &Path) -> String {
         .map(|c| c.to_string_lossy().trim_start_matches(r"\\?\").to_string())
         .unwrap_or_else(|_| p.to_string_lossy().to_string());
     let unified = canonical.replace('/', "\\");
-    // Windows paths are case-insensitive; POSIX paths are not —
-    // lowercasing on Linux would collapse distinct lanes (round-5 P3).
+    // Windows paths are case-insensitive and separator-ambiguous (8.3
+    // short names, / vs \\); POSIX paths are neither — folding either on
+    // Linux would collapse distinct lanes and mangle the display
+    // (round-5/6 P3).
     if cfg!(windows) {
         unified.to_lowercase()
     } else {
-        unified
+        canonical
     }
 }
 
@@ -870,6 +834,82 @@ fn registry_record(root: &Path, plan: &str, store: &Path) {
     drop(lock);
 }
 
+/// Plans found, as (name, store) — the shared discovery output type.
+pub type DiscoveredPlans = Vec<(String, PathBuf)>;
+/// Corrupt-state diagnostics from a discovery pass (name, store, error).
+pub type DiscoveryCorruption = Vec<(String, PathBuf, anyhow::Error)>;
+
+/// One discovery pass shared by `status` and the recovery verbs (GH-557
+/// round-6: the two surfaces must never disagree about which store holds a
+/// plan). Scans every store's conductor directory plus every store
+/// registry, deduped by (plan, normalized store). Returns the plan→store
+/// map and the corrupt-state diagnostics — callers decide: warn on the
+/// read-only overview, error on a mutating verb.
+fn discover_plans(repo_root: &Path) -> Result<(DiscoveredPlans, DiscoveryCorruption)> {
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    let mut corrupt: Vec<(String, PathBuf, anyhow::Error)> = Vec::new();
+    let mark = |name: &str, store: &Path, found: &mut Vec<(String, PathBuf)>| {
+        if !found
+            .iter()
+            .any(|(n, s)| n == name && normalize_store_path(s) == normalize_store_path(store))
+        {
+            found.push((name.to_string(), store.to_path_buf()));
+        }
+    };
+    for store in plan_stores(repo_root) {
+        let conductor_dir = store.join(".edda").join("conductor");
+        // Registry-referenced stores FIRST (round-5 P1-2: the registry is
+        // the store `conduct run` actually used — the authoritative record;
+        // a stale same-name state.json in the repo root or a worktree must
+        // not outrank it).
+        match registry_read(&store) {
+            Ok(registry) => {
+                for (name, referenced) in &registry {
+                    match load_state(referenced, name) {
+                        Ok(Some(_)) => mark(name, referenced, &mut found),
+                        Ok(None) => continue,
+                        Err(e) => corrupt.push((
+                            name.clone(),
+                            referenced.clone(),
+                            e.context(format!(
+                                "plan \"{name}\" registry points to {}",
+                                referenced.display()
+                            )),
+                        )),
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("⚠ store registry unreadable ({}): {e}", store.display());
+            }
+        }
+        if !conductor_dir.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&conductor_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(name) = entry.file_name().to_str() {
+                    match load_state(&store, name) {
+                        Ok(Some(_)) => mark(name, &store, &mut found),
+                        Ok(None) => continue,
+                        Err(e) => corrupt.push((
+                            name.to_string(),
+                            store.clone(),
+                            e.context(format!(
+                                "plan \"{name}\" state in {} is unreadable",
+                                store.display()
+                            )),
+                        )),
+                    }
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((found, corrupt))
+}
+
 /// Every store currently holding `<plan>`'s state.json (GH-557), in
 /// deterministic order (repo root first, then `git worktree list` order).
 /// A corrupt state file is an error, NOT "absent" — swallowing it would
@@ -877,59 +917,28 @@ fn registry_record(root: &Path, plan: &str, store: &Path) {
 /// stale same-name state.
 fn stores_holding(repo_root: &Path, plan: &str) -> Result<Vec<PathBuf>> {
     edda_conductor::state::persist::validate_plan_name(plan)?;
-    let mut holding: Vec<PathBuf> = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
-    // push: normalized identity (round-5 P1-1 — raw PathBuf equality is
-    // case- and short-name-sensitive on Windows and cried wolf on a single
-    // store), first writer wins.
-    let push = |store: PathBuf, holding: &mut Vec<PathBuf>, seen: &mut Vec<String>| {
-        let key = normalize_store_path(&store);
-        if !seen.contains(&key) {
-            seen.push(key);
-            holding.push(store);
-        }
-    };
-    // Registry FIRST (round-5 P1-2): it is the store `conduct run` actually
-    // used — the authoritative record. Any stale same-name state.json in
-    // the repo root or a worktree must not outrank it.
-    for store in plan_stores(repo_root) {
-        // A corrupt REGISTRY is read-path noise (warn, keep scanning) —
-        // mutating verbs still propagate corrupt state files.
-        let registry = match registry_read(&store) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("⚠ store registry unreadable ({}): {e}", store.display());
-                continue;
-            }
-        };
-        if let Some(referenced) = registry.get(plan) {
-            if load_state(referenced, plan)
-                .with_context(|| {
-                    format!(
-                        "plan \"{plan}\" registry points to {}",
-                        referenced.display()
-                    )
-                })?
-                .is_some()
-            {
-                push(referenced.clone(), &mut holding, &mut seen);
-            }
+    let (found, corrupt) = discover_plans(repo_root)?;
+    // A corrupt state file for THIS plan is an error, never "absent" —
+    // swallowing it could retarget the mutation onto a different store
+    // holding a same-name state. Corrupt files of OTHER plans are that
+    // lane's problem and do not block this verb.
+    for (name, store, e) in &corrupt {
+        if name == plan {
+            return Err(anyhow::anyhow!(
+                "plan \"{plan}\" state in {} is unreadable: {e:#}",
+                store.display()
+            ));
         }
     }
-    // Direct scan second.
-    for store in plan_stores(repo_root) {
-        match load_state(&store, plan) {
-            Ok(Some(_)) => push(store, &mut holding, &mut seen),
-            Ok(None) => continue,
-            Err(e) => {
-                return Err(e.context(format!(
-                    "plan \"{plan}\" state in {} is unreadable",
-                    store.display()
-                )))
-            }
-        }
-    }
-    Ok(holding)
+    // discover_plans orders registry-referenced stores FIRST (round-5
+    // P1-2: the registry is the authoritative `conduct run` record; a
+    // stale same-name state.json anywhere else must not outrank it) and
+    // dedups by normalized store identity (round-5 P1-1).
+    Ok(found
+        .into_iter()
+        .filter(|(name, _)| name == plan)
+        .map(|(_, store)| store.clone())
+        .collect())
 }
 
 /// The store a verb should act on: the first store holding the plan. When
@@ -1506,6 +1515,38 @@ mod tests {
             text.contains("plan-x") && text.contains("scratchpad"),
             "registry-referenced plans must be listed with provenance: {text}"
         );
+    }
+
+    /// GH-557 (independent-review round 6, P0-1): every recovery invocation
+    /// the docs and the shipped skill teach must PARSE — `abort --plan`
+    /// was a positional arg, so the documented command errored out.
+    #[test]
+    fn documented_recovery_invocations_parse() {
+        match parse(&["edda", "abort", "--plan", "plan-x"]) {
+            ConductCmd::Abort { plan } => {
+                assert_eq!(plan.as_deref(), Some("plan-x"))
+            }
+            _other => panic!("expected Abort"),
+        }
+        match parse(&["edda", "retry", "a", "--plan", "plan-x"]) {
+            ConductCmd::Retry { phase_id, plan } => {
+                assert_eq!(phase_id, "a");
+                assert_eq!(plan.as_deref(), Some("plan-x"));
+            }
+            _other => panic!("expected Retry"),
+        }
+        match parse(&["edda", "skip", "a", "--plan", "plan-x", "--reason", "why"]) {
+            ConductCmd::Skip {
+                phase_id,
+                reason,
+                plan,
+            } => {
+                assert_eq!(phase_id, "a");
+                assert_eq!(plan.as_deref(), Some("plan-x"));
+                assert_eq!(reason.as_deref(), Some("why"));
+            }
+            _other => panic!("expected Skip"),
+        }
     }
 
     /// GH-557: with no matching state anywhere, the error names the searched
