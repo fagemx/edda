@@ -172,32 +172,51 @@ mod tests {
         assert_eq!(v["uncommitted_events"], Value::from(0));
     }
 
-    /// COMPATIBILITY.md claims `--json` "adds no failure mode of its own".
-    /// That sentence is only worth having if something checks it: on a
-    /// directory that is not a workspace, both forms must agree on the exit
-    /// code, and the JSON form must not print a half-object consumers would
-    /// try to parse.
+    /// COMPATIBILITY.md claims `--json` "adds no failure mode of its own" and
+    /// that both forms produce the same exit code and stderr in every state.
+    /// That sentence is only worth having if something checks it: the two
+    /// forms must agree on the exit code, and the JSON form must never print a
+    /// half-object consumers would try to parse.
+    ///
+    /// Covers the two states reachable without hand-building a ledger: no
+    /// workspace at all, and a `.edda/ledger.db` that is not a database. The
+    /// third — a ledger whose schema is newer than the binary — is pinned for
+    /// the text form by `tests/schema_refusal_contract.rs`.
     #[test]
     fn status_json_adds_no_failure_mode() {
-        let empty = tempfile::tempdir().expect("empty tempdir");
+        let no_workspace = tempfile::tempdir().expect("no-workspace tempdir");
 
-        let (text_code, text_out, _) = run_edda(&["status"], empty.path());
-        let (json_code, json_out, _) = run_edda(&["status", "--json"], empty.path());
+        let corrupt = tempfile::tempdir().expect("corrupt tempdir");
+        std::fs::create_dir_all(corrupt.path().join(".edda")).expect("mkdir .edda");
+        std::fs::write(
+            corrupt.path().join(".edda").join("ledger.db"),
+            b"this is not a database",
+        )
+        .expect("write corrupt ledger");
 
-        assert_eq!(
-            text_code, json_code,
-            "--json changed the exit code on a failure path: \
-             text={text_code} json={json_code}"
-        );
-        assert_ne!(json_code, 0, "expected a failure on a non-workspace");
-        assert!(
-            json_out.trim().is_empty(),
-            "a failure must not print JSON on stdout: {json_out:?}"
-        );
-        assert!(
-            text_out.trim().is_empty(),
-            "a failure must not print status text on stdout: {text_out:?}"
-        );
+        for repo in [no_workspace.path(), corrupt.path()] {
+            let (text_code, text_out, text_err) = run_edda(&["status"], repo);
+            let (json_code, json_out, json_err) = run_edda(&["status", "--json"], repo);
+
+            assert_eq!(
+                text_code, json_code,
+                "--json changed the exit code on a failure path in {repo:?}: \
+                 text={text_code} json={json_code}"
+            );
+            assert_ne!(json_code, 0, "expected a failure in {repo:?}");
+            assert_eq!(
+                text_err, json_err,
+                "--json changed stderr on a failure path in {repo:?}"
+            );
+            assert!(
+                json_out.trim().is_empty(),
+                "a failure must not print JSON on stdout: {json_out:?}"
+            );
+            assert!(
+                text_out.trim().is_empty(),
+                "a failure must not print status text on stdout: {text_out:?}"
+            );
+        }
     }
 
     /// The text form is the default and is not disturbed by the new flag.
