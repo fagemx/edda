@@ -105,6 +105,7 @@ One JSON object with exactly these keys (emitted at
 | `error` | string \| null | crash detail; null except `crash` |
 | `model_requested` | string | what edda passed to the backend, or `inherited` |
 | `model_observed` | string | what the backend reported in-band, or `unknown` |
+| `session_observed` | string | the session id the backend reported in-band, or `unknown` |
 
 Exit-code table (contract, mirrors the long help; mapping at
 `cmd_dispatch.rs:127-134`): `0` done · `1` crash or any other failure ·

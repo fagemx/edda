@@ -689,6 +689,7 @@ mod tests {
             "sess-1".into(),
             "inherited".into(),
             "openai-codex/gpt-5.6-sol".into(),
+            "observed-session-1".into(),
         );
         let value: serde_json::Value = serde_json::from_str(&done.to_json()).expect("json parses");
 
@@ -709,6 +710,7 @@ mod tests {
                 "outcome",
                 "result_text",
                 "session_id",
+                "session_observed",
             ],
             "dispatch --json key set changed — this is a stable contract; \
              see COMPATIBILITY.md"
@@ -720,6 +722,7 @@ mod tests {
         assert!(value["error"].is_null());
         assert_eq!(value["model_requested"], "inherited");
         assert!(value["model_observed"].is_string());
+        assert_eq!(value["session_observed"], "observed-session-1");
 
         let crash = DispatchOutput::from_result(
             PhaseResult::AgentCrash {
@@ -727,6 +730,7 @@ mod tests {
             },
             "sess-1".into(),
             "inherited".into(),
+            "unknown".into(),
             "unknown".into(),
         );
         let value: serde_json::Value = serde_json::from_str(&crash.to_json()).expect("json parses");
@@ -737,6 +741,7 @@ mod tests {
         assert!(value["session_id"].is_string());
         assert!(value["model_requested"].is_string());
         assert!(value["model_observed"].is_string());
+        assert!(value["session_observed"].is_string());
 
         // Outcome wire vocabulary — the strings a consumer switches on.
         assert_eq!(Outcome::Done.as_str(), "done");
