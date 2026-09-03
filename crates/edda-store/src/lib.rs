@@ -110,6 +110,30 @@ pub fn lock_file(path: &Path) -> anyhow::Result<LockGuard> {
     Ok(LockGuard { _file: file })
 }
 
+/// Try to acquire an exclusive file lock without blocking.
+/// Returns `Ok(Some(LockGuard))` if acquired, `Ok(None)` if contended.
+pub fn try_lock_file(path: &Path) -> anyhow::Result<Option<LockGuard>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(LockGuard { _file: file })),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.raw_os_error() == Some(33)
+                || e.raw_os_error() == Some(32) =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Serialize tests that mutate `EDDA_STORE_ROOT` env var to avoid races.
 #[cfg(test)]
 pub(crate) static ENV_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

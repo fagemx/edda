@@ -2,6 +2,14 @@ use crate::state::machine::{PhaseStatus, PlanState};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+/// Validate that a plan name is safe to use in file paths and contains no traversal components.
+pub fn validate_plan_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        anyhow::bail!("invalid plan name: {name:?}");
+    }
+    Ok(())
+}
+
 /// Compute the state file path for a plan.
 /// Location: `{cwd}/.edda/conductor/{plan_name}/state.json`
 pub fn state_path(cwd: &Path, plan_name: &str) -> PathBuf {
@@ -9,6 +17,67 @@ pub fn state_path(cwd: &Path, plan_name: &str) -> PathBuf {
         .join("conductor")
         .join(plan_name)
         .join("state.json")
+}
+
+/// Compute the lock file path for a plan.
+/// Location: `{cwd}/.edda/conductor/{plan_name}/state.lock`
+pub fn lock_path(cwd: &Path, plan_name: &str) -> PathBuf {
+    cwd.join(".edda")
+        .join("conductor")
+        .join(plan_name)
+        .join("state.lock")
+}
+
+/// Plan-scoped exclusive file lock on `.edda/conductor/{plan_name}/state.lock`.
+///
+/// Serializes concurrent read-modify-write cycles between the long-lived
+/// runner and CLI verbs (`conduct skip`, `retry`, `abort`) (GH-714).
+pub struct PlanStateLock {
+    _guard: edda_store::LockGuard,
+}
+
+impl PlanStateLock {
+    /// Acquire the plan state lock, blocking until acquired.
+    pub fn acquire(cwd: &Path, plan_name: &str) -> Result<Self> {
+        validate_plan_name(plan_name)?;
+        let path = lock_path(cwd, plan_name);
+        let guard = edda_store::lock_file(&path)
+            .with_context(|| format!("acquiring plan state lock: {}", path.display()))?;
+        Ok(Self { _guard: guard })
+    }
+
+    /// Try to acquire the plan state lock non-blocking.
+    /// Returns `Ok(Some(lock))` if acquired, `Ok(None)` if already held by another process.
+    #[cfg(test)]
+    pub(crate) fn try_acquire(cwd: &Path, plan_name: &str) -> Result<Option<Self>> {
+        validate_plan_name(plan_name)?;
+        let path = lock_path(cwd, plan_name);
+        let guard = edda_store::try_lock_file(&path)
+            .with_context(|| format!("trying plan state lock: {}", path.display()))?;
+        Ok(guard.map(|g| Self { _guard: g }))
+    }
+}
+
+/// Atomically load, mutate, and save plan state under the plan's exclusive lock (GH-714).
+///
+/// Validates that the plan state exists before taking any lock or creating directories,
+/// preventing phantom directory creation from invalid or misspelled plan names.
+pub fn update_state<F, R>(cwd: &Path, plan_name: &str, mutate: F) -> Result<R>
+where
+    F: FnOnce(&mut PlanState) -> Result<R>,
+{
+    validate_plan_name(plan_name)?;
+    let path = state_path(cwd, plan_name);
+    if !path.is_file() {
+        anyhow::bail!("no state for plan \"{plan_name}\"");
+    }
+
+    let _lock = PlanStateLock::acquire(cwd, plan_name)?;
+    let mut state = load_state(cwd, plan_name)?
+        .ok_or_else(|| anyhow::anyhow!("no state for plan \"{plan_name}\""))?;
+    let ret = mutate(&mut state)?;
+    save_state(cwd, &state)?;
+    Ok(ret)
 }
 
 /// Load state from disk. Returns None if the file doesn't exist.
@@ -34,7 +103,7 @@ pub fn save_state(cwd: &Path, state: &PlanState) -> Result<()> {
 }
 
 /// Save state from a long-lived writer (the runner) after reconciling with
-/// the state currently on disk (GH-556).
+/// the state currently on disk under the plan's exclusive lock (GH-556, GH-714).
 ///
 /// The runner holds `PlanState` in memory for the whole run while other
 /// processes (`edda conduct skip`, `retry`, ...) mutate the same file. A
@@ -50,6 +119,7 @@ pub fn save_state(cwd: &Path, state: &PlanState) -> Result<()> {
 /// the authority for phases it has started (Running/Checking/terminal
 /// transitions it observed itself).
 pub fn save_state_reconciled(cwd: &Path, state: &mut PlanState) -> Result<()> {
+    let _lock = PlanStateLock::acquire(cwd, &state.plan_name)?;
     if let Ok(Some(disk)) = load_state(cwd, &state.plan_name) {
         for disk_phase in &disk.phases {
             if disk_phase.status != PhaseStatus::Skipped {
@@ -306,5 +376,111 @@ mod tests {
             result.is_err(),
             "binary garbage should return Err, not panic"
         );
+    }
+
+    #[test]
+    fn plan_state_lock_mutual_exclusion() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan_name = "locked_plan";
+
+        // Thread/Handle 1 acquires the lock
+        let lock1 = PlanStateLock::acquire(dir.path(), plan_name).unwrap();
+
+        // Second non-blocking attempt must fail to acquire while lock1 is held
+        let lock2 = PlanStateLock::try_acquire(dir.path(), plan_name).unwrap();
+        assert!(lock2.is_none(), "lock2 should be None while lock1 is held");
+
+        // Release lock1
+        drop(lock1);
+
+        // Now lock can be acquired
+        let lock3 = PlanStateLock::try_acquire(dir.path(), plan_name).unwrap();
+        assert!(
+            lock3.is_some(),
+            "lock3 should succeed after lock1 is dropped"
+        );
+    }
+
+    #[test]
+    fn update_state_nonexistent_plan_does_not_create_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = update_state(dir.path(), "typo_plan", |_| Ok(()));
+        assert!(result.is_err());
+        assert!(
+            !dir.path().join(".edda").exists(),
+            "update_state on nonexistent plan must not create phantom directory"
+        );
+    }
+
+    #[test]
+    fn plan_name_with_traversal_is_rejected() {
+        assert!(validate_plan_name("").is_err());
+        assert!(validate_plan_name("foo/bar").is_err());
+        assert!(validate_plan_name("foo\\bar").is_err());
+        assert!(validate_plan_name("../escape").is_err());
+        assert!(validate_plan_name("normal-plan_123").is_ok());
+
+        let dir = tempfile::tempdir().unwrap();
+        let result = update_state(dir.path(), "../escape", |_| Ok(()));
+        assert!(result.is_err());
+        assert!(!dir.path().join("escape").exists());
+    }
+
+    #[test]
+    fn concurrent_update_state_serializes_without_clobbering() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = parse_plan(
+            "name: concurrent\nphases:\n  - id: p1\n    prompt: \"one\"\n  - id: p2\n    prompt: \"two\"\n",
+        )
+        .unwrap();
+
+        let initial_state = PlanState::from_plan(&plan, "concurrent.yaml");
+        save_state(dir.path(), &initial_state).unwrap();
+
+        let path = Arc::new(dir.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Thread A skips p1 via update_state
+        let path_a = Arc::clone(&path);
+        let barrier_a = Arc::clone(&barrier);
+        let handle_a = thread::spawn(move || {
+            barrier_a.wait();
+            update_state(&path_a, "concurrent", |state| {
+                let p = state.get_phase_mut("p1").unwrap();
+                p.status = PhaseStatus::Skipped;
+                p.skip_reason = Some("skipped by thread A".into());
+                Ok(())
+            })
+            .unwrap();
+        });
+
+        // Thread B skips p2 via update_state
+        let path_b = Arc::clone(&path);
+        let barrier_b = Arc::clone(&barrier);
+        let handle_b = thread::spawn(move || {
+            barrier_b.wait();
+            update_state(&path_b, "concurrent", |state| {
+                let p = state.get_phase_mut("p2").unwrap();
+                p.status = PhaseStatus::Skipped;
+                p.skip_reason = Some("skipped by thread B".into());
+                Ok(())
+            })
+            .unwrap();
+        });
+
+        handle_a.join().unwrap();
+        handle_b.join().unwrap();
+
+        // Both updates must have survived — neither clobbered the other!
+        let final_state = load_state(dir.path(), "concurrent").unwrap().unwrap();
+        let p1 = final_state.get_phase("p1").unwrap();
+        let p2 = final_state.get_phase("p2").unwrap();
+        assert_eq!(p1.status, PhaseStatus::Skipped);
+        assert_eq!(p1.skip_reason.as_deref(), Some("skipped by thread A"));
+        assert_eq!(p2.status, PhaseStatus::Skipped);
+        assert_eq!(p2.skip_reason.as_deref(), Some("skipped by thread B"));
     }
 }
