@@ -122,9 +122,28 @@ fn hook_entrypoint_post_tool_use_no_output() {
 
 // transform_context_strips_header_and_cite → moved to render::tests
 
+/// GH-646 regression guard: any test that calls `render_workspace_section`
+/// must establish its own workspace premise through this helper. A bare
+/// tempdir is NOT hermetic — `find_root` climbs parents, so the section
+/// would silently render whatever workspace exists above %TEMP% (the fleet
+/// coordination workspace in $HOME), and the test would pass or fail with
+/// the environment instead of the code.
+///
+/// The workspace is anchored at the test's own directory with a
+/// deterministically unopenable ledger: `.edda/` exists (find_root stops
+/// here) but `ledger.db` is a directory (SQLite cannot open it). Nothing
+/// outside the returned tree is read or written. Keep the returned TempDir
+/// alive for the whole test.
+fn hermetic_unopenable_workspace() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("workspace tempdir");
+    std::fs::create_dir_all(tmp.path().join(".edda").join("ledger.db"))
+        .expect("anchor .edda workspace with directory-shaped ledger.db");
+    tmp
+}
+
 #[test]
-fn render_workspace_section_no_edda_returns_none() {
-    let tmp = tempfile::tempdir().unwrap();
+fn render_workspace_section_unopenable_ledger_returns_none() {
+    let tmp = hermetic_unopenable_workspace();
     let result = render_workspace_section(tmp.path().to_str().unwrap(), 2000);
     assert!(result.is_none());
 }

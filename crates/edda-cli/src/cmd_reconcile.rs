@@ -689,6 +689,30 @@ fn canonical_main_repo(repo: &Path) -> anyhow::Result<PathBuf> {
         .context("canonicalize Edda workspace root")
 }
 
+/// Test mirror of [`canonical_main_repo`] that anchors the workspace walk
+/// inside the caller's own tree (GH-646).
+///
+/// The production walk is unbounded: from a fixture tempdir it climbs
+/// through `%TEMP%` up to `$HOME`, where the fleet coordination workspace
+/// lives, and resolves THERE instead of failing. Tests that assert
+/// "not an initialized workspace" must bound the climb at the fixture root
+/// so the premise is created by the fixture, not by the environment.
+#[cfg(test)]
+fn canonical_main_repo_bounded(repo: &Path, ceiling: &Path) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(repo.is_absolute(), "--repo must be absolute");
+    let repo = repo
+        .canonicalize()
+        .with_context(|| format!("canonicalize repository {}", repo.display()))?;
+    let ceiling = ceiling
+        .canonicalize()
+        .with_context(|| format!("canonicalize ceiling {}", ceiling.display()))?;
+    anyhow::ensure!(repo.is_dir(), "--repo must name a directory");
+    edda_ledger::EddaPaths::find_root_bounded(&repo, &ceiling)
+        .context("--repo must name an initialized Edda workspace (bounded walk)")?
+        .canonicalize()
+        .context("canonicalize Edda workspace root")
+}
+
 #[cfg(any(windows, test))]
 fn quote_windows_argument(path: &Path) -> anyhow::Result<String> {
     let value = path.to_str().context("scheduler path is not Unicode")?;
@@ -4271,11 +4295,18 @@ mod tests {
         let parent = dir.path().join("parent git");
         std::fs::create_dir(&parent)?;
         init_git(&parent)?;
-        assert!(canonical_main_repo(&parent).is_err());
+        // GH-646: bounded walk anchored at the fixture root. The unbounded
+        // production walk would climb out of the tempdir into $HOME's
+        // coordination workspace and the `is_err` premise below would be
+        // environment-dependent, not fixture-established.
+        assert!(canonical_main_repo_bounded(&parent, dir.path()).is_err());
         let nested = parent.join("nested edda");
         std::fs::create_dir(&nested)?;
         Ledger::ensure_initialized(&nested)?;
-        assert_eq!(canonical_main_repo(&nested)?, nested.canonicalize()?);
+        assert_eq!(
+            canonical_main_repo_bounded(&nested, dir.path())?,
+            nested.canonicalize()?
+        );
 
         let repo = dir.path().join("repo");
         std::fs::create_dir_all(repo.join(".git").join("worktrees").join("scheduler"))?;
@@ -4288,7 +4319,10 @@ mod tests {
             format!("gitdir: {}", gitdir.canonicalize()?.display()),
         )?;
 
-        assert_eq!(canonical_main_repo(&worktree)?, repo.canonicalize()?);
+        assert_eq!(
+            canonical_main_repo_bounded(&worktree, dir.path())?,
+            repo.canonicalize()?
+        );
         assert_eq!(
             edda_store::project_id(&worktree),
             edda_store::project_id(&repo)
@@ -4985,7 +5019,8 @@ mod tests {
         let worktree = ensure_attempt_worktree(&repo, &view, 1, false)?;
         append_started(&ledger, 4, 1, 300)?;
 
-        let resolved = edda_ledger::EddaPaths::find_root(&worktree).expect("original ledger root");
+        let resolved = edda_ledger::EddaPaths::find_root_bounded(&worktree, dir.path())
+            .expect("original ledger root");
         crate::cmd_task::execute(
             crate::cmd_task::TaskCmd::Done {
                 id: 4,
@@ -5371,7 +5406,7 @@ mod tests {
         observer_result.expect("observer thread")?;
 
         assert_eq!(
-            edda_ledger::EddaPaths::find_root(&worktree)
+            edda_ledger::EddaPaths::find_root_bounded(&worktree, dir.path())
                 .expect("original ledger root")
                 .canonicalize()?,
             repo.canonicalize()?

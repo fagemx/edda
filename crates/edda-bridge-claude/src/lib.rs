@@ -37,7 +37,10 @@ pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Acquires `ENV_LOCK` to prevent concurrent env var mutation.
 #[cfg(test)]
 pub(crate) fn with_env_guard(vars: &[(&str, Option<&str>)], f: impl FnOnce()) {
-    let _guard = ENV_LOCK.lock().unwrap();
+    // Poison-tolerant, same reasoning as edda-cli's `isolated_store`: a test
+    // that panics while holding the lock is that test's failure and must not
+    // cascade into a PoisonError for every later env-var test in the run.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     for (key, val) in vars {
         match val {
             Some(v) => std::env::set_var(key, v),

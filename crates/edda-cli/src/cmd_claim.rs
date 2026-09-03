@@ -1175,6 +1175,23 @@ fn first_valid_char(from: u32, to: u32) -> Option<char> {
 mod tests {
     use super::*;
 
+    /// A fake repo for e2e runs of the spawned `edda` binary.
+    ///
+    /// The `.edda/` directory is load-bearing, not decoration (GH-646):
+    /// `main` resolves the workspace with `EddaPaths::find_root`, which
+    /// climbs parents. A bare tempdir under `%TEMP%` would silently resolve
+    /// to whatever workspace exists above it (the fleet coordination
+    /// workspace in `$HOME`), and the spawned command would read or write
+    /// THERE. Anchoring `.edda/` at the repo pins `repo_root` to the test's
+    /// own directory. Every new e2e test MUST go through this helper —
+    /// that is the regression guard against env-dependent tests.
+    fn e2e_repo() -> tempfile::TempDir {
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        std::fs::create_dir_all(repo.path().join(".edda")).expect("anchor .edda workspace");
+        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
+        repo
+    }
+
     fn claim(label: &str, session: &str, paths: &[&str]) -> edda_bridge_claude::peers::ClaimEntry {
         edda_bridge_claude::peers::ClaimEntry {
             session_id: session.to_string(),
@@ -1439,9 +1456,7 @@ mod tests {
         // Claim `src/Ä.rs`, query `src/ä.rs`: the pre-fix engine returned
         // exit 0 with {"conflicts":[]} although both spellings resolve to
         // the same NTFS file. The check must refuse (exit 2) instead.
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1539,9 +1554,7 @@ mod tests {
 
     #[test]
     fn e2e_unreadable_board_is_error_not_clear() {
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         // A directory at the board path makes every read fail.
@@ -1559,9 +1572,7 @@ mod tests {
 
     #[test]
     fn e2e_malformed_board_line_is_error_not_clear() {
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1583,9 +1594,7 @@ mod tests {
     #[test]
     fn e2e_missing_board_is_clear() {
         // A missing board file legitimately means an empty board: exit 0.
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let store = tempfile::tempdir().expect("store tempdir");
         let (code, stdout, stderr) = run_edda(
             &["claim", "check", "src/main.rs", "--json"],
@@ -1602,9 +1611,7 @@ mod tests {
     fn e2e_non_check_label_rejects_trailing_positional() {
         // Pre-GH-562 this was a clap usage error (exit 2); the shortcut must
         // not silently record a pathless claim from a typo.
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         let (code, stdout, stderr) = run_edda(
@@ -1624,9 +1631,7 @@ mod tests {
 
     #[test]
     fn e2e_non_check_label_rejects_json_flag() {
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let store = tempfile::tempdir().expect("store tempdir");
         let (code, stdout, stderr) =
             run_edda(&["claim", "auth", "--json"], repo.path(), store.path());
@@ -1639,9 +1644,7 @@ mod tests {
     #[test]
     fn e2e_non_check_claim_still_records_paths() {
         // The plain claim path must keep working byte-identically.
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         let (code, stdout, stderr) = run_edda(
@@ -1871,9 +1874,7 @@ mod tests {
         // the same path. Querying that path must conflict with ONLY the live
         // session's claim; the stale one must neither appear as a conflict
         // nor flip the exit code.
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1914,9 +1915,7 @@ mod tests {
         // GH-617 death visibility: a board holding only a dead session's
         // claim must exit 0 AND say what was filtered, so "surface is clear"
         // stays distinguishable from "the liveness judgement broke".
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1944,9 +1943,7 @@ mod tests {
     fn e2e_claim_from_session_without_heartbeat_is_not_a_conflict() {
         // A session with no heartbeat file at all was never heard from — the
         // same verdict `edda peers` reaches — so its claim must not conflict.
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -1973,9 +1970,7 @@ mod tests {
     fn e2e_stale_claims_appear_in_json_report() {
         // Machine-readable death visibility: the JSON report must carry the
         // filtered stale claims alongside the (live-only) conflict list.
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let project_id = edda_store::project_id(repo.path());
         let store = tempfile::tempdir().expect("store tempdir");
         write_board(
@@ -2022,9 +2017,7 @@ mod tests {
         if !bin.exists() {
             panic!("edda binary not found at {}", bin.display());
         }
-        let repo = tempfile::tempdir().expect("repo tempdir");
-        std::fs::create_dir_all(repo.path().join(".git")).expect("fake .git");
-        std::fs::create_dir_all(repo.path().join(".edda")).expect("fake .edda");
+        let repo = e2e_repo();
         let project_id = edda_store::project_id(repo.path());
 
         // Conflict case: an active claim overlaps the query surface.

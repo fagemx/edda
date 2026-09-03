@@ -430,9 +430,22 @@ mod tests {
 
     #[test]
     fn idempotency_guard_works() {
+        // GH-646: the default store root is the real per-user store, so a
+        // bare pid inherits leftovers from an environment this test did not
+        // create: a previous run that panicked before its cleanup leaves a
+        // "completed" digest state behind and the first assertion fails on
+        // every later run (the GH-415 self-perpetuating-leftover shape).
+        // The premise is therefore established here: wipe this test's own
+        // pid directory before asserting anything. No EDDA_STORE_ROOT
+        // redirect — mutating the process-wide root while holding ENV_LOCK
+        // strands sibling tests that resolve `project_dir` WITHOUT that
+        // lock into a store this test then deletes, turning one hermetic
+        // test into NotFound failures everywhere else (see agent_phase's
+        // heartbeat test for the same cross-store hazard).
         let pid = "test_digest_guard";
         let sid = "sess-guard-1";
-        let _ = edda_store::ensure_dirs(pid);
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+        edda_store::ensure_dirs(pid).expect("ensure dirs");
 
         // Initially not digested
         assert!(!already_digested(pid, sid));

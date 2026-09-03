@@ -380,19 +380,29 @@ mod tests {
     }
 
     #[test]
-    fn verify_outside_edda_repo_exits_2_with_explanation() {
+    fn verify_anchored_workspace_with_unopenable_ledger_exits_2_and_never_reports_ok() {
+        // GH-646 hermetic isolation: `find_root` climbs parents, so a bare
+        // tempdir would silently resolve to whatever workspace exists above
+        // %TEMP% (the fleet coordination workspace in $HOME) and `edda
+        // verify` would judge THAT ledger. The "no `.edda/` anywhere above"
+        // premise cannot be established by a spawned binary, so anchor the
+        // climb at this test's own directory and make the ledger
+        // deterministically unopenable: `.edda/` exists (find_root stops
+        // here) but `ledger.db` is a directory (SQLite cannot open it).
+        // Verify must refuse with exit 2 — never fabricate OK.
         let repo = tempfile::tempdir().expect("repo tempdir");
-        // No `.edda/` anywhere — `edda verify` must refuse, not fabricate OK.
+        std::fs::create_dir_all(repo.path().join(".edda").join("ledger.db"))
+            .expect("anchored workspace with directory-shaped ledger.db");
         let (code, stdout, stderr) = run_edda(&["verify"], repo.path());
         assert_eq!(code, 2, "stdout={stdout:?} stderr={stderr:?}");
         let report = format!("{stdout}{stderr}");
         assert!(
             !report.contains("OK"),
-            "must not report success outside a repo: {report:?}"
+            "must not report success on an unopenable ledger: {report:?}"
         );
         assert!(
-            report.contains("workspace"),
-            "must explain it is not an edda workspace: {report:?}"
+            report.contains("cannot open ledger"),
+            "must explain the ledger cannot be opened: {report:?}"
         );
     }
 }
