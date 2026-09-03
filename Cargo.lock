@@ -897,7 +897,6 @@ dependencies = [
  "edda-ledger",
  "edda-notify",
  "edda-store",
- "fs2",
  "regex",
  "rusqlite",
  "serde",

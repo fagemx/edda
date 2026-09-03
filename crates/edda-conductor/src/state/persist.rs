@@ -1,8 +1,14 @@
 use crate::state::machine::{PhaseStatus, PlanState};
 use anyhow::{Context, Result};
-use fs2::FileExt;
-use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+
+/// Validate that a plan name is safe to use in file paths and contains no traversal components.
+pub fn validate_plan_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+        anyhow::bail!("invalid plan name: {name:?}");
+    }
+    Ok(())
+}
 
 /// Compute the state file path for a plan.
 /// Location: `{cwd}/.edda/conductor/{plan_name}/state.json`
@@ -27,69 +33,45 @@ pub fn lock_path(cwd: &Path, plan_name: &str) -> PathBuf {
 /// Serializes concurrent read-modify-write cycles between the long-lived
 /// runner and CLI verbs (`conduct skip`, `retry`, `abort`) (GH-714).
 pub struct PlanStateLock {
-    _file: File,
-}
-
-fn is_lock_contention(err: &std::io::Error) -> bool {
-    err.kind() == std::io::ErrorKind::WouldBlock
-        || err.kind() == std::io::ErrorKind::PermissionDenied
-        || err.raw_os_error() == Some(33) // ERROR_LOCK_VIOLATION on Windows
-        || err.raw_os_error() == Some(32) // ERROR_SHARING_VIOLATION on Windows
+    _guard: edda_store::LockGuard,
 }
 
 impl PlanStateLock {
     /// Acquire the plan state lock, blocking until acquired.
     pub fn acquire(cwd: &Path, plan_name: &str) -> Result<Self> {
+        validate_plan_name(plan_name)?;
         let path = lock_path(cwd, plan_name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("creating conductor plan directory: {}", parent.display())
-            })?;
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .with_context(|| format!("opening plan state lock: {}", path.display()))?;
-
-        file.lock_exclusive()
-            .with_context(|| format!("acquiring exclusive plan state lock: {}", path.display()))?;
-
-        Ok(Self { _file: file })
+        let guard = edda_store::lock_file(&path)
+            .with_context(|| format!("acquiring plan state lock: {}", path.display()))?;
+        Ok(Self { _guard: guard })
     }
 
     /// Try to acquire the plan state lock non-blocking.
     /// Returns `Ok(Some(lock))` if acquired, `Ok(None)` if already held by another process.
-    pub fn try_acquire(cwd: &Path, plan_name: &str) -> Result<Option<Self>> {
+    #[cfg(test)]
+    pub(crate) fn try_acquire(cwd: &Path, plan_name: &str) -> Result<Option<Self>> {
+        validate_plan_name(plan_name)?;
         let path = lock_path(cwd, plan_name);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("creating conductor plan directory: {}", parent.display())
-            })?;
-        }
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .with_context(|| format!("opening plan state lock: {}", path.display()))?;
-
-        match file.try_lock_exclusive() {
-            Ok(()) => Ok(Some(Self { _file: file })),
-            Err(e) if is_lock_contention(&e) => Ok(None),
-            Err(e) => Err(anyhow::anyhow!("try_lock_exclusive failed: {e}")),
-        }
+        let guard = edda_store::try_lock_file(&path)
+            .with_context(|| format!("trying plan state lock: {}", path.display()))?;
+        Ok(guard.map(|g| Self { _guard: g }))
     }
 }
 
 /// Atomically load, mutate, and save plan state under the plan's exclusive lock (GH-714).
+///
+/// Validates that the plan state exists before taking any lock or creating directories,
+/// preventing phantom directory creation from invalid or misspelled plan names.
 pub fn update_state<F, R>(cwd: &Path, plan_name: &str, mutate: F) -> Result<R>
 where
     F: FnOnce(&mut PlanState) -> Result<R>,
 {
+    validate_plan_name(plan_name)?;
+    let path = state_path(cwd, plan_name);
+    if !path.is_file() {
+        anyhow::bail!("no state for plan \"{plan_name}\"");
+    }
+
     let _lock = PlanStateLock::acquire(cwd, plan_name)?;
     let mut state = load_state(cwd, plan_name)?
         .ok_or_else(|| anyhow::anyhow!("no state for plan \"{plan_name}\""))?;
@@ -420,8 +402,33 @@ mod tests {
     }
 
     #[test]
+    fn update_state_nonexistent_plan_does_not_create_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = update_state(dir.path(), "typo_plan", |_| Ok(()));
+        assert!(result.is_err());
+        assert!(
+            !dir.path().join(".edda").exists(),
+            "update_state on nonexistent plan must not create phantom directory"
+        );
+    }
+
+    #[test]
+    fn plan_name_with_traversal_is_rejected() {
+        assert!(validate_plan_name("").is_err());
+        assert!(validate_plan_name("foo/bar").is_err());
+        assert!(validate_plan_name("foo\\bar").is_err());
+        assert!(validate_plan_name("../escape").is_err());
+        assert!(validate_plan_name("normal-plan_123").is_ok());
+
+        let dir = tempfile::tempdir().unwrap();
+        let result = update_state(dir.path(), "../escape", |_| Ok(()));
+        assert!(result.is_err());
+        assert!(!dir.path().join("escape").exists());
+    }
+
+    #[test]
     fn concurrent_update_state_serializes_without_clobbering() {
-        use std::sync::Arc;
+        use std::sync::{Arc, Barrier};
         use std::thread;
 
         let dir = tempfile::tempdir().unwrap();
@@ -434,10 +441,13 @@ mod tests {
         save_state(dir.path(), &initial_state).unwrap();
 
         let path = Arc::new(dir.path().to_path_buf());
+        let barrier = Arc::new(Barrier::new(2));
 
         // Thread A skips p1 via update_state
         let path_a = Arc::clone(&path);
+        let barrier_a = Arc::clone(&barrier);
         let handle_a = thread::spawn(move || {
+            barrier_a.wait();
             update_state(&path_a, "concurrent", |state| {
                 let p = state.get_phase_mut("p1").unwrap();
                 p.status = PhaseStatus::Skipped;
@@ -449,7 +459,9 @@ mod tests {
 
         // Thread B skips p2 via update_state
         let path_b = Arc::clone(&path);
+        let barrier_b = Arc::clone(&barrier);
         let handle_b = thread::spawn(move || {
+            barrier_b.wait();
             update_state(&path_b, "concurrent", |state| {
                 let p = state.get_phase_mut("p2").unwrap();
                 p.status = PhaseStatus::Skipped;

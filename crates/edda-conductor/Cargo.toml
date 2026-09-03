@@ -26,7 +26,6 @@ tokio-util = "0.7"
 async-trait = "0.1"
 regex.workspace = true
 uuid.workspace = true
-fs2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
