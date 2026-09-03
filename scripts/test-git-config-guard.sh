@@ -23,6 +23,7 @@ command -v pwsh >/dev/null 2>&1 || { echo "SKIP: pwsh not on PATH"; exit 0; }
 command -v git >/dev/null 2>&1 || { echo "SKIP: git not on PATH"; exit 0; }
 
 tmp=$(mktemp -d)
+logdir="$tmp/lanes"
 
 # GH-786: every fake lane this run starts is torn down from the trap, not only
 # from the success path: a `fail` between starting a lane and dropping it would
@@ -33,7 +34,7 @@ started_lanes=''
 e2e_cleanup() {
   [ -n "$started_lanes" ] || return 0
   for cl_lane in $started_lanes; do
-    cl_wrapper=$(cygpath -w "$tmp/lanes/$cl_lane.wrapper.ps1" 2>/dev/null || echo "$tmp/lanes/$cl_lane.wrapper.ps1")
+    cl_wrapper=$(cygpath -w "$logdir/$cl_lane.wrapper.ps1" 2>/dev/null || echo "$logdir/$cl_lane.wrapper.ps1")
     # Written to a file, never passed as -Command: a query whose own command
     # line contains the pattern matches itself and kills the killer.
     {
@@ -230,7 +231,6 @@ ok "-Backup keeps one previous generation and -Restore falls back to it"
 # Registers a scheduled task, so it is off by default; run with
 # GIT_CONFIG_GUARD_E2E=1 to exercise the whole lane-stop path end to end.
 if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
-  logdir="$tmp/lanes"
   mkdir -p "$logdir"
   logdir_w=$(cygpath -w "$logdir" 2>/dev/null || echo "$logdir")
 
