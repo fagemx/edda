@@ -81,7 +81,10 @@ fn compat_golden_fixture_ask_json_keys_and_types() {
             "workspace_decision_count",
             "workspace_event_count",
         ],
-        "ask --json top-level key set changed — this is a stable contract;          see COMPATIBILITY.md (tasks/dependents/override_risk and the          workspace counts are absent when empty/unknown by the          skip_serializing_if contract)"
+        "ask --json top-level key set changed — this is a stable contract; \
+         see COMPATIBILITY.md (tasks/dependents/override_risk and the \
+         workspace counts are absent when empty/unknown by the \
+         skip_serializing_if contract)"
     );
     assert_eq!(v["query"], "db");
     assert!(v["input_type"].is_string());
@@ -124,7 +127,8 @@ fn compat_golden_fixture_ask_json_keys_and_types() {
             "ts",
             "value",
         ],
-        "DecisionHit key set changed — this is a stable contract;          see COMPATIBILITY.md"
+        "DecisionHit key set changed — this is a stable contract; \
+         see COMPATIBILITY.md"
     );
     assert!(d["event_id"].is_string());
     assert_eq!(d["key"], "db.engine");

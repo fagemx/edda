@@ -8,8 +8,7 @@ use edda_ledger::Ledger;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// Path to the `edda` binary cargo just built for this test run
-/// (`current_exe` = `target/debug/deps/<test>-<hash>.exe`).
+/// Path to the `edda` binary (`CARGO_BIN_EXE_edda`).
 fn edda_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_edda"))
 }
