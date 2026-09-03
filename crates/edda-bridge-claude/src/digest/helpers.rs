@@ -199,6 +199,7 @@ mod tests {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            ..Default::default()
         };
         assert_eq!(
             measured_cost(&usage),
@@ -216,6 +217,7 @@ mod tests {
             output_tokens: 0,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
+            ..Default::default()
         };
         assert_eq!(
             measured_cost(&usage),
@@ -233,6 +235,7 @@ mod tests {
             output_tokens: 100_000,
             cache_read_tokens: 500_000,
             cache_creation_tokens: 0,
+            ..Default::default()
         };
         let cost = measured_cost(&usage).expect("fable should be priceable");
         // full price in: (1M - 500k) = 500k * $10/M = $5.00

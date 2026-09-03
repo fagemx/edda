@@ -43,6 +43,9 @@ pub struct UsageSnapshot {
     pub cache_read_tokens: u64,
     #[serde(default)]
     pub cache_creation_tokens: u64,
+    /// Measured cost in USD if carried directly by the agent transcript (e.g. Pi).
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
     /// Whether at least one `message.usage` record was observed in the
     /// transcript (GH-585 round 2). Presence is recorded independently of
     /// the token counters so a measured all-zero usage (e.g. zero pricing)
@@ -2095,6 +2098,7 @@ mod tests {
                 cache_read_tokens: 100,
                 cache_creation_tokens: 50,
                 usage_observed: true,
+                ..Default::default()
             },
             ..Default::default()
         };
