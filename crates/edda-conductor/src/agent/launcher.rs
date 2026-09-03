@@ -51,6 +51,18 @@ pub trait AgentLauncher: Send + Sync {
     fn last_observed_model(&self) -> Option<String> {
         None
     }
+
+    /// The session id the backend reported **in-band** during the most
+    /// recent turn, on the same terms as [`Self::last_observed_model`]: an
+    /// observation, never the id the caller asked for. It matters because
+    /// asking is not getting — `claude --resume <id>` "starts a copy and
+    /// says so when the session is already running", so only the reported
+    /// id says whether a resume continued the conversation or forked it.
+    /// `None` means the backend reported nothing and callers must render
+    /// `"unknown"` (GH-708).
+    fn last_observed_session(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Fixed namespace UUID for conductor sessions.
@@ -88,6 +100,9 @@ pub struct ClaudeCodeLauncher {
     /// In-band model report from the most recent turn (stream-json
     /// `system/init`), for [`AgentLauncher::last_observed_model`].
     observed_model: std::sync::Mutex<Option<String>>,
+    /// In-band session id from the same `system/init` message, for
+    /// [`AgentLauncher::last_observed_session`] (GH-708).
+    observed_session: std::sync::Mutex<Option<String>>,
 }
 
 impl Default for ClaudeCodeLauncher {
@@ -194,6 +209,7 @@ impl ClaudeCodeLauncher {
             transcript_dir: None,
             resume: false,
             observed_model: std::sync::Mutex::new(None),
+            observed_session: std::sync::Mutex::new(None),
         }
     }
 
@@ -204,6 +220,7 @@ impl ClaudeCodeLauncher {
             transcript_dir: None,
             resume: false,
             observed_model: std::sync::Mutex::new(None),
+            observed_session: std::sync::Mutex::new(None),
         }
     }
 
@@ -217,6 +234,12 @@ impl ClaudeCodeLauncher {
     fn record_observed_model(&self, model: Option<String>) {
         if let Ok(mut slot) = self.observed_model.lock() {
             *slot = model;
+        }
+    }
+
+    fn record_observed_session(&self, session: Option<String>) {
+        if let Ok(mut slot) = self.observed_session.lock() {
+            *slot = session;
         }
     }
 
@@ -288,6 +311,10 @@ impl AgentLauncher for ClaudeCodeLauncher {
                 // In-band model observation: whatever the backend itself
                 // reported, or nothing. Never inferred from config.
                 self.record_observed_model(monitor_result.model.clone());
+                // Same terms for the session id: what claude says it ran,
+                // which is the only way to see a --resume that forked
+                // instead of continuing (GH-708).
+                self.record_observed_session(monitor_result.session_id.clone());
                 let exit = child.wait().await?;
                 Ok(classify_result(&monitor_result, exit.code()))
             }
@@ -305,6 +332,13 @@ impl AgentLauncher for ClaudeCodeLauncher {
 
     fn last_observed_model(&self) -> Option<String> {
         self.observed_model
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    fn last_observed_session(&self) -> Option<String> {
+        self.observed_session
             .lock()
             .ok()
             .and_then(|slot| slot.clone())
@@ -621,6 +655,17 @@ mod tests {
 
     /// GH-574: the in-band observation starts empty and is only filled by
     /// what the backend itself reports — never from config or session files.
+    /// GH-708: the same rule for the session id. A launcher that has run
+    /// nothing has observed nothing — it must not report the id a caller
+    /// would have passed, or a forked `--resume` would look like a clean one.
+    #[test]
+    fn claude_observed_session_starts_unknown() {
+        let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude"));
+        assert_eq!(launcher.last_observed_session(), None);
+        let resuming = ClaudeCodeLauncher::with_bin(PathBuf::from("claude")).with_resume(true);
+        assert_eq!(resuming.last_observed_session(), None);
+    }
+
     #[test]
     fn claude_observed_model_starts_unknown() {
         let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude"));

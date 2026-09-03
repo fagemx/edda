@@ -111,6 +111,9 @@
    第 1 輪 `--session-id` 開，之後每輪 `--resume` 續，所以第 2 輪只讀 delta
    （`fleet.reviewer-agent` 當初選 pi 就是為了這個性質，GH-708 把它帶進 Opus 路徑）；
    worktree 一輪結束就刪、下輪原地重建（續談與 cwd 無關，實測過）。
+   **前置條件**：lane 的續談用 `edda dispatch --resume`，所以 PATH 上的 `edda` 必須是
+   GH-708 之後建的；舊的 `edda` 第 1 輪照跑，第 2 輪會因未知旗標失敗（大聲失敗、標
+   `review:unreviewed`，不會產生假判決）。`cargo install --path crates/edda-cli --force` 更新。
    檢查方式：`Get-ScheduledTask edda-pr-review-watcher`、`tail ~/.edda/fleet/watch.log`、PR 留言與 label。
    provider 過載時：同模型探測通過後重試一次（同一 `edda dispatch --agent claude` 運輸），仍沒有判決就標
    `review:unreviewed` 並對該 head 停手
@@ -163,7 +166,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 規則 | 決策 key |
 |---|---|
 | 執行用便宜模型（pi 預設 glm-5.3-flash）；**審查一律 Claude Opus**（`claude-opus-5`，顯式 `--model` 釘死，正常臂走 `edda dispatch --agent claude` 訂閱運輸——本機 pi/openrouter 到不了任何 Anthropic 模型；brief 超出 spawn 上限的 fallback 走唯讀 allowlist 的 `claude -p` stdin，表頭印實際臂） | `fleet.review-engine-model`、`fleet.review-backend`（supersede `fleet.agent-model-split` 的審查半邊） |
-| 審查 provider 過載：**改運輸不降模型**——(1) 同 `--model` 先用最低成本探測，通了才重試一次（同一 claude 訂閱運輸）；(2) 仍沒有判決就對該 head 標 `review:unreviewed` 並停——未審查是誠實狀態，便宜模型的判決不是。watcher 無 Codex 路線（superseding 決策 `…codex-route-withdrawn-for-automated-watcher`：Codex 對 watcher 做不到唯讀；人類控制者仍可手動用 Codex）。**GH-708 註記：此決策原文的 `edda dispatch --agent codex` 降級步驟與「審查一律 Opus」矛盾——codex 跑不了 Opus；程式碼無 codex 路線，等待操作者改判** | `fleet.review-provider-overload` |
+| 審查 provider 過載：**改運輸不降模型**——(1) 同 `--model` 先用最低成本探測，通了才重試一次（同一 claude 訂閱運輸）；(2) 仍沒有判決就對該 head 標 `review:unreviewed` 並停——未審查是誠實狀態，便宜模型的判決不是。watcher 無 Codex 路線（superseding 決策 `…codex-route-withdrawn-for-automated-watcher`：Codex 對 watcher 做不到唯讀；人類控制者仍可手動用 Codex）。**2026-09-03 操作者裁決（`opus-default-sol-via-pi-fallback-no-codex`）：不是矛盾，是過時——Opus 是預設引擎，`fleet.review-engine-pool` 的錨仍是 sol（走 pi）；codex 自 `fleet.reviewer-agent` 起就不是審查運輸。watcher 自己不換模型，降到錨引擎是操作者動作** | `fleet.review-provider-overload` |
 | **lane 啟動走 Task Scheduler，不走 nohup／Start-Process**：Claude Code 的工具 shell 在 Windows Job Object 裡，nohup 的子程序仍隨 session 死。`Register-ScheduledTask` + `Start-ScheduledTask`（父程序是 svchost）；該環境 `HOME` 為空，lane wrapper 必須顯式設；`CARGO_TARGET_DIR` 只在 `-BuildLane` 指名四個允許 build lane 之一時設（不編譯的 session 沒有 build lane——`.claude/CLAUDE.md`、`verification.cost-discipline`；要編譯的必須給四擇一，launcher 拒絕其他名字）。`lane-launch.ps1` 不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`，設 `CARGO_TARGET_DIR`＝lane root（`$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）\`<BuildLane>`；docs lane 不傳，wrapper 不設。`Get-ScheduledTaskInfo` 可輪詢，`Unregister-ScheduledTask` 清理。重派前先讀 worktree／branch／PR 狀態，不信任 live handle。**手續已脚本化**：用 `scripts/fleet/lane-launch.ps1` 註冊起 lane、`scripts/fleet/lane-status.ps1` 盯狀態（用法見 START HERE），不要再手寫 wrapper | `fleet.lane-launch`、`fleet.lane-dispatch` |
 | **停 lane 一律走 `scripts/fleet/lane-stop.ps1 -Name <lane>`**：`Stop-ScheduledTask` 與 `Unregister-ScheduledTask` 都只終止任務的 wrapper，**不殺它 spawn 的 process tree**（GH-672：被「停」的 lane 照樣 commit／push／開 PR，任務卻顯示 `State = Ready`）。`lane-stop.ps1` 停任務、殺整棵樹（wrapper 已死時依 `CommandLine` 比對 wrapper／brief 路徑抓孤兒）、驗證無殘留、回報實際終止了什麼，並補寫結束記錄（done-file + lane log 的 `=== EXIT ===` 行）——wrapper 本身也在 `finally` 寫同樣的結束記錄，所以正常結束、出錯、被停三種 endings 都有 EXIT | `fleet.lane-stop-4090` |
 | 一 issue ＝ 一單 phase plan ＝ 一 worktree ＝ 一 build lane；並行在 plan 之間；plan 裡不寫沒理由的 `depends_on`；並行 plan 不用 verdict gate | `cleanup.parallel-exec`、`cleanup.review-gate` |

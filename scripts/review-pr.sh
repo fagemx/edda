@@ -304,7 +304,7 @@ review_session_uuid() { # $1 = PR number
     "$(printf '%s' "$h" | cut -c18-20)" \
     "$(printf '%s' "$h" | cut -c21-32)"
 }
-SID=$(review_session_uuid "$PR")
+SID=$(review_session_uuid "$PR") || exit 1
 
 # New conversation or continued one? Claude Code refuses a `--session-id` that
 # already exists ("Session ID <id> is already in use", exit 1), so the two are
@@ -502,7 +502,8 @@ if (\$r -and \$r.result) {
     # "0,33", which the watcher's [0-9.]* pattern drops to cost: unknown.
     Add-Content -Path "$LOGW" -Value ("Cost: \$" + [math]::Round(\$r.total_cost_usd, 2).ToString([System.Globalization.CultureInfo]::InvariantCulture)) -Encoding utf8
   }
-  Add-Content -Path "$LOGW" -Value "Session: \$(\$r.session_id)" -Encoding utf8
+  Add-Content -Path "$LOGW" -Value "Session: $SID" -Encoding utf8
+  Add-Content -Path "$LOGW" -Value "Session observed: \$(\$r.session_id)" -Encoding utf8
 } else {
   \$json | Out-File -FilePath "$LOGW" -Encoding utf8
 }
@@ -550,7 +551,9 @@ if command -v jq >/dev/null 2>&1; then
   printf 'Model requested: %s\n' '$MODEL' >> '$LOG'
   printf 'Model observed: %s\n' "\$mu" >> '$LOG'
   jq -r 'if .total_cost_usd != null then "Cost: \$" + ((.total_cost_usd * 100 | round) / 100 | tostring) else empty end' '$LOG.json' >> '$LOG'
-  jq -r '"Session: " + (.session_id // "")' '$LOG.json' >> '$LOG'
+  printf 'Session: %s
+' '$SID' >> '$LOG'
+  jq -r '"Session observed: " + (.session_id // "unknown")' '$LOG.json' >> '$LOG'
 else
   # No jq is not a silent degradation into a dead verdict: name the fault in
   # the log the watcher reads, keep the raw JSON for diagnosis, and fail the

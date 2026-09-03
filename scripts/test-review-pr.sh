@@ -469,8 +469,19 @@ grep -q 'function Remove-ReviewWorktree' "$lane" \
 if [ "$(grep -c 'Remove-ReviewWorktree$' "$lane")" -lt 2 ]; then
     fail 'D9i: the lane does not remove the worktree on both arms'
 fi
-grep -q 'worktree prune' "$root/scripts/review-pr.sh" \
+# Anchored at the start of a line so the assertion cannot be satisfied by the
+# comment block above the call (round 1 P2: the loose grep matched prose).
+grep -qE '^[[:space:]]*git -C "\$ROOT" worktree prune' "$root/scripts/review-pr.sh" \
     || fail 'D9i: review-pr.sh does not prune stale worktree registrations before adding one at the same per-PR path'
+
+# D9j (round 1 P1): the id the watcher cross-checks must be the backend's OWN
+# report, not an echo of the one we launched with — a comparison of a value
+# with itself can never fire. Both arms therefore record the launched id AND
+# the observed one, on separate lines from separate sources.
+grep -q -- 'Session observed: ' "$lane" \
+    || fail 'D9j: the fallback arm records no `Session observed:` line, so the watcher has nothing to cross-check the launched id against'
+grep -q -- "Session: $EXPECTED_SID_9999" "$lane" \
+    || fail 'D9j: the fallback arm no longer records the launched session id alongside the observed one'
 
 # --- offline guarantee: the real fleet scratch carries none of our output -----
 # Only our own fixture PR is asserted, not the whole listing: a live watcher or

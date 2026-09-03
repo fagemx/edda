@@ -484,10 +484,14 @@ enum Command {
     ///   {"outcome":"done|crash|timeout|max_turns|budget_exceeded",
     ///    "result_text":string|null,"cost_usd":number|null,
     ///    "session_id":string,"error":string|null,
-    ///    "model_requested":string,"model_observed":string}
+    ///    "model_requested":string,"model_observed":string,
+    ///    "session_observed":string}
     /// model_requested is the --model value or "inherited"; model_observed
-    /// is what the backend reported in-band or "unknown". --json cannot be
-    /// combined with --list-models (the listing is text) and is refused.
+    /// is what the backend reported in-band or "unknown". session_id is the
+    /// id edda asked for; session_observed is the one the backend reported
+    /// in-band, or "unknown" — they differ when a --resume forked instead of
+    /// continuing. --json cannot be combined with --list-models (the listing
+    /// is text) and is refused.
     Dispatch {
         #[command(flatten)]
         args: cmd_dispatch::DispatchArgs,

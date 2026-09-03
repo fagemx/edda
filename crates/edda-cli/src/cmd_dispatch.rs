@@ -163,6 +163,13 @@ pub struct DispatchOutput {
     /// when it reported nothing. Observed, never inferred from config or
     /// session files (GH-574 honesty rule).
     pub model_observed: String,
+    /// The session id the backend reported in-band, or "unknown" when it
+    /// reported nothing. `session_id` above is what edda ASKED for; this is
+    /// what the backend says it ran. Keeping them apart is the whole point:
+    /// `claude --resume <id>` "starts a copy and says so when the session is
+    /// already running", so echoing the requested id back would report every
+    /// fork as a clean resume (GH-708).
+    pub session_observed: String,
 }
 
 impl DispatchOutput {
@@ -171,6 +178,7 @@ impl DispatchOutput {
         session_id: String,
         model_requested: String,
         model_observed: String,
+        session_observed: String,
     ) -> Self {
         match result {
             PhaseResult::AgentDone {
@@ -184,6 +192,7 @@ impl DispatchOutput {
                 error: None,
                 model_requested,
                 model_observed,
+                session_observed,
             },
             PhaseResult::AgentCrash { error } => Self {
                 outcome: Outcome::Crash,
@@ -193,6 +202,7 @@ impl DispatchOutput {
                 error: Some(error),
                 model_requested,
                 model_observed,
+                session_observed,
             },
             PhaseResult::Timeout => Self {
                 outcome: Outcome::Timeout,
@@ -202,6 +212,7 @@ impl DispatchOutput {
                 error: None,
                 model_requested,
                 model_observed,
+                session_observed,
             },
             PhaseResult::MaxTurns { cost_usd } => Self {
                 outcome: Outcome::MaxTurns,
@@ -211,6 +222,7 @@ impl DispatchOutput {
                 error: None,
                 model_requested,
                 model_observed,
+                session_observed,
             },
             PhaseResult::BudgetExceeded { cost_usd } => Self {
                 outcome: Outcome::BudgetExceeded,
@@ -220,6 +232,7 @@ impl DispatchOutput {
                 error: None,
                 model_requested,
                 model_observed,
+                session_observed,
             },
         }
     }
@@ -240,7 +253,8 @@ impl DispatchOutput {
 
     /// Text-mode stdout: an `Outcome:` line whenever the turn did not
     /// finish, then result text, then `Cost:`, then the model story
-    /// (GH-574), then `Session:`.
+    /// (GH-574), then the session story — `Session:` (asked for) and
+    /// `Session observed:` (what the backend reported, GH-708).
     ///
     /// A failed turn used to render exactly like a successful one — same
     /// `Cost:`/`Session:` summary, nothing naming the failure (GH-669) — so
@@ -262,6 +276,7 @@ impl DispatchOutput {
         out.push_str(&format!("Model requested: {}\n", self.model_requested));
         out.push_str(&format!("Model observed: {}\n", self.model_observed));
         out.push_str(&format!("Session: {}\n", self.session_id));
+        out.push_str(&format!("Session observed: {}\n", self.session_observed));
         out
     }
 
@@ -275,6 +290,7 @@ impl DispatchOutput {
             "error": self.error,
             "model_requested": self.model_requested,
             "model_observed": self.model_observed,
+            "session_observed": self.session_observed,
         })
         .to_string()
     }
@@ -585,11 +601,15 @@ pub async fn run_with_launcher(
     let model_observed = launcher
         .last_observed_model()
         .unwrap_or_else(|| "unknown".to_owned());
+    let session_observed = launcher
+        .last_observed_session()
+        .unwrap_or_else(|| "unknown".to_owned());
     Ok(DispatchOutput::from_result(
         result,
         session_id.to_owned(),
         model_requested,
         model_observed,
+        session_observed,
     ))
 }
 
@@ -739,6 +759,7 @@ mod tests {
             "s".into(),
             "inherited".into(),
             "unknown".into(),
+            "unknown".into(),
         );
         let text = out.render_text();
         assert!(text.contains("Model requested: inherited"), "{text}");
@@ -758,6 +779,7 @@ mod tests {
             "s".into(),
             "openai-codex/gpt-5.6-sol".into(),
             "openai-codex/gpt-5.6-sol".into(),
+            "unknown".into(),
         );
         let text = out.render_text();
         assert!(
@@ -787,9 +809,15 @@ mod tests {
             "s".into(),
             "openai-codex/gpt-5.6-sol".into(),
             "unknown".into(),
+            "unknown".into(),
         );
-        let without_model =
-            DispatchOutput::from_result(result, "s".into(), "inherited".into(), "unknown".into());
+        let without_model = DispatchOutput::from_result(
+            result,
+            "s".into(),
+            "inherited".into(),
+            "unknown".into(),
+            "unknown".into(),
+        );
         assert_ne!(
             with_model.render_text(),
             without_model.render_text(),
@@ -932,12 +960,14 @@ mod tests {
             }),
             result_text: Some(reason.into()),
             model: Some("claude-opus-5[1m]".into()),
+            session_id: None,
         };
         let out = DispatchOutput::from_result(
             classify_result(&monitor, Some(1)),
             "0e92629d-1f2e-597e-90ec-662e206efcde".into(),
             "inherited".into(),
             "claude-opus-5[1m]".into(),
+            "unknown".into(),
         );
 
         assert_eq!(out.exit_code(), 1, "{out:?}");
@@ -986,6 +1016,7 @@ mod tests {
                 "s".into(),
                 "inherited".into(),
                 "unknown".into(),
+                "unknown".into(),
             );
             assert_eq!(
                 exit_code_for(out.outcome),
@@ -1006,6 +1037,7 @@ mod tests {
             },
             "s".into(),
             "inherited".into(),
+            "unknown".into(),
             "unknown".into(),
         );
         assert_eq!(out.exit_code(), 0);
@@ -1043,6 +1075,7 @@ mod tests {
                 "sess-1".into(),
                 "inherited".into(),
                 "unknown".into(),
+                "unknown".into(),
             );
             let value: serde_json::Value =
                 serde_json::from_str(&out.to_json()).expect("json parses");
@@ -1067,7 +1100,8 @@ mod tests {
                     "model_requested",
                     "outcome",
                     "result_text",
-                    "session_id"
+                    "session_id",
+                    "session_observed"
                 ]
             );
         }
@@ -1081,6 +1115,7 @@ mod tests {
             },
             "s".into(),
             "inherited".into(),
+            "unknown".into(),
             "unknown".into(),
         );
         let value: serde_json::Value = serde_json::from_str(&crash.to_json()).unwrap();
@@ -1096,6 +1131,7 @@ mod tests {
             },
             "s".into(),
             "inherited".into(),
+            "unknown".into(),
             "unknown".into(),
         );
         let value: serde_json::Value = serde_json::from_str(&done.to_json()).expect("json parses");
@@ -1117,6 +1153,7 @@ mod tests {
             "abc-123".into(),
             "inherited".into(),
             "unknown".into(),
+            "unknown".into(),
         );
         let text = out.render_text();
         assert!(text.contains("done deal\n"), "{text}");
@@ -1135,6 +1172,7 @@ mod tests {
             PhaseResult::MaxTurns { cost_usd: None },
             "s".into(),
             "inherited".into(),
+            "unknown".into(),
             "unknown".into(),
         );
         let text = out.render_text();
@@ -1165,9 +1203,62 @@ mod tests {
             "my-session-42".into(),
             "inherited".into(),
             "unknown".into(),
+            "unknown".into(),
         );
         assert!(out.render_text().contains("Session: my-session-42"));
         assert!(out.to_json().contains("my-session-42"));
+    }
+
+    /// GH-708: the requested id and the observed one are separate fields
+    /// with separate sources, so a `--resume` that forked instead of
+    /// continuing is visible. Echoing the request into `session_observed`
+    /// would report every fork as a clean resume.
+    #[test]
+    fn requested_and_observed_session_ids_are_reported_separately() {
+        let forked = DispatchOutput::from_result(
+            PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: None,
+            },
+            "asked-for-42".into(),
+            "inherited".into(),
+            "unknown".into(),
+            "actually-ran-99".into(),
+        );
+        let text = forked.render_text();
+        assert!(text.contains("Session: asked-for-42"), "{text}");
+        assert!(text.contains("Session observed: actually-ran-99"), "{text}");
+        assert!(forked
+            .to_json()
+            .contains("\"session_observed\":\"actually-ran-99\""));
+    }
+
+    /// A backend that reports no session id renders "unknown", never the
+    /// requested id — the same honesty rule `model_observed` follows.
+    #[tokio::test]
+    async fn a_silent_backend_reports_an_unknown_observed_session() {
+        let launcher = MockLauncher::new();
+        let phase = build_phase(
+            "prompt",
+            None,
+            None,
+            "bypassPermissions",
+            CapabilityOptions::default(),
+        );
+        let out = run_with_launcher(
+            &launcher,
+            &phase,
+            "asked-for-42",
+            Path::new("."),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("mock run");
+        assert_eq!(out.session_id, "asked-for-42");
+        assert_eq!(
+            out.session_observed, "unknown",
+            "a launcher that observed nothing must not echo the requested id"
+        );
     }
 
     /// Records the session ids it receives. This proves verbatim delivery

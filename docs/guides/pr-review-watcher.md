@@ -57,11 +57,20 @@
 - 續談與 cwd 無關（GH-708 實測：從無關目錄 `--resume` 一樣續得到，而且是**同一個**
   transcript 繼續長，不會多出一個檔），所以 lane 每輪刪掉又重建 worktree 不影響它。
 - 判決表頭帶 `reviewer_session`：watcher 那一行印的是 lane 記在 `.done` 的
-  `SESSION=`／`SESSION_MODE=`（**發起時**的事實），並跟 log 裡後端自己回報的
-  `Session:` 行對照；兩者不一致代表這輪其實沒跑在該續的對話裡，表頭會直接寫出來
-  （`BACKEND REPORTED ...`），不會拿發起值蓋過去。
+  `SESSION=`／`SESSION_MODE=`（**發起時**的事實），並跟 log 裡的
+  `Session observed:` 行對照 —— 那一行是**後端自己回報**的（`edda dispatch` 取自
+  claude stream-json 的 `system/init`，fallback 臂取自 claude 的 JSON `session_id`），
+  跟 `Session:`（我們要求的 id）是兩個不同來源。兩者不一致代表這輪沒跑在該續的
+  對話裡（`claude --resume` 在 session 已在跑時會「開一份副本並說明」），表頭直接
+  寫出來（`BACKEND REPORTED ...`）；後端什麼都沒回報就是 `unknown`，不會假裝相符。
 
 ## Provider 過載怎麼辦（v1：無 codex 後備）
+
+> 決策現值：`fleet.review-provider-overload=opus-default-sol-via-pi-fallback-no-codex`
+> （操作者裁決 2026-09-03）。Opus 是**預設**審查引擎，不是唯一——`fleet.review-engine-pool`
+> 的錨仍是 `gpt-5.6-sol`（走 pi）。但 watcher 自己**永遠不換模型**：降到錨引擎是操作者的
+> 動作，自動路徑到 `review:unreviewed` 就停。codex 這條運輸自 `fleet.reviewer-agent`
+> 起就不用於審查（做不到唯讀，也到不了 Opus）。
 
 判決死掉或空白（log 沒有 verdict 區塊、zero-byte log、或超過 45 分鐘沒有 `.done`）時：
 
@@ -125,8 +134,8 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 | `review-acks.tsv` | `pr<TAB>sha<TAB>attempts<TAB>status`——已啟動但 ack 未貼出的 head；成功即移除；3 次失敗 → 加 `review:post-failed`，條目標記 `post-failed`（終態）；label 呼叫也失敗則條目保留、下一輪重試 |
 | `review-fails.tsv` | `pr<TAB>sha<TAB>count`——連續啟動失敗次數（連續 3 次 → `review:unreviewed` 並停） |
 | `watch.log` | watcher 每一步的時間戳紀錄 |
-| `review-prN-rR-brief.md` / `.log` / `.done` / `-verdict.md`（`.posted`） / `-comment.md` | 每輪審查的 brief、審查者轉錄（`edda dispatch` 輸出，或 oversized-brief fallback 的 claude stdin 輸出）、結束旗標（`TRANSPORT=<實際走的臂>` ＋ `DISPATCH_EXIT=<code>`）、抽出來的判決（`.posted` = 留言已貼出）、貼出的留言 |
-| `wt-review-prN/` | 該 PR 的 detached worktree |
+| `review-prN-rR-brief.md` / `.log` / `.done` / `-verdict.md`（`.posted`） / `-comment.md` | 每輪審查的 brief、審查者轉錄（`edda dispatch` 輸出，或 oversized-brief fallback 的 claude stdin 輸出）、結束旗標（`TRANSPORT=<實際走的臂>`、`SESSION=<uuid>`、`SESSION_MODE=new|resume`、`DISPATCH_EXIT=<code>`）、抽出來的判決（`.posted` = 留言已貼出）、貼出的留言 |
+| `wt-review-prN/` | 該 PR 的 detached worktree；一輪結束由 lane 移除，下輪原地重建 |
 
 ## Labels（watcher 啟動時自動建立，缺了才建）
 

@@ -667,7 +667,10 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | `--json` | Print exactly one JSON object to stdout instead of text lines |
 
 With `--json` the object has the shape
-`{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded", "result_text":string\|null, "cost_usd":number\|null, "session_id":string, "error":string\|null}`.
+`{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded", "result_text":string\|null, "cost_usd":number\|null, "session_id":string, "error":string\|null, "model_requested":string, "model_observed":string, "session_observed":string}`.
+`session_id` is the id edda asked for; `session_observed` is the one the
+backend reported in-band, or `"unknown"`. They differ when a `--resume` forked
+instead of continuing, which is the only way to see that from outside.
 
 Exit codes:
 
