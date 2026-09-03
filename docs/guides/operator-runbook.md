@@ -61,8 +61,8 @@
    ```bash
    pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <worktree> -Verify
    pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <worktree> -Restore
-   # 若最新備份本身破損或未被偵測為異常，可手動指向前一代備份：
-   pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <worktree> -Restore -BackupPath <worktree>/.git/config.guard.bak.prev
+   # 若最新備份本身破損（但仍可解析）已被套用，直接手動覆蓋為前一代備份：
+   Copy-Item <worktree>/.git/config.guard.bak.prev <worktree>/.git/config -Force
    ```
 
 ---
