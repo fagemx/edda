@@ -175,8 +175,8 @@ pwsh -NoProfile -NonInteractive -File "$tmp/locked.ps1" >"$tmp/out9" 2>&1 ||
   fail "locked-config probe did not run: $(cat "$tmp/out9")"
 grep -q '^backup=3$' "$tmp/out9" ||
   fail "-Backup on an unreadable config should exit 3 (no backup taken), got: $(cat "$tmp/out9")"
-grep -q '^restore=2$' "$tmp/out9" ||
-  fail "-Restore on an unreadable config should exit 2 and not restore, got: $(cat "$tmp/out9")"
+grep -q '^restore=4$' "$tmp/out9" ||
+  fail "-Restore on an unreadable config should exit 4 (could not be judged) and not restore, got: $(cat "$tmp/out9")"
 cmp -s "$tmp/locked-good" "$repo8/.git/config" ||
   fail "the unreadable config was overwritten; a locked config is not a corrupt one"
 [ "$(corrupt_backups "$repo8")" -eq 0 ] || fail "a locked config was treated as corrupt and archived"
@@ -354,13 +354,40 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
 
   grep -q '^stop=1$' "$tmp/out14" ||
     fail "lane-stop should exit 1 when it cannot verify the config, got: $(cat "$tmp/out14")"
+  grep -q '\.git/config UNVERIFIED' "$logdir/$lane4.log" 2>/dev/null ||
+    fail "an unreadable config must not be reported as UNREPAIRABLE: $(cat "$logdir/$lane4.log" 2>/dev/null)"
   grep -q '=== EXIT' "$logdir/$lane4.log" 2>/dev/null ||
-    fail "a guard exception cost the lane its === EXIT === record (GH-672): $(cat "$tmp/out14")"
+    fail "an unreadable config cost the lane its === EXIT === record (GH-672): $(cat "$tmp/out14")"
   [ -f "$logdir/$lane4.done" ] ||
-    fail "a guard exception cost the lane its done-file (GH-672): $(cat "$tmp/out14")"
-  ok "a guard exception is reported but never skips the end record"
+    fail "an unreadable config cost the lane its done-file (GH-672): $(cat "$tmp/out14")"
+  ok "an unreadable config is reported as UNVERIFIED and never skips the end record"
+
+  # --- case 15 (opt-in): the guard itself raising never costs the end record -
+  # lane-stop runs under $ErrorActionPreference = Stop. The guard converts what
+  # it can into exit codes, but anything it cannot — here, the script missing,
+  # as in a partial checkout — still raises, and step 7 must survive it.
+  lane5=guard-e2e-noguard
+  repo12=$(new_repo e2e-noguard)
+  start_fake_lane "$lane5" "$repo12"
+  crippled="$tmp/crippled"
+  mkdir -p "$crippled"
+  cp "$root/scripts/fleet/lane-stop.ps1" "$crippled/lane-stop.ps1"
+  if pwsh -NoProfile -NonInteractive -File "$crippled/lane-stop.ps1" \
+    -Name "$lane5" -LogDir "$logdir_w" >"$tmp/out15" 2>&1
+  then stop_status5=0; else stop_status5=$?; fi
+  drop_fake_lane "$lane5"
+
+  [ "$stop_status5" -eq 1 ] ||
+    fail "lane-stop should exit 1 when the guard cannot run at all, got $stop_status5: $(cat "$tmp/out15")"
+  grep -q 'gitconfig=CHECK FAILED' "$tmp/out15" ||
+    fail "a guard that cannot run must be reported, not swallowed: $(cat "$tmp/out15")"
+  grep -q '=== EXIT' "$logdir/$lane5.log" 2>/dev/null ||
+    fail "a raised guard error cost the lane its === EXIT === record (GH-672): $(cat "$tmp/out15")"
+  [ -f "$logdir/$lane5.done" ] ||
+    fail "a raised guard error cost the lane its done-file (GH-672): $(cat "$tmp/out15")"
+  ok "a guard that raises is caught, reported, and never skips the end record"
 else
-  echo "-- cases 11-14 (lane-stop end-to-end) skipped; set GIT_CONFIG_GUARD_E2E=1 to run them"
+  echo "-- cases 11-15 (lane-stop end-to-end) skipped; set GIT_CONFIG_GUARD_E2E=1 to run them"
 fi
 
 echo "all $case_number case(s) passed"

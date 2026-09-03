@@ -21,10 +21,13 @@
 # always the SHARED config (`git rev-parse --git-common-dir`), because that is
 # the single file whose loss takes down every worktree.
 #
-# -Backup keeps one generation: the outgoing backup moves to
-# <backup>.prev before the new one is written, and -Restore falls back to it.
-# A torn write can end on a byte boundary that still parses, and backing THAT
-# up would retire the last complete copy.
+# -Backup keeps one generation: the outgoing backup moves to <backup>.prev
+# before the new one is written. Be precise about what that buys. The
+# AUTOMATIC fallback only fires when the newest backup is DETECTABLY broken
+# (case 10). It cannot fire for the case that motivates keeping a generation
+# at all — a torn write ending on a boundary that still parses — because
+# nothing can tell that file from a good one; there, .prev is the copy an
+# operator points -BackupPath at by hand once they know the newest is wrong.
 #
 # A config that cannot be READ (held open by whatever is writing it) is a third
 # outcome, not a synonym for corrupt: nothing is backed up from it and nothing
@@ -35,8 +38,9 @@
 #   1  usage or resolution error (no mode, not a git repo, git unavailable)
 #   2  the config is unhealthy — and for -Restore/-VerifyOrRestore, could not
 #      be repaired (no usable backup, or the restored file still does not parse)
-#   3  no backup was taken: the config is healthy but the copy failed, or the
-#      config could not be read at all
+#   3  no backup was taken: the config is healthy but the copy failed
+#   4  the config could not be judged at all, because it could not be read.
+#      Distinct from 2 on purpose: nothing is known to be wrong with it
 param(
   [string]$RepoPath = '.',
   [switch]$Backup,
@@ -191,14 +195,18 @@ if ($Verify) {
     "config=$ConfigPath healthy ($($health.Reason))"
     exit 0
   }
+  if ($health.Unreadable) {
+    Fail "config=$ConfigPath COULD NOT BE JUDGED: $($health.Reason)" 4
+  }
   Fail "config=$ConfigPath UNHEALTHY: $($health.Reason)" 2
 }
 
 # --- -Backup -----------------------------------------------------------------
 
-# One generation back. A torn write can land on a byte boundary that still
-# parses, and backing that up would retire the last complete copy; keeping the
-# previous one means a single such event is still recoverable.
+# One generation back. The automatic fallback below only fires when the newest
+# backup is DETECTABLY broken; for a torn-but-parsing one nothing can tell it
+# from a good copy, and .prev is then the file an operator restores by hand
+# with -BackupPath. See the header.
 $PrevBackupPath = "$BackupPath.prev"
 
 if ($Backup) {
@@ -232,7 +240,7 @@ if ($health.Healthy) {
 if ($health.Unreadable) {
   # A locked config is not a corrupt one. Overwriting it here would destroy a
   # file that may be perfectly good and is currently being written.
-  Fail "config=$ConfigPath could not be read, so it was NOT restored ($($health.Reason)); check what holds it open" 2
+  Fail "config=$ConfigPath could not be read, so it was NOT restored ($($health.Reason)); check what holds it open" 4
 }
 
 [Console]::Error.WriteLine("git-config-guard: config=$ConfigPath UNHEALTHY: $($health.Reason)")

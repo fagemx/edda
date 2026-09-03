@@ -35,10 +35,11 @@
 # Prints what was terminated, one line each, plus the .git/config verdict.
 # Exit codes (style of lane-status.ps1): 0 = stopped (N processes terminated,
 # or the lane was not running); 1 = error: no matching task, wrapper missing,
-# processes survived the kill, or the lane's .git/config is corrupt and could
-# not be restored. The end record (step 7) is written before any of those
-# .git/config failures is reported, so a stop never costs the log its EXIT
-# line (GH-672).
+# processes survived the kill, or the lane's .git/config was not confirmed
+# healthy — either corrupt and unrepairable, or impossible to judge (the
+# gitconfig= line says which). The end record (step 7) is written before any
+# of those .git/config failures is reported, so a stop never costs the log its
+# EXIT line (GH-672).
 # Matches tasks registered across the fleet (edda-lane-*, edda-review-pr*-r*, GH-712).
 param(
   [Parameter(Mandatory = $true)][string]$Name,
@@ -124,7 +125,7 @@ $brief = if ($wrapperBody -match '--prompt-file\s+[''"]([^''"]+)[''"]') {
 
 # The worktree the lane ran in, which resolves the SHARED .git/config this
 # script checks after the kill (GH-715). Both wrapper generators this script
-# stops must match: lane-launch.ps1:143 writes `Set-Location -LiteralPath '<p>'`
+# stops must match: lane-launch.ps1:154 writes `Set-Location -LiteralPath '<p>'`
 # (single-quoted literal, embedded quotes doubled), while the review lanes of
 # review-pr.sh:453 and pr-review-launch.ps1:64 write a bare `Set-Location '<p>'`
 # — so the parameter name is optional here. Anchored to end of line because
@@ -319,8 +320,14 @@ if ($laneCwd -and (Test-Path -LiteralPath $laneCwd)) {
       $restoredLine = @($guardOut | Where-Object { "$_" -match 'RESTORED' })
       $gitConfigVerdict = if ($restoredLine.Count -gt 0) { "$($restoredLine[0])" } else { 'healthy' }
     } else {
+      # Exit 4 means the guard declined to judge the file (it could not read
+      # it), which is not the same claim as "corrupt and unrepairable".
       $gitConfigBroken = $true
-      $gitConfigVerdict = "UNREPAIRABLE (git-config-guard exit $guardExit)"
+      $gitConfigVerdict = if ($guardExit -eq 4) {
+        'UNVERIFIED (git-config-guard could not read the config; nothing was changed)'
+      } else {
+        "UNREPAIRABLE (git-config-guard exit $guardExit)"
+      }
     }
     $guardOut | ForEach-Object { [Console]::Error.WriteLine("lane-stop: git-config-guard: $_") }
   } catch {
