@@ -318,15 +318,17 @@ pub fn status(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<(
 /// testable without stdout capture.
 fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<String> {
     let mut out = String::new();
-    let stores = plan_stores(repo_root);
     let plans: Vec<(String, PathBuf)> = if let Some(name) = plan_name {
         match resolve_plan_store(repo_root, name)? {
             Some(store) => vec![(name.to_string(), store)],
             None => vec![(name.to_string(), repo_root.to_path_buf())],
         }
     } else {
+        // Round-2 P2: same union resolve_plan_name auto-detects over,
+        // filtered to directories that actually hold a state.json — the
+        // directory-name rule and the state.json rule used to disagree.
         let mut found: Vec<(String, PathBuf)> = Vec::new();
-        for store in &stores {
+        for store in plan_stores(repo_root) {
             let conductor_dir = store.join(".edda").join("conductor");
             if !conductor_dir.exists() {
                 continue;
@@ -335,7 +337,9 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
                 let entry = entry?;
                 if entry.file_type()?.is_dir() {
                     if let Some(name) = entry.file_name().to_str() {
-                        if !found.iter().any(|(n, _)| n == name) {
+                        if load_state(&store, name).ok().flatten().is_some()
+                            && !found.iter().any(|(n, _)| n == name)
+                        {
                             found.push((name.to_string(), store.clone()));
                         }
                     }
@@ -356,10 +360,18 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
     }
 
     if json {
-        let states: Vec<PlanState> = plans
-            .iter()
-            .filter_map(|(name, store)| load_state(store, name).ok().flatten())
-            .collect();
+        // Round-2 P2: propagate, don't silently drop — a corrupt state file
+        // is an error, never an absent entry (same rule as the text mode).
+        let mut states = Vec::new();
+        for (name, store) in &plans {
+            states.push(
+                load_state(store, name)
+                    .with_context(|| format!("plan \"{name}\" in {}", store.display()))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("plan \"{name}\": no state file in {}", store.display())
+                    })?,
+            );
+        }
         // Single plan name specified: output object directly; otherwise array
         if plan_name.is_some() {
             if let Some(s) = states.into_iter().next() {
@@ -398,6 +410,7 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
 /// Render one plan's status block (the body `print_status` writes).
 fn print_status_to_string(state: &PlanState) -> String {
     let mut out = String::new();
+    out.push('\n');
     out.push_str(&format!(
         "Plan: {} ({:?})\n",
         state.plan_name, state.plan_status
@@ -435,6 +448,8 @@ fn print_status_to_string(state: &PlanState) -> String {
                 let reason = ps.skip_reason.as_deref().unwrap_or("");
                 format!("({})", reason)
             }
+            // GH-552: a waived gate keeps the honest status — "skip" would
+            // understate what was verified (the phase ran and passed).
             PhaseStatus::GateTimedOut => match ps.skip_reason.as_deref() {
                 Some(reason) => format!("(waived: {})", reason),
                 None => "(awaiting operator: retry or waive)".to_string(),
@@ -455,7 +470,7 @@ pub fn retry(repo_root: &Path, phase_id: &str, plan_name: Option<&str>) -> Resul
     let name = resolve_plan_name(repo_root, plan_name)?;
     let store =
         resolve_plan_store(repo_root, &name)?.ok_or_else(|| no_state_error(repo_root, &name))?;
-    update_state(&store, &name, |state| {
+    let plan_file = update_state(&store, &name, |state| {
         let current_status = {
             let ps = state.get_phase_mut(phase_id)?;
             if ps.status != PhaseStatus::Failed
@@ -484,10 +499,24 @@ pub fn retry(repo_root: &Path, phase_id: &str, plan_name: Option<&str>) -> Resul
             state.plan_status = PlanStatus::Running;
         }
 
-        Ok(())
+        Ok(state.plan_file.clone())
     })?;
 
-    println!("Phase \"{phase_id}\" reset to Pending. Run `edda conduct run` to resume.");
+    // GH-557 review round 2, P1-1: a destructive verb must name the store
+    // it wrote, and the resume hint must resolve the SAME store.
+    println!("Phase \"{phase_id}\" reset to Pending.");
+    println!("  store: {}", store.display());
+    if plan_file.is_empty() {
+        println!(
+            "  resume: `edda conduct run <plan.yaml> --cwd {}`",
+            store.display()
+        );
+    } else {
+        println!(
+            "  resume: `edda conduct run {plan_file} --cwd {}`",
+            store.display()
+        );
+    }
     Ok(())
 }
 
@@ -539,6 +568,7 @@ pub fn skip(
         Ok(false)
     })?;
 
+    println!("  store: {}", store.display());
     if is_waived {
         println!("Phase \"{phase_id}\" gate waived (status kept as GateTimedOut).");
     } else {
@@ -562,7 +592,7 @@ pub fn abort(repo_root: &Path, plan_name: Option<&str>) -> Result<()> {
         Ok(())
     })?;
 
-    println!("Plan \"{name}\" aborted.");
+    println!("Plan \"{name}\" aborted. (store: {})", store.display());
     Ok(())
 }
 
@@ -665,15 +695,17 @@ fn plan_stores(repo_root: &Path) -> Vec<PathBuf> {
     stores
 }
 
-/// Find the store directory that actually holds `<plan>`'s state.json
-/// (GH-557): the repo root first, then each git worktree. A corrupt state
-/// file is an error, NOT "absent" — swallowing it would retarget a
-/// mutating verb onto a different store that happens to hold a stale
-/// same-name state.
-fn resolve_plan_store(repo_root: &Path, plan: &str) -> Result<Option<PathBuf>> {
+/// Every store currently holding `<plan>`'s state.json (GH-557), in
+/// deterministic order (repo root first, then `git worktree list` order).
+/// A corrupt state file is an error, NOT "absent" — swallowing it would
+/// retarget a mutating verb onto a different store that happens to hold a
+/// stale same-name state.
+fn stores_holding(repo_root: &Path, plan: &str) -> Result<Vec<PathBuf>> {
+    edda_conductor::state::persist::validate_plan_name(plan)?;
+    let mut holding = Vec::new();
     for store in plan_stores(repo_root) {
         match load_state(&store, plan) {
-            Ok(Some(_)) => return Ok(Some(store)),
+            Ok(Some(_)) => holding.push(store),
             Ok(None) => continue,
             Err(e) => {
                 return Err(e.context(format!(
@@ -683,7 +715,32 @@ fn resolve_plan_store(repo_root: &Path, plan: &str) -> Result<Option<PathBuf>> {
             }
         }
     }
-    Ok(None)
+    Ok(holding)
+}
+
+/// The store a verb should act on: the first store holding the plan. When
+/// more than one store holds the same plan name, the others are shadowed —
+/// warn on stderr so a destructive verb is never mute about that (GH-557
+/// independent review round 2, P1-1).
+fn resolve_plan_store(repo_root: &Path, plan: &str) -> Result<Option<PathBuf>> {
+    let holding = stores_holding(repo_root, plan)?;
+    match holding.len() {
+        0 => Ok(None),
+        1 => Ok(Some(holding[0].clone())),
+        _ => {
+            eprintln!(
+                "⚠ plan \"{plan}\" exists in {} stores; acting on {} (shadowed: {})",
+                holding.len(),
+                holding[0].display(),
+                holding[1..]
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            Ok(Some(holding[0].clone()))
+        }
+    }
 }
 
 /// Refuse to act when the plan's state is nowhere on the repo (GH-557):
@@ -696,13 +753,20 @@ fn no_state_error(repo_root: &Path, plan: &str) -> anyhow::Error {
         .filter(|p| p.join(".edda").join("conductor").is_dir())
         .map(|p| p.display().to_string())
         .collect();
-    let shown = if searched.len() > 5 {
+    let shown = if searched.is_empty() {
+        "no store with a .edda/conductor directory".to_string()
+    } else if searched.len() > 5 {
         format!("{} … ({} stores)", searched[..5].join(", "), searched.len())
     } else {
         searched.join(", ")
     };
+    // GH-557 review round 2, P1-2: name the REAL store rule — a plan's
+    // state lives in the --cwd it was launched with, the plan's own `cwd:`
+    // key, or the plan file's directory. The old text blamed a --cwd the
+    // operator may never have passed.
     anyhow::anyhow!(
-        "no state for plan \"{plan}\" (searched: {shown}); a plan launched with a --cwd outside this repo's worktrees stores its state there and is not auto-discoverable"
+        "no state for plan \"{plan}\" (searched: {shown}); a plan's state lives in the store it was launched from — \
+         the --cwd passed to conduct run, the plan's cwd: key, or the plan file's own directory"
     )
 }
 
@@ -711,23 +775,35 @@ fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Result<String>
         return Ok(name.to_string());
     }
 
-    let conductor_dir = repo_root.join(".edda").join("conductor");
-    if !conductor_dir.exists() {
-        bail!("No conductor state found. Specify --plan <name>.");
-    }
-
-    let mut names = Vec::new();
-    for entry in std::fs::read_dir(&conductor_dir)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            if let Some(n) = entry.file_name().to_str() {
-                names.push(n.to_string());
+    // GH-557 review round 2, P1-3: auto-detection spans the same stores
+    // `status` lists — the shipped agent recovery loop reads `status --json`
+    // and then runs retry/skip/abort WITHOUT --plan, so a split resolution
+    // let `abort` hit the wrong plan or dead-end. Scanning the same union
+    // makes the read and write verbs agree; more than one plan still
+    // requires an explicit --plan, so a destructive verb can never silently
+    // resolve across lanes.
+    let mut names: Vec<String> = Vec::new();
+    for store in plan_stores(repo_root) {
+        let conductor_dir = store.join(".edda").join("conductor");
+        if !conductor_dir.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(&conductor_dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                if let Some(n) = entry.file_name().to_str() {
+                    if load_state(&store, n).ok().flatten().is_some()
+                        && !names.iter().any(|existing| existing == n)
+                    {
+                        names.push(n.to_string());
+                    }
+                }
             }
         }
     }
 
     match names.len() {
-        0 => bail!("No plans found."),
+        0 => bail!("No plans found. Specify --plan <name>."),
         1 => Ok(names
             .into_iter()
             .next()
