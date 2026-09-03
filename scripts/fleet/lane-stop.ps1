@@ -200,7 +200,15 @@ foreach ($s in $seedPids) {
 while ($verifyQueue.Count -gt 0) {
   $curr = $verifyQueue.Dequeue()
   if (-not $verifySnap.ChildrenOf.ContainsKey($curr)) { continue }
-  $parentProc = $verifySnap.ProcMap[$curr]
+  $parentProc = if ($verifySnap.ProcMap.ContainsKey($curr)) {
+    $verifySnap.ProcMap[$curr]
+  } elseif ($postSnap.ProcMap.ContainsKey($curr)) {
+    $postSnap.ProcMap[$curr]
+  } elseif ($preSnap.ProcMap.ContainsKey($curr)) {
+    $preSnap.ProcMap[$curr]
+  } else {
+    $null
+  }
   foreach ($c in $verifySnap.ChildrenOf[$curr]) {
     $childProc = $verifySnap.ProcMap[$c]
     if ($parentProc -and $childProc -and $parentProc.CreationDate -and $childProc.CreationDate) {
@@ -214,13 +222,6 @@ while ($verifyQueue.Count -gt 0) {
 
 $residual = @($residualSet)
 if ($residual.Count -gt 0) {
-  # Write exit record before failing on residual, so the lane log is never left ambiguous (GH-672, GH-706)
-  if ($terminated.Count -gt 0 -or ((Test-Path -LiteralPath $Log) -and -not (Test-Path -LiteralPath $Done))) {
-    Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1 with residual: $($residual -join ','); terminated $($terminated.Count) process(es)) ===" -Encoding utf8
-    if (-not (Test-Path -LiteralPath $Done)) {
-      Set-Content -LiteralPath $Done -Value 'residual' -Encoding ascii
-    }
-  }
   Fail "residual lane processes survive the kill: $($residual -join ',')"
 }
 $task = Get-ScheduledTask -TaskName $TaskName
