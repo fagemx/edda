@@ -63,7 +63,7 @@ REPO=${EDDA_REPO:-fagemx/edda}
 MODEL=${EDDA_REVIEW_MODEL:-claude-opus-5}
 POLL=${EDDA_REVIEW_POLL_SECONDS:-60}
 SCRATCH=${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}
-STALE=${EDDA_REVIEW_STALE_SECONDS:-2700}   # 45 min: pi task limit is 30 min
+STALE=${EDDA_REVIEW_STALE_SECONDS:-2700}   # 45 min: the scheduled-task limit is 30 min
 POSTFAIL_CAP=5
 ACK_CAP=3
 
@@ -254,8 +254,10 @@ verdict_ok() { # $1=verdict file
   grep -qE '^(LGTM|Changes Requested)' "$1" 2>/dev/null
 }
 
-# Model observed + cost, read from the pi session files (never from what the
-# brief asked for). Missing session file => explicitly "unknown", never made up.
+# Model observed + cost, read from the transcript's receipt lines (edda
+# dispatch prints them; the oversized-brief claude-stdin fallback writes the
+# same lines) — never from what the brief asked for. Missing lines =>
+# explicitly "unknown", never made up.
 session_model_cost() { # $1=log file -> sets REQ, OBSERVED, COST, SIDO
   t=$(tr -d '\r' < "$1" 2>/dev/null)
   REQ=$(printf '%s\n' "$t" | sed -n 's/^Model requested: //p' | tail -1)
@@ -407,9 +409,19 @@ settle_pending() {
       if extract_verdict "$LOG" "$VERDICT" && verdict_ok "$VERDICT"; then
         session_model_cost "$LOG"
         if [ "$COST" = "?" ]; then costline='cost: unknown'; else costline='cost: $'"$COST"; fi
+        # The transport that actually ran, read from the lane's TRANSPORT=
+        # receipt in .done — never the transport we wish had run (GH-708
+        # round 2: this header used to hardcode `edda dispatch` even when the
+        # oversized-brief claude-stdin fallback was the arm that ran).
+        tline=$(sed -n 's/^TRANSPORT=//p' "$DONE" 2>/dev/null | tail -1)
+        case "$tline" in
+          edda-dispatch) tdesc='edda dispatch --agent claude' ;;
+          claude-stdin)  tdesc='claude -p via stdin (oversized-brief fallback; read-only allowlist)' ;;
+          *)             tdesc='unknown — no TRANSPORT receipt in .done' ;;
+        esac
         COMMENT="$SCRATCH/review-pr$pr-r$round-comment.md"
         {
-          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): edda dispatch --agent claude --model $REQ --exclude-tools Edit,Write,NotebookEdit --session-id $SIDO, read-only, detached worktree at \`$sha\`. Model requested/observed (dispatch transcript): \`$REQ\` / \`$OBSERVED\`. $costline. Reviewed head SHA: \`$sha\`."
+          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): transport \`$tdesc\`, model \`$REQ\` (observed \`$OBSERVED\`), session \`$SIDO\`, $costline, read-only, detached worktree at \`$sha\`. Reviewed head SHA: \`$sha\`."
           echo
           cat "$VERDICT"
         } > "$COMMENT"

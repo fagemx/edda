@@ -224,17 +224,19 @@ if ! grep -q '#683' "$tmp/err"; then
     fail "D2e: a brief generated with no acceptance criteria printed no warning on stderr"
 fi
 
-# --- D3 (#691): the brief must not tell anyone to open a browser manual -------
+# --- D3 (#691): the reviewer must never be told to open a browser manual -------
+# The spec reaches the reviewer as the worktree copy (.edda-review-spec.md,
+# asserted in D8d), so the spec source is checked alongside the brief.
 
 dry_run 'Issue: #650\n'
-if grep -nE 'git [a-z][a-z0-9-]* --help' "$brief"; then
-    fail "D3: the brief instructs 'git <verb> --help', which opens the HTML manual in the operator's browser on Windows (#691)"
+if grep -nE 'git [a-z][a-z0-9-]* --help' "$brief" "$EDDA_REVIEW_SPEC"; then
+    fail "D3: the brief or the spec instructs 'git <verb> --help', which opens the HTML manual in the operator's browser on Windows (#691)"
 fi
-if ! grep -q 'git <verb> -h' "$brief"; then
-    fail "D3: the brief does not instruct 'git <verb> -h' as the probe form"
+if ! grep -q 'git <verb> -h' "$EDDA_REVIEW_SPEC"; then
+    fail 'D3: the spec does not instruct git <verb> -h as the probe form'
 fi
-if ! grep -q '691' "$brief"; then
-    fail "D3: the brief states the -h rule without the reason, so a future editor may restore --help"
+if ! grep -q '691' "$EDDA_REVIEW_SPEC"; then
+    fail 'D3: the spec states the -h rule without the reason, so a future editor may restore --help'
 fi
 
 # --- D4 (#697): verdict-label reads the Verdict line, not the last keyword ----
@@ -328,14 +330,51 @@ fi
 unset EDDA_REVIEW_MODEL
 
 # --- D7 (GH-708/#699): the closing-keyword ban is narrowed, not blanket --------
+# The rule lives in the spec (reached via the worktree copy, D8d), so the spec
+# source is the surface to pin.
 
 dry_run 'Issue: #650\n'
-if grep -q 'no closing keywords' "$brief"; then
+if grep -q 'no closing keywords' "$brief" "$EDDA_REVIEW_SPEC"; then
     fail 'D7a: the spec still blanket-bans closing keywords — pr.closing-keyword=only-when-all-donewhen-delivered narrowed it (#699)'
 fi
-if ! grep -q 'only-when-all-donewhen-delivered' "$brief"; then
-    fail 'D7b: the brief does not state the narrowed closing-keyword policy (#699)'
+if ! grep -q 'only-when-all-donewhen-delivered' "$EDDA_REVIEW_SPEC"; then
+    fail 'D7b: the spec does not state the narrowed closing-keyword policy (#699)'
 fi
+
+# --- D8 (GH-708 round 2): the edda dispatch arm must be the arm that runs ------
+# Round 1 P1-1: the brief inlined REVIEW.md verbatim (~33k chars), so the lane's
+# `$briefChars -lt 30000` guard was never true and every real review silently
+# ran the undocumented claude-stdin fallback. The brief now points the reviewer
+# at the spec copy in the worktree (.edda-review-spec.md) instead of inlining
+# it; these cases pin that shape. Round 1 P1-2: the fallback arm — the only arm
+# when a brief ever does exceed the budget — must carry the recorded
+# fleet.review-engine-model read-only shape, not an unrestricted reviewer.
+
+dry_run 'Issue: #650\n'
+brief_chars=$(wc -m < "$brief")
+spec_chars=$(wc -m < "$EDDA_REVIEW_SPEC")
+if [ "$brief_chars" -ge 30000 ]; then
+    fail "D8a: the brief is $brief_chars chars — at or over the lane's 30000-char guard, so the edda dispatch arm would be skipped for every real brief"
+fi
+if [ "$brief_chars" -ge "$spec_chars" ]; then
+    fail "D8b: the brief ($brief_chars chars) is not smaller than the spec ($spec_chars chars) — the spec is being inlined again"
+fi
+if grep -q '# review-spec:classifier-end' "$brief"; then
+    fail 'D8c: the brief inlines the spec body (found a spec-only marker) — inlining pushed every real brief over the dispatch budget (round 2 P1-1)'
+fi
+if ! grep -q '.edda-review-spec.md' "$brief"; then
+    fail 'D8d: the brief does not point the reviewer at the worktree spec copy .edda-review-spec.md'
+fi
+lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-lane.ps1"
+grep -q -- "--allowedTools 'Read,Glob,Grep,Bash'" "$lane" \
+    || fail 'D8e: the fallback arm does not restrict the reviewer to the read-only allowlist --allowedTools Read,Glob,Grep,Bash (round 2 P1-2)'
+if grep -q 'bypassPermissions' "$lane"; then
+    fail 'D8f: the fallback arm still grants --permission-mode bypassPermissions — the recorded fleet.review-engine-model shape auto-approves only the read allowlist'
+fi
+grep -q 'TRANSPORT=edda-dispatch' "$lane" \
+    || fail 'D8g: the dispatch arm writes no TRANSPORT=edda-dispatch receipt — the verdict header cannot name the transport that actually ran'
+grep -q 'TRANSPORT=claude-stdin' "$lane" \
+    || fail 'D8h: the fallback arm writes no TRANSPORT=claude-stdin receipt'
 
 # --- offline guarantee: the real fleet scratch carries none of our output -----
 # Only our own fixture PR is asserted, not the whole listing: a live watcher or

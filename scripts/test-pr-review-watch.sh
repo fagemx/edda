@@ -464,6 +464,66 @@ if [ "$(printf '%s' "$(pending_get)" | cut -f4)" != "1" ]; then
     exit 1
 fi
 
+# --- live loop: the verdict header names the transport that actually ran (P1) --
+# Round 2 P1-1: the header used to hardcode `edda dispatch --agent claude` even
+# when the oversized-brief claude-stdin fallback was the arm that ran. The
+# header must print the TRANSPORT= receipt from .done, verbatim, or say
+# "unknown" when the receipt is missing — never the transport we wish had run.
+
+header_comment_path() {
+    sed -n 's/.*--body-file //p' "$GH_STUB_LOG" | tail -1
+}
+
+verdict_log_fixture() {
+    {
+        printf '<<<VERDICT\n'
+        printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha"
+        printf 'VERDICT>>>\n'
+        printf 'Model requested: claude-opus-5\nModel observed: claude-opus-5\nCost: $0.33\nSession: 11111111-2222-4333-8444-555555555555\n'
+    } >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
+}
+
+export GH_HEAD="$sha"
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: dispatch arm)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+[ -n "$cfile" ] || { printf 'live: a settled verdict should post a comment\n' >&2; exit 1; }
+grep -qF 'transport `edda dispatch --agent claude`' "$cfile" || {
+    printf 'live: header must name the edda-dispatch receipt, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=claude-stdin\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: fallback arm)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+grep -qF 'transport `claude -p via stdin (oversized-brief fallback; read-only allowlist)`' "$cfile" || {
+    printf 'live: header must name the claude-stdin fallback receipt, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+if grep -qF 'edda dispatch --agent claude' "$cfile"; then
+    printf 'live: header must not claim edda dispatch when the claude-stdin fallback ran, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+fi
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'DISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: missing receipt)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+grep -qF 'transport `unknown — no TRANSPORT receipt in .done`' "$cfile" || {
+    printf 'live: a missing TRANSPORT receipt must render as unknown, not a guessed transport, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+unset GH_HEAD
+
 # --- offline guarantee: the real watcher log was never touched -----------------
 size_after=0
 [ -f "$REAL_WATCHLOG" ] && size_after=$(stat -c %s "$REAL_WATCHLOG")

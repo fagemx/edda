@@ -18,7 +18,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.1`
+- Spec version: `review-spec-v1.2`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -63,7 +63,9 @@ implements this as `git show <base-sha>:REVIEW.md`; when the base SHA predates
 this file it falls back to the checkout's copy and prints which SHA the spec
 came from, so a spec-less brief is never emitted silently. The front matter is
 the machine half (gate set, RAN allowlist, class globs, independence policy);
-the body below is injected verbatim and is never parsed.
+the body below is delivered verbatim — as the worktree copy
+`.edda-review-spec.md` the launcher writes and the brief points at — and is
+never parsed.
 
 ## 0. The read-only contract
 
@@ -77,7 +79,11 @@ A reviewer reads, runs read-only checks, and writes exactly one PR comment.
   (`brief-v1` §4).
 - Transport should enforce this where it can: the shipped reviewer runs
   `edda dispatch --agent claude --exclude-tools Edit,Write,NotebookEdit`
-  (GH-708); the brief text is the second layer.
+  (GH-708); when a brief outgrows the Windows 32767-char spawn cap that
+  transport trips, the launcher's oversized-brief fallback runs the brief
+  through `claude -p` stdin with the read-only allowlist `--allowedTools
+  "Read,Glob,Grep,Bash" --disallowedTools "Edit,Write,NotebookEdit"` — never
+  an unrestricted reviewer; the brief text is the second layer.
 - If `FLEET_PAUSE` exists at the repo root, exit idle without touching state.
 
 **Reading exit codes.** Several checks below end in a pipe. In POSIX `sh`,
@@ -594,7 +600,7 @@ One comment per round, pinned to the reviewed full SHA
 
 - model_requested: <the model dispatch asked for>
 - model_observed: <read from the system, or "unverified">
-- spec: review-spec-v1.1
+- spec: review-spec-v1.2
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
 - cost: <elapsed / tokens / tool calls, as available>
@@ -707,6 +713,14 @@ mechanical.
   on closing keywords narrows to `pr.closing-keyword=only-when-all-donewhen-
   delivered` (GH-699): a PR writes `closes #N` exactly when it delivers every
   doneWhen of issue #N.
+- `review-spec-v1.2` (2026-09-03, issue #708 round 2): the spec is no longer
+  inlined into the brief — it is copied verbatim to `.edda-review-spec.md` in
+  the review worktree and the brief points at it — because inlining pushed
+  every real brief over the 30000-char guard and silently switched every
+  review to the fallback transport while the shipped claims said
+  `edda dispatch` ran. The fallback arm is pinned to the recorded
+  `fleet.review-engine-model` read-only shape (§0 above) and the verdict
+  header prints the `TRANSPORT=` receipt of the arm that actually ran.
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
