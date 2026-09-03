@@ -818,6 +818,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "edda-bridge-claude",
+ "edda-core",
  "edda-pack",
  "edda-postmortem",
  "edda-store",
@@ -915,6 +916,7 @@ name = "edda-core"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "globset",
  "hex",
  "regex",
@@ -1123,6 +1125,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "dirs",
+ "edda-core",
  "edda-store",
  "fs2",
  "serde",

@@ -56,7 +56,7 @@ pub fn store_root() -> PathBuf {
     }
     if let Some(data_dir) = dirs::data_dir() {
         data_dir.join("edda")
-    } else if let Some(home) = dirs::home_dir() {
+    } else if let Some(home) = edda_core::paths::home_dir() {
         home.join(".edda")
     } else {
         PathBuf::from(".edda-store")

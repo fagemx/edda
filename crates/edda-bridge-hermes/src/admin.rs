@@ -35,7 +35,7 @@ fn default_config_path() -> Option<PathBuf> {
     // equivalent on Windows. The primary config filename is `cli-config.yaml`
     // (the codebase writes both cli-config.yaml and config.yaml in different
     // eras; cli-config.yaml is the current name).
-    dirs::home_dir().map(|h| h.join(".hermes").join("cli-config.yaml"))
+    edda_core::paths::home_dir().map(|h| h.join(".hermes").join("cli-config.yaml"))
 }
 
 /// Write (or merge) the edda hook into Hermes' cli-config.yaml.
@@ -231,7 +231,7 @@ pub fn doctor() -> anyhow::Result<()> {
     // Check consent status. Even if hooks are installed, they don't fire
     // until approved once via TTY/env/config.
     let allowlist_path =
-        dirs::home_dir().map(|h| h.join(".hermes").join("shell-hooks-allowlist.json"));
+        edda_core::paths::home_dir().map(|h| h.join(".hermes").join("shell-hooks-allowlist.json"));
     let approved_here = allowlist_path
         .as_ref()
         .and_then(|p| fs::read_to_string(p).ok())
