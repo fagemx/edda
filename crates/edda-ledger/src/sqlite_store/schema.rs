@@ -31,6 +31,7 @@ fn add_missing_columns(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // 204 lines at #779; split tracked in none
 fn set_schema_version_on(conn: &Connection, version: u32) -> anyhow::Result<()> {
     conn.execute(
         "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('version', ?1)",

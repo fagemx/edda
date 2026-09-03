@@ -67,6 +67,7 @@ fn write_commit_md(dir: &Path, snap: &BranchSnapshot) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // 178 lines at #779; split tracked in none
 fn write_log_md(dir: &Path, ledger: &Ledger, branch: &str) -> Result<()> {
     let branch_events = collect_branch_events(ledger, branch)?;
     let mut out = String::new();

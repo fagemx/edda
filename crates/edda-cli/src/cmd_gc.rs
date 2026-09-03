@@ -31,6 +31,7 @@ struct GcCandidate {
     reason: DeleteReason,
 }
 
+#[allow(clippy::too_many_lines)] // 376 lines at #779; split tracked in none
 pub fn execute(params: &GcParams) -> anyhow::Result<()> {
     if params.purge_archive {
         return purge_archive(params);

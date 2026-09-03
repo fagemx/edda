@@ -11,6 +11,7 @@ use crate::types::*;
 use helpers::cmd_base_key;
 use session::render_session_history;
 
+#[allow(clippy::too_many_lines)] // 219 lines at #779; split tracked in none
 pub fn render_context(ledger: &Ledger, branch: &str, opt: DeriveOptions) -> Result<String> {
     let snap = build_branch_snapshot(ledger, branch)?;
     let n = opt.depth.max(1);

@@ -404,6 +404,7 @@ pub fn run(args: DispatchArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // 162 lines at #779; split tracked in none
 fn run_inner(args: DispatchArgs) -> Result<i32> {
     // GH-574 honesty gate: refuse unsupported backend/option combinations
     // instead of accepting them and silently doing nothing. An explicitly

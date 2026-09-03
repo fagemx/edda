@@ -110,6 +110,7 @@ pub fn run_cmd(cmd: ConductCmd, repo_root: &Path) -> Result<()> {
 // ── Command Implementations ──
 
 /// Execute `edda conduct run <plan.yaml>`
+#[allow(clippy::too_many_lines)] // 201 lines at #779; split tracked in none
 pub fn run(
     plan_file: &Path,
     cwd_override: Option<&Path>,

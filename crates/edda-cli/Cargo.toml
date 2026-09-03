@@ -63,3 +63,6 @@ async-trait = "0.1"
 # Test-only: tamper tests must write raw SQL against a real SQLite ledger
 # (the repo does not mock internal crates), and the ledger DB is SQLite.
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+[lints]
+workspace = true

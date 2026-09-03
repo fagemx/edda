@@ -32,6 +32,7 @@ pub struct SyncStats {
 /// The cursor is owned here: callers never pass or reset it. `sync` resets to a
 /// full rebuild when the index was created fresh (schema upgrade, corruption,
 /// crash mid-wipe) or when the stored cursor no longer matches the ledger.
+#[allow(clippy::too_many_lines)] // 151 lines at #779; split tracked in none
 pub fn sync<F>(
     proj_dir: &Path,
     project_id: &str,

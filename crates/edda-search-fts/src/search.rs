@@ -40,6 +40,7 @@ pub struct SearchOptions<'a> {
 ///   even inside a longer run; CJK *alternatives* need an explicit `OR`
 /// - Field boosting: title matches ranked 5x higher than body
 /// - Filtering by doc_type, event_type, project_id, session_id
+#[allow(clippy::too_many_lines)] // 151 lines at #779; split tracked in none
 pub fn search(
     index: &Index,
     query_str: &str,

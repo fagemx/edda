@@ -191,6 +191,7 @@ pub type TranscriptSearchFn = dyn Fn(&str, usize) -> Vec<ConversationHit>;
 
 // ── Core ask function ────────────────────────────────────────────────
 
+#[allow(clippy::too_many_lines)] // 264 lines at #779; split tracked in none
 pub fn ask(
     ledger: &Ledger,
     query: &str,

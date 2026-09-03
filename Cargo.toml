@@ -57,6 +57,9 @@ rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[workspace.lints.clippy]
+too_many_lines = "warn"
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -588,6 +588,7 @@ pub struct ProposeParams<'a> {
     pub max_evidence: usize,
 }
 
+#[allow(clippy::too_many_lines)] // 167 lines at #779; split tracked in none
 pub fn propose(p: ProposeParams<'_>) -> anyhow::Result<()> {
     let ledger = Ledger::open(p.repo_root).context("cmd_draft::propose: opening ledger")?;
     let _lock = WorkspaceLock::acquire(&ledger.paths)?;
@@ -945,6 +946,7 @@ pub fn inbox(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)] // 169 lines at #779; split tracked in none
 pub fn approve(
     repo_root: &Path,
     id: &str,

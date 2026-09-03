@@ -386,6 +386,7 @@ pub fn group_bindings(bindings: &[BindingEntry]) -> Vec<(&str, Vec<&BindingEntry
 // ── Event formatting ──
 
 /// Extract display type, preview text, and style from an event.
+#[allow(clippy::too_many_lines)] // 151 lines at #779; split tracked in none
 fn event_display(payload: &serde_json::Value, event_type: &str) -> (String, String, Style) {
     let default = Style::default();
     match event_type {

@@ -20,3 +20,6 @@ dirs.workspace = true
 tempfile.workspace = true
 fs2.workspace = true
 time.workspace = true
+
+[lints]
+workspace = true

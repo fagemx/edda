@@ -403,6 +403,28 @@ expect_reject "reject: removed swallow-ok comment no longer suppresses (GH-692)"
     git commit -m "feat(test): stale swallow-ok removed"
 git reset -q --hard "$prev"
 
+# --- GH-779: staged .rs one line over / under its file-length ceiling ------
+# Default ceiling is 1000 for any unlisted path. A staged blob of 1001 lines
+# must be rejected with an output line naming path, count and ceiling; 999
+# lines must be accepted. Stub cargo keeps fmt/clippy green so only the
+# length ratchet decides.
+prev=$(git rev-parse HEAD)
+: > "$stub_log"
+awk 'BEGIN { for (i = 1; i <= 1001; i++) print "// line " i }' \
+    > crates/hooktest/src/long.rs
+git add crates/hooktest/src/long.rs
+expect_reject "reject: staged .rs one line over file-length ceiling (GH-779)" \
+    "crates/hooktest/src/long.rs is 1001 lines (ceiling 1000)" \
+    env PATH="$stub_dir:$PATH" CARGO_STUB_LOG="$stub_log" \
+    git commit -m "feat(test): over-ceiling rust file"
+awk 'BEGIN { for (i = 1; i <= 999; i++) print "// line " i }' \
+    > crates/hooktest/src/long.rs
+git add crates/hooktest/src/long.rs
+expect_accept "accept: staged .rs one line under file-length ceiling (GH-779)" \
+    env PATH="$stub_dir:$PATH" CARGO_STUB_LOG="$stub_log" \
+    git commit -m "feat(test): under-ceiling rust file"
+git reset -q --hard "$prev"
+
 echo
 if [ "$failed" -eq 0 ]; then
     echo "ALL SCENARIOS PASSED"

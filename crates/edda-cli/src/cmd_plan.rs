@@ -571,6 +571,7 @@ fn escape_yaml_str(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+#[allow(clippy::too_many_lines)] // 280 lines at #779; split tracked in none
 fn detect_workspace_members(cwd: &Path) -> Option<Vec<String>> {
     let content = std::fs::read_to_string(cwd.join("Cargo.toml")).ok()?;
     // Simple parse: look for [workspace] section with members = [...]

@@ -14,6 +14,7 @@ use super::{
     should_nudge, wrap_context_boundary, HookResult,
 };
 
+#[allow(clippy::too_many_lines)] // 159 lines at #779; split tracked in none
 pub(super) fn dispatch_pre_tool_use(
     raw: &serde_json::Value,
     cwd: &str,

@@ -949,6 +949,7 @@ fn describe_claims(claims: &[edda_bridge_claude::peers::ClaimEntry]) -> String {
 /// 1. Peers `coordination.jsonl` — real-time broadcast to active peers
 /// 2. Workspace ledger — permanent record visible to all sessions
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // 209 lines at #779; split tracked in #777
 pub fn decide(
     repo_root: &Path,
     decision: &str,

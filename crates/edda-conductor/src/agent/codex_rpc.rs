@@ -251,6 +251,7 @@ impl CodexLauncher {
 
 #[async_trait::async_trait]
 impl AgentLauncher for CodexLauncher {
+    #[allow(clippy::too_many_lines)] // 163 lines at #779; split tracked in none
     async fn run_phase(
         &self,
         phase: &Phase,

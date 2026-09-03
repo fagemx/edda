@@ -43,6 +43,7 @@ pub struct RunContext<'a> {
 }
 
 /// Run a plan sequentially. The main conductor loop.
+#[allow(clippy::too_many_lines)] // 863 lines at #779; split tracked in #776
 pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -> Result<()> {
     let RunContext {
         launcher,
@@ -1294,6 +1295,7 @@ async fn fail_checking_phase(
 /// on_fail policy. Shared by the main loop and the post-rejection redispatch
 /// turn (D3).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // 400 lines at #779; split tracked in #776
 async fn process_phase_result(
     plan: &Plan,
     phase: &crate::plan::schema::Phase,
@@ -1788,6 +1790,7 @@ fn load_gate_output(cwd: &Path, plan_name: &str, phase_id: &str) -> Option<Strin
 /// the workspace root so the abort policy can write the structured plan
 /// abort event to the ledger (GH-584 round-2 P1-1).
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // 173 lines at #779; split tracked in #776
 async fn handle_on_fail(
     plan: &Plan,
     phase: &crate::plan::schema::Phase,

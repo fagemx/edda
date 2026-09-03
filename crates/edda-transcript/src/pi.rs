@@ -144,6 +144,7 @@ const DEFAULT_MAX_BYTES: u64 = 8 * 1024 * 1024; // 8MB
 /// 2. Appends raw transcript lines to `transcripts/{session_id}.jsonl`.
 /// 3. Normalizes tool calls, tool results, and user prompts into `ledger/{session_id}.jsonl`.
 /// 4. Updates `state/usage.json` with observed model and token totals.
+#[allow(clippy::too_many_lines)] // 367 lines at #779; split tracked in none
 pub fn ingest_pi_transcript_delta(
     project_dir: &Path,
     session_id: &str,

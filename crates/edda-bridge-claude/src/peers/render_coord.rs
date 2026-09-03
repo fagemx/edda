@@ -106,6 +106,7 @@ fn distinct_senders(requests: &[&RequestEntry]) -> Vec<String> {
 ///
 /// "Pre-computed" refers to `peers` and `board` only — heartbeat writes and
 /// other per-session I/O still happen at the call site in `dispatch.rs`.
+#[allow(clippy::too_many_lines)] // 195 lines at #779; split tracked in none
 pub fn render_coordination_protocol_with(
     peers: &[PeerSummary],
     board: &BoardState,

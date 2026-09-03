@@ -144,6 +144,7 @@ impl SqliteStore {
     /// 1. Recurring decisions (same key changed >= min_occurrences times)
     /// 2. Chief repeated actions (same authority+key >= min_occurrences times)
     /// 3. Rollback trends (supersession chains >= 2 within the window)
+    #[allow(clippy::too_many_lines)] // 161 lines at #779; split tracked in none
     pub fn detect_village_patterns(
         &self,
         village_id: &str,

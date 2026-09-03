@@ -70,6 +70,7 @@ struct TimelineEntry {
     supersedes: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)] // 153 lines at #779; split tracked in none
 async fn get_dashboard(
     State(_state): State<Arc<AppState>>,
     Query(params): Query<DashboardQuery>,

@@ -162,7 +162,7 @@ from a Windows workstation is load-bearing rather than redundant.
 
 | Level | When | Run |
 |---|---|---|
-| L0 iterate | while editing | `cargo fmt --all --check`; `cargo clippy -p <crate> --all-targets -- -D warnings`; `cargo test -p <crate>` for each touched crate |
+| L0 iterate | while editing | `cargo fmt --all --check`; `cargo clippy -p <crate> --all-targets -- -D warnings`; `cargo test -p <crate>` for each touched crate; `scripts/lint-file-length.sh --tree` |
 | L1 freeze | once per frozen full SHA, clean tree, before push / PR update | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`, with `CARGO_INCREMENTAL=0`; record the result together with the full SHA (gate receipt) |
 | L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN only focused or adversarial checks they do not cover — **including Windows behavior in any crate outside the CI Windows subset above**. A full local rerun needs a stated reason: no receipt, red or absent CI, or grounds to distrust the receipt. A coverage gap earns a **focused** check for that gap, not a full rerun — running the workspace to reach one uncovered crate is the cost this ladder exists to remove. Deterministically red CI already blocks the SHA — audit and request changes instead of spending a full run; if the red is environmental, re-run only the failed job |
 | L3 pre-merge | merge authority | READ exact-head CI and the final current-head LGTM; RAN only a merge check against the current base. A draft/ready, label, or status flip is not a push — nothing reruns |
@@ -238,6 +238,8 @@ bound.
 cargo fmt --all --check
 cargo clippy -p <touched crate> --all-targets -- -D warnings
 cargo test -p <touched crate>
+# GH-779 file-length ratchet: scripts/lint-file-length.sh --tree (CI / L0);
+# pre-commit runs --staged on each staged *.rs blob.
 
 # Before freezing a SHA for push / PR update (L1 — once per frozen SHA,
 # clean tree, incremental off). Record the result with the full SHA.
