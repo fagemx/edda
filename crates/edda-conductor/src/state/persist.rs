@@ -102,37 +102,55 @@ pub fn save_state(cwd: &Path, state: &PlanState) -> Result<()> {
     Ok(())
 }
 
-/// Save state from a long-lived writer (the runner) after reconciling with
-/// the state currently on disk under the plan's exclusive lock (GH-556, GH-714).
+/// Reconcile in-memory state with a disk state under the plan lock (GH-556, GH-714, GH-750).
 ///
 /// The runner holds `PlanState` in memory for the whole run while other
 /// processes (`edda conduct skip`, `retry`, ...) mutate the same file. A
-/// plain `save_state` then clobbers those external writes with the stale
-/// in-memory copy — observed as a manual skip on a Pending phase reverting
-/// to Pending when a sibling phase transitioned to Stale in the runner.
+/// plain `save_state` or unreconciled phase selection would clobber those
+/// external writes or dispatch skipped phases.
 ///
 /// Reconciliation rule: a phase that is Skipped on disk but still Pending in
 /// memory is a manual skip recorded by another writer while this runner had
-/// not started the phase — operator intent wins, and the disk phase
-/// (including its skip reason) is folded into the in-memory state before
-/// saving. Every other divergence keeps the in-memory value: the runner is
-/// the authority for phases it has started (Running/Checking/terminal
-/// transitions it observed itself).
+/// not started the phase — operator intent wins.
+/// Field-scoped merge: we fold the status, skip_reason, and completed_at from the disk
+/// phase into the in-memory phase without wholesale-replacing unrelated fields (GH-750).
+pub fn reconcile_state(mem_state: &mut PlanState, disk_state: &PlanState) {
+    for disk_phase in &disk_state.phases {
+        if disk_phase.status != PhaseStatus::Skipped {
+            continue;
+        }
+        if let Some(mem) = mem_state
+            .phases
+            .iter_mut()
+            .find(|p| p.id == disk_phase.id && p.status == PhaseStatus::Pending)
+        {
+            mem.status = PhaseStatus::Skipped;
+            mem.skip_reason = disk_phase.skip_reason.clone();
+            if disk_phase.completed_at.is_some() {
+                mem.completed_at = disk_phase.completed_at.clone();
+            }
+        }
+    }
+}
+
+/// Reconcile in-memory state with disk state under the plan's exclusive lock (GH-750).
+/// Returns Ok(true) if state on disk was loaded and reconciled, Ok(false) if no state file exists.
+pub fn reconcile_with_disk(cwd: &Path, state: &mut PlanState) -> Result<bool> {
+    let _lock = PlanStateLock::acquire(cwd, &state.plan_name)?;
+    if let Some(disk) = load_state(cwd, &state.plan_name)? {
+        reconcile_state(state, &disk);
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Save state from a long-lived writer (the runner) after reconciling with
+/// the state currently on disk under the plan's exclusive lock (GH-556, GH-714, GH-750).
 pub fn save_state_reconciled(cwd: &Path, state: &mut PlanState) -> Result<()> {
     let _lock = PlanStateLock::acquire(cwd, &state.plan_name)?;
     if let Some(disk) = load_state(cwd, &state.plan_name)? {
-        for disk_phase in &disk.phases {
-            if disk_phase.status != PhaseStatus::Skipped {
-                continue;
-            }
-            if let Some(mem) = state
-                .phases
-                .iter_mut()
-                .find(|p| p.id == disk_phase.id && p.status == PhaseStatus::Pending)
-            {
-                *mem = disk_phase.clone();
-            }
-        }
+        reconcile_state(state, &disk);
     }
     save_state(cwd, state)
 }
@@ -507,5 +525,62 @@ mod tests {
         // The on-disk file content must remain unchanged
         let on_disk = std::fs::read_to_string(&p).unwrap();
         assert_eq!(on_disk, "{ not valid json }");
+    }
+
+    #[test]
+    fn reconcile_with_disk_fails_on_corrupted_state_with_diagnostic() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan =
+            parse_plan("name: corrupt-reconcile\nphases:\n  - id: p1\n    prompt: \"one\"\n")
+                .unwrap();
+        let mut state = PlanState::from_plan(&plan, "corrupt-reconcile.yaml");
+
+        let p = state_path(dir.path(), "corrupt-reconcile");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"{ invalid json }").unwrap();
+
+        let res = reconcile_with_disk(dir.path(), &mut state);
+        assert!(
+            res.is_err(),
+            "reconcile_with_disk must fail on unreadable state.json, but got: {:?}",
+            res
+        );
+        let err_msg = format!("{:#}", res.unwrap_err());
+        assert!(
+            err_msg.contains("parsing state"),
+            "error diagnostic must surface failure reason: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn reconcile_state_field_scoped_merge_preserves_unrelated_fields() {
+        let plan =
+            parse_plan("name: field-scoped\nphases:\n  - id: p1\n    prompt: \"one\"\n").unwrap();
+        let mut mem_state = PlanState::from_plan(&plan, "field-scoped.yaml");
+        let p = mem_state.get_phase_mut("p1").unwrap();
+        p.status = PhaseStatus::Pending;
+        p.attempts = 2;
+        p.env_retries = 1;
+        p.retry_context = Some("previous failure context".into());
+
+        let mut disk_state = PlanState::from_plan(&plan, "field-scoped.yaml");
+        let dp = disk_state.get_phase_mut("p1").unwrap();
+        dp.status = PhaseStatus::Skipped;
+        dp.skip_reason = Some("skipped externally".into());
+        dp.completed_at = Some("2026-09-03T10:00:00Z".into());
+        dp.attempts = 0; // disk had attempts 0 before runner attempts
+
+        reconcile_state(&mut mem_state, &disk_state);
+
+        let p = mem_state.get_phase("p1").unwrap();
+        // Reconciled fields updated
+        assert_eq!(p.status, PhaseStatus::Skipped);
+        assert_eq!(p.skip_reason.as_deref(), Some("skipped externally"));
+        assert_eq!(p.completed_at.as_deref(), Some("2026-09-03T10:00:00Z"));
+        // Unrelated in-memory fields preserved (not wholesale wiped by disk phase)
+        assert_eq!(p.attempts, 2);
+        assert_eq!(p.env_retries, 1);
+        assert_eq!(p.retry_context.as_deref(), Some("previous failure context"));
     }
 }
