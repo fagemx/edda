@@ -1075,7 +1075,7 @@ enum McpCommand {
     Serve,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
@@ -1084,6 +1084,28 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = parse_cli();
+    if let Err(err) = run(cli) {
+        if let Some(e) = find_unsupported_schema_version_error(&err) {
+            eprintln!("error: {e}");
+            std::process::exit(2);
+        }
+        eprintln!("Error: {err:?}");
+        std::process::exit(1);
+    }
+}
+
+fn find_unsupported_schema_version_error(
+    err: &anyhow::Error,
+) -> Option<&edda_ledger::UnsupportedSchemaVersionError> {
+    for cause in err.chain() {
+        if let Some(e) = cause.downcast_ref::<edda_ledger::UnsupportedSchemaVersionError>() {
+            return Some(e);
+        }
+    }
+    None
+}
+
+fn run(cli: Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let repo_root = edda_ledger::EddaPaths::find_root(&cwd).unwrap_or(cwd);
 
