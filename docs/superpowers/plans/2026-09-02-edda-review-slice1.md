@@ -2678,8 +2678,9 @@ fn classify_crash(error: &str) -> &'static str {
     if OVERLOAD_MARKERS.iter().any(|m| e.contains(m)) { "overload" } else { "crash" }
 }
 
-/// The gate evidence lattice (spec §8), used by EVERY source — local receipts,
-/// exact-head CI, and RAN — so the rule exists once instead of being restated
+/// The gate evidence lattice (spec §8). Local READ seeds the accumulator
+/// (`read_gates` returns the starting status directly, not a call); CI and RAN
+/// each call this once, so the rule exists once instead of being restated
 /// per source (Round 5 and Round 6 both broke it by restating it):
 ///
 /// * `undeclared` is absorbing — nothing substitutes for declaring gates;
