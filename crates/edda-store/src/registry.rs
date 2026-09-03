@@ -116,6 +116,12 @@ pub fn get_project(pid: &str) -> Option<ProjectEntry> {
     reg.projects.get(pid).cloned()
 }
 
+/// Check whether a project is registered in the user-level registry.
+pub fn is_registered(repo_root: &Path) -> bool {
+    let pid = project_id(repo_root);
+    get_project(&pid).is_some()
+}
+
 /// Update last_seen timestamp for a project.
 pub fn touch_project(repo_root: &Path) -> anyhow::Result<()> {
     let _lock = lock_file(&registry_lock_path())?;

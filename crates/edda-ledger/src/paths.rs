@@ -120,6 +120,15 @@ pub fn validate_branch_name(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn clean_unc_path(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        p.to_path_buf()
+    }
+}
+
 impl EddaPaths {
     /// Walk up from `start` looking for a directory containing `.edda/`.
     ///
@@ -129,19 +138,52 @@ impl EddaPaths {
     ///
     /// Returns `None` if not found by either method.
     pub fn find_root(start: &Path) -> Option<PathBuf> {
-        // Phase 1: Walk up looking for .edda/ (fast path)
+        let home = dirs::home_dir();
+
+        // Walk up looking for `.edda/` or `.git`.
         let mut cur = start.to_path_buf();
         loop {
-            if cur.join(".edda").is_dir() {
+            // Case 1: Check for .edda/ directory (nested or direct workspace).
+            // Do NOT treat the user's home directory as a workspace root (its ~/.edda
+            // is the global user state directory or fleet scratch space).
+            let is_home = home.as_deref().is_some_and(|h| {
+                h == cur.as_path()
+                    || h.canonicalize().ok().as_deref() == cur.canonicalize().ok().as_deref()
+            });
+
+            if !is_home && cur.join(".edda").is_dir() {
                 return Some(cur);
             }
-            if !cur.pop() {
+
+            // Case 2: Git boundary.
+            // If we encounter a `.git` file or directory, we have reached the root of
+            // this git worktree or repository.
+            let git_marker = cur.join(".git");
+            if git_marker.is_file() {
+                // This is a git worktree root (its .git is a file pointing to gitdir).
+                // If the worktree root itself does not have .edda/, resolve to the main
+                // repository and check if .edda/ exists there.
+                // Do NOT continue walking up above this worktree (which could escape into ~/.edda).
+                return edda_core::git::resolve_git_root(&cur).and_then(|main_repo| {
+                    let cleaned = clean_unc_path(&main_repo);
+                    if cleaned.join(".edda").is_dir() {
+                        Some(cleaned)
+                    } else {
+                        None
+                    }
+                });
+            } else if git_marker.is_dir() {
+                // This is a main git repository root. Since it has no .edda/ (checked above),
+                // do NOT escape above this git repository into parent directories (e.g. ~/.edda).
+                return None;
+            }
+
+            if is_home || !cur.pop() {
                 break;
             }
         }
 
-        // Phase 2: Git worktree fallback — resolve to main repo, check .edda/ there
-        edda_core::git::resolve_git_root(start).filter(|root| root.join(".edda").is_dir())
+        None
     }
 }
 
@@ -276,6 +318,73 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
 
         assert!(EddaPaths::find_root(&tmp).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_root_worktree_inside_parent_with_dot_edda() {
+        // GH-701: A detached review worktree is created at ~/.edda/fleet/wt-review-pr<N>.
+        // Its parent hierarchy has ~/.edda (the global user state directory).
+        // find_root must resolve to the main repo, NOT ~/.edda!
+        let tmp = unique_tmp("wt_in_fake_home");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("main_repo");
+        let fake_home = tmp.join("fake_home");
+        let wt = fake_home
+            .join(".edda")
+            .join("fleet")
+            .join("wt-review-pr100");
+
+        // Main repo with .edda
+        std::fs::create_dir_all(repo.join(".git").join("worktrees").join("pr100")).unwrap();
+        std::fs::create_dir_all(repo.join(".edda")).unwrap();
+
+        // Fake home containing an unrelated .edda directory (user store root)
+        std::fs::create_dir_all(fake_home.join(".edda")).unwrap();
+
+        // Worktree under fake_home/.edda/fleet
+        std::fs::create_dir_all(&wt).unwrap();
+        let gitdir = repo.join(".git").join("worktrees").join("pr100");
+        let gitdir_str = gitdir
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        std::fs::write(wt.join(".git"), format!("gitdir: {gitdir_str}")).unwrap();
+
+        let found = EddaPaths::find_root(&wt);
+        assert!(found.is_some(), "must resolve worktree to main repo");
+        let resolved = found.unwrap();
+        assert_eq!(
+            resolved.canonicalize().unwrap(),
+            repo.canonicalize().unwrap(),
+            "must resolve to main_repo, NOT fake_home!"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn find_root_nested_workspace_inside_git_repo() {
+        // P0-1: An edda workspace nested inside a larger git repo must be discovered
+        let tmp = unique_tmp("nested_git");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("outer_git");
+        let nested = repo.join("sub").join("nested_workspace");
+        let deep = nested.join("deep").join("dir");
+
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(nested.join(".edda")).unwrap();
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let found = EddaPaths::find_root(&deep);
+        assert!(found.is_some(), "must discover nested edda workspace");
+        assert_eq!(
+            found.unwrap().canonicalize().unwrap(),
+            nested.canonicalize().unwrap(),
+            "must resolve to nested workspace, not outer git repo"
+        );
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

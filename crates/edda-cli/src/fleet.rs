@@ -13,6 +13,27 @@ pub use edda_store::fleet::{fan_out, group_by_project, FleetHit, FleetMiss};
 use edda_store::registry::ProjectEntry;
 use std::path::Path;
 
+/// Helper to identify whether a miss is an ephemeral test fixture based on path provenance.
+pub fn is_temp_miss(miss: &FleetMiss) -> bool {
+    if !miss.reason.starts_with("repo not on this machine (") {
+        return false;
+    }
+    let Some(path_str) = miss
+        .reason
+        .strip_prefix("repo not on this machine (")
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let p = Path::new(path_str);
+    let temp = std::env::temp_dir();
+    p.starts_with(&temp)
+        || path_str.starts_with("/tmp/")
+        || path_str.starts_with("/var/tmp/")
+        || path_str.contains(r"\AppData\Local\Temp\")
+        || path_str.contains("/AppData/Local/Temp/")
+}
+
 /// Report the projects that did not answer, in the one form every fleet verb
 /// uses.
 ///
@@ -20,8 +41,16 @@ use std::path::Path;
 /// prefix would contradict half of them — the most common miss is "repo not on
 /// this machine", which is absent, not unreadable.
 pub fn print_misses(misses: &[FleetMiss]) {
+    let mut temp_count = 0;
     for miss in misses {
-        println!("  [{}] {}", miss.project, miss.reason);
+        if is_temp_miss(miss) {
+            temp_count += 1;
+        } else {
+            println!("  [{}] {}", miss.project, miss.reason);
+        }
+    }
+    if temp_count > 0 {
+        println!("  ({temp_count} ephemeral test fixture(s) omitted; not on this machine)");
     }
 }
 
@@ -42,12 +71,16 @@ pub fn print_misses(misses: &[FleetMiss]) {
 /// shortfall clause so the sentence still reads in order.
 pub fn empty_summary(what: &str, tail: &str, scope_len: usize, misses: &[FleetMiss]) -> String {
     let answered = scope_len.saturating_sub(misses.len());
+    let temp_count = misses.iter().filter(|m| is_temp_miss(m)).count();
+    let real_misses = misses.len() - temp_count;
+
     if misses.is_empty() {
         format!("No {what} across {answered} project(s){tail}")
+    } else if real_misses == 0 {
+        format!("No {what} in the {answered} project(s) that answered{tail}")
     } else {
         format!(
-            "No {what} in the {answered} project(s) that answered{tail}; {} could not be read (above)",
-            misses.len()
+            "No {what} in the {answered} project(s) that answered{tail}; {real_misses} could not be read (above)"
         )
     }
 }
@@ -315,6 +348,37 @@ mod tests {
         assert!(
             env.get("unreadable").is_none() && env.get("fleet").is_none(),
             "the retired spellings must not come back: {env}"
+        );
+    }
+
+    #[test]
+    fn ephemeral_test_fixture_misses_are_omitted_from_flooding() {
+        let temp_miss = FleetMiss {
+            project: ".tmpABC123".to_string(),
+            reason: "repo not on this machine (C:\\Users\\fagem\\AppData\\Local\\Temp\\.tmpABC123)"
+                .to_string(),
+        };
+        assert!(is_temp_miss(&temp_miss));
+
+        let real_miss = FleetMiss {
+            project: "dazun".to_string(),
+            reason: "repo not on this machine (D:\\work\\dazun)".to_string(),
+        };
+        assert!(!is_temp_miss(&real_miss));
+
+        let summary = empty_summary(
+            "results",
+            " for: q",
+            5,
+            &[temp_miss.clone(), real_miss.clone()],
+        );
+        assert!(summary.contains("3 project(s) that answered"));
+        assert!(summary.contains("1 could not be read (above)"));
+
+        let only_temp_summary = empty_summary("results", " for: q", 5, &[temp_miss]);
+        assert_eq!(
+            only_temp_summary,
+            "No results in the 4 project(s) that answered for: q"
         );
     }
 }
