@@ -595,6 +595,94 @@ mod tests {
         }
     }
 
+    // ── GH-651 compat golden fixture ──
+
+    /// GH-651 golden fixture for the `edda dispatch --json` stable contract
+    /// (ledger decision `compat.stable-json-surfaces=dispatch-verify-ask-
+    /// status-mcp`; policy page: COMPATIBILITY.md § "Stable `--json`
+    /// contracts"). Within 0.x, keys may be added, never deleted, renamed, or
+    /// retyped. This test is the machine-readable reader of the policy: a
+    /// rename or retype must turn it red, and COMPATIBILITY.md must ship
+    /// updated in the same release. Covers the key set, the per-key types
+    /// (including the null sides of the optional keys), the outcome wire
+    /// vocabulary, and the exit-code table from the long help.
+    #[test]
+    fn compat_golden_fixture_dispatch_json_keys_types_and_exit_code_table() {
+        // `done` populates every optional key; `crash` exercises the null
+        // sides. Together they pin the full type of each key.
+        let done = DispatchOutput::from_result(
+            PhaseResult::AgentDone {
+                cost_usd: Some(1.25),
+                result_text: Some("did it".into()),
+            },
+            "sess-1".into(),
+            "inherited".into(),
+            "openai-codex/gpt-5.6-sol".into(),
+        );
+        let value: serde_json::Value = serde_json::from_str(&done.to_json()).expect("json parses");
+
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .expect("one JSON object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "cost_usd",
+                "error",
+                "model_observed",
+                "model_requested",
+                "outcome",
+                "result_text",
+                "session_id",
+            ],
+            "dispatch --json key set changed — this is a stable contract; \
+             see COMPATIBILITY.md"
+        );
+        assert_eq!(value["outcome"], "done");
+        assert!(value["result_text"].is_string());
+        assert_eq!(value["cost_usd"].as_f64(), Some(1.25));
+        assert!(value["session_id"].is_string());
+        assert!(value["error"].is_null());
+        assert_eq!(value["model_requested"], "inherited");
+        assert!(value["model_observed"].is_string());
+
+        let crash = DispatchOutput::from_result(
+            PhaseResult::AgentCrash {
+                error: "boom".into(),
+            },
+            "sess-1".into(),
+            "inherited".into(),
+            "unknown".into(),
+        );
+        let value: serde_json::Value = serde_json::from_str(&crash.to_json()).expect("json parses");
+        assert_eq!(value["outcome"], "crash");
+        assert!(value["result_text"].is_null());
+        assert!(value["cost_usd"].is_null());
+        assert_eq!(value["error"], "boom");
+        assert!(value["session_id"].is_string());
+        assert!(value["model_requested"].is_string());
+        assert!(value["model_observed"].is_string());
+
+        // Outcome wire vocabulary — the strings a consumer switches on.
+        assert_eq!(Outcome::Done.as_str(), "done");
+        assert_eq!(Outcome::Crash.as_str(), "crash");
+        assert_eq!(Outcome::Timeout.as_str(), "timeout");
+        assert_eq!(Outcome::MaxTurns.as_str(), "max_turns");
+        assert_eq!(Outcome::BudgetExceeded.as_str(), "budget_exceeded");
+
+        // Exit-code table (long help + COMPATIBILITY.md): 0 done, 1 crash,
+        // 2 timeout, 3 budget exceeded, 4 max turns.
+        assert_eq!(exit_code_for(Outcome::Done), 0);
+        assert_eq!(exit_code_for(Outcome::Crash), 1);
+        assert_eq!(exit_code_for(Outcome::Timeout), 2);
+        assert_eq!(exit_code_for(Outcome::BudgetExceeded), 3);
+        assert_eq!(exit_code_for(Outcome::MaxTurns), 4);
+    }
+
     #[test]
     fn dispatch_accepts_json_flag() {
         let args = parse(&["edda", "--agent", "pi", "--prompt-file", "p.txt", "--json"]);

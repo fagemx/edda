@@ -446,6 +446,8 @@ Next — folding the fleet intelligence layer into the product ([#560](https://g
 
 Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
 
+**Compatibility contract:** [COMPATIBILITY.md](COMPATIBILITY.md) — the `schema_version` upgrade policy and the enumerated stable `--json` surfaces. If you change a contracted output shape, this is the page (and the golden fixtures) you answer to.
+
 ## Community
 
 - [GitHub Issues](https://github.com/fagemx/edda/issues) — bugs & feature requests
