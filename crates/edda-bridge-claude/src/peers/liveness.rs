@@ -4,6 +4,9 @@
 //! [`stale_secs`] (x15 for parented sub-agents, mirroring peer discovery).
 //! `edda peers` and `edda claim check` must both go through this module so
 //! the two verbs can never grow a second, disagreeing notion of "dead".
+//! Session inference (`discovery::infer_session_id`) observes the same
+//! criterion (GH-705), so a session that is live for those two verbs is
+//! inferable there too.
 //!
 //! There is one liveness surface — the heartbeat file — and one criterion —
 //! [`liveness_from_heartbeat`]. Do not add a parallel one.

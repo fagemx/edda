@@ -773,6 +773,43 @@ pub fn claim(
         paths,
         subject,
     );
+
+    // GH-705: the board entry is the claim's entire machine visibility —
+    // `claim check` counts a claim it can read, never one it cannot. The
+    // append is best-effort by shape (it serves fire-and-forget hook paths
+    // too), so verify the fold actually sees the new claim before printing
+    // success: a lost write must not look like a claimed scope, or the
+    // surface reads clear while the occupation is real. This deliberately
+    // does NOT write a heartbeat for the minted session: the claimant is a
+    // one-shot process, so a heartbeat it writes once ages with nothing to
+    // refresh it and proves nothing after stale_secs — and its residue made
+    // every subsequent bare claim hit resolve_session_id's live-session
+    // ambiguity refusal. The machine gate instead counts a `cli-*` claim
+    // for as long as it stands on the board (cmd_claim: unjudgeable,
+    // fail-closed), which does not decay with time.
+    //
+    // Distinguish the new entry from any replaced entry: the entry must exist,
+    // match the just-written label, paths, and subject, and its timestamp must
+    // advance past the replaced entry (so a lost write on re-claiming,
+    // narrowing, or identical re-claim does not falsely pass by re-reading the
+    // prior state).
+    let current = edda_bridge_claude::peers::compute_board_state(&project_id)
+        .claims
+        .into_iter()
+        .find(|c| c.session_id == session_id);
+    let recorded = current.as_ref().is_some_and(|c| {
+        c.label == label
+            && c.paths == paths
+            && c.subject.as_deref() == subject
+            && replaced.as_ref().map(|r| &r.ts) != Some(&c.ts)
+    });
+    if !recorded {
+        anyhow::bail!(
+            "claim for session {session_id} was not recorded on the coordination board; \
+             refusing to report a claim the machine gate cannot see"
+        );
+    }
+
     for line in claim_disclosure(replaced.as_ref(), label, paths) {
         println!("{line}");
     }
@@ -1289,10 +1326,12 @@ pub(crate) fn resolve_session_id(
         }
     }
 
-    if has_live_sessions(project_id) {
+    let live = fresh_sessions(project_id);
+    if !live.is_empty() {
         anyhow::bail!(
             "cannot prove which live session belongs to this process, so --session is required \
-             (or set EDDA_SESSION_ID in the invoking process)"
+             (or set EDDA_SESSION_ID in the invoking process).\n{}",
+            format_live_sessions(&live)
         );
     }
 
@@ -1301,10 +1340,27 @@ pub(crate) fn resolve_session_id(
 }
 
 fn has_live_sessions(project_id: &str) -> bool {
+    !fresh_sessions(project_id).is_empty()
+}
+
+/// The sessions currently passing the shared liveness window.
+fn fresh_sessions(project_id: &str) -> Vec<edda_bridge_claude::peers::PeerSummary> {
     let stale = edda_bridge_claude::peers::stale_secs();
     edda_bridge_claude::peers::discover_all_sessions(project_id)
         .into_iter()
-        .any(|session| session.age_secs <= stale)
+        .filter(|session| session.age_secs <= stale)
+        .collect()
+}
+
+/// Name the live sessions in the identity-refusal error, so the caller can
+/// copy an id into `--session` — an error that demands an id without
+/// showing one cannot be acted on (round-1 consequence, GH-705).
+fn format_live_sessions(live: &[edda_bridge_claude::peers::PeerSummary]) -> String {
+    let mut out = String::from("Live sessions (pass --session with one of these ids):");
+    for session in live {
+        out.push_str(&format!("\n  {} — {}", session.session_id, session.label));
+    }
+    out
 }
 
 /// `edda bridge claude digest --session <id>` or `--all`
@@ -2238,6 +2294,31 @@ mod tests {
         assert_eq!(sid, "explicit-wins", "tier 1 should beat tier 2");
         std::env::remove_var("EDDA_SESSION_ID");
 
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn resolve_session_id_refusal_names_live_sessions() {
+        // Round-1 consequence (GH-705): when the bare-CLI refusal does fire —
+        // a live hooked session beside this bare command — the error must
+        // name the ids to copy into `--session`, the way `unclaim`'s refusal
+        // lists the board. An error that demands an id without showing one
+        // cannot be acted on.
+        let _store = crate::test_support::isolated_store();
+        let _env = env_guard();
+        let pid = "test_resolve_sid_refusal_names";
+        let _ = edda_store::ensure_dirs(pid);
+        std::env::remove_var("EDDA_SESSION_ID");
+        std::env::remove_var("EDDA_SESSION_LABEL");
+        edda_bridge_claude::peers::write_heartbeat_minimal(pid, "sess-live", "auth", ".");
+        let err = resolve_session_id(None, pid, "auth")
+            .expect_err("a bare command beside a live session must refuse");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sess-live"),
+            "refusal must name the live session id to pass to --session: {msg}"
+        );
+        assert!(msg.contains("--session"), "{msg}");
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     }
 

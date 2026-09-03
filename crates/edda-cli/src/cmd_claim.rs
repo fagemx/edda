@@ -8,7 +8,11 @@
 //! - 0 — the query surface is disjoint from every active claim (or the board
 //!   holds no claims)
 //! - 1 — at least one active claim overlaps; the conflicting labels/sessions
-//!   are named on stdout
+//!   are named on stdout. That includes a bare CLI claim (`cli-*`, minted by
+//!   `resolve_session_id` tier 4): its claimant is a one-shot process, so no
+//!   heartbeat age can prove it gone and its claim stands on the board until
+//!   `unclaim` (GH-705). Reading such an occupation as clear is the false
+//!   negative this verb exists to prevent.
 //! - 2 — the query could not be answered soundly: usage error, the board
 //!   cannot be read or parsed, a glob pattern is malformed, or a pair of
 //!   surfaces cannot be decided soundly (for example two tokens differing
@@ -49,9 +53,11 @@ pub struct ClaimConflict {
 pub struct StaleClaim {
     pub label: String,
     pub session_id: String,
-    /// Seconds since the session's last heartbeat, or `None` when the
-    /// session has no heartbeat file at all (never heard from).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Seconds since the session's last heartbeat, or `null` in the machine
+    /// report when the session has no heartbeat file at all (never heard
+    /// from). The field is always serialized — GH-705: a consumer must be
+    /// able to distinguish "expired heartbeat" from "no heartbeat file"
+    /// without guessing.
     pub age_secs: Option<u64>,
 }
 
@@ -59,6 +65,19 @@ pub struct StaleClaim {
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 pub struct CheckReport {
     pub conflicts: Vec<ClaimConflict>,
+    /// Bare CLI claims (`cli-*`) whose surface intersects the query (GH-705).
+    /// A bare CLI session is a one-shot process: no heartbeat writer ever
+    /// refreshes for it, so heartbeat age carries no liveness information —
+    /// an old heartbeat does not mean the claim is gone, and no heartbeat
+    /// does not mean it was never real. The claim stands on the board until
+    /// `unclaim` (board claims never expire), so the gate must never read
+    /// the surface as genuinely clear while it stands: these are counted
+    /// toward the exit code exactly like `conflicts`, separated only so a
+    /// consumer can tell a live peer from an occupation whose liveness
+    /// cannot be judged. Unlike the GH-617 liveness filter, this does not
+    /// decay with time.
+    #[serde(default)]
+    pub unjudgeable_claims: Vec<ClaimConflict>,
     /// Claims filtered out because their session is dead (GH-617). Reported
     /// for death visibility — never counted toward the exit code.
     #[serde(default)]
@@ -102,19 +121,32 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
     let board_size = claims.len();
     let mut live: Vec<ClaimEntry> = Vec::new();
     let mut stale_claims: Vec<StaleClaim> = Vec::new();
+    // GH-705: a claim owned by a bare CLI session (`cli-*`, minted by
+    // resolve_session_id tier 4) is an occupation whose liveness cannot be
+    // judged from a heartbeat. The claimant is a one-shot process; nothing
+    // ever refreshes a heartbeat for it; and the board claim never expires.
+    // Age therefore proves nothing, so instead of dismissing such a claim as
+    // stale when its heartbeat ages out, it is separated out here and
+    // counted toward the exit code when its surface intersects the query
+    // (fail-closed). A session with a live heartbeat still conflicts
+    // normally; the GH-617 criterion itself is untouched.
+    let mut unjudgeable: Vec<ClaimEntry> = Vec::new();
     for c in claims {
-        match classify_session_liveness(&project_id, &c.session_id) {
-            SessionLiveness::Live { .. } => live.push(c),
-            SessionLiveness::Stale { age_secs } => stale_claims.push(StaleClaim {
+        let liveness = classify_session_liveness(&project_id, &c.session_id);
+        if liveness.is_live() {
+            live.push(c);
+        } else if is_bare_cli_session(&c.session_id) {
+            unjudgeable.push(c);
+        } else {
+            let age_secs = match liveness {
+                SessionLiveness::Stale { age_secs } => Some(age_secs),
+                _ => None, // NoHeartbeat: never heard from
+            };
+            stale_claims.push(StaleClaim {
                 label: c.label,
                 session_id: c.session_id,
-                age_secs: Some(age_secs),
-            }),
-            SessionLiveness::NoHeartbeat => stale_claims.push(StaleClaim {
-                label: c.label,
-                session_id: c.session_id,
-                age_secs: None,
-            }),
+                age_secs,
+            });
         }
     }
 
@@ -125,16 +157,28 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
             std::process::exit(2);
         }
     };
+    // The unjudgeable claims go through the same sound intersection
+    // decision — including its exit-2 refusal of malformed or undecidable
+    // patterns — so a bare claim's surface can never be judged clear by a
+    // looser rule than a live claim's.
+    let unjudgeable_conflicts = match intersecting_claims(&unjudgeable, &query_refs) {
+        Ok(conflicts) => conflicts,
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(2);
+        }
+    };
 
     let report = CheckReport {
         conflicts: report.conflicts,
+        unjudgeable_claims: unjudgeable_conflicts,
         stale_claims,
     };
 
     if json {
         let out = serde_json::to_string_pretty(&report).context("serialize claim check report")?;
         println!("{out}");
-    } else if report.conflicts.is_empty() {
+    } else if report.conflicts.is_empty() && report.unjudgeable_claims.is_empty() {
         if board_size == 0 {
             println!("No active claims on the coordination board; surface is clear.");
         } else {
@@ -155,9 +199,19 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
                 println!("  query {}  <->  claim {}", pair.query, pair.claim_path);
             }
         }
+        for conflict in &report.unjudgeable_claims {
+            println!(
+                "CONFLICT with claim \"{}\" (session {}) — bare-CLI claim, liveness cannot be \
+                 judged; it counts until it is unclaimed",
+                conflict.label, conflict.session_id
+            );
+            for pair in &conflict.intersections {
+                println!("  query {}  <->  claim {}", pair.query, pair.claim_path);
+            }
+        }
         println!(
             "{} conflicting claim(s) across {} query path(s).",
-            report.conflicts.len(),
+            report.conflicts.len() + report.unjudgeable_claims.len(),
             query.len()
         );
         print_stale_claims(&report.stale_claims);
@@ -173,12 +227,25 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
 ///
 /// Stale claims (dead sessions, GH-617) are deliberately not counted here:
 /// they are liveness-filtered bookkeeping, never a conflict signal.
+/// Unjudgeable claims (bare CLI claims, GH-705) ARE counted: their session
+/// has no heartbeat writer, so the gate cannot prove the occupation gone
+/// and must fail closed.
 fn exit_code_for(report: &CheckReport) -> i32 {
-    if report.conflicts.is_empty() {
+    if report.conflicts.is_empty() && report.unjudgeable_claims.is_empty() {
         0
     } else {
         1
     }
+}
+
+/// Session ids minted by `cmd_bridge::resolve_session_id` tier 4 for bare
+/// CLI invocations (`cli-<label>`). Such a session is a one-shot process:
+/// it wrote its claim and exited, and no hook ever refreshes a heartbeat
+/// for it, so heartbeat age carries no liveness information (GH-705). The
+/// same shape is already classified in `cmd_bridge` when it names the
+/// actor of a `cli-*` session.
+fn is_bare_cli_session(session_id: &str) -> bool {
+    session_id.starts_with("cli-")
 }
 
 /// Death visibility (GH-617): reveal how many stale claims the liveness
@@ -350,6 +417,19 @@ pub fn check(
     claims: &[edda_bridge_claude::peers::ClaimEntry],
     query: &[&str],
 ) -> Result<CheckReport, String> {
+    Ok(CheckReport {
+        conflicts: intersecting_claims(claims, query)?,
+        unjudgeable_claims: Vec::new(),
+        stale_claims: Vec::new(),
+    })
+}
+
+/// The claims from `claims` whose recorded surface intersects `query`, by
+/// the same sound intersection decision for every caller.
+fn intersecting_claims(
+    claims: &[edda_bridge_claude::peers::ClaimEntry],
+    query: &[&str],
+) -> Result<Vec<ClaimConflict>, String> {
     // Validate every glob up front, so a malformed pattern is an error even
     // when it would never be compared against another glob.
     for token in query.iter().map(|t| normalize_token(t)).chain(
@@ -405,10 +485,7 @@ pub fn check(
             });
         }
     }
-    Ok(CheckReport {
-        conflicts,
-        stale_claims: Vec::new(),
-    })
+    Ok(conflicts)
 }
 
 /// Whether a query token and a claim subject token name the same process object.
@@ -1544,6 +1621,25 @@ mod tests {
         )
     }
 
+    /// Run the real binary carrying no session identity, so
+    /// `resolve_session_id` falls through to the bare-CLI tier-4 mint of
+    /// `cli-<label>` — the path every bare-shell agent takes.
+    fn run_edda_bare(args: &[&str], repo: &Path, store: &Path) -> (i32, String, String) {
+        let out = std::process::Command::new(edda_bin())
+            .args(args)
+            .current_dir(repo)
+            .env("EDDA_STORE_ROOT", store)
+            .env_remove("EDDA_SESSION_ID")
+            .env_remove("EDDA_SESSION_LABEL")
+            .output()
+            .expect("spawn edda");
+        (
+            out.status.code().expect("exit code"),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
     fn board_file(store: &Path, project_id: &str) -> PathBuf {
         store
             .join("projects")
@@ -1670,6 +1766,316 @@ mod tests {
             "claim event must carry the paths, got: {board}"
         );
     }
+
+    #[test]
+    fn e2e_bare_cli_claim_is_visible_to_claim_check() {
+        // GH-705 defect A: a bare CLI claim (`cli-<label>`, minted by
+        // resolve_session_id tier 4) comes from a one-shot process that
+        // leaves no heartbeat whose age could later prove anything about
+        // liveness. The machine gate must see the claim anyway: `claim
+        // check` on the claimed surface conflicts immediately after the
+        // claim — no freshness window, no heartbeat file required.
+        let repo = e2e_repo();
+        let store = tempfile::tempdir().expect("store tempdir");
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "bare-cli-lane", "--paths", "src/*"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 0,
+            "bare claim must succeed, got stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("cli-bare-cli-lane"),
+            "claim must mint the tier-4 session id, got {stdout:?}"
+        );
+        // Reader side: the bare-CLI claim must conflict.
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "check", "src/main.rs"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 1,
+            "a bare-CLI claim on the queried surface must conflict; stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("bare-cli-lane"),
+            "the bare-CLI claim must be reported as a conflict, got {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_aged_bare_cli_claim_still_conflicts() {
+        // GH-705 round-1 P0: the claimant is a one-shot process, gone the
+        // moment the command returns, so a heartbeat written at claim time
+        // ages with nothing to refresh it. Backdating it past stale_secs
+        // (120s by default — the round-1 probe) must NOT return the surface
+        // to clear: the claim stands on the board until it is unclaimed, so
+        // the gate keeps counting it (fail-closed) instead of dismissing it
+        // as a dead session's claim.
+        let repo = e2e_repo();
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[coord_event("cli-aged", "ghost-cli", &["src/*"])],
+        );
+        write_heartbeat(store.path(), &project_id, "cli-aged", 600);
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "check", "src/main.rs"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 1,
+            "an aged bare-CLI claim must still conflict, not read as clear; \
+             stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("cli-aged"),
+            "the aged bare-CLI claim must be named, got {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_never_heartbeated_bare_cli_claim_conflicts() {
+        // The same fail-closed verdict when the one-shot claim left no
+        // heartbeat at all: for a session id this binary itself mints,
+        // "no heartbeat" cannot mean "never existed" — the board entry is
+        // the evidence that the occupation is real.
+        let repo = e2e_repo();
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[coord_event("cli-lost", "ghost-cli", &["src/*"])],
+        );
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "check", "src/main.rs"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 1,
+            "a bare-CLI claim without any heartbeat must still conflict; \
+             stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("cli-lost"),
+            "the bare-CLI claim must be named, got {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_aged_bare_cli_claim_is_classified_in_json() {
+        // Machine-readable classification (GH-705 doneWhen): an overlapping
+        // bare-CLI claim appears in its own `unjudgeable_claims` bucket — an
+        // occupation whose liveness cannot be judged, distinct from a live
+        // peer's conflict and from a dead session's stale claim, and counted
+        // toward the exit code.
+        let repo = e2e_repo();
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[coord_event("cli-aged", "ghost-cli", &["src/*"])],
+        );
+        write_heartbeat(store.path(), &project_id, "cli-aged", 600);
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "check", "src/main.rs", "--json"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 1,
+            "must exit 1 on unjudgeable claim conflict; stdout={stdout:?} stderr={stderr:?}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
+        let unjudgeable = parsed["unjudgeable_claims"]
+            .as_array()
+            .expect("unjudgeable_claims array");
+        assert_eq!(unjudgeable.len(), 1, "got {parsed:?}");
+        assert_eq!(unjudgeable[0]["session_id"], "cli-aged");
+        assert!(
+            parsed["conflicts"].as_array().unwrap().is_empty(),
+            "an unjudgeable claim must not be reported as a live conflict, got {parsed:?}"
+        );
+        assert!(
+            parsed["stale_claims"].as_array().unwrap().is_empty(),
+            "an unjudgeable claim must not be dismissed as stale, got {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_bare_cli_reclaim_is_idempotent() {
+        // GH-705 round-1 P1: a one-shot heartbeat written at claim time made
+        // the NEXT bare claim in the project hit resolve_session_id's
+        // live-session ambiguity refusal — an identical re-claim, the most
+        // ordinary bare-shell restart, exited 1. Tier 4's mint is
+        // deterministic (`cli-<label>`), so a bare re-claim must go through.
+        let repo = e2e_repo();
+        let store = tempfile::tempdir().expect("store tempdir");
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "auth", "--paths", "src/auth/*"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(code, 0, "first claim must succeed: {stdout:?} {stderr:?}");
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "auth", "--paths", "src/auth/*"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 0,
+            "an idempotent bare re-claim must succeed; stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("Re-claimed scope: auth (unchanged)"),
+            "re-claim must be disclosed as a replacement, got {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_bare_cli_claim_can_narrow_scope() {
+        // Same refusal shape, different command: narrowing a scope re-claims
+        // the same minted session with fewer paths (cmd_bridge.rs: the
+        // replacement-is-right contract).
+        let repo = e2e_repo();
+        let store = tempfile::tempdir().expect("store tempdir");
+        let (code, _stdout, stderr) = run_edda_bare(
+            &["claim", "auth", "--paths", "src/auth/*"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(code, 0, "first claim must succeed: {stderr:?}");
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "auth", "--paths", "src/auth/login.rs"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 0,
+            "narrowing a bare claim must succeed; stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("previous paths replaced"),
+            "narrowing must be disclosed as replacement, got {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_second_agent_claims_disjoint_scope() {
+        // The multi-agent instruction every agent is given is "claim your
+        // scope at session start". A second bare-CLI agent claiming a
+        // disjoint scope must not be refused because the first agent's claim
+        // left a heartbeat behind.
+        let repo = e2e_repo();
+        let store = tempfile::tempdir().expect("store tempdir");
+        let (code, _stdout, stderr) = run_edda_bare(
+            &["claim", "auth", "--paths", "src/auth/*"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(code, 0, "first claim must succeed: {stderr:?}");
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "api", "--paths", "src/api/*"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 0,
+            "a second bare-CLI agent claiming a disjoint scope must succeed; \
+             stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("Claimed scope: api") && stdout.contains("session: cli-api"),
+            "the second claim must mint its own session, got {stdout:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_lost_board_write_is_not_reported_as_success() {
+        // GH-705 round-1 §5.5: the board append the machine gate reads is
+        // best-effort on the hook paths it serves, but `edda claim`'s board
+        // entry is its entire machine visibility. A directory at the board
+        // path makes every append fail; the claim verb must verify the fold
+        // actually sees the claim and refuse, rather than print `Claimed
+        // scope:` and exit 0 over a claim nothing will ever count.
+        let repo = e2e_repo();
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        std::fs::create_dir_all(board_file(store.path(), &project_id)).expect("block board");
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "auth", "--paths", "src/auth/*"],
+            repo.path(),
+            store.path(),
+        );
+        assert_ne!(
+            code, 0,
+            "a claim that was not recorded must not exit 0; stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            !stdout.contains("Claimed scope"),
+            "must not report a claim that did not land, got {stdout:?}"
+        );
+        assert!(
+            stderr.contains("not recorded") || stderr.contains("coordination board"),
+            "the failure must name the lost write, got {stderr:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn e2e_lost_board_write_on_reclaim_is_not_reported_as_success() {
+        // GH-705 Round 2 P1-1: a lost write during re-claiming (narrowing or
+        // widening scope) must not be satisfied by re-reading the PREVIOUS
+        // claim entry. If the new event fails to append to the board, the verb
+        // must fail loudly rather than printing `Re-claimed scope:` and
+        // returning 0.
+        let repo = e2e_repo();
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "auth", "--paths", "src/auth/*"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(code, 0, "first claim must succeed: {stdout:?} {stderr:?}");
+
+        let b_file = board_file(store.path(), &project_id);
+        let mut perms = std::fs::metadata(&b_file).expect("metadata").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&b_file, perms.clone()).expect("set readonly");
+
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "auth", "--paths", "src/auth/login.rs"],
+            repo.path(),
+            store.path(),
+        );
+
+        // Restore permissions so tempdir cleanup doesn't fail on Windows.
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(&b_file, perms);
+
+        assert_ne!(
+            code, 0,
+            "a lost write on re-claim must not exit 0; stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            !stdout.contains("Re-claimed scope"),
+            "must not report re-claim success when write was lost; got {stdout:?}"
+        );
+        assert!(
+            stderr.contains("not recorded") || stderr.contains("coordination board"),
+            "the failure must name the lost write, got {stderr:?}"
+        );
+    }
     #[test]
     fn invalid_glob_is_an_error_not_a_clear() {
         // `[` without a closing bracket is unparseable for globset. Deciding
@@ -1790,6 +2196,7 @@ mod tests {
                 session_id: "y".into(),
                 intersections: vec![],
             }],
+            unjudgeable_claims: vec![],
             stale_claims: vec![StaleClaim {
                 label: "ghost".into(),
                 session_id: "dead".into(),
@@ -2009,6 +2416,45 @@ mod tests {
             "the filtered stale claim must be named in the report, got {parsed:?}"
         );
         assert_eq!(stale[0]["session_id"], "dead0004");
+    }
+
+    #[test]
+    fn e2e_never_heartbeated_stale_claim_is_explicit_in_json() {
+        // GH-705 defect A (machine report): "never heard from" must be an
+        // explicit signal in the machine report (`"age_secs": null`), not a
+        // silently missing field — a consumer must be able to tell "expired
+        // heartbeat" from "no heartbeat file at all" without guessing.
+        let repo = e2e_repo();
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[coord_event("lost0005", "ghost-lane", &["src/*"])],
+        );
+        let (code, stdout, stderr) = run_edda(
+            &["claim", "check", "src/main.rs", "--json"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 0,
+            "a never-heartbeated session must not conflict; stdout={stdout:?} stderr={stderr:?}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
+        let stale = parsed["stale_claims"]
+            .as_array()
+            .expect("stale_claims array in JSON report");
+        assert_eq!(stale.len(), 1, "got {parsed:?}");
+        assert_eq!(stale[0]["session_id"], "lost0005");
+        assert!(
+            stale[0].get("age_secs").is_some(),
+            "age_secs must be present (null) for a never-heartbeated session, got {stale:?}"
+        );
+        assert!(
+            stale[0]["age_secs"].is_null(),
+            "a never-heartbeated session has no age, got {stale:?}"
+        );
     }
 
     #[test]
