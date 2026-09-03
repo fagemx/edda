@@ -3,6 +3,7 @@ name = "edda-core"
 description = "Core event model, hash chain, and schema for Edda"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
