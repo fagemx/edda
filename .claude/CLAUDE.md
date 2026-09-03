@@ -170,6 +170,12 @@ from a Windows workstation is load-bearing rather than redundant.
 Docs-only changes (no code/product blob, `Cargo.lock`, or toolchain change)
 run no Cargo gate locally; exact-head CI is the gate.
 
+For crates whose tests spawn their own binary (such as `crates/edda-cli`),
+process-spawning tests live in `tests/*.rs` and use `env!("CARGO_BIN_EXE_<bin>")`
+so Cargo guarantees the binary is compiled fresh (`cargo test -p <crate>`).
+The narrower `cargo test -p <crate> --bin <bin>` runs only pure unit tests
+and does not depend on the binary, eliminating warm-lane stale-binary hazards (GH-789).
+
 ### Build lanes
 
 **When this section applies:** only to sessions that compile this workspace on
