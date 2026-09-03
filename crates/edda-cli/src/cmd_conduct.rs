@@ -73,6 +73,10 @@ pub enum ConductCmd {
         /// Plan name (auto-detects if only one store holds plans)
         #[arg(long)]
         plan: Option<String>,
+        /// Positional plan name — kept for the karvi→edda integration
+        /// contract (`edda conduct abort {plan}` in brief-schema.md).
+        /// `--plan` wins when both are given.
+        plan_name: Option<String>,
     },
 }
 
@@ -104,7 +108,9 @@ pub fn run_cmd(cmd: ConductCmd, repo_root: &Path) -> Result<()> {
             reason,
             plan,
         } => skip(repo_root, &phase_id, reason.as_deref(), plan.as_deref()),
-        ConductCmd::Abort { plan } => abort(repo_root, plan.as_deref()),
+        ConductCmd::Abort { plan, plan_name } => {
+            abort(repo_root, plan.as_deref().or(plan_name.as_deref()))
+        }
     }
 }
 
@@ -856,33 +862,38 @@ fn discover_plans(repo_root: &Path) -> Result<(DiscoveredPlans, DiscoveryCorrupt
             found.push((name.to_string(), store.to_path_buf()));
         }
     };
+    // PASS 1 — every store's registry, before any directory scan
+    // (round-8 P0: an interleaved per-store loop let repo_root's own
+    // directory entry insert before a worktree's registry-referenced
+    // store, so a stale same-name state.json outranked the live lane).
     for store in plan_stores(repo_root) {
-        let conductor_dir = store.join(".edda").join("conductor");
-        // Registry-referenced stores FIRST (round-5 P1-2: the registry is
-        // the store `conduct run` actually used — the authoritative record;
-        // a stale same-name state.json in the repo root or a worktree must
-        // not outrank it).
-        match registry_read(&store) {
-            Ok(registry) => {
-                for (name, referenced) in &registry {
-                    match load_state(referenced, name) {
-                        Ok(Some(_)) => mark(name, referenced, &mut found),
-                        Ok(None) => continue,
-                        Err(e) => corrupt.push((
-                            name.clone(),
-                            referenced.clone(),
-                            e.context(format!(
-                                "plan \"{name}\" registry points to {}",
-                                referenced.display()
-                            )),
-                        )),
-                    }
-                }
-            }
+        let registry = match registry_read(&store) {
+            Ok(m) => m,
             Err(e) => {
                 eprintln!("⚠ store registry unreadable ({}): {e}", store.display());
+                continue;
+            }
+        };
+        for (name, referenced) in &registry {
+            match load_state(referenced, name) {
+                Ok(Some(_)) => mark(name, referenced, &mut found),
+                Ok(None) => continue,
+                Err(e) => corrupt.push((
+                    name.clone(),
+                    referenced.clone(),
+                    e.context(format!(
+                        "plan \"{name}\" registry points to {}",
+                        referenced.display()
+                    )),
+                )),
             }
         }
+    }
+    // PASS 2 — directory scan. Skip names the registry already resolved
+    // (found OR corrupt): a stale/truncated copy in the repo root must
+    // neither outrank the live store nor deny recovery for it.
+    for store in plan_stores(repo_root) {
+        let conductor_dir = store.join(".edda").join("conductor");
         if !conductor_dir.exists() {
             continue;
         }
@@ -890,6 +901,11 @@ fn discover_plans(repo_root: &Path) -> Result<(DiscoveredPlans, DiscoveryCorrupt
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 if let Some(name) = entry.file_name().to_str() {
+                    if found.iter().any(|(n, _)| n == name)
+                        || corrupt.iter().any(|(n, _, _)| n == name)
+                    {
+                        continue;
+                    }
                     match load_state(&store, name) {
                         Ok(Some(_)) => mark(name, &store, &mut found),
                         Ok(None) => continue,
@@ -918,27 +934,29 @@ fn discover_plans(repo_root: &Path) -> Result<(DiscoveredPlans, DiscoveryCorrupt
 fn stores_holding(repo_root: &Path, plan: &str) -> Result<Vec<PathBuf>> {
     edda_conductor::state::persist::validate_plan_name(plan)?;
     let (found, corrupt) = discover_plans(repo_root)?;
-    // A corrupt state file for THIS plan is an error, never "absent" —
-    // swallowing it could retarget the mutation onto a different store
-    // holding a same-name state. Corrupt files of OTHER plans are that
-    // lane's problem and do not block this verb.
-    for (name, store, e) in &corrupt {
-        if name == plan {
-            return Err(anyhow::anyhow!(
-                "plan \"{plan}\" state in {} is unreadable: {e:#}",
-                store.display()
-            ));
-        }
-    }
-    // discover_plans orders registry-referenced stores FIRST (round-5
-    // P1-2: the registry is the authoritative `conduct run` record; a
-    // stale same-name state.json anywhere else must not outrank it) and
-    // dedups by normalized store identity (round-5 P1-1).
-    Ok(found
+    // Registry-referenced stores land first (discover_plans pass 1) and
+    // a stale same-name directory copy is not even collected (pass 2
+    // skips names the registry already resolved). Dedup is by
+    // normalized store identity (round-5 P1-1).
+    let holding: Vec<PathBuf> = found
         .into_iter()
         .filter(|(name, _)| name == plan)
-        .map(|(_, store)| store.clone())
-        .collect())
+        .map(|(_, store)| store)
+        .collect();
+    // A corrupt file denies recovery only when it is the ONLY copy of
+    // this plan (round-8: a truncated leftover in the repo root must
+    // not block a healthy registry-referenced store).
+    if holding.is_empty() {
+        for (name, store, e) in &corrupt {
+            if name == plan {
+                return Err(anyhow::anyhow!(
+                    "plan \"{plan}\" state in {} is unreadable: {e:#}",
+                    store.display()
+                ));
+            }
+        }
+    }
+    Ok(holding)
 }
 
 /// The store a verb should act on: the first store holding the plan. When
@@ -1242,6 +1260,83 @@ mod tests {
         assert!(!root.join(".edda").join("conductor").join("plan-x").exists());
     }
 
+    /// GH-557 (independent-review round 8, P0): a same-name plan that was
+    /// first run at the repo root (leaving a stale state.json) then moved
+    /// into a lane — registry recorded only on the worktree, the shape of
+    /// `conduct run --cwd <wt>` from inside the worktree — must have
+    /// recovery verbs act on the LIVE store, never the stale root copy.
+    #[test]
+    fn registry_store_outranks_stale_same_name_in_repo_root() {
+        let (_dir, wt) = repo_with_worktree_state();
+        let root = _dir.path().join("repo");
+
+        let plan = parse_plan(
+            "name: plan-x
+phases:
+  - id: a
+    prompt: x
+",
+        )
+        .unwrap();
+        let mut stale = edda_conductor::state::machine::PlanState::from_plan(&plan, "plan-x.yaml");
+        stale.phases[0].status = PhaseStatus::Failed;
+        stale.plan_status = PlanStatus::Blocked;
+        stale.phases[0].skip_reason = Some("stale-root".into());
+        let stale_dir = root.join(".edda").join("conductor").join("plan-x");
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::write(
+            stale_dir.join("state.json"),
+            serde_json::to_string_pretty(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let mut live = load_state(&wt, "plan-x").unwrap().unwrap();
+        live.phases[0].status = PhaseStatus::Failed;
+        live.plan_status = PlanStatus::Blocked;
+        save_state(&wt, &live).unwrap();
+
+        // Run-from-inside-the-worktree: registry lands only on the wt.
+        registry_record(&wt, "plan-x", &wt);
+
+        retry(&root, "a", Some("plan-x")).unwrap();
+
+        let live = load_state(&wt, "plan-x").unwrap().unwrap();
+        assert_eq!(live.phases[0].status, PhaseStatus::Pending);
+        let stale = load_state(&root, "plan-x").unwrap().unwrap();
+        assert_eq!(
+            stale.phases[0].status,
+            PhaseStatus::Failed,
+            "must not mutate the stale repo-root copy"
+        );
+        assert_eq!(stale.phases[0].skip_reason.as_deref(), Some("stale-root"));
+    }
+
+    /// GH-557 (independent-review round 8): a truncated leftover
+    /// state.json at the repo root must not deny recovery of a healthy
+    /// registry-referenced copy of the same plan.
+    #[test]
+    fn stale_corrupt_copy_does_not_deny_healthy_registry_store() {
+        let (_dir, wt) = repo_with_worktree_state();
+        let root = _dir.path().join("repo");
+
+        let corrupt_dir = root.join(".edda").join("conductor").join("plan-x");
+        std::fs::create_dir_all(&corrupt_dir).unwrap();
+        std::fs::write(corrupt_dir.join("state.json"), b"{corrupt").unwrap();
+
+        let mut live = load_state(&wt, "plan-x").unwrap().unwrap();
+        live.phases[0].status = PhaseStatus::Failed;
+        live.plan_status = PlanStatus::Blocked;
+        save_state(&wt, &live).unwrap();
+        registry_record(&wt, "plan-x", &wt);
+
+        retry(&root, "a", Some("plan-x")).unwrap();
+
+        let live = load_state(&wt, "plan-x").unwrap().unwrap();
+        assert_eq!(live.phases[0].status, PhaseStatus::Pending);
+        let leftover = std::fs::read(corrupt_dir.join("state.json")).unwrap();
+        assert_eq!(leftover, b"{corrupt");
+    }
+
     /// GH-557: a corrupt state file is an ERROR, not "no state" — swallowing
     /// it could retarget a mutating verb onto a stale same-name state in
     /// another store (independent-review P1-1).
@@ -1535,8 +1630,17 @@ mod tests {
     #[test]
     fn documented_recovery_invocations_parse() {
         match parse(&["edda", "abort", "--plan", "plan-x"]) {
-            ConductCmd::Abort { plan } => {
-                assert_eq!(plan.as_deref(), Some("plan-x"))
+            ConductCmd::Abort { plan, plan_name } => {
+                assert_eq!(plan.as_deref(), Some("plan-x"));
+                assert_eq!(plan_name.as_deref(), None);
+            }
+            _other => panic!("expected Abort"),
+        }
+        // Positional form kept for the karvi→edda contract.
+        match parse(&["edda", "abort", "plan-x"]) {
+            ConductCmd::Abort { plan, plan_name } => {
+                assert_eq!(plan.as_deref(), None);
+                assert_eq!(plan_name.as_deref(), Some("plan-x"));
             }
             _other => panic!("expected Abort"),
         }
