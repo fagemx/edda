@@ -377,15 +377,30 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
     }
 
     if json {
+        // Round-10 P1-2: every machine-readable object carries `store` so
+        // same-named plans across lanes are distinguishable. Flattened onto
+        // PlanState so existing field paths (`plan_name`, `phases`, …) stay.
+        #[derive(serde::Serialize)]
+        struct StatusJson {
+            store: String,
+            #[serde(flatten)]
+            state: PlanState,
+        }
+        let row = |store: &Path, state: PlanState| StatusJson {
+            store: normalize_store_path(store),
+            state,
+        };
         // Named-missing keeps the pre-GH-557 "null" contract (round-3 P1-1);
         // a CORRUPT state file still propagates as an error. The unnamed
-        // listing builds only from parseable states, so its array is clean.
+        // listing skip-and-warns a plan whose file vanished between
+        // discovery and load (round-10 P1-1: the old filter_map could not
+        // fail; a hard error here would drop every healthy lane's status).
         if plan_name.is_some() {
             let (name, store) = &plans[0];
             let state = load_state(store, name)?;
             match state {
                 Some(s) => {
-                    out.push_str(&serde_json::to_string_pretty(&s)?);
+                    out.push_str(&serde_json::to_string_pretty(&row(store, s))?);
                     out.push('\n');
                 }
                 None => out.push_str("null\n"),
@@ -393,9 +408,17 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
         } else {
             let mut states = Vec::new();
             for (name, store) in &plans {
-                states.push(load_state(store, name)?.ok_or_else(|| {
-                    anyhow::anyhow!("plan \"{name}\": no state file in {}", store.display())
-                })?);
+                match load_state(store, name) {
+                    Ok(Some(s)) => states.push(row(store, s)),
+                    Ok(None) => eprintln!(
+                        "⚠ plan \"{name}\" state in {} disappeared before load, omitted",
+                        store.display()
+                    ),
+                    Err(e) => eprintln!(
+                        "⚠ plan \"{name}\" state in {} unreadable at load, omitted: {e:#}",
+                        store.display()
+                    ),
+                }
             }
             out.push_str(&serde_json::to_string_pretty(&states)?);
             out.push('\n');
@@ -1512,6 +1535,22 @@ phases:
         );
         // An explicit --plan still works across stores.
         assert_eq!(resolve_plan_name(&root, Some("plan-x")).unwrap(), "plan-x");
+    }
+
+    /// GH-557 (independent-review round 10, P1-2): unnamed `--json` carries
+    /// `store` so same-named plans across lanes are distinguishable, and
+    /// existing PlanState field paths (`plan_name`, …) stay at the top level.
+    #[test]
+    fn status_json_unnamed_includes_store_provenance() {
+        let (_dir, wt) = repo_with_worktree_state();
+        let root = _dir.path().join("repo");
+        let out = status_impl(&root, None, true).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let arr = v.as_array().expect("unnamed json is an array");
+        assert_eq!(arr.len(), 1, "{out}");
+        assert_eq!(arr[0]["plan_name"], "plan-x");
+        let store = arr[0]["store"].as_str().expect("store field");
+        assert_eq!(store, normalize_store_path(&wt));
     }
 
     /// GH-557 (independent-review round 3, P1-1): `status <plan> --json`

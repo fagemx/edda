@@ -73,10 +73,14 @@ edda conduct status --json
 
 ### Interpret the JSON output
 
-The output is a `PlanState` object (or array if multiple plans):
+The output is a `PlanState` object (or array if multiple plans). Each object
+includes `store` — the directory holding that plan's `state.json` — so two
+lanes with the same `plan_name` are distinguishable. Use `--plan` on retry/
+skip/abort.
 
 ```json
 {
+  "store": "/path/to/worktree",
   "plan_name": "api-decisions",
   "plan_status": "running",
   "total_cost_usd": 0.42,
@@ -252,7 +256,7 @@ If there's only one active plan, assume the user means that one. If multiple, as
 
 - **edda not found**: Tell the user `edda` is not installed or not in PATH.
 - **No active plans**: "No active conductor plans."
-- **Multiple plans**: List them by name, ask user which one.
+- **Multiple plans**: List them by name **and store**, ask user which one.
 - **Stale status**: If `updated_at` in runner-status.json is older than `timeout_sec`, the conductor process likely crashed. Report: "Plan status is stale (last update: [time]). The conductor may have crashed. Re-run to resume."
 - **Conductor not built**: If `edda conduct` fails, suggest `cargo build -p edda-cli`.
 
