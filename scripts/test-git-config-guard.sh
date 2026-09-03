@@ -173,8 +173,8 @@ guard_w=$(cygpath -w "$GUARD" 2>/dev/null || echo "$GUARD")
 } >"$tmp/locked.ps1"
 pwsh -NoProfile -NonInteractive -File "$tmp/locked.ps1" >"$tmp/out9" 2>&1 ||
   fail "locked-config probe did not run: $(cat "$tmp/out9")"
-grep -q '^backup=3$' "$tmp/out9" ||
-  fail "-Backup on an unreadable config should exit 3 (no backup taken), got: $(cat "$tmp/out9")"
+grep -q '^backup=4$' "$tmp/out9" ||
+  fail "-Backup on an unreadable config should exit 4 (could not be judged), got: $(cat "$tmp/out9")"
 grep -q '^restore=4$' "$tmp/out9" ||
   fail "-Restore on an unreadable config should exit 4 (could not be judged) and not restore, got: $(cat "$tmp/out9")"
 cmp -s "$tmp/locked-good" "$repo8/.git/config" ||
@@ -259,7 +259,7 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
       "Unregister-ScheduledTask -TaskName 'edda-lane-$1' -Confirm:\$false -ErrorAction SilentlyContinue" >/dev/null 2>&1
   }
 
-  lane=guard-e2e
+  lane=guard-e2e-$$
   repo6=$(new_repo e2e)
   guard -RepoPath "$repo6" -Backup >/dev/null 2>&1 || fail "e2e setup: backup failed"
   cp "$repo6/.git/config" "$tmp/e2e-good"
@@ -291,7 +291,7 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   ok "lane-stop restores the shared .git/config after really killing a lane"
 
   # --- case 12 (opt-in): unrepairable config is an error, not a clean stop --
-  lane2=guard-e2e-nobak
+  lane2=guard-e2e-nobak-$$
   repo7=$(new_repo e2e-nobak)
   start_fake_lane "$lane2" "$repo7"
   nul_ise "$repo7/.git/config"
@@ -303,6 +303,8 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
 
   [ "$stop_status2" -eq 1 ] ||
     fail "lane-stop exited $stop_status2 on an unrepairable config; expected 1: $(cat "$tmp/out10")"
+  grep -q 'terminated=[1-9]' "$tmp/out10" ||
+    fail "lane-stop terminated nothing in case 12: $(cat "$tmp/out10")"
   grep -q 'gitconfig=UNREPAIRABLE' "$tmp/out10" ||
     fail "lane-stop did not report the config as unrepairable: $(cat "$tmp/out10")"
   grep -q '=== EXIT' "$logdir/$lane2.log" 2>/dev/null ||
@@ -312,7 +314,7 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   # --- case 13 (opt-in): review lanes get the check too ----------------------
   # review-pr.sh:453 and pr-review-launch.ps1:64 write a bare `Set-Location`,
   # and lane-stop.ps1 claims to stop those tasks (GH-712).
-  lane3=guard-e2e-review
+  lane3=guard-e2e-review-$$
   repo10=$(new_repo e2e-review)
   guard -RepoPath "$repo10" -Backup >/dev/null 2>&1 || fail "e2e setup: backup failed"
   cp "$repo10/.git/config" "$tmp/e2e-review-good"
@@ -334,7 +336,7 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   # --- case 14 (opt-in): a guard exception never costs the end record --------
   # $ErrorActionPreference is Stop in lane-stop; a config held open makes the
   # guard's ReadAllBytes throw. That must not skip the GH-672 end record.
-  lane4=guard-e2e-throw
+  lane4=guard-e2e-throw-$$
   repo11=$(new_repo e2e-throw)
   guard -RepoPath "$repo11" -Backup >/dev/null 2>&1 || fail "e2e setup: backup failed"
   start_fake_lane "$lane4" "$repo11"
@@ -366,7 +368,7 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   # lane-stop runs under $ErrorActionPreference = Stop. The guard converts what
   # it can into exit codes, but anything it cannot — here, the script missing,
   # as in a partial checkout — still raises, and step 7 must survive it.
-  lane5=guard-e2e-noguard
+  lane5=guard-e2e-noguard-$$
   repo12=$(new_repo e2e-noguard)
   start_fake_lane "$lane5" "$repo12"
   crippled="$tmp/crippled"

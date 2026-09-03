@@ -213,7 +213,7 @@ if ($Backup) {
   if ($health.Unreadable) {
     # Nothing is known about the config, so nothing may be concluded from it:
     # do not overwrite the backup, and do not claim the config is broken.
-    Fail "config could not be read, so no backup was taken ($($health.Reason)); $BackupPath left as it was" 3
+    Fail "config could not be read, so no backup was taken ($($health.Reason)); $BackupPath left as it was" 4
   }
   if (-not $health.Healthy) {
     # Refusing here is the whole point: the real .bak files on this machine were
