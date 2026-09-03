@@ -120,7 +120,7 @@ pub fn save_state(cwd: &Path, state: &PlanState) -> Result<()> {
 /// transitions it observed itself).
 pub fn save_state_reconciled(cwd: &Path, state: &mut PlanState) -> Result<()> {
     let _lock = PlanStateLock::acquire(cwd, &state.plan_name)?;
-    if let Ok(Some(disk)) = load_state(cwd, &state.plan_name) {
+    if let Some(disk) = load_state(cwd, &state.plan_name)? {
         for disk_phase in &disk.phases {
             if disk_phase.status != PhaseStatus::Skipped {
                 continue;
@@ -482,5 +482,30 @@ mod tests {
         assert_eq!(p1.skip_reason.as_deref(), Some("skipped by thread A"));
         assert_eq!(p2.status, PhaseStatus::Skipped);
         assert_eq!(p2.skip_reason.as_deref(), Some("skipped by thread B"));
+    }
+
+    #[test]
+    fn save_state_reconciled_fails_on_corrupted_state_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan =
+            parse_plan("name: corrupt-plan\nphases:\n  - id: p1\n    prompt: \"one\"\n").unwrap();
+        let mut state = PlanState::from_plan(&plan, "corrupt-plan.yaml");
+
+        // Write invalid/corrupted JSON to state.json
+        let p = state_path(dir.path(), "corrupt-plan");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, b"{ not valid json }").unwrap();
+
+        // save_state_reconciled must fail and must NOT overwrite the corrupted file (GH-741)
+        let res = save_state_reconciled(dir.path(), &mut state);
+        assert!(
+            res.is_err(),
+            "save_state_reconciled must return Err on unreadable state.json, but got: {:?}",
+            res
+        );
+
+        // The on-disk file content must remain unchanged
+        let on_disk = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(on_disk, "{ not valid json }");
     }
 }
