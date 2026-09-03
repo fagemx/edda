@@ -1,31 +1,24 @@
 use crate::agent::budget::BudgetTracker;
-use crate::agent::launcher::{phase_session_id_attempt, AgentLauncher, PhaseResult};
-use crate::check::engine::{CheckEngine, CheckRunResult};
-use crate::plan::schema::{CheckSpec, OnFail, OnGateTimeout, OnReject, Plan};
+use crate::agent::launcher::{phase_session_id_attempt, AgentLauncher};
+use crate::check::engine::CheckEngine;
+use crate::plan::schema::{CheckSpec, Plan};
 use crate::plan::topo::topo_sort;
 use crate::runner::edda;
 use crate::runner::event_log::{self, Event, EventLogger};
-use crate::runner::heartbeat::{
-    lane_heartbeat_interval_secs, run_phase_with_heartbeat, LaneHeartbeat,
-};
+use crate::runner::gate;
+use crate::runner::heartbeat::{run_phase_with_heartbeat, LaneHeartbeat};
 use crate::runner::notify::Notifier;
+use crate::runner::outcome::{phase_terminal_event, process_phase_result};
 use crate::state::brief::write_brief;
 use crate::state::derive::{
     detect_stale_phases, find_next_phase, is_plan_blocked, is_plan_complete, update_plan_status,
 };
-use crate::state::machine::{
-    transition, CheckResult, CheckStatus, ErrorInfo, ErrorType, PhaseStatus, PhaseUpdate,
-    PlanState, PlanStatus,
-};
+use crate::state::machine::{transition, PhaseStatus, PhaseUpdate, PlanState, PlanStatus};
 use crate::state::persist::{reconcile_with_disk, save_state_reconciled};
 use crate::tmux::TmuxSession;
-use anyhow::Context;
-use anyhow::Result;
-use edda_core::VerdictPayload;
-use edda_ledger::VerdictRecord;
-use edda_notify::NotifyEvent;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use anyhow::{Context, Result};
+use std::path::Path;
+use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 /// Runtime context for [`run_plan`], grouping execution environment parameters.
@@ -118,146 +111,9 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
         }
 
         if is_plan_blocked(state) {
-            let failed = state.phases.iter().find(|p| {
-                p.status == PhaseStatus::Failed
-                    || p.status == PhaseStatus::Stale
-                    // GH-552: an unwaived gate timeout blocks like a failure.
-                    || (p.status == PhaseStatus::GateTimedOut && p.skip_reason.is_none())
-            });
-            let failed_id = failed.map(|f| f.id.clone()).unwrap_or_default();
-            let failed_status = failed.map(|f| f.status).unwrap_or(PhaseStatus::Failed);
-
-            if interactive {
-                match prompt_blocked_action(&failed_id, failed_status) {
-                    BlockedAction::Retry => {
-                        let current = state
-                            .get_phase(&failed_id)
-                            .map(|p| p.status)
-                            .unwrap_or(PhaseStatus::Failed);
-                        let _ = transition(state, &failed_id, current, PhaseStatus::Pending, None);
-                        state.plan_status = PlanStatus::Running;
-                        save_state_reconciled(cwd, state)?;
-                        println!("  ↻ Retrying \"{failed_id}\"");
-                        continue;
-                    }
-                    BlockedAction::Skip => {
-                        let ps = state.get_phase_mut(&failed_id)?;
-                        ps.status = PhaseStatus::Skipped;
-                        ps.skip_reason = Some("manually skipped (interactive)".into());
-                        state.plan_status = PlanStatus::Running;
-                        save_state_reconciled(cwd, state)?;
-                        event_log.record(Event::PhaseSkipped {
-                            phase_id: failed_id.clone(),
-                            reason: "manually skipped (interactive)".into(),
-                        });
-                        let attempt_now =
-                            state.get_phase(&failed_id).map(|p| p.attempts).unwrap_or(0);
-                        notifier
-                            .notify_phase_terminal(phase_terminal_event(
-                                &plan.name,
-                                &failed_id,
-                                "Skipped",
-                                attempt_now,
-                                None,
-                            ))
-                            .await;
-                        println!("  ⊘ Skipped \"{failed_id}\"");
-                        continue;
-                    }
-                    BlockedAction::Waive => {
-                        // GH-552: the phase ran, its checks passed, and its
-                        // gate timed out — record a waiver on the honest
-                        // GateTimedOut status, never a false Skipped.
-                        let (gate_sha, entered_at) = {
-                            let ps = state.get_phase(&failed_id)?;
-                            (
-                                ps.gate_sha.clone().unwrap_or_default(),
-                                ps.gate_entered_at.clone(),
-                            )
-                        };
-                        let waited = entered_at
-                            .and_then(|t| {
-                                time::OffsetDateTime::parse(
-                                    &t,
-                                    &time::format_description::well_known::Rfc3339,
-                                )
-                                .ok()
-                            })
-                            .map(|t| {
-                                std::time::Duration::from_secs(
-                                    (time::OffsetDateTime::now_utc() - t).whole_seconds().max(0)
-                                        as u64,
-                                )
-                            })
-                            .map(format_elapsed)
-                            .unwrap_or_else(|| "unknown".into());
-                        let reason = format!(
-                            "gate waived after timeout: work completed and checks passed (commit {gate_sha}); waited {waited}"
-                        );
-                        let ps = state.get_phase_mut(&failed_id)?;
-                        ps.skip_reason = Some(reason.clone());
-                        state.plan_status = PlanStatus::Running;
-                        save_state_reconciled(cwd, state)?;
-                        event_log.record(Event::GateWaived {
-                            phase_id: failed_id.clone(),
-                            reason: reason.clone(),
-                            auto: false,
-                        });
-                        println!(
-                            "  ⧗ Waived gate on \"{failed_id}\" (status kept as GateTimedOut)"
-                        );
-                        continue;
-                    }
-                    BlockedAction::Abort => {
-                        state.plan_status = PlanStatus::Aborted;
-                        state.aborted_at = Some(now_rfc3339());
-                        save_state_reconciled(cwd, state)?;
-                        // GH-584 round-2 P1-1: the plan abort reaches the
-                        // workspace ledger as a structured conductor_plan
-                        // event, not only the plan-local event log.
-                        let phases_passed = state
-                            .phases
-                            .iter()
-                            .filter(|p| p.status == PhaseStatus::Passed)
-                            .count();
-                        let phases_pending = state
-                            .phases
-                            .iter()
-                            .filter(|p| p.status == PhaseStatus::Pending)
-                            .count();
-                        event_log.record(Event::PlanAborted {
-                            phases_passed,
-                            phases_pending,
-                        });
-                        edda::record_plan_aborted(cwd, &plan.name, phases_passed, phases_pending);
-                        let attempt_now =
-                            state.get_phase(&failed_id).map(|p| p.attempts).unwrap_or(0);
-                        notifier
-                            .notify_phase_terminal(phase_terminal_event(
-                                &plan.name,
-                                &failed_id,
-                                "Aborted",
-                                attempt_now,
-                                None,
-                            ))
-                            .await;
-                        println!("  ✗ Plan aborted.");
-                        break;
-                    }
-                    BlockedAction::Quit => {
-                        println!("Paused. Run `edda conduct run` to resume.");
-                        break;
-                    }
-                }
-            } else {
-                notifier
-                    .notify(&format!(
-                        "Plan blocked: phase \"{}\" is {:?}. Use retry/skip/abort.",
-                        failed_id,
-                        failed.map(|f| f.status),
-                    ))
-                    .await;
-                break;
+            match handle_blocked(plan, state, cwd, interactive, notifier, &mut event_log).await? {
+                BlockedStep::Continue => continue,
+                BlockedStep::Break => break,
             }
         }
 
@@ -267,499 +123,21 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
         }
 
         // ── Verdict gate wait (GH-519 D3) ────────────────────────────
-        // A phase holding AWAITING_VERDICT pauses the plan until a verdict
-        // arrives. On restart this re-enters the wait WITHOUT re-running the
-        // phase agent turn or checks; gate_sha comes from persisted state.
-        if let Some(gated_id) = state
-            .phases
-            .iter()
-            .find(|p| p.status == PhaseStatus::AwaitingVerdict)
-            .map(|p| p.id.clone())
+        if gate::settle_gated_phase(
+            plan,
+            state,
+            &order,
+            launcher,
+            check_engine,
+            notifier,
+            budget,
+            &cancel,
+            cwd,
+            tmux_session,
+            &mut event_log,
+        )
+        .await?
         {
-            let phase = plan
-                .phases
-                .iter()
-                .find(|p| p.id == gated_id)
-                .with_context(|| format!("gated phase \"{gated_id}\" not found in plan"))?;
-            let phase_cwd = phase
-                .cwd
-                .as_deref()
-                .or(plan.cwd.as_deref())
-                .map(|p| cwd.join(p))
-                .unwrap_or_else(|| cwd.to_path_buf());
-            let subject = gate_subject(&plan.name, &gated_id);
-            let (gate_sha, entered_at) = {
-                let ps = state.get_phase(&gated_id)?;
-                let sha = ps.gate_sha.clone().with_context(|| {
-                    format!("AWAITING_VERDICT state for \"{gated_id}\" is missing gate_sha")
-                })?;
-                // GH-541: fail CLOSED on a missing freshness bound. Substituting
-                // `now` (the previous behavior) admitted every verdict recorded
-                // after the resume instant — including the stale rejection from
-                // the previous gate entry that D6 blocks — with no diagnostic.
-                // An AWAITING_VERDICT phase must carry the persisted entry time:
-                // it is the D6 bound and the timeout anchor across restarts.
-                let at = ps.gate_entered_at.clone().with_context(|| {
-                    format!(
-                        "AWAITING_VERDICT state for \"{gated_id}\" is missing gate_entered_at — \
-                         the D6 freshness bound cannot be established, so refusing to wait; \
-                         a stale verdict could otherwise be admitted"
-                    )
-                })?;
-                time::OffsetDateTime::parse(
-                    &at,
-                    &time::format_description::well_known::Rfc3339,
-                )
-                .with_context(|| {
-                    format!(
-                        "AWAITING_VERDICT state for \"{gated_id}\" has unparsable gate_entered_at \"{at}\" — \
-                         the D6 freshness bound cannot be established, so refusing to wait; \
-                         a stale verdict could otherwise be admitted"
-                    )
-                })?;
-                (sha, at)
-            };
-            let phase_num = order.iter().position(|id| id == &gated_id).unwrap_or(0) + 1;
-
-            // D4: unmistakable surface naming subject + gate_sha + the exact
-            // approve/reject commands to run.
-            println!("\n⏸ [{phase_num}/{total_phases}] Phase \"{gated_id}\" AWAITING_VERDICT — waiting for an external verdict");
-            println!("  subject:  {subject}");
-            println!("  gate_sha: {gate_sha}");
-            // GH-551: the budget must be visible where the wait is announced
-            // — an operator who set 7200s hours earlier has no surface
-            // telling them the clock is draining.
-            println!(
-                "  deadline: {}",
-                format_gate_deadline(phase.gate_timeout_sec, &entered_at)
-            );
-            println!("  approve:  edda verdict approve {subject} --sha {gate_sha}");
-            println!(
-                "  reject:   edda verdict reject {subject} --sha {gate_sha} --comment \"<why>\""
-            );
-            event_log::write_runner_status(cwd, state, Some(&gated_id));
-            write_brief(cwd, state, None);
-
-            // The lane stays alive while gated — keep its heartbeat honest
-            // with an "awaiting_verdict" stage (GH-566).
-            let lane_hb = {
-                let ps = state.get_phase(&gated_id)?;
-                LaneHeartbeat {
-                    cwd: cwd.to_path_buf(),
-                    session_id: phase_session_id_attempt(&plan.name, &gated_id, ps.attempts)
-                        .to_string(),
-                    plan: plan.name.clone(),
-                    phase: gated_id.clone(),
-                    attempt: ps.attempts,
-                }
-            };
-
-            match wait_for_verdict(
-                cwd,
-                &plan.name,
-                &gated_id,
-                &gate_sha,
-                phase.gate_timeout_sec,
-                Some(&entered_at),
-                &cancel,
-                Some(&lane_hb),
-                notifier,
-            )
-            .await
-            {
-                GateVerdict::Approved(record) => {
-                    event_log.record(Event::VerdictReceived {
-                        phase_id: gated_id.clone(),
-                        decision: "approved".into(),
-                        gate_sha: gate_sha.clone(),
-                        comment: record.payload.comment.clone(),
-                    });
-                    transition(
-                        state,
-                        &gated_id,
-                        PhaseStatus::AwaitingVerdict,
-                        PhaseStatus::Passed,
-                        Some(PhaseUpdate {
-                            completed_at: Some(now_rfc3339()),
-                            ..Default::default()
-                        }),
-                    )?;
-                    record_verdict_metadata(state, &gated_id, &record.payload);
-                    println!("  ✓ Verdict approved — phase \"{gated_id}\" passed");
-                    if let Some(tmux) = tmux_session {
-                        let _ = tmux.update_phase_status(&gated_id, "Passed");
-                    }
-                    edda::record_note(
-                        cwd,
-                        &format!("Gate \"{subject}\" approved (sha {gate_sha})"),
-                        &["conductor", "verdict"],
-                    );
-                    let approved_ps = state.get_phase(&gated_id)?;
-                    // GH-564 P1-3: the approved phase's agent final output
-                    // (last line = PR URL by convention) was parked at gate
-                    // entry and survives restarts — restore it, never drop
-                    // it to null. GH-564 Round-2 P1: consume the sidecar —
-                    // its lifecycle ends with this verdict.
-                    let final_output = load_gate_output(cwd, &plan.name, &gated_id);
-                    clear_gate_output(cwd, &plan.name, &gated_id);
-                    // GH-584 round-3: gate approval is a phase terminal
-                    // state like any other — write the structured
-                    // `conductor_phase` event with the plan id and the
-                    // measured cost parked on the phase at gate entry,
-                    // exactly as the non-gate pass path does.
-                    edda::record_phase_done_with_plan(
-                        cwd,
-                        Some(&plan.name),
-                        &gated_id,
-                        final_output.as_deref(),
-                        approved_ps.cost_usd,
-                    );
-                    notifier
-                        .notify_phase_terminal(phase_terminal_event(
-                            &plan.name,
-                            &gated_id,
-                            "Passed",
-                            approved_ps.attempts,
-                            final_output.as_deref(),
-                        ))
-                        .await;
-                }
-                GateVerdict::Rejected(record) => {
-                    let comment = record.payload.comment.clone().unwrap_or_default();
-                    event_log.record(Event::VerdictReceived {
-                        phase_id: gated_id.clone(),
-                        decision: "rejected".into(),
-                        gate_sha: gate_sha.clone(),
-                        comment: Some(comment.clone()),
-                    });
-                    println!("  ✗ Verdict rejected for \"{gated_id}\"");
-                    edda::record_note(
-                        cwd,
-                        &format!("Gate \"{subject}\" rejected (sha {gate_sha})"),
-                        &["conductor", "verdict"],
-                    );
-
-                    let (attempts, redispatches) = {
-                        let ps = state.get_phase(&gated_id)?;
-                        (ps.attempts, ps.gate_redispatches)
-                    };
-                    let max = phase.max_attempts.unwrap_or(plan.max_attempts);
-                    let bound_exhausted = redispatches >= MAX_GATE_REDISPATCHES;
-                    if phase.on_reject == OnReject::Halt || attempts >= max || bound_exhausted {
-                        // Halt (or a bound exhausted): the comment is the
-                        // error (D3). The redispatch bound gets a distinct
-                        // message naming the bound (D6).
-                        let message = if bound_exhausted {
-                            format!(
-                                "verdict gate redispatch bound exhausted ({redispatches} redispatch cycles, max {MAX_GATE_REDISPATCHES}) for \"{subject}\"; last rejection: {comment}"
-                            )
-                        } else {
-                            comment.clone()
-                        };
-                        transition(
-                            state,
-                            &gated_id,
-                            PhaseStatus::AwaitingVerdict,
-                            PhaseStatus::Failed,
-                            Some(PhaseUpdate {
-                                error: Some(ErrorInfo {
-                                    error_type: ErrorType::GateRejected,
-                                    message: message.clone(),
-                                    retryable: false,
-                                    check_index: None,
-                                    timestamp: now_rfc3339(),
-                                }),
-                                ..Default::default()
-                            }),
-                        )?;
-                        record_verdict_metadata(state, &gated_id, &record.payload);
-                        println!("  ✗ Phase \"{gated_id}\" failed: {message}");
-                        if let Some(tmux) = tmux_session {
-                            let _ = tmux.update_phase_status(&gated_id, "Failed");
-                        }
-                        let gate_cost = state.get_phase(&gated_id).ok().and_then(|p| p.cost_usd);
-                        edda::record_phase_failed_with_plan(
-                            cwd,
-                            Some(&plan.name),
-                            &gated_id,
-                            gate_cost,
-                            &message,
-                        );
-                        let gate_ps = state.get_phase(&gated_id)?;
-                        event_log.record(Event::PhaseFailed {
-                            phase_id: gated_id.clone(),
-                            attempt: gate_ps.attempts,
-                            duration_ms: 0,
-                            error: format!("verdict rejected: {message}"),
-                            error_type: Some(ErrorType::GateRejected.tag().to_string()),
-                            env_retries: gate_ps.env_retries,
-                            attempt_charged: true,
-                        });
-                        // GH-564 P1-3: same parked output as the approved
-                        // branch — the agent did produce a final line before
-                        // the gate rejected it. Consume the sidecar with the
-                        // verdict (GH-564 Round-2 P1).
-                        let final_output = load_gate_output(cwd, &plan.name, &gated_id);
-                        clear_gate_output(cwd, &plan.name, &gated_id);
-                        notifier
-                            .notify_phase_terminal(phase_terminal_event(
-                                &plan.name,
-                                &gated_id,
-                                "Failed",
-                                gate_ps.attempts,
-                                final_output.as_deref(),
-                            ))
-                            .await;
-                    } else {
-                        // Redispatch (D3): ONE more agent turn in the SAME
-                        // session — do NOT increment attempt; the rejection
-                        // comment becomes the prompt, prefixed with context.
-                        // D6: count the cycle on its own persisted counter.
-                        state.get_phase_mut(&gated_id)?.gate_redispatches += 1;
-                        let session_id =
-                            phase_session_id_attempt(&plan.name, &gated_id, attempts).to_string();
-                        let prompt = build_redispatch_prompt(phase, &gated_id, &comment);
-                        let plan_context =
-                            build_plan_context_with_edda(plan, state, &gated_id, cwd);
-                        transition(
-                            state,
-                            &gated_id,
-                            PhaseStatus::AwaitingVerdict,
-                            PhaseStatus::Running,
-                            None,
-                        )?;
-                        save_state_reconciled(cwd, state)?;
-                        println!(
-                            "  ↻ Redispatching one more turn in the same session ({session_id})"
-                        );
-                        let lane_hb = LaneHeartbeat {
-                            cwd: cwd.to_path_buf(),
-                            session_id: session_id.clone(),
-                            plan: plan.name.clone(),
-                            phase: gated_id.clone(),
-                            attempt: attempts,
-                        };
-                        let result = run_phase_with_heartbeat(
-                            launcher,
-                            phase,
-                            &prompt,
-                            &plan_context,
-                            &phase_cwd,
-                            &cancel,
-                            &lane_hb,
-                        )
-                        .await?;
-                        process_phase_result(
-                            plan,
-                            phase,
-                            state,
-                            &gated_id,
-                            attempts,
-                            result,
-                            cwd,
-                            &phase_cwd,
-                            Instant::now(),
-                            budget,
-                            check_engine,
-                            notifier,
-                            &mut event_log,
-                            tmux_session,
-                            &cancel,
-                            Some(&lane_hb),
-                        )
-                        .await?;
-                    }
-                }
-                GateVerdict::TimedOut => {
-                    // D3: NOT silent, NOT auto-approve. GH-552: also not a
-                    // phase failure — the work completed and its checks
-                    // passed, so the honest terminal state is GateTimedOut
-                    // with the real elapsed gate time, and the plan's
-                    // on_gate_timeout policy decides what happens next.
-                    let elapsed_ms = time::OffsetDateTime::parse(
-                        &entered_at,
-                        &time::format_description::well_known::Rfc3339,
-                    )
-                    .ok()
-                    .and_then(|t| {
-                        let elapsed = time::OffsetDateTime::now_utc() - t;
-                        if elapsed.whole_seconds() < 0 {
-                            None
-                        } else {
-                            Some(elapsed.whole_seconds() as u64 * 1000)
-                        }
-                    })
-                    .unwrap_or(0);
-                    let msg = format!(
-                        "gate timed out: no verdict for \"{subject}\" (sha {gate_sha}) within {}s",
-                        phase.gate_timeout_sec.unwrap_or(0)
-                    );
-                    transition(
-                        state,
-                        &gated_id,
-                        PhaseStatus::AwaitingVerdict,
-                        PhaseStatus::GateTimedOut,
-                        Some(PhaseUpdate {
-                            error: Some(ErrorInfo {
-                                error_type: ErrorType::GateTimeout,
-                                message: msg.clone(),
-                                retryable: false,
-                                check_index: None,
-                                timestamp: now_rfc3339(),
-                            }),
-                            ..Default::default()
-                        }),
-                    )?;
-                    println!("  ⏰ Phase \"{gated_id}\" {msg}");
-                    if let Some(tmux) = tmux_session {
-                        let _ = tmux.update_phase_status(&gated_id, "GateTimedOut");
-                    }
-                    let gate_cost = state.get_phase(&gated_id).ok().and_then(|p| p.cost_usd);
-                    edda::record_phase_gate_timed_out(
-                        cwd,
-                        Some(&plan.name),
-                        &gated_id,
-                        gate_cost,
-                        &msg,
-                    );
-                    event_log.record(Event::GateTimedOut {
-                        phase_id: gated_id.clone(),
-                        gate_sha: gate_sha.clone(),
-                        elapsed_ms,
-                    });
-                    // GH-564 P1-3: same parked output as the approved branch.
-                    // Consume the sidecar with the verdict (GH-564 Round-2 P1).
-                    let final_output = load_gate_output(cwd, &plan.name, &gated_id);
-                    clear_gate_output(cwd, &plan.name, &gated_id);
-                    let gate_ps = state.get_phase(&gated_id)?;
-                    notifier
-                        .notify_phase_terminal(phase_terminal_event(
-                            &plan.name,
-                            &gated_id,
-                            "GateTimedOut",
-                            gate_ps.attempts,
-                            final_output.as_deref(),
-                        ))
-                        .await;
-
-                    // GH-552 policy: let an unattended run declare the
-                    // decision in advance instead of exiting with
-                    // instructions it cannot follow.
-                    if phase.on_gate_timeout == OnGateTimeout::Skip {
-                        let reason = format!(
-                            "gate waived after timeout ({} waited, {}s configured): work completed and checks passed; auto-waived by on_gate_timeout: skip",
-                            format_elapsed(std::time::Duration::from_millis(elapsed_ms)),
-                            phase.gate_timeout_sec.unwrap_or(0)
-                        );
-                        let ps = state.get_phase_mut(&gated_id)?;
-                        ps.skip_reason = Some(reason.clone());
-                        event_log.record(Event::GateWaived {
-                            phase_id: gated_id.clone(),
-                            reason: reason.clone(),
-                            auto: true,
-                        });
-                        println!(
-                            "  ⧗ Gate auto-waived for \"{gated_id}\" (on_gate_timeout: skip) — plan proceeds"
-                        );
-                    }
-                }
-                GateVerdict::LedgerUnreadable(err) => {
-                    // GH-541 / GH-744: the gate could not read the ledger persistently
-                    // (not lock contention). The phase's work completed and checks passed;
-                    // the failure is infrastructure, not the agent's work.
-                    // Transition to GateTimedOut (rather than Failed) so the GH-552 waive route
-                    // is preserved: the operator can waive the gate in interactive mode,
-                    // and unattended runs honor on_gate_timeout: skip.
-                    let msg = format!(
-                        "gate aborted: ledger unreadable for \"{subject}\" (sha {gate_sha}): {err}"
-                    );
-                    transition(
-                        state,
-                        &gated_id,
-                        PhaseStatus::AwaitingVerdict,
-                        PhaseStatus::GateTimedOut,
-                        Some(PhaseUpdate {
-                            error: Some(ErrorInfo {
-                                error_type: ErrorType::LedgerUnreadable,
-                                message: msg.clone(),
-                                retryable: false,
-                                check_index: None,
-                                timestamp: now_rfc3339(),
-                            }),
-                            ..Default::default()
-                        }),
-                    )?;
-                    println!("  ⏰ Phase \"{gated_id}\" {msg}");
-                    if let Some(tmux) = tmux_session {
-                        let _ = tmux.update_phase_status(&gated_id, "GateTimedOut");
-                    }
-                    let gate_cost = state.get_phase(&gated_id).ok().and_then(|p| p.cost_usd);
-                    edda::record_phase_gate_timed_out(
-                        cwd,
-                        Some(&plan.name),
-                        &gated_id,
-                        gate_cost,
-                        &msg,
-                    );
-                    let elapsed_ms = time::OffsetDateTime::parse(
-                        &entered_at,
-                        &time::format_description::well_known::Rfc3339,
-                    )
-                    .ok()
-                    .and_then(|t| {
-                        let elapsed = time::OffsetDateTime::now_utc() - t;
-                        if elapsed.whole_seconds() < 0 {
-                            None
-                        } else {
-                            Some(elapsed.whole_seconds() as u64 * 1000)
-                        }
-                    })
-                    .unwrap_or(0);
-                    event_log.record(Event::GateTimedOut {
-                        phase_id: gated_id.clone(),
-                        gate_sha: gate_sha.clone(),
-                        elapsed_ms,
-                    });
-                    let final_output = load_gate_output(cwd, &plan.name, &gated_id);
-                    clear_gate_output(cwd, &plan.name, &gated_id);
-                    let gate_ps = state.get_phase(&gated_id)?;
-                    notifier
-                        .notify_phase_terminal(phase_terminal_event(
-                            &plan.name,
-                            &gated_id,
-                            "GateTimedOut",
-                            gate_ps.attempts,
-                            final_output.as_deref(),
-                        ))
-                        .await;
-
-                    // GH-552 / GH-744: auto-waive if phase configured with on_gate_timeout: skip
-                    if phase.on_gate_timeout == OnGateTimeout::Skip {
-                        let reason = format!(
-                            "gate waived after ledger unreadable: work completed and checks passed; auto-waived by on_gate_timeout: skip ({err})"
-                        );
-                        let ps = state.get_phase_mut(&gated_id)?;
-                        ps.skip_reason = Some(reason.clone());
-                        event_log.record(Event::GateWaived {
-                            phase_id: gated_id.clone(),
-                            reason: reason.clone(),
-                            auto: true,
-                        });
-                        println!(
-                            "  ⧗ Gate auto-waived for \"{gated_id}\" (on_gate_timeout: skip) — plan proceeds"
-                        );
-                    }
-                }
-                GateVerdict::Cancelled => {
-                    // The loop top sees the cancelled token and shuts down;
-                    // the phase stays AWAITING_VERDICT so a later
-                    // `edda conduct run` resumes the wait (D3 restart).
-                }
-            }
-
-            save_state_reconciled(cwd, state)?;
-            event_log::write_runner_status(cwd, state, Some(&gated_id));
-            write_brief(cwd, state, None);
             continue;
         }
 
@@ -767,113 +145,25 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
         // never be selected or dispatched by the live runner (GH-750).
         reconcile_with_disk(cwd, state)?;
 
-        // 2. Find next runnable phase
-        let Some(phase_id) = find_next_phase(plan, state, &order) else {
-            break; // all done or no runnable phase
-        };
-        let phase = plan
-            .phases
-            .iter()
-            .find(|p| p.id == phase_id)
-            .context("runnable phase not found in plan")?;
-        let phase_state = state.get_phase_mut(&phase_id)?;
-        let attempt = phase_state.attempts + 1;
-        let phase_cwd = phase
-            .cwd
-            .as_deref()
-            .or(plan.cwd.as_deref())
-            .map(|p| cwd.join(p))
-            .unwrap_or_else(|| cwd.to_path_buf());
-
-        let phase_num = order.iter().position(|id| id == &phase_id).unwrap_or(0) + 1;
-
-        // Clear retry_context on new attempt start (it was already consumed for prompt building)
-        let retry_ctx = phase_state.retry_context.take();
-        // GH-584 round-2 P1-3: a fresh attempt starts unmeasured — the
-        // previous attempt's cost belongs to its own (already written)
-        // terminal event, not to this one.
-        phase_state.cost_usd = None;
-
-        // 3. Transition: pending → running
-        transition(
-            state,
-            &phase_id,
-            PhaseStatus::Pending,
-            PhaseStatus::Running,
-            Some(PhaseUpdate {
-                started_at: Some(now_rfc3339()),
-                attempts: Some(attempt),
-                checks: Some(vec![]),
-                error: None,
-                ..Default::default()
-            }),
-        )?;
-        save_state_reconciled(cwd, state)?;
-
-        println!("\n▶ [{phase_num}/{total_phases}] Phase \"{phase_id}\" (attempt {attempt})");
-        if let Some(tmux) = tmux_session {
-            let _ = tmux.update_phase_status(&phase_id, "Running");
-        }
-        let phase_start = Instant::now();
-        event_log.record(Event::PhaseStart {
-            phase_id: phase_id.clone(),
-            attempt,
-        });
-        event_log::write_runner_status(cwd, state, Some(&phase_id));
-        write_brief(cwd, state, None);
-
-        // 4. Build prompt + launch agent
-        let prompt = build_phase_prompt(phase, retry_ctx.as_deref());
-        let plan_context = build_plan_context_with_edda(plan, state, &phase_id, cwd);
-        let session_id = phase_session_id_attempt(&plan.name, &phase_id, attempt).to_string();
-
-        // Auto-claim scope for this phase (so peers can see it and send requests)
-        write_phase_claim(cwd, &session_id, &phase_id, &phase.owns);
-
-        // GH-566/GH-569: the runner refreshes the lane heartbeat during the
-        // agent turn so any backend (no Claude hooks required) is visible to
-        // `edda peers` while it works. One write site serves conduct + dispatch.
-        let lane_hb = LaneHeartbeat {
-            cwd: cwd.to_path_buf(),
-            session_id: session_id.clone(),
-            plan: plan.name.clone(),
-            phase: phase_id.clone(),
-            attempt,
-        };
-        let result = run_phase_with_heartbeat(
-            launcher,
-            phase,
-            &prompt,
-            &plan_context,
-            &phase_cwd,
-            &cancel,
-            &lane_hb,
-        )
-        .await?;
-
-        // 5. Process result (shared with the post-rejection redispatch turn;
-        // gated phases enter AWAITING_VERDICT here instead of Passed — D3)
-        process_phase_result(
+        // 2-5. Find next runnable phase, launch, process result.
+        if !run_next_phase(
             plan,
-            phase,
             state,
-            &phase_id,
-            attempt,
-            result,
-            cwd,
-            &phase_cwd,
-            phase_start,
-            budget,
+            &order,
+            total_phases,
+            launcher,
             check_engine,
             notifier,
-            &mut event_log,
-            tmux_session,
+            budget,
             &cancel,
-            Some(&lane_hb),
+            cwd,
+            tmux_session,
+            &mut event_log,
         )
-        .await?;
-
-        save_state_reconciled(cwd, state)?;
+        .await?
+        {
+            break;
+        }
     }
 
     // Plan completion check
@@ -912,1106 +202,6 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
     event_log::write_runner_status(cwd, state, None);
     write_brief(cwd, state, None);
     Ok(())
-}
-
-/// Verdict gate helpers (GH-519 D3/D4/D5) ────────────────────────────────
-/// Ledger poll interval while a gate waits for a verdict.
-const GATE_POLL_SEC: u64 = 2;
-
-/// GH-551: progress signals during a long gate wait. The first signal goes
-/// out after this many seconds of waiting, then the interval doubles up to
-/// the cap — low-frequency by design, so the normal 2s poll stays silent.
-const GATE_PROGRESS_FIRST_SECS: u64 = 60;
-const GATE_PROGRESS_MAX_SECS: u64 = 600;
-
-/// GH-541: first report of a persistent ledger read failure goes out
-/// immediately; repeats follow this interval, doubling up to the cap.
-const GATE_READ_ERROR_REPORT_SECS: u64 = 30;
-const GATE_READ_ERROR_REPORT_CAP_SECS: u64 = 300;
-/// GH-541: consecutive persistent (non-lock) ledger read failures after
-/// which the gate fails with the diagnostic instead of waiting silently.
-/// At the 2s poll this is ~30s of a persistently broken ledger — an
-/// operator-fixable fault (corrupt db, permissions, wrong workspace root)
-/// must not consume the whole gate budget unnoticed.
-const GATE_MAX_PERSISTENT_READ_ERRORS: u32 = 15;
-
-/// GH-541: tracks persistent (non-lock) ledger read failures while a gate
-/// waits. Busy/lock contention is transient and never counts. A healthy
-/// poll resets the budget. Reports the error on the first failure and then
-/// on a decaying interval; returns `LedgerUnreadable` when the budget
-/// expires.
-struct ReadErrorTracker {
-    consecutive: u32,
-    report_backoff_secs: u64,
-    next_report: Option<Instant>,
-}
-
-impl Default for ReadErrorTracker {
-    fn default() -> Self {
-        Self {
-            consecutive: 0,
-            report_backoff_secs: GATE_READ_ERROR_REPORT_SECS,
-            next_report: None,
-        }
-    }
-}
-
-impl ReadErrorTracker {
-    /// Observe a poll error. Returns `Some(GateVerdict::LedgerUnreadable)`
-    /// when the persistent-failure budget is exhausted.
-    fn observe(&mut self, err: &anyhow::Error) -> Option<GateVerdict> {
-        if edda_ledger::lock::is_busy_error(err) {
-            // Transient lock contention: degrade quietly, as before.
-            return None;
-        }
-        self.consecutive += 1;
-        if self.consecutive == 1 || self.next_report.is_some_and(|t| Instant::now() >= t) {
-            eprintln!(
-                "  ⚠ verdict gate: ledger read failed (attempt {}): {err:#}",
-                self.consecutive
-            );
-            self.next_report = Some(Instant::now() + Duration::from_secs(self.report_backoff_secs));
-            self.report_backoff_secs =
-                (self.report_backoff_secs * 2).min(GATE_READ_ERROR_REPORT_CAP_SECS);
-        }
-        if self.consecutive >= GATE_MAX_PERSISTENT_READ_ERRORS {
-            return Some(GateVerdict::LedgerUnreadable(format!(
-                "{} consecutive failed ledger reads: {err:#}",
-                self.consecutive
-            )));
-        }
-        None
-    }
-
-    /// A healthy poll (the ledger opened and the query answered) resets the
-    /// persistent-failure budget.
-    fn reset(&mut self) {
-        self.consecutive = 0;
-        self.next_report = None;
-    }
-}
-
-/// D6: bound gate redispatch cycles with their own persisted counter, NOT
-/// `attempt` (which D3 forbids incrementing on redispatch). A redispatch
-/// turn is not guaranteed to produce a commit, so a re-entered gate can
-/// wait on the same `(subject, gate_sha)` forever while `max_attempts`
-/// never trips — this counter is the real loop bound. Exhausting it fails
-/// the phase like `on_reject: halt`, with a distinct error naming the bound.
-///
-/// Fixed at 3 rather than plan-configurable, on purpose: this bound exists
-/// to kill loop-shaped defects (the D6 loop measured 176 cycles before the
-/// fix), and a plan-author-tunable ceiling would let the same optimism that
-/// wrote an unbounded gate re-open the loop from inside the plan file. Three
-/// covers the multi-round review cycles this repo actually ships (e.g. the
-/// three-round review of GH-534); a phase that genuinely needs more review
-/// rounds should be split into smaller phases instead of raising the bound.
-const MAX_GATE_REDISPATCHES: u32 = 3;
-
-/// `<plan-name>/<phase-id>` — the subject an `edda verdict` targets (D1/D3).
-fn gate_subject(plan_name: &str, phase_id: &str) -> String {
-    format!("{plan_name}/{phase_id}")
-}
-
-/// Current git HEAD of `cwd` — the SHA a verdict must match (D3).
-fn capture_git_head(cwd: &Path) -> Result<String> {
-    let out = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(cwd)
-        .output()
-        .context("spawning git rev-parse HEAD to capture the gate sha")?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "git rev-parse HEAD failed in {}: {}",
-            cwd.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-        anyhow::bail!("git rev-parse HEAD returned a non-40-hex sha: \"{sha}\"");
-    }
-    Ok(sha)
-}
-
-/// Outcome of waiting on a verdict gate.
-#[derive(Debug)]
-enum GateVerdict {
-    Approved(VerdictRecord),
-    Rejected(VerdictRecord),
-    /// `gate_timeout_sec` elapsed with no matching verdict — NOT silent,
-    /// NOT auto-approve (D3).
-    TimedOut,
-    /// The ledger stayed unreadable (NOT SQLite busy/lock contention) for
-    /// the whole error budget (GH-541): fail the gate with the diagnostic
-    /// instead of polling in silence forever. In this state the printed
-    /// `edda verdict` command could never satisfy the gate anyway — it
-    /// writes to a ledger this gate cannot read.
-    LedgerUnreadable(String),
-    /// The CancellationToken fired while waiting. The phase stays
-    /// AWAITING_VERDICT so a later resume re-enters the wait (D3 restart).
-    Cancelled,
-}
-
-/// Poll the ledger for a verdict matching `(subject, gate_sha)` that was
-/// recorded AFTER this gate's `gate_entered_at` (D3 + D6 freshness).
-///
-/// A verdict bound to a different SHA is findable in the ledger but never
-/// satisfies this wait (D1). A stale verdict — one predating this gate's
-/// entry, e.g. the rejection still sitting in the ledger when a redispatch
-/// turn produced no new commit — also never satisfies it (D6); without that
-/// bound the re-entered gate would re-read the same rejection forever.
-/// The timeout deadline is computed from the persisted `gate_entered_at`,
-/// so it survives restarts.
-#[allow(clippy::too_many_arguments)]
-async fn wait_for_verdict(
-    cwd: &Path,
-    plan_name: &str,
-    phase_id: &str,
-    gate_sha: &str,
-    timeout_sec: Option<u64>,
-    entered_at: Option<&str>,
-    cancel: &CancellationToken,
-    heartbeat: Option<&LaneHeartbeat>,
-    notifier: &dyn Notifier,
-) -> GateVerdict {
-    let subject = gate_subject(plan_name, phase_id);
-    let deadline = timeout_sec.map(|t| {
-        let base = entered_at
-            .and_then(|s| {
-                time::OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
-            })
-            .unwrap_or_else(time::OffsetDateTime::now_utc);
-        base + time::Duration::seconds(t as i64)
-    });
-
-    // A gated lane is still alive — refresh its heartbeat while waiting so
-    // it does not read as stale to peer discovery (GH-566).
-    if let Some(hb) = heartbeat {
-        hb.write("awaiting_verdict");
-    }
-    let mut last_heartbeat = Instant::now();
-
-    // GH-551: a bounded gate gives no indication that a clock is running,
-    // and an unbounded one looks identical to a broken one — in the measured
-    // run two gates burned 7200s each while a one-line "still waiting" would
-    // have rescued the wait at any moment. Emit a low-frequency progress
-    // signal (60s, then doubling to 10min) naming the remaining budget.
-    // tokio::time::Instant so tests can drive the whole schedule on paused
-    // time without wall-clock sleeps.
-    let mut next_progress =
-        tokio::time::Instant::now() + Duration::from_secs(GATE_PROGRESS_FIRST_SECS);
-    let mut progress_interval = GATE_PROGRESS_FIRST_SECS;
-    // Paused-time mirror of the deadline, for the remaining-budget label —
-    // anchored to the same remaining time as the wall-clock `deadline` above
-    // so it survives controller restart honestly (GH-751).
-    let deadline_t = deadline.map(|d| {
-        let now_utc = time::OffsetDateTime::now_utc();
-        let remaining_secs = (d - now_utc).whole_seconds().max(0) as u64;
-        tokio::time::Instant::now() + Duration::from_secs(remaining_secs)
-    });
-
-    // GH-541: a failed ledger read is not the same event as "no verdict yet".
-    // SQLite busy/lock contention degrades quietly (transient); every other
-    // error (corrupt database, permission, missing workspace) is persistent,
-    // is reported at least once and then on a decaying interval, and fails
-    // the gate after the error budget — the one response that cannot be
-    // right here is silence (the operator runs the printed approve command
-    // and nothing happens, with no diagnostic anywhere).
-    let mut read_errors = ReadErrorTracker::default();
-
-    loop {
-        // Poll BEFORE the deadline check: a verdict recorded during this
-        // wait (e.g. right after the gate_entered event) must be observed
-        // at the last poll, not skipped by a deadline that fires first.
-        match edda_ledger::Ledger::open(cwd) {
-            Err(e) => {
-                if let Some(v) = read_errors.observe(&e) {
-                    return v;
-                }
-            }
-            Ok(ledger) => match ledger.latest_verdict_fresh(&subject, gate_sha, entered_at) {
-                Ok(Some(record)) => {
-                    return match record.payload.decision {
-                        edda_core::VerdictDecision::Approved => GateVerdict::Approved(record),
-                        edda_core::VerdictDecision::Rejected => GateVerdict::Rejected(record),
-                    };
-                }
-                Ok(None) => read_errors.reset(),
-                Err(e) => {
-                    if let Some(v) = read_errors.observe(&e) {
-                        return v;
-                    }
-                }
-            },
-        }
-        if let Some(deadline) = deadline {
-            if time::OffsetDateTime::now_utc() >= deadline {
-                return GateVerdict::TimedOut;
-            }
-        }
-        // GH-551: progress signal on the decaying schedule. Inside the same
-        // select arm cadence as the poll but gated on its own clock, so the
-        // 2s poll itself stays silent.
-        let now_t = tokio::time::Instant::now();
-        if now_t >= next_progress {
-            let wait_label = match deadline_t {
-                Some(d) => {
-                    let remaining = (d - now_t).as_secs();
-                    format!(
-                        "{} remaining",
-                        format_elapsed(std::time::Duration::from_secs(remaining))
-                    )
-                }
-                None => "no deadline (waits until cancelled)".to_string(),
-            };
-            notifier
-                .notify_gate_progress(edda_notify::NotifyEvent::GateProgress {
-                    plan: plan_name.to_string(),
-                    phase: phase_id.to_string(),
-                    subject: subject.clone(),
-                    gate_sha: gate_sha.to_string(),
-                    wait_label,
-                })
-                .await;
-            progress_interval = (progress_interval * 2).min(GATE_PROGRESS_MAX_SECS);
-            next_progress = now_t + Duration::from_secs(progress_interval);
-        }
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(GATE_POLL_SEC)) => {
-                if let Some(hb) = heartbeat {
-                    if last_heartbeat.elapsed() >= Duration::from_secs(lane_heartbeat_interval_secs()) {
-                        hb.write("awaiting_verdict");
-                        last_heartbeat = Instant::now();
-                    }
-                }
-            }
-            _ = cancel.cancelled() => return GateVerdict::Cancelled,
-        }
-    }
-}
-
-/// Record verdict metadata on the phase state (D3).
-fn record_verdict_metadata(state: &mut PlanState, phase_id: &str, payload: &VerdictPayload) {
-    if let Ok(ps) = state.get_phase_mut(phase_id) {
-        ps.verdict_decision = Some(payload.decision.to_string());
-        ps.verdict_actor = Some(payload.actor.clone());
-        ps.verdict_comment = payload.comment.clone();
-    }
-}
-
-/// Prompt for the redispatch turn after a rejected verdict (D3): the
-/// rejection comment becomes the prompt, prefixed with brief context.
-fn build_redispatch_prompt(
-    phase: &crate::plan::schema::Phase,
-    phase_id: &str,
-    comment: &str,
-) -> String {
-    let mut prompt = String::new();
-    if let Some(ctx) = &phase.context {
-        prompt.push_str(ctx);
-        prompt.push_str("\n\n");
-    }
-    prompt.push_str(&format!(
-        "## Verdict: REJECTED\n\n\
-         The external reviewer rejected the gated result for phase \"{phase_id}\".\n\n\
-         Reviewer feedback:\n{comment}\n\n\
-         Address the feedback above (your previous changes are still on disk), \
-         then make sure the phase checks pass again."
-    ));
-    prompt
-}
-
-/// Shared tail of a failed check run: transition Checking → Failed, print,
-/// record to edda + event log, then apply the phase's on_fail policy.
-#[allow(clippy::too_many_arguments)]
-async fn fail_checking_phase(
-    plan: &Plan,
-    phase: &crate::plan::schema::Phase,
-    state: &mut PlanState,
-    phase_id: &str,
-    cwd: &Path,
-    check_result: &CheckRunResult,
-    err_override: Option<&str>,
-    elapsed: Duration,
-    final_output: Option<&str>,
-    notifier: &dyn Notifier,
-    event_log: &mut EventLogger,
-    tmux_session: Option<&TmuxSession>,
-) -> Result<()> {
-    let (err_msg, error_info) = match err_override {
-        Some(msg) => (
-            msg.to_string(),
-            Some(ErrorInfo {
-                error_type: ErrorType::CheckFailed,
-                message: msg.to_string(),
-                retryable: true,
-                check_index: None,
-                timestamp: now_rfc3339(),
-            }),
-        ),
-        None => {
-            let msg = check_result
-                .error
-                .as_ref()
-                .map(|e| e.message.as_str())
-                .unwrap_or("check failed")
-                .to_string();
-            (msg, check_result.error.clone())
-        }
-    };
-    // GH-529: a harness-side timeout is surfaced distinctly from a genuine
-    // check failure — the fix differs (raise timeout_sec / inspect command
-    // vs. let the agent fix the work).
-    let is_timeout = error_info
-        .as_ref()
-        .is_some_and(|e| e.error_type == ErrorType::Timeout);
-    transition(
-        state,
-        phase_id,
-        PhaseStatus::Checking,
-        PhaseStatus::Failed,
-        Some(PhaseUpdate {
-            checks: Some(check_result.results.clone()),
-            error: error_info.clone(),
-            ..Default::default()
-        }),
-    )?;
-    if is_timeout {
-        println!(
-            "  ⏰ Phase \"{phase_id}\" check timed out ({}): {err_msg}",
-            format_elapsed(elapsed),
-        );
-    } else {
-        println!(
-            "  ✗ Phase \"{phase_id}\" failed ({}): {err_msg}",
-            format_elapsed(elapsed),
-        );
-    }
-    if let Some(tmux) = tmux_session {
-        let _ = tmux.update_phase_status(phase_id, "Failed");
-    }
-    // GH-584 round-2 P1-2/P1-3: the failure event carries the plan id and
-    // the phase's measured cost — checks failing after a measured agent
-    // turn must not rewrite that cost as unmeasured null.
-    let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
-    edda::record_phase_failed_with_plan(
-        cwd,
-        Some(plan.name.as_str()),
-        phase_id,
-        measured,
-        &err_msg,
-    );
-    let ps = state.get_phase(phase_id)?;
-    let (error_type, attempt_charged) = match &error_info {
-        Some(e) => (
-            Some(e.error_type.tag().to_string()),
-            e.error_type != ErrorType::Environmental,
-        ),
-        None => (None, true),
-    };
-    event_log.record(Event::PhaseFailed {
-        phase_id: phase_id.to_string(),
-        attempt: ps.attempts,
-        duration_ms: elapsed.as_millis() as u64,
-        error: err_msg,
-        error_type,
-        env_retries: ps.env_retries,
-        attempt_charged,
-    });
-    notifier
-        .notify_phase_terminal(phase_terminal_event(
-            plan.name.as_str(),
-            phase_id,
-            "Failed",
-            ps.attempts,
-            final_output,
-        ))
-        .await;
-    handle_on_fail(
-        plan,
-        phase,
-        state,
-        phase_id,
-        cwd,
-        check_result,
-        notifier,
-        event_log,
-    )
-    .await;
-    Ok(())
-}
-
-/// Process the result of one agent turn: classify it, run checks, resolve the
-/// phase (Passed / AWAITING_VERDICT gate entry / Failed / Stale) and apply the
-/// on_fail policy. Shared by the main loop and the post-rejection redispatch
-/// turn (D3).
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)] // 400 lines at #779; split tracked in #776
-async fn process_phase_result(
-    plan: &Plan,
-    phase: &crate::plan::schema::Phase,
-    state: &mut PlanState,
-    phase_id: &str,
-    attempt: u32,
-    result: PhaseResult,
-    cwd: &Path,
-    phase_cwd: &Path,
-    phase_start: Instant,
-    budget: &mut BudgetTracker,
-    check_engine: &CheckEngine,
-    notifier: &dyn Notifier,
-    event_log: &mut EventLogger,
-    tmux_session: Option<&TmuxSession>,
-    cancel: &CancellationToken,
-    lane_hb: Option<&LaneHeartbeat>,
-) -> Result<()> {
-    match result {
-        PhaseResult::AgentDone {
-            cost_usd,
-            result_text,
-        } => {
-            if let Some(cost) = cost_usd {
-                budget.record(cost);
-                state.record_cost(cost);
-                // GH-584 round-2 P1-3: park the measured cost on the phase
-                // itself so a later failure in this attempt (failed checks,
-                // gate rejection/timeout) can still write it. Redispatch
-                // turns accumulate; a fresh attempt resets it below.
-                if let Ok(ps) = state.get_phase_mut(phase_id) {
-                    ps.cost_usd = Some(ps.cost_usd.unwrap_or(0.0) + cost);
-                }
-            }
-
-            // running → checking
-            transition(
-                state,
-                phase_id,
-                PhaseStatus::Running,
-                PhaseStatus::Checking,
-                None,
-            )?;
-            save_state_reconciled(cwd, state)?;
-
-            // GH-566: the lane heartbeat must cover the whole phase
-            // lifetime — keep it beating (stage "checking") while the
-            // checks run, not just during the agent turn.
-            let checking_writer = lane_hb.map(|hb| hb.spawn("checking", cancel.child_token()));
-            // Run checks
-            let check_result = check_engine
-                .run_all(
-                    &phase.check,
-                    state.get_phase(phase_id)?.started_at.as_deref(),
-                )
-                .await;
-            if let Some(writer) = checking_writer {
-                writer.abort();
-            }
-
-            if check_result.all_passed {
-                if phase.gate.is_some() {
-                    // D3: capture gate_sha = current git HEAD of the phase
-                    // cwd, persist AWAITING_VERDICT, emit GateEntered + a
-                    // notifier message, then wait (the loop's gate-wait branch).
-                    match capture_git_head(phase_cwd) {
-                        Ok(gate_sha) => {
-                            // GH-564 P1-3 / Round-2 P1: park the agent's final
-                            // output BEFORE the phase enters AWAITING_VERDICT.
-                            // Every gate entry atomically rewrites the sidecar
-                            // — the last non-empty agent line when there is
-                            // one, an empty file when there is none — so it
-                            // always represents THIS entry's output and a
-                            // previous cycle's value can never be read back.
-                            // The error is NOT swallowed: a failed write would
-                            // leave the previous cycle's file in place, which
-                            // the verdict site could read back as this
-                            // entry's output — fail the entry instead.
-                            if let Err(e) = persist_gate_output(
-                                cwd,
-                                &plan.name,
-                                phase_id,
-                                final_output_line(result_text.as_deref()).as_deref(),
-                            ) {
-                                let msg = format!("failed to persist gate final output: {e}");
-                                fail_checking_phase(
-                                    plan,
-                                    phase,
-                                    state,
-                                    phase_id,
-                                    cwd,
-                                    &check_result,
-                                    Some(&msg),
-                                    phase_start.elapsed(),
-                                    final_output_line(result_text.as_deref()).as_deref(),
-                                    notifier,
-                                    event_log,
-                                    tmux_session,
-                                )
-                                .await?;
-                                return Ok(());
-                            }
-                            let subject = gate_subject(&plan.name, phase_id);
-                            transition(
-                                state,
-                                phase_id,
-                                PhaseStatus::Checking,
-                                PhaseStatus::AwaitingVerdict,
-                                Some(PhaseUpdate {
-                                    checks: Some(check_result.results),
-                                    gate_sha: Some(gate_sha.clone()),
-                                    // D6 LOAD-BEARING: `gate_entered_at` is
-                                    // REWRITTEN on every gate entry, including
-                                    // redispatch re-entry. Verdict freshness
-                                    // compares the verdict timestamp against
-                                    // this bound, so re-entry stales every
-                                    // earlier verdict for the same
-                                    // (subject, gate_sha) — including the
-                                    // rejection that triggered this
-                                    // redispatch — and that is what kills the
-                                    // re-approval loop. Hoisting, caching, or
-                                    // reusing the original bound here silently
-                                    // reintroduces the 176-cycle D6 loop
-                                    // while the happy path still passes.
-                                    gate_entered_at: Some(now_rfc3339()),
-                                    ..Default::default()
-                                }),
-                            )?;
-                            println!("\n  ⏸ Phase \"{phase_id}\" AWAITING_VERDICT — waiting for an external verdict");
-                            println!("    subject:  {subject}");
-                            println!("    gate_sha: {gate_sha}");
-                            println!(
-                                "    approve:  edda verdict approve {subject} --sha {gate_sha}"
-                            );
-                            println!("    reject:   edda verdict reject {subject} --sha {gate_sha} --comment \"<why>\"");
-                            if let Some(tmux) = tmux_session {
-                                let _ = tmux.update_phase_status(phase_id, "AwaitingVerdict");
-                            }
-                            event_log.record(Event::GateEntered {
-                                phase_id: phase_id.to_string(),
-                                subject: subject.clone(),
-                                gate_sha: gate_sha.clone(),
-                            });
-                            notifier
-                                .notify(&format!(
-                                    "Phase \"{phase_id}\" is AWAITING_VERDICT. Approve: edda verdict approve {subject} --sha {gate_sha} | Reject: edda verdict reject {subject} --sha {gate_sha} --comment \"<why>\""
-                                ))
-                                .await;
-                            edda::record_note(
-                                cwd,
-                                &format!(
-                                    "Phase \"{phase_id}\" entered AWAITING_VERDICT (gate sha {gate_sha})"
-                                ),
-                                &["conductor", "gate"],
-                            );
-                        }
-                        Err(e) => {
-                            let msg = format!("failed to capture gate sha: {e}");
-                            fail_checking_phase(
-                                plan,
-                                phase,
-                                state,
-                                phase_id,
-                                cwd,
-                                &check_result,
-                                Some(&msg),
-                                phase_start.elapsed(),
-                                final_output_line(result_text.as_deref()).as_deref(),
-                                notifier,
-                                event_log,
-                                tmux_session,
-                            )
-                            .await?;
-                        }
-                    }
-                } else {
-                    transition(
-                        state,
-                        phase_id,
-                        PhaseStatus::Checking,
-                        PhaseStatus::Passed,
-                        Some(PhaseUpdate {
-                            completed_at: Some(now_rfc3339()),
-                            checks: Some(check_result.results),
-                            ..Default::default()
-                        }),
-                    )?;
-                    let elapsed_ms = phase_start.elapsed().as_millis() as u64;
-                    println!(
-                        "  ✓ Phase \"{phase_id}\" passed ({})",
-                        format_elapsed(phase_start.elapsed())
-                    );
-                    if let Some(tmux) = tmux_session {
-                        let _ = tmux.update_phase_status(phase_id, "Passed");
-                    }
-
-                    // Record to edda ledger — with the plan id (GH-584
-                    // round-2 P1-2): the structured payload must attribute
-                    // the cost to its plan on the production path.
-                    edda::record_phase_done_with_plan(
-                        cwd,
-                        Some(&plan.name),
-                        phase_id,
-                        result_text.as_deref(),
-                        cost_usd,
-                    );
-                    event_log.record(Event::PhasePassed {
-                        phase_id: phase_id.to_string(),
-                        attempt,
-                        duration_ms: elapsed_ms,
-                        cost_usd,
-                    });
-                    notifier
-                        .notify_phase_terminal(phase_terminal_event(
-                            &plan.name,
-                            phase_id,
-                            "Passed",
-                            attempt,
-                            final_output_line(result_text.as_deref()).as_deref(),
-                        ))
-                        .await;
-                }
-            } else {
-                fail_checking_phase(
-                    plan,
-                    phase,
-                    state,
-                    phase_id,
-                    cwd,
-                    &check_result,
-                    None,
-                    phase_start.elapsed(),
-                    final_output_line(result_text.as_deref()).as_deref(),
-                    notifier,
-                    event_log,
-                    tmux_session,
-                )
-                .await?;
-            }
-        }
-        PhaseResult::Timeout => {
-            transition(
-                state,
-                phase_id,
-                PhaseStatus::Running,
-                PhaseStatus::Stale,
-                Some(PhaseUpdate {
-                    error: Some(ErrorInfo {
-                        error_type: ErrorType::Timeout,
-                        message: format!("phase \"{phase_id}\" timed out"),
-                        retryable: true,
-                        check_index: None,
-                        timestamp: now_rfc3339(),
-                    }),
-                    ..Default::default()
-                }),
-            )?;
-            let elapsed_ms = phase_start.elapsed().as_millis() as u64;
-            println!(
-                "  ⏰ Phase \"{phase_id}\" timed out ({})",
-                format_elapsed(phase_start.elapsed())
-            );
-            if let Some(tmux) = tmux_session {
-                let _ = tmux.update_phase_status(phase_id, "Stale");
-            }
-            let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
-            edda::record_phase_failed_with_plan(
-                cwd,
-                Some(&plan.name),
-                phase_id,
-                measured,
-                "timed out",
-            );
-            event_log.record(Event::PhaseFailed {
-                phase_id: phase_id.to_string(),
-                attempt,
-                duration_ms: elapsed_ms,
-                error: "timed out".into(),
-                error_type: Some(ErrorType::Timeout.tag().to_string()),
-                env_retries: phase_env_retries(state, phase_id),
-                attempt_charged: true,
-            });
-            notifier
-                .notify_phase_terminal(phase_terminal_event(
-                    &plan.name, phase_id, "Stale", attempt, None,
-                ))
-                .await;
-        }
-        PhaseResult::AgentCrash { error } => {
-            transition(
-                state,
-                phase_id,
-                PhaseStatus::Running,
-                PhaseStatus::Failed,
-                Some(PhaseUpdate {
-                    error: Some(ErrorInfo {
-                        error_type: ErrorType::AgentCrash,
-                        message: error.clone(),
-                        retryable: true,
-                        check_index: None,
-                        timestamp: now_rfc3339(),
-                    }),
-                    ..Default::default()
-                }),
-            )?;
-            let elapsed_ms = phase_start.elapsed().as_millis() as u64;
-            println!(
-                "  ✗ Phase \"{phase_id}\" crashed ({}): {error}",
-                format_elapsed(phase_start.elapsed())
-            );
-            if let Some(tmux) = tmux_session {
-                let _ = tmux.update_phase_status(phase_id, "Failed");
-            }
-            let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
-            edda::record_phase_failed_with_plan(cwd, Some(&plan.name), phase_id, measured, &error);
-            event_log.record(Event::PhaseFailed {
-                phase_id: phase_id.to_string(),
-                attempt,
-                duration_ms: elapsed_ms,
-                error: error.clone(),
-                error_type: Some(ErrorType::AgentCrash.tag().to_string()),
-                env_retries: phase_env_retries(state, phase_id),
-                attempt_charged: true,
-            });
-            notifier
-                .notify_phase_terminal(phase_terminal_event(
-                    &plan.name, phase_id, "Failed", attempt, None,
-                ))
-                .await;
-            // For crash, use empty check results
-            let empty_result = CheckRunResult {
-                all_passed: false,
-                results: vec![],
-                error: None,
-            };
-            handle_on_fail(
-                plan,
-                phase,
-                state,
-                phase_id,
-                cwd,
-                &empty_result,
-                notifier,
-                event_log,
-            )
-            .await;
-        }
-        PhaseResult::MaxTurns { cost_usd } | PhaseResult::BudgetExceeded { cost_usd } => {
-            if let Some(cost) = cost_usd {
-                budget.record(cost);
-                state.record_cost(cost);
-                if let Ok(ps) = state.get_phase_mut(phase_id) {
-                    ps.cost_usd = Some(ps.cost_usd.unwrap_or(0.0) + cost);
-                }
-            }
-            let elapsed_ms = phase_start.elapsed().as_millis() as u64;
-            let msg = format!("{result:?}");
-            transition(
-                state,
-                phase_id,
-                PhaseStatus::Running,
-                PhaseStatus::Failed,
-                Some(PhaseUpdate {
-                    error: Some(ErrorInfo {
-                        error_type: ErrorType::BudgetExceeded,
-                        message: msg.clone(),
-                        retryable: false,
-                        check_index: None,
-                        timestamp: now_rfc3339(),
-                    }),
-                    ..Default::default()
-                }),
-            )?;
-            event_log.record(Event::PhaseFailed {
-                phase_id: phase_id.to_string(),
-                attempt,
-                duration_ms: elapsed_ms,
-                error: msg.clone(),
-                error_type: Some(ErrorType::BudgetExceeded.tag().to_string()),
-                env_retries: phase_env_retries(state, phase_id),
-                attempt_charged: true,
-            });
-            // GH-584 round-2 P1-3: MaxTurns / BudgetExceeded ARE phase
-            // terminal states — the workspace ledger must get the failure
-            // event, carrying the measured cost when the backend reported one.
-            let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
-            edda::record_phase_failed_with_plan(cwd, Some(&plan.name), phase_id, measured, &msg);
-            notifier
-                .notify_phase_terminal(phase_terminal_event(
-                    &plan.name, phase_id, "Failed", attempt, None,
-                ))
-                .await;
-        }
-    }
-    Ok(())
-}
-
-/// Environmental retries already charged to the phase's free-retry counter
-/// (GH-540 review round 1) — recorded on `phase_failed` so event consumers
-/// can reconstruct the retry accounting.
-fn phase_env_retries(state: &PlanState, phase_id: &str) -> u32 {
-    state
-        .get_phase(phase_id)
-        .map(|p| p.env_retries)
-        .unwrap_or(0)
-}
-
-/// GH-564: build the phase terminal-state notification payload. `state` is
-/// the terminal status name ("Passed" | "Failed" | "Stale" | "Skipped" |
-/// "Aborted"); "Aborted" is plan-level and names the phase that forced the
-/// abort. `final_output` carries the agent's last output line when the
-/// transition site has one (by convention it contains the PR URL).
-fn phase_terminal_event(
-    plan_name: &str,
-    phase_id: &str,
-    state: &str,
-    attempt: u32,
-    final_output: Option<&str>,
-) -> NotifyEvent {
-    NotifyEvent::PhaseTerminal {
-        plan: plan_name.to_string(),
-        phase: phase_id.to_string(),
-        state: state.to_string(),
-        attempt,
-        final_output: final_output.map(str::to_string),
-    }
-}
-
-/// Last non-empty line of the agent's result text (GH-564: by convention it
-/// contains the PR URL).
-fn final_output_line(result_text: Option<&str>) -> Option<String> {
-    result_text?
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .map(str::to_string)
-}
-
-/// GH-564 P1-3: where a gated phase's agent final output is parked while the
-/// plan waits for the external verdict. `{cwd}/.edda/conductor/{plan}/{phase}.gate_output`.
-/// Survives a conductor restart, so the verdict site can restore the output
-/// into the terminal notification instead of dropping it to `null`.
-fn gate_output_path(cwd: &Path, plan_name: &str, phase_id: &str) -> PathBuf {
-    cwd.join(".edda")
-        .join("conductor")
-        .join(plan_name)
-        .join(format!("{phase_id}.gate_output"))
-}
-
-/// GH-564 P1-3 / Round-2 P1: park the agent's final output when the phase
-/// enters AWAITING_VERDICT. EVERY gate entry atomically rewrites the sidecar
-/// so it represents THIS entry's output and only this entry's: the last
-/// non-empty agent line when there is one, an EMPTY file when there is none
-/// (`load_gate_output` maps empty to `None`). A previous redispatch cycle's
-/// value can therefore never be read back as the current output.
-///
-/// Errors are NOT swallowed: a failed write would leave the previous cycle's
-/// file in place, which the verdict site could read back as this entry's
-/// output — the caller must fail the gate entry instead of waiting on a
-/// verdict against a possibly wrong payload.
-fn persist_gate_output(
-    cwd: &Path,
-    plan_name: &str,
-    phase_id: &str,
-    final_output: Option<&str>,
-) -> anyhow::Result<()> {
-    let path = gate_output_path(cwd, plan_name, phase_id);
-    edda_store::write_atomic(&path, final_output.unwrap_or("").as_bytes())
-}
-
-/// GH-564 Round-2 P1: consume the parked output at the verdict site, so the
-/// sidecar only exists between a gate entry and its verdict. Best-effort: a
-/// failed removal cannot produce a wrong payload because every gate entry
-/// rewrites the sidecar atomically before any verdict is waited on.
-fn clear_gate_output(cwd: &Path, plan_name: &str, phase_id: &str) {
-    let _ = std::fs::remove_file(gate_output_path(cwd, plan_name, phase_id));
-}
-
-/// GH-564 P1-3: read back the parked final output at the gate verdict site.
-fn load_gate_output(cwd: &Path, plan_name: &str, phase_id: &str) -> Option<String> {
-    let output = std::fs::read_to_string(gate_output_path(cwd, plan_name, phase_id)).ok()?;
-    let trimmed = output.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-/// Apply the phase's on_fail policy after a terminal failure. `cwd` carries
-/// the workspace root so the abort policy can write the structured plan
-/// abort event to the ledger (GH-584 round-2 P1-1).
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)] // 173 lines at #779; split tracked in #776
-async fn handle_on_fail(
-    plan: &Plan,
-    phase: &crate::plan::schema::Phase,
-    state: &mut PlanState,
-    phase_id: &str,
-    cwd: &Path,
-    check_result: &CheckRunResult,
-    notifier: &dyn Notifier,
-    event_log: &mut EventLogger,
-) {
-    /// GH-540: bound on environmental retries per phase run. Without it a
-    /// persistently broken environment (e.g. antivirus holding every newly
-    /// linked .exe) would retry forever; two in a row failing a phase that
-    /// never had a product problem is the exact harm the issue describes.
-    const MAX_ENV_RETRIES: u32 = 2;
-
-    let on_fail = phase.on_fail.unwrap_or(plan.on_fail);
-
-    match on_fail {
-        OnFail::AutoRetry => {
-            // GH-529: a check timeout is a property of the harness, not of
-            // the agent's work — every retry hits the same wall at the same
-            // second, so auto-retry must not burn the ladder on it. Halt
-            // and report with an actionable message instead.
-            if check_result
-                .error
-                .as_ref()
-                .is_some_and(|e| e.error_type == ErrorType::Timeout)
-            {
-                notifier
-                    .notify(&format!(
-                        "Phase \"{phase_id}\" check timed out — auto_retry skipped \
-                         (retrying cannot change the outcome). Raise the check's \
-                         timeout_sec or inspect the command."
-                    ))
-                    .await;
-                return;
-            }
-            let is_environmental = check_result
-                .error
-                .as_ref()
-                .is_some_and(|e| e.error_type == ErrorType::Environmental);
-            let max = phase.max_attempts.unwrap_or(plan.max_attempts);
-            let (product_attempts, env_retries, should_retry) = {
-                let ps = state
-                    .get_phase_mut(phase_id)
-                    .expect("phase must exist in state");
-                // GH-540: an environmental build failure (LNK1104) is not the
-                // agent's work — its attempt is not charged to the ladder.
-                // `attempts` counts every dispatch (attempt numbers key the
-                // session id and must stay unique), so the product count is
-                // `attempts - env_retries`. Review round 1: EVERY
-                // environmental occurrence charges env_retries — including
-                // the one that exhausts MAX_ENV_RETRIES — otherwise the
-                // cap-ending fault leaves a phantom product attempt and the
-                // first genuine failure after a manual `conduct retry` is
-                // denied auto-retry. Once the counter passes MAX_ENV_RETRIES
-                // the environment is treated as persistently broken: halt and
-                // report instead of looping forever.
-                let product = ps.attempts.saturating_sub(ps.env_retries);
-                if is_environmental {
-                    ps.env_retries += 1;
-                    (product, ps.env_retries, ps.env_retries <= MAX_ENV_RETRIES)
-                } else if product < max {
-                    let error_context = format_check_failures(&check_result.results);
-                    ps.retry_context = Some(error_context);
-                    (product, ps.env_retries, true)
-                } else {
-                    (product, ps.env_retries, false)
-                }
-            };
-            if should_retry {
-                let _ = transition(
-                    state,
-                    phase_id,
-                    PhaseStatus::Failed,
-                    PhaseStatus::Pending,
-                    None,
-                );
-                if is_environmental {
-                    println!(
-                        "  ↻ Environmental build failure — retrying without \
-                         charging the attempt ladder ({env_retries}/{MAX_ENV_RETRIES})"
-                    );
-                } else {
-                    println!("  ↻ Auto-retrying ({product_attempts}/{max})");
-                }
-            } else if is_environmental {
-                // cap exhausted (should_retry is only false for environmental
-                // when MAX_ENV_RETRIES is spent; the counter reads MAX+1
-                // because the cap-ending occurrence is itself charged)
-                notifier
-                    .notify(&format!(
-                        "Phase \"{phase_id}\" failed on repeated environmental build \
-                         failures ({env_retries} occurrences, capped at {MAX_ENV_RETRIES} retries) — the \
-                         machine layer, not the agent's work, is at fault. Clear the fault, \
-                         then retry."
-                    ))
-                    .await;
-            } else {
-                notifier
-                    .notify(&format!(
-                        "Phase \"{phase_id}\" failed after {max} attempts. Retry, skip, or abort?"
-                    ))
-                    .await;
-            }
-        }
-        OnFail::Skip => {
-            let ps = state
-                .get_phase_mut(phase_id)
-                .expect("phase must exist in state");
-            ps.status = PhaseStatus::Skipped;
-            ps.skip_reason = Some("auto-skipped by on_fail policy".into());
-            event_log.record(Event::PhaseSkipped {
-                phase_id: phase_id.to_string(),
-                reason: "auto-skipped by on_fail policy".into(),
-            });
-            let attempt_now = state.get_phase(phase_id).map(|p| p.attempts).unwrap_or(0);
-            notifier
-                .notify_phase_terminal(phase_terminal_event(
-                    &plan.name,
-                    phase_id,
-                    "Skipped",
-                    attempt_now,
-                    None,
-                ))
-                .await;
-            println!("  → Auto-skipped (on_fail: skip)");
-        }
-        OnFail::Abort => {
-            state.plan_status = PlanStatus::Aborted;
-            state.aborted_at = Some(now_rfc3339());
-            // GH-584 round-2 P1-1: the plan abort reaches the workspace
-            // ledger as a structured conductor_plan event, not only the
-            // plan-local event log.
-            let phases_passed = state
-                .phases
-                .iter()
-                .filter(|p| p.status == PhaseStatus::Passed)
-                .count();
-            let phases_pending = state
-                .phases
-                .iter()
-                .filter(|p| p.status == PhaseStatus::Pending)
-                .count();
-            event_log.record(Event::PlanAborted {
-                phases_passed,
-                phases_pending,
-            });
-            edda::record_plan_aborted(cwd, &plan.name, phases_passed, phases_pending);
-            let attempt_now = state.get_phase(phase_id).map(|p| p.attempts).unwrap_or(0);
-            notifier
-                .notify_phase_terminal(phase_terminal_event(
-                    &plan.name,
-                    phase_id,
-                    "Aborted",
-                    attempt_now,
-                    None,
-                ))
-                .await;
-            println!("  → Plan aborted (on_fail: abort)");
-        }
-        OnFail::Ask => {
-            notifier
-                .notify(&format!(
-                    "Phase \"{phase_id}\" failed. Retry, skip, or abort?"
-                ))
-                .await;
-        }
-    }
 }
 
 /// Build the full prompt for a phase, including retry context if any.
@@ -2065,25 +255,7 @@ fn build_phase_prompt(phase: &crate::plan::schema::Phase, retry_context: Option<
     prompt
 }
 
-fn format_check_failures(results: &[CheckResult]) -> String {
-    let mut out = String::new();
-    for r in results {
-        let icon = match r.status {
-            CheckStatus::Passed => "✓",
-            CheckStatus::Failed => "✗",
-            _ => "○",
-        };
-        out.push_str(&format!(
-            "{icon} {}: {}\n",
-            r.check_type,
-            r.detail.as_deref().unwrap_or("(no detail)"),
-        ));
-    }
-    out
-}
-
-/// Build plan progress context with edda decision history for --append-system-prompt.
-fn build_plan_context_with_edda(
+pub(super) fn build_plan_context_with_edda(
     plan: &Plan,
     state: &PlanState,
     current_phase: &str,
@@ -2130,6 +302,286 @@ fn build_plan_context(plan: &Plan, state: &PlanState, current_phase: &str) -> St
         ctx.push_str(&format!("{icon} {}\n", ps.id));
     }
     ctx
+}
+
+/// Loop-control result of [`handle_blocked`].
+enum BlockedStep {
+    Continue,
+    Break,
+}
+
+/// Handle a blocked plan. Body is the original `run_plan` blocked branch.
+async fn handle_blocked(
+    plan: &Plan,
+    state: &mut PlanState,
+    cwd: &Path,
+    interactive: bool,
+    notifier: &dyn Notifier,
+    event_log: &mut EventLogger,
+) -> Result<BlockedStep> {
+    let failed = state.phases.iter().find(|p| {
+        p.status == PhaseStatus::Failed
+            || p.status == PhaseStatus::Stale
+            // GH-552: an unwaived gate timeout blocks like a failure.
+            || (p.status == PhaseStatus::GateTimedOut && p.skip_reason.is_none())
+    });
+    let failed_id = failed.map(|f| f.id.clone()).unwrap_or_default();
+    let failed_status = failed.map(|f| f.status).unwrap_or(PhaseStatus::Failed);
+
+    if interactive {
+        match prompt_blocked_action(&failed_id, failed_status) {
+            BlockedAction::Retry => {
+                let current = state
+                    .get_phase(&failed_id)
+                    .map(|p| p.status)
+                    .unwrap_or(PhaseStatus::Failed);
+                let _ = transition(state, &failed_id, current, PhaseStatus::Pending, None);
+                state.plan_status = PlanStatus::Running;
+                save_state_reconciled(cwd, state)?;
+                println!("  ↻ Retrying \"{failed_id}\"");
+                Ok(BlockedStep::Continue)
+            }
+            BlockedAction::Skip => {
+                let ps = state.get_phase_mut(&failed_id)?;
+                ps.status = PhaseStatus::Skipped;
+                ps.skip_reason = Some("manually skipped (interactive)".into());
+                state.plan_status = PlanStatus::Running;
+                save_state_reconciled(cwd, state)?;
+                event_log.record(Event::PhaseSkipped {
+                    phase_id: failed_id.clone(),
+                    reason: "manually skipped (interactive)".into(),
+                });
+                let attempt_now = state.get_phase(&failed_id).map(|p| p.attempts).unwrap_or(0);
+                notifier
+                    .notify_phase_terminal(phase_terminal_event(
+                        &plan.name,
+                        &failed_id,
+                        "Skipped",
+                        attempt_now,
+                        None,
+                    ))
+                    .await;
+                println!("  ⊘ Skipped \"{failed_id}\"");
+                Ok(BlockedStep::Continue)
+            }
+            BlockedAction::Waive => {
+                // GH-552: the phase ran, its checks passed, and its
+                // gate timed out — record a waiver on the honest
+                // GateTimedOut status, never a false Skipped.
+                let (gate_sha, entered_at) = {
+                    let ps = state.get_phase(&failed_id)?;
+                    (
+                        ps.gate_sha.clone().unwrap_or_default(),
+                        ps.gate_entered_at.clone(),
+                    )
+                };
+                let waited = entered_at
+                    .and_then(|t| {
+                        time::OffsetDateTime::parse(
+                            &t,
+                            &time::format_description::well_known::Rfc3339,
+                        )
+                        .ok()
+                    })
+                    .map(|t| {
+                        std::time::Duration::from_secs(
+                            (time::OffsetDateTime::now_utc() - t).whole_seconds().max(0) as u64,
+                        )
+                    })
+                    .map(format_elapsed)
+                    .unwrap_or_else(|| "unknown".into());
+                let reason = format!(
+                    "gate waived after timeout: work completed and checks passed (commit {gate_sha}); waited {waited}"
+                );
+                let ps = state.get_phase_mut(&failed_id)?;
+                ps.skip_reason = Some(reason.clone());
+                state.plan_status = PlanStatus::Running;
+                save_state_reconciled(cwd, state)?;
+                event_log.record(Event::GateWaived {
+                    phase_id: failed_id.clone(),
+                    reason: reason.clone(),
+                    auto: false,
+                });
+                println!("  ⧗ Waived gate on \"{failed_id}\" (status kept as GateTimedOut)");
+                Ok(BlockedStep::Continue)
+            }
+            BlockedAction::Abort => {
+                state.plan_status = PlanStatus::Aborted;
+                state.aborted_at = Some(now_rfc3339());
+                save_state_reconciled(cwd, state)?;
+                // GH-584 round-2 P1-1: the plan abort reaches the
+                // workspace ledger as a structured conductor_plan
+                // event, not only the plan-local event log.
+                let phases_passed = state
+                    .phases
+                    .iter()
+                    .filter(|p| p.status == PhaseStatus::Passed)
+                    .count();
+                let phases_pending = state
+                    .phases
+                    .iter()
+                    .filter(|p| p.status == PhaseStatus::Pending)
+                    .count();
+                event_log.record(Event::PlanAborted {
+                    phases_passed,
+                    phases_pending,
+                });
+                edda::record_plan_aborted(cwd, &plan.name, phases_passed, phases_pending);
+                let attempt_now = state.get_phase(&failed_id).map(|p| p.attempts).unwrap_or(0);
+                notifier
+                    .notify_phase_terminal(phase_terminal_event(
+                        &plan.name,
+                        &failed_id,
+                        "Aborted",
+                        attempt_now,
+                        None,
+                    ))
+                    .await;
+                println!("  ✗ Plan aborted.");
+                Ok(BlockedStep::Break)
+            }
+            BlockedAction::Quit => {
+                println!("Paused. Run `edda conduct run` to resume.");
+                Ok(BlockedStep::Break)
+            }
+        }
+    } else {
+        notifier
+            .notify(&format!(
+                "Plan blocked: phase \"{}\" is {:?}. Use retry/skip/abort.",
+                failed_id,
+                failed.map(|f| f.status),
+            ))
+            .await;
+        Ok(BlockedStep::Break)
+    }
+}
+
+/// Find the next runnable phase, launch it, and process the result.
+/// Returns `Ok(false)` when no runnable phase remains (caller breaks).
+#[allow(clippy::too_many_arguments)]
+async fn run_next_phase(
+    plan: &Plan,
+    state: &mut PlanState,
+    order: &[String],
+    total_phases: usize,
+    launcher: &dyn AgentLauncher,
+    check_engine: &CheckEngine,
+    notifier: &dyn Notifier,
+    budget: &mut BudgetTracker,
+    cancel: &CancellationToken,
+    cwd: &Path,
+    tmux_session: Option<&TmuxSession>,
+    event_log: &mut EventLogger,
+) -> Result<bool> {
+    // 2. Find next runnable phase
+    let Some(phase_id) = find_next_phase(plan, state, order) else {
+        return Ok(false); // all done or no runnable phase
+    };
+    let phase = plan
+        .phases
+        .iter()
+        .find(|p| p.id == phase_id)
+        .context("runnable phase not found in plan")?;
+    let phase_state = state.get_phase_mut(&phase_id)?;
+    let attempt = phase_state.attempts + 1;
+    let phase_cwd = phase
+        .cwd
+        .as_deref()
+        .or(plan.cwd.as_deref())
+        .map(|p| cwd.join(p))
+        .unwrap_or_else(|| cwd.to_path_buf());
+
+    let phase_num = order.iter().position(|id| id == &phase_id).unwrap_or(0) + 1;
+
+    // Clear retry_context on new attempt start (it was already consumed for prompt building)
+    let retry_ctx = phase_state.retry_context.take();
+    // GH-584 round-2 P1-3: a fresh attempt starts unmeasured — the
+    // previous attempt's cost belongs to its own (already written)
+    // terminal event, not to this one.
+    phase_state.cost_usd = None;
+
+    // 3. Transition: pending → running
+    transition(
+        state,
+        &phase_id,
+        PhaseStatus::Pending,
+        PhaseStatus::Running,
+        Some(PhaseUpdate {
+            started_at: Some(now_rfc3339()),
+            attempts: Some(attempt),
+            checks: Some(vec![]),
+            error: None,
+            ..Default::default()
+        }),
+    )?;
+    save_state_reconciled(cwd, state)?;
+
+    println!("\n▶ [{phase_num}/{total_phases}] Phase \"{phase_id}\" (attempt {attempt})");
+    if let Some(tmux) = tmux_session {
+        let _ = tmux.update_phase_status(&phase_id, "Running");
+    }
+    let phase_start = Instant::now();
+    event_log.record(Event::PhaseStart {
+        phase_id: phase_id.clone(),
+        attempt,
+    });
+    event_log::write_runner_status(cwd, state, Some(&phase_id));
+    write_brief(cwd, state, None);
+
+    // 4. Build prompt + launch agent
+    let prompt = build_phase_prompt(phase, retry_ctx.as_deref());
+    let plan_context = build_plan_context_with_edda(plan, state, &phase_id, cwd);
+    let session_id = phase_session_id_attempt(&plan.name, &phase_id, attempt).to_string();
+
+    // Auto-claim scope for this phase (so peers can see it and send requests)
+    write_phase_claim(cwd, &session_id, &phase_id, &phase.owns);
+
+    // GH-566/GH-569: the runner refreshes the lane heartbeat during the
+    // agent turn so any backend (no Claude hooks required) is visible to
+    // `edda peers` while it works. One write site serves conduct + dispatch.
+    let lane_hb = LaneHeartbeat {
+        cwd: cwd.to_path_buf(),
+        session_id: session_id.clone(),
+        plan: plan.name.clone(),
+        phase: phase_id.clone(),
+        attempt,
+    };
+    let result = run_phase_with_heartbeat(
+        launcher,
+        phase,
+        &prompt,
+        &plan_context,
+        &phase_cwd,
+        cancel,
+        &lane_hb,
+    )
+    .await?;
+
+    // 5. Process result (shared with the post-rejection redispatch turn;
+    // gated phases enter AWAITING_VERDICT here instead of Passed — D3)
+    process_phase_result(
+        plan,
+        phase,
+        state,
+        &phase_id,
+        attempt,
+        result,
+        cwd,
+        &phase_cwd,
+        phase_start,
+        budget,
+        check_engine,
+        notifier,
+        event_log,
+        tmux_session,
+        cancel,
+        Some(&lane_hb),
+    )
+    .await?;
+
+    save_state_reconciled(cwd, state)?;
+    Ok(true)
 }
 
 enum BlockedAction {
@@ -2192,27 +644,7 @@ fn prompt_blocked_action(phase_id: &str, status: PhaseStatus) -> BlockedAction {
 /// GH-551: the deadline line for the AWAITING_VERDICT surface. A bounded
 /// gate states its deadline; an unbounded one says so explicitly, so an
 /// operator who set 7200s hours earlier can tell the clock is draining.
-fn format_gate_deadline(timeout_sec: Option<u64>, entered_at: &str) -> String {
-    match timeout_sec {
-        Some(secs) => {
-            let deadline = time::OffsetDateTime::parse(
-                entered_at,
-                &time::format_description::well_known::Rfc3339,
-            )
-            .ok()
-            .map(|t| t + time::Duration::seconds(secs as i64))
-            .and_then(|d| {
-                d.format(&time::format_description::well_known::Rfc3339)
-                    .ok()
-            })
-            .unwrap_or_else(|| "<unparsable gate_entered_at>".into());
-            format!("{deadline} (gate_timeout_sec {secs})")
-        }
-        None => "none — waits until cancelled".to_string(),
-    }
-}
-
-fn format_elapsed(d: std::time::Duration) -> String {
+pub(super) fn format_elapsed(d: std::time::Duration) -> String {
     let secs = d.as_secs();
     if secs < 60 {
         format!("{secs}s")
@@ -2223,7 +655,7 @@ fn format_elapsed(d: std::time::Duration) -> String {
     }
 }
 
-fn now_rfc3339() -> String {
+pub(super) fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()
@@ -2260,7 +692,14 @@ pub(crate) mod tests {
     use super::*;
     use crate::agent::launcher::{MockLauncher, PhaseResult};
     use crate::plan::parser::parse_plan;
+    use crate::runner::gate::{
+        format_gate_deadline, gate_subject, wait_for_verdict, GateVerdict, ReadErrorTracker,
+        GATE_MAX_PERSISTENT_READ_ERRORS, MAX_GATE_REDISPATCHES,
+    };
     use crate::runner::notify::CollectNotifier;
+    use crate::runner::outcome::format_check_failures;
+    use crate::state::machine::{CheckResult, CheckStatus, ErrorType};
+    use std::time::Duration;
 
     async fn run_test_plan_notifier(
         yaml: &str,
