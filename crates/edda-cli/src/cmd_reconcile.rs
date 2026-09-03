@@ -1064,6 +1064,7 @@ fn remove_unreferenced_scheduler_manifest(path: &Path) -> String {
 }
 
 #[cfg(any(windows, test))]
+#[allow(clippy::too_many_lines)] // 256 lines at #779; split tracked in #778
 fn scheduler_direct_exec_values(xml: &str) -> anyhow::Result<Vec<(String, String)>> {
     anyhow::ensure!(
         xml.len() <= SCHEDULER_OUTPUT_LIMIT,
@@ -1909,6 +1910,7 @@ fn static_prefix(path: &str) -> Option<StaticPrefix> {
     })
 }
 
+#[allow(clippy::too_many_lines)] // 153 lines at #779; split tracked in #778
 fn persist_reconciliation(
     repo_root: &Path,
     config: &ReconcileConfig,

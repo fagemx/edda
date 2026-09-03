@@ -324,6 +324,7 @@ impl PendingMeta {
 ///
 /// Returns the SQLite writes the caller must [`PendingMeta::flush`] *after*
 /// committing the Tantivy writer (GH-413).
+#[allow(clippy::too_many_lines)] // 212 lines at #779; split tracked in none
 pub fn index_session(
     writer: &IndexWriter,
     schema: &Schema,

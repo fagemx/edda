@@ -1113,6 +1113,7 @@ fn find_unsupported_schema_version_error(
     None
 }
 
+#[allow(clippy::too_many_lines)] // 304 lines at #779; split tracked in none
 fn run(cli: Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let repo_root = edda_ledger::EddaPaths::find_root(&cwd).unwrap_or(cwd);

@@ -83,6 +83,7 @@ pub(crate) struct SubagentSummary {
 }
 
 /// One-pass transcript scan: extract tasks, files modified, and commits.
+#[allow(clippy::too_many_lines)] // 257 lines at #779; split tracked in none
 pub(crate) fn extract_session_signals(transcript_store_path: &Path) -> SessionSignals {
     use std::io::BufRead;
 

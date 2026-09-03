@@ -74,6 +74,7 @@ pub(super) fn render_persistent_tasks(digests: &[SessionDigestEntry]) -> String 
 /// - Tier 1 (last session): Full detail — tasks, commits, files, notes, failed commands, outcome
 /// - Tier 2 (sessions 2-5): One-liner per session — date, outcome, commit count, key activity
 /// - Tier 3 (sessions 6+): Aggregate — N sessions, M commits, time span
+#[allow(clippy::too_many_lines)] // 199 lines at #779; split tracked in none
 pub(super) fn render_session_history(digests: &[SessionDigestEntry]) -> String {
     if digests.is_empty() {
         return String::new();

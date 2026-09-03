@@ -19,3 +19,6 @@ time = { workspace = true, features = ["formatting", "parsing"] }
 
 [dev-dependencies]
 ulid = { workspace = true }
+
+[lints]
+workspace = true

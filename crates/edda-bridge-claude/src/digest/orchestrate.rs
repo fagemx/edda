@@ -559,6 +559,7 @@ pub(super) fn harvest_inferred_decisions(
     written_ids
 }
 
+#[allow(clippy::too_many_lines)] // 309 lines at #779; split tracked in none
 fn digest_one_session(
     project_id: &str,
     session_id: &str,
@@ -868,6 +869,7 @@ fn digest_one_session(
 ///   costs a re-scan and never a duplicate;
 /// * the source ledger is never deleted, so a live producer's future
 ///   appends are always digestable.
+#[allow(clippy::too_many_lines)] // 204 lines at #779; split tracked in none
 pub fn digest_session_manual(
     project_id: &str,
     session_id: &str,

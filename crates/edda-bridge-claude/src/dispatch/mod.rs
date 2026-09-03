@@ -112,6 +112,7 @@ pub(crate) fn render_write_back_protocol(_cwd: &str) -> Option<String> {
 
 /// Main hook entrypoint: parse stdin, dispatch by hook_event_name.
 /// Returns `HookResult` with optional stdout JSON and/or stderr warnings.
+#[allow(clippy::too_many_lines)] // 221 lines at #779; split tracked in none
 pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
     if stdin.trim().is_empty() {
         return Ok(HookResult::empty());

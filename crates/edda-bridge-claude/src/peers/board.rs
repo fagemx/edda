@@ -10,6 +10,7 @@ use crate::parse::now_rfc3339;
 // ── Board State Computation ──
 
 /// Read coordination.jsonl and compute current board state.
+#[allow(clippy::too_many_lines)] // 178 lines at #779; split tracked in none
 pub fn compute_board_state(project_id: &str) -> BoardState {
     let path = coordination_path(project_id);
     let content = match fs::read_to_string(&path) {

@@ -49,6 +49,7 @@ fn env_label() -> Option<String> {
 }
 
 /// Detect git branch in a specific directory.
+#[allow(clippy::too_many_lines)] // 155 lines at #779; split tracked in none
 pub(crate) fn detect_git_branch_in(cwd: &str) -> Option<String> {
     std::process::Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])

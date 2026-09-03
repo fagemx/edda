@@ -30,6 +30,7 @@ pub struct IngestStats {
 ///
 /// If `index_writer` is Some, calls it for each kept record with
 /// (raw_line, store_offset, store_len, parsed_json) for index generation.
+#[allow(clippy::too_many_lines)] // 186 lines at #779; split tracked in none
 pub fn ingest_transcript_delta(
     project_dir: &Path,
     session_id: &str,

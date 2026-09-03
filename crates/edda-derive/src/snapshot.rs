@@ -86,6 +86,7 @@ pub(crate) fn resolve_branch_created_at_fallback(
     Ok(None)
 }
 
+#[allow(clippy::too_many_lines)] // 256 lines at #779; split tracked in none
 pub(crate) fn build_branch_snapshot(ledger: &Ledger, branch: &str) -> Result<BranchSnapshot> {
     let branch_events = collect_branch_events(ledger, branch)?;
 

@@ -29,6 +29,10 @@
 #                                     examined. Same swallow-pattern family as
 #                                     scripts/wiring-scan.sh section 2 (#594),
 #                                     narrowed to hook-path write calls.
+#   - staged *.rs                  -> GH-779 file-length ratchet:
+#                                     scripts/lint-file-length.sh --staged
+#                                     (staged blob line count <= per-path
+#                                     ceiling; default 1000)
 #
 # Bypass everything with `git commit --no-verify`. CI runs on pull requests
 # and on pushes to main (.github/workflows/ci.yml), so a feature branch is
@@ -222,5 +226,13 @@ if [ "$md_needed" -eq 1 ]; then
     echo "pre-commit: sh scripts/lint-markdown-content.sh"
     sh scripts/lint-markdown-content.sh || fail "markdown content lint failed"
 fi
+
+# --- GH-779 file-length ratchet (staged *.rs blobs) -------------------------
+# Resolve the script next to this hook so a test repo using core.hooksPath
+# still runs the real lint; ceilings come from the committing repo.
+lint_file_length=$(cd "$(dirname "$0")" && pwd)/../lint-file-length.sh
+echo "pre-commit: bash scripts/lint-file-length.sh --staged"
+bash "$lint_file_length" --staged \
+    || fail "file-length ratchet: a staged *.rs blob exceeds its ceiling"
 
 exit 0

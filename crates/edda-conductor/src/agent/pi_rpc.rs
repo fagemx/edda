@@ -372,6 +372,7 @@ impl PiRpcSession {
     /// Protocol-level failures (rejected prompt, malformed JSONL, EOF before
     /// settlement) surface as `PhaseResult::AgentCrash` — the runner retries
     /// crashes per its failure policy. `Err` is reserved for spawn/IO errors.
+    #[allow(clippy::too_many_lines)] // 172 lines at #779; split tracked in none
     async fn run_turn(
         &mut self,
         message: &str,

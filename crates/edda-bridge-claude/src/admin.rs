@@ -144,6 +144,7 @@ pub fn install(repo_root: &Path, no_claude_md: bool) -> anyhow::Result<()> {
 }
 
 /// Uninstall edda hooks from `.claude/settings.local.json`.
+#[allow(clippy::too_many_lines)] // 173 lines at #779; split tracked in none
 pub fn uninstall(repo_root: &Path) -> anyhow::Result<()> {
     let path = settings_path(repo_root);
 

@@ -261,6 +261,7 @@ pub(super) fn dispatch_subagent_context(
 // ── SessionEnd ──
 
 /// Dispatch SessionEnd — auto-digest, cleanup state, warn about pending tasks.
+#[allow(clippy::too_many_lines)] // 186 lines at #779; split tracked in none
 pub(super) fn dispatch_session_end(
     project_id: &str,
     session_id: &str,
@@ -484,6 +485,7 @@ pub(super) fn notify_session_end(project_id: &str, cwd: &str, session_id: &str) 
 ///
 /// Best-effort — all errors are silently swallowed. The session-end hook must
 /// never fail because of post-mortem logic.
+#[allow(clippy::too_many_lines)] // 176 lines at #779; split tracked in none
 pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
     if std::env::var("EDDA_POSTMORTEM").unwrap_or_else(|_| "1".into()) == "0" {
         return;
@@ -732,6 +734,7 @@ pub(super) fn collect_session_end_warnings(project_id: &str) -> Option<String> {
     ))
 }
 /// Dispatch SessionStart with pack + skills + optional digest warning.
+#[allow(clippy::too_many_lines)] // 228 lines at #779; split tracked in none
 pub(super) fn dispatch_session_start(
     project_id: &str,
     session_id: &str,

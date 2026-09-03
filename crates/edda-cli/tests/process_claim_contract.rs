@@ -187,6 +187,7 @@ fn claim_check_on_stale_session_subject_reports_clear() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // 193 lines at #779; split tracked in none
 fn check_merge_refuses_claimed_pr_unless_force() {
     let env = TestEnv::new();
     env.write_heartbeat("active-reviewer", 0); // live session

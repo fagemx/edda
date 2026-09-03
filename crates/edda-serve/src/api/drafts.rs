@@ -272,6 +272,7 @@ async fn post_draft_deny(
 }
 
 /// Shared handler for approve/deny actions on drafts.
+#[allow(clippy::too_many_lines)] // 245 lines at #779; split tracked in none
 async fn handle_draft_action(
     state: &AppState,
     headers: &HeaderMap,

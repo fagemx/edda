@@ -446,6 +446,7 @@ fn do_show(repo_root: &Path, id: u64) -> anyhow::Result<TaskView> {
     Ok(find_view(&views, id)?.clone())
 }
 
+#[allow(clippy::too_many_lines)] // 151 lines at #779; split tracked in none
 pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
     match cmd {
         TaskCmd::New {

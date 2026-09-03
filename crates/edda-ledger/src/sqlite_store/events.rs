@@ -84,6 +84,7 @@ impl SqliteStore {
     ///
     /// If the event is a decision (note with `"decision"` tag), the `decisions`
     /// table is also updated atomically within the same transaction.
+    #[allow(clippy::too_many_lines)] // 166 lines at #779; split tracked in none
     pub fn append_event(&self, event: &Event) -> anyhow::Result<()> {
         let payload = serde_json::to_string(&event.payload)?;
         let refs_blobs = serde_json::to_string(&event.refs.blobs)?;
