@@ -46,7 +46,7 @@ pub(crate) fn write_heartbeat(
             }
         });
 
-    let _ = edda_store::update_heartbeat(project_id, session_id, |hb| {
+    let result = edda_store::update_heartbeat(project_id, session_id, |hb| {
         if hb.started_at.is_empty() {
             hb.started_at = now.clone();
         }
@@ -74,31 +74,56 @@ pub(crate) fn write_heartbeat(
         // parent_session_id and the conductor lane fields (plan, phase,
         // attempt, stage, pid) belong to other producers — preserved.
     });
+    if let Err(e) = result {
+        // GH-692: the heartbeat write failed — count it, don't pretend it landed.
+        crate::state::record_dropped_write(
+            project_id,
+            session_id,
+            "peer heartbeat",
+            &format!("{e:#}"),
+        );
+    }
 }
 
 /// Lightweight heartbeat touch: only update last_heartbeat timestamp.
 /// Rides the shared locked update; a still-virgin record is not persisted.
 pub fn touch_heartbeat(project_id: &str, session_id: &str) {
     let now = now_rfc3339();
-    let _ = edda_store::update_heartbeat(project_id, session_id, |hb| {
+    let result = edda_store::update_heartbeat(project_id, session_id, |hb| {
         if hb.started_at.is_empty() && hb.last_heartbeat.is_empty() {
             // No existing heartbeat: skip touch (write_heartbeat creates it).
             return;
         }
         hb.last_heartbeat = now.clone();
     });
+    if let Err(e) = result {
+        crate::state::record_dropped_write(
+            project_id,
+            session_id,
+            "peer heartbeat touch",
+            &format!("{e:#}"),
+        );
+    }
 }
 
 /// Update the branch field in an existing heartbeat.
 /// Called when the agent intentionally switches branch (git checkout / git switch).
 pub(crate) fn update_heartbeat_branch(project_id: &str, session_id: &str, branch: &str) {
-    let _ = edda_store::update_heartbeat(project_id, session_id, |hb| {
+    let result = edda_store::update_heartbeat(project_id, session_id, |hb| {
         if hb.started_at.is_empty() && hb.last_heartbeat.is_empty() {
             // No existing heartbeat: nothing to update.
             return;
         }
         hb.branch = Some(branch.to_string());
     });
+    if let Err(e) = result {
+        crate::state::record_dropped_write(
+            project_id,
+            session_id,
+            "peer heartbeat branch update",
+            &format!("{e:#}"),
+        );
+    }
 }
 
 /// Ensure a heartbeat file exists for this session.
@@ -134,7 +159,7 @@ pub fn remove_heartbeat(project_id: &str, session_id: &str) {
 pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str, cwd: &str) {
     let now = now_rfc3339();
     let branch = detect_git_branch_in(cwd);
-    let _ = edda_store::update_heartbeat(project_id, session_id, |hb| {
+    let result = edda_store::update_heartbeat(project_id, session_id, |hb| {
         if hb.started_at.is_empty() {
             hb.started_at = now.clone();
         }
@@ -146,6 +171,14 @@ pub fn write_heartbeat_minimal(project_id: &str, session_id: &str, label: &str, 
         // Signal fields and the conductor lane fields belong to other
         // producers on the shared surface — preserved.
     });
+    if let Err(e) = result {
+        crate::state::record_dropped_write(
+            project_id,
+            session_id,
+            "peer heartbeat (minimal)",
+            &format!("{e:#}"),
+        );
+    }
 }
 
 /// Write a heartbeat for a sub-agent spawned via Claude Code's Task tool.
@@ -163,7 +196,7 @@ pub(crate) fn write_subagent_heartbeat(
 ) {
     let now = now_rfc3339();
     let branch = detect_git_branch_in(cwd);
-    let _ = edda_store::update_heartbeat(project_id, agent_id, |hb| {
+    let result = edda_store::update_heartbeat(project_id, agent_id, |hb| {
         if hb.started_at.is_empty() {
             hb.started_at = now.clone();
         }
@@ -175,6 +208,14 @@ pub(crate) fn write_subagent_heartbeat(
         }
         // Signal fields and lane fields belong to other producers — preserved.
     });
+    if let Err(e) = result {
+        crate::state::record_dropped_write(
+            project_id,
+            agent_id,
+            "sub-agent heartbeat",
+            &format!("{e:#}"),
+        );
+    }
 }
 
 /// Remove all sub-agent heartbeats belonging to a parent session.
@@ -194,6 +235,16 @@ pub(crate) fn cleanup_subagent_heartbeats(project_id: &str, parent_session_id: &
             if let Ok(hb) = serde_json::from_str::<SessionHeartbeat>(&content) {
                 if hb.parent_session_id.as_deref() == Some(parent_session_id) {
                     let _ = fs::remove_file(entry.path());
+                    // Also drop this sub-agent's dropped-write counter (GH-692),
+                    // keyed by the same id as the heartbeat file.
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let sid = name
+                        .strip_prefix("session.")
+                        .and_then(|s| s.strip_suffix(".json"))
+                        .unwrap_or("");
+                    if !sid.is_empty() {
+                        let _ = fs::remove_file(state_dir.join(format!("dropped_writes.{sid}")));
+                    }
                 }
             }
         }
@@ -205,20 +256,33 @@ pub(crate) fn cleanup_subagent_heartbeats(project_id: &str, parent_session_id: &
 // ── Coordination Events (append-only log) ──
 
 /// Append a coordination event to coordination.jsonl.
+///
+/// GH-692: any failure creating the directory, serializing, opening or
+/// writing the append-only log is counted (per session) and warned — a lost
+/// coordination event must not look like a quiet channel.
 pub(crate) fn append_coord_event(project_id: &str, event: &CoordEvent) {
+    if let Err(e) = append_coord_event_inner(project_id, event) {
+        crate::state::record_dropped_write(
+            project_id,
+            &event.session_id,
+            "coordination event",
+            &format!("{e:#}"),
+        );
+    }
+}
+
+fn append_coord_event_inner(project_id: &str, event: &CoordEvent) -> anyhow::Result<()> {
     let path = coordination_path(project_id);
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)?;
     }
-    let line = match serde_json::to_string(event) {
-        Ok(l) => l,
-        Err(_) => return,
-    };
-    let mut file = match fs::OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-    let _ = writeln!(file, "{line}");
+    let line = serde_json::to_string(event)?;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    writeln!(file, "{line}")?;
+    Ok(())
 }
 
 /// Write a claim event with optional process subject.
@@ -502,7 +566,7 @@ pub(crate) fn resolve_teammate_session(project_id: &str, teammate_name: &str) ->
 /// pre-lane record, then atomically restored it after the runner wrote
 /// lane fields, erasing them).
 pub(crate) fn update_teammate_phase(project_id: &str, session_id: &str, phase: &str) {
-    let _ = edda_store::update_heartbeat(project_id, session_id, |hb| {
+    let result = edda_store::update_heartbeat(project_id, session_id, |hb| {
         // `update_heartbeat` seeds a blank record when no file exists; a
         // TeammateIdle event must not create a heartbeat for a session that
         // never had one, so leave the still-blank record unwritten.
@@ -512,6 +576,14 @@ pub(crate) fn update_teammate_phase(project_id: &str, session_id: &str, phase: &
         hb.current_phase = Some(phase.to_string());
         hb.last_heartbeat = now_rfc3339();
     });
+    if let Err(e) = result {
+        crate::state::record_dropped_write(
+            project_id,
+            session_id,
+            "teammate phase heartbeat update",
+            &format!("{e:#}"),
+        );
+    }
 }
 
 /// Write a teammate idle event to coordination.jsonl.

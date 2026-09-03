@@ -302,6 +302,30 @@ fi
 git reset -q --hard "$prev"
 rm -rf crates/litname
 
+# --- GH-692: swallowed hook-path write on an added line is rejected ---------
+# Added line under crates/*/src (not a tests file) matching the issue's style
+# ('let _ = ledger.append_event(&e);') with no swallow-ok justification must
+# block the commit and print the style and line number. Adding
+# '// swallow-ok: cleanup only' on the same line lets it through. Stub cargo
+# keeps the fmt/clippy gates green so only the ratchet decides.
+prev=$(git rev-parse HEAD)
+: > "$stub_log"
+printf '\nfn gh692_swallow() {
+    let _ = ledger.append_event(&e);
+}
+' >> crates/hooktest/src/main.rs
+git add crates/hooktest/src/main.rs
+expect_reject "reject: added 'let _ = ledger.append_event(&e);' without swallow-ok (GH-692)" \
+    "let _ = ledger.append_event" \
+    env PATH="$stub_dir:$PATH" CARGO_STUB_LOG="$stub_log" \
+    git commit -m "feat(test): swallowed hook write"
+sed -i 's|let _ = ledger.append_event(&e);|let _ = ledger.append_event(&e); // swallow-ok: cleanup only|' crates/hooktest/src/main.rs
+git add crates/hooktest/src/main.rs
+expect_accept "accept: same write line with '// swallow-ok: cleanup only' passes (GH-692)" \
+    env PATH="$stub_dir:$PATH" CARGO_STUB_LOG="$stub_log" \
+    git commit -m "feat(test): swallowed hook write justified"
+git reset -q --hard "$prev"
+
 echo
 if [ "$failed" -eq 0 ]; then
     echo "ALL SCENARIOS PASSED"

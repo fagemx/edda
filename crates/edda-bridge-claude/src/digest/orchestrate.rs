@@ -1089,7 +1089,16 @@ fn record_failure(project_id: &str, session_id: &str, state: &mut DigestState, e
         state.retry_count = 1;
     }
     state.last_error = error.to_string();
-    let _ = save_digest_state(project_id, state);
+    if let Err(e) = save_digest_state(project_id, state) {
+        // GH-692: failing to persist the failure record is itself a dropped
+        // write — count it so the session digest can show the loss.
+        crate::state::record_dropped_write(
+            project_id,
+            session_id,
+            "digest state",
+            &format!("{e:#}"),
+        );
+    }
 }
 
 /// Build a warning message if there are pending digest failures.

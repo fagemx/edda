@@ -18,6 +18,17 @@
 #                                     that directory's Cargo.toml, not the
 #                                     directory name)
 #   - staged *.md                  -> sh scripts/lint-markdown-content.sh
+#   - staged crates/*/src/**/*.rs  -> GH-692 ratchet: ADDED lines (excluding
+#                                     tests.rs and tests/) must not swallow
+#                                     hook-path write errors
+#                                     ('let _ = <write-call>',
+#                                     '<write-call>(...).ok();'). Hit without
+#                                     '// swallow-ok: <reason>' on the same or
+#                                     previous line -> reject. Existing code is
+#                                     never re-flagged: only added lines are
+#                                     examined. Same swallow-pattern family as
+#                                     scripts/wiring-scan.sh section 2 (#594),
+#                                     narrowed to hook-path write calls.
 #
 # Bypass everything with `git commit --no-verify`. CI runs on pull requests
 # and on pushes to main (.github/workflows/ci.yml), so a feature branch is
@@ -46,7 +57,8 @@ rm -f "$skip_marker"
 # source: no environment variable or other override can hide staged paths
 # from the gates.
 staged_z=$(mktemp)
-trap 'rm -f "$staged_z"' EXIT
+ratchet_violations=$(mktemp)
+trap 'rm -f "$staged_z" "$ratchet_violations"' EXIT
 git diff --cached --raw -z --no-renames --diff-filter=ACMR >"$staged_z"
 [ -s "$staged_z" ] || exit 0
 
@@ -99,7 +111,63 @@ while IFS= read -r -d '' meta; do
     esac
 done <"$staged_z"
 
-# --- cargo fmt ------------------------------------------------------------
+# --- GH-692 ratchet: swallowed hook-path writes on ADDED lines --------------
+
+# The issue's style family (same shapes wiring-scan.sh section 2 greps for,
+# narrowed to hook-path write calls):
+#   1. let _ = .*(append_event|append_to_session_ledger|save_project|
+#                  save_digest_state|save_detect_state|update_heartbeat|
+#                  write_heartbeat|fs::write|writeln!)
+#   2. the same write calls ending in .ok();
+# An added line matching either is rejected unless that line — or the line
+# directly above it — carries '// swallow-ok: <reason>'.
+
+while IFS= read -r -d '' meta; do
+    IFS= read -r -d '' f || break
+    [ -n "$f" ] || continue
+    case "$f" in
+        crates/*/src/*.rs) ;;
+        *) continue ;;
+    esac
+    # Exclude tests.rs files and anything under a tests/ directory.
+    base=${f#crates/*/src/}
+    case "$base" in
+        *tests.rs | tests/* | */tests/*) continue ;;
+    esac
+    # -U1 keeps one context line above each addition so a swallow-ok comment
+    # on the previous (unchanged) line is still visible to the check.
+    git diff --cached -U1 -- "$f" | awk -v file="$f" '
+        /^@@/ {
+            split(substr($3, 2), a, ",")
+            line = a[1] - 1
+            prev = ""
+            next
+        }
+        /^---/ || /^\+\+\+/ { next }
+        /^[ -]/ {            # context line: advance, remember text
+            line++
+            prev = substr($0, 2)
+            next
+        }
+        /^\+/ {
+            line++
+            text = substr($0, 2)
+            if (text ~ /let _ = .*(append_event|append_to_session_ledger|save_project|save_digest_state|save_detect_state|update_heartbeat|write_heartbeat|fs::write|writeln!)/ ||
+                text ~ /(append_event|append_to_session_ledger|save_project|save_digest_state|save_detect_state|update_heartbeat|write_heartbeat|fs::write|writeln!).*\.ok\(\);/) {
+                if (text !~ /swallow-ok/ && prev !~ /swallow-ok/) {
+                    print file ":" line ": " text
+                }
+            }
+            prev = text
+        }
+    ' >>"$ratchet_violations"
+done <"$staged_z"
+
+if [ -s "$ratchet_violations" ]; then
+    echo "pre-commit: GH-692 ratchet — swallowed hook-path write on ADDED line(s):" >&2
+    cat "$ratchet_violations" >&2
+    fail "style: 'let _ = <write-call>(...)' or '<write-call>(...).ok();' on added lines under crates/*/src (tests.rs / tests/ excluded), where <write-call> is one of append_event, append_to_session_ledger, save_project, save_digest_state, save_detect_state, update_heartbeat, write_heartbeat, fs::write, writeln! — propagate the error, or justify with '// swallow-ok: <reason>' on the same or previous line"
+fi
 
 if [ "$fmt_needed" -eq 1 ]; then
     echo "pre-commit: cargo fmt --all --check"

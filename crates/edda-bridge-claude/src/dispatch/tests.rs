@@ -17,6 +17,7 @@ use super::{
 // Imports from sub-modules
 use super::events::{
     extract_task_id, is_karvi_project, try_write_commit_event, try_write_merge_event,
+    try_write_task_completed_note_event,
 };
 use super::helpers::{inject_karvi_brief, read_project_state, render_active_plan_from_dir};
 use super::session::{
@@ -1756,7 +1757,7 @@ fn try_write_commit_event_creates_event() {
         "cwd": workspace.to_str().unwrap()
     });
 
-    try_write_commit_event(&raw, "feat: add auth");
+    try_write_commit_event(&raw, "feat: add auth").unwrap();
 
     // Verify event was written
     let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
@@ -1789,7 +1790,7 @@ fn try_write_merge_event_creates_event() {
         "cwd": workspace.to_str().unwrap()
     });
 
-    try_write_merge_event(&raw, "PR#42", "squash");
+    try_write_merge_event(&raw, "PR#42", "squash").unwrap();
 
     // Verify event was written
     let ledger = edda_ledger::Ledger::open(&workspace).unwrap();
@@ -1813,7 +1814,7 @@ fn try_write_commit_event_skips_when_no_workspace() {
         "cwd": tmp.path().to_str().unwrap()
     });
     // Should not panic or error
-    try_write_commit_event(&raw, "test");
+    try_write_commit_event(&raw, "test").unwrap();
 }
 
 #[test]
@@ -1823,7 +1824,64 @@ fn try_write_commit_event_skips_when_empty_cwd() {
         "tool_input": { "command": "git commit -m \"test\"" }
     });
     // No cwd field — should silently skip
-    try_write_commit_event(&raw, "test");
+    try_write_commit_event(&raw, "test").unwrap();
+}
+
+// ── GH-692: failed hook-path writes must be visible ──
+
+/// Make the ledger DB read-only so ledger opens/appends fail at write time.
+fn set_ledger_readonly(paths: &edda_ledger::EddaPaths, ro: bool) {
+    let mut perms = std::fs::metadata(&paths.ledger_db).unwrap().permissions();
+    perms.set_readonly(ro);
+    std::fs::set_permissions(&paths.ledger_db, perms).unwrap();
+}
+
+#[test]
+fn try_write_commit_event_reports_readonly_ledger() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().to_path_buf();
+    let paths = edda_ledger::EddaPaths::discover(&workspace);
+    edda_ledger::ledger::init_workspace(&paths).unwrap();
+    edda_ledger::ledger::init_head(&paths, "main").unwrap();
+    edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
+
+    set_ledger_readonly(&paths, true);
+    let raw = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": "git commit -m \"feat: ro\"" },
+        "cwd": workspace.to_str().unwrap()
+    });
+
+    // GH-692: a failed write must NOT look like success.
+    let result = try_write_commit_event(&raw, "feat: ro");
+    assert!(
+        result.is_err(),
+        "read-only ledger must surface the failed write"
+    );
+
+    // Restore so tempdir cleanup can delete the file (Windows).
+    set_ledger_readonly(&paths, false);
+}
+
+#[test]
+fn try_write_task_completed_note_event_reports_readonly_ledger() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().to_path_buf();
+    let paths = edda_ledger::EddaPaths::discover(&workspace);
+    edda_ledger::ledger::init_workspace(&paths).unwrap();
+    edda_ledger::ledger::init_head(&paths, "main").unwrap();
+    edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
+
+    set_ledger_readonly(&paths, true);
+
+    let result =
+        try_write_task_completed_note_event(workspace.to_str().unwrap(), "T1", "demo task");
+    assert!(
+        result.is_err(),
+        "read-only ledger must surface the failed write"
+    );
+
+    set_ledger_readonly(&paths, false);
 }
 
 // ── Auto-claim in PostToolUse (#56) ──
