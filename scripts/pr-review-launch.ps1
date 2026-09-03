@@ -66,7 +66,13 @@ Set-Location '$RepoRoot'
 exit `$LASTEXITCODE
 "@ | Out-File -FilePath $Wrapper -Encoding utf8
 
-$action = New-ScheduledTaskAction -Execute "pwsh.exe" `
+# Resolve pwsh.exe to an absolute path: Task Scheduler cannot resolve the
+# bare name when pwsh is a Store/WindowsApps install (GH-694; same fix as
+# scripts/fleet/lane-launch.ps1).
+$PwshExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
+if (-not $PwshExe) { throw "pwsh.exe not found on PATH; cannot register the task" }
+
+$action = New-ScheduledTaskAction -Execute $PwshExe `
   -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
   -WorkingDirectory $RepoRoot
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"  # any-user trigger needs admin
@@ -92,6 +98,13 @@ if ($DryRun) {
   "LastRunTime=$($info.LastRunTime) LastTaskResult=$($info.LastTaskResult)"
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
   "task=$TaskName unregistered (dry-run)"
+  # A non-zero LastTaskResult means the task died (e.g. 0x80070002 when the
+  # Execute path is unresolvable) — fail loudly so -DryRun cannot silently
+  # pass a broken registration (GH-694).
+  if ($info.LastTaskResult -ne 0) {
+    "dry-run FAILED: LastTaskResult=$($info.LastTaskResult) (0x{0:X8}) - task did not complete successfully" -f [int64]$info.LastTaskResult
+    exit 1
+  }
   exit 0
 }
 
