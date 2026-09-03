@@ -11,7 +11,7 @@ use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
 use edda_conductor::state::persist::{load_state, update_state};
 use edda_conductor::tmux::TmuxSession;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 // ── CLI Schema ──
@@ -308,74 +308,154 @@ pub fn run(
 
 /// Execute `edda conduct status [plan-name]`
 pub fn status(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<()> {
-    let conductor_dir = repo_root.join(".edda").join("conductor");
-    if !conductor_dir.exists() {
-        if json {
-            println!("[]");
-        } else {
-            println!("No conductor state found.");
-        }
-        return Ok(());
-    }
+    let out = status_impl(repo_root, plan_name, json)?;
+    print!("{out}");
+    Ok(())
+}
 
-    let plans: Vec<String> = if let Some(name) = plan_name {
-        vec![name.to_string()]
+/// GH-557: plan state lives in the store that launched it (repo root or a
+/// git worktree) — scan all of them. Split from [`status`] so the text is
+/// testable without stdout capture.
+fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<String> {
+    let mut out = String::new();
+    let stores = plan_stores(repo_root);
+    let plans: Vec<(String, PathBuf)> = if let Some(name) = plan_name {
+        match resolve_plan_store(repo_root, name)? {
+            Some(store) => vec![(name.to_string(), store)],
+            None => vec![(name.to_string(), repo_root.to_path_buf())],
+        }
     } else {
-        // List all plan directories
-        let mut names = Vec::new();
-        for entry in std::fs::read_dir(&conductor_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    names.push(name.to_string());
+        let mut found: Vec<(String, PathBuf)> = Vec::new();
+        for store in &stores {
+            let conductor_dir = store.join(".edda").join("conductor");
+            if !conductor_dir.exists() {
+                continue;
+            }
+            for entry in std::fs::read_dir(&conductor_dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        if !found.iter().any(|(n, _)| n == name) {
+                            found.push((name.to_string(), store.clone()));
+                        }
+                    }
                 }
             }
         }
-        names.sort();
-        names
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        found
     };
 
     if plans.is_empty() {
         if json {
-            println!("[]");
+            out.push_str("[]\n");
         } else {
-            println!("No plans found.");
+            out.push_str("No plans found.\n");
         }
-        return Ok(());
+        return Ok(out);
     }
 
     if json {
         let states: Vec<PlanState> = plans
             .iter()
-            .filter_map(|name| load_state(repo_root, name).ok().flatten())
+            .filter_map(|(name, store)| load_state(store, name).ok().flatten())
             .collect();
         // Single plan name specified: output object directly; otherwise array
         if plan_name.is_some() {
             if let Some(s) = states.into_iter().next() {
-                println!("{}", serde_json::to_string_pretty(&s)?);
+                out.push_str(&serde_json::to_string_pretty(&s)?);
+                out.push('\n');
             } else {
-                println!("null");
+                out.push_str("null\n");
             }
         } else {
-            println!("{}", serde_json::to_string_pretty(&states)?);
+            out.push_str(&serde_json::to_string_pretty(&states)?);
+            out.push('\n');
         }
     } else {
-        for name in &plans {
-            let state = load_state(repo_root, name)?;
+        for (name, store) in &plans {
+            let state = load_state(store, name)?;
             match state {
-                Some(s) => print_status(&s),
-                None => println!("Plan \"{name}\": no state file found"),
+                Some(s) => {
+                    out.push_str(&format!(
+                        "  Store: {}\n",
+                        if *store == repo_root {
+                            "(repo root)".to_string()
+                        } else {
+                            store.display().to_string()
+                        }
+                    ));
+                    out.push_str(&print_status_to_string(&s));
+                }
+                None => out.push_str(&format!("Plan \"{name}\": no state file found\n")),
             }
         }
     }
 
-    Ok(())
+    Ok(out)
+}
+
+/// Render one plan's status block (the body `print_status` writes).
+fn print_status_to_string(state: &PlanState) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Plan: {} ({:?})\n",
+        state.plan_name, state.plan_status
+    ));
+    if !state.plan_file.is_empty() {
+        out.push_str(&format!("  File: {}\n", state.plan_file));
+    }
+    out.push_str(&format!(
+        "  Cost: {}\n",
+        cost_line(state.total_cost_usd, state.cost_measured)
+    ));
+    out.push('\n');
+    for ps in &state.phases {
+        let icon = match ps.status {
+            PhaseStatus::Passed => "\u{2713}",
+            PhaseStatus::Failed => "\u{2717}",
+            PhaseStatus::Running | PhaseStatus::Checking => "\u{25B6}",
+            PhaseStatus::Skipped => "\u{2298}",
+            PhaseStatus::Stale => "\u{23F0}",
+            PhaseStatus::GateTimedOut => "\u{29D7}",
+            PhaseStatus::AwaitingVerdict => "\u{23F8}",
+            PhaseStatus::Pending => "\u{25CB}",
+        };
+        let detail = match ps.status {
+            PhaseStatus::Passed => format!("(attempt {})", ps.attempts),
+            PhaseStatus::Failed => {
+                let err = ps
+                    .error
+                    .as_ref()
+                    .map(|e| e.message.as_str())
+                    .unwrap_or("unknown");
+                format!("(attempt {}, {})", ps.attempts, err)
+            }
+            PhaseStatus::Skipped => {
+                let reason = ps.skip_reason.as_deref().unwrap_or("");
+                format!("({})", reason)
+            }
+            PhaseStatus::GateTimedOut => match ps.skip_reason.as_deref() {
+                Some(reason) => format!("(waived: {})", reason),
+                None => "(awaiting operator: retry or waive)".to_string(),
+            },
+            _ => String::new(),
+        };
+        out.push_str(&format!(
+            "  {icon} {:<24} {:?} {detail}\n",
+            ps.id, ps.status
+        ));
+    }
+    out.push('\n');
+    out
 }
 
 /// Execute `edda conduct retry <phase-id>`
 pub fn retry(repo_root: &Path, phase_id: &str, plan_name: Option<&str>) -> Result<()> {
     let name = resolve_plan_name(repo_root, plan_name)?;
-    update_state(repo_root, &name, |state| {
+    let store =
+        resolve_plan_store(repo_root, &name)?.ok_or_else(|| no_state_error(repo_root, &name))?;
+    update_state(&store, &name, |state| {
         let current_status = {
             let ps = state.get_phase_mut(phase_id)?;
             if ps.status != PhaseStatus::Failed
@@ -419,7 +499,9 @@ pub fn skip(
     plan_name: Option<&str>,
 ) -> Result<()> {
     let name = resolve_plan_name(repo_root, plan_name)?;
-    let is_waived = update_state(repo_root, &name, |state| {
+    let store =
+        resolve_plan_store(repo_root, &name)?.ok_or_else(|| no_state_error(repo_root, &name))?;
+    let is_waived = update_state(&store, &name, |state| {
         let ps = state.get_phase_mut(phase_id)?;
         if ps.status == PhaseStatus::GateTimedOut {
             // GH-552: skipping a timed-out gate is a WAIVER — the phase ran and
@@ -468,7 +550,9 @@ pub fn skip(
 /// Execute `edda conduct abort [plan-name]`
 pub fn abort(repo_root: &Path, plan_name: Option<&str>) -> Result<()> {
     let name = resolve_plan_name(repo_root, plan_name)?;
-    update_state(repo_root, &name, |state| {
+    let store =
+        resolve_plan_store(repo_root, &name)?.ok_or_else(|| no_state_error(repo_root, &name))?;
+    update_state(&store, &name, |state| {
         if state.plan_status == PlanStatus::Completed || state.plan_status == PlanStatus::Aborted {
             bail!("Plan \"{}\" is already {:?}.", name, state.plan_status);
         }
@@ -554,6 +638,74 @@ pub(crate) fn cost_line(total_cost_usd: f64, cost_measured: bool) -> String {
     }
 }
 
+/// Directories that can hold conductor state for this repo (GH-557):
+/// the repo root itself plus every git worktree reported by
+/// `git worktree list --porcelain`. A plan launched with `--cwd
+/// <worktree>` stores its state in that worktree's `.edda/conductor/`,
+/// and the recovery verbs must be able to find it no matter which cwd
+/// the operator invokes from.
+fn plan_stores(repo_root: &Path) -> Vec<PathBuf> {
+    let mut stores = vec![repo_root.to_path_buf()];
+    let out = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_root)
+        .output();
+    if let Ok(out) = out {
+        if out.status.success() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if let Some(path) = line.strip_prefix("worktree ") {
+                    let p = PathBuf::from(path);
+                    if !stores.contains(&p) {
+                        stores.push(p);
+                    }
+                }
+            }
+        }
+    }
+    stores
+}
+
+/// Find the store directory that actually holds `<plan>`'s state.json
+/// (GH-557): the repo root first, then each git worktree. A corrupt state
+/// file is an error, NOT "absent" — swallowing it would retarget a
+/// mutating verb onto a different store that happens to hold a stale
+/// same-name state.
+fn resolve_plan_store(repo_root: &Path, plan: &str) -> Result<Option<PathBuf>> {
+    for store in plan_stores(repo_root) {
+        match load_state(&store, plan) {
+            Ok(Some(_)) => return Ok(Some(store)),
+            Ok(None) => continue,
+            Err(e) => {
+                return Err(e.context(format!(
+                    "plan \"{plan}\" state in {} is unreadable",
+                    store.display()
+                )))
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Refuse to act when the plan's state is nowhere on the repo (GH-557):
+/// the runner's own blocked-phase message names retry/skip/abort — those
+/// commands must never answer "no state for plan" without pointing at the
+/// actual resolution surface.
+fn no_state_error(repo_root: &Path, plan: &str) -> anyhow::Error {
+    let searched: Vec<String> = plan_stores(repo_root)
+        .iter()
+        .filter(|p| p.join(".edda").join("conductor").is_dir())
+        .map(|p| p.display().to_string())
+        .collect();
+    let shown = if searched.len() > 5 {
+        format!("{} … ({} stores)", searched[..5].join(", "), searched.len())
+    } else {
+        searched.join(", ")
+    };
+    anyhow::anyhow!(
+        "no state for plan \"{plan}\" (searched: {shown}); a plan launched with a --cwd outside this repo's worktrees stores its state there and is not auto-discoverable"
+    )
+}
+
 fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Result<String> {
     if let Some(name) = explicit {
         return Ok(name.to_string());
@@ -587,57 +739,6 @@ fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Result<String>
     }
 }
 
-fn print_status(state: &PlanState) {
-    println!("\nPlan: {} ({:?})", state.plan_name, state.plan_status);
-    if !state.plan_file.is_empty() {
-        println!("  File: {}", state.plan_file);
-    }
-    println!(
-        "  Cost: {}",
-        cost_line(state.total_cost_usd, state.cost_measured)
-    );
-
-    println!();
-    for ps in &state.phases {
-        let icon = match ps.status {
-            PhaseStatus::Passed => "\u{2713}",                          // ✓
-            PhaseStatus::Failed => "\u{2717}",                          // ✗
-            PhaseStatus::Running | PhaseStatus::Checking => "\u{25B6}", // ▶
-            PhaseStatus::Skipped => "\u{2298}",                         // ⊘
-            PhaseStatus::Stale => "\u{23F0}",                           // ⏰
-            PhaseStatus::AwaitingVerdict => "\u{23F8}",                 // ⏸
-            PhaseStatus::GateTimedOut => "\u{29D7}",                    // ⧗
-            PhaseStatus::Pending => "\u{25CB}",                         // ○
-        };
-        let detail = match ps.status {
-            PhaseStatus::Passed => format!("(attempt {})", ps.attempts),
-            PhaseStatus::Failed => {
-                let err = ps
-                    .error
-                    .as_ref()
-                    .map(|e| e.message.as_str())
-                    .unwrap_or("unknown");
-                format!("(attempt {}, {})", ps.attempts, err)
-            }
-            PhaseStatus::Skipped => {
-                let reason = ps.skip_reason.as_deref().unwrap_or("");
-                format!("({})", reason)
-            }
-            PhaseStatus::GateTimedOut => {
-                // GH-552: honest audit line — timed-out gate, and whether
-                // it was waived (the status itself is never Skipped).
-                match ps.skip_reason.as_deref() {
-                    Some(reason) => format!("(waived: {})", reason),
-                    None => "(awaiting operator: retry or waive)".to_string(),
-                }
-            }
-            _ => String::new(),
-        };
-        println!("  {icon} {:<24} {:?} {detail}", ps.id, ps.status);
-    }
-    println!();
-}
-
 fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -655,6 +756,7 @@ mod tests {
     use super::*;
     use clap::Parser;
     use edda_conductor::plan::parser::parse_plan;
+    use edda_conductor::state::persist::save_state;
 
     /// Minimal parser harness: `ConductCmd` is a `Subcommand`, so it needs a
     /// root command to be parsed standalone.
@@ -675,6 +777,192 @@ mod tests {
             ConductCmd::Run { agent, .. } => agent,
             _ => panic!("expected the Run subcommand"),
         }
+    }
+
+    /// GH-557 harness: a real git repo plus one worktree, with a conductor
+    /// state for `plan-x` fabricated inside the worktree's `.edda` — the
+    /// exact shape of a plan launched with `--cwd <worktree>`.
+    fn repo_with_worktree_state() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let wt = dir.path().join("wt");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q"], &root);
+        std::fs::write(root.join("f.txt"), "x").unwrap();
+        git(&["add", "."], &root);
+        git(
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-qm",
+                "init",
+            ],
+            &root,
+        );
+        git(
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "wt-branch",
+                wt.to_str().unwrap(),
+            ],
+            &root,
+        );
+
+        let plan_yaml = "name: plan-x\nphases:\n  - id: a\n    prompt: x\n";
+        let plan = parse_plan(plan_yaml).unwrap();
+        let state = edda_conductor::state::machine::PlanState::from_plan(&plan, "plan-x.yaml");
+        let state_dir = wt.join(".edda").join("conductor").join("plan-x");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::to_string_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        (dir, wt)
+    }
+
+    /// GH-557 regression: a plan state that lives in a worktree is acted on
+    /// by the recovery verbs from the MAIN repo cwd — the exact dead end
+    /// from the issue (`conduct run` resumes it, its own message names
+    /// retry/skip/abort, and those answered "no state for plan").
+    ///
+    /// Verified to FAIL before the fix: with store resolution reduced to the
+    /// repo root, `retry` errors with "no state for plan \"plan-x\"".
+    #[test]
+    fn retry_resolves_state_living_in_a_worktree() {
+        let (_dir, wt) = repo_with_worktree_state();
+        let root = _dir.path().join("repo");
+
+        // The old failure mode, asserted directly.
+        assert!(
+            load_state(&root, "plan-x").unwrap().is_none(),
+            "precondition: the state is NOT in the repo root store"
+        );
+
+        // A failed phase, as the blocked runner leaves it.
+        let mut state = load_state(&wt, "plan-x").unwrap().unwrap();
+        state.phases[0].status = PhaseStatus::Failed;
+        state.plan_status = PlanStatus::Blocked;
+        save_state(&wt, &state).unwrap();
+
+        retry(&root, "a", Some("plan-x")).unwrap();
+
+        let reloaded = load_state(&wt, "plan-x").unwrap().unwrap();
+        assert_eq!(reloaded.phases[0].status, PhaseStatus::Pending);
+        assert_eq!(reloaded.plan_status, PlanStatus::Running);
+        // The fix never writes a duplicate store in the repo root.
+        assert!(
+            !root.join(".edda").join("conductor").join("plan-x").exists(),
+            "the fix must act in place, not fork the state into the repo root"
+        );
+    }
+
+    /// GH-557 (independent-review P1-4): `status` itself must list and
+    /// resolve worktree-launched plans — tested through the same code path
+    /// the verb runs, not a helper that did not exist before the fix.
+    #[test]
+    fn status_lists_and_resolves_worktree_launch_plans() {
+        let (_dir, _wt) = repo_with_worktree_state();
+        let root = _dir.path().join("repo");
+
+        // Unnamed listing: the worktree plan must appear, with provenance.
+        let text = status_impl(&root, None, false).unwrap();
+        assert!(text.contains("plan-x"), "{text}");
+        assert!(
+            text.contains("wt"),
+            "listing must show store provenance: {text}"
+        );
+
+        // Named: resolves into the worktree store and renders the state.
+        let named = status_impl(&root, Some("plan-x"), false).unwrap();
+        assert!(named.contains("plan-x"), "{named}");
+        assert!(named.contains("Pending"), "{named}");
+
+        // Unknown plan: honest emptiness, not another store's data.
+        let missing = status_impl(&root, Some("plan-y"), false).unwrap();
+        assert!(missing.contains("no state file found"), "{missing}");
+    }
+
+    /// GH-557 (independent-review P1-4): skip and abort act on the
+    /// worktree store in place.
+    #[test]
+    fn skip_and_abort_act_on_worktree_store_from_repo_root() {
+        let (_dir, wt) = repo_with_worktree_state();
+        let root = _dir.path().join("repo");
+
+        let mut state = load_state(&wt, "plan-x").unwrap().unwrap();
+        state.phases[0].status = PhaseStatus::Failed;
+        state.plan_status = PlanStatus::Blocked;
+        save_state(&wt, &state).unwrap();
+
+        skip(&root, "a", Some("lane handed off"), Some("plan-x")).unwrap();
+        let reloaded = load_state(&wt, "plan-x").unwrap().unwrap();
+        assert_eq!(reloaded.phases[0].status, PhaseStatus::Skipped);
+        assert_eq!(
+            reloaded.phases[0].skip_reason.as_deref(),
+            Some("lane handed off")
+        );
+
+        abort(&root, Some("plan-x")).unwrap();
+        let reloaded = load_state(&wt, "plan-x").unwrap().unwrap();
+        assert_eq!(reloaded.plan_status, PlanStatus::Aborted);
+        assert!(!root.join(".edda").join("conductor").join("plan-x").exists());
+    }
+
+    /// GH-557: a corrupt state file is an ERROR, not "no state" — swallowing
+    /// it could retarget a mutating verb onto a stale same-name state in
+    /// another store (independent-review P1-1).
+    #[test]
+    fn resolve_plan_store_propagates_corrupt_state_as_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join(".edda").join("conductor").join("plan-x")).unwrap();
+        std::fs::write(
+            root.join(".edda")
+                .join("conductor")
+                .join("plan-x")
+                .join("state.json"),
+            b"{corrupt",
+        )
+        .unwrap();
+
+        let err = resolve_plan_store(&root, "plan-x").unwrap_err();
+        assert!(
+            err.to_string().contains("unreadable"),
+            "corrupt state must surface as unreadable: {err}"
+        );
+    }
+
+    /// GH-557: with no matching state anywhere, the error names the searched
+    /// stores (capped) instead of the bare "no state for plan".
+    #[test]
+    fn no_state_error_names_the_searched_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let err = no_state_error(&root, "plan-x");
+        let text = err.to_string();
+        assert!(text.contains("searched:"), "{text}");
+        assert!(text.contains("plan-x"), "{text}");
     }
 
     #[test]
