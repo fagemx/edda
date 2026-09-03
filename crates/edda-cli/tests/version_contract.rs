@@ -44,6 +44,25 @@ fn git_metadata_paths_follow_a_worktree_head_to_its_ref() {
 }
 
 #[test]
+fn git_metadata_paths_watch_packed_refs_and_a_new_loose_ref() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let common_dir = temp.path().join("common");
+    let ref_dir = common_dir.join("refs").join("heads");
+    let head_path = temp.path().join("worktrees").join("pr804").join("HEAD");
+    let packed_refs = common_dir.join("packed-refs");
+    std::fs::create_dir_all(head_path.parent().expect("HEAD parent")).expect("create HEAD parent");
+    std::fs::create_dir_all(&ref_dir).expect("create ref directory");
+    std::fs::write(&head_path, "ref: refs/heads/feature\n").expect("write HEAD");
+    std::fs::write(&packed_refs, "0123456789abcdef refs/heads/feature\n")
+        .expect("write packed refs");
+
+    assert_eq!(
+        build_identity::git_metadata_paths(&head_path, &common_dir),
+        vec![head_path, packed_refs, ref_dir]
+    );
+}
+
+#[test]
 fn version_reports_the_built_commit_and_date() {
     let output = Command::new(edda_bin())
         .arg("--version")

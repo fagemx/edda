@@ -20,11 +20,21 @@ pub fn git_metadata_paths(head_path: &Path, common_dir: &Path) -> Vec<PathBuf> {
 
     if let Some(reference) = reference {
         let ref_path = common_dir.join(reference);
-        paths.push(if ref_path.exists() {
-            ref_path
-        } else {
-            common_dir.join("packed-refs")
-        });
+        let ref_exists = ref_path.exists();
+        if ref_exists {
+            paths.push(ref_path.clone());
+        }
+
+        let packed_refs = common_dir.join("packed-refs");
+        if packed_refs.exists() {
+            paths.push(packed_refs);
+        }
+
+        if !ref_exists {
+            if let Some(parent) = ref_path.parent().filter(|parent| parent.is_dir()) {
+                paths.push(parent.to_path_buf());
+            }
+        }
     }
 
     paths
