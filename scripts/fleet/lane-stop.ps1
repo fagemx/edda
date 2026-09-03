@@ -47,7 +47,7 @@ if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
 # Resolve scheduled task: support exact name, edda-lane-$Name, and edda-$Name (covers edda-review-pr*-r*) (GH-712)
 $task = $null
 $TaskName = $null
-$candidateTaskNames = @($Name, "edda-lane-$Name", "edda-$Name")
+$candidateTaskNames = @("edda-$Name", "edda-lane-$Name", $Name)
 foreach ($cand in $candidateTaskNames) {
   $t = Get-ScheduledTask -TaskName $cand -ErrorAction SilentlyContinue
   if ($t) {
@@ -64,8 +64,8 @@ if (-not $task) {
 # 1. From the task's registered action argument line (works for both worker and review lanes)
 $Wrapper = $null
 $actionArg = if ($task.Actions -and $task.Actions.Count -gt 0) { $task.Actions[0].Arguments } else { $null }
-if ($actionArg -and $actionArg -match '-File\s+"?([^"\s]+)"?') {
-  $extracted = $Matches[1]
+if ($actionArg -and $actionArg -match '-File\s+("([^"]+)"|''([^'']+)''|([^\s]+))') {
+  $extracted = if ($Matches[2]) { $Matches[2] } elseif ($Matches[3]) { $Matches[3] } else { $Matches[4] }
   if (Test-Path -LiteralPath $extracted -PathType Leaf) {
     $Wrapper = $extracted
   }
@@ -78,7 +78,9 @@ if (-not $Wrapper) {
     (Join-Path $LogDir "$Name.wrapper.ps1"),
     (Join-Path $LogDir "$lane.wrapper.ps1"),
     (Join-Path $LogDir "$Name.ps1"),
-    (Join-Path $LogDir "$lane.ps1")
+    (Join-Path $LogDir "$lane.ps1"),
+    (Join-Path $LogDir "$Name-lane.ps1"),
+    (Join-Path $LogDir "$lane-lane.ps1")
   )
   foreach ($c in $candidates) {
     if (Test-Path -LiteralPath $c -PathType Leaf) {
@@ -92,15 +94,21 @@ if (-not $Wrapper -or -not (Test-Path -LiteralPath $Wrapper -PathType Leaf)) {
   Fail "wrapper not found for task $TaskName; cannot verify the lane's process tree by CommandLine"
 }
 
+# Derive .log and .done paths: review lanes name the wrapper review-pr<N>-r<R>-lane.ps1
+# while .log and .done are review-pr<N>-r<R>.log/.done (without the -lane suffix, GH-712 P1-1).
 $base = $Wrapper -replace '\.(wrapper\.)?ps1$', ''
-$Log = "$base.log"
-$Done = "$base.done"
+$cleanBase = $base -replace '-lane$', ''
+$Log = if (Test-Path -LiteralPath "$cleanBase.log") { "$cleanBase.log" } elseif (Test-Path -LiteralPath "$base.log") { "$base.log" } else { "$cleanBase.log" }
+$Done = if (Test-Path -LiteralPath "$cleanBase.done") { "$cleanBase.done" } elseif (Test-Path -LiteralPath "$base.done") { "$base.done" } else { "$cleanBase.done" }
 
 # What the lane's processes look like on the command line. The wrapper path
 # matches the wrapper itself; the brief path matches the child process and
 # stays identifiable after the wrapper is already dead.
 $wrapperBody = Get-Content -LiteralPath $Wrapper -Raw
-$brief = if ($wrapperBody -match "--prompt-file\s+['""]?([^'""]+)['""]?") { $Matches[1] } else { $null }
+$brief = if ($wrapperBody -match '--prompt-file\s+[''"]([^''"]+)[''"]') {
+  $b = $Matches[1].Trim()
+  if ($b.Length -gt 4) { $b } else { $null }
+} else { $null }
 
 function Get-ProcessSnapshot {
   # Index children by parent PID using explicit [int] keys (GH-706: Win32_Process

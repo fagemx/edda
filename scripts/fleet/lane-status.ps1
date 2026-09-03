@@ -15,7 +15,7 @@ param(
 )
 
 $tasks = if ($Name) {
-  $cand = @($Name, "edda-lane-$Name", "edda-$Name")
+  $cand = @("edda-$Name", "edda-lane-$Name", $Name)
   $found = @()
   foreach ($c in $cand) {
     $t = @(Get-ScheduledTask -TaskName $c -ErrorAction SilentlyContinue)
@@ -34,24 +34,38 @@ if ($tasks.Count -eq 0) {
   exit 1
 }
 
-# Snapshot once to check live processes (GH-712: "A stopped-lane check is available to the controller as one command")
+# Snapshot once and index children for live process tree traversal (GH-712 P1-3)
 $allProcs = @(Get-CimInstance Win32_Process)
+$childrenOf = @{}
+foreach ($p in $allProcs) {
+  $ppid = [int]$p.ParentProcessId
+  $procId = [int]$p.ProcessId
+  if (-not $childrenOf.ContainsKey($ppid)) {
+    $childrenOf[$ppid] = New-Object System.Collections.Generic.List[int]
+  }
+  $childrenOf[$ppid].Add($procId)
+}
 
 foreach ($t in $tasks) {
   $info = Get-ScheduledTaskInfo -TaskName $t.TaskName
 
   $wrapper = $null
   $actionArg = if ($t.Actions -and $t.Actions.Count -gt 0) { $t.Actions[0].Arguments } else { $null }
-  if ($actionArg -and $actionArg -match '-File\s+"?([^"\s]+)"?') {
-    $wrapper = $Matches[1]
+  if ($actionArg -and $actionArg -match '-File\s+("([^"]+)"|''([^'']+)''|([^\s]+))') {
+    $extracted = if ($Matches[2]) { $Matches[2] } elseif ($Matches[3]) { $Matches[3] } else { $Matches[4] }
+    if (Test-Path -LiteralPath $extracted -PathType Leaf) {
+      $wrapper = $extracted
+    }
   }
 
   $log = $null
   $done = $null
   if ($wrapper -and (Test-Path -LiteralPath $wrapper)) {
+    # Strip -lane suffix for review lanes where wrapper is review-pr<N>-r<R>-lane.ps1 (GH-712 P1-2)
     $base = $wrapper -replace '\.(wrapper\.)?ps1$', ''
-    $log = "$base.log"
-    $done = "$base.done"
+    $cleanBase = $base -replace '-lane$', ''
+    $log = if (Test-Path -LiteralPath "$cleanBase.log") { "$cleanBase.log" } elseif (Test-Path -LiteralPath "$base.log") { "$base.log" } else { "$cleanBase.log" }
+    $done = if (Test-Path -LiteralPath "$cleanBase.done") { "$cleanBase.done" } elseif (Test-Path -LiteralPath "$base.done") { "$base.done" } else { "$cleanBase.done" }
   } else {
     $lane = $t.TaskName -replace '^edda-lane-', '' -replace '^edda-', ''
     $log = Join-Path $LogDir "$lane.log"
@@ -67,10 +81,35 @@ foreach ($t in $tasks) {
     if ($LASTEXITCODE -eq 0 -and $h) { $head = $h }
   }
 
-  # Live process count: check if any process currently on system names this wrapper
+  # Live process count: traverse wrapper, brief, and their full descendant trees (GH-712 P1-3)
   $liveProcs = 0
   if ($wrapper) {
-    $liveProcs = @($allProcs | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($wrapper) }).Count
+    $brief = if (Test-Path -LiteralPath $wrapper) {
+      $wb = Get-Content -LiteralPath $wrapper -Raw
+      if ($wb -match '--prompt-file\s+[''"]([^''"]+)[''"]') {
+        $b = $Matches[1].Trim()
+        if ($b.Length -gt 4) { $b } else { $null }
+      } else { $null }
+    } else { $null }
+
+    $seeds = @($allProcs | Where-Object {
+      $_.ProcessId -ne $PID -and $_.CommandLine -and (
+        $_.CommandLine.Contains($wrapper) -or
+        ($brief -and $_.CommandLine.Contains($brief)))
+    })
+    $liveSet = New-Object System.Collections.Generic.HashSet[int]
+    $q = New-Object System.Collections.Generic.Queue[int]
+    foreach ($s in $seeds) { [void]$liveSet.Add([int]$s.ProcessId); $q.Enqueue([int]$s.ProcessId) }
+    while ($q.Count -gt 0) {
+      $curr = $q.Dequeue()
+      if (-not $childrenOf.ContainsKey($curr)) { continue }
+      foreach ($c in $childrenOf[$curr]) {
+        if ($c -ne $PID -and $liveSet.Add($c)) {
+          $q.Enqueue($c)
+        }
+      }
+    }
+    $liveProcs = $liveSet.Count
   }
 
   "{0} state={1} lastTaskResult={2} logBytes={3} done={4} head={5} cwd={6} liveProcs={7}" -f `
