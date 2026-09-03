@@ -32,6 +32,35 @@ pub fn execute(
     }
 
     let ledger = Ledger::open(repo_root)?;
+    let is_registered = edda_store::registry::is_registered(repo_root);
+
+    if !is_registered {
+        eprintln!(
+            "Warning: workspace at {} is not registered in edda registry (run `edda init`)",
+            repo_root.display()
+        );
+    }
+    match ledger.count_events() {
+        Ok(0) => eprintln!(
+            "Warning: workspace ledger at {} is empty (0 events recorded)",
+            repo_root.display()
+        ),
+        Err(e) => eprintln!(
+            "Warning: workspace ledger events at {} could not be read: {e}",
+            repo_root.display()
+        ),
+        Ok(_) => match ledger.count_decisions() {
+            Ok(0) => eprintln!(
+                "Warning: workspace ledger at {} has 0 decisions recorded",
+                repo_root.display()
+            ),
+            Err(e) => eprintln!(
+                "Warning: workspace ledger decisions at {} could not be read: {e}",
+                repo_root.display()
+            ),
+            Ok(_) => {}
+        },
+    }
 
     // Build transcript search callback
     let transcript_cb = build_transcript_callback(repo_root, None);
@@ -82,6 +111,13 @@ fn hit_count(r: &edda_ask::AskResult) -> usize {
         + r.dependents.len()
 }
 
+fn open_ledger_for_read(root: &Path) -> anyhow::Result<Ledger> {
+    match Ledger::open(root) {
+        Ok(l) => Ok(l),
+        Err(_) => Ledger::open_existing(root),
+    }
+}
+
 /// Ask the rest of the fleet whether a local miss is really absence (GH-407,
 /// acceptance 4).
 ///
@@ -96,7 +132,7 @@ fn fleet_hint_for_ask(repo_root: &Path, q: &str, opts: &AskOptions) -> Option<St
     let home = edda_store::project_id(repo_root);
     crate::fleet::elsewhere_hint(&scope, &home, "result", |entry| {
         let root = Path::new(&entry.path);
-        let ledger = Ledger::open(root)?;
+        let ledger = open_ledger_for_read(root)?;
         let cb = build_transcript_callback(root, Some(&entry.name));
         let cb_ref: Option<&TranscriptSearchFn> = cb.as_ref().map(|f| f.as_ref());
         Ok(hit_count(&ask(&ledger, q, opts, cb_ref)?))
@@ -115,7 +151,7 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
 
     let (hits, misses) = crate::fleet::fan_out(&scope, |entry| {
         let root = Path::new(&entry.path);
-        let ledger = Ledger::open(root)?;
+        let ledger = open_ledger_for_read(root)?;
         let cb = build_transcript_callback(root, Some(&entry.name));
         let cb_ref: Option<&TranscriptSearchFn> = cb.as_ref().map(|f| f.as_ref());
         let mut result = ask(&ledger, q, opts, cb_ref)?;
@@ -247,6 +283,7 @@ mod tests {
             tasks: Vec::new(),
             dependents: Vec::new(),
             override_risk: None,
+            ..Default::default()
         };
         assert_eq!(hit_count(&r), 0, "an empty result is empty");
 
@@ -284,6 +321,7 @@ mod tests {
             tasks: Vec::new(),
             dependents: Vec::new(),
             override_risk: None,
+            ..Default::default()
         };
 
         assert_eq!(hit_count(&empty), 0, "nothing was found");

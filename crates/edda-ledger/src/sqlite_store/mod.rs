@@ -13,6 +13,7 @@ mod task_leases;
 pub mod types;
 mod village;
 
+pub use schema::{UnsupportedSchemaVersionError, MAX_KNOWN_SCHEMA_VERSION};
 pub use types::*;
 
 use rusqlite::Connection;
@@ -73,6 +74,7 @@ impl SqliteStore {
         store
             .conn
             .execute_batch("PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;")?;
+        store.check_schema_version_supported()?;
         Ok(store)
     }
 

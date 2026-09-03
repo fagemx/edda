@@ -24,3 +24,8 @@ sha2.workspace = true
 hex.workspace = true
 tracing.workspace = true
 globset.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

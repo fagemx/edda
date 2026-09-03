@@ -48,7 +48,7 @@ pub fn detect_input_type(query: &str, known_domains: &[String]) -> InputType {
 
 // ── Result types ─────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Default, Serialize)]
 pub struct AskResult {
     pub query: String,
     pub input_type: String,
@@ -65,6 +65,12 @@ pub struct AskResult {
     pub dependents: Vec<DependentHit>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub override_risk: Option<OverrideRisk>,
+    /// Count of total events in the workspace ledger, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_event_count: Option<u64>,
+    /// Count of total decisions in the workspace ledger, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_decision_count: Option<u64>,
 }
 
 /// A task matched by `ask`. The receipt is the point — it is where a finished
@@ -428,6 +434,9 @@ pub fn ask(
         (vec![], None)
     };
 
+    let workspace_event_count = ledger.count_events().ok();
+    let workspace_decision_count = ledger.count_decisions().ok();
+
     Ok(AskResult {
         query: q.to_string(),
         input_type: input_type_str.to_string(),
@@ -439,6 +448,8 @@ pub fn ask(
         tasks,
         dependents,
         override_risk,
+        workspace_event_count,
+        workspace_decision_count,
     })
 }
 
@@ -903,7 +914,15 @@ pub fn format_human(result: &AskResult) -> String {
     }
 
     if out.is_empty() {
-        out.push_str("No results found.\n");
+        if result.workspace_event_count == Some(0) {
+            out.push_str("No results found (workspace ledger is empty; 0 events recorded).\n");
+        } else if result.workspace_decision_count == Some(0) {
+            out.push_str(
+                "No results found (workspace ledger has 0 decisions recorded; run `edda decide` to record decisions).\n",
+            );
+        } else {
+            out.push_str("No results found.\n");
+        }
     }
 
     out
@@ -1547,6 +1566,7 @@ mod tests {
             tasks: vec![],
             dependents: vec![],
             override_risk: None,
+            ..Default::default()
         };
 
         let output = format_human(&result);
@@ -1606,6 +1626,7 @@ mod tests {
             tasks: vec![],
             dependents: vec![],
             override_risk: None,
+            ..Default::default()
         };
 
         let output = format_human(&result);
@@ -1630,10 +1651,37 @@ mod tests {
             tasks: vec![],
             dependents: vec![],
             override_risk: None,
+            workspace_event_count: Some(5),
+            workspace_decision_count: Some(2),
         };
 
         let output = format_human(&result);
-        assert!(output.contains("No results found"));
+        assert_eq!(output, "No results found.\n");
+    }
+
+    #[test]
+    fn format_human_empty_ledger_distinguished_from_empty_results() {
+        let result_empty_ledger = AskResult {
+            query: "test".into(),
+            workspace_event_count: Some(0),
+            workspace_decision_count: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_human(&result_empty_ledger),
+            "No results found (workspace ledger is empty; 0 events recorded).\n"
+        );
+
+        let result_zero_decisions = AskResult {
+            query: "test".into(),
+            workspace_event_count: Some(1),
+            workspace_decision_count: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_human(&result_zero_decisions),
+            "No results found (workspace ledger has 0 decisions recorded; run `edda decide` to record decisions).\n"
+        );
     }
 
     // ── Impact analysis tests ───────────────────────────────────────
@@ -1956,6 +2004,7 @@ mod tests {
                 dependent_count: 2,
                 suggestion: Some("建議覆蓋順序: api.format → db.schema".into()),
             }),
+            ..Default::default()
         };
 
         let output = format_human(&result);

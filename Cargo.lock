@@ -972,6 +972,7 @@ name = "edda-ledger"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "edda-core",
  "fs2",
  "globset",
@@ -981,6 +982,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "time",
  "tracing",
@@ -1120,12 +1122,14 @@ name = "edda-transcript"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "dirs",
  "edda-store",
  "fs2",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
+ "time",
 ]
 
 [[package]]

@@ -724,7 +724,9 @@ fn digest_one_session(
         stats.output_tokens = usage.output_tokens;
         stats.cache_read_tokens = usage.cache_read_tokens;
         stats.cache_creation_tokens = usage.cache_creation_tokens;
-        stats.estimated_cost_usd = super::helpers::measured_cost(&usage);
+        stats.estimated_cost_usd = usage
+            .cost_usd
+            .or_else(|| super::helpers::measured_cost(&usage));
     }
 
     // Collect session notes and decisions from workspace ledger
@@ -971,6 +973,22 @@ pub fn digest_session_manual(
     let parent_hash = ledger.last_event_hash()?;
 
     stats.tasks_snapshot = load_tasks_for_digest(project_id);
+
+    // Enrich with usage data (model, tokens, cost) from transcript signals
+    {
+        let usage = crate::signals::read_usage_state(project_id);
+        if !usage.model.is_empty() {
+            stats.model = usage.model.clone();
+        }
+        stats.input_tokens = usage.input_tokens;
+        stats.output_tokens = usage.output_tokens;
+        stats.cache_read_tokens = usage.cache_read_tokens;
+        stats.cache_creation_tokens = usage.cache_creation_tokens;
+        stats.estimated_cost_usd = usage
+            .cost_usd
+            .or_else(|| super::helpers::measured_cost(&usage));
+    }
+
     let (_decisions, notes) = collect_session_ledger_extras(cwd, stats.first_ts.as_deref());
 
     // Identity proof of the consumed prefix, stamped into the note so the

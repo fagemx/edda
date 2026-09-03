@@ -224,8 +224,32 @@ CREATE TABLE IF NOT EXISTS task_leases (
 CREATE INDEX IF NOT EXISTS idx_task_leases_expires_at ON task_leases(expires_at);
 ";
 
+/// The maximum schema version known and supported by this binary.
+pub const MAX_KNOWN_SCHEMA_VERSION: u32 = 13;
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+#[error("refusing to open ledger: stored schema version {stored} is newer than maximum supported version {max} (upgrade edda to open this workspace)")]
+pub struct UnsupportedSchemaVersionError {
+    pub stored: u32,
+    pub max: u32,
+}
+
 impl SqliteStore {
+    pub(super) fn check_schema_version_supported(&self) -> anyhow::Result<()> {
+        let current = self.schema_version()?;
+        if current > MAX_KNOWN_SCHEMA_VERSION {
+            anyhow::bail!(UnsupportedSchemaVersionError {
+                stored: current,
+                max: MAX_KNOWN_SCHEMA_VERSION,
+            });
+        }
+        Ok(())
+    }
+
     pub(super) fn apply_schema(&self) -> anyhow::Result<()> {
+        // Enforce that the ledger version is not newer than our max supported version.
+        self.check_schema_version_supported()?;
+
         // Always apply v1 base schema (idempotent via IF NOT EXISTS)
         self.conn.execute_batch(SCHEMA_SQL)?;
 
@@ -986,5 +1010,71 @@ impl SqliteStore {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn test_refuse_newer_schema_version_on_open_or_create() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("ledger.db");
+
+        // Manually create a database with a future schema version (e.g. 99)
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO schema_meta (key, value) VALUES ('version', '99');",
+            )
+            .unwrap();
+        }
+
+        // Attempting to open_or_create must fail with UnsupportedSchemaVersionError
+        let err = match SqliteStore::open_or_create(&db_path) {
+            Ok(_) => panic!("open_or_create should have failed on newer schema"),
+            Err(e) => e,
+        };
+        let version_err = err
+            .downcast_ref::<UnsupportedSchemaVersionError>()
+            .expect("should fail with UnsupportedSchemaVersionError");
+        assert_eq!(version_err.stored, 99);
+        assert_eq!(version_err.max, MAX_KNOWN_SCHEMA_VERSION);
+        assert!(err
+            .to_string()
+            .contains("stored schema version 99 is newer than maximum supported version 13"));
+    }
+
+    #[test]
+    fn test_refuse_newer_schema_version_on_open_existing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("ledger.db");
+
+        // Manually create a database with a future schema version (e.g. 99)
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO schema_meta (key, value) VALUES ('version', '99');",
+            )
+            .unwrap();
+        }
+
+        // Attempting to open_existing must fail with UnsupportedSchemaVersionError
+        let err = match SqliteStore::open_existing(&db_path) {
+            Ok(_) => panic!("open_existing should have failed on newer schema"),
+            Err(e) => e,
+        };
+        let version_err = err
+            .downcast_ref::<UnsupportedSchemaVersionError>()
+            .expect("should fail with UnsupportedSchemaVersionError");
+        assert_eq!(version_err.stored, 99);
+        assert_eq!(version_err.max, MAX_KNOWN_SCHEMA_VERSION);
+        assert!(err
+            .to_string()
+            .contains("stored schema version 99 is newer than maximum supported version 13"));
     }
 }

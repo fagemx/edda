@@ -27,6 +27,7 @@ pub use domain::{
 pub use ledger::Ledger;
 pub use lock::WorkspaceLock;
 pub use paths::{validate_branch_name, EddaPaths};
+pub use sqlite_store::{UnsupportedSchemaVersionError, MAX_KNOWN_SCHEMA_VERSION};
 pub use tasks::{TaskStatus, TaskView};
 pub use tombstone::{append_tombstone, list_tombstones, make_tombstone, DeleteReason, Tombstone};
 pub use verdict::{latest_verdict, parse_verdict_event, VerdictRecord};
