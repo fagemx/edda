@@ -196,11 +196,15 @@ pub fn run(
     // operator/agent stands in), then the run cwd's — reads scan all of
     // them, so at least one lands inside plan_stores scope.
     // Round-4 P1-4: the chain is a pure function so tests can drive it.
-    for root in registry_roots_for(
-        &cwd,
-        &std::env::current_dir().unwrap_or_else(|_| cwd.clone()),
-    ) {
-        registry_record(&root, &plan.name, &cwd);
+    // Round-5 P2: a dry run writes nothing — no registry entries for a plan
+    // that never ran.
+    if !dry_run {
+        for root in registry_roots_for(
+            &cwd,
+            &std::env::current_dir().unwrap_or_else(|_| cwd.clone()),
+        ) {
+            registry_record(&root, &plan.name, &cwd);
+        }
     }
 
     let order = edda_conductor::plan::topo::topo_sort(&plan)?;
@@ -367,7 +371,7 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
                             Ok(Some(_)) => mark(name, referenced, &mut found),
                             Ok(None) => continue,
                             Err(e) => eprintln!(
-                                "⚠ plan \"{name}\" (registry → {}) unreadable, listed as broken: {e}",
+                                "⚠ plan \"{name}\" (registry → {}) unreadable, omitted from the listing: {e}",
                                 referenced.display()
                             ),
                         }
@@ -433,14 +437,15 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
             let state = load_state(store, name)?;
             match state {
                 Some(s) => {
-                    out.push_str(&format!(
-                        "  Store: {}\n",
-                        if *store == repo_root {
-                            "(repo root)".to_string()
-                        } else {
-                            store.display().to_string()
-                        }
-                    ));
+                    // Round-5 P0: print the normalized identity — the test
+                    // compares it against normalize_store_path(wt), robust
+                    // to 8.3 short names, slash direction, and case.
+                    let label = if normalize_store_path(store) == normalize_store_path(repo_root) {
+                        "(repo root)".to_string()
+                    } else {
+                        normalize_store_path(store)
+                    };
+                    out.push_str(&format!("  Store: {label}\n"));
                     out.push_str(&print_status_to_string(&s));
                 }
                 None => out.push_str(&format!("Plan \"{name}\": no state file found\n")),
@@ -612,12 +617,12 @@ pub fn skip(
         Ok(false)
     })?;
 
-    println!("  store: {}", store.display());
     if is_waived {
         println!("Phase \"{phase_id}\" gate waived (status kept as GateTimedOut).");
     } else {
         println!("Phase \"{phase_id}\" skipped.");
     }
+    println!("  store: {}", store.display());
     Ok(())
 }
 
@@ -727,7 +732,14 @@ fn normalize_store_path(p: &Path) -> String {
     let canonical = std::fs::canonicalize(p)
         .map(|c| c.to_string_lossy().trim_start_matches(r"\\?\").to_string())
         .unwrap_or_else(|_| p.to_string_lossy().to_string());
-    canonical.replace('/', "\\").to_lowercase()
+    let unified = canonical.replace('/', "\\");
+    // Windows paths are case-insensitive; POSIX paths are not —
+    // lowercasing on Linux would collapse distinct lanes (round-5 P3).
+    if cfg!(windows) {
+        unified.to_lowercase()
+    } else {
+        unified
+    }
 }
 
 fn plan_stores(repo_root: &Path) -> Vec<PathBuf> {
@@ -752,9 +764,10 @@ fn plan_stores(repo_root: &Path) -> Vec<PathBuf> {
                     push(PathBuf::from(path), &mut stores, &mut seen);
                 }
             }
-        } else {
+        } else if repo_root.join(".git").exists() {
             // GH-557 round-3 P1-2: silent degradation turns the no-state
             // error into a false diagnosis ("searched: <repo root>").
+            // Round-5 P3: a non-git cwd (demo projects) is not a fault.
             eprintln!(
                 "⚠ could not enumerate git worktrees ({}); searching the repo root only",
                 String::from_utf8_lossy(&out.stderr).trim()
@@ -774,8 +787,6 @@ fn registry_path(root: &Path) -> PathBuf {
     root.join(".edda").join("conductor").join(".stores.json")
 }
 
-/// Read a store registry. Best-effort: missing or corrupt file reads as an
-/// empty map — the direct worktree scan remains the fallback.
 /// Candidate registry roots for a run launched with `run_cwd`, invoked
 /// from `shell_cwd` (GH-557 round-4 P0-3): the invoking shell's root
 /// first — the lane the operator/agent stands in — then the run cwd's.
@@ -825,8 +836,9 @@ fn registry_read(root: &Path) -> Result<std::collections::BTreeMap<String, PathB
 /// Record plan → store in the registry under `root`, under the registry's
 /// exclusive lock (round-4 P1-2: two concurrent `conduct run` processes
 /// are the parallel-wave norm; unlocked read-modify-write loses entries).
-/// Best-effort: lock contention or a corrupt existing registry prints a
-/// warning and skips the write — discovery still has the direct scan.
+/// Best-effort: the lock is blocking (a concurrent `conduct run` finishes
+/// its write and releases); a corrupt existing registry prints a warning
+/// and skips the write rather than destroying the other entries.
 fn registry_record(root: &Path, plan: &str, store: &Path) {
     let path = registry_path(root);
     if let Some(parent) = path.parent() {
@@ -865,26 +877,24 @@ fn registry_record(root: &Path, plan: &str, store: &Path) {
 /// stale same-name state.
 fn stores_holding(repo_root: &Path, plan: &str) -> Result<Vec<PathBuf>> {
     edda_conductor::state::persist::validate_plan_name(plan)?;
-    let mut holding = Vec::new();
-    for store in plan_stores(repo_root) {
-        match load_state(&store, plan) {
-            Ok(Some(_)) => holding.push(store),
-            Ok(None) => continue,
-            Err(e) => {
-                return Err(e.context(format!(
-                    "plan \"{plan}\" state in {} is unreadable",
-                    store.display()
-                )))
-            }
+    let mut holding: Vec<PathBuf> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    // push: normalized identity (round-5 P1-1 — raw PathBuf equality is
+    // case- and short-name-sensitive on Windows and cried wolf on a single
+    // store), first writer wins.
+    let push = |store: PathBuf, holding: &mut Vec<PathBuf>, seen: &mut Vec<String>| {
+        let key = normalize_store_path(&store);
+        if !seen.contains(&key) {
+            seen.push(key);
+            holding.push(store);
         }
-    }
-    // Registry-referenced stores (recorded by conduct run) — covers plan
-    // YAMLs living outside the repo, which no worktree scan can reach
-    // (round-3 P0-2: the reported incident's store was the plan YAML's own
-    // directory).
+    };
+    // Registry FIRST (round-5 P1-2): it is the store `conduct run` actually
+    // used — the authoritative record. Any stale same-name state.json in
+    // the repo root or a worktree must not outrank it.
     for store in plan_stores(repo_root) {
-        // Round-4 P1-2: a corrupt REGISTRY is read-path noise (warn, keep
-        // scanning) — mutating verbs still propagate corrupt state files.
+        // A corrupt REGISTRY is read-path noise (warn, keep scanning) —
+        // mutating verbs still propagate corrupt state files.
         let registry = match registry_read(&store) {
             Ok(m) => m,
             Err(e) => {
@@ -893,17 +903,29 @@ fn stores_holding(repo_root: &Path, plan: &str) -> Result<Vec<PathBuf>> {
             }
         };
         if let Some(referenced) = registry.get(plan) {
-            if !holding.contains(referenced)
-                && load_state(referenced, plan)
-                    .with_context(|| {
-                        format!(
-                            "plan \"{plan}\" registry points to {}",
-                            referenced.display()
-                        )
-                    })?
-                    .is_some()
+            if load_state(referenced, plan)
+                .with_context(|| {
+                    format!(
+                        "plan \"{plan}\" registry points to {}",
+                        referenced.display()
+                    )
+                })?
+                .is_some()
             {
-                holding.push(referenced.clone());
+                push(referenced.clone(), &mut holding, &mut seen);
+            }
+        }
+    }
+    // Direct scan second.
+    for store in plan_stores(repo_root) {
+        match load_state(&store, plan) {
+            Ok(Some(_)) => push(store, &mut holding, &mut seen),
+            Ok(None) => continue,
+            Err(e) => {
+                return Err(e.context(format!(
+                    "plan \"{plan}\" state in {} is unreadable",
+                    store.display()
+                )))
             }
         }
     }
@@ -1002,13 +1024,42 @@ fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Result<String>
         }
     }
 
+    // Round-5: registry-referenced plans are contributors too — a plan
+    // launched from an external YAML directory is listed by `status`, so
+    // bare recovery verbs must see it (or refuse), never ignore it.
+    for store in plan_stores(repo_root) {
+        let registry = match registry_read(&store) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("⚠ store registry unreadable ({}): {e}", store.display());
+                continue;
+            }
+        };
+        for (name, referenced) in &registry {
+            if load_state(referenced, name)
+                .with_context(|| {
+                    format!(
+                        "plan \"{name}\" registry points to {}",
+                        referenced.display()
+                    )
+                })?
+                .is_some()
+                && !contributing
+                    .iter()
+                    .any(|(s, _)| normalize_store_path(s) == normalize_store_path(referenced))
+            {
+                contributing.push((referenced.clone(), vec![name.clone()]));
+            }
+        }
+    }
+
     if contributing.is_empty() {
         bail!("No plans found. Specify --plan <name>.");
     }
     if contributing.len() > 1 {
         let shown = contributing
             .iter()
-            .map(|(s, ns)| format!("{} ({})", s.display(), ns.join("/")))
+            .map(|(s, ns)| format!("{} ({})", normalize_store_path(s), ns.join("/")))
             .collect::<Vec<_>>()
             .join(", ");
         bail!("Plans found in multiple stores: {shown}. Specify --plan <name>.");
@@ -1174,10 +1225,10 @@ mod tests {
         // naming the exact worktree path (not a substring accident).
         let text = status_impl(&root, None, false).unwrap();
         assert!(text.contains("plan-x"), "{text}");
-        let wt_normalized = wt.to_string_lossy().replace('\\', "/");
+        let wt_identity = normalize_store_path(&wt);
         assert!(
-            text.contains(&wt_normalized),
-            "listing must show the worktree store path: {text}"
+            text.contains(&wt_identity),
+            "listing must show the normalized worktree store identity: {text}"
         );
 
         // Named: resolves into the worktree store and renders the state.
