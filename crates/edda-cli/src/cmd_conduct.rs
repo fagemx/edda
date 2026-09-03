@@ -186,6 +186,22 @@ pub fn run(
         }
     };
 
+    // GH-557 round-3 P0-2: record the store this run actually uses, so the
+    // recovery verbs can find a plan launched from a plain directory (the
+    // plan YAML's own folder — the reported incident's shape) that no
+    // worktree scan can enumerate. Best-effort at the nearest repo root:
+    // the run cwd's, then the invoking shell's.
+    {
+        let registry_root = edda_ledger::EddaPaths::find_root(&cwd)
+            .or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .and_then(|d| edda_ledger::EddaPaths::find_root(&d))
+            })
+            .unwrap_or_else(|| cwd.clone());
+        registry_record(&registry_root, &plan.name, &cwd);
+    }
+
     let order = edda_conductor::plan::topo::topo_sort(&plan)?;
 
     if dry_run {
@@ -324,9 +340,11 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
             None => vec![(name.to_string(), repo_root.to_path_buf())],
         }
     } else {
-        // Round-2 P2: same union resolve_plan_name auto-detects over,
-        // filtered to directories that actually hold a state.json — the
-        // directory-name rule and the state.json rule used to disagree.
+        // Round-2 P2, adjusted by round-3 P1-1: the listing scans the same
+        // union resolve_plan_name auto-detects over, filtered to directories
+        // that hold a parseable state.json. A CORRUPT state file propagates
+        // (an error, never "absent"); the named-missing fallback below
+        // restores status --json's "null" contract.
         let mut found: Vec<(String, PathBuf)> = Vec::new();
         for store in plan_stores(repo_root) {
             let conductor_dir = store.join(".edda").join("conductor");
@@ -337,10 +355,19 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
                 let entry = entry?;
                 if entry.file_type()?.is_dir() {
                     if let Some(name) = entry.file_name().to_str() {
-                        if load_state(&store, name).ok().flatten().is_some()
-                            && !found.iter().any(|(n, _)| n == name)
-                        {
-                            found.push((name.to_string(), store.clone()));
+                        match load_state(&store, name) {
+                            Ok(Some(_)) => {
+                                if !found.iter().any(|(n, _)| n == name) {
+                                    found.push((name.to_string(), store.clone()));
+                                }
+                            }
+                            Ok(None) => continue,
+                            Err(e) => {
+                                return Err(e.context(format!(
+                                    "plan \"{name}\" state in {} is unreadable",
+                                    store.display()
+                                )))
+                            }
                         }
                     }
                 }
@@ -360,27 +387,26 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
     }
 
     if json {
-        // Round-2 P2: propagate, don't silently drop — a corrupt state file
-        // is an error, never an absent entry (same rule as the text mode).
-        let mut states = Vec::new();
-        for (name, store) in &plans {
-            states.push(
-                load_state(store, name)
-                    .with_context(|| format!("plan \"{name}\" in {}", store.display()))?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("plan \"{name}\": no state file in {}", store.display())
-                    })?,
-            );
-        }
-        // Single plan name specified: output object directly; otherwise array
+        // Named-missing keeps the pre-GH-557 "null" contract (round-3 P1-1);
+        // a CORRUPT state file still propagates as an error. The unnamed
+        // listing builds only from parseable states, so its array is clean.
         if plan_name.is_some() {
-            if let Some(s) = states.into_iter().next() {
-                out.push_str(&serde_json::to_string_pretty(&s)?);
-                out.push('\n');
-            } else {
-                out.push_str("null\n");
+            let (name, store) = &plans[0];
+            let state = load_state(store, name)?;
+            match state {
+                Some(s) => {
+                    out.push_str(&serde_json::to_string_pretty(&s)?);
+                    out.push('\n');
+                }
+                None => out.push_str("null\n"),
             }
         } else {
+            let mut states = Vec::new();
+            for (name, store) in &plans {
+                states.push(load_state(store, name)?.ok_or_else(|| {
+                    anyhow::anyhow!("plan \"{name}\": no state file in {}", store.display())
+                })?);
+            }
             out.push_str(&serde_json::to_string_pretty(&states)?);
             out.push('\n');
         }
@@ -690,9 +716,61 @@ fn plan_stores(repo_root: &Path) -> Vec<PathBuf> {
                     }
                 }
             }
+        } else {
+            // GH-557 round-3 P1-2: silent degradation turns the no-state
+            // error into a false diagnosis ("searched: <repo root>").
+            eprintln!(
+                "⚠ could not enumerate git worktrees ({}); searching the repo root only",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
     }
     stores
+}
+
+/// Store registry: `<root>/.edda/conductor/.stores.json` maps plan name →
+/// the store directory `conduct run` actually used (GH-557 round 3, P0-2).
+/// The reported incident's store was the plan YAML's own directory — a
+/// plain path that is neither the repo root nor a registered worktree —
+/// so search-order heuristics can never cover it; `run` records the store
+/// it chose and the recovery verbs look it up.
+fn registry_path(root: &Path) -> PathBuf {
+    root.join(".edda").join("conductor").join(".stores.json")
+}
+
+/// Read a store registry. Best-effort: missing or corrupt file reads as an
+/// empty map — the direct worktree scan remains the fallback.
+fn registry_read(root: &Path) -> std::collections::BTreeMap<String, PathBuf> {
+    let mut map = std::collections::BTreeMap::new();
+    if let Ok(content) = std::fs::read_to_string(registry_path(root)) {
+        if let Ok(parsed) =
+            serde_json::from_str::<std::collections::BTreeMap<String, String>>(&content)
+        {
+            for (plan, store) in parsed {
+                map.insert(plan, PathBuf::from(store));
+            }
+        }
+    }
+    map
+}
+
+/// Record plan → store in the registry under `root`. Best-effort: a failed
+/// write prints a warning; discovery falls back to the worktree scan.
+fn registry_record(root: &Path, plan: &str, store: &Path) {
+    let path = registry_path(root);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut map = registry_read(root);
+    map.insert(plan.to_string(), store.to_path_buf());
+    match serde_json::to_string_pretty(&map) {
+        Ok(data) => {
+            if let Err(e) = edda_store::write_atomic(&path, data.as_bytes()) {
+                eprintln!("⚠ store registry write failed ({}): {e}", path.display());
+            }
+        }
+        Err(e) => eprintln!("⚠ store registry serialize failed: {e}"),
+    }
 }
 
 /// Every store currently holding `<plan>`'s state.json (GH-557), in
@@ -712,6 +790,26 @@ fn stores_holding(repo_root: &Path, plan: &str) -> Result<Vec<PathBuf>> {
                     "plan \"{plan}\" state in {} is unreadable",
                     store.display()
                 )))
+            }
+        }
+    }
+    // Registry-referenced stores (recorded by conduct run) — covers plan
+    // YAMLs living outside the repo, which no worktree scan can reach
+    // (round-3 P0-2: the reported incident's store was the plan YAML's own
+    // directory).
+    for store in plan_stores(repo_root) {
+        if let Some(referenced) = registry_read(&store).get(plan) {
+            if !holding.contains(referenced)
+                && load_state(referenced, plan)
+                    .with_context(|| {
+                        format!(
+                            "plan \"{plan}\" registry points to {}",
+                            referenced.display()
+                        )
+                    })?
+                    .is_some()
+            {
+                holding.push(referenced.clone());
             }
         }
     }
@@ -775,39 +873,57 @@ fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Result<String>
         return Ok(name.to_string());
     }
 
-    // GH-557 review round 2, P1-3: auto-detection spans the same stores
-    // `status` lists — the shipped agent recovery loop reads `status --json`
-    // and then runs retry/skip/abort WITHOUT --plan, so a split resolution
-    // let `abort` hit the wrong plan or dead-end. Scanning the same union
-    // makes the read and write verbs agree; more than one plan still
-    // requires an explicit --plan, so a destructive verb can never silently
-    // resolve across lanes.
-    let mut names: Vec<String> = Vec::new();
+    // GH-557 review rounds 2–3: the auto-detection scope is the INVOKING
+    // store (repo_root), falling back to another store only when exactly
+    // one store on the machine holds any plan. Once more than one store
+    // contributes, a destructive verb requires an explicit --plan — bare
+    // auto-detection across lanes is how `abort` hits the wrong plan.
+    // Corrupt state files propagate (they are errors, never "absent").
+    let mut contributing: Vec<(PathBuf, Vec<String>)> = Vec::new();
     for store in plan_stores(repo_root) {
         let conductor_dir = store.join(".edda").join("conductor");
         if !conductor_dir.exists() {
             continue;
         }
+        let mut store_names = Vec::new();
         for entry in std::fs::read_dir(&conductor_dir)? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 if let Some(n) = entry.file_name().to_str() {
-                    if load_state(&store, n).ok().flatten().is_some()
-                        && !names.iter().any(|existing| existing == n)
-                    {
-                        names.push(n.to_string());
+                    match load_state(&store, n) {
+                        Ok(Some(_)) => store_names.push(n.to_string()),
+                        Ok(None) => continue,
+                        Err(e) => {
+                            return Err(e.context(format!(
+                                "plan \"{n}\" state in {} is unreadable",
+                                store.display()
+                            )))
+                        }
                     }
                 }
             }
         }
+        if !store_names.is_empty() {
+            contributing.push((store, store_names));
+        }
     }
+
+    if contributing.is_empty() {
+        bail!("No plans found. Specify --plan <name>.");
+    }
+    if contributing.len() > 1 {
+        let shown = contributing
+            .iter()
+            .map(|(s, ns)| format!("{} ({})", s.display(), ns.join("/")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("Plans found in multiple stores: {shown}. Specify --plan <name>.");
+    }
+    let names = &contributing[0].1;
 
     match names.len() {
         0 => bail!("No plans found. Specify --plan <name>."),
-        1 => Ok(names
-            .into_iter()
-            .next()
-            .context("expected exactly one plan")?),
+        1 => Ok(names[0].clone()),
         _ => bail!(
             "Multiple plans found: {}. Use --plan to specify.",
             names.join(", ")
@@ -957,15 +1073,17 @@ mod tests {
     /// the verb runs, not a helper that did not exist before the fix.
     #[test]
     fn status_lists_and_resolves_worktree_launch_plans() {
-        let (_dir, _wt) = repo_with_worktree_state();
+        let (_dir, wt) = repo_with_worktree_state();
         let root = _dir.path().join("repo");
 
-        // Unnamed listing: the worktree plan must appear, with provenance.
+        // Unnamed listing: the worktree plan must appear, with provenance
+        // naming the exact worktree path (not a substring accident).
         let text = status_impl(&root, None, false).unwrap();
         assert!(text.contains("plan-x"), "{text}");
+        let wt_normalized = wt.to_string_lossy().replace('\\', "/");
         assert!(
-            text.contains("wt"),
-            "listing must show store provenance: {text}"
+            text.contains(&wt_normalized),
+            "listing must show the worktree store path: {text}"
         );
 
         // Named: resolves into the worktree store and renders the state.
@@ -1026,6 +1144,91 @@ mod tests {
             err.to_string().contains("unreadable"),
             "corrupt state must surface as unreadable: {err}"
         );
+    }
+
+    /// GH-557 (independent-review round 3, P0-2): `conduct run` records the
+    /// store it used in the registry, and a plan launched from a plain
+    /// directory — the plan YAML's own folder, neither the repo root nor a
+    /// worktree — is then recoverable from the repo root. This is the
+    /// reported incident's actual shape (parallel-wave launches with no
+    /// --cwd, plan YAMLs live outside the repo).
+    #[test]
+    fn registry_recorded_store_is_recoverable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let plans_dir = dir.path().join("scratchpad");
+        std::fs::create_dir_all(root.join(".edda").join("conductor")).unwrap();
+        std::fs::create_dir_all(&plans_dir).unwrap();
+
+        let plan = parse_plan("name: plan-x\nphases:\n  - id: a\n    prompt: x\n").unwrap();
+        let mut state = edda_conductor::state::machine::PlanState::from_plan(&plan, "plan-x.yaml");
+        state.phases[0].status = PhaseStatus::Failed;
+        state.plan_status = PlanStatus::Blocked;
+        let store = plans_dir.clone();
+        let state_dir = store.join(".edda").join("conductor").join("plan-x");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::to_string_pretty(&state).unwrap(),
+        )
+        .unwrap();
+
+        // What conduct run writes at start (best-effort registry record).
+        registry_record(&root, "plan-x", &store);
+
+        // The store is not in any scannable location — only the registry
+        // knows it.
+        assert!(
+            load_state(&root, "plan-x").unwrap().is_none(),
+            "precondition: the store is outside the repo and its worktrees"
+        );
+
+        retry(&root, "a", Some("plan-x")).unwrap();
+
+        let reloaded = load_state(&store, "plan-x").unwrap().unwrap();
+        assert_eq!(reloaded.phases[0].status, PhaseStatus::Pending);
+    }
+
+    /// GH-557 (independent-review round 3, P0-3): bare destructive verbs
+    /// refuse once more than one store contributes plans — auto-detection
+    /// must never silently resolve across lanes.
+    #[test]
+    fn auto_detect_refuses_when_multiple_stores_contribute() {
+        let (_dir, _wt) = repo_with_worktree_state();
+        let root = _dir.path().join("repo");
+
+        // A second plan in the repo-root store: now two stores contribute
+        // (root holds plan-y, the worktree holds plan-x) and bare
+        // destructive verbs must refuse rather than pick a lane.
+        let plan_y = parse_plan("name: plan-y\nphases:\n  - id: a\n    prompt: x\n").unwrap();
+        let state_y = edda_conductor::state::machine::PlanState::from_plan(&plan_y, "y.yaml");
+        let y_dir = root.join(".edda").join("conductor").join("plan-y");
+        std::fs::create_dir_all(&y_dir).unwrap();
+        std::fs::write(
+            y_dir.join("state.json"),
+            serde_json::to_string_pretty(&state_y).unwrap(),
+        )
+        .unwrap();
+
+        let err = resolve_plan_name(&root, None).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("multiple stores"),
+            "auto-detection must refuse across stores: {text}"
+        );
+        // An explicit --plan still works across stores.
+        assert_eq!(resolve_plan_name(&root, Some("plan-x")).unwrap(), "plan-x");
+    }
+
+    /// GH-557 (independent-review round 3, P1-1): `status <plan> --json`
+    /// keeps the pre-GH-557 "null" contract for a named-but-missing plan
+    /// (exit 0, body "null"), while text mode stays forgiving.
+    #[test]
+    fn status_json_named_missing_prints_null() {
+        let (_dir, _wt) = repo_with_worktree_state();
+        let root = _dir.path().join("repo");
+        let out = status_impl(&root, Some("plan-y"), true).unwrap();
+        assert_eq!(out.trim(), "null", "{out}");
     }
 
     /// GH-557: with no matching state anywhere, the error names the searched

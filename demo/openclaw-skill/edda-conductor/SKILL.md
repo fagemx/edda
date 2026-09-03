@@ -215,19 +215,19 @@ Options:
 
 **Retry:**
 ```bash
-edda conduct retry [phase-id]
+edda conduct retry [phase-id] --plan [plan-name]
 edda conduct run plan.yaml --quiet
 ```
 
 **Skip:**
 ```bash
-edda conduct skip [phase-id] --reason "user: [reason if given]"
+edda conduct skip [phase-id] --plan [plan-name] --reason "user: [reason if given]"
 edda conduct run plan.yaml --quiet
 ```
 
 **Abort:**
 ```bash
-edda conduct abort
+edda conduct abort --plan [plan-name]
 ```
 
 After retry or skip, you must re-run `edda conduct run` to resume execution.

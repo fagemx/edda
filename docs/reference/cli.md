@@ -796,11 +796,15 @@ edda plan scan     # scan codebase and suggest a plan
 Multi-phase AI plan conductor.
 
 ```bash
-edda conduct run <PLAN.yaml>     # run a plan
-edda conduct status              # show running/completed plans
-edda conduct retry <PLAN>        # reset a failed phase
-edda conduct skip <PLAN>         # skip a phase
-edda conduct abort <PLAN>        # abort a running plan
+edda conduct run <PLAN.yaml>     # run a plan (state lands in --cwd, the plan's cwd:, or the plan file's directory; recorded in the store registry)
+edda conduct status              # list plans across the repo root and its git worktrees, with store provenance
+edda conduct retry <PHASE> --plan <PLAN>   # reset a failed phase (state found via the registry and worktrees)
+edda conduct skip <PHASE> --plan <PLAN>    # skip a phase
+edda conduct abort --plan <PLAN>           # abort a running plan
+
+> Plans are recovered by name from the store `conduct run` recorded, wherever
+> it lives; bare retry/skip/abort auto-detect only when exactly one store on
+> the machine holds plans. `status` also reads worktrees outside the repo.
 ```
 
 ---
