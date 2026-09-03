@@ -24,7 +24,7 @@ crates/edda-cli/src/main.rs 1451
 crates/edda-conductor/src/agent/codex_app_server.rs 1061
 crates/edda-conductor/src/agent/codex_rpc.rs 1378
 crates/edda-conductor/src/agent/pi_rpc.rs 1480
-crates/edda-conductor/src/runner/sequential.rs 6150
+crates/edda-conductor/src/runner/sequential.rs 6157
 crates/edda-core/src/event.rs 2191
 crates/edda-derive/src/context/session.rs 1072
 crates/edda-ledger/src/ledger.rs 1927

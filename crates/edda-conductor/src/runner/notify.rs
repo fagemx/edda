@@ -29,12 +29,15 @@ pub trait Notifier: Send + Sync {
             ..
         } = &event
         {
-            self.notify(&format!(
-                "Still waiting for verdict on \"{subject}\" (sha {gate_sha}) — {wait_label}"
-            ))
-            .await;
+            self.notify(&format_gate_progress_message(subject, gate_sha, wait_label))
+                .await;
         }
     }
+}
+
+/// Single format site for the operator-visible gate progress line (GH-751).
+pub fn format_gate_progress_message(subject: &str, gate_sha: &str, wait_label: &str) -> String {
+    format!("Still waiting for verdict on \"{subject}\" (sha {gate_sha}) — {wait_label}")
 }
 
 /// Prints to stdout.
@@ -97,9 +100,7 @@ impl Notifier for ChannelNotifier {
         } = &event
         {
             self.fallback
-                .notify(&format!(
-                    "Still waiting for verdict on \"{subject}\" (sha {gate_sha}) — {wait_label}"
-                ))
+                .notify(&format_gate_progress_message(subject, gate_sha, wait_label))
                 .await;
         }
         let config = self.config.clone();
@@ -162,9 +163,10 @@ impl Notifier for CollectNotifier {
             ..
         } = &event
         {
-            self.messages.lock().unwrap().push(format!(
-                "Still waiting for verdict on \"{subject}\" (sha {gate_sha}) — {wait_label}"
-            ));
+            self.messages
+                .lock()
+                .unwrap()
+                .push(format_gate_progress_message(subject, gate_sha, wait_label));
         }
         self.gate_progress_events.lock().unwrap().push(event);
     }

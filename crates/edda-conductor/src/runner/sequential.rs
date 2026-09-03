@@ -356,7 +356,8 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
 
             match wait_for_verdict(
                 cwd,
-                &subject,
+                &plan.name,
+                &gated_id,
                 &gate_sha,
                 phase.gate_timeout_sec,
                 Some(&entered_at),
@@ -1064,7 +1065,8 @@ enum GateVerdict {
 #[allow(clippy::too_many_arguments)]
 async fn wait_for_verdict(
     cwd: &Path,
-    subject: &str,
+    plan_name: &str,
+    phase_id: &str,
     gate_sha: &str,
     timeout_sec: Option<u64>,
     entered_at: Option<&str>,
@@ -1072,6 +1074,7 @@ async fn wait_for_verdict(
     heartbeat: Option<&LaneHeartbeat>,
     notifier: &dyn Notifier,
 ) -> GateVerdict {
+    let subject = format!("{plan_name}/{phase_id}");
     let deadline = timeout_sec.map(|t| {
         let base = entered_at
             .and_then(|s| {
@@ -1126,7 +1129,7 @@ async fn wait_for_verdict(
                     return v;
                 }
             }
-            Ok(ledger) => match ledger.latest_verdict_fresh(subject, gate_sha, entered_at) {
+            Ok(ledger) => match ledger.latest_verdict_fresh(&subject, gate_sha, entered_at) {
                 Ok(Some(record)) => {
                     return match record.payload.decision {
                         edda_core::VerdictDecision::Approved => GateVerdict::Approved(record),
@@ -1161,12 +1164,11 @@ async fn wait_for_verdict(
                 }
                 None => "no deadline (waits until cancelled)".to_string(),
             };
-            let (plan_name, phase_id) = subject.split_once('/').unwrap_or(("", subject));
             notifier
                 .notify_gate_progress(edda_notify::NotifyEvent::GateProgress {
                     plan: plan_name.to_string(),
                     phase: phase_id.to_string(),
-                    subject: subject.to_string(),
+                    subject: subject.clone(),
                     gate_sha: gate_sha.to_string(),
                     wait_label,
                 })
@@ -5021,7 +5023,8 @@ phases:
         let cancel = CancellationToken::new();
         let verdict = wait_for_verdict(
             &root,
-            "plan/phase",
+            "plan",
+            "phase",
             &sha_b,
             Some(1),
             Some(&now_rfc3339()),
@@ -5119,7 +5122,8 @@ phases:
         let cancel = CancellationToken::new();
         let verdict = wait_for_verdict(
             &root,
-            "plan/phase",
+            "plan",
+            "phase",
             &"d".repeat(40),
             None, // no timeout: without the error budget this would hang forever
             Some(&now_rfc3339()),
@@ -5244,7 +5248,8 @@ phases:
         let cancel = CancellationToken::new();
         let verdict = wait_for_verdict(
             &root,
-            "plan/phase",
+            "plan",
+            "phase",
             &sha,
             Some(30),
             Some(&entered_at),
@@ -5300,7 +5305,8 @@ phases:
 
         let verdict = wait_for_verdict(
             &root,
-            "plan/phase",
+            "plan",
+            "phase",
             &sha,
             Some(3600),
             Some(&now_rfc3339()),
@@ -5370,7 +5376,8 @@ phases:
 
         let verdict = wait_for_verdict(
             &root,
-            "plan/phase",
+            "plan",
+            "phase",
             &sha,
             Some(3600), // 1 hour timeout
             Some(&entered_at),
@@ -5390,12 +5397,38 @@ phases:
             !progress.is_empty(),
             "must produce progress signals: {msgs:?}"
         );
-        // First signal at 60s: remaining is 3600 - 3000 (elapsed before restart) - 60 = 540s = 9m0s
+        let msg = progress[0];
+        // P0-1: Must NOT contain 59m (which was the bug where deadline was anchored to wait entry)
         assert!(
-            progress[0].contains("8m59s remaining") || progress[0].contains("9m0s remaining"),
-            "signal must name the true remaining budget anchored to entered_at, got: {}",
-            progress[0]
+            !msg.contains("59m"),
+            "signal must not anchor to wait entry (59m): {msg}"
         );
+        // P2-1: Delimiter-anchored true remaining budget (3600 - 3000 - 60 = 540s = 9m0s)
+        assert!(
+            msg.contains("— 8m58s remaining")
+                || msg.contains("— 8m59s remaining")
+                || msg.contains("— 9m0s remaining"),
+            "signal must name the true remaining budget anchored to entered_at, got: {msg}"
+        );
+        // P2-2: Verify structured GateProgress event fields
+        assert_eq!(
+            notifier.gate_progress_events().len(),
+            1,
+            "must record exactly 1 GateProgress event"
+        );
+        if let edda_notify::NotifyEvent::GateProgress {
+            plan,
+            phase,
+            subject,
+            ..
+        } = &notifier.gate_progress_events()[0]
+        {
+            assert_eq!(plan, "plan");
+            assert_eq!(phase, "phase");
+            assert_eq!(subject, "plan/phase");
+        } else {
+            panic!("expected GateProgress event");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -5424,7 +5457,8 @@ phases:
 
         let verdict = wait_for_verdict(
             &root,
-            "plan/phase",
+            "plan",
+            "phase",
             &sha,
             None, // unbounded gate
             Some(&now_rfc3339()),
@@ -5498,7 +5532,8 @@ phases:
 
         let verdict = wait_for_verdict(
             &root,
-            "plan/phase",
+            "plan",
+            "phase",
             &sha,
             Some(3600),
             Some(&now_rfc3339()),
