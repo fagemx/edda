@@ -557,6 +557,153 @@ mod tests {
         assert!(server.open_ledger().is_err());
     }
 
+    // ── GH-651 compat golden fixtures ──
+
+    /// GH-651 golden fixture for the `edda_ask` MCP tool response (ledger
+    /// decision `compat.stable-json-surfaces`; policy page: COMPATIBILITY.md
+    /// § "Stable `--json` contracts"). Within 0.x, keys may be added, never
+    /// deleted, renamed, or retyped. The tool returns an `AskResult` rendered
+    /// as JSON text, so the pinned shape matches `edda ask --json`.
+    #[tokio::test]
+    async fn compat_golden_fixture_ask_tool_response_keys_and_types() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        server
+            .edda_decide(Parameters(DecideParams {
+                decision: "db.engine=postgres".to_string(),
+                reason: Some("golden fixture".to_string()),
+            }))
+            .await
+            .unwrap();
+
+        let result = server
+            .edda_ask(Parameters(AskParams {
+                query: Some("db".to_string()),
+                context_summary: None,
+                limit: None,
+                include_superseded: None,
+                branch: None,
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        let v: serde_json::Value = serde_json::from_str(text).expect("tool returns valid JSON");
+
+        let mut keys: Vec<&str> = v
+            .as_object()
+            .expect("one JSON object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "conversations",
+                "decisions",
+                "input_type",
+                "query",
+                "related_commits",
+                "related_notes",
+                "timeline",
+                "workspace_decision_count",
+                "workspace_event_count",
+            ],
+            "edda_ask tool response key set changed — this is a stable contract; \
+             see COMPATIBILITY.md (tasks/dependents/override_risk and the \
+             workspace counts are absent when empty/unknown by the \
+             skip_serializing_if contract)"
+        );
+        // The two workspace counts are integers when the ledger is readable,
+        // and absent from the key set above when unknown (#728).
+        assert!(
+            v["workspace_event_count"].is_u64(),
+            "workspace_event_count must be an integer: {v}"
+        );
+        assert!(
+            v["workspace_decision_count"].is_u64(),
+            "workspace_decision_count must be an integer: {v}"
+        );
+        assert!(v["query"].is_string());
+        assert!(v["input_type"].is_string());
+        for section in [
+            "decisions",
+            "timeline",
+            "related_commits",
+            "related_notes",
+            "conversations",
+        ] {
+            assert!(v[section].is_array(), "{section} must be an array: {v}");
+        }
+
+        let d = &v["decisions"][0];
+        let mut dkeys: Vec<&str> = d
+            .as_object()
+            .expect("decision object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        dkeys.sort_unstable();
+        assert_eq!(
+            dkeys,
+            vec![
+                "branch",
+                "domain",
+                "event_id",
+                "is_active",
+                "key",
+                "reason",
+                "ts",
+                "value",
+            ],
+            "DecisionHit key set changed — this is a stable contract; \
+             see COMPATIBILITY.md"
+        );
+        assert!(d["event_id"].is_string());
+        assert_eq!(d["key"], "db.engine");
+        assert_eq!(d["value"], "postgres");
+        assert_eq!(d["is_active"], serde_json::Value::Bool(true));
+    }
+
+    /// GH-651 golden fixture for the `edda_tool_tier` MCP tool response —
+    /// the other JSON-returning MCP tool. Pins the exact key set and types
+    /// of `ToolTierResult`.
+    #[tokio::test]
+    async fn compat_golden_fixture_tool_tier_response_keys_and_types() {
+        let (_tmp, root) = setup_workspace();
+        let server = EddaServer::new(root);
+
+        let result = server
+            .edda_tool_tier(Parameters(ToolTierParams {
+                tool_name: "bash".to_string(),
+            }))
+            .await
+            .unwrap();
+
+        let text = result.content[0].raw.as_text().unwrap().text.as_str();
+        let v: serde_json::Value = serde_json::from_str(text).expect("tool returns valid JSON");
+
+        let mut keys: Vec<&str> = v
+            .as_object()
+            .expect("one JSON object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["approval", "description", "tier", "tool"],
+            "edda_tool_tier response key set changed — this is a stable contract; \
+             see COMPATIBILITY.md"
+        );
+        assert_eq!(v["tool"], "bash");
+        assert!(v["tier"].is_string(), "tier must be a string: {v}");
+        assert!(v["approval"].is_string(), "approval must be a string: {v}");
+        assert!(v["description"].is_string());
+    }
+
     // --- edda_decide tests ---
 
     #[tokio::test]

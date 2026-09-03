@@ -161,6 +161,68 @@ mod tests {
             .collect()
     }
 
+    /// GH-651 golden fixture for the `edda verify --json` stable contract
+    /// (ledger decision `compat.stable-json-surfaces`; policy page:
+    /// COMPATIBILITY.md § "Stable `--json` contracts"). Within 0.x, keys may
+    /// be added, never deleted, renamed, or retyped. Pins the exact key set
+    /// and per-key types on both the clean (`first_bad_event: null`) and the
+    /// broken (`first_bad_event: string`) side, through the real binary.
+    #[test]
+    fn compat_golden_fixture_verify_json_keys_and_types() {
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        seeded_ledger(repo.path());
+
+        let (code, stdout, stderr) = run_edda(&["verify", "--json"], repo.path());
+        assert_eq!(code, 0, "stdout={stdout:?} stderr={stderr:?}");
+        let v: Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+        let mut keys: Vec<&str> = v
+            .as_object()
+            .expect("one JSON object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["events", "first_bad_event", "ok"],
+            "verify --json key set changed — this is a stable contract; \
+             see COMPATIBILITY.md"
+        );
+        assert_eq!(v["ok"], Value::Bool(true));
+        assert!(v["events"].is_u64(), "events must be an integer: {v}");
+        assert_eq!(v["events"], Value::from(2));
+        assert_eq!(v["first_bad_event"], Value::Null);
+
+        // Broken side: same key set, `ok` flips to false and
+        // `first_bad_event` names the first broken event as a string.
+        let e2 = &seeded_event_ids(repo.path())[1];
+        tamper(
+            repo.path(),
+            e2,
+            "UPDATE events SET payload = replace(payload, 'second event', 'tampered') \
+             WHERE event_id = ?1",
+        );
+        let (code, stdout, stderr) = run_edda(&["verify", "--json"], repo.path());
+        assert_eq!(code, 1, "stdout={stdout:?} stderr={stderr:?}");
+        let v: Value = serde_json::from_str(&stdout).expect("valid JSON");
+        let mut keys: Vec<&str> = v
+            .as_object()
+            .expect("one JSON object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec!["events", "first_bad_event", "ok"],
+            "broken-side key set must match the clean side"
+        );
+        assert_eq!(v["ok"], Value::Bool(false));
+        assert_eq!(v["first_bad_event"], Value::String(e2.clone()));
+        assert!(v["events"].is_u64(), "events must be an integer: {v}");
+    }
+
     #[test]
     fn verify_clean_ledger_is_ok_and_exits_0() {
         let repo = tempfile::tempdir().expect("repo tempdir");

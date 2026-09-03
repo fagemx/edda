@@ -331,4 +331,152 @@ mod tests {
              branch gated on a blank body is dead code"
         );
     }
+
+    /// Path to the `edda` binary cargo just built for this test run
+    /// (`current_exe` = `target/debug/deps/<test>-<hash>.exe`).
+    fn edda_bin() -> std::path::PathBuf {
+        let exe = std::env::current_exe().expect("current_exe");
+        let dir = exe
+            .parent()
+            .and_then(|d| d.parent())
+            .expect("deps/.. = target/debug")
+            .to_path_buf();
+        dir.join(format!("edda{}", std::env::consts::EXE_SUFFIX))
+    }
+
+    /// Run `edda ask` in `repo` and return (exit code, stdout, stderr).
+    fn run_edda_ask(args: &[&str], repo: &Path) -> (i32, String, String) {
+        assert!(edda_bin().exists(), "edda binary not found");
+        let out = std::process::Command::new(edda_bin())
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("spawn edda");
+        (
+            out.status.code().expect("exit code"),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    /// GH-651 golden fixture for the `edda ask --json` stable contract
+    /// (ledger decision `compat.stable-json-surfaces`; policy page:
+    /// COMPATIBILITY.md § "Stable `--json` contracts"). Within 0.x, keys may
+    /// be added, never deleted, renamed, or retyped. Pins the exact top-level
+    /// key set (as it is emitted today: `tasks`, `dependents`,
+    /// `override_risk`, `workspace_event_count`, and `workspace_decision_count`
+    /// are `skip_serializing_if` — absent when empty/None; both counts are
+    /// always known here because this fixture opens a real ledger first)
+    /// and the per-key types of the envelope and of a `DecisionHit`, through
+    /// the real binary.
+    #[test]
+    fn compat_golden_fixture_ask_json_keys_and_types() {
+        use edda_core::event::new_decision_event;
+        use edda_core::types::DecisionPayload;
+
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let ledger = Ledger::open_or_init(repo.path()).expect("open_or_init");
+        let parent = ledger.last_event_hash().expect("parent hash");
+        let dp = DecisionPayload {
+            key: "db.engine".to_string(),
+            value: "sqlite".to_string(),
+            reason: Some("golden fixture".to_string()),
+            scope: None,
+            authority: None,
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: None,
+        };
+        let event =
+            new_decision_event("main", parent.as_deref(), "system", &dp).expect("decision event");
+        ledger.append_event(&event).expect("append decision");
+        drop(ledger);
+
+        let (code, stdout, stderr) = run_edda_ask(&["ask", "--json", "db"], repo.path());
+        assert_eq!(code, 0, "stdout={stdout:?} stderr={stderr:?}");
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+
+        let mut keys: Vec<&str> = v
+            .as_object()
+            .expect("one JSON object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "conversations",
+                "decisions",
+                "input_type",
+                "query",
+                "related_commits",
+                "related_notes",
+                "timeline",
+                "workspace_decision_count",
+                "workspace_event_count",
+            ],
+            "ask --json top-level key set changed — this is a stable contract; \
+             see COMPATIBILITY.md (tasks/dependents/override_risk and the \
+             workspace counts are absent when empty/unknown by the \
+             skip_serializing_if contract)"
+        );
+        assert_eq!(v["query"], "db");
+        assert!(v["input_type"].is_string());
+        // The two workspace counts are integers when the ledger is readable
+        // (always the case here — the fixture wrote one event and one
+        // decision), and absent from the key set above when unknown.
+        assert!(
+            v["workspace_event_count"].is_u64(),
+            "workspace_event_count must be an integer: {v}"
+        );
+        assert!(
+            v["workspace_decision_count"].is_u64(),
+            "workspace_decision_count must be an integer: {v}"
+        );
+        for section in [
+            "decisions",
+            "timeline",
+            "related_commits",
+            "related_notes",
+            "conversations",
+        ] {
+            assert!(v[section].is_array(), "{section} must be an array: {v}");
+        }
+
+        // DecisionHit shape (the only populated section here).
+        let d = &v["decisions"][0];
+        let mut dkeys: Vec<&str> = d
+            .as_object()
+            .expect("decision object")
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
+        dkeys.sort_unstable();
+        assert_eq!(
+            dkeys,
+            vec![
+                "branch",
+                "domain",
+                "event_id",
+                "is_active",
+                "key",
+                "reason",
+                "ts",
+                "value",
+            ],
+            "DecisionHit key set changed — this is a stable contract; \
+             see COMPATIBILITY.md"
+        );
+        assert!(d["event_id"].is_string());
+        assert_eq!(d["key"], "db.engine");
+        assert_eq!(d["value"], "sqlite");
+        assert!(d["reason"].is_string());
+        assert!(d["domain"].is_string());
+        assert!(d["branch"].is_string());
+        assert!(d["ts"].is_string());
+        assert_eq!(d["is_active"], serde_json::Value::Bool(true));
+    }
 }
