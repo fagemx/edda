@@ -64,3 +64,12 @@ too_many_lines = "warn"
 lto = true
 codegen-units = 1
 strip = true
+
+[profile.dev]
+# Debug info is 64% of a clean `--all-targets` build here (2.64 GB of 4.14 GB,
+# `edda.pdb` alone 312 MB against a 53 MB `edda.exe`), because every one of the
+# workspace's test and binary executables links statically and carries full
+# symbols. `line-tables-only` keeps file and line numbers in backtraces — what
+# a failing test actually needs — and drops the type and variable information
+# that a debugger would use. Measured before/after in GH-810.
+debug = "line-tables-only"
