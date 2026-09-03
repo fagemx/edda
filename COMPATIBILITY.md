@@ -30,7 +30,8 @@ store version**:
   to v13 (`schema.rs:238-308`): v5 added cross-project sync fields, v6 the
   `task_briefs` view, v7 `device_tokens`, v8 `decide_snapshots`, v9 hot-path
   indexes, v10 decision deepening columns, v11 `village_id`, v12 the
-  suggestions queue, v13 further decision columns.
+  suggestions queue, v13 the `task_leases` table
+  (`schema.rs:216-226`).
 - **Event payload version** — `edda_core::SCHEMA_VERSION`
   (`crates/edda-core/src/types.rs:4`, stamped into every event payload at
   `crates/edda-core/src/event.rs:186` and siblings). This has been `1` for
@@ -136,7 +137,7 @@ One JSON object — the `AskResult` envelope
 `related_notes`, `conversations` (arrays). Keys `tasks` (array, GH-404),
 `dependents` (array) and `override_risk` (object) are present **only when
 non-empty / Some** — they are serialized with `skip_serializing_if`
-(`lib.rs:66-71`) and their absence means "none", not "removed".
+(`lib.rs:62-67`) and their absence means "none", not "removed".
 
 A `DecisionHit` (element of `decisions`/`timeline`;
 `crates/edda-ask/src/lib.rs:84-107`) always carries: `event_id`, `key`,
@@ -170,7 +171,7 @@ Golden fixtures: `crates/edda-mcp/src/lib.rs` →
 Declared stable by the ruling, **not yet implemented**. Today `edda status`
 is text-only and takes no `--json` flag
 (`crates/edda-cli/src/cmd_status.rs:5-10`, dispatched at
-`crates/edda-cli/src/main.rs:669-671,1224`); passing `--json` is rejected at
+`crates/edda-cli/src/main.rs:289,1224`); passing `--json` is rejected at
 argument parsing. There is no key set to pin, so no golden fixture exists for
 it yet: the flag must land together with its fixture in the same commit, and
 this page updates the same day. Tracked as #730.
@@ -178,7 +179,8 @@ this page updates the same day. Tracked as #730.
 ## 3. Layer 2/3 events are unstable
 
 All Layer 2/3 objects — task, claim, receipt, verdict, plan, and phase
-events, plus the `edda review` review-verdict events — are **unstable** until
+events, plus the `edda review` review-verdict events (the verb itself is a
+designed future verb, tracked as #652) — are **unstable** until
 the v1 event spec (#608) lands and declares otherwise.
 
 That is not re-declared here: it is the recorded decision
