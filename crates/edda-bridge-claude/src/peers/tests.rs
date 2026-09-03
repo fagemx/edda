@@ -964,6 +964,62 @@ fn infer_session_only_stale() {
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
+/// RFC3339 timestamp `secs` seconds before now (UTC) — for heartbeats whose
+/// age must fall inside (not just outside) the staleness window.
+fn rfc3339_now_minus(secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs()
+        .saturating_sub(secs);
+    time::OffsetDateTime::from_unix_timestamp(now as i64)
+        .expect("unix timestamp")
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("rfc3339")
+}
+
+#[test]
+fn infer_session_counts_parented_subagent_by_shared_criterion() {
+    // GH-705 defect B: the shared liveness criterion gives a parented
+    // sub-agent a 15x staleness multiplier (no hook events fire during a
+    // sub-agent run, so its heartbeat would otherwise age out mid-run).
+    // `infer_session_id` must apply the SAME criterion: a 20-minute-old
+    // parented sub-agent heartbeat is Live for `edda peers` and `claim
+    // check`, so session inference must not drop it as stale — otherwise
+    // the same session is simultaneously alive and dead depending on which
+    // verb asks.
+    let pid = "test_infer_parented_15x";
+    let _ = edda_store::ensure_dirs(pid);
+
+    let age_secs: u64 = 20 * 60; // 20 min: stale at 120s, live at 15x (1800s)
+    let ts = rfc3339_now_minus(age_secs);
+    let path = heartbeat_path(pid, "sub-agent");
+    let hb = serde_json::json!({
+        "session_id": "sub-agent",
+        "started_at": ts,
+        "last_heartbeat": ts,
+        "label": "sub",
+        "focus_files": [],
+        "active_tasks": [],
+        "files_modified_count": 0,
+        "total_edits": 0,
+        "recent_commits": [],
+        "parent_session_id": "parent-1"
+    });
+    let _ = fs::create_dir_all(path.parent().unwrap());
+    let _ = fs::write(&path, serde_json::to_string_pretty(&hb).unwrap());
+
+    let result = infer_session_id(pid);
+    assert_eq!(
+        result,
+        Some(("sub-agent".into(), "sub".into())),
+        "a parented sub-agent live under the shared criterion must be inferable"
+    );
+
+    remove_heartbeat(pid, "sub-agent");
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
 // ── Issue #148 Gap 6: Cross-session decision conflict ──
 
 #[test]

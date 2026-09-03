@@ -131,8 +131,23 @@ $ edda peers
 > No active sessions
 ```
 
-Enforcement stays safe either way: every consumer joins claims against live
-heartbeats, so a claim left behind by a dead session does not block a peer.
+A bare CLI claim is machine-visible for as long as it stands, not for a
+freshness window: the claimant is a one-shot process, so no heartbeat age can
+prove it gone, and `edda claim check` counts the claim — exit 1, and
+`unjudgeable_claims` in `--json` — until it is unclaimed (GH-705). That is
+deliberately fail-closed: the gate never reads an occupied surface as clear.
+
+```bash edda-doctest
+$ edda claim "auth" --paths "src/auth/*"
+> session: cli-auth
+$ edda claim check "src/auth/login.rs"
+! bare-CLI claim, liveness cannot be judged
+```
+
+So release the scope when the work is done (Step 5 above); until then the
+occupation is visible to every peer. Hooked sessions are the other shape:
+their claims age out with their heartbeats, so a claim left behind by a dead
+session does not block a peer.
 
 ## Output Format
 

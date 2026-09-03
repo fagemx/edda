@@ -5,7 +5,7 @@ use crate::parse::now_rfc3339;
 use super::board::compute_board_state;
 use super::helpers::parse_rfc3339_to_epoch;
 use super::liveness::{liveness_from_heartbeat, SessionLiveness};
-use super::{stale_secs, PeerSummary, SessionHeartbeat};
+use super::{PeerSummary, SessionHeartbeat};
 
 // ── Peer Discovery ──
 
@@ -164,7 +164,6 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
 /// (GH-503).
 pub fn infer_session_id(project_id: &str) -> Option<(String, String)> {
     let state_dir = edda_store::project_dir(project_id).join("state");
-    let stale_threshold = stale_secs();
     let now = parse_rfc3339_to_epoch(&now_rfc3339()).unwrap_or(0);
 
     let entries = match fs::read_dir(&state_dir) {
@@ -189,10 +188,13 @@ pub fn infer_session_id(project_id: &str) -> Option<(String, String)> {
             Err(_) => continue,
         };
 
-        let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
-        let age = now.saturating_sub(hb_epoch);
-
-        if age <= stale_threshold {
+        // GH-705: the ONE liveness criterion (`peers::liveness`), not an
+        // inline age check. The shared criterion carries the parented
+        // sub-agent 15x multiplier, so a sub-agent heartbeat that `edda
+        // peers` and `claim check` both count as live cannot be dropped as
+        // stale here — the same session must not be simultaneously alive
+        // and dead depending on which verb asks.
+        if liveness_from_heartbeat(&hb, now).is_live() {
             active.push((hb.session_id, hb.label));
         }
     }
