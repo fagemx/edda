@@ -9,7 +9,7 @@ use edda_conductor::plan::schema::{GateKind, OnReject, Phase, Plan};
 use edda_conductor::runner::notify::ChannelNotifier;
 use edda_conductor::runner::sequential::{run_plan, RunContext};
 use edda_conductor::state::machine::{PhaseStatus, PlanState, PlanStatus};
-use edda_conductor::state::persist::{load_state, save_state};
+use edda_conductor::state::persist::{load_state, update_state};
 use edda_conductor::tmux::TmuxSession;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
@@ -375,38 +375,38 @@ pub fn status(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<(
 /// Execute `edda conduct retry <phase-id>`
 pub fn retry(repo_root: &Path, phase_id: &str, plan_name: Option<&str>) -> Result<()> {
     let name = resolve_plan_name(repo_root, plan_name)?;
-    let mut state = load_state(repo_root, &name)?
-        .ok_or_else(|| anyhow::anyhow!("no state for plan \"{name}\""))?;
+    update_state(repo_root, &name, |state| {
+        let current_status = {
+            let ps = state.get_phase_mut(phase_id)?;
+            if ps.status != PhaseStatus::Failed
+                && ps.status != PhaseStatus::Stale
+                && ps.status != PhaseStatus::GateTimedOut
+            {
+                bail!(
+                    "Phase \"{}\" is {:?}, not Failed or Stale. Cannot retry.",
+                    phase_id,
+                    ps.status
+                );
+            }
+            ps.status
+        };
 
-    let current_status = {
-        let ps = state.get_phase_mut(phase_id)?;
-        if ps.status != PhaseStatus::Failed
-            && ps.status != PhaseStatus::Stale
-            && ps.status != PhaseStatus::GateTimedOut
-        {
-            bail!(
-                "Phase \"{}\" is {:?}, not Failed or Stale. Cannot retry.",
-                phase_id,
-                ps.status
-            );
+        edda_conductor::state::machine::transition(
+            state,
+            phase_id,
+            current_status,
+            PhaseStatus::Pending,
+            None,
+        )?;
+
+        // Reset plan status so runner picks up
+        if state.plan_status == PlanStatus::Blocked {
+            state.plan_status = PlanStatus::Running;
         }
-        ps.status
-    };
 
-    edda_conductor::state::machine::transition(
-        &mut state,
-        phase_id,
-        current_status,
-        PhaseStatus::Pending,
-        None,
-    )?;
+        Ok(())
+    })?;
 
-    // Reset plan status so runner picks up
-    if state.plan_status == PlanStatus::Blocked {
-        state.plan_status = PlanStatus::Running;
-    }
-
-    save_state(repo_root, &state)?;
     println!("Phase \"{phase_id}\" reset to Pending. Run `edda conduct run` to resume.");
     Ok(())
 }
@@ -419,63 +419,65 @@ pub fn skip(
     plan_name: Option<&str>,
 ) -> Result<()> {
     let name = resolve_plan_name(repo_root, plan_name)?;
-    let mut state = load_state(repo_root, &name)?
-        .ok_or_else(|| anyhow::anyhow!("no state for plan \"{name}\""))?;
+    let is_waived = update_state(repo_root, &name, |state| {
+        let ps = state.get_phase_mut(phase_id)?;
+        if ps.status == PhaseStatus::GateTimedOut {
+            // GH-552: skipping a timed-out gate is a WAIVER — the phase ran and
+            // its checks passed, so recording `Skipped` would understate what
+            // was verified. Keep the honest status, record the waiver.
+            ps.skip_reason = Some(
+                reason
+                    .unwrap_or("gate waived by operator (edda conduct skip)")
+                    .to_string(),
+            );
+            if state.plan_status == PlanStatus::Blocked {
+                state.plan_status = PlanStatus::Running;
+            }
+            return Ok(true);
+        }
+        if ps.status != PhaseStatus::Failed
+            && ps.status != PhaseStatus::Stale
+            && ps.status != PhaseStatus::Pending
+        {
+            bail!(
+                "Phase \"{}\" is {:?}. Can only skip Failed, Stale, or Pending phases.",
+                phase_id,
+                ps.status
+            );
+        }
 
-    let ps = state.get_phase_mut(phase_id)?;
-    if ps.status == PhaseStatus::GateTimedOut {
-        // GH-552: skipping a timed-out gate is a WAIVER — the phase ran and
-        // its checks passed, so recording `Skipped` would understate what
-        // was verified. Keep the honest status, record the waiver.
-        ps.skip_reason = Some(
-            reason
-                .unwrap_or("gate waived by operator (edda conduct skip)")
-                .to_string(),
-        );
+        ps.status = PhaseStatus::Skipped;
+        ps.skip_reason = Some(reason.unwrap_or("manually skipped").to_string());
+
+        // Unblock plan
         if state.plan_status == PlanStatus::Blocked {
             state.plan_status = PlanStatus::Running;
         }
-        save_state(repo_root, &state)?;
+
+        Ok(false)
+    })?;
+
+    if is_waived {
         println!("Phase \"{phase_id}\" gate waived (status kept as GateTimedOut).");
-        return Ok(());
+    } else {
+        println!("Phase \"{phase_id}\" skipped.");
     }
-    if ps.status != PhaseStatus::Failed
-        && ps.status != PhaseStatus::Stale
-        && ps.status != PhaseStatus::Pending
-    {
-        bail!(
-            "Phase \"{}\" is {:?}. Can only skip Failed, Stale, or Pending phases.",
-            phase_id,
-            ps.status
-        );
-    }
-
-    ps.status = PhaseStatus::Skipped;
-    ps.skip_reason = Some(reason.unwrap_or("manually skipped").to_string());
-
-    // Unblock plan
-    if state.plan_status == PlanStatus::Blocked {
-        state.plan_status = PlanStatus::Running;
-    }
-
-    save_state(repo_root, &state)?;
-    println!("Phase \"{phase_id}\" skipped.");
     Ok(())
 }
 
 /// Execute `edda conduct abort [plan-name]`
 pub fn abort(repo_root: &Path, plan_name: Option<&str>) -> Result<()> {
     let name = resolve_plan_name(repo_root, plan_name)?;
-    let mut state = load_state(repo_root, &name)?
-        .ok_or_else(|| anyhow::anyhow!("no state for plan \"{name}\""))?;
+    update_state(repo_root, &name, |state| {
+        if state.plan_status == PlanStatus::Completed || state.plan_status == PlanStatus::Aborted {
+            bail!("Plan \"{}\" is already {:?}.", name, state.plan_status);
+        }
 
-    if state.plan_status == PlanStatus::Completed || state.plan_status == PlanStatus::Aborted {
-        bail!("Plan \"{}\" is already {:?}.", name, state.plan_status);
-    }
+        state.plan_status = PlanStatus::Aborted;
+        state.aborted_at = Some(now_rfc3339());
+        Ok(())
+    })?;
 
-    state.plan_status = PlanStatus::Aborted;
-    state.aborted_at = Some(now_rfc3339());
-    save_state(repo_root, &state)?;
     println!("Plan \"{name}\" aborted.");
     Ok(())
 }
