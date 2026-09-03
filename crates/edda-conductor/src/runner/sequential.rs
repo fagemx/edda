@@ -17,7 +17,7 @@ use crate::state::machine::{
     transition, CheckResult, CheckStatus, ErrorInfo, ErrorType, PhaseStatus, PhaseUpdate,
     PlanState, PlanStatus,
 };
-use crate::state::persist::save_state_reconciled;
+use crate::state::persist::{reconcile_with_disk, save_state_reconciled};
 use crate::tmux::TmuxSession;
 use anyhow::Context;
 use anyhow::Result;
@@ -106,6 +106,9 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
             println!("Shutdown. Run `edda conduct run` to resume.");
             break;
         }
+
+        // Reconcile in-memory state with disk under lock before evaluating plan status (GH-750).
+        reconcile_with_disk(cwd, state)?;
 
         update_plan_status(state);
 
@@ -718,6 +721,10 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
             write_brief(cwd, state, None);
             continue;
         }
+
+        // Reconcile before phase selection so an externally skipped phase can
+        // never be selected or dispatched by the live runner (GH-750).
+        reconcile_with_disk(cwd, state)?;
 
         // 2. Find next runnable phase
         let Some(phase_id) = find_next_phase(plan, state, &order) else {
@@ -5574,5 +5581,65 @@ phases:
             })
             .unwrap_or_default();
         assert!(paths.is_empty());
+    }
+
+    /// GH-750: an externally skipped phase on disk must never be selected or dispatched
+    /// by the live runner, even if the runner's in-memory state has it as Pending on resume.
+    #[tokio::test]
+    async fn resume_does_not_dispatch_externally_skipped_phase() {
+        let yaml = r#"
+name: test-skip-resume
+phases:
+  - id: a
+    prompt: "do a"
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut disk_state = PlanState::from_plan(&plan, "test.yaml");
+        disk_state.started_at = Some("2026-09-03T10:00:00Z".into());
+        disk_state.plan_status = PlanStatus::Running;
+        let a = disk_state.get_phase_mut("a").unwrap();
+        a.status = PhaseStatus::Skipped;
+        a.skip_reason = Some("skipped by operator via edda conduct skip".into());
+        crate::state::persist::save_state(dir.path(), &disk_state).unwrap();
+
+        // Runner starts with stale in-memory state where "a" is still Pending, but plan was already started
+        let mut mem_state = PlanState::from_plan(&plan, "test.yaml");
+        mem_state.started_at = Some("2026-09-03T10:00:00Z".into());
+        mem_state.plan_status = PlanStatus::Running;
+
+        let launcher = MockLauncher::new();
+        let engine = CheckEngine::new(dir.path().to_path_buf());
+        let notifier = CollectNotifier::new();
+        let mut budget = BudgetTracker::new(plan.budget_usd);
+        let cancel = CancellationToken::new();
+
+        run_plan(
+            &plan,
+            &mut mem_state,
+            RunContext {
+                launcher: &launcher,
+                check_engine: &engine,
+                notifier: &notifier,
+                budget: &mut budget,
+                cancel,
+                cwd: dir.path(),
+                interactive: false,
+                json_events: false,
+                tmux_session: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            launcher.call_count("a"),
+            0,
+            "externally skipped phase 'a' must never be dispatched"
+        );
+        assert_eq!(
+            mem_state.get_phase("a").unwrap().status,
+            PhaseStatus::Skipped
+        );
     }
 }
