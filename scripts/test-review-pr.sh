@@ -12,6 +12,15 @@
 #             operator's browser on Windows;
 #   D4 (#697) verdict-label must read the Verdict line, not the last verdict
 #             keyword anywhere in the prose.
+#   D5 (#708) the review transport is `edda dispatch --agent claude` with the
+#             model explicitly pinned (--model) and a valid-UUID session id —
+#             the claude backend rejects non-UUID session ids — and the
+#             generated lane is written even on --dry-run so the transport is
+#             inspectable offline before anything launches;
+#   D6 (#708) EDDA_REVIEW_MODEL flows into the lane's --model verbatim;
+#   D7 (#708) the spec's closing-keyword rule is narrowed to
+#             pr.closing-keyword=only-when-all-donewhen-delivered (#699) —
+#             no blanket ban.
 #
 # Everything is offline: EDDA_FLEET_SCRATCH is a temp dir, EDDA_REVIEW_SPEC
 # points at the checkout's REVIEW.md (read, never written), and `gh`, `uname`
@@ -215,17 +224,19 @@ if ! grep -q '#683' "$tmp/err"; then
     fail "D2e: a brief generated with no acceptance criteria printed no warning on stderr"
 fi
 
-# --- D3 (#691): the brief must not tell anyone to open a browser manual -------
+# --- D3 (#691): the reviewer must never be told to open a browser manual -------
+# The spec reaches the reviewer as the worktree copy (.edda-review-spec.md,
+# asserted in D8d), so the spec source is checked alongside the brief.
 
 dry_run 'Issue: #650\n'
-if grep -nE 'git [a-z][a-z0-9-]* --help' "$brief"; then
-    fail "D3: the brief instructs 'git <verb> --help', which opens the HTML manual in the operator's browser on Windows (#691)"
+if grep -nE 'git [a-z][a-z0-9-]* --help' "$brief" "$EDDA_REVIEW_SPEC"; then
+    fail "D3: the brief or the spec instructs 'git <verb> --help', which opens the HTML manual in the operator's browser on Windows (#691)"
 fi
-if ! grep -q 'git <verb> -h' "$brief"; then
-    fail "D3: the brief does not instruct 'git <verb> -h' as the probe form"
+if ! grep -q 'git <verb> -h' "$EDDA_REVIEW_SPEC"; then
+    fail 'D3: the spec does not instruct git <verb> -h as the probe form'
 fi
-if ! grep -q '691' "$brief"; then
-    fail "D3: the brief states the -h rule without the reason, so a future editor may restore --help"
+if ! grep -q '691' "$EDDA_REVIEW_SPEC"; then
+    fail 'D3: the spec states the -h rule without the reason, so a future editor may restore --help'
 fi
 
 # --- D4 (#697): verdict-label reads the Verdict line, not the last keyword ----
@@ -275,6 +286,95 @@ expect_label \
 # verdict-label must still exit 0 when it emits nothing, so the caller decides.
 printf '%b' 'no verdict at all\n' | timeout 60 sh "$root/scripts/review-pr.sh" verdict-label >/dev/null || \
     fail 'D4e: verdict-label must exit 0 when it emits no label'
+
+# --- D5 (GH-708): the shipped transport is edda dispatch --agent claude -------
+# Default model claude-opus-5, a valid UUID v4 session id, and a lane script
+# that pins the model explicitly and never calls pi.
+
+dry_run 'Issue: #650\n'
+if ! grep -q '(read-only, claude-opus-5, session ' "$brief"; then
+    fail "D5a: the default review model in the brief header is not claude-opus-5"
+fi
+sid=$(sed -n 's/.*session \([0-9a-f-]*\))/\1/p' "$brief" | head -1)
+case "$sid" in
+    ????????-????-4???-[89ab]???-????????????) : ;;
+    *) fail "D5b: the session id is not a valid UUID v4 — the claude backend rejects anything else (GH-694 second half): $sid" ;;
+esac
+lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-lane.ps1"
+if [ ! -f "$lane" ]; then
+    fail "D5c: --dry-run wrote no lane script, so the transport cannot be inspected before launch"
+else
+    grep -q 'edda dispatch --agent claude' "$lane" \
+        || fail 'D5d: the lane does not run the edda dispatch claude transport'
+    grep -q -- "--model 'claude-opus-5'" "$lane" \
+        || fail 'D5e: the lane does not pin the review model with --model (default-only is not allowed)'
+    grep -q -- "--exclude-tools 'Edit,Write,NotebookEdit'" "$lane" \
+        || fail 'D5f: the lane does not structurally deny the write tools'
+    grep -q -- "--session-id '$sid'" "$lane" \
+        || fail 'D5g: the lane does not pass the brief header session UUID'
+    if grep -q 'pi -p' "$lane"; then
+        fail 'D5h: the lane still calls pi — pi cannot reach any Anthropic model on this fleet (GH-708)'
+    fi
+    grep -q 'DISPATCH_EXIT=' "$lane" \
+        || fail 'D5i: the lane writes no DISPATCH_EXIT receipt into the .done file'
+fi
+
+# --- D6 (GH-708): EDDA_REVIEW_MODEL reaches the lane's --model verbatim --------
+
+EDDA_REVIEW_MODEL=claude-opus-5-20260101
+export EDDA_REVIEW_MODEL
+dry_run 'Issue: #650\n'
+if ! grep -q -- "--model 'claude-opus-5-20260101'" "$lane"; then
+    fail 'D6: an explicit EDDA_REVIEW_MODEL did not reach the lane as --model'
+fi
+unset EDDA_REVIEW_MODEL
+
+# --- D7 (GH-708/#699): the closing-keyword ban is narrowed, not blanket --------
+# The rule lives in the spec (reached via the worktree copy, D8d), so the spec
+# source is the surface to pin.
+
+dry_run 'Issue: #650\n'
+if grep -q 'no closing keywords' "$brief" "$EDDA_REVIEW_SPEC"; then
+    fail 'D7a: the spec still blanket-bans closing keywords — pr.closing-keyword=only-when-all-donewhen-delivered narrowed it (#699)'
+fi
+if ! grep -q 'only-when-all-donewhen-delivered' "$EDDA_REVIEW_SPEC"; then
+    fail 'D7b: the spec does not state the narrowed closing-keyword policy (#699)'
+fi
+
+# --- D8 (GH-708 round 2): the edda dispatch arm must be the arm that runs ------
+# Round 1 P1-1: the brief inlined REVIEW.md verbatim (~33k chars), so the lane's
+# `$briefChars -lt 30000` guard was never true and every real review silently
+# ran the undocumented claude-stdin fallback. The brief now points the reviewer
+# at the spec copy in the worktree (.edda-review-spec.md) instead of inlining
+# it; these cases pin that shape. Round 1 P1-2: the fallback arm — the only arm
+# when a brief ever does exceed the budget — must carry the recorded
+# fleet.review-engine-model read-only shape, not an unrestricted reviewer.
+
+dry_run 'Issue: #650\n'
+brief_chars=$(wc -m < "$brief")
+spec_chars=$(wc -m < "$EDDA_REVIEW_SPEC")
+if [ "$brief_chars" -ge 30000 ]; then
+    fail "D8a: the brief is $brief_chars chars — at or over the lane's 30000-char guard, so the edda dispatch arm would be skipped for every real brief"
+fi
+if [ "$brief_chars" -ge "$spec_chars" ]; then
+    fail "D8b: the brief ($brief_chars chars) is not smaller than the spec ($spec_chars chars) — the spec is being inlined again"
+fi
+if grep -q '# review-spec:classifier-end' "$brief"; then
+    fail 'D8c: the brief inlines the spec body (found a spec-only marker) — inlining pushed every real brief over the dispatch budget (round 2 P1-1)'
+fi
+if ! grep -q '.edda-review-spec.md' "$brief"; then
+    fail 'D8d: the brief does not point the reviewer at the worktree spec copy .edda-review-spec.md'
+fi
+lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-lane.ps1"
+grep -q -- "--allowedTools 'Read,Glob,Grep,Bash'" "$lane" \
+    || fail 'D8e: the fallback arm does not restrict the reviewer to the read-only allowlist --allowedTools Read,Glob,Grep,Bash (round 2 P1-2)'
+if grep -q 'bypassPermissions' "$lane"; then
+    fail 'D8f: the fallback arm still grants --permission-mode bypassPermissions — the recorded fleet.review-engine-model shape auto-approves only the read allowlist'
+fi
+grep -q 'TRANSPORT=edda-dispatch' "$lane" \
+    || fail 'D8g: the dispatch arm writes no TRANSPORT=edda-dispatch receipt — the verdict header cannot name the transport that actually ran'
+grep -q 'TRANSPORT=claude-stdin' "$lane" \
+    || fail 'D8h: the fallback arm writes no TRANSPORT=claude-stdin receipt'
 
 # --- offline guarantee: the real fleet scratch carries none of our output -----
 # Only our own fixture PR is asserted, not the whole listing: a live watcher or

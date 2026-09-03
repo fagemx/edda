@@ -13,7 +13,7 @@
 #   EDDA_REPO                  owner/repo            (default fagemx/edda)
 #   EDDA_FLEET_ROOT            main checkout path    (default: derived from git)
 #   EDDA_FLEET_SCRATCH         state/log dir         (default $HOME/.edda/fleet)
-#   EDDA_REVIEW_MODEL          review model          (default openai-codex/gpt-5.6-sol)
+#   EDDA_REVIEW_MODEL          review model          (default claude-opus-5)
 #   EDDA_REVIEW_POLL_SECONDS   poll interval         (default 60)
 #   PR_REVIEW_WATCH_STATE      state file override   (used by tests)
 #   PR_REVIEW_WATCH_ACKS       acks file override    (used by tests)
@@ -32,10 +32,15 @@
 #
 # Provider-overload rule, v1 (no Codex fallback — it cannot be made read-only;
 # fleet.review-provider-overload=…codex-route-withdrawn-for-automated-watcher):
-# on a dead/empty verdict, retry pi once with the same model; if that also
-# yields no verdict, label the PR `review:unreviewed`, log it, and stop for
-# that head. model_observed and cost are read from the pi session file and are
-# NEVER fabricated — a missing session file is reported as unknown.
+# on a dead/empty verdict, retry the review once through the same dispatch
+# transport with the same model; if that also yields no verdict, label the PR
+# `review:unreviewed`, log it, and stop for that head. model_requested /
+# model_observed / cost are read from the dispatch transcript — the `Model
+# requested:` / `Model observed:` / `Cost:` lines `edda dispatch` prints — and
+# are NEVER fabricated; a missing line is reported as unknown.
+# (GH-708: the decision text's `edda dispatch --agent codex` fallback step
+# cannot run Opus — that contradiction awaits an operator re-ruling; the code
+# has no codex path.)
 #
 # review:unreviewed is per head: it blocks only while the PR's current head
 # equals the head recorded as unreviewed. A new head drops the label and is
@@ -55,10 +60,10 @@
 set -u
 
 REPO=${EDDA_REPO:-fagemx/edda}
-MODEL=${EDDA_REVIEW_MODEL:-openai-codex/gpt-5.6-sol}
+MODEL=${EDDA_REVIEW_MODEL:-claude-opus-5}
 POLL=${EDDA_REVIEW_POLL_SECONDS:-60}
 SCRATCH=${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}
-STALE=${EDDA_REVIEW_STALE_SECONDS:-2700}   # 45 min: pi task limit is 30 min
+STALE=${EDDA_REVIEW_STALE_SECONDS:-2700}   # 45 min: the scheduled-task limit is 30 min
 POSTFAIL_CAP=5
 ACK_CAP=3
 
@@ -249,20 +254,20 @@ verdict_ok() { # $1=verdict file
   grep -qE '^(LGTM|Changes Requested)' "$1" 2>/dev/null
 }
 
-# Model observed + cost, read from the pi session files (never from what the
-# brief asked for). Missing session file => explicitly "unknown", never made up.
-session_model_cost() { # $1=session id -> sets OBSERVED, COST
-  files=$(find "$HOME/.pi/agent/sessions" -name "*_$1.jsonl" 2>/dev/null)
-  if [ -n "$files" ]; then
-    OBSERVED=$(cat $files 2>/dev/null | grep -o '"modelId":"[^"]*"' | tail -1 | sed 's/.*:"//;s/"$//')
-    COST=$(cat $files 2>/dev/null | grep -o '"cost":{[^}]*}' | sed 's/.*"total"://' \
-      | awk '{s+=$1} END{if (s=="") s=0; printf "%.2f", s}')
-  else
-    OBSERVED=""
-    COST=""
-  fi
+# Model observed + cost, read from the transcript's receipt lines (edda
+# dispatch prints them; the oversized-brief claude-stdin fallback writes the
+# same lines) — never from what the brief asked for. Missing lines =>
+# explicitly "unknown", never made up.
+session_model_cost() { # $1=log file -> sets REQ, OBSERVED, COST, SIDO
+  t=$(tr -d '\r' < "$1" 2>/dev/null)
+  REQ=$(printf '%s\n' "$t" | sed -n 's/^Model requested: //p' | tail -1)
+  OBSERVED=$(printf '%s\n' "$t" | sed -n 's/^Model observed: //p' | tail -1)
+  COST=$(printf '%s\n' "$t" | sed -n 's/^Cost: \$\([0-9.]*\)$/\1/p' | tail -1)
+  SIDO=$(printf '%s\n' "$t" | sed -n 's/^Session: //p' | tail -1)
+  [ -n "${REQ:-}" ] || REQ="unknown"
   [ -n "${OBSERVED:-}" ] || OBSERVED="unknown"
   [ -n "${COST:-}" ] || COST="?"
+  [ -n "${SIDO:-}" ] || SIDO="unknown"
 }
 
 pr_is_open() { # $1=pr
@@ -274,13 +279,17 @@ pr_head() { # $1=pr
 }
 
 # Trivial probe from the superseding fleet.review-provider-overload decision:
-# before spending a full retry, check the review provider answers at
-# --thinking minimal with the SAME --model (never a cheaper model).
+# before spending a full retry, check the review transport answers at minimal
+# cost with the SAME --model (never a cheaper model). The transport is
+# `edda dispatch --agent claude` (GH-708): pi's openrouter routing cannot
+# reach any Anthropic model on this fleet.
+PROBE_PROMPT="$SCRATCH/review-provider-probe.txt"
 probe_review_provider() {
+  printf 'reply OK\n' > "$PROBE_PROMPT"
   if command -v timeout >/dev/null 2>&1; then
-    timeout 60 pi -p --model "$MODEL" --thinking minimal --exclude-tools edit,write "reply OK" >/dev/null 2>&1
+    timeout 120 edda dispatch --agent claude --model "$MODEL" --exclude-tools Edit,Write,NotebookEdit --prompt-file "$PROBE_PROMPT" >/dev/null 2>&1
   else
-    pi -p --model "$MODEL" --thinking minimal --exclude-tools edit,write "reply OK" >/dev/null 2>&1
+    edda dispatch --agent claude --model "$MODEL" --exclude-tools Edit,Write,NotebookEdit --prompt-file "$PROBE_PROMPT" >/dev/null 2>&1
   fi
 }
 
@@ -398,11 +407,21 @@ settle_pending() {
 
     if [ "$is_done" = "1" ] || [ "$is_stale" = "1" ]; then
       if extract_verdict "$LOG" "$VERDICT" && verdict_ok "$VERDICT"; then
-        session_model_cost "review-pr$pr"
+        session_model_cost "$LOG"
         if [ "$COST" = "?" ]; then costline='cost: unknown'; else costline='cost: $'"$COST"; fi
+        # The transport that actually ran, read from the lane's TRANSPORT=
+        # receipt in .done — never the transport we wish had run (GH-708
+        # round 2: this header used to hardcode `edda dispatch` even when the
+        # oversized-brief claude-stdin fallback was the arm that ran).
+        tline=$(sed -n 's/^TRANSPORT=//p' "$DONE" 2>/dev/null | tail -1)
+        case "$tline" in
+          edda-dispatch) tdesc='edda dispatch --agent claude' ;;
+          claude-stdin)  tdesc='claude -p via stdin (oversized-brief fallback; read-only allowlist)' ;;
+          *)             tdesc='unknown — no TRANSPORT receipt in .done' ;;
+        esac
         COMMENT="$SCRATCH/review-pr$pr-r$round-comment.md"
         {
-          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): pi -p --model $MODEL --thinking high --exclude-tools edit,write --session-id review-pr$pr, read-only, detached worktree at \`$sha\`. Model observed in the pi session file: \`$OBSERVED\`. $costline. Reviewed head SHA: \`$sha\`."
+          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): transport \`$tdesc\`, model \`$REQ\` (observed \`$OBSERVED\`), session \`$SIDO\`, $costline, read-only, detached worktree at \`$sha\`. Reviewed head SHA: \`$sha\`."
           echo
           cat "$VERDICT"
         } > "$COMMENT"
@@ -429,31 +448,31 @@ settle_pending() {
         case "$attempts" in
           0)
             if [ "$DRY" = "1" ]; then
-              echo "dry-run: would probe the provider and retry PR #$pr r$round with pi"
+              echo "dry-run: would probe the provider and retry PR #$pr r$round via edda dispatch"
               pending_drop "$pr"
               continue
             fi
             if ! probe_review_provider; then
-              mark_unreviewed "$pr" "$sha" "$round" "provider probe (--thinking minimal) failed before the pi retry"
+              mark_unreviewed "$pr" "$sha" "$round" "provider probe failed before the dispatch retry"
               pending_drop "$pr"
               continue
             fi
-            log "pr$pr r$round provider probe OK — retrying once with pi (same model, fleet.review-provider-overload)"
+            log "pr$pr r$round provider probe OK — retrying once via edda dispatch (same model, fleet.review-provider-overload)"
             if "$REVIEW_PR" "$pr" "$round" "$sha" --sha "$sha" >> "$WATCHLOG" 2>&1; then
-              log "pr$pr r$round pi retry launched"
+              log "pr$pr r$round dispatch retry launched"
               pending_update "$pr" "$round" "$sha" 1 "$(date +%s)" "$postfails"
             else
               rc=$?
               if [ "$rc" = "3" ]; then
-                log "pr$pr head moved before pi retry; dropping pending entry (rescan will re-review)"
+                log "pr$pr head moved before dispatch retry; dropping pending entry (rescan will re-review)"
               else
-                log "pr$pr r$round pi retry launch failed (rc=$rc)"
+                log "pr$pr r$round dispatch retry launch failed (rc=$rc)"
               fi
               pending_drop "$pr"
             fi
             ;;
           *)
-            mark_unreviewed "$pr" "$sha" "$round" "no verdict after one pi retry (v1 has no codex fallback)"
+            mark_unreviewed "$pr" "$sha" "$round" "no verdict after one dispatch retry (v1 has no codex fallback)"
             pending_drop "$pr"
             ;;
         esac

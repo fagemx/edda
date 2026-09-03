@@ -4,10 +4,10 @@
 # verdict text -> review:* label mapping, per-head review:unreviewed semantics,
 # verdict label only on the reviewed head, retried acknowledgement with a
 # stubbed gh (including its terminal failure path), and the provider probe
-# before the single pi retry.
+# before the single dispatch retry.
 #
 # Everything is offline: EDDA_FLEET_SCRATCH, PR_REVIEW_WATCH_LOG and all state
-# files are redirected into a temp dir, and `gh`/`pi`/review-pr are stubs —
+# files are redirected into a temp dir, and `gh`/`edda`/review-pr are stubs —
 # the real ~/.edda/fleet/watch.log must be byte-for-byte unchanged across a
 # full run (guarded below).
 # Style follows scripts/test-lint-markdown-content.sh — no new tooling.
@@ -77,9 +77,14 @@ EOF
 cat >"$STUBBIN/pi" <<'EOF'
 #!/bin/sh
 echo "pi $*" >>"$PI_STUB_LOG"
+exit 0
+EOF
+cat >"$STUBBIN/edda" <<'EOF'
+#!/bin/sh
+echo "edda $*" >>"$EDDA_STUB_LOG"
 case "$*" in
-  *--thinking\ minimal*)
-    [ -n "${PI_FAIL_PROBE:-}" ] && exit 1
+  *--agent*claude*)
+    [ -n "${DISPATCH_FAIL_PROBE:-}" ] && exit 1
     exit 0
     ;;
 esac
@@ -90,18 +95,19 @@ cat >"$STUBBIN/review-pr-stub" <<'EOF'
 echo "REVIEW_LAUNCH $*" >>"$REVIEW_STUB_LOG"
 exit 0
 EOF
-chmod +x "$STUBBIN/gh" "$STUBBIN/pi" "$STUBBIN/review-pr-stub"
+chmod +x "$STUBBIN/gh" "$STUBBIN/pi" "$STUBBIN/edda" "$STUBBIN/review-pr-stub"
 
 export GH_STUB_LOG="$tmp/gh-stub.log"
 export PI_STUB_LOG="$tmp/pi-stub.log"
+export EDDA_STUB_LOG="$tmp/edda-stub.log"
 export REVIEW_STUB_LOG="$tmp/review-stub.log"
-: >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$REVIEW_STUB_LOG"
+: >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$EDDA_STUB_LOG"; : >"$REVIEW_STUB_LOG"
 export PATH="$STUBBIN:$PATH"
 
 reset_stubs() {
-    : >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$REVIEW_STUB_LOG"
+    : >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$EDDA_STUB_LOG"; : >"$REVIEW_STUB_LOG"
     unset GH_FAIL_COMMENT_FIRST GH_FAIL_COMMENT_ALWAYS GH_FAIL_EDIT GH_FAIL_HEAD \
-          GH_PR_LIST_FILE GH_HEAD GH_HEAD_FILE PI_FAIL_PROBE 2>/dev/null || true
+          GH_PR_LIST_FILE GH_HEAD GH_HEAD_FILE DISPATCH_FAIL_PROBE 2>/dev/null || true
     rm -f "$EDDA_FLEET_SCRATCH"/review-* 2>/dev/null || true
     : >"$EDDA_FLEET_SCRATCH/review-state.tsv"
     : >"$EDDA_FLEET_SCRATCH/review-acks.tsv"
@@ -399,15 +405,15 @@ if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
     exit 1
 fi
 
-# --- live loop: provider probe before the single pi retry (P1) -----------------
+# --- live loop: provider probe before the single dispatch retry (P1) ---------
 
 reset_stubs
 pending_set 42 1 "$sha" 0 0
-printf 'PI_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'DISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 printf 'Codex error: our servers are currently overloaded, please try again later.\n' \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
 
-export PI_FAIL_PROBE=1
+export DISPATCH_FAIL_PROBE=1
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (probe fails)\n' >&2; exit 1; }
 if [ -n "$(pending_get)" ]; then
     printf 'live: failed probe should stop for that head (pending dropped), got:\n%s\n' "$(pending_get)" >&2
@@ -425,20 +431,24 @@ if ! grep -qF -- '--add-label review:unreviewed' "$GH_STUB_LOG"; then
     printf 'live: failed probe should label review:unreviewed\n' >&2
     exit 1
 fi
-unset PI_FAIL_PROBE
+unset DISPATCH_FAIL_PROBE
 
 reset_stubs
 pending_set 42 1 "$sha" 0 0
-printf 'PI_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'DISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 printf 'Codex error: our servers are currently overloaded, please try again later.\n' \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (probe OK)\n' >&2; exit 1; }
-if [ "$(grep -c 'thinking minimal' "$PI_STUB_LOG")" -lt 1 ]; then
-    printf 'live: the --thinking minimal probe must run before the retry\n' >&2
+if [ "$(grep -c 'agent claude' "$EDDA_STUB_LOG")" -lt 1 ]; then
+    printf 'live: the edda dispatch probe must run before the retry\n' >&2
     exit 1
 fi
-if ! grep -q 'thinking minimal.*--exclude-tools edit,write' "$PI_STUB_LOG"; then
-    printf 'live: the provider probe must be read-only (--exclude-tools edit,write)\n' >&2
+if ! grep -q -- '--exclude-tools Edit,Write,NotebookEdit' "$EDDA_STUB_LOG"; then
+    printf 'live: the provider probe must be read-only (--exclude-tools Edit,Write,NotebookEdit)\n' >&2
+    exit 1
+fi
+if ! grep -q -- '--model claude-opus-5' "$EDDA_STUB_LOG"; then
+    printf 'live: the provider probe must pin the same review model (--model claude-opus-5)\n' >&2
     exit 1
 fi
 if [ "$(grep -c '^REVIEW_LAUNCH' "$REVIEW_STUB_LOG")" != "1" ]; then
@@ -453,6 +463,66 @@ if [ "$(printf '%s' "$(pending_get)" | cut -f4)" != "1" ]; then
     printf 'live: pending attempts should be 1 after the retry, got:\n%s\n' "$(pending_get)" >&2
     exit 1
 fi
+
+# --- live loop: the verdict header names the transport that actually ran (P1) --
+# Round 2 P1-1: the header used to hardcode `edda dispatch --agent claude` even
+# when the oversized-brief claude-stdin fallback was the arm that ran. The
+# header must print the TRANSPORT= receipt from .done, verbatim, or say
+# "unknown" when the receipt is missing — never the transport we wish had run.
+
+header_comment_path() {
+    sed -n 's/.*--body-file //p' "$GH_STUB_LOG" | tail -1
+}
+
+verdict_log_fixture() {
+    {
+        printf '<<<VERDICT\n'
+        printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha"
+        printf 'VERDICT>>>\n'
+        printf 'Model requested: claude-opus-5\nModel observed: claude-opus-5\nCost: $0.33\nSession: 11111111-2222-4333-8444-555555555555\n'
+    } >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
+}
+
+export GH_HEAD="$sha"
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: dispatch arm)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+[ -n "$cfile" ] || { printf 'live: a settled verdict should post a comment\n' >&2; exit 1; }
+grep -qF 'transport `edda dispatch --agent claude`' "$cfile" || {
+    printf 'live: header must name the edda-dispatch receipt, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=claude-stdin\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: fallback arm)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+grep -qF 'transport `claude -p via stdin (oversized-brief fallback; read-only allowlist)`' "$cfile" || {
+    printf 'live: header must name the claude-stdin fallback receipt, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+if grep -qF 'edda dispatch --agent claude' "$cfile"; then
+    printf 'live: header must not claim edda dispatch when the claude-stdin fallback ran, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+fi
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'DISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: missing receipt)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+grep -qF 'transport `unknown — no TRANSPORT receipt in .done`' "$cfile" || {
+    printf 'live: a missing TRANSPORT receipt must render as unknown, not a guessed transport, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+unset GH_HEAD
 
 # --- offline guarantee: the real watcher log was never touched -----------------
 size_after=0
