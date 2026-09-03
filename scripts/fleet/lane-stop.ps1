@@ -5,15 +5,18 @@
 # lane's `edda dispatch` child kept running to commit / push / open a PR while
 # the task reported State = Ready. This script is the only sanctioned way to
 # stop a lane. It
-#   1. stops the scheduled task (best-effort, kills the wrapper only),
-#   2. kills the lane's whole process tree — the wrapper plus, even after the
+#   1. snapshots the process tree to capture the wrapper PID while alive,
+#   2. stops the scheduled task (best-effort, kills the wrapper only),
+#   3. re-snapshots the process tree after the task is stopped so any child or
+#      grandchild spawned before or during task shutdown is indexed (GH-706),
+#   4. kills the lane's whole process tree — the wrapper plus, even after the
 #      wrapper is already dead (the orphan case above), every process still
 #      identifiable by CommandLine as the lane: the wrapper path and the
 #      brief path the wrapper was launched with — including each match's
-#      descendants,
-#   3. verifies by CommandLine match (wrapper path + brief path) that nothing
-#      survived, and
-#   4. writes the end record the killed wrapper can no longer write: the
+#      descendants, using type-safe [int] parent/child indexing,
+#   5. verifies by both PID survival and tree/CommandLine match that nothing
+#      survived (GH-706), and
+#   6. writes the end record the killed wrapper can no longer write: the
 #      done-file (sentinel "stopped") and a === EXIT === line in the lane log,
 #      so a lane log with START but no EXIT is never left ambiguous (GH-672).
 #
@@ -61,81 +64,170 @@ if (-not (Test-Path -LiteralPath $Wrapper -PathType Leaf)) {
 $wrapperBody = Get-Content -LiteralPath $Wrapper -Raw
 $brief = if ($wrapperBody -match "--prompt-file '([^']+)'") { $Matches[1] } else { $null }
 
-# Snapshot once; index children by parent PID so the whole tree below any
-# match (cargo, git, the agent runtime) is reachable even though none of
-# those children's own command lines mention the lane.
-$allProcs = @(Get-CimInstance Win32_Process)
-$childrenOf = @{}
-foreach ($p in $allProcs) {
-  if (-not $childrenOf.ContainsKey($p.ParentProcessId)) {
-    $childrenOf[$p.ParentProcessId] = New-Object System.Collections.Generic.List[int]
-  }
-  $childrenOf[$p.ParentProcessId].Add($p.ProcessId)
-}
-
-function Find-LaneProcessIds {
-  # Seed = processes whose command line names this lane; then their whole
-  # descendant trees. Never this process ($PID) and never a PID twice.
-  $seeds = @($allProcs | Where-Object {
-    $_.ProcessId -ne $PID -and $_.CommandLine -and (
-      $_.CommandLine.Contains($Wrapper) -or
-      ($brief -and $_.CommandLine.Contains($brief)))
-  })
-  $ids = New-Object System.Collections.Generic.HashSet[int]
-  $queue = New-Object System.Collections.Generic.Queue[int]
-  foreach ($s in $seeds) { [void]$ids.Add($s.ProcessId); $queue.Enqueue($s.ProcessId) }
-  while ($queue.Count -gt 0) {
-    $currentPid = $queue.Dequeue()
-    if (-not $childrenOf.ContainsKey($currentPid)) { continue }
-    foreach ($c in $childrenOf[$currentPid]) {
-      if ($c -ne $PID -and $ids.Add($c)) { $queue.Enqueue($c) }
+function Get-ProcessSnapshot {
+  # Index children by parent PID using explicit [int] keys (GH-706: Win32_Process
+  # returns uint32 which does not match [int] lookup keys in .NET hashtables).
+  # Also build ProcMap for O(1) process lookup and CreationDate checks.
+  $allProcs = @(Get-CimInstance Win32_Process)
+  $childrenOf = @{}
+  $procMap = @{}
+  foreach ($p in $allProcs) {
+    $ppid = [int]$p.ParentProcessId
+    $procId = [int]$p.ProcessId
+    $procMap[$procId] = $p
+    if (-not $childrenOf.ContainsKey($ppid)) {
+      $childrenOf[$ppid] = New-Object System.Collections.Generic.List[int]
     }
+    $childrenOf[$ppid].Add($procId)
   }
-  return @($ids)
+  return @{
+    Procs      = $allProcs
+    ProcMap    = $procMap
+    ChildrenOf = $childrenOf
+  }
 }
 
-# --- 1. stop the task (kills the wrapper only — never the tree, GH-672) -----
+# --- 1. pre-stop snapshot (GH-706) -------------------------------------------
+# Capture any live wrapper PID before Stop-ScheduledTask terminates it.
+$preSnap = Get-ProcessSnapshot
+$preSeeds = @($preSnap.Procs | Where-Object {
+  $_.ProcessId -ne $PID -and $_.CommandLine -and (
+    $_.CommandLine.Contains($Wrapper) -or
+    ($brief -and $_.CommandLine.Contains($brief)))
+})
+$seedPids = New-Object System.Collections.Generic.HashSet[int]
+foreach ($s in $preSeeds) { [void]$seedPids.Add([int]$s.ProcessId) }
+
+# --- 2. stop the task (kills the wrapper only — never the tree, GH-672) -----
 
 if ($task.State -eq 'Running') {
   Stop-ScheduledTask -TaskName $TaskName
   Start-Sleep -Seconds 1
 }
 
-# --- 2. kill the whole tree -------------------------------------------------
+# --- 3. snapshot process tree after the task is stopped (GH-706) -----------
+# Now that the task is stopped, no new wrapper can be spawned. Re-snapshot so
+# any child or grandchild spawned before or during task shutdown is captured.
+$postSnap = Get-ProcessSnapshot
+foreach ($p in $postSnap.Procs) {
+  if ($p.ProcessId -ne $PID -and $p.CommandLine -and (
+    $p.CommandLine.Contains($Wrapper) -or
+    ($brief -and $p.CommandLine.Contains($brief)))) {
+    [void]$seedPids.Add([int]$p.ProcessId)
+  }
+}
 
-$targets = Find-LaneProcessIds
+# Traverse descendant trees in the post-stop tree starting from all seeds
+# (including pre-stop wrapper PIDs whose ParentProcessId links to their children).
+$targets = New-Object System.Collections.Generic.HashSet[int]
+$queue = New-Object System.Collections.Generic.Queue[int]
+foreach ($id in $seedPids) {
+  if ($postSnap.ProcMap.ContainsKey($id)) {
+    [void]$targets.Add($id)
+  }
+  $queue.Enqueue($id)
+}
+
+while ($queue.Count -gt 0) {
+  $currentPid = $queue.Dequeue()
+  if (-not $postSnap.ChildrenOf.ContainsKey($currentPid)) { continue }
+  $parentProc = $postSnap.ProcMap[$currentPid]
+  foreach ($c in $postSnap.ChildrenOf[$currentPid]) {
+    $childProc = $postSnap.ProcMap[$c]
+    # Guard: child creation date must be >= parent creation date to prevent stale reused PID traversal (GH-706, P2-1)
+    if ($parentProc -and $childProc -and $parentProc.CreationDate -and $childProc.CreationDate) {
+      if ($childProc.CreationDate -lt $parentProc.CreationDate) { continue }
+    }
+    if ($c -ne $PID -and $targets.Add($c)) {
+      $queue.Enqueue($c)
+    }
+  }
+}
+
+# --- 4. kill the whole tree -------------------------------------------------
+
 $terminated = New-Object System.Collections.Generic.List[int]
-if ($targets.Count -gt 0) {
-  foreach ($t in $targets) {
+$targetList = @($targets)
+if ($targetList.Count -gt 0) {
+  foreach ($t in $targetList) {
     Stop-Process -Id $t -Force -ErrorAction SilentlyContinue
   }
   Start-Sleep -Seconds 2
   # Anything that ignored Stop-Process gets taskkill /T /F, then one final
   # accounting pass.
-  $survivors = @(Get-Process -Id $targets -ErrorAction SilentlyContinue)
+  $survivors = @(Get-Process -Id $targetList -ErrorAction SilentlyContinue)
   foreach ($s in $survivors) {
     & taskkill /PID $s.Id /T /F 2>$null | Out-Null
   }
   if ($survivors.Count -gt 0) { Start-Sleep -Seconds 2 }
-  foreach ($t in $targets) {
+  foreach ($t in $targetList) {
     if (-not (Get-Process -Id $t -ErrorAction SilentlyContinue)) { $terminated.Add($t) }
   }
 }
 
-# --- 3. verify by CommandLine: nothing matching the lane remains ------------
+# --- 5. verify: nothing matching the lane or descended from it remains (GH-706) -
 
-$residual = @(Get-CimInstance Win32_Process | Where-Object {
+$residualSet = New-Object System.Collections.Generic.HashSet[int]
+# Check whether any targeted process survived
+foreach ($t in $targetList) {
+  if (Get-Process -Id $t -ErrorAction SilentlyContinue) {
+    [void]$residualSet.Add($t)
+  }
+}
+
+# Check whether any process currently on the system matches the lane CommandLine or tree
+$verifySnap = Get-ProcessSnapshot
+$verifySeeds = @($verifySnap.Procs | Where-Object {
   $_.ProcessId -ne $PID -and $_.CommandLine -and (
     $_.CommandLine.Contains($Wrapper) -or
     ($brief -and $_.CommandLine.Contains($brief)))
 })
+$verifyQueue = New-Object System.Collections.Generic.Queue[int]
+foreach ($s in $verifySeeds) {
+  $sid = [int]$s.ProcessId
+  [void]$residualSet.Add($sid)
+  $verifyQueue.Enqueue($sid)
+}
+# Also enqueue all targets and seed PIDs (even if dead) so any live orphan whose
+# ParentProcessId points to a killed lane target is traversed and detected (GH-706, P1-1).
+foreach ($t in $targetList) {
+  $verifyQueue.Enqueue($t)
+}
+foreach ($s in $seedPids) {
+  $verifyQueue.Enqueue($s)
+}
+
+while ($verifyQueue.Count -gt 0) {
+  $curr = $verifyQueue.Dequeue()
+  if (-not $verifySnap.ChildrenOf.ContainsKey($curr)) { continue }
+  $parentProc = if ($verifySnap.ProcMap.ContainsKey($curr)) {
+    $verifySnap.ProcMap[$curr]
+  } elseif ($postSnap.ProcMap.ContainsKey($curr)) {
+    $postSnap.ProcMap[$curr]
+  } elseif ($preSnap.ProcMap.ContainsKey($curr)) {
+    $preSnap.ProcMap[$curr]
+  } else {
+    $null
+  }
+  foreach ($c in $verifySnap.ChildrenOf[$curr]) {
+    $childProc = $verifySnap.ProcMap[$c]
+    if ($parentProc -and $childProc -and $parentProc.CreationDate -and $childProc.CreationDate) {
+      if ($childProc.CreationDate -lt $parentProc.CreationDate) { continue }
+    }
+    if ($c -ne $PID -and $residualSet.Add($c)) {
+      $verifyQueue.Enqueue($c)
+    }
+  }
+}
+
+$residual = @($residualSet)
 if ($residual.Count -gt 0) {
-  Fail "residual lane processes survive the kill: $(($residual | ForEach-Object { $_.ProcessId }) -join ',')"
+  Fail "residual lane processes survive the kill: $($residual -join ',')"
 }
 $task = Get-ScheduledTask -TaskName $TaskName
 if ($task.State -eq 'Running') { Fail "task $TaskName still reports State = Running after the stop" }
 
-# --- 4. write the end record the killed wrapper cannot write ----------------
+# --- 6. write the end record the killed wrapper cannot write ----------------
 
 if ($terminated.Count -gt 0 -or ((Test-Path -LiteralPath $Log) -and -not (Test-Path -LiteralPath $Done))) {
   Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1; terminated $($terminated.Count) process(es)) ===" -Encoding utf8
@@ -152,5 +244,5 @@ if ($terminated.Count -gt 0) {
 } else {
   "terminated=0 (lane was not running)"
 }
-"residual=$($residual.Count) (CommandLine match: wrapper path$(if ($brief) { ' + brief path' } else { '' }))"
+"residual=$($residual.Count) (CommandLine match + process tree verification)"
 exit 0
