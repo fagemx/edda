@@ -15,18 +15,31 @@
 #      brief path the wrapper was launched with — including each match's
 #      descendants, using type-safe [int] parent/child indexing,
 #   5. verifies by both PID survival and tree/CommandLine match that nothing
-#      survived (GH-706), and
-#   6. writes the end record the killed wrapper can no longer write: the
+#      survived (GH-706),
+#   6. verifies the SHARED .git/config the lane was working in still parses and
+#      restores it from the known-good backup if it does not — a hard kill
+#      landing on git's config write NULs that file and takes down the main
+#      checkout and every linked worktree at once (GH-715). There is no
+#      graceful-shutdown window before the kill: `taskkill` without /F posts
+#      WM_CLOSE, and a lane's processes are hidden console processes with no
+#      window, so it is refused with "can only be terminated forcefully"
+#      (exit 128, measured) and the target survives. The kill stays immediate
+#      and the damage is repaired here instead, and
+#   7. writes the end record the killed wrapper can no longer write: the
 #      done-file (sentinel "stopped") and a === EXIT === line in the lane log,
 #      so a lane log with START but no EXIT is never left ambiguous (GH-672).
 #
 # usage:
 #   pwsh -NoProfile -File scripts/fleet/lane-stop.ps1 -Name <lane> [-LogDir <dir>]
 #
-# Prints what was terminated, one line each. Exit codes (style of
-# lane-status.ps1): 0 = stopped (N processes terminated, or the lane was not
-# running); 1 = error: no matching task, wrapper missing, or processes
-# survived the kill.
+# Prints what was terminated, one line each, plus the .git/config verdict.
+# Exit codes (style of lane-status.ps1): 0 = stopped (N processes terminated,
+# or the lane was not running); 1 = error: no matching task, wrapper missing,
+# processes survived the kill, or the lane's .git/config was not confirmed
+# healthy — either corrupt and unrepairable, or impossible to judge (the
+# gitconfig= line says which). The end record (step 7) is written before any
+# of those .git/config failures is reported, so a stop never costs the log its
+# EXIT line (GH-672).
 # Matches tasks registered across the fleet (edda-lane-*, edda-review-pr*-r*, GH-712).
 param(
   [Parameter(Mandatory = $true)][string]$Name,
@@ -108,6 +121,17 @@ $wrapperBody = Get-Content -LiteralPath $Wrapper -Raw
 $brief = if ($wrapperBody -match '--prompt-file\s+[''"]([^''"]+)[''"]') {
   $b = $Matches[1].Trim()
   if ($b.Length -gt 4) { $b } else { $null }
+} else { $null }
+
+# The worktree the lane ran in, which resolves the SHARED .git/config this
+# script checks after the kill (GH-715). Both wrapper generators this script
+# stops must match: lane-launch.ps1:154 writes `Set-Location -LiteralPath '<p>'`
+# (single-quoted literal, embedded quotes doubled), while the review lanes of
+# review-pr.sh:453 and pr-review-launch.ps1:64 write a bare `Set-Location '<p>'`
+# — so the parameter name is optional here. Anchored to end of line because
+# both generators put nothing after the path.
+$laneCwd = if ($wrapperBody -match "(?m)^\s*Set-Location\s+(?:-(?:LiteralPath|Path)\s+)?'((?:[^']|'')*)'\s*$") {
+  $Matches[1] -replace "''", "'"
 } else { $null }
 
 function Get-ProcessSnapshot {
@@ -273,10 +297,50 @@ if ($residual.Count -gt 0) {
 $task = Get-ScheduledTask -TaskName $TaskName
 if ($task.State -eq 'Running') { Fail "task $TaskName still reports State = Running after the stop" }
 
-# --- 6. write the end record the killed wrapper cannot write ----------------
+# --- 6. the shared .git/config must still parse after the kill (GH-715) -----
+# The lane's worktree shares one .git/config with the main checkout and every
+# other worktree; a kill landing on git's write to it NULs the file and takes
+# them all down. Check it here — the one moment we know a kill just happened —
+# and restore from the backup lane-launch took before the lane could write.
+# The end record below is written either way, so the verdict never costs the
+# log its === EXIT === line.
+
+$gitConfigVerdict = 'skipped (lane cwd not resolvable from the wrapper)'
+$gitConfigBroken = $false
+if ($laneCwd -and (Test-Path -LiteralPath $laneCwd)) {
+  # $ErrorActionPreference is Stop for this script, so an exception raised
+  # inside the guard — a config held open by another process makes
+  # ReadAllBytes throw, measured — would otherwise end lane-stop right here
+  # and cost the lane its end record. Catch it, carry it as the verdict, and
+  # let step 7 run.
+  try {
+    $guardOut = & (Join-Path $PSScriptRoot 'git-config-guard.ps1') -RepoPath $laneCwd -VerifyOrRestore 2>&1
+    $guardExit = $LASTEXITCODE
+    if ($guardExit -eq 0) {
+      $restoredLine = @($guardOut | Where-Object { "$_" -match 'RESTORED' })
+      $gitConfigVerdict = if ($restoredLine.Count -gt 0) { "$($restoredLine[0])" } else { 'healthy' }
+    } else {
+      # Exit 4 means the guard declined to judge the file (it could not read
+      # it), which is not the same claim as "corrupt and unrepairable".
+      $gitConfigBroken = $true
+      $gitConfigVerdict = if ($guardExit -eq 4) {
+        'UNVERIFIED (git-config-guard could not read the config; nothing was changed)'
+      } else {
+        "UNREPAIRABLE (git-config-guard exit $guardExit)"
+      }
+    }
+    $guardOut | ForEach-Object { [Console]::Error.WriteLine("lane-stop: git-config-guard: $_") }
+  } catch {
+    $gitConfigBroken = $true
+    $gitConfigVerdict = "CHECK FAILED ($($_.Exception.Message))"
+    [Console]::Error.WriteLine("lane-stop: git-config-guard threw: $($_.Exception.Message)")
+  }
+}
+
+# --- 7. write the end record the killed wrapper cannot write ----------------
 
 if ($terminated.Count -gt 0 -or ((Test-Path -LiteralPath $Log) -and -not (Test-Path -LiteralPath $Done))) {
-  Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1; terminated $($terminated.Count) process(es)) ===" -Encoding utf8
+  Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1; terminated $($terminated.Count) process(es); .git/config $gitConfigVerdict) ===" -Encoding utf8
   if (-not (Test-Path -LiteralPath $Done)) {
     Set-Content -LiteralPath $Done -Value 'stopped' -Encoding ascii
   }
@@ -291,4 +355,8 @@ if ($terminated.Count -gt 0) {
   "terminated=0 (lane was not running)"
 }
 "residual=$($residual.Count) (CommandLine match + process tree verification)"
+"gitconfig=$gitConfigVerdict"
+if ($gitConfigBroken) {
+  Fail "the shared .git/config for '$laneCwd' was not confirmed healthy after the kill ($gitConfigVerdict); every worktree sharing it depends on that file, so check it before starting anything else (GH-715)"
+}
 exit 0
