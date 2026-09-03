@@ -288,9 +288,8 @@ enum Command {
     },
     /// Show workspace status
     Status {
-        /// Emit the status as one JSON object on stdout instead of text.
-        /// Stable contract: within 0.x keys may be added, never deleted,
-        /// renamed, or retyped (COMPATIBILITY.md § "Stable `--json` contracts").
+        /// Emit one JSON object on stdout instead of text. Stable contract —
+        /// see COMPATIBILITY.md § "Stable `--json` contracts".
         #[arg(long)]
         json: bool,
     },
