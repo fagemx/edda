@@ -123,6 +123,11 @@ pub struct PrevDigest {
     /// Activity classification for this session.
     #[serde(default)]
     pub activity: String,
+    /// Hook-path writes that failed and were dropped during this session
+    /// (GH-692). Zero means every write landed; a nonzero count is printed by
+    /// the session digest so a lost write never looks like "nothing happened".
+    #[serde(default)]
+    pub dropped_writes: u64,
 }
 
 /// Write prev_digest.json from SessionStats + optional ledger extras.
@@ -178,6 +183,7 @@ pub fn write_prev_digest(
         cache_creation_tokens: stats.cache_creation_tokens,
         estimated_cost_usd: stats.estimated_cost_usd,
         activity: stats.activity.to_string(),
+        dropped_writes: crate::state::read_dropped_writes(project_id, session_id),
     };
 
     let path = edda_store::project_dir(project_id)

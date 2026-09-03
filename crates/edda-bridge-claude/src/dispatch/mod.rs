@@ -55,6 +55,19 @@ impl HookResult {
     pub fn empty() -> Self {
         Self::default()
     }
+
+    /// Attach a stderr warning while keeping any stdout output.
+    ///
+    /// Per the hook contract, stderr is shown to the user and exits 1 —
+    /// non-blocking. Used to surface failed hook-path writes (GH-692) so a
+    /// dropped ledger/session write is visible to both agent and human.
+    pub fn with_warning(mut self, msg: String) -> Self {
+        self.stderr = Some(match self.stderr.take() {
+            Some(existing) => format!("{existing}\n{msg}"),
+            None => msg,
+        });
+        self
+    }
 }
 
 impl From<Option<String>> for HookResult {
@@ -134,8 +147,18 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
         raw: sanitized_raw,
     };
 
-    // Append to session ledger
-    let _ = append_to_session_ledger(&envelope);
+    // Append to session ledger.
+    // GH-692: a failed append is counted and warned — the count surfaces in
+    // the SessionEnd warning and the next session's digest. It must never
+    // look like the event was recorded when it was not.
+    if let Err(e) = append_to_session_ledger(&envelope) {
+        crate::state::record_dropped_write(
+            &project_id,
+            &session_id,
+            "session ledger",
+            &format!("{e:#}"),
+        );
+    }
 
     // Update peer heartbeat timestamp (lightweight touch for liveness)
     if !session_id.is_empty() {
@@ -222,6 +245,7 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
             let agent_type = get_str(&raw, "agent_type");
             let agent_transcript_path = get_str(&raw, "agent_transcript_path");
             let last_assistant_message = get_str(&raw, "last_assistant_message");
+            let mut result = HookResult::empty();
             if !agent_id.is_empty() {
                 let summary = extract_subagent_summary(
                     &agent_transcript_path,
@@ -242,15 +266,28 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
                     },
                 );
 
-                try_write_subagent_completed_note_event(&cwd, &agent_id, &agent_type, &summary);
+                if let Err(e) =
+                    try_write_subagent_completed_note_event(&cwd, &agent_id, &agent_type, &summary)
+                {
+                    // GH-692: the note event was NOT written — surface it.
+                    crate::state::record_dropped_write(
+                        &project_id,
+                        &session_id,
+                        "ledger note event (subagent completed)",
+                        &format!("{e:#}"),
+                    );
+                    result = result.with_warning(format!("edda: ledger write failed: {e:#}"));
+                }
                 crate::peers::remove_heartbeat(&project_id, &agent_id);
             }
-            Ok(HookResult::empty())
+            Ok(result)
         }
         "TaskCompleted" => {
             let task_id = get_str(&raw, "task_id");
             let task_subject = get_str(&raw, "task_subject");
             let task_description = get_str(&raw, "task_description");
+
+            let mut result = HookResult::empty();
 
             if !task_id.is_empty() {
                 crate::peers::write_task_completed(
@@ -261,10 +298,19 @@ pub fn hook_entrypoint_from_stdin(stdin: &str) -> anyhow::Result<HookResult> {
                     &task_description,
                 );
 
-                try_write_task_completed_note_event(&cwd, &task_id, &task_subject);
+                if let Err(e) = try_write_task_completed_note_event(&cwd, &task_id, &task_subject) {
+                    // GH-692: the note event was NOT written — surface it.
+                    crate::state::record_dropped_write(
+                        &project_id,
+                        &session_id,
+                        "ledger note event (task completed)",
+                        &format!("{e:#}"),
+                    );
+                    result = result.with_warning(format!("edda: ledger write failed: {e:#}"));
+                }
             }
 
-            Ok(HookResult::empty())
+            Ok(result)
         }
         "TeammateIdle" => {
             let teammate_name = get_str(&raw, "teammate_name");

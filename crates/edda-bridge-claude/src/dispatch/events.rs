@@ -3,27 +3,30 @@ use std::path::Path;
 use crate::parse::*;
 use crate::signals::SubagentSummary;
 
-/// Best-effort write of a `commit` event to the workspace ledger.
+/// Write a `commit` event to the workspace ledger.
 /// Uses try-lock: silently skips if workspace is locked by another process.
-pub(super) fn try_write_commit_event(raw: &serde_json::Value, msg: &str) {
+///
+/// GH-692: a failed ledger open or append is returned as an error (and counted
+/// by the caller via `record_dropped_write`) instead of being swallowed —
+/// only a *missing workspace* and a *contended lock* are legitimate silent
+/// skips.
+pub(super) fn try_write_commit_event(raw: &serde_json::Value, msg: &str) -> anyhow::Result<()> {
     let cwd = get_str(raw, "cwd");
     if cwd.is_empty() {
-        return;
+        return Ok(());
     }
     let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(&cwd)) else {
-        return;
+        return Ok(()); // no edda workspace — hooks fire in arbitrary dirs
     };
-    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
-        return;
-    };
+    let ledger = edda_ledger::Ledger::open(&root)?;
     let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
-        return; // locked by another process — skip
+        return Ok(()); // locked by another process — skip
     };
     let Ok(branch) = ledger.head_branch() else {
-        return;
+        return Ok(());
     };
     let Ok(parent_hash) = ledger.last_event_hash() else {
-        return;
+        return Ok(());
     };
     let mut params = edda_core::event::CommitEventParams {
         branch: &branch,
@@ -36,31 +39,36 @@ pub(super) fn try_write_commit_event(raw: &serde_json::Value, msg: &str) {
         labels: vec!["auto_detect".to_string()],
     };
     if let Ok(event) = edda_core::event::new_commit_event(&mut params) {
-        let _ = ledger.append_event(&event);
+        ledger.append_event(&event)?;
     }
+    Ok(())
 }
 
-/// Best-effort write of a `merge` event to the workspace ledger.
+/// Write a `merge` event to the workspace ledger.
 /// Uses try-lock: silently skips if workspace is locked by another process.
-pub(super) fn try_write_merge_event(raw: &serde_json::Value, src: &str, strategy: &str) {
+///
+/// GH-692: failed ledger open/append propagate — see `try_write_commit_event`.
+pub(super) fn try_write_merge_event(
+    raw: &serde_json::Value,
+    src: &str,
+    strategy: &str,
+) -> anyhow::Result<()> {
     let cwd = get_str(raw, "cwd");
     if cwd.is_empty() {
-        return;
+        return Ok(());
     }
     let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(&cwd)) else {
-        return;
+        return Ok(()); // no edda workspace — hooks fire in arbitrary dirs
     };
-    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
-        return;
-    };
+    let ledger = edda_ledger::Ledger::open(&root)?;
     let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
-        return;
+        return Ok(()); // locked by another process — skip
     };
     let Ok(branch) = ledger.head_branch() else {
-        return;
+        return Ok(());
     };
     let Ok(parent_hash) = ledger.last_event_hash() else {
-        return;
+        return Ok(());
     };
     if let Ok(event) = edda_core::event::new_merge_event(
         &branch,
@@ -70,8 +78,9 @@ pub(super) fn try_write_merge_event(raw: &serde_json::Value, src: &str, strategy
         strategy,
         &[],
     ) {
-        let _ = ledger.append_event(&event);
+        ledger.append_event(&event)?;
     }
+    Ok(())
 }
 
 /// Check if current directory is a karvi project (has server/board.json).
@@ -154,27 +163,31 @@ pub(super) fn try_post_karvi_signal(
     }
 }
 
-/// Best-effort write of a task-completed `note` event to workspace ledger.
+/// Write a task-completed `note` event to workspace ledger.
 /// Uses try-lock: silently skips if workspace is locked by another process.
-pub(super) fn try_write_task_completed_note_event(cwd: &str, task_id: &str, task_subject: &str) {
+///
+/// GH-692: failed ledger open/append propagate — see `try_write_commit_event`.
+pub(super) fn try_write_task_completed_note_event(
+    cwd: &str,
+    task_id: &str,
+    task_subject: &str,
+) -> anyhow::Result<()> {
     if cwd.is_empty() || task_id.is_empty() {
-        return;
+        return Ok(());
     }
 
     let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(cwd)) else {
-        return;
+        return Ok(()); // no edda workspace — hooks fire in arbitrary dirs
     };
-    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
-        return;
-    };
+    let ledger = edda_ledger::Ledger::open(&root)?;
     let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
-        return;
+        return Ok(()); // locked by another process — skip
     };
     let Ok(branch) = ledger.head_branch() else {
-        return;
+        return Ok(());
     };
     let Ok(parent_hash) = ledger.last_event_hash() else {
-        return;
+        return Ok(());
     };
 
     let text = if task_subject.is_empty() {
@@ -187,36 +200,37 @@ pub(super) fn try_write_task_completed_note_event(cwd: &str, task_id: &str, task
     if let Ok(event) =
         edda_core::event::new_note_event(&branch, parent_hash.as_deref(), "agent", &text, &tags)
     {
-        let _ = ledger.append_event(&event);
+        ledger.append_event(&event)?;
     }
+    Ok(())
 }
 
-/// Best-effort write of a sub-agent completion `note` event to workspace ledger.
+/// Write a sub-agent completion `note` event to workspace ledger.
 /// Uses try-lock: silently skips if workspace is locked by another process.
+///
+/// GH-692: failed ledger open/append propagate — see `try_write_commit_event`.
 pub(super) fn try_write_subagent_completed_note_event(
     cwd: &str,
     agent_id: &str,
     agent_type: &str,
     summary: &SubagentSummary,
-) {
+) -> anyhow::Result<()> {
     if cwd.is_empty() || agent_id.is_empty() {
-        return;
+        return Ok(());
     }
 
     let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(cwd)) else {
-        return;
+        return Ok(()); // no edda workspace — hooks fire in arbitrary dirs
     };
-    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
-        return;
-    };
+    let ledger = edda_ledger::Ledger::open(&root)?;
     let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
-        return;
+        return Ok(()); // locked by another process — skip
     };
     let Ok(branch) = ledger.head_branch() else {
-        return;
+        return Ok(());
     };
     let Ok(parent_hash) = ledger.last_event_hash() else {
-        return;
+        return Ok(());
     };
 
     let mut details = Vec::new();
@@ -251,6 +265,7 @@ pub(super) fn try_write_subagent_completed_note_event(
     if let Ok(event) =
         edda_core::event::new_note_event(&branch, parent_hash.as_deref(), "agent", &text, &tags)
     {
-        let _ = ledger.append_event(&event);
+        ledger.append_event(&event)?;
     }
+    Ok(())
 }

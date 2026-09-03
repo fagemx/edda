@@ -271,6 +271,12 @@ fn build_stats_context(project_id: &str) -> String {
     if !digest.notes.is_empty() {
         parts.push(format!("Notes: {}", digest.notes.join("; ")));
     }
+    if digest.dropped_writes > 0 {
+        parts.push(format!(
+            "Dropped writes: {} — some hook-path writes FAILED and were not persisted (GH-692)",
+            digest.dropped_writes
+        ));
+    }
 
     parts.join("\n")
 }

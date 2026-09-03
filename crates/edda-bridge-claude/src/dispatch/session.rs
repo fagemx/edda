@@ -278,7 +278,13 @@ pub(super) fn dispatch_session_end(
     let decide_count = read_counter(project_id, session_id, "decide_count");
     let signal_count = read_counter(project_id, session_id, "signal_count");
 
-    // 2c. Snapshot session digest for next session's "## Previous Session"
+    // 2c. Snapshot session digest for next session's "## Previous Session".
+    // Known undercount: hook-path writes that fail LATER in SessionEnd (the
+    // postmortem L3 stores and detect state below) are counted but not
+    // reflected in this digest, so it can disagree with the SessionEnd
+    // stderr warning by up to that phase's failure count. Nothing is
+    // invisible — the warning (and the counter it reads) is the complete
+    // record; this snapshot is an approximation for the next-session context.
     crate::digest::write_prev_digest_from_store(
         project_id,
         session_id,
@@ -346,7 +352,7 @@ pub(super) fn dispatch_session_end(
     }
 
     // 2i. Background pattern detection (interval-gated)
-    crate::bg_detect::increment_session_count(project_id);
+    crate::bg_detect::increment_session_count(project_id, session_id);
     if crate::bg_detect::should_run(project_id) {
         let tx = bg_tx.clone();
         let pid = project_id.to_string();
@@ -416,14 +422,26 @@ pub(super) fn dispatch_session_end(
     // 2d. Push notification (best-effort, fire-and-forget)
     notify_session_end(project_id, cwd, session_id);
 
-    // 3. Clean up session-scoped state files
+    // 3. Collect the dropped-write count before cleanup deletes the counter
+    //    (GH-692: a failed hook-path write must surface at session end).
+    let dropped_writes = crate::state::read_dropped_writes(project_id, session_id);
+
+    // 4. Clean up session-scoped state files
     cleanup_session_state(project_id, session_id);
 
-    // 4. Collect warnings (pending tasks)
-    if let Some(warning) = collect_session_end_warnings(project_id) {
-        Ok(HookResult::warning(warning))
-    } else {
+    // 5. Collect warnings (pending tasks, dropped writes — GH-692)
+    let mut warnings = collect_session_end_warnings(project_id)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if dropped_writes > 0 {
+        warnings.push(format!(
+            "edda: {dropped_writes} hook write(s) failed this session and were NOT persisted (ledger/session-ledger/coordination/state) — see debug log"
+        ));
+    }
+    if warnings.is_empty() {
         Ok(HookResult::empty())
+    } else {
+        Ok(HookResult::warning(warnings.join("\n")))
     }
 }
 
@@ -566,11 +584,27 @@ pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
         rules_store.run_decay_cycle();
     }
 
-    let _ = rules_store.save_project(project_id);
+    if let Err(e) = rules_store.save_project(project_id) {
+        // GH-692: the L3 rules write failed — count it, don't pretend it landed.
+        crate::state::record_dropped_write(
+            project_id,
+            session_id,
+            "L3 rules store",
+            &format!("{e:#}"),
+        );
+    }
 
     let mut lessons_store = edda_postmortem::lessons::LessonsStore::load_project(project_id);
     lessons_store.add_lessons(&result.lessons, session_id);
-    let _ = lessons_store.save_project(project_id);
+    if let Err(e) = lessons_store.save_project(project_id) {
+        // GH-692: the L3 lessons write failed — count it, don't pretend it landed.
+        crate::state::record_dropped_write(
+            project_id,
+            session_id,
+            "L3 lessons store",
+            &format!("{e:#}"),
+        );
+    }
 
     // Sync top lessons to CLAUDE.md (best-effort)
     let claude_md_path = Path::new(cwd).join("CLAUDE.md");
@@ -639,6 +673,8 @@ pub(super) fn cleanup_session_state(project_id: &str, session_id: &str) {
     let _ = fs::remove_file(state_dir.join(format!("nudge_ts.{session_id}")));
     // Recall rate counters
     let _ = fs::remove_file(state_dir.join(format!("nudge_count.{session_id}")));
+    // Dropped-write counter (GH-692)
+    let _ = fs::remove_file(state_dir.join(format!("dropped_writes.{session_id}")));
     let _ = fs::remove_file(state_dir.join(format!("decide_count.{session_id}")));
     let _ = fs::remove_file(state_dir.join(format!("signal_count.{session_id}")));
     // Late peer detection counter (#11)

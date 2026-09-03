@@ -109,7 +109,7 @@ struct AuditEntry {
 /// combine the increment + threshold check into a single file-locked
 /// read-modify-write, but the current design is acceptable for the
 /// single-user CLI use case.
-pub fn increment_session_count(project_id: &str) {
+pub fn increment_session_count(project_id: &str, session_id: &str) {
     let state = load_detect_state(project_id).unwrap_or(DetectState {
         last_detect_at: String::new(),
         sessions_since_last: 0,
@@ -121,7 +121,17 @@ pub fn increment_session_count(project_id: &str) {
         ..state
     };
 
-    let _ = save_detect_state_raw(project_id, &updated);
+    if let Err(e) = save_detect_state_raw(project_id, &updated) {
+        // GH-692: the detect-state write failed — count it, don't pretend the
+        // counter advanced. Without this, the next threshold crossing is
+        // silently misjudged.
+        crate::state::record_dropped_write(
+            project_id,
+            session_id,
+            "detect state",
+            &format!("{e:#}"),
+        );
+    }
 }
 
 /// Check whether background pattern detection should run for this project.
@@ -948,11 +958,11 @@ mod tests {
         // Start fresh
         let _ = fs::remove_file(detect_state_path(pid));
 
-        increment_session_count(pid);
+        increment_session_count(pid, "sess-test");
         let state = load_detect_state(pid).unwrap();
         assert_eq!(state.sessions_since_last, 1);
 
-        increment_session_count(pid);
+        increment_session_count(pid, "sess-test");
         let state = load_detect_state(pid).unwrap();
         assert_eq!(state.sessions_since_last, 2);
 

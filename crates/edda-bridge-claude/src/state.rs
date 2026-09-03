@@ -32,6 +32,51 @@ pub fn read_counter(project_id: &str, session_id: &str, name: &str) -> u64 {
         .unwrap_or(0)
 }
 
+// ── Dropped-Write Visibility (GH-692) ──
+
+/// Record a failed hook-path write so the loss stays observable.
+///
+/// Death visibility for ledger, session-ledger, coordination, heartbeat,
+/// L3-store and digest-state writes on the hook path: every dropped write is
+/// `tracing::warn!`-ed and counted in a per-session counter. The count is
+/// printed by the SessionEnd hook warning and carried into the session digest
+/// (`prev_digest.json` → "Dropped writes"), so a failed write can never look
+/// like "nothing happened".
+pub fn record_dropped_write(project_id: &str, session_id: &str, what: &str, err: &str) {
+    tracing::warn!(
+        error = %err,
+        what = %what,
+        "edda hook write dropped — data was not persisted"
+    );
+    if session_id.is_empty() {
+        return;
+    }
+    let path = edda_store::project_dir(project_id)
+        .join("state")
+        .join(format!("dropped_writes.{session_id}"));
+    let current: u64 = fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0);
+    if let Err(counter_err) = fs::write(&path, (current + 1).to_string()) {
+        tracing::warn!(
+            error = %counter_err,
+            "edda: failed to persist dropped_writes counter — this loss is reported via tracing only"
+        );
+    }
+}
+
+/// Read the per-session dropped-write count (0 if missing).
+pub fn read_dropped_writes(project_id: &str, session_id: &str) -> u64 {
+    let path = edda_store::project_dir(project_id)
+        .join("state")
+        .join(format!("dropped_writes.{session_id}"));
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 // ── Injection Dedup ──
 
 /// Path to the inject hash state file for a given session.
@@ -184,6 +229,24 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_writes_round_trip() {
+        let pid = "test_state_dropped_writes";
+        let sid = "s-dw";
+        let _ = edda_store::ensure_dirs(pid);
+
+        assert_eq!(read_dropped_writes(pid, sid), 0);
+        record_dropped_write(pid, sid, "session ledger", "test failure");
+        record_dropped_write(pid, sid, "coordination event", "test failure");
+        assert_eq!(read_dropped_writes(pid, sid), 2);
+
+        // Empty session id: warn only, no counter write, no panic.
+        record_dropped_write(pid, "", "session ledger", "test failure");
+        assert_eq!(read_dropped_writes(pid, ""), 0);
+
+        let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+    }
 
     #[test]
     fn counter_round_trip() {

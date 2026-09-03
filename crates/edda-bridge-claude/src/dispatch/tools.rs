@@ -357,13 +357,32 @@ pub(super) fn dispatch_post_tool_use(
     // Count every detected signal (including SelfRecord and cooldown-suppressed ones).
     increment_counter(project_id, session_id, "signal_count");
 
-    // Auto-write events to workspace ledger (best-effort, try-lock).
-    match &signal {
+    // Auto-write events to workspace ledger (try-lock).
+    // GH-692: a failed open/append is surfaced to the agent instead of being
+    // silently dropped, and counted for the session digest.
+    let write_result = match &signal {
         crate::nudge::NudgeSignal::Commit(msg) => try_write_commit_event(raw, msg),
         crate::nudge::NudgeSignal::Merge(src, strategy) => {
             try_write_merge_event(raw, src, strategy)
         }
-        _ => {}
+        _ => Ok(()),
+    };
+    if let Err(e) = write_result {
+        crate::state::record_dropped_write(
+            project_id,
+            session_id,
+            "ledger event (post-tool-use)",
+            &format!("{e:#}"),
+        );
+        // Fail fast, documented trade-off: this early return also skips the
+        // karvi write-back, the SelfRecord decide-count, the cooldown check
+        // and this turn's nudge additionalContext — a read-only ledger
+        // therefore costs the agent its nudge for this PostToolUse.
+        // `mark_nudge_sent` is skipped too, so the nudge is not permanently
+        // lost; the failure warning stays unburied in the hook output.
+        return Ok(HookResult::warning(format!(
+            "edda: ledger write failed: {e:#}"
+        )));
     }
 
     // Write-back to karvi API if this is a karvi project (fire-and-forget).
