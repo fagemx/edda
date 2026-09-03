@@ -912,9 +912,12 @@ fn discover_plans(repo_root: &Path) -> Result<(DiscoveredPlans, DiscoveryCorrupt
             }
         }
     }
-    // PASS 2 — directory scan. Skip names the registry already resolved
-    // (found OR corrupt): a stale/truncated copy in the repo root must
-    // neither outrank the live store nor deny recovery for it.
+    // PASS 2 — directory scan. Skip only the *same* (name, store) the
+    // registry already resolved (round-11 P1: a name-global skip silently
+    // erased a live same-name plan in another store, and a corrupt
+    // registry target denied a healthy copy elsewhere). Registry-first
+    // insertion + stable sort still ranks the live lane first; duplicates
+    // surface via resolve_plan_store's shadow warning.
     for store in plan_stores(repo_root) {
         let conductor_dir = store.join(".edda").join("conductor");
         if !conductor_dir.exists() {
@@ -957,8 +960,9 @@ fn discover_plans(repo_root: &Path) -> Result<(DiscoveredPlans, DiscoveryCorrupt
             };
             if is_dir {
                 if let Some(name) = entry.file_name().to_str() {
-                    if found.iter().any(|(n, _)| n == name)
-                        || corrupt.iter().any(|(n, _, _)| n == name)
+                    let same = |s: &Path| normalize_store_path(s) == normalize_store_path(&store);
+                    if found.iter().any(|(n, s)| n == name && same(s))
+                        || corrupt.iter().any(|(n, s, _)| n == name && same(s))
                     {
                         continue;
                     }
@@ -1388,6 +1392,90 @@ phases:
         retry(&root, "a", Some("plan-x")).unwrap();
 
         let live = load_state(&wt, "plan-x").unwrap().unwrap();
+        assert_eq!(live.phases[0].status, PhaseStatus::Pending);
+        let leftover = std::fs::read(corrupt_dir.join("state.json")).unwrap();
+        assert_eq!(leftover, b"{corrupt");
+    }
+
+    /// GH-557 (independent-review round 11, P1-1): two LIVE same-name copies
+    /// — registry points at the worktree, repo root still has its own state
+    /// — must BOTH appear in `status`, and a verb must shadow-warn rather
+    /// than erase the root copy.
+    #[test]
+    fn same_name_live_copy_is_listed_and_not_erased() {
+        let (_dir, wt) = repo_with_worktree_state();
+        let root = _dir.path().join("repo");
+
+        let plan = parse_plan("name: plan-x\nphases:\n  - id: a\n    prompt: x\n").unwrap();
+        let mut root_state =
+            edda_conductor::state::machine::PlanState::from_plan(&plan, "plan-x.yaml");
+        root_state.phases[0].status = PhaseStatus::Failed;
+        root_state.plan_status = PlanStatus::Blocked;
+        let root_dir = root.join(".edda").join("conductor").join("plan-x");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        std::fs::write(
+            root_dir.join("state.json"),
+            serde_json::to_string_pretty(&root_state).unwrap(),
+        )
+        .unwrap();
+
+        let mut live = load_state(&wt, "plan-x").unwrap().unwrap();
+        live.phases[0].status = PhaseStatus::Failed;
+        live.plan_status = PlanStatus::Blocked;
+        save_state(&wt, &live).unwrap();
+        registry_record(&root, "plan-x", &wt);
+
+        let text = status_impl(&root, None, false).unwrap();
+        assert!(
+            text.contains(&normalize_store_path(&wt)),
+            "live registry store must be listed: {text}"
+        );
+        assert!(
+            text.contains("(repo root)"),
+            "live repo-root copy must not be erased from status: {text}"
+        );
+
+        let holding = stores_holding(&root, "plan-x").unwrap();
+        assert!(
+            holding.len() >= 2,
+            "both stores must be visible to verbs: {holding:?}"
+        );
+        assert_eq!(
+            normalize_store_path(&holding[0]),
+            normalize_store_path(&wt),
+            "registry-referenced store ranks first"
+        );
+    }
+
+    /// GH-557 (independent-review round 11, P1-2): a truncated registry
+    /// target must not deny recovery of a healthy same-name copy in the
+    /// repo root (the inverse of `stale_corrupt_copy_does_not_deny_…`).
+    #[test]
+    fn corrupt_registry_target_does_not_deny_healthy_same_name_elsewhere() {
+        let (_dir, wt) = repo_with_worktree_state();
+        let root = _dir.path().join("repo");
+
+        let plan = parse_plan("name: plan-x\nphases:\n  - id: a\n    prompt: x\n").unwrap();
+        let mut root_state =
+            edda_conductor::state::machine::PlanState::from_plan(&plan, "plan-x.yaml");
+        root_state.phases[0].status = PhaseStatus::Failed;
+        root_state.plan_status = PlanStatus::Blocked;
+        let root_dir = root.join(".edda").join("conductor").join("plan-x");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        std::fs::write(
+            root_dir.join("state.json"),
+            serde_json::to_string_pretty(&root_state).unwrap(),
+        )
+        .unwrap();
+
+        let corrupt_dir = wt.join(".edda").join("conductor").join("plan-x");
+        std::fs::create_dir_all(&corrupt_dir).unwrap();
+        std::fs::write(corrupt_dir.join("state.json"), b"{corrupt").unwrap();
+        registry_record(&root, "plan-x", &wt);
+
+        retry(&root, "a", Some("plan-x")).unwrap();
+
+        let live = load_state(&root, "plan-x").unwrap().unwrap();
         assert_eq!(live.phases[0].status, PhaseStatus::Pending);
         let leftover = std::fs::read(corrupt_dir.join("state.json")).unwrap();
         assert_eq!(leftover, b"{corrupt");
