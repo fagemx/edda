@@ -145,7 +145,7 @@ pub(super) async fn fail_checking_phase(
 /// on_fail policy. Shared by the main loop and the post-rejection redispatch
 /// turn (D3).
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)] // 400 lines at #779; split tracked in #776
+#[allow(clippy::too_many_lines)] // 395 lines — moved verbatim from sequential.rs (GH-776)
 pub(super) async fn process_phase_result(
     plan: &Plan,
     phase: &Phase,
@@ -341,27 +341,26 @@ pub(super) async fn process_phase_result(
                     if let Some(tmux) = tmux_session {
                         let _ = tmux.update_phase_status(phase_id, "Passed");
                     }
+
+                    // Record to edda ledger — with the plan id (GH-584
+                    // round-2 P1-2): the structured payload must attribute
+                    // the cost to its plan on the production path.
+                    edda::record_phase_done_with_plan(
+                        cwd,
+                        Some(&plan.name),
+                        phase_id,
+                        result_text.as_deref(),
+                        cost_usd,
+                    );
                     event_log.record(Event::PhasePassed {
                         phase_id: phase_id.to_string(),
                         attempt,
                         duration_ms: elapsed_ms,
                         cost_usd,
                     });
-                    // GH-584 round-2 P1-1: the phase terminal state reaches
-                    // the workspace ledger as a structured conductor_phase
-                    // event, not only the plan-local event log.
-                    // GH-584 round-2 P1-3: carry the attempt's measured cost.
-                    let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
-                    edda::record_phase_done_with_plan(
-                        cwd,
-                        Some(plan.name.as_str()),
-                        phase_id,
-                        final_output_line(result_text.as_deref()).as_deref(),
-                        measured,
-                    );
                     notifier
                         .notify_phase_terminal(phase_terminal_event(
-                            plan.name.as_str(),
+                            &plan.name,
                             phase_id,
                             "Passed",
                             attempt,
@@ -503,13 +502,6 @@ pub(super) async fn process_phase_result(
             }
             let elapsed_ms = phase_start.elapsed().as_millis() as u64;
             let msg = format!("{result:?}");
-            println!(
-                "  ✗ Phase \"{phase_id}\" stopped: {msg} ({})",
-                format_elapsed(phase_start.elapsed())
-            );
-            if let Some(tmux) = tmux_session {
-                let _ = tmux.update_phase_status(phase_id, "Failed");
-            }
             transition(
                 state,
                 phase_id,
