@@ -241,6 +241,10 @@ pub fn run(
             // Conduct has no session-dir surface (GH-574); pi uses its own
             // default session storage under conduct.
             session_dir: None,
+            // Conduct's session ids are deterministic per plan/phase/attempt
+            // and each attempt is a fresh conversation, so it never resumes
+            // (GH-708). Retries change the attempt, and therefore the id.
+            resume: false,
         },
     )?;
     let engine = CheckEngine::new(cwd.clone());

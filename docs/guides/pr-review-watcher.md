@@ -16,6 +16,9 @@
    - 在 `$EDDA_FLEET_SCRATCH/wt-review-prN` 建立/更新 **--sha 指定那個 SHA** 的 detached
      worktree；若 PR head 已經移走（第二次讀 head 只用來拒審，不用來選審什麼）就拒絕、
      下一輪掃描重來——審什麼由 watcher 掃描當下釘死，不會有兩次獨立讀 head 的 race；
+     這個 worktree **一輪結束就由 lane 移除**（判決那時已經在 log 裡），下一輪在同一個
+     路徑重建；每次啟動前先 `git worktree prune`（GH-708：曾經累積 14 個沒清掉的
+     `wt-review-pr*`）；
    - Windows 上照決策 `fleet.lane-launch` 用 Task Scheduler 起隱藏排程任務
      `edda-review-prN-rR`（wrapper 設 `HOME`、UTF-8；父程序是 svchost，不受
      session 的 Job Object 牽連）；Linux 上退化成 `nohup`。
@@ -35,7 +38,39 @@
    label `review:post-failed`）。
 4. head 被 push 之後（SHA 變了）自動再審一輪（round+1，delta brief，`prev-sha` 帶入）。
 
+## 一張 PR 一個審查者對話（GH-708）
+
+`fleet.reviewer-agent=pi-with-per-pr-resumable-session` 當初選 pi 只為一個量到的性質：
+**per-PR 的審查者 session 可以續**，所以第 2 輪以後只讀 delta，不用重讀整張 PR。
+換成 Claude Opus 之後這個性質必須留著，作法是把 session id **從 PR 編號推導**：
+
+- id ＝ `SHA-1("edda-review-pr<N>")` 排成 name-based（v5）UUID，
+  例如 PR #740 → `435cc101-9d69-56ca-878d-e454d6725f1a`。
+  跨機器、跨輪、跨重跑都一樣，也不可能撞到實作者的 session（`review.independence-policy`）。
+- **開新的 vs 續舊的看磁碟，不看輪次**：`~/.claude/projects/*/<uuid>.jsonl` 存在就續
+  （輪次是 2 但第 1 輪根本沒建起 session 的情況也有）。`review-pr.sh --dry-run` 會印
+  `session=` 與 `session_mode=new|resume`。
+- 兩條運輸的拼法不同，這是最容易寫錯的地方：
+  `edda dispatch` 保留 `--session-id <id>` 再加 `--resume`（旗標要求要有 id）；
+  `claude -p` 則是把 `--session-id` **換成** `--resume <id>`——在那裡兩者互斥，而且
+  重複用同一個 `--session-id` 不是續談，是直接失敗：`Session ID <id> is already in use`。
+- 續談與 cwd 無關（GH-708 實測：從無關目錄 `--resume` 一樣續得到，而且是**同一個**
+  transcript 繼續長，不會多出一個檔），所以 lane 每輪刪掉又重建 worktree 不影響它。
+- 判決表頭帶 `reviewer_session`：watcher 那一行印的是 lane 記在 `.done` 的
+  `SESSION=`／`SESSION_MODE=`（**發起時**的事實），並跟 log 裡的
+  `Session observed:` 行對照 —— 那一行是**後端自己回報**的（`edda dispatch` 取自
+  claude stream-json 的 `system/init`，fallback 臂取自 claude 的 JSON `session_id`），
+  跟 `Session:`（我們要求的 id）是兩個不同來源。兩者不一致代表這輪沒跑在該續的
+  對話裡（`claude --resume` 在 session 已在跑時會「開一份副本並說明」），表頭直接
+  寫出來（`BACKEND REPORTED ...`）；後端什麼都沒回報就是 `unknown`，不會假裝相符。
+
 ## Provider 過載怎麼辦（v1：無 codex 後備）
+
+> 決策現值：`fleet.review-provider-overload=opus-default-sol-via-pi-fallback-no-codex`
+> （操作者裁決 2026-09-03）。Opus 是**預設**審查引擎，不是唯一——`fleet.review-engine-pool`
+> 的錨仍是 `gpt-5.6-sol`（走 pi）。但 watcher 自己**永遠不換模型**：降到錨引擎是操作者的
+> 動作，自動路徑到 `review:unreviewed` 就停。codex 這條運輸自 `fleet.reviewer-agent`
+> 起就不用於審查（做不到唯讀，也到不了 Opus）。
 
 判決死掉或空白（log 沒有 verdict 區塊、zero-byte log、或超過 45 分鐘沒有 `.done`）時：
 
@@ -99,8 +134,8 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 | `review-acks.tsv` | `pr<TAB>sha<TAB>attempts<TAB>status`——已啟動但 ack 未貼出的 head；成功即移除；3 次失敗 → 加 `review:post-failed`，條目標記 `post-failed`（終態）；label 呼叫也失敗則條目保留、下一輪重試 |
 | `review-fails.tsv` | `pr<TAB>sha<TAB>count`——連續啟動失敗次數（連續 3 次 → `review:unreviewed` 並停） |
 | `watch.log` | watcher 每一步的時間戳紀錄 |
-| `review-prN-rR-brief.md` / `.log` / `.done` / `-verdict.md`（`.posted`） / `-comment.md` | 每輪審查的 brief、審查者轉錄（`edda dispatch` 輸出，或 oversized-brief fallback 的 claude stdin 輸出）、結束旗標（`TRANSPORT=<實際走的臂>` ＋ `DISPATCH_EXIT=<code>`）、抽出來的判決（`.posted` = 留言已貼出）、貼出的留言 |
-| `wt-review-prN/` | 該 PR 的 detached worktree |
+| `review-prN-rR-brief.md` / `.log` / `.done` / `-verdict.md`（`.posted`） / `-comment.md` | 每輪審查的 brief、審查者轉錄（`edda dispatch` 輸出，或 oversized-brief fallback 的 claude stdin 輸出）、結束旗標（`TRANSPORT=<實際走的臂>`、`SESSION=<uuid>`、`SESSION_MODE=new|resume`、`DISPATCH_EXIT=<code>`）、抽出來的判決（`.posted` = 留言已貼出）、貼出的留言 |
+| `wt-review-prN/` | 該 PR 的 detached worktree；一輪結束由 lane 移除，下輪原地重建 |
 
 ## Labels（watcher 啟動時自動建立，缺了才建）
 

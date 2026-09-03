@@ -658,7 +658,8 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 |--------|-------------|
 | `--agent AGENT` | Backend that runs the turn: `claude` (default), `pi`, or `codex` |
 | `--prompt-file FILE` | Path to the file containing the prompt, read verbatim (required) |
-| `--session-id ID` | Session id passed to the backend verbatim; generated and printed when omitted so the caller can reuse it on the next call |
+| `--session-id ID` | Session id passed to the backend verbatim; generated and printed when omitted so the caller can reuse it on the next call. pi and codex resume a prior conversation by repeating the id; claude refuses an id that already exists (`Session ID <id> is already in use`) and needs `--resume` |
+| `--resume` | Continue the conversation `--session-id` names instead of starting a new one (`claude --resume <id>`). claude only — pi and codex resume by repeating `--session-id` alone and refuse this flag. Requires `--session-id` |
 | `--cwd DIR` | Working directory for the agent (default: current directory) |
 | `--budget-usd N` | Per-turn budget in USD (codex cannot enforce budgets) |
 | `--timeout-sec S` | Turn timeout in seconds (default: 1800, like a conduct phase) |
@@ -666,7 +667,10 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | `--json` | Print exactly one JSON object to stdout instead of text lines |
 
 With `--json` the object has the shape
-`{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded", "result_text":string\|null, "cost_usd":number\|null, "session_id":string, "error":string\|null}`.
+`{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded", "result_text":string\|null, "cost_usd":number\|null, "session_id":string, "error":string\|null, "model_requested":string, "model_observed":string, "session_observed":string}`.
+`session_id` is the id edda asked for; `session_observed` is the one the
+backend reported in-band, or `"unknown"`. They differ when a `--resume` forked
+instead of continuing, which is the only way to see that from outside.
 
 Exit codes:
 

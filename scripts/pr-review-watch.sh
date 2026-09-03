@@ -30,17 +30,19 @@
 #   review-fails.tsv     pr<TAB>sha<TAB>consecutive launch failures
 #   watch.log            everything the watcher did
 #
-# Provider-overload rule, v1 (no Codex fallback — it cannot be made read-only;
-# fleet.review-provider-overload=…codex-route-withdrawn-for-automated-watcher):
+# Provider-overload rule, v1 (no Codex fallback — it cannot be made read-only,
+# and it cannot reach Opus either; fleet.review-provider-overload=
+# opus-default-sol-via-pi-fallback-no-codex, operator ruling 2026-09-03):
 # on a dead/empty verdict, retry the review once through the same dispatch
 # transport with the same model; if that also yields no verdict, label the PR
-# `review:unreviewed`, log it, and stop for that head. model_requested /
-# model_observed / cost are read from the dispatch transcript — the `Model
-# requested:` / `Model observed:` / `Cost:` lines `edda dispatch` prints — and
-# are NEVER fabricated; a missing line is reported as unknown.
-# (GH-708: the decision text's `edda dispatch --agent codex` fallback step
-# cannot run Opus — that contradiction awaits an operator re-ruling; the code
-# has no codex path.)
+# `review:unreviewed`, log it, and stop for that head. Opus is the DEFAULT
+# review engine, not the only one — the pool's anchor is still gpt-5.6-sol via
+# pi — but the watcher itself never changes model: dropping to the anchor is an
+# operator action, so the automated path stops at `review:unreviewed`.
+# model_requested / model_observed / cost are read from the dispatch
+# transcript — the `Model requested:` / `Model observed:` / `Cost:` lines
+# `edda dispatch` prints — and are NEVER fabricated; a missing line is
+# reported as unknown.
 #
 # review:unreviewed is per head: it blocks only while the PR's current head
 # equals the head recorded as unreviewed. A new head drops the label and is
@@ -263,11 +265,42 @@ session_model_cost() { # $1=log file -> sets REQ, OBSERVED, COST, SIDO
   REQ=$(printf '%s\n' "$t" | sed -n 's/^Model requested: //p' | tail -1)
   OBSERVED=$(printf '%s\n' "$t" | sed -n 's/^Model observed: //p' | tail -1)
   COST=$(printf '%s\n' "$t" | sed -n 's/^Cost: \$\([0-9.]*\)$/\1/p' | tail -1)
-  SIDO=$(printf '%s\n' "$t" | sed -n 's/^Session: //p' | tail -1)
+  # `Session observed:` is the backend's OWN report of the conversation it ran
+  # (dispatch prints `last_observed_session()` from claude's stream-json
+  # `system/init`; the fallback arm prints claude's JSON `session_id`). The
+  # `Session:` line above it is only the id edda asked for, so reading THAT one
+  # here would compare the launched id with itself and never see a fork
+  # (GH-708 round 1, P1). A reviewer that reported none stays "unknown".
+  SIDO=$(printf '%s\n' "$t" | sed -n 's/^Session observed: //p' | tail -1)
   [ -n "${REQ:-}" ] || REQ="unknown"
   [ -n "${OBSERVED:-}" ] || OBSERVED="unknown"
   [ -n "${COST:-}" ] || COST="?"
   [ -n "${SIDO:-}" ] || SIDO="unknown"
+}
+
+# The reviewer conversation this round ran in, as a header fragment. Two
+# independent facts are compared, never merged (GH-708): SESSION=/SESSION_MODE=
+# are what review-pr.sh LAUNCHED with, and $2 is the id the backend REPORTED
+# in-band (`Session observed:`), which is a different source, not an echo.
+# Round 2+ of a PR is supposed to continue round 1's conversation, so a
+# disagreement means the resume forked into a new one — printed as the defect
+# it is instead of quietly showing the launched id. A reviewer that reported
+# no observation at all leaves `$2` "unknown", which claims nothing.
+reviewer_session_desc() { # $1=.done file  $2=session id observed in the log
+  sid=$(sed -n 's/^SESSION=//p' "$1" 2>/dev/null | tail -1)
+  mode=$(sed -n 's/^SESSION_MODE=//p' "$1" 2>/dev/null | tail -1)
+  [ -n "${sid:-}" ] || sid=${2:-unknown}
+  case "${mode:-}" in
+    resume) mdesc=resumed ;;
+    new)    mdesc=new ;;
+    *)      mdesc='mode unknown — no SESSION_MODE receipt in .done' ;;
+  esac
+  if [ -n "${2:-}" ] && [ "$2" != "unknown" ] && [ -n "${sid:-}" ] && [ "$2" != "$sid" ]; then
+    printf '`%s` (%s; BACKEND REPORTED `%s` — this round did not run in the launched conversation)' \
+      "$sid" "$mdesc" "$2"
+  else
+    printf '`%s` (%s)' "$sid" "$mdesc"
+  fi
 }
 
 pr_is_open() { # $1=pr
@@ -421,7 +454,7 @@ settle_pending() {
         esac
         COMMENT="$SCRATCH/review-pr$pr-r$round-comment.md"
         {
-          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): transport \`$tdesc\`, model \`$REQ\` (observed \`$OBSERVED\`), session \`$SIDO\`, $costline, read-only, detached worktree at \`$sha\`. Reviewed head SHA: \`$sha\`."
+          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): transport \`$tdesc\`, model \`$REQ\` (observed \`$OBSERVED\`), reviewer_session $(reviewer_session_desc "$DONE" "$SIDO"), $costline, read-only, detached worktree at \`$sha\`. Reviewed head SHA: \`$sha\`."
           echo
           cat "$VERDICT"
         } > "$COMMENT"

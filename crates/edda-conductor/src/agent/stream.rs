@@ -72,6 +72,14 @@ pub struct MonitorResult {
     /// if any. In-band observation only — `None` means claude did not
     /// report one (GH-574).
     pub model: Option<String>,
+    /// The session id the backend itself reported in the `system/init`
+    /// message, if any. In-band observation only, on the same terms as
+    /// `model`: it is what claude says it is running, not what the caller
+    /// asked for. The two can differ — `claude --resume <id>` "starts a copy
+    /// and says so when the session is already running" — so a caller that
+    /// wants to know whether a resume actually continued the conversation
+    /// has to compare this against the id it passed (GH-708).
+    pub session_id: Option<String>,
 }
 
 /// Reads Claude Code's `--output-format stream-json` stdout line by line,
@@ -177,12 +185,20 @@ impl StreamMonitor {
             StreamMessage::System { model: Some(m), .. } => Some(m.clone()),
             _ => None,
         });
+        let session_id = self.messages.iter().rev().find_map(|m| match m {
+            StreamMessage::System {
+                session_id: Some(s),
+                ..
+            } => Some(s.clone()),
+            _ => None,
+        });
 
         Ok(MonitorResult {
             total_cost_usd: self.total_cost_usd,
             result: result_info,
             result_text,
             model,
+            session_id,
         })
     }
 }
@@ -413,6 +429,7 @@ mod tests {
             }),
             result_text: None,
             model: None,
+            session_id: None,
         };
         let r = classify_result(&monitor, Some(0));
         assert!(
@@ -433,6 +450,7 @@ mod tests {
             }),
             result_text: None,
             model: None,
+            session_id: None,
         };
         let r = classify_result(&monitor, Some(1));
         assert!(matches!(r, PhaseResult::MaxTurns { .. }));
@@ -451,6 +469,7 @@ mod tests {
             }),
             result_text: None,
             model: None,
+            session_id: None,
         };
         let r = classify_result(&monitor, Some(1));
         assert!(matches!(r, PhaseResult::BudgetExceeded { .. }));
@@ -469,6 +488,7 @@ mod tests {
             }),
             result_text: None,
             model: None,
+            session_id: None,
         };
         let r = classify_result(&monitor, Some(1));
         match r {
@@ -533,6 +553,7 @@ mod tests {
             result_text: info.result_text.clone(),
             result: Some(info),
             model: Some("claude-opus-5[1m]".into()),
+            session_id: None,
         };
         match classify_result(&monitor, Some(1)) {
             PhaseResult::AgentCrash { error } => {
@@ -558,6 +579,7 @@ mod tests {
             }),
             result_text: None,
             model: None,
+            session_id: None,
         };
         match classify_result(&monitor, Some(1)) {
             PhaseResult::AgentCrash { error } => assert!(!error.is_empty()),
@@ -585,6 +607,7 @@ mod tests {
                 }),
                 result_text: None,
                 model: None,
+                session_id: None,
             };
             let classified = classify_result(&monitor, Some(1));
             let ok = matches!(
@@ -609,6 +632,7 @@ mod tests {
             }),
             result_text: None,
             model: None,
+            session_id: None,
         };
         let r = classify_result(&monitor, Some(2));
         assert!(matches!(r, PhaseResult::AgentCrash { .. }));
@@ -621,6 +645,7 @@ mod tests {
             result: None,
             result_text: None,
             model: None,
+            session_id: None,
         };
         let r = classify_result(&monitor, Some(137));
         match r {
@@ -638,6 +663,7 @@ mod tests {
             result: None,
             result_text: None,
             model: None,
+            session_id: None,
         };
         let r = classify_result(&monitor, None);
         match r {

@@ -6,6 +6,12 @@
 # and explicitly pinned with --model; reviews run on the Claude subscription
 # because pi's openrouter routing cannot reach any Anthropic model — GH-708).
 #
+# One reviewer conversation per PR, resumed across rounds
+# (fleet.reviewer-agent=pi-with-per-pr-resumable-session, carried over to the
+# claude transport by GH-708): the session id is derived from the PR number,
+# so round 1 opens it with --session-id and every later round continues it
+# with --resume and reads only the delta.
+#
 # The brief is BUILT BY READING REVIEW.md, the repo's executable review spec.
 # This script contributes only the PR's facts (head SHA, surface, the linked
 # issue's doneWhen); every review rule, severity, check command, the class
@@ -46,8 +52,13 @@
 #                                  `Model observed:` / `Cost:` lines follow it)
 #   review-pr<N>-r<R>.done         written when the dispatch exits
 #                                  ("TRANSPORT=<arm>" naming the arm that
-#                                  actually ran, then "DISPATCH_EXIT=<code>")
-#   wt-review-pr<N>/               detached worktree at the PR head
+#                                  actually ran, "SESSION=<uuid>",
+#                                  "SESSION_MODE=new|resume", then
+#                                  "DISPATCH_EXIT=<code>")
+#   wt-review-pr<N>/               detached worktree at the PR head, removed by
+#                                  the lane once the round's verdict is in the
+#                                  log and recreated at the same path next
+#                                  round
 #
 # --dry-run generates the brief and prints what would be launched, but does not
 # create the worktree, register the scheduled task, or start any process.
@@ -250,27 +261,65 @@ if [ -z "$CLASSES" ] || [ -z "$CANON_CLASS" ]; then
   exit 1
 fi
 
-# ---- session id -------------------------------------------------------------
+# ---- reviewer session id: one resumable conversation per PR -----------------
 # The claude backend (`claude -p`) accepts only valid UUIDs: the old
 # `review-pr$PR` shape made every launch die with "Invalid session ID. Must be
 # a valid UUID." (issue #694's second half, walked into by GH-708's transport
-# switch). A fresh UUID v4 per launch; rounds are SHA-pinned independent
-# reviews, not resumed conversations.
-gen_uuid() {
-  r=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
-  if [ "${#r}" -ne 32 ]; then
-    echo "review-pr.sh: cannot read 16 random bytes for a session UUID" >&2
+# switch).
+#
+# The id is DERIVED FROM THE PR NUMBER, not random, so every round of PR #N
+# lands in the same reviewer conversation and round 2+ reads only the delta —
+# the measured property `fleet.reviewer-agent=pi-with-per-pr-resumable-session`
+# chose pi for, and which GH-708's transport switch must not give up. It is a
+# name-based UUID (RFC 4122 §4.3 layout: SHA-1 digest, version nibble 5,
+# variant 10xx) over the literal `edda-review-pr<N>`, so it is stable across
+# machines, rounds and reruns, and can never collide with an implementer's
+# session id (`review.independence-policy`).
+review_session_uuid() { # $1 = PR number
+  if command -v sha1sum >/dev/null 2>&1; then
+    h=$(printf 'edda-review-pr%s' "$1" | sha1sum | cut -d' ' -f1)
+  elif command -v shasum >/dev/null 2>&1; then
+    h=$(printf 'edda-review-pr%s' "$1" | shasum -a 1 | cut -d' ' -f1)
+  else
+    echo "review-pr.sh: neither sha1sum nor shasum found — cannot derive the reviewer session UUID" >&2
     exit 1
   fi
-  # version nibble -> 4, variant nibble -> a (10xx)
-  printf '%s-%s-4%s-a%s-%s\n' \
-    "$(printf '%s' "$r" | cut -c 1-8)" \
-    "$(printf '%s' "$r" | cut -c 9-12)" \
-    "$(printf '%s' "$r" | cut -c 14-16)" \
-    "$(printf '%s' "$r" | cut -c 18-20)" \
-    "$(printf '%s' "$r" | cut -c 21-32)"
+  if [ "${#h}" -lt 32 ]; then
+    echo "review-pr.sh: SHA-1 of the session name is too short ('$h')" >&2
+    exit 1
+  fi
+  # Variant nibble: (digit & 0x3) | 0x8, i.e. the RFC's 10xx bits.
+  case $(printf '%s' "$h" | cut -c17) in
+    0|4|8|c) v=8 ;;
+    1|5|9|d) v=9 ;;
+    2|6|a|e) v=a ;;
+    3|7|b|f) v=b ;;
+    *) echo "review-pr.sh: SHA-1 digest is not hex ('$h')" >&2; exit 1 ;;
+  esac
+  printf '%s-%s-5%s-%s%s-%s\n' \
+    "$(printf '%s' "$h" | cut -c1-8)" \
+    "$(printf '%s' "$h" | cut -c9-12)" \
+    "$(printf '%s' "$h" | cut -c14-16)" \
+    "$v" \
+    "$(printf '%s' "$h" | cut -c18-20)" \
+    "$(printf '%s' "$h" | cut -c21-32)"
 }
-SID=$(gen_uuid)
+SID=$(review_session_uuid "$PR") || exit 1
+
+# New conversation or continued one? Claude Code refuses a `--session-id` that
+# already exists ("Session ID <id> is already in use", exit 1), so the two are
+# different flags and the choice must be made from what is actually on disk —
+# not from the round number, which is 2 both when round 1 produced a session
+# and when round 1 died before creating one. The session store is keyed by the
+# launch cwd, so the glob spans every project dir; resume itself is
+# cwd-independent (verified GH-708: a `--resume` from an unrelated directory
+# still continued the conversation and kept appending to the SAME transcript),
+# which is why deleting and recreating the per-PR worktree between rounds does
+# not break it.
+SESSION_MODE=new
+for f in "$HOME/.claude/projects"/*/"$SID.jsonl"; do
+  if [ -f "$f" ]; then SESSION_MODE=resume; break; fi
+done
 
 # ---- brief: PR facts + REVIEW.md verbatim (fleet.review-brief-framing) ------
 BRIEF="$SCRATCH/review-pr$PR-r$ROUND-brief.md"
@@ -280,6 +329,11 @@ BRIEF="$SCRATCH/review-pr$PR-r$ROUND-brief.md"
   echo "You stand in a detached worktree at PR head **$SHA** (branch \`$BR\`). The workspace ledger is reachable (\`edda ask\` works). Title: $TITLE. Issue(s): ${ISSUES:-none}. Files changed by the PR: ${SURFACE:-none}"
   if [ -n "$PREV" ]; then
     echo "This is a DELTA round: your prior verdict on $PREV is posted on the PR; review \`git diff $PREV..$SHA\` and RAN-confirm each prior finding is resolved; do not re-review the whole PR."
+    if [ "$SESSION_MODE" = "resume" ]; then
+      echo "You are the SAME reviewer session that produced it (\`$SID\`, resumed), so your earlier rounds are above this message — read the delta, not the PR."
+    else
+      echo "NOTE: the reviewer session \`$SID\` carries no prior transcript, so the earlier rounds are NOT in your context — read your posted verdict on $PREV from the PR before judging the delta."
+    fi
   fi
   echo
   echo "## The spec you run"
@@ -321,6 +375,9 @@ BRIEF="$SCRATCH/review-pr$PR-r$ROUND-brief.md"
   echo "…the rest exactly as REVIEW.md §7 specifies (model_requested: $MODEL, spec: $SPEC_VERSION, class: $CANON_CLASS)…"
   echo "VERDICT>>>"
   echo
+  echo "Add one field to that header, directly under \`model_observed\`, so a reader can tell which reviewer conversation judged this round (GH-708):"
+  echo "\`reviewer_session: $SID\` (this round: **$SESSION_MODE**)"
+  echo
   echo "---"
   echo
   echo "(End of brief — the spec itself is at \`.edda-review-spec.md\` in the worktree root, from $SPEC_SOURCE.)"
@@ -334,6 +391,8 @@ echo "classes=${CLASSES:-code-plain}"
 echo "canonical_class=$CANON_CLASS"
 echo "spec=$SPEC_SOURCE ($SPEC_VERSION)"
 echo "base=$BASE_SHA"
+echo "session=$SID"
+echo "session_mode=$SESSION_MODE"
 
 # ---- what would be launched: lane script + exact -File argument -------------
 # Both launchers are GENERATED BEFORE the dry-run exit so the whole transport
@@ -348,6 +407,17 @@ DONE="$SCRATCH/review-pr$PR-r$ROUND.done"
 LANE="$SCRATCH/review-pr$PR-r$ROUND-lane.ps1"
 LANE_FILE_ARG=$LANE
 RUNNER="$SCRATCH/review-pr$PR-r$ROUND-run.sh"
+
+# The two arms spell "continue this conversation" differently: `edda dispatch`
+# keeps --session-id and adds --resume (which requires it), while `claude -p`
+# swaps --session-id for --resume — there they are mutually exclusive, and a
+# repeated --session-id is a hard error rather than a resume (GH-708).
+DISPATCH_SESSION_ARGS="--session-id '$SID'"
+CLAUDE_SESSION_ARGS="--session-id '$SID'"
+if [ "$SESSION_MODE" = "resume" ]; then
+  DISPATCH_SESSION_ARGS="--session-id '$SID' --resume"
+  CLAUDE_SESSION_ARGS="--resume '$SID'"
+fi
 if [ "$IS_WIN" = "1" ]; then
   command -v cygpath >/dev/null 2>&1 || { echo "review-pr.sh: cygpath not found" >&2; exit 1; }
   WTW=$(cygpath -w "$WT")
@@ -356,6 +426,11 @@ if [ "$IS_WIN" = "1" ]; then
   DONEW=$(cygpath -w "$DONE")
   ERRW=$(cygpath -w "$DONE.err")
   LANE_FILE_ARG=$(cygpath -w "$LANE")
+  SCRATCHW=$(cygpath -w "$SCRATCH")
+  # Empty only when the main checkout could not be located; the launch path
+  # refuses that case below, and a dry-run never runs the lane.
+  ROOTW=""
+  [ -n "$ROOT" ] && ROOTW=$(cygpath -w "$ROOT")
   # Resolve pwsh to a full Windows path for the task action: on a Store (MSIX)
   # install the bare "pwsh.exe" execution alias does not launch under Task
   # Scheduler — the task dies with LastTaskResult=0x80070002 before the lane
@@ -376,6 +451,19 @@ if [ "$IS_WIN" = "1" ]; then
 \$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 \$env:HOME = \$env:USERPROFILE
 Set-Location '$WTW'
+function Remove-ReviewWorktree {
+  # The verdict is in the log by the time this runs, so the detached worktree
+  # has served its purpose. Left behind, they accumulate: 14 stale
+  # wt-review-pr* trees sat on this workstation when GH-708 was written. The
+  # path stays per-PR and is recreated at the same place next round, which
+  # does not break --resume (verified: resume is cwd-independent and keeps
+  # appending to the same transcript). --force because the launcher copies
+  # the untracked .edda-review-spec.md into the tree. A failure here (a file
+  # still locked, say) must not change the round's exit code.
+  if ('$ROOTW' -eq '') { return }
+  Set-Location '$SCRATCHW'
+  & git -C '$ROOTW' worktree remove --force '$WTW' 2>&1 | Out-Null
+}
 # edda dispatch hands the prompt to 'claude -p' as a command-line argument,
 # and Windows caps a command line at 32767 chars — an oversized prompt dies in
 # the spawn with os error 206 before claude starts. The brief stays far under
@@ -389,13 +477,17 @@ Set-Location '$WTW'
 # prints that receipt verbatim instead of a hardcoded transport.
 \$briefChars = (Get-Content -Raw "$BRIEFW").Length
 if (\$briefChars -lt 30000) {
-  & edda dispatch --agent claude --model '$MODEL' --exclude-tools 'Edit,Write,NotebookEdit' --session-id '$SID' --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
+  & edda dispatch --agent claude --model '$MODEL' --exclude-tools 'Edit,Write,NotebookEdit' $DISPATCH_SESSION_ARGS --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
+  \$code = \$LASTEXITCODE
   "TRANSPORT=edda-dispatch" | Out-File "$DONEW" -Encoding utf8
-  "DISPATCH_EXIT=\$LASTEXITCODE" | Out-File "$DONEW" -Append -Encoding utf8
-  exit \$LASTEXITCODE
+  "SESSION=$SID" | Out-File "$DONEW" -Append -Encoding utf8
+  "SESSION_MODE=$SESSION_MODE" | Out-File "$DONEW" -Append -Encoding utf8
+  "DISPATCH_EXIT=\$code" | Out-File "$DONEW" -Append -Encoding utf8
+  Remove-ReviewWorktree
+  exit \$code
 }
 \$raw = Get-Content -Raw "$BRIEFW"
-\$json = \$raw | & claude -p --model '$MODEL' --output-format json --session-id '$SID' --allowedTools 'Read,Glob,Grep,Bash' --disallowedTools 'Edit,Write,NotebookEdit' 2>"$ERRW"
+\$json = \$raw | & claude -p --model '$MODEL' --output-format json $CLAUDE_SESSION_ARGS --allowedTools 'Read,Glob,Grep,Bash' --disallowedTools 'Edit,Write,NotebookEdit' 2>"$ERRW"
 \$code = \$LASTEXITCODE
 \$r = \$null
 try { \$r = \$json | ConvertFrom-Json } catch { }
@@ -410,13 +502,17 @@ if (\$r -and \$r.result) {
     # "0,33", which the watcher's [0-9.]* pattern drops to cost: unknown.
     Add-Content -Path "$LOGW" -Value ("Cost: \$" + [math]::Round(\$r.total_cost_usd, 2).ToString([System.Globalization.CultureInfo]::InvariantCulture)) -Encoding utf8
   }
-  Add-Content -Path "$LOGW" -Value "Session: \$(\$r.session_id)" -Encoding utf8
+  Add-Content -Path "$LOGW" -Value "Session: $SID" -Encoding utf8
+  Add-Content -Path "$LOGW" -Value "Session observed: \$(\$r.session_id)" -Encoding utf8
 } else {
   \$json | Out-File -FilePath "$LOGW" -Encoding utf8
 }
 if (Test-Path "$ERRW") { Get-Content "$ERRW" | Add-Content -Path "$LOGW" -Encoding utf8; Remove-Item "$ERRW" -ErrorAction SilentlyContinue }
 "TRANSPORT=claude-stdin" | Out-File "$DONEW" -Encoding utf8
+"SESSION=$SID" | Out-File "$DONEW" -Append -Encoding utf8
+"SESSION_MODE=$SESSION_MODE" | Out-File "$DONEW" -Append -Encoding utf8
 "DISPATCH_EXIT=\$code" | Out-File "$DONEW" -Append -Encoding utf8
+Remove-ReviewWorktree
 exit \$code
 PS
 else
@@ -425,18 +521,29 @@ else
 #!/bin/sh
 export HOME="\${HOME:-$(getent passwd "\$(id -u)" 2>/dev/null | cut -d: -f6)}"
 cd '$WT' || exit 1
+# Same lifecycle as the Windows lane's Remove-ReviewWorktree (see there): the
+# verdict is in the log once the reviewer exits, so the detached worktree is
+# removed rather than left to accumulate. Never changes the round's exit code.
+remove_review_worktree() {
+  [ -n '$ROOT' ] || return 0
+  cd '$SCRATCH' || return 0
+  git -C '$ROOT' worktree remove --force '$WT' >/dev/null 2>&1 || true
+}
 # Same size guard as the Windows lane (see there): edda dispatch while the
 # brief fits the Windows-shaped spawn budget, the read-only-allowlisted
 # claude-via-stdin fallback above it. TRANSPORT= names the arm that ran.
 chars=\$(wc -m < '$BRIEF')
 if [ "\$chars" -lt 30000 ]; then
-  edda dispatch --agent claude --model '$MODEL' --exclude-tools Edit,Write,NotebookEdit --session-id '$SID' --prompt-file '$BRIEF' > '$LOG' 2>&1
+  edda dispatch --agent claude --model '$MODEL' --exclude-tools Edit,Write,NotebookEdit $DISPATCH_SESSION_ARGS --prompt-file '$BRIEF' > '$LOG' 2>&1
   code=\$?
   echo "TRANSPORT=edda-dispatch" > '$DONE'
+  echo "SESSION=$SID" >> '$DONE'
+  echo "SESSION_MODE=$SESSION_MODE" >> '$DONE'
   echo "DISPATCH_EXIT=\$code" >> '$DONE'
+  remove_review_worktree
   exit \$code
 fi
-claude -p --model '$MODEL' --output-format json --session-id '$SID' --allowedTools Read,Glob,Grep,Bash --disallowedTools Edit,Write,NotebookEdit < '$BRIEF' > '$LOG.json' 2>'$LOG.err'
+claude -p --model '$MODEL' --output-format json $CLAUDE_SESSION_ARGS --allowedTools Read,Glob,Grep,Bash --disallowedTools Edit,Write,NotebookEdit < '$BRIEF' > '$LOG.json' 2>'$LOG.err'
 code=\$?
 if command -v jq >/dev/null 2>&1; then
   jq -r '.result // empty' '$LOG.json' > '$LOG'
@@ -444,7 +551,9 @@ if command -v jq >/dev/null 2>&1; then
   printf 'Model requested: %s\n' '$MODEL' >> '$LOG'
   printf 'Model observed: %s\n' "\$mu" >> '$LOG'
   jq -r 'if .total_cost_usd != null then "Cost: \$" + ((.total_cost_usd * 100 | round) / 100 | tostring) else empty end' '$LOG.json' >> '$LOG'
-  jq -r '"Session: " + (.session_id // "")' '$LOG.json' >> '$LOG'
+  printf 'Session: %s
+' '$SID' >> '$LOG'
+  jq -r '"Session observed: " + (.session_id // "unknown")' '$LOG.json' >> '$LOG'
 else
   # No jq is not a silent degradation into a dead verdict: name the fault in
   # the log the watcher reads, keep the raw JSON for diagnosis, and fail the
@@ -458,7 +567,10 @@ fi
 [ -f '$LOG.err' ] && cat '$LOG.err' >> '$LOG'
 rm -f '$LOG.json' '$LOG.err'
 echo "TRANSPORT=claude-stdin" > '$DONE'
+echo "SESSION=$SID" >> '$DONE'
+echo "SESSION_MODE=$SESSION_MODE" >> '$DONE'
 echo "DISPATCH_EXIT=\$code" >> '$DONE'
+remove_review_worktree
 exit \$code
 RUN
   sh -n "$RUNNER" || exit 1
@@ -485,6 +597,11 @@ command -v edda >/dev/null 2>&1 || {
 }
 
 # ---- detached worktree at the PR head ---------------------------------------
+# Prune first: the lane removes its worktree when the round ends, so a
+# registration whose directory is gone is either that removal (recorded but
+# not yet pruned) or a tree deleted by hand. Either way `worktree add` at the
+# same per-PR path would refuse it as "already registered" (GH-708).
+git -C "$ROOT" worktree prune
 git -C "$ROOT" fetch -q origin "$BR"
 if [ -d "$WT" ]; then
   git -C "$WT" checkout -q --detach "$SHA"

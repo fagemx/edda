@@ -156,6 +156,23 @@ dry_run() { # $1 = body text
     brief="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-brief.md"
 }
 
+# Same, for a specific round — and optionally under a HOME whose Claude
+# session store decides whether the round opens a session or resumes one.
+dry_run_round() { # $1=body  $2=round  $3=prev sha (may be empty)  $4=HOME (may be empty)
+    case_number=$((case_number + 1))
+    printf '%b' "$1" >"$tmp/body"
+    export GH_BODY_FILE="$tmp/body"
+    rm -f "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-"* 2>/dev/null || true
+    out=$(HOME="${4:-$HOME}" timeout 60 sh "$root/scripts/review-pr.sh" \
+            "$FIXTURE_PR" "$2" ${3:+"$3"} --dry-run 2>"$tmp/err") || {
+        printf 'review-pr.sh --dry-run (round %s) exited non-zero; stderr:\n%s\n' \
+            "$2" "$(cat "$tmp/err")" >&2
+        return 1
+    }
+    brief="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r$2-brief.md"
+    lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r$2-lane.ps1"
+}
+
 field() { printf '%s\n' "$out" | sed -n "s/^$1=//p"; }
 
 # --- D1 (#683): the -File argument the scheduled task will receive ------------
@@ -297,8 +314,8 @@ if ! grep -q '(read-only, claude-opus-5, session ' "$brief"; then
 fi
 sid=$(sed -n 's/.*session \([0-9a-f-]*\))/\1/p' "$brief" | head -1)
 case "$sid" in
-    ????????-????-4???-[89ab]???-????????????) : ;;
-    *) fail "D5b: the session id is not a valid UUID v4 — the claude backend rejects anything else (GH-694 second half): $sid" ;;
+    ????????-????-5???-[89ab]???-????????????) : ;;
+    *) fail "D5b: the session id is not a valid name-based (v5) UUID — the claude backend rejects anything that is not a UUID at all (GH-694 second half), and GH-708 requires it to be derived from the PR number: $sid" ;;
 esac
 lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-lane.ps1"
 if [ ! -f "$lane" ]; then
@@ -375,6 +392,96 @@ grep -q 'TRANSPORT=edda-dispatch' "$lane" \
     || fail 'D8g: the dispatch arm writes no TRANSPORT=edda-dispatch receipt — the verdict header cannot name the transport that actually ran'
 grep -q 'TRANSPORT=claude-stdin' "$lane" \
     || fail 'D8h: the fallback arm writes no TRANSPORT=claude-stdin receipt'
+
+# --- D9 (GH-708 scope addition): one resumable reviewer conversation per PR ---
+# fleet.reviewer-agent=pi-with-per-pr-resumable-session chose pi for one
+# measured property: a per-PR reviewer session that RESUMES, so round 2+ reads
+# the delta instead of the whole PR. The claude transport must keep it. The id
+# is therefore derived from the PR number (identical every round, never the
+# implementer's), round 1 opens the conversation and later rounds continue it —
+# and the two backends spell "continue" differently, which is the part a
+# string-level change silently gets wrong.
+
+# D9a: derivation is deterministic and pinned. If the name string ever changes,
+# every PR's reviewer conversation silently forks; this is the tripwire.
+EXPECTED_SID_9999=0dc98ad1-d4ae-5321-b81b-b249644368c6   # SHA-1("edda-review-pr9999"), v5 layout
+dry_run_round 'Issue: #650\n' 1 '' ''
+if [ "$(field session)" != "$EXPECTED_SID_9999" ]; then
+    fail "D9a: the reviewer session id for PR $FIXTURE_PR is $(field session), not the derived $EXPECTED_SID_9999"
+fi
+if [ "$(field session_mode)" != "new" ]; then
+    fail "D9a: a PR with no recorded reviewer conversation must open one (session_mode=new), got $(field session_mode)"
+fi
+grep -q -- "--session-id '$EXPECTED_SID_9999'" "$lane" \
+    || fail 'D9b: round 1 does not open the conversation with --session-id'
+if grep -qE '(edda dispatch|claude -p) .*--resume' "$lane"; then
+    fail 'D9b: round 1 asks to resume a conversation that does not exist yet — claude exits 1 with "No conversation found"'
+fi
+grep -q "SESSION=$EXPECTED_SID_9999" "$lane" \
+    || fail 'D9c: the lane writes no SESSION= receipt, so the watcher cannot report which conversation ran'
+grep -q 'SESSION_MODE=new' "$lane" \
+    || fail 'D9c: the lane writes no SESSION_MODE= receipt'
+grep -q "reviewer_session: $EXPECTED_SID_9999" "$brief" \
+    || fail 'D9d: the brief does not tell the reviewer to carry reviewer_session in the REVIEW.md §7 header'
+
+# The same id on the next round — that is the whole point of deriving it.
+dry_run_round 'Issue: #650\n' 2 'cccccccccccccccccccccccccccccccccccccccc' ''
+if [ "$(field session)" != "$EXPECTED_SID_9999" ]; then
+    fail "D9e: round 2 uses a different reviewer session ($(field session)) — rounds would not accumulate context"
+fi
+
+# D9f: with the conversation on disk, both arms must switch to the resume
+# spelling — `edda dispatch` keeps --session-id and ADDS --resume (it requires
+# the id), while `claude -p` REPLACES --session-id with --resume. Reusing
+# --session-id there is not a resume: claude exits 1, "Session ID <id> is
+# already in use".
+FAKE_HOME="$tmp/home"
+mkdir -p "$FAKE_HOME/.claude/projects/C--some-worktree"
+: >"$FAKE_HOME/.claude/projects/C--some-worktree/$EXPECTED_SID_9999.jsonl"
+dry_run_round 'Issue: #650\n' 2 'cccccccccccccccccccccccccccccccccccccccc' "$FAKE_HOME"
+if [ "$(field session_mode)" != "resume" ]; then
+    fail "D9f: a recorded reviewer conversation was not resumed (session_mode=$(field session_mode))"
+fi
+grep -q -- "edda dispatch .*--session-id '$EXPECTED_SID_9999' --resume" "$lane" \
+    || fail 'D9f: the dispatch arm does not continue the recorded conversation (--session-id <id> --resume)'
+grep -q -- "claude -p .*--resume '$EXPECTED_SID_9999'" "$lane" \
+    || fail 'D9f: the fallback arm does not continue the recorded conversation (--resume <id>)'
+if grep -q -- "claude -p .*--session-id" "$lane"; then
+    fail 'D9f: the fallback arm still names the session with --session-id while resuming — claude refuses an id that already exists'
+fi
+grep -q 'SESSION_MODE=resume' "$lane" \
+    || fail 'D9f: the resumed round writes no SESSION_MODE=resume receipt'
+if ! grep -q 'SAME reviewer session' "$brief"; then
+    fail 'D9g: a resumed delta round does not tell the reviewer its earlier rounds are in context'
+fi
+
+# D9h: a delta round whose conversation is NOT on disk must say so rather than
+# let the reviewer assume a context it does not have.
+dry_run_round 'Issue: #650\n' 2 'cccccccccccccccccccccccccccccccccccccccc' ''
+if ! grep -q 'carries no prior transcript' "$brief"; then
+    fail 'D9h: a delta round with no recorded conversation does not warn that the earlier rounds are missing from context'
+fi
+
+# D9i: the per-PR worktree is removed when the round ends and pruned before the
+# next one — 14 stale wt-review-pr* trees were the reason (GH-708 comment).
+grep -q 'function Remove-ReviewWorktree' "$lane" \
+    || fail 'D9i: the lane defines no worktree removal'
+if [ "$(grep -c 'Remove-ReviewWorktree$' "$lane")" -lt 2 ]; then
+    fail 'D9i: the lane does not remove the worktree on both arms'
+fi
+# Anchored at the start of a line so the assertion cannot be satisfied by the
+# comment block above the call (round 1 P2: the loose grep matched prose).
+grep -qE '^[[:space:]]*git -C "\$ROOT" worktree prune' "$root/scripts/review-pr.sh" \
+    || fail 'D9i: review-pr.sh does not prune stale worktree registrations before adding one at the same per-PR path'
+
+# D9j (round 1 P1): the id the watcher cross-checks must be the backend's OWN
+# report, not an echo of the one we launched with — a comparison of a value
+# with itself can never fire. Both arms therefore record the launched id AND
+# the observed one, on separate lines from separate sources.
+grep -q -- 'Session observed: ' "$lane" \
+    || fail 'D9j: the fallback arm records no `Session observed:` line, so the watcher has nothing to cross-check the launched id against'
+grep -q -- "Session: $EXPECTED_SID_9999" "$lane" \
+    || fail 'D9j: the fallback arm no longer records the launched session id alongside the observed one'
 
 # --- offline guarantee: the real fleet scratch carries none of our output -----
 # Only our own fixture PR is asserted, not the whole listing: a live watcher or
