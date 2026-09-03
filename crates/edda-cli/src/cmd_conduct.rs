@@ -186,20 +186,21 @@ pub fn run(
         }
     };
 
-    // GH-557 round-3 P0-2: record the store this run actually uses, so the
-    // recovery verbs can find a plan launched from a plain directory (the
-    // plan YAML's own folder — the reported incident's shape) that no
-    // worktree scan can enumerate. Best-effort at the nearest repo root:
-    // the run cwd's, then the invoking shell's.
-    {
-        let registry_root = edda_ledger::EddaPaths::find_root(&cwd)
-            .or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .and_then(|d| edda_ledger::EddaPaths::find_root(&d))
-            })
-            .unwrap_or_else(|| cwd.clone());
-        registry_record(&registry_root, &plan.name, &cwd);
+    // GH-557 round-3 P0-2 / round-4 P0-3: record the store this run actually
+    // uses, so the recovery verbs can find a plan launched from a plain
+    // directory (the plan YAML's own folder — the reported incident's shape)
+    // that no worktree scan can enumerate. find_root(run_cwd) returns the
+    // run cwd ITSELF once its .edda exists, so a single-root choice files
+    // every plan after the first where nothing reads it. Record into EVERY
+    // candidate root — the invoking shell's root first (the lane the
+    // operator/agent stands in), then the run cwd's — reads scan all of
+    // them, so at least one lands inside plan_stores scope.
+    // Round-4 P1-4: the chain is a pure function so tests can drive it.
+    for root in registry_roots_for(
+        &cwd,
+        &std::env::current_dir().unwrap_or_else(|_| cwd.clone()),
+    ) {
+        registry_record(&root, &plan.name, &cwd);
     }
 
     let order = edda_conductor::plan::topo::topo_sort(&plan)?;
@@ -340,34 +341,51 @@ fn status_impl(repo_root: &Path, plan_name: Option<&str>, json: bool) -> Result<
             None => vec![(name.to_string(), repo_root.to_path_buf())],
         }
     } else {
-        // Round-2 P2, adjusted by round-3 P1-1: the listing scans the same
-        // union resolve_plan_name auto-detects over, filtered to directories
-        // that hold a parseable state.json. A CORRUPT state file propagates
-        // (an error, never "absent"); the named-missing fallback below
-        // restores status --json's "null" contract.
+        // Round-2 P2, adjusted by round-3 P1-1, adjusted by round-4 P1-1/P1-3:
+        // the unnamed listing is a READ-ONLY overview — it scans the direct
+        // worktree union AND every store registry (a scratchpad-launched plan
+        // is invisible otherwise, which is the literally-reported symptom of
+        // #557), and a corrupt state file degrades to a stderr warning + a
+        // marked entry instead of killing the overview of every healthy lane.
+        // Mutating verbs still propagate corrupt files (retarget risk).
         let mut found: Vec<(String, PathBuf)> = Vec::new();
+        let mark = |name: &str, store: &Path, found: &mut Vec<(String, PathBuf)>| {
+            if !found.iter().any(|(n, _)| n == name) {
+                found.push((name.to_string(), store.to_path_buf()));
+            }
+        };
         for store in plan_stores(repo_root) {
             let conductor_dir = store.join(".edda").join("conductor");
             if !conductor_dir.exists() {
                 continue;
+            }
+            // Registry-referenced stores first (round-4 P1-1).
+            match registry_read(&store) {
+                Ok(registry) => {
+                    for (name, referenced) in &registry {
+                        match load_state(referenced, name) {
+                            Ok(Some(_)) => mark(name, referenced, &mut found),
+                            Ok(None) => continue,
+                            Err(e) => eprintln!(
+                                "⚠ plan \"{name}\" (registry → {}) unreadable, listed as broken: {e}",
+                                referenced.display()
+                            ),
+                        }
+                    }
+                }
+                Err(e) => eprintln!("⚠ store registry unreadable ({}): {e}", store.display()),
             }
             for entry in std::fs::read_dir(&conductor_dir)? {
                 let entry = entry?;
                 if entry.file_type()?.is_dir() {
                     if let Some(name) = entry.file_name().to_str() {
                         match load_state(&store, name) {
-                            Ok(Some(_)) => {
-                                if !found.iter().any(|(n, _)| n == name) {
-                                    found.push((name.to_string(), store.clone()));
-                                }
-                            }
+                            Ok(Some(_)) => mark(name, &store, &mut found),
                             Ok(None) => continue,
-                            Err(e) => {
-                                return Err(e.context(format!(
-                                    "plan \"{name}\" state in {} is unreadable",
-                                    store.display()
-                                )))
-                            }
+                            Err(e) => eprintln!(
+                                "⚠ plan \"{name}\" state in {} unreadable, omitted from listing: {e}",
+                                store.display()
+                            ),
                         }
                     }
                 }
@@ -700,8 +718,29 @@ pub(crate) fn cost_line(total_cost_usd: f64, cost_measured: bool) -> String {
 /// <worktree>` stores its state in that worktree's `.edda/conductor/`,
 /// and the recovery verbs must be able to find it no matter which cwd
 /// the operator invokes from.
+/// Normalized identity of a store path: canonicalized where possible
+/// (resolving 8.3 short names, symlinks, and case) with the `\\?\` UNC
+/// prefix stripped, lowercased — Windows path forms diverge wildly
+/// (`RUNNER~1` vs the long name, forward vs back slashes) and the same
+/// physical store MUST NOT enter the list twice (GH-557 round-4 P0-2).
+fn normalize_store_path(p: &Path) -> String {
+    let canonical = std::fs::canonicalize(p)
+        .map(|c| c.to_string_lossy().trim_start_matches(r"\\?\").to_string())
+        .unwrap_or_else(|_| p.to_string_lossy().to_string());
+    canonical.replace('/', "\\").to_lowercase()
+}
+
 fn plan_stores(repo_root: &Path) -> Vec<PathBuf> {
-    let mut stores = vec![repo_root.to_path_buf()];
+    let mut stores: Vec<PathBuf> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let push = |p: PathBuf, stores: &mut Vec<PathBuf>, seen: &mut Vec<String>| {
+        let key = normalize_store_path(&p);
+        if !seen.contains(&key) {
+            seen.push(key);
+            stores.push(p);
+        }
+    };
+    push(repo_root.to_path_buf(), &mut stores, &mut seen);
     let out = std::process::Command::new("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(repo_root)
@@ -710,10 +749,7 @@ fn plan_stores(repo_root: &Path) -> Vec<PathBuf> {
         if out.status.success() {
             for line in String::from_utf8_lossy(&out.stdout).lines() {
                 if let Some(path) = line.strip_prefix("worktree ") {
-                    let p = PathBuf::from(path);
-                    if !stores.contains(&p) {
-                        stores.push(p);
-                    }
+                    push(PathBuf::from(path), &mut stores, &mut seen);
                 }
             }
         } else {
@@ -740,28 +776,76 @@ fn registry_path(root: &Path) -> PathBuf {
 
 /// Read a store registry. Best-effort: missing or corrupt file reads as an
 /// empty map — the direct worktree scan remains the fallback.
-fn registry_read(root: &Path) -> std::collections::BTreeMap<String, PathBuf> {
-    let mut map = std::collections::BTreeMap::new();
-    if let Ok(content) = std::fs::read_to_string(registry_path(root)) {
-        if let Ok(parsed) =
-            serde_json::from_str::<std::collections::BTreeMap<String, String>>(&content)
-        {
-            for (plan, store) in parsed {
-                map.insert(plan, PathBuf::from(store));
-            }
+/// Candidate registry roots for a run launched with `run_cwd`, invoked
+/// from `shell_cwd` (GH-557 round-4 P0-3): the invoking shell's root
+/// first — the lane the operator/agent stands in — then the run cwd's.
+/// `find_root(run_cwd)` returns the run cwd ITSELF once its `.edda`
+/// exists (created by the first run there), so a single-root choice
+/// files every plan after the first where nothing reads it; recording
+/// into every candidate and reading from every scanned store makes the
+/// write side and the read side meet.
+fn registry_roots_for(run_cwd: &Path, shell_cwd: &Path) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for r in [
+        edda_ledger::EddaPaths::find_root(shell_cwd),
+        edda_ledger::EddaPaths::find_root(run_cwd),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !roots.contains(&r) {
+            roots.push(r);
         }
     }
-    map
+    if roots.is_empty() {
+        roots.push(run_cwd.to_path_buf());
+    }
+    roots
 }
 
-/// Record plan → store in the registry under `root`. Best-effort: a failed
-/// write prints a warning; discovery falls back to the worktree scan.
+/// Read a store registry. Missing file reads as an empty map; a CORRUPT
+/// file is an error — round-4 P1-2: silently reading it as empty makes the
+/// next record persist an empty map plus one key, destroying every other
+/// plan's entry.
+fn registry_read(root: &Path) -> Result<std::collections::BTreeMap<String, PathBuf>> {
+    let path = registry_path(root);
+    if !path.exists() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading store registry {}", path.display()))?;
+    let parsed: std::collections::BTreeMap<String, String> = serde_json::from_str(&content)
+        .with_context(|| format!("parsing store registry {}", path.display()))?;
+    Ok(parsed
+        .into_iter()
+        .map(|(plan, store)| (plan, PathBuf::from(store)))
+        .collect())
+}
+
+/// Record plan → store in the registry under `root`, under the registry's
+/// exclusive lock (round-4 P1-2: two concurrent `conduct run` processes
+/// are the parallel-wave norm; unlocked read-modify-write loses entries).
+/// Best-effort: lock contention or a corrupt existing registry prints a
+/// warning and skips the write — discovery still has the direct scan.
 fn registry_record(root: &Path, plan: &str, store: &Path) {
     let path = registry_path(root);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut map = registry_read(root);
+    let lock = match edda_store::lock_file(&PathBuf::from(format!("{}.lock", path.display()))) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("⚠ store registry lock failed ({}): {e}", path.display());
+            return;
+        }
+    };
+    let mut map = match registry_read(root) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("⚠ store registry unreadable, skipping record: {e}");
+            return;
+        }
+    };
     map.insert(plan.to_string(), store.to_path_buf());
     match serde_json::to_string_pretty(&map) {
         Ok(data) => {
@@ -771,6 +855,7 @@ fn registry_record(root: &Path, plan: &str, store: &Path) {
         }
         Err(e) => eprintln!("⚠ store registry serialize failed: {e}"),
     }
+    drop(lock);
 }
 
 /// Every store currently holding `<plan>`'s state.json (GH-557), in
@@ -798,7 +883,16 @@ fn stores_holding(repo_root: &Path, plan: &str) -> Result<Vec<PathBuf>> {
     // (round-3 P0-2: the reported incident's store was the plan YAML's own
     // directory).
     for store in plan_stores(repo_root) {
-        if let Some(referenced) = registry_read(&store).get(plan) {
+        // Round-4 P1-2: a corrupt REGISTRY is read-path noise (warn, keep
+        // scanning) — mutating verbs still propagate corrupt state files.
+        let registry = match registry_read(&store) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("⚠ store registry unreadable ({}): {e}", store.display());
+                continue;
+            }
+        };
+        if let Some(referenced) = registry.get(plan) {
             if !holding.contains(referenced)
                 && load_state(referenced, plan)
                     .with_context(|| {
@@ -1229,6 +1323,138 @@ mod tests {
         let root = _dir.path().join("repo");
         let out = status_impl(&root, Some("plan-y"), true).unwrap();
         assert_eq!(out.trim(), "null", "{out}");
+    }
+
+    /// GH-557 (independent-review round 4, P0-3): the registry-root chain
+    /// must include the invoking shell's store even after the run cwd has
+    /// grown its own `.edda` — find_root(run_cwd) returns the run cwd
+    /// itself at that point, and entries filed only there are unreadable.
+    #[test]
+    fn registry_roots_cover_the_invoking_store_after_edda_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let shell = dir.path().join("repo");
+        let run_cwd = dir.path().join("scratchpad");
+        std::fs::create_dir_all(shell.join(".edda")).unwrap();
+        std::fs::create_dir_all(run_cwd.join(".edda")).unwrap();
+
+        let roots = registry_roots_for(&run_cwd, &shell);
+        assert!(
+            roots.contains(&shell),
+            "invoking shell's store must be a registry root: {roots:?}"
+        );
+    }
+
+    /// GH-557 (independent-review round 4, P0-3): two plans launched from
+    /// the same external plan-YAML directory — the parallel-wave shape the
+    /// issue reports (wave-b-par-b4 AND wave-b-par-b5) — must BOTH be
+    /// recoverable after the first run created `.edda` there.
+    #[test]
+    fn second_plan_in_same_external_store_is_recoverable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let plans_dir = dir.path().join("scratchpad");
+        std::fs::create_dir_all(root.join(".edda").join("conductor")).unwrap();
+        std::fs::create_dir_all(&plans_dir).unwrap();
+
+        for name in ["plan-x", "plan-y"] {
+            let yaml = format!("name: {name}\nphases:\n  - id: a\n    prompt: x\n");
+            let plan = parse_plan(&yaml).unwrap();
+            let mut state = edda_conductor::state::machine::PlanState::from_plan(
+                &plan,
+                &format!("{name}.yaml"),
+            );
+            state.phases[0].status = PhaseStatus::Failed;
+            state.plan_status = PlanStatus::Blocked;
+            let state_dir = plans_dir.join(".edda").join("conductor").join(name);
+            std::fs::create_dir_all(&state_dir).unwrap();
+            std::fs::write(
+                state_dir.join("state.json"),
+                serde_json::to_string_pretty(&state).unwrap(),
+            )
+            .unwrap();
+        }
+
+        // Two runs from the same plans_dir: after the first, scratchpad has
+        // .edda, so find_root(run_cwd) == scratchpad. The chain records into
+        // every candidate root, so both entries land somewhere the verbs read.
+        for name in ["plan-x", "plan-y"] {
+            for root in registry_roots_for(&plans_dir, &root) {
+                registry_record(&root, name, &plans_dir);
+            }
+        }
+
+        // The repo-root registry (the one verbs scan) knows both plans.
+        let registry = registry_read(&root).unwrap();
+        assert!(registry.contains_key("plan-x"), "{registry:?}");
+        assert!(registry.contains_key("plan-y"), "{registry:?}");
+
+        retry(&root, "a", Some("plan-y")).unwrap();
+        let reloaded = load_state(&plans_dir, "plan-y").unwrap().unwrap();
+        assert_eq!(reloaded.phases[0].status, PhaseStatus::Pending);
+    }
+
+    /// GH-557 (independent-review round 4, P1-3): one corrupt state file
+    /// must not take down the overview of every healthy lane — the
+    /// read-only listing warns and skips; mutating verbs still error.
+    #[test]
+    fn status_listing_survives_a_corrupt_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let conductor = root.join(".edda").join("conductor");
+        std::fs::create_dir_all(conductor.join("plan-healthy")).unwrap();
+        std::fs::create_dir_all(conductor.join("plan-corrupt")).unwrap();
+
+        let plan = parse_plan("name: plan-healthy\nphases:\n  - id: a\n    prompt: x\n").unwrap();
+        let state = edda_conductor::state::machine::PlanState::from_plan(&plan, "h.yaml");
+        std::fs::write(
+            conductor.join("plan-healthy").join("state.json"),
+            serde_json::to_string_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            conductor.join("plan-corrupt").join("state.json"),
+            b"{corrupt",
+        )
+        .unwrap();
+
+        let text = status_impl(&root, None, false).unwrap();
+        assert!(
+            text.contains("plan-healthy"),
+            "healthy lanes must still be listed: {text}"
+        );
+        assert!(
+            !text.contains("plan-corrupt"),
+            "the corrupt entry is omitted (warned on stderr), not listed as healthy: {text}"
+        );
+    }
+
+    /// GH-557 (independent-review round 4, P1-1): the unnamed listing must
+    /// include registry-referenced plans — the literally-reported symptom
+    /// ("status never lists wave-b-par-b4/b5").
+    #[test]
+    fn status_listing_includes_registry_referenced_plans() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let plans_dir = dir.path().join("scratchpad");
+        std::fs::create_dir_all(root.join(".edda").join("conductor")).unwrap();
+        std::fs::create_dir_all(&plans_dir).unwrap();
+
+        let plan = parse_plan("name: plan-x\nphases:\n  - id: a\n    prompt: x\n").unwrap();
+        let state = edda_conductor::state::machine::PlanState::from_plan(&plan, "x.yaml");
+        let state_dir = plans_dir.join(".edda").join("conductor").join("plan-x");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(
+            state_dir.join("state.json"),
+            serde_json::to_string_pretty(&state).unwrap(),
+        )
+        .unwrap();
+        registry_record(&root, "plan-x", &plans_dir);
+
+        let text = status_impl(&root, None, false).unwrap();
+        assert!(
+            text.contains("plan-x") && text.contains("scratchpad"),
+            "registry-referenced plans must be listed with provenance: {text}"
+        );
     }
 
     /// GH-557: with no matching state anywhere, the error names the searched
