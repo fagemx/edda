@@ -67,11 +67,14 @@ $brief = if ($wrapperBody -match "--prompt-file '([^']+)'") { $Matches[1] } else
 function Get-ProcessSnapshot {
   # Index children by parent PID using explicit [int] keys (GH-706: Win32_Process
   # returns uint32 which does not match [int] lookup keys in .NET hashtables).
+  # Also build ProcMap for O(1) process lookup and CreationDate checks.
   $allProcs = @(Get-CimInstance Win32_Process)
   $childrenOf = @{}
+  $procMap = @{}
   foreach ($p in $allProcs) {
     $ppid = [int]$p.ParentProcessId
     $procId = [int]$p.ProcessId
+    $procMap[$procId] = $p
     if (-not $childrenOf.ContainsKey($ppid)) {
       $childrenOf[$ppid] = New-Object System.Collections.Generic.List[int]
     }
@@ -79,6 +82,7 @@ function Get-ProcessSnapshot {
   }
   return @{
     Procs      = $allProcs
+    ProcMap    = $procMap
     ChildrenOf = $childrenOf
   }
 }
@@ -118,7 +122,7 @@ foreach ($p in $postSnap.Procs) {
 $targets = New-Object System.Collections.Generic.HashSet[int]
 $queue = New-Object System.Collections.Generic.Queue[int]
 foreach ($id in $seedPids) {
-  if ($postSnap.Procs | Where-Object { [int]$_.ProcessId -eq $id }) {
+  if ($postSnap.ProcMap.ContainsKey($id)) {
     [void]$targets.Add($id)
   }
   $queue.Enqueue($id)
@@ -127,7 +131,13 @@ foreach ($id in $seedPids) {
 while ($queue.Count -gt 0) {
   $currentPid = $queue.Dequeue()
   if (-not $postSnap.ChildrenOf.ContainsKey($currentPid)) { continue }
+  $parentProc = $postSnap.ProcMap[$currentPid]
   foreach ($c in $postSnap.ChildrenOf[$currentPid]) {
+    $childProc = $postSnap.ProcMap[$c]
+    # Guard: child creation date must be >= parent creation date to prevent stale reused PID traversal (GH-706, P2-1)
+    if ($parentProc -and $childProc -and $parentProc.CreationDate -and $childProc.CreationDate) {
+      if ($childProc.CreationDate -lt $parentProc.CreationDate) { continue }
+    }
     if ($c -ne $PID -and $targets.Add($c)) {
       $queue.Enqueue($c)
     }
@@ -178,10 +188,24 @@ foreach ($s in $verifySeeds) {
   [void]$residualSet.Add($sid)
   $verifyQueue.Enqueue($sid)
 }
+# Also enqueue all targets and seed PIDs (even if dead) so any live orphan whose
+# ParentProcessId points to a killed lane target is traversed and detected (GH-706, P1-1).
+foreach ($t in $targetList) {
+  $verifyQueue.Enqueue($t)
+}
+foreach ($s in $seedPids) {
+  $verifyQueue.Enqueue($s)
+}
+
 while ($verifyQueue.Count -gt 0) {
   $curr = $verifyQueue.Dequeue()
   if (-not $verifySnap.ChildrenOf.ContainsKey($curr)) { continue }
+  $parentProc = $verifySnap.ProcMap[$curr]
   foreach ($c in $verifySnap.ChildrenOf[$curr]) {
+    $childProc = $verifySnap.ProcMap[$c]
+    if ($parentProc -and $childProc -and $parentProc.CreationDate -and $childProc.CreationDate) {
+      if ($childProc.CreationDate -lt $parentProc.CreationDate) { continue }
+    }
     if ($c -ne $PID -and $residualSet.Add($c)) {
       $verifyQueue.Enqueue($c)
     }
@@ -190,6 +214,13 @@ while ($verifyQueue.Count -gt 0) {
 
 $residual = @($residualSet)
 if ($residual.Count -gt 0) {
+  # Write exit record before failing on residual, so the lane log is never left ambiguous (GH-672, GH-706)
+  if ($terminated.Count -gt 0 -or ((Test-Path -LiteralPath $Log) -and -not (Test-Path -LiteralPath $Done))) {
+    Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1 with residual: $($residual -join ','); terminated $($terminated.Count) process(es)) ===" -Encoding utf8
+    if (-not (Test-Path -LiteralPath $Done)) {
+      Set-Content -LiteralPath $Done -Value 'residual' -Encoding ascii
+    }
+  }
   Fail "residual lane processes survive the kill: $($residual -join ',')"
 }
 $task = Get-ScheduledTask -TaskName $TaskName
