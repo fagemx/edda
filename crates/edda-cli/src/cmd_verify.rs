@@ -37,6 +37,10 @@ pub fn execute(repo_root: &Path, json: bool) -> Result<()> {
     let ledger = match Ledger::open_existing(repo_root) {
         Ok(ledger) => ledger,
         Err(err) => {
+            if let Some(e) = err.downcast_ref::<edda_ledger::UnsupportedSchemaVersionError>() {
+                eprintln!("error: {e}");
+                std::process::exit(2);
+            }
             eprintln!(
                 "error: cannot open ledger at {}: {:#}",
                 repo_root.display(),
