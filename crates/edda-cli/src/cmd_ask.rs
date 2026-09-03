@@ -363,8 +363,10 @@ mod tests {
     /// (ledger decision `compat.stable-json-surfaces`; policy page:
     /// COMPATIBILITY.md § "Stable `--json` contracts"). Within 0.x, keys may
     /// be added, never deleted, renamed, or retyped. Pins the exact top-level
-    /// key set (as it is emitted today: `tasks`, `dependents`, and
-    /// `override_risk` are `skip_serializing_if` — absent when empty/None)
+    /// key set (as it is emitted today: `tasks`, `dependents`,
+    /// `override_risk`, `workspace_event_count`, and `workspace_decision_count`
+    /// are `skip_serializing_if` — absent when empty/None; both counts are
+    /// always known here because this fixture opens a real ledger first)
     /// and the per-key types of the envelope and of a `DecisionHit`, through
     /// the real binary.
     #[test]
@@ -413,13 +415,27 @@ mod tests {
                 "related_commits",
                 "related_notes",
                 "timeline",
+                "workspace_decision_count",
+                "workspace_event_count",
             ],
             "ask --json top-level key set changed — this is a stable contract; \
-             see COMPATIBILITY.md (tasks/dependents/override_risk are \
-             absent when empty by the skip_serializing_if contract)"
+             see COMPATIBILITY.md (tasks/dependents/override_risk and the \
+             workspace counts are absent when empty/unknown by the \
+             skip_serializing_if contract)"
         );
         assert_eq!(v["query"], "db");
         assert!(v["input_type"].is_string());
+        // The two workspace counts are integers when the ledger is readable
+        // (always the case here — the fixture wrote one event and one
+        // decision), and absent from the key set above when unknown.
+        assert!(
+            v["workspace_event_count"].is_u64(),
+            "workspace_event_count must be an integer: {v}"
+        );
+        assert!(
+            v["workspace_decision_count"].is_u64(),
+            "workspace_decision_count must be an integer: {v}"
+        );
         for section in [
             "decisions",
             "timeline",

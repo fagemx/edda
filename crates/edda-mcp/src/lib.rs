@@ -608,10 +608,23 @@ mod tests {
                 "related_commits",
                 "related_notes",
                 "timeline",
+                "workspace_decision_count",
+                "workspace_event_count",
             ],
             "edda_ask tool response key set changed — this is a stable contract; \
-             see COMPATIBILITY.md (tasks/dependents/override_risk are absent \
-             when empty by the skip_serializing_if contract)"
+             see COMPATIBILITY.md (tasks/dependents/override_risk and the \
+             workspace counts are absent when empty/unknown by the \
+             skip_serializing_if contract)"
+        );
+        // The two workspace counts are integers when the ledger is readable,
+        // and absent from the key set above when unknown (#728).
+        assert!(
+            v["workspace_event_count"].is_u64(),
+            "workspace_event_count must be an integer: {v}"
+        );
+        assert!(
+            v["workspace_decision_count"].is_u64(),
+            "workspace_decision_count must be an integer: {v}"
         );
         assert!(v["query"].is_string());
         assert!(v["input_type"].is_string());
