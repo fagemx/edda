@@ -13,21 +13,25 @@ pub use edda_store::fleet::{fan_out, group_by_project, FleetHit, FleetMiss};
 use edda_store::registry::ProjectEntry;
 use std::path::Path;
 
-/// Helper to identify whether a miss is an ephemeral test fixture (e.g. from temp directories).
+/// Helper to identify whether a miss is an ephemeral test fixture based on path provenance.
 pub fn is_temp_miss(miss: &FleetMiss) -> bool {
-    if !miss.reason.starts_with("repo not on this machine") {
+    if !miss.reason.starts_with("repo not on this machine (") {
         return false;
     }
-    let r = &miss.reason;
-    r.contains("/Temp/")
-        || r.contains("\\Temp\\")
-        || r.starts_with("repo not on this machine (/tmp/")
-        || r.starts_with("repo not on this machine (/var/tmp/")
-        || miss.project.starts_with(".tmp")
-        || miss.project.starts_with("edda_init_test_")
-        || miss.project.starts_with("edda_ask_test_")
-        || miss.project.starts_with("edda_test_")
-        || miss.project.starts_with("edda-pr")
+    let Some(path_str) = miss
+        .reason
+        .strip_prefix("repo not on this machine (")
+        .and_then(|s| s.strip_suffix(')'))
+    else {
+        return false;
+    };
+    let p = Path::new(path_str);
+    let temp = std::env::temp_dir();
+    p.starts_with(&temp)
+        || path_str.starts_with("/tmp/")
+        || path_str.starts_with("/var/tmp/")
+        || path_str.contains(r"\AppData\Local\Temp\")
+        || path_str.contains("/AppData/Local/Temp/")
 }
 
 /// Report the projects that did not answer, in the one form every fleet verb
@@ -70,19 +74,13 @@ pub fn empty_summary(what: &str, tail: &str, scope_len: usize, misses: &[FleetMi
     let temp_count = misses.iter().filter(|m| is_temp_miss(m)).count();
     let real_misses = misses.len() - temp_count;
 
-    let omitted_clause = if temp_count > 0 {
-        format!(" ({temp_count} ephemeral test fixture(s) omitted)")
-    } else {
-        String::new()
-    };
-
     if misses.is_empty() {
         format!("No {what} across {answered} project(s){tail}")
     } else if real_misses == 0 {
-        format!("No {what} in the {answered} project(s) that answered{tail}{omitted_clause}")
+        format!("No {what} in the {answered} project(s) that answered{tail}")
     } else {
         format!(
-            "No {what} in the {answered} project(s) that answered{tail}; {real_misses} could not be read (above){omitted_clause}"
+            "No {what} in the {answered} project(s) that answered{tail}; {real_misses} could not be read (above)"
         )
     }
 }
@@ -376,10 +374,11 @@ mod tests {
         );
         assert!(summary.contains("3 project(s) that answered"));
         assert!(summary.contains("1 could not be read (above)"));
-        assert!(summary.contains("1 ephemeral test fixture(s) omitted"));
 
         let only_temp_summary = empty_summary("results", " for: q", 5, &[temp_miss]);
-        assert!(only_temp_summary.contains("4 project(s) that answered for: q"));
-        assert!(only_temp_summary.contains("1 ephemeral test fixture(s) omitted"));
+        assert_eq!(
+            only_temp_summary,
+            "No results in the 4 project(s) that answered for: q"
+        );
     }
 }

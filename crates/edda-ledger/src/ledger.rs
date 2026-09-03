@@ -113,11 +113,6 @@ impl Ledger {
             .context("Ledger::count_decisions")
     }
 
-    /// Check whether the ledger contains any events.
-    pub fn is_empty(&self) -> anyhow::Result<bool> {
-        Ok(self.count_events()? == 0)
-    }
-
     // ── HEAD branch ─────────────────────────────────────────────────
 
     /// Read the current HEAD branch name.
