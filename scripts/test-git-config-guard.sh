@@ -23,7 +23,33 @@ command -v pwsh >/dev/null 2>&1 || { echo "SKIP: pwsh not on PATH"; exit 0; }
 command -v git >/dev/null 2>&1 || { echo "SKIP: git not on PATH"; exit 0; }
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' 0 HUP INT TERM
+logdir="$tmp/lanes"
+
+# GH-786: every fake lane this run starts is torn down from the trap, not only
+# from the success path: a `fail` between starting a lane and dropping it would
+# otherwise leave a live scheduled task and its process tree behind, and that
+# tree holds the temp dir open so even `rm -rf` fails.
+started_lanes=''
+
+e2e_cleanup() {
+  [ -n "$started_lanes" ] || return 0
+  for cl_lane in $started_lanes; do
+    cl_wrapper=$(cygpath -w "$logdir/$cl_lane.wrapper.ps1" 2>/dev/null || echo "$logdir/$cl_lane.wrapper.ps1")
+    # Written to a file, never passed as -Command: a query whose own command
+    # line contains the pattern matches itself and kills the killer.
+    {
+      printf "Unregister-ScheduledTask -TaskName 'edda-lane-%s' -Confirm:\$false -ErrorAction SilentlyContinue\n" "$cl_lane"
+      printf "\$w = '%s'\n" "$cl_wrapper"
+      printf "foreach (\$h in @(Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -and \$_.CommandLine.Contains(\$w) })) {\n"
+      printf "  & taskkill /PID \$h.ProcessId /T /F 2>\$null | Out-Null\n"
+      printf "}\n"
+    } >"$tmp/cleanup-$cl_lane.ps1"
+    pwsh -NoProfile -NonInteractive -File "$tmp/cleanup-$cl_lane.ps1" >/dev/null 2>&1 || true
+  done
+  started_lanes=''
+}
+
+trap 'e2e_cleanup; rm -rf "$tmp"' 0 HUP INT TERM
 
 case_number=0
 fail() { echo "FAIL (after case $case_number): $*" >&2; exit 1; }
@@ -205,7 +231,6 @@ ok "-Backup keeps one previous generation and -Restore falls back to it"
 # Registers a scheduled task, so it is off by default; run with
 # GIT_CONFIG_GUARD_E2E=1 to exercise the whole lane-stop path end to end.
 if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
-  logdir="$tmp/lanes"
   mkdir -p "$logdir"
   logdir_w=$(cygpath -w "$logdir" 2>/dev/null || echo "$logdir")
 
@@ -224,6 +249,9 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
     fl_lane=$1
     fl_repo_w=$(cygpath -w "$2" 2>/dev/null || echo "$2")
     fl_shape=${3:-literal}
+    # Registered for cleanup BEFORE anything starts, because start_fake_lane
+    # calls fail() itself on a bad start.
+    started_lanes="$started_lanes $fl_lane"
     : >"$logdir/$fl_lane.brief.md"
     {
       if [ "$fl_shape" = bare ]; then
@@ -257,6 +285,11 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   drop_fake_lane() {
     pwsh -NoProfile -NonInteractive -Command \
       "Unregister-ScheduledTask -TaskName 'edda-lane-$1' -Confirm:\$false -ErrorAction SilentlyContinue" >/dev/null 2>&1
+    _new=''
+    for _l in $started_lanes; do
+      [ "$_l" = "$1" ] || _new="$_new $_l"
+    done
+    started_lanes=$_new
   }
 
   lane=guard-e2e-$$
