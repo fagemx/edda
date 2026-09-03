@@ -270,6 +270,7 @@ pub fn ingest_pi_transcript_delta(
     let mut total_cache_write = 0u64;
     let mut total_cost = 0.0f64;
     let mut usage_observed = false;
+    let mut cost_observed = false;
 
     let default_ts = now_rfc3339();
 
@@ -333,6 +334,7 @@ pub fn ingest_pi_transcript_delta(
                                 .and_then(|v| v.as_f64())
                             {
                                 total_cost += cost;
+                                cost_observed = true;
                             }
                         }
 
@@ -420,7 +422,7 @@ pub fn ingest_pi_transcript_delta(
     stats.output_tokens = total_output;
     stats.cache_read_tokens = total_cache_read;
     stats.cache_creation_tokens = total_cache_write;
-    stats.cost_usd = if usage_observed {
+    stats.cost_usd = if cost_observed {
         Some(total_cost)
     } else {
         None
@@ -457,6 +459,13 @@ pub fn ingest_pi_transcript_delta(
             .get("cache_creation_tokens")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
+        let prev_cost = prev_u.get("cost_usd").and_then(|v| v.as_f64());
+        let final_cost = match (prev_cost, cost_observed) {
+            (Some(prev), true) => Some(prev + total_cost),
+            (Some(prev), false) => Some(prev),
+            (None, true) => Some(total_cost),
+            (None, false) => None,
+        };
 
         let usage_obj = serde_json::json!({
             "session_id": session_id,
@@ -471,7 +480,7 @@ pub fn ingest_pi_transcript_delta(
                 "output_tokens": prev_out + total_output,
                 "cache_read_tokens": prev_cr + total_cache_read,
                 "cache_creation_tokens": prev_cw + total_cache_write,
-                "cost_usd": if usage_observed { Some(total_cost) } else { None },
+                "cost_usd": final_cost,
                 "usage_observed": true,
             }
         });

@@ -1447,11 +1447,9 @@ mod tests {
 
     #[test]
     fn ingest_pi_session_post_dispatch_wired_produces_digest() {
+        let _store = crate::test_support::isolated_store();
         let tmp_ws = tempfile::tempdir().unwrap();
-        let tmp_store = tempfile::tempdir().unwrap();
         let tmp_sessions = tempfile::tempdir().unwrap();
-
-        std::env::set_var("EDDA_STORE_ROOT", tmp_store.path());
 
         let ws_path = tmp_ws.path();
         let ledger = edda_ledger::Ledger::open_or_init(ws_path).unwrap();
