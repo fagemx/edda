@@ -287,7 +287,13 @@ enum Command {
         argv: Vec<String>,
     },
     /// Show workspace status
-    Status,
+    Status {
+        /// Emit the status as one JSON object on stdout instead of text.
+        /// Stable contract: within 0.x keys may be added, never deleted,
+        /// renamed, or retyped (COMPATIBILITY.md § "Stable `--json` contracts").
+        #[arg(long)]
+        json: bool,
+    },
     /// Create a commit event
     Commit {
         /// Commit title
@@ -1252,7 +1258,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             json,
         ),
         Command::Run { argv } => cmd_run::execute(&repo_root, &argv),
-        Command::Status => cmd_status::execute(&repo_root),
+        Command::Status { json } => cmd_status::execute(&repo_root, json),
         Command::Commit {
             title,
             purpose,
@@ -1446,6 +1452,6 @@ mod tests {
     fn parses_cli_through_stack_safe_entrypoint() {
         let cli = parse_cli_from(vec![OsString::from("edda"), OsString::from("status")]);
 
-        assert!(matches!(cli.cmd, Command::Status));
+        assert!(matches!(cli.cmd, Command::Status { json: false }));
     }
 }

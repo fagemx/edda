@@ -173,13 +173,32 @@ Golden fixtures: `crates/edda-mcp/src/lib.rs` →
 
 ### `edda status --json`
 
-Declared stable by the ruling, **not yet implemented**. Today `edda status`
-is text-only and takes no `--json` flag
-(`crates/edda-cli/src/cmd_status.rs:5-10`, dispatched at
-`crates/edda-cli/src/main.rs:289,1246`); passing `--json` is rejected at
-argument parsing. There is no key set to pin, so no golden fixture exists for
-it yet: the flag must land together with its fixture in the same commit, and
-this page updates the same day. Tracked as #730.
+One JSON object with exactly these keys (emitted at
+`crates/edda-cli/src/cmd_status.rs:10-32`; flag declared at
+`crates/edda-cli/src/main.rs:290-296`, dispatched at `:1260`):
+
+| Key | Type | Notes |
+|---|---|---|
+| `branch` | string | the ledger's head branch |
+| `last_commit` | object \| null | null until the branch has a commit; keys below |
+| `uncommitted_events` | number | events on the branch since that commit |
+
+`last_commit`, when present, has exactly these keys — they are part of the
+same contract:
+
+| Key | Type | Notes |
+|---|---|---|
+| `event_id` | string | the commit event's id |
+| `ts` | string | the commit event's timestamp |
+| `title` | string | the commit title |
+
+Exit code is `0` for a readable ledger; the flag adds no new failure mode.
+The text form (no `--json`) is unchanged and is not a contract.
+
+Golden fixture: `crates/edda-cli/src/cmd_status.rs` →
+`compat_golden_fixture_status_json_keys_and_types` (crate `edda`), which pins
+the key set and per-key types on both sides of `last_commit` — null before a
+commit exists, object after.
 
 ## 3. Layer 2/3 events are unstable
 

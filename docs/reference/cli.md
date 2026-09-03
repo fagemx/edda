@@ -30,11 +30,18 @@ Creates `.edda/` with an empty ledger. If `.claude/` is detected, automatically 
 
 ### `edda status`
 
-Show workspace status — ledger stats, active branches, hook status.
+Show workspace status — head branch, last commit, and how many events sit on
+the branch since it.
 
 ```bash
 edda status
+edda status --json
 ```
+
+`--json` emits one object with `branch`, `last_commit` (null until the branch
+has one) and `uncommitted_events`. It is a stable contract: within 0.x keys
+may be added, never deleted, renamed, or retyped. The exact shape is in
+COMPATIBILITY.md § "Stable `--json` contracts".
 
 ### `edda doctor`
 
