@@ -102,6 +102,20 @@ pub struct DispatchArgs {
     /// conflict error, because --json promises exactly one JSON object.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub list_models: Option<String>,
+    /// GH-656 cross-machine claim guard: check this issue on GitHub before
+    /// dispatching. Both machines read the same truth through `gh`; if
+    /// another machine has claimed it (a `lane:<machine>` label or a
+    /// `taking: <machine>` comment), the agent is not started and the
+    /// process exits 2. Requires --machine (or env EDDA_MACHINE). Without
+    /// --issue, dispatch behaves exactly as before.
+    #[arg(long)]
+    pub issue: Option<u64>,
+    /// Machine label for the claim guard (e.g. `4090`, `docs`) — the token
+    /// in `lane:<machine>` labels and `taking: <machine>` comments. Only an
+    /// explicit value counts: passed here or via EDDA_MACHINE; the hostname
+    /// is never guessed. Requires --issue.
+    #[arg(long)]
+    pub machine: Option<String>,
     /// Print one JSON object to stdout instead of text lines
     #[arg(long)]
     pub json: bool,
@@ -436,6 +450,28 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         return Ok(0);
     }
 
+    // GH-656: cross-machine claim guard. GitHub is the only shared truth
+    // between machines, so with an explicit --issue and machine label,
+    // check the issue before starting any agent; a claim by another
+    // machine refuses with exit 2 and no spawn. Without --issue nothing
+    // here runs at all.
+    if let Some((issue, machine, reason)) = claim_guard_refusal(&args)? {
+        if args.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "outcome": "claim_refused",
+                    "error": reason,
+                    "issue": issue,
+                    "machine": machine,
+                })
+            );
+        } else {
+            eprintln!("Error: {reason}");
+        }
+        return Ok(2);
+    }
+
     let prompt_file = args
         .prompt_file
         .as_deref()
@@ -554,6 +590,60 @@ pub(crate) fn ingest_pi_session_post_dispatch(
     edda_bridge_claude::digest::digest_session_manual(&project_id, session_id, &cwd_str, true)?;
 
     Ok(())
+}
+
+/// The cross-machine claim guard for one dispatch (GH-656). `Ok(None)`
+/// means dispatch may proceed; `Ok(Some((issue, machine, reason)))` means
+/// the issue is claimed by another machine and the turn must not start.
+/// Runs only when `--issue` is given; an explicit `--machine` without
+/// `--issue` is refused (it could never fire the guard, so accepting it
+/// would silently drop it — the GH-574 honesty rule). The machine label
+/// must be explicit: `--machine` or `EDDA_MACHINE`, never the hostname.
+fn claim_guard_refusal(args: &DispatchArgs) -> Result<Option<(u64, String, String)>> {
+    let Some(issue) = args.issue else {
+        if args.machine.is_some() {
+            bail!(
+                "--machine is only meaningful with --issue: pass --issue <N> so the \
+                 cross-machine claim guard can check it; an explicit value is never \
+                 silently dropped"
+            );
+        }
+        return Ok(None);
+    };
+    let machine = match args.machine.as_deref() {
+        Some(machine) => machine.trim().to_owned(),
+        None => std::env::var("EDDA_MACHINE")
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+    };
+    if machine.is_empty() {
+        bail!(
+            "--issue {issue} requires an explicit machine label: pass --machine <label> \
+             or set EDDA_MACHINE (the hostname is never guessed)"
+        );
+    }
+    crate::claim_guard::validate_machine(&machine)?;
+    match crate::claim_guard::fetch_claim_state(issue, &machine)? {
+        crate::claim_guard::ClaimState::Unclaimed
+        | crate::claim_guard::ClaimState::ClaimedBySelf => Ok(None),
+        crate::claim_guard::ClaimState::ClaimedByOther {
+            machine: other,
+            when,
+            source,
+        } => {
+            let when = when.map(|when| format!(" at {when}")).unwrap_or_default();
+            Ok(Some((
+                issue,
+                machine,
+                format!(
+                    "issue {issue} is already claimed by machine '{other}' ({source}{when}); \
+                     dispatch refused — leave the claim to that machine \
+                     (fleet.cross-machine-claim)"
+                ),
+            )))
+        }
+    }
 }
 
 /// One turn through the launcher with an empty plan context. Split out from
@@ -1077,6 +1167,90 @@ mod tests {
         let text = out.render_text();
         assert!(text.contains("Outcome: crash"), "{text}");
         assert!(!text.contains("Cost: $0.00"), "{text}");
+    }
+
+    // ── GH-656: claim-guard flags ──
+
+    #[test]
+    fn dispatch_parses_issue_and_machine_flags() {
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "pi",
+            "--prompt-file",
+            "p.txt",
+            "--issue",
+            "656",
+            "--machine",
+            "docs",
+        ]);
+        assert_eq!(args.issue, Some(656));
+        assert_eq!(args.machine.as_deref(), Some("docs"));
+        let args = parse(&["edda", "--agent", "pi", "--prompt-file", "p.txt"]);
+        assert_eq!(args.issue, None);
+        assert_eq!(args.machine, None);
+    }
+
+    /// The guard needs an explicit machine; --issue alone (no flag, no
+    /// EDDA_MACHINE) is an error, never a hostname guess.
+    #[test]
+    fn issue_without_an_explicit_machine_is_refused() {
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "pi",
+            "--prompt-file",
+            "p.txt",
+            "--issue",
+            "656",
+        ]);
+        let error = claim_guard_refusal(&args).expect_err("machine must be explicit");
+        assert!(error.to_string().contains("--machine"), "{error}");
+        assert!(error.to_string().contains("EDDA_MACHINE"), "{error}");
+    }
+
+    /// Honesty rule: --machine without --issue can never fire the guard,
+    /// so it is refused instead of accepted and silently dropped.
+    #[test]
+    fn machine_without_issue_is_refused_not_silently_dropped() {
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "pi",
+            "--prompt-file",
+            "p.txt",
+            "--machine",
+            "docs",
+        ]);
+        let error = claim_guard_refusal(&args).expect_err("--machine without --issue");
+        assert!(error.to_string().contains("--issue"), "{error}");
+    }
+
+    /// Without --issue (and without --machine) the guard does not run at
+    /// all — no gh call, no refusal: dispatch behaves exactly as before.
+    #[test]
+    fn no_issue_means_no_guard_and_no_gh_call() {
+        let args = parse(&["edda", "--agent", "pi", "--prompt-file", "p.txt"]);
+        assert!(claim_guard_refusal(&args).unwrap().is_none());
+    }
+
+    /// A machine label with whitespace can never become a clean
+    /// `lane:<machine>` label, so the guard refuses it before any gh call.
+    #[test]
+    fn guard_refuses_an_ill_formed_machine_label_before_gh() {
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "pi",
+            "--prompt-file",
+            "p.txt",
+            "--issue",
+            "656",
+            "--machine",
+            "docs lane",
+        ]);
+        let error = claim_guard_refusal(&args).expect_err("whitespace machine label");
+        assert!(error.to_string().contains("one token"), "{error}");
     }
 
     // ── Outcome → exit-code mapping (all five PhaseResult variants) ──
