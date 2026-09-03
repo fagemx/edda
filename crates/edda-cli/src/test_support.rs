@@ -73,3 +73,54 @@ pub(crate) fn isolated_store() -> IsolatedStore {
 //
 // A flaky test here would be worse than none: it would train the next person to
 // re-run until green, which is the habit that lets real failures through.
+
+/// Write a heartbeat file directly, controlling its age and whether it belongs
+/// to a parented sub-agent — the two inputs the shared liveness criterion
+/// reads (`peers::liveness::liveness_from_heartbeat`).
+///
+/// `write_heartbeat_minimal` always stamps "now" and never a parent, so it
+/// cannot produce the case that separates the shared criterion from a plain
+/// `age <= stale_secs()` comparison: a sub-agent whose heartbeat is older than
+/// the threshold but inside the 15x window the criterion grants it.
+pub(crate) fn write_aged_heartbeat(
+    project_id: &str,
+    session_id: &str,
+    age_secs: u64,
+    parent_session_id: Option<&str>,
+) {
+    let _ = edda_store::ensure_dirs(project_id);
+    let state_dir = edda_store::project_dir(project_id).join("state");
+    std::fs::create_dir_all(&state_dir).expect("state dir");
+    let ts = rfc3339_now_minus(age_secs);
+    let mut hb = serde_json::json!({
+        "session_id": session_id,
+        "started_at": ts,
+        "last_heartbeat": ts,
+        "label": session_id,
+        "focus_files": [],
+        "active_tasks": [],
+        "files_modified_count": 0,
+        "total_edits": 0,
+        "recent_commits": [],
+    });
+    if let Some(parent) = parent_session_id {
+        hb["parent_session_id"] = serde_json::json!(parent);
+    }
+    std::fs::write(
+        state_dir.join(format!("session.{session_id}.json")),
+        hb.to_string(),
+    )
+    .expect("heartbeat file");
+}
+
+fn rfc3339_now_minus(secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs()
+        .saturating_sub(secs);
+    time::OffsetDateTime::from_unix_timestamp(now as i64)
+        .expect("unix timestamp")
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("rfc3339")
+}

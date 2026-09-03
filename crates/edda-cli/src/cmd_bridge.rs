@@ -574,7 +574,12 @@ fn peers_json(project_id: &str) -> serde_json::Value {
         edda_bridge_claude::peers::discover_all_sessions(project_id)
             .into_iter()
             .map(|peer| {
-                let stale = peer.age_secs > stale_threshold;
+                // The shared criterion's verdict, not `age_secs >
+                // stale_threshold`: that comparison cannot see the 15x
+                // parented sub-agent window, so it published `stale: true`
+                // for a session `claim check` counted as a live conflict
+                // (GH-780).
+                let stale = !peer.is_live;
                 let mut value = serde_json::to_value(&peer).unwrap_or_default();
                 value["stale"] = serde_json::json!(stale);
                 value
@@ -627,11 +632,9 @@ pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Collapse stale sessions (heartbeat older than threshold) to a count so
-    // dead heartbeat files do not read as live contention.
-    let stale_threshold = edda_bridge_claude::peers::stale_secs();
-    let (active, stale): (Vec<_>, Vec<_>) =
-        sessions.iter().partition(|p| p.age_secs <= stale_threshold);
+    // Collapse stale sessions to a count so dead heartbeat files do not read
+    // as live contention. The split is the shared criterion's (GH-780).
+    let (active, stale): (Vec<_>, Vec<_>) = sessions.iter().partition(|p| p.is_live);
 
     if active.is_empty() {
         println!(
@@ -1265,10 +1268,9 @@ pub fn request(
 
 /// Labels of every currently active session, for "did you mean" diagnostics.
 fn active_labels(project_id: &str) -> Vec<String> {
-    let stale = edda_bridge_claude::peers::stale_secs();
     let mut labels: Vec<String> = edda_bridge_claude::peers::discover_all_sessions(project_id)
         .into_iter()
-        .filter(|p| p.age_secs <= stale && !p.label.is_empty())
+        .filter(|p| p.is_live && !p.label.is_empty())
         .map(|p| p.label)
         .collect();
     labels.sort();
@@ -1344,12 +1346,18 @@ fn has_live_sessions(project_id: &str) -> bool {
     !fresh_sessions(project_id).is_empty()
 }
 
-/// The sessions currently passing the shared liveness window.
+/// The sessions currently passing the shared liveness criterion.
+///
+/// This decides whether `resolve_session_id` may infer an identity at all, so
+/// an inline `age_secs <= stale_secs()` here was not a cosmetic divergence: it
+/// dropped the 15x parented sub-agent window, and a sub-agent the criterion
+/// calls live went uncounted, sending `resolve_session_id` to tier 4 to mint a
+/// `cli-*` id — the structurally unjudgeable claim GH-705 exists to handle
+/// (GH-780).
 fn fresh_sessions(project_id: &str) -> Vec<edda_bridge_claude::peers::PeerSummary> {
-    let stale = edda_bridge_claude::peers::stale_secs();
     edda_bridge_claude::peers::discover_all_sessions(project_id)
         .into_iter()
-        .filter(|session| session.age_secs <= stale)
+        .filter(|session| session.is_live)
         .collect()
 }
 
@@ -2389,6 +2397,79 @@ mod tests {
         let result = edda_bridge_claude::render::pack(pid);
         assert!(result.is_none(), "no hot.md should return None");
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn parented_sub_agent_inside_the_15x_window_counts_as_live() {
+        // GH-780 finding 2: `fresh_sessions` decided liveness with an inline
+        // `age_secs <= stale_secs()`, while the shared criterion
+        // (`peers::liveness::liveness_from_heartbeat`) grants a parented
+        // sub-agent 15x that threshold — no hook events fire during a
+        // sub-agent's run, so a heartbeat written at spawn would otherwise age
+        // out mid-run.
+        //
+        // The consequence of the disagreement is not cosmetic: a session that
+        // `edda peers` and `claim check` both call live is invisible to
+        // `has_live_sessions`, so `resolve_session_id` falls through to tier 4
+        // and mints a `cli-*` id — creating exactly the structurally
+        // unjudgeable claim GH-705 exists to handle, for a project that does
+        // have a live session.
+        let _store = crate::test_support::isolated_store();
+        let pid = "test_gh780_parented_live";
+        let stale = edda_bridge_claude::peers::stale_secs();
+        crate::test_support::write_aged_heartbeat(pid, "sub-agent-1", stale * 3, Some("parent-1"));
+
+        assert!(
+            has_live_sessions(pid),
+            "a parented sub-agent {}s old is inside the 15x window ({}s) and must count as live",
+            stale * 3,
+            stale * 15
+        );
+    }
+
+    #[test]
+    fn unparented_session_past_the_threshold_is_not_live() {
+        // Non-vacuity guard for the test above: the 15x window is what makes
+        // the parented session live, not a blanket widening of the threshold.
+        // Same age, no parent, must stay dead.
+        let _store = crate::test_support::isolated_store();
+        let pid = "test_gh780_unparented_dead";
+        let stale = edda_bridge_claude::peers::stale_secs();
+        crate::test_support::write_aged_heartbeat(pid, "plain-1", stale * 3, None);
+
+        assert!(
+            !has_live_sessions(pid),
+            "an unparented session {}s old is past the {}s threshold and must not count as live",
+            stale * 3,
+            stale
+        );
+    }
+
+    #[test]
+    fn peers_json_marks_a_parented_sub_agent_live() {
+        // `peers_json` computes its own `stale` flag from `age_secs >
+        // stale_threshold` (the `edda peers --json` contract). Under the shared
+        // criterion the same sub-agent is live, so leaving this site inline
+        // would have `edda peers --json` report `stale: true` for a session
+        // `claim check` counts as a live conflict — the two verbs the
+        // `peers::liveness` module doc names as its clients, disagreeing.
+        let _store = crate::test_support::isolated_store();
+        let pid = "test_gh780_peers_json";
+        let stale = edda_bridge_claude::peers::stale_secs();
+        crate::test_support::write_aged_heartbeat(pid, "sub-agent-2", stale * 3, Some("parent-2"));
+
+        let snapshot = peers_json(pid);
+        let sessions = snapshot["sessions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("sessions array, got {snapshot}"));
+        let me = sessions
+            .iter()
+            .find(|s| s["session_id"] == "sub-agent-2")
+            .unwrap_or_else(|| panic!("sub-agent-2 in {snapshot}"));
+        assert_eq!(
+            me["stale"], false,
+            "a parented sub-agent inside the 15x window must not be marked stale, got {snapshot}"
+        );
     }
 
     #[test]

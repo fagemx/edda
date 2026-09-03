@@ -61,6 +61,26 @@ pub struct StaleClaim {
     pub age_secs: Option<u64>,
 }
 
+/// A bare-CLI claim standing on the board outside the queried surface
+/// (GH-780).
+///
+/// GH-705 routes every non-live `cli-*` claim into `unjudgeable_claims`, but
+/// that vector is narrowed to the claims that intersect the query, and such a
+/// claim can no longer reach `stale_claims` either — so this class fell out of
+/// the report entirely on the non-intersecting path. The exit code was right
+/// (a non-intersecting claim is not a conflict, and these are not counted),
+/// but GH-617's death-visibility property was lost for it: the reader could no
+/// longer tell "the board is empty" from "the board holds claims and the
+/// filter removed them all".
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct StandingBareClaim {
+    pub label: String,
+    pub session_id: String,
+    /// The surface it occupies — the query did not overlap it, so the reader
+    /// needs to be told what it does cover to judge whether that matters.
+    pub paths: Vec<String>,
+}
+
 /// Machine-readable result of a claim check (`--json`).
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 pub struct CheckReport {
@@ -82,6 +102,12 @@ pub struct CheckReport {
     /// for death visibility — never counted toward the exit code.
     #[serde(default)]
     pub stale_claims: Vec<StaleClaim>,
+    /// Bare-CLI claims standing on the board that do NOT intersect the query
+    /// (GH-780). Reported for the same death-visibility reason as
+    /// `stale_claims` and, like them, never counted toward the exit code: the
+    /// caller did not ask about that surface.
+    #[serde(default)]
+    pub standing_bare_claims: Vec<StandingBareClaim>,
 }
 
 /// `edda claim check <paths|globs>...` — read-only conflict query.
@@ -169,10 +195,27 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
         }
     };
 
+    // Whatever the intersection decision did not pick up is still an
+    // occupation on the board; it is reported, never counted (GH-780).
+    let standing_bare_claims: Vec<StandingBareClaim> = unjudgeable
+        .iter()
+        .filter(|c| {
+            !unjudgeable_conflicts
+                .iter()
+                .any(|hit| hit.session_id == c.session_id)
+        })
+        .map(|c| StandingBareClaim {
+            label: c.label.clone(),
+            session_id: c.session_id.clone(),
+            paths: c.paths.clone(),
+        })
+        .collect();
+
     let report = CheckReport {
         conflicts: report.conflicts,
         unjudgeable_claims: unjudgeable_conflicts,
         stale_claims,
+        standing_bare_claims,
     };
 
     if json {
@@ -188,6 +231,7 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
                 query.len()
             );
             print_stale_claims(&report.stale_claims);
+            print_standing_bare_claims(&report.standing_bare_claims);
         }
     } else {
         for conflict in &report.conflicts {
@@ -215,6 +259,7 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
             query.len()
         );
         print_stale_claims(&report.stale_claims);
+        print_standing_bare_claims(&report.standing_bare_claims);
     }
 
     if exit_code_for(&report) != 0 {
@@ -253,6 +298,29 @@ fn is_bare_cli_session(session_id: &str) -> bool {
 /// liveness judgement removed everything". The count line goes to stdout
 /// as part of the human report; the per-claim detail (with labels) goes to
 /// stderr so stdout stays free of dead sessions' identifiers.
+/// Name the bare-CLI claims standing outside the queried surface.
+///
+/// Mirrors `print_stale_claims`: the count goes to stdout so a human scanning
+/// the clear result sees that the board is not empty, and the per-claim detail
+/// to stderr so it never contaminates piped stdout.
+fn print_standing_bare_claims(standing: &[StandingBareClaim]) {
+    if standing.is_empty() {
+        return;
+    }
+    println!(
+        "note: {} bare-CLI claim(s) standing on the board outside the queried surface,          not counted (--json lists them).",
+        standing.len()
+    );
+    for s in standing {
+        eprintln!(
+            "  standing, not counted: claim \"{}\" (session {}) — occupies {}",
+            s.label,
+            s.session_id,
+            s.paths.join(", ")
+        );
+    }
+}
+
 fn print_stale_claims(stale: &[StaleClaim]) {
     if stale.is_empty() {
         return;
@@ -421,6 +489,7 @@ pub fn check(
         conflicts: intersecting_claims(claims, query)?,
         unjudgeable_claims: Vec::new(),
         stale_claims: Vec::new(),
+        standing_bare_claims: Vec::new(),
     })
 }
 
@@ -1841,6 +1910,83 @@ mod tests {
     }
 
     #[test]
+    fn e2e_non_intersecting_bare_cli_claim_is_still_named() {
+        // GH-780 finding 1: GH-705 routes a non-live `cli-*` claim into
+        // `unjudgeable_claims`, but that vector is then narrowed to the claims
+        // whose surface intersects the query. A bare claim that does not
+        // intersect reaches neither `stale_claims` nor `unjudgeable_claims`, so
+        // the clear branch prints "No conflicts: 0 live claim(s)" and mentions
+        // the occupation nowhere.
+        //
+        // The exit code is right either way — a non-intersecting claim is not a
+        // conflict, and must not become one. What must not be lost is GH-617's
+        // death-visibility property for this class: the reader has to be able
+        // to tell "the board is empty" from "the board holds claims and the
+        // filter removed them all". Before GH-705 this same claim printed as
+        // `stale, not counted: ... — no heartbeat`.
+        let repo = e2e_repo();
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[coord_event("cli-elsewhere", "other-lane", &["src/auth/*"])],
+        );
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "check", "docs/guide.md"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 0,
+            "a non-intersecting claim is not a conflict: stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            stdout.contains("other-lane") || stderr.contains("other-lane"),
+            "a standing bare-CLI claim must be named even when it does not              intersect the query, got stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_non_intersecting_bare_cli_claim_is_listed_in_json() {
+        // The same GH-780 property on the machine-readable side: `--json` is
+        // what a gate script reads, so the standing occupation has to be listed
+        // there too, and under its own key rather than folded into
+        // `unjudgeable_claims` (which carries the exit code).
+        let repo = e2e_repo();
+        let project_id = edda_store::project_id(repo.path());
+        let store = tempfile::tempdir().expect("store tempdir");
+        write_board(
+            store.path(),
+            &project_id,
+            &[coord_event("cli-elsewhere", "other-lane", &["src/auth/*"])],
+        );
+        let (code, stdout, stderr) = run_edda_bare(
+            &["claim", "check", "docs/guide.md", "--json"],
+            repo.path(),
+            store.path(),
+        );
+        assert_eq!(
+            code, 0,
+            "still not a conflict: stdout={stdout:?} stderr={stderr:?}"
+        );
+        let report: serde_json::Value =
+            serde_json::from_str(&stdout).expect("claim check --json must parse");
+        let standing = report["standing_bare_claims"]
+            .as_array()
+            .unwrap_or_else(|| panic!("--json must carry standing_bare_claims, got {report}"));
+        assert_eq!(standing.len(), 1, "one standing bare claim, got {report}");
+        assert_eq!(standing[0]["session_id"], "cli-elsewhere", "{report}");
+        assert_eq!(standing[0]["label"], "other-lane", "{report}");
+        assert!(
+            report["unjudgeable_claims"]
+                .as_array()
+                .is_some_and(|v| v.is_empty()),
+            "a non-intersecting claim must not be counted toward the exit code, got {report}"
+        );
+    }
+
+    #[test]
     fn e2e_never_heartbeated_bare_cli_claim_conflicts() {
         // The same fail-closed verdict when the one-shot claim left no
         // heartbeat at all: for a session id this binary itself mints,
@@ -2202,6 +2348,7 @@ mod tests {
                 session_id: "dead".into(),
                 age_secs: None,
             }],
+            standing_bare_claims: vec![],
         };
         // Stale claims never affect the exit code (GH-617).
         assert_eq!(exit_code_for(&conflict), 1);
