@@ -306,6 +306,17 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                          a stale verdict could otherwise be admitted"
                     )
                 })?;
+                time::OffsetDateTime::parse(
+                    &at,
+                    &time::format_description::well_known::Rfc3339,
+                )
+                .with_context(|| {
+                    format!(
+                        "AWAITING_VERDICT state for \"{gated_id}\" has unparsable gate_entered_at \"{at}\" — \
+                         the D6 freshness bound cannot be established, so refusing to wait; \
+                         a stale verdict could otherwise be admitted"
+                    )
+                })?;
                 (sha, at)
             };
             let phase_num = order.iter().position(|id| id == &gated_id).unwrap_or(0) + 1;
@@ -652,11 +663,12 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                     }
                 }
                 GateVerdict::LedgerUnreadable(err) => {
-                    // GH-541: the gate could not read the ledger persistently
-                    // (not lock contention). Failing with the diagnostic is
-                    // the only honest outcome — the printed `edda verdict`
-                    // command writes to a ledger this gate cannot read, so
-                    // the wait was unrescuable from the start.
+                    // GH-541 / GH-744: the gate could not read the ledger persistently
+                    // (not lock contention). The phase's work completed and checks passed;
+                    // the failure is infrastructure, not the agent's work.
+                    // Transition to GateTimedOut (rather than Failed) so the GH-552 waive route
+                    // is preserved: the operator can waive the gate in interactive mode,
+                    // and unattended runs honor on_gate_timeout: skip.
                     let msg = format!(
                         "gate aborted: ledger unreadable for \"{subject}\" (sha {gate_sha}): {err}"
                     );
@@ -664,7 +676,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         state,
                         &gated_id,
                         PhaseStatus::AwaitingVerdict,
-                        PhaseStatus::Failed,
+                        PhaseStatus::GateTimedOut,
                         Some(PhaseUpdate {
                             error: Some(ErrorInfo {
                                 error_type: ErrorType::LedgerUnreadable,
@@ -676,39 +688,66 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                             ..Default::default()
                         }),
                     )?;
-                    println!("  ⚠ Phase \"{gated_id}\" {msg}");
+                    println!("  ⏰ Phase \"{gated_id}\" {msg}");
                     if let Some(tmux) = tmux_session {
-                        let _ = tmux.update_phase_status(&gated_id, "Failed");
+                        let _ = tmux.update_phase_status(&gated_id, "GateTimedOut");
                     }
                     let gate_cost = state.get_phase(&gated_id).ok().and_then(|p| p.cost_usd);
-                    edda::record_phase_failed_with_plan(
+                    edda::record_phase_gate_timed_out(
                         cwd,
                         Some(&plan.name),
                         &gated_id,
                         gate_cost,
                         &msg,
                     );
-                    let gate_ps = state.get_phase(&gated_id)?;
-                    event_log.record(Event::PhaseFailed {
+                    let elapsed_ms = time::OffsetDateTime::parse(
+                        &entered_at,
+                        &time::format_description::well_known::Rfc3339,
+                    )
+                    .ok()
+                    .and_then(|t| {
+                        let elapsed = time::OffsetDateTime::now_utc() - t;
+                        if elapsed.whole_seconds() < 0 {
+                            None
+                        } else {
+                            Some(elapsed.whole_seconds() as u64 * 1000)
+                        }
+                    })
+                    .unwrap_or(0);
+                    event_log.record(Event::GateTimedOut {
                         phase_id: gated_id.clone(),
-                        attempt: gate_ps.attempts,
-                        duration_ms: 0,
-                        error: msg,
-                        error_type: Some(ErrorType::LedgerUnreadable.tag().to_string()),
-                        env_retries: gate_ps.env_retries,
-                        attempt_charged: true,
+                        gate_sha: gate_sha.clone(),
+                        elapsed_ms,
                     });
                     let final_output = load_gate_output(cwd, &plan.name, &gated_id);
                     clear_gate_output(cwd, &plan.name, &gated_id);
+                    let gate_ps = state.get_phase(&gated_id)?;
                     notifier
                         .notify_phase_terminal(phase_terminal_event(
                             &plan.name,
                             &gated_id,
-                            "Failed",
+                            "GateTimedOut",
                             gate_ps.attempts,
                             final_output.as_deref(),
                         ))
                         .await;
+
+                    // GH-552 / GH-744: auto-waive if phase configured with on_gate_timeout: skip
+                    if phase.on_gate_timeout == OnGateTimeout::Skip {
+                        let reason = format!(
+                            "gate waived after ledger unreadable: work completed and checks passed; auto-waived by on_gate_timeout: skip ({err})"
+                        );
+                        let ps = state.get_phase_mut(&gated_id)?;
+                        ps.skip_reason = Some(reason.clone());
+                        event_log.record(Event::GateWaived {
+                            phase_id: gated_id.clone(),
+                            reason: reason.clone(),
+                            auto: true,
+                        });
+                        println!(
+                            "  ⧗ Gate auto-waived for \"{gated_id}\" (on_gate_timeout: skip) — plan proceeds"
+                        );
+                    }
                 }
                 GateVerdict::Cancelled => {
                     // The loop top sees the cancelled token and shuts down;
@@ -3926,12 +3965,69 @@ phases:
             "diagnostic must name the missing invariant: {msg}"
         );
 
-        // The stale-verdict approval was not consumed: the phase is still
-        // awaiting on disk.
+        // GH-744: The stale-verdict approval was not consumed: the phase did NOT advance
+        // to Passed, no verdict decision was recorded, and dependent phase b was never run.
         let persisted = crate::state::persist::load_state(&root, "gated")
             .unwrap()
             .expect("state persists");
-        assert_eq!(persisted.phases[0].status, PhaseStatus::AwaitingVerdict);
+        assert_ne!(
+            persisted.phases[0].status,
+            PhaseStatus::Passed,
+            "stale verdict must NOT advance the phase to Passed"
+        );
+        assert!(
+            persisted.phases[0].verdict_decision.is_none(),
+            "stale approval must NOT be recorded in phase state"
+        );
+        assert_eq!(
+            persisted.phases[1].status,
+            PhaseStatus::Pending,
+            "dependent phase b must remain pending"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-744 P1-1: an AWAITING_VERDICT phase whose persisted state has an
+    /// unparsable `gate_entered_at` (e.g. space instead of T) must fail closed
+    /// at resume with a diagnostic, not enter an unsatisfiable wait.
+    #[tokio::test]
+    async fn resume_with_unparsable_gate_entered_at_fails_closed() {
+        let root = fresh_root("unparsable_entered");
+        let head = init_git_repo(&root);
+        let launcher = MockLauncher::new();
+        let plan = parse_plan(GATED_YAML).unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        state.phases[0].status = PhaseStatus::AwaitingVerdict;
+        state.phases[0].gate_sha = Some(head.clone());
+        state.phases[0].gate_entered_at = Some("not-a-timestamp".into()); // unparsable
+
+        let handle = spawn_runner(GATED_YAML, root.clone(), launcher, state);
+        let result = tokio::time::timeout(GATE_TEST_DEADLINE, handle)
+            .await
+            .expect("gate test exceeded deadline")
+            .unwrap();
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("expected run_plan to error on unparsable gate_entered_at"),
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("unparsable gate_entered_at"),
+            "diagnostic must name the unparsable field: {msg}"
+        );
+        let persisted = crate::state::persist::load_state(&root, "gated")
+            .unwrap()
+            .expect("state persists");
+        assert_ne!(
+            persisted.phases[0].status,
+            PhaseStatus::Passed,
+            "unparsable bound must NOT advance the phase to Passed"
+        );
+        assert_eq!(
+            persisted.phases[1].status,
+            PhaseStatus::Pending,
+            "dependent phase b must remain pending"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4974,6 +5070,29 @@ phases:
         }
     }
 
+    /// GH-744 Item 3: A flapping ledger (e.g. error, ok, error, ok) defeats the
+    /// rate-limiter (reports every error because reset wipes next_report) and
+    /// never exhausts the persistent-failure budget (consecutive count is reset).
+    #[test]
+    fn flapping_ledger_defeats_rate_limiter_and_never_trips_budget() {
+        let mut t = ReadErrorTracker::default();
+        let err = anyhow::anyhow!("disk I/O error");
+        for cycle in 0..25 {
+            // Error observed: consecutive becomes 1
+            assert!(
+                t.observe(&err).is_none(),
+                "cycle {cycle} must not trip budget because of intervening reset"
+            );
+            assert_eq!(t.consecutive, 1);
+            assert!(t.next_report.is_some());
+
+            // A single healthy poll resets consecutive to 0 and next_report to None
+            t.reset();
+            assert_eq!(t.consecutive, 0);
+            assert!(t.next_report.is_none());
+        }
+    }
+
     /// GH-541 §2: a persistently unreadable ledger must fail the gate with
     /// a diagnostic after the error budget — not poll in silence forever.
     /// A bare directory has no `.edda` workspace, so every `Ledger::open`
@@ -5006,6 +5125,94 @@ phases:
             }
             other => panic!("expected LedgerUnreadable, got {other:?}"),
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-744 Item 2: when a gate encounters LedgerUnreadable, the phase's work
+    /// has completed and checks passed. It transitions to GateTimedOut (carrying
+    /// ErrorType::LedgerUnreadable), NOT Failed, preserving the waive route.
+    /// When on_gate_timeout: skip is configured, it auto-waives and proceeds.
+    #[tokio::test(start_paused = true)]
+    async fn ledger_unreadable_preserves_waive_route_and_auto_skips() {
+        let root = fresh_root("ledger_unreadable_waive");
+        // Keep `.edda/` (run_plan's state lock recreates it) but make
+        // Ledger::open fail persistently: a directory at ledger.db is not a
+        // SQLite file and is not lock contention.
+        let db = root.join(".edda").join("ledger.db");
+        std::fs::remove_file(&db).expect("remove fresh ledger.db");
+        std::fs::create_dir(&db).expect("ledger.db as directory");
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "b",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some("done".into()),
+            }],
+        );
+        let yaml = r#"
+name: unreadableplan
+timeout_sec: 600
+phases:
+  - id: a
+    prompt: "do it"
+    gate: verdict
+    on_gate_timeout: skip
+  - id: b
+    prompt: "next"
+    depends_on: [a]
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        let head = "a".repeat(40);
+        state.phases[0].status = PhaseStatus::AwaitingVerdict;
+        state.phases[0].gate_sha = Some(head.clone());
+        state.phases[0].gate_entered_at = Some(now_rfc3339());
+        state.started_at = Some(now_rfc3339());
+
+        let engine = CheckEngine::new(root.clone());
+        let notifier = CollectNotifier::new();
+        let mut budget = BudgetTracker::new(plan.budget_usd);
+        let cancel = CancellationToken::new();
+        tokio::time::timeout(
+            GATE_TEST_DEADLINE,
+            run_plan(
+                &plan,
+                &mut state,
+                RunContext {
+                    launcher: &launcher,
+                    check_engine: &engine,
+                    notifier: &notifier,
+                    budget: &mut budget,
+                    cancel,
+                    cwd: &root,
+                    interactive: false,
+                    json_events: false,
+                    tmux_session: None,
+                },
+            ),
+        )
+        .await
+        .expect("gate test exceeded deadline")
+        .unwrap();
+
+        let phase_a = &state.phases[0];
+        assert_eq!(
+            phase_a.status,
+            PhaseStatus::GateTimedOut,
+            "must transition to GateTimedOut, not Failed"
+        );
+        let err = phase_a.error.as_ref().expect("error must be recorded");
+        assert_eq!(err.error_type, ErrorType::LedgerUnreadable);
+        assert!(
+            phase_a.skip_reason.is_some(),
+            "auto-waived when on_gate_timeout: skip is set"
+        );
+        assert_eq!(
+            state.plan_status,
+            PlanStatus::Completed,
+            "plan must complete past auto-waived gate"
+        );
+        assert_eq!(launcher.call_count("b"), 1, "dependent phase b dispatched");
         let _ = std::fs::remove_dir_all(&root);
     }
 
