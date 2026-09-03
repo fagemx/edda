@@ -27,9 +27,7 @@
 # lane-status.ps1): 0 = stopped (N processes terminated, or the lane was not
 # running); 1 = error: no matching task, wrapper missing, or processes
 # survived the kill.
-#
-# Never points at another lane: -Name selects exactly one edda-lane-* task,
-# and the CommandLine matches are the lane's own wrapper and brief paths.
+# Matches tasks registered across the fleet (edda-lane-*, edda-review-pr*-r*, GH-712).
 param(
   [Parameter(Mandatory = $true)][string]$Name,
   [string]$LogDir = "$env:TEMP\edda-lanes"
@@ -45,24 +43,64 @@ function Fail([string]$Msg) {
 if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
   Fail "-Name '$Name' may contain only letters, digits, dot, underscore, hyphen"
 }
-$TaskName = "edda-lane-$Name"
-$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if (-not $task) { Fail "no scheduled task $TaskName (scripts/fleet/lane-status.ps1 lists what exists)" }
 
-$Wrapper = Join-Path $LogDir "$Name.wrapper.ps1"
-$Log = Join-Path $LogDir "$Name.log"
-$Done = Join-Path $LogDir "$Name.done"
-if (-not (Test-Path -LiteralPath $Wrapper -PathType Leaf)) {
-  Fail "wrapper not found: $Wrapper; cannot verify the lane's process tree by CommandLine"
+# Resolve scheduled task: support exact name, edda-lane-$Name, and edda-$Name (covers edda-review-pr*-r*) (GH-712)
+$task = $null
+$TaskName = $null
+$candidateTaskNames = @($Name, "edda-lane-$Name", "edda-$Name")
+foreach ($cand in $candidateTaskNames) {
+  $t = Get-ScheduledTask -TaskName $cand -ErrorAction SilentlyContinue
+  if ($t) {
+    $TaskName = $cand
+    $task = $t
+    break
+  }
+}
+if (-not $task) {
+  Fail "no scheduled task matching '$Name' (checked: $($candidateTaskNames -join ', '); scripts/fleet/lane-status.ps1 lists what exists)"
 }
 
+# Resolve wrapper script:
+# 1. From the task's registered action argument line (works for both worker and review lanes)
+$Wrapper = $null
+$actionArg = if ($task.Actions -and $task.Actions.Count -gt 0) { $task.Actions[0].Arguments } else { $null }
+if ($actionArg -and $actionArg -match '-File\s+"?([^"\s]+)"?') {
+  $extracted = $Matches[1]
+  if (Test-Path -LiteralPath $extracted -PathType Leaf) {
+    $Wrapper = $extracted
+  }
+}
+
+# 2. Fallback to LogDir candidate paths if not in action arguments
+if (-not $Wrapper) {
+  $lane = $TaskName -replace '^edda-lane-', '' -replace '^edda-', ''
+  $candidates = @(
+    (Join-Path $LogDir "$Name.wrapper.ps1"),
+    (Join-Path $LogDir "$lane.wrapper.ps1"),
+    (Join-Path $LogDir "$Name.ps1"),
+    (Join-Path $LogDir "$lane.ps1")
+  )
+  foreach ($c in $candidates) {
+    if (Test-Path -LiteralPath $c -PathType Leaf) {
+      $Wrapper = $c
+      break
+    }
+  }
+}
+
+if (-not $Wrapper -or -not (Test-Path -LiteralPath $Wrapper -PathType Leaf)) {
+  Fail "wrapper not found for task $TaskName; cannot verify the lane's process tree by CommandLine"
+}
+
+$base = $Wrapper -replace '\.(wrapper\.)?ps1$', ''
+$Log = "$base.log"
+$Done = "$base.done"
+
 # What the lane's processes look like on the command line. The wrapper path
-# matches the wrapper itself; the brief path (extracted from the wrapper the
-# same way the #606 clobber-guard does) matches the `edda dispatch` child and
-# stays identifiable after the wrapper is already dead — exactly the
-# State=Ready-but-still-working orphan Stop-ScheduledTask leaves behind.
+# matches the wrapper itself; the brief path matches the child process and
+# stays identifiable after the wrapper is already dead.
 $wrapperBody = Get-Content -LiteralPath $Wrapper -Raw
-$brief = if ($wrapperBody -match "--prompt-file '([^']+)'") { $Matches[1] } else { $null }
+$brief = if ($wrapperBody -match "--prompt-file\s+['""]?([^'""]+)['""]?") { $Matches[1] } else { $null }
 
 function Get-ProcessSnapshot {
   # Index children by parent PID using explicit [int] keys (GH-706: Win32_Process
