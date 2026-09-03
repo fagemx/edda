@@ -53,9 +53,10 @@ be decided mechanically and boldly.
 
 ## Splitting a running serial plan
 
-Order is mandatory: `edda conduct skip <phase> --reason "parallelized: <new plan>"`
+Order is mandatory: `edda conduct skip <phase> --plan <serial-plan> --reason "parallelized: <new plan>"`
 for every phase being split out, **then** launch the parallel plans. Launch-first
-duplicates the work when the serial runner advances.
+duplicates the work when the serial runner advances. `--plan` is required once any
+other store on the machine holds a plan (parallel worktree lanes are that state).
 
 ## Review + merge
 

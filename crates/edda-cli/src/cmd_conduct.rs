@@ -897,9 +897,42 @@ fn discover_plans(repo_root: &Path) -> Result<(DiscoveredPlans, DiscoveryCorrupt
         if !conductor_dir.exists() {
             continue;
         }
-        for entry in std::fs::read_dir(&conductor_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
+        // Round-9 P1: directory I/O must not kill discovery. A concurrently
+        // removed worktree (`git worktree remove`, fleet cleanup) can race
+        // `exists()` → `read_dir`; warn and skip that store, same as an
+        // unreadable registry / failed `git worktree list`.
+        let entries = match std::fs::read_dir(&conductor_dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                eprintln!(
+                    "⚠ could not read conductor dir {}: {e}",
+                    conductor_dir.display()
+                );
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!(
+                        "⚠ skipping unreadable entry in {}: {e}",
+                        conductor_dir.display()
+                    );
+                    continue;
+                }
+            };
+            let is_dir = match entry.file_type() {
+                Ok(t) => t.is_dir(),
+                Err(e) => {
+                    eprintln!(
+                        "⚠ skipping unreadable entry in {}: {e}",
+                        conductor_dir.display()
+                    );
+                    continue;
+                }
+            };
+            if is_dir {
                 if let Some(name) = entry.file_name().to_str() {
                     if found.iter().any(|(n, _)| n == name)
                         || corrupt.iter().any(|(n, _, _)| n == name)
