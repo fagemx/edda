@@ -94,6 +94,21 @@ if ($LASTEXITCODE -ne 0 -or $inside -ne 'true') {
 # --- resolve paths (absolute BEFORE anything is written or embedded) --------
 
 $Cwd = (Resolve-Path -LiteralPath $Cwd).Path
+
+# --- known-good .git/config, captured BEFORE the lane can write (GH-715) ----
+# The lane ends with `git push -u`, which extends the SHARED .git/config; a
+# hard kill mid-write leaves it all NULs and every worktree loses git at once.
+# Copy it now, while nothing of this lane is writing — and only if it parses,
+# which is exactly the check the two useless .bak files of 2026-09 skipped.
+& (Join-Path $PSScriptRoot 'git-config-guard.ps1') -RepoPath $Cwd -Backup
+$guardExit = $LASTEXITCODE
+if ($guardExit -eq 2) {
+  Fail "the shared .git/config for '$Cwd' does not parse; repair it first (scripts/fleet/git-config-guard.ps1 -RepoPath '$Cwd' -Restore) — a lane launched against it cannot run git"
+}
+if ($guardExit -ne 0) {
+  [Console]::Error.WriteLine("lane-launch: warning: .git/config backup not written (git-config-guard exit $guardExit); launching anyway, but lane-stop will have nothing to restore from")
+}
+
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $LogDir = (Resolve-Path -LiteralPath $LogDir).Path
 if (-not $SessionId) { $SessionId = "lane-$Name" }

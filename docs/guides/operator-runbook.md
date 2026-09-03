@@ -49,6 +49,16 @@
    而任務顯示 `State = Ready`。停 lane 一律走 `lane-stop.ps1`：它停任務、殺整棵
    process tree、依 `CommandLine` 比對 wrapper／brief 路徑驗證無殘留，並補寫
    wrapper 已寫不出的結束記錄（done-file + `=== EXIT ===` 行）。
+   殺之前每個目標會先收到 `taskkill`（不帶 `/F`）並有 `-GraceSec` 秒（預設 5，
+   `0` 關閉）自己結束，之後才強殺——硬殺撞上 git 寫 `.git/config` 會把那個檔
+   變成整片 NUL，主 checkout 與全部 worktree 同時失去 git（GH-715）。殺完後
+   `lane-stop.ps1` 會驗證那份共用 config 仍可解析，壞了就用 `lane-launch.ps1`
+   開跑前存的已驗證備份還原，並在 stdout 印 `gitconfig=…`；還不回來就 exit 1。
+   手動檢查或修復用同一支脚本：
+   ```bash
+   pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <worktree> -Verify
+   pwsh -NoProfile -File scripts/fleet/git-config-guard.ps1 -RepoPath <worktree> -Restore
+   ```
 
 ---
 
@@ -168,7 +178,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 執行用便宜模型（pi 預設 glm-5.3-flash）；**審查一律 Claude Opus**（`claude-opus-5`，顯式 `--model` 釘死，正常臂走 `edda dispatch --agent claude` 訂閱運輸——本機 pi/openrouter 到不了任何 Anthropic 模型；brief 超出 spawn 上限的 fallback 走唯讀 allowlist 的 `claude -p` stdin，表頭印實際臂） | `fleet.review-engine-model`、`fleet.review-backend`（supersede `fleet.agent-model-split` 的審查半邊） |
 | 審查 provider 過載：**改運輸不降模型**——(1) 同 `--model` 先用最低成本探測，通了才重試一次（同一 claude 訂閱運輸）；(2) 仍沒有判決就對該 head 標 `review:unreviewed` 並停——未審查是誠實狀態，便宜模型的判決不是。watcher 無 Codex 路線（superseding 決策 `…codex-route-withdrawn-for-automated-watcher`：Codex 對 watcher 做不到唯讀；人類控制者仍可手動用 Codex）。**2026-09-03 操作者裁決（`opus-default-sol-via-pi-fallback-no-codex`）：不是矛盾，是過時——Opus 是預設引擎，`fleet.review-engine-pool` 的錨仍是 sol（走 pi）；codex 自 `fleet.reviewer-agent` 起就不是審查運輸。watcher 自己不換模型，降到錨引擎是操作者動作** | `fleet.review-provider-overload` |
 | **lane 啟動走 Task Scheduler，不走 nohup／Start-Process**：Claude Code 的工具 shell 在 Windows Job Object 裡，nohup 的子程序仍隨 session 死。`Register-ScheduledTask` + `Start-ScheduledTask`（父程序是 svchost）；該環境 `HOME` 為空，lane wrapper 必須顯式設；`CARGO_TARGET_DIR` 只在 `-BuildLane` 指名四個允許 build lane 之一時設（不編譯的 session 沒有 build lane——`.claude/CLAUDE.md`、`verification.cost-discipline`；要編譯的必須給四擇一，launcher 拒絕其他名字）。`lane-launch.ps1` 不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`，設 `CARGO_TARGET_DIR`＝lane root（`$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）\`<BuildLane>`；docs lane 不傳，wrapper 不設。`Get-ScheduledTaskInfo` 可輪詢，`Unregister-ScheduledTask` 清理。重派前先讀 worktree／branch／PR 狀態，不信任 live handle。**手續已脚本化**：用 `scripts/fleet/lane-launch.ps1` 註冊起 lane、`scripts/fleet/lane-status.ps1` 盯狀態（用法見 START HERE），不要再手寫 wrapper | `fleet.lane-launch`、`fleet.lane-dispatch` |
-| **停 lane 一律走 `scripts/fleet/lane-stop.ps1 -Name <lane>`**：`Stop-ScheduledTask` 與 `Unregister-ScheduledTask` 都只終止任務的 wrapper，**不殺它 spawn 的 process tree**（GH-672：被「停」的 lane 照樣 commit／push／開 PR，任務卻顯示 `State = Ready`）。`lane-stop.ps1` 停任務、殺整棵樹（wrapper 已死時依 `CommandLine` 比對 wrapper／brief 路徑抓孤兒）、驗證無殘留、回報實際終止了什麼，並補寫結束記錄（done-file + lane log 的 `=== EXIT ===` 行）——wrapper 本身也在 `finally` 寫同樣的結束記錄，所以正常結束、出錯、被停三種 endings 都有 EXIT | `fleet.lane-stop-4090` |
+| **停 lane 一律走 `scripts/fleet/lane-stop.ps1 -Name <lane>`**：`Stop-ScheduledTask` 與 `Unregister-ScheduledTask` 都只終止任務的 wrapper，**不殺它 spawn 的 process tree**（GH-672：被「停」的 lane 照樣 commit／push／開 PR，任務卻顯示 `State = Ready`）。`lane-stop.ps1` 停任務、殺整棵樹（wrapper 已死時依 `CommandLine` 比對 wrapper／brief 路徑抓孤兒）、驗證無殘留、回報實際終止了什麼，並補寫結束記錄（done-file + lane log 的 `=== EXIT ===` 行）——wrapper 本身也在 `finally` 寫同樣的結束記錄，所以正常結束、出錯、被停三種 endings 都有 EXIT。**殺是「先請、後強」**：每個目標先收不帶 `/F` 的 `taskkill`，`-GraceSec` 秒（預設 5）內自己結束就不強殺；殺完再驗證共用 `.git/config` 仍可解析，壞了就從 `lane-launch.ps1` 開跑前存的**已驗證**備份還原（`scripts/fleet/git-config-guard.ps1`），還不回來就 exit 1。硬殺撞上 git 寫 config 會把它變成整片 NUL，主 checkout 加全部 worktree 同時失去 git；2026-09-02／03 各發生一次，而當時的 `.bak` 是**損毀後**才複製的，所以也是整片 NUL——備份不驗證等於沒有備份（GH-715） | `fleet.lane-stop-4090` |
 | 一 issue ＝ 一單 phase plan ＝ 一 worktree ＝ 一 build lane；並行在 plan 之間；plan 裡不寫沒理由的 `depends_on`；並行 plan 不用 verdict gate | `cleanup.parallel-exec`、`cleanup.review-gate` |
 | 派工前跨機器認領一律走機械守門（GH-656）：開工步先跑 `scripts/fleet-claim-issue.sh <issue> <machine>`（未認領→貼 `taking:` 留言＋加 `lane:<machine>` 標籤，exit 0；**別台已認領→exit 1 不動**；本機已認領→冪等 exit 0；`--check` 唯讀），或用 `edda dispatch --issue <N> --machine <label>` 派發——它在啟動 agent 前跑同一檢查，**別台已認領 → exit 2、不啟動 agent、`--json.error` 說明原因**；machine 只認顯式值（旗標或 `EDDA_MACHINE`），不猜 hostname | `fleet.cross-machine-claim`（GH-656 把約定變成守門） |
 | build lane 只用 `worker-1|worker-2|verifier|verifier-2`；永不建 ad-hoc `CARGO_TARGET_DIR`；L1 與 verifier 設 `CARGO_INCREMENTAL=0` | `verification.cost-discipline` |

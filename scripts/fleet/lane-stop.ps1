@@ -13,24 +13,34 @@
 #      wrapper is already dead (the orphan case above), every process still
 #      identifiable by CommandLine as the lane: the wrapper path and the
 #      brief path the wrapper was launched with — including each match's
-#      descendants, using type-safe [int] parent/child indexing,
+#      descendants, using type-safe [int] parent/child indexing. Each target
+#      is first asked to exit (taskkill without /F) and given -GraceSec to
+#      finish; only what is still alive after that window is terminated by
+#      force, so a lane in the middle of writing shared git state usually
+#      gets to finish the write (GH-715),
 #   5. verifies by both PID survival and tree/CommandLine match that nothing
-#      survived (GH-706), and
-#   6. writes the end record the killed wrapper can no longer write: the
+#      survived (GH-706),
+#   6. verifies the SHARED .git/config the lane was working in still parses and
+#      restores it from the known-good backup if it does not — a hard kill
+#      landing on git's config write NULs that file and takes down the main
+#      checkout and every linked worktree at once (GH-715), and
+#   7. writes the end record the killed wrapper can no longer write: the
 #      done-file (sentinel "stopped") and a === EXIT === line in the lane log,
 #      so a lane log with START but no EXIT is never left ambiguous (GH-672).
 #
 # usage:
-#   pwsh -NoProfile -File scripts/fleet/lane-stop.ps1 -Name <lane> [-LogDir <dir>]
+#   pwsh -NoProfile -File scripts/fleet/lane-stop.ps1 -Name <lane> [-LogDir <dir>] [-GraceSec <s>]
 #
-# Prints what was terminated, one line each. Exit codes (style of
-# lane-status.ps1): 0 = stopped (N processes terminated, or the lane was not
-# running); 1 = error: no matching task, wrapper missing, or processes
-# survived the kill.
+# Prints what was terminated, one line each, plus the .git/config verdict.
+# Exit codes (style of lane-status.ps1): 0 = stopped (N processes terminated,
+# or the lane was not running); 1 = error: no matching task, wrapper missing,
+# processes survived the kill, or the lane's .git/config is corrupt and could
+# not be restored.
 # Matches tasks registered across the fleet (edda-lane-*, edda-review-pr*-r*, GH-712).
 param(
   [Parameter(Mandatory = $true)][string]$Name,
-  [string]$LogDir = "$env:TEMP\edda-lanes"
+  [string]$LogDir = "$env:TEMP\edda-lanes",
+  [ValidateRange(0, 120)][int]$GraceSec = 5
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,6 +118,13 @@ $wrapperBody = Get-Content -LiteralPath $Wrapper -Raw
 $brief = if ($wrapperBody -match '--prompt-file\s+[''"]([^''"]+)[''"]') {
   $b = $Matches[1].Trim()
   if ($b.Length -gt 4) { $b } else { $null }
+} else { $null }
+
+# The worktree the lane ran in. lane-launch.ps1 writes it into the wrapper as a
+# single-quoted PowerShell literal (embedded quotes doubled), and it is what
+# resolves the SHARED .git/config this script checks after the kill (GH-715).
+$laneCwd = if ($wrapperBody -match "(?m)^\s*Set-Location\s+-LiteralPath\s+'((?:[^']|'')*)'") {
+  $Matches[1] -replace "''", "'"
 } else { $null }
 
 function Get-ProcessSnapshot {
@@ -190,11 +207,29 @@ while ($queue.Count -gt 0) {
   }
 }
 
-# --- 4. kill the whole tree -------------------------------------------------
+# --- 4. stop the tree: ask first, force what ignores the ask (GH-715) -------
+# A hard kill that lands while git is extending the shared .git/config leaves
+# that file a run of NULs (twice on 2026-09-02/03). Asking the tree to exit
+# first — taskkill without /F — lets an in-flight write finish in the common
+# case; only what is still alive after -GraceSec is terminated by force.
 
 $terminated = New-Object System.Collections.Generic.List[int]
 $targetList = @($targets)
+$gracefulExits = 0
 if ($targetList.Count -gt 0) {
+  if ($GraceSec -gt 0) {
+    foreach ($t in $targetList) {
+      & taskkill /PID $t /T 2>$null | Out-Null
+    }
+    $graceDeadline = (Get-Date).AddSeconds($GraceSec)
+    while ((Get-Date) -lt $graceDeadline) {
+      if (-not (Get-Process -Id $targetList -ErrorAction SilentlyContinue)) { break }
+      Start-Sleep -Milliseconds 250
+    }
+    foreach ($t in $targetList) {
+      if (-not (Get-Process -Id $t -ErrorAction SilentlyContinue)) { $gracefulExits++ }
+    }
+  }
   foreach ($t in $targetList) {
     Stop-Process -Id $t -Force -ErrorAction SilentlyContinue
   }
@@ -273,10 +308,33 @@ if ($residual.Count -gt 0) {
 $task = Get-ScheduledTask -TaskName $TaskName
 if ($task.State -eq 'Running') { Fail "task $TaskName still reports State = Running after the stop" }
 
-# --- 6. write the end record the killed wrapper cannot write ----------------
+# --- 6. the shared .git/config must still parse after the kill (GH-715) -----
+# The lane's worktree shares one .git/config with the main checkout and every
+# other worktree; a kill landing on git's write to it NULs the file and takes
+# them all down. Check it here — the one moment we know a kill just happened —
+# and restore from the backup lane-launch took before the lane could write.
+# The end record below is written either way, so the verdict never costs the
+# log its === EXIT === line.
+
+$gitConfigVerdict = 'skipped (lane cwd not resolvable from the wrapper)'
+$gitConfigBroken = $false
+if ($laneCwd -and (Test-Path -LiteralPath $laneCwd)) {
+  $guardOut = & (Join-Path $PSScriptRoot 'git-config-guard.ps1') -RepoPath $laneCwd -VerifyOrRestore 2>&1
+  $guardExit = $LASTEXITCODE
+  if ($guardExit -eq 0) {
+    $restoredLine = @($guardOut | Where-Object { "$_" -match 'RESTORED' })
+    $gitConfigVerdict = if ($restoredLine.Count -gt 0) { "$($restoredLine[0])" } else { 'healthy' }
+  } else {
+    $gitConfigBroken = $true
+    $gitConfigVerdict = "UNREPAIRABLE (git-config-guard exit $guardExit)"
+  }
+  $guardOut | ForEach-Object { [Console]::Error.WriteLine("lane-stop: git-config-guard: $_") }
+}
+
+# --- 7. write the end record the killed wrapper cannot write ----------------
 
 if ($terminated.Count -gt 0 -or ((Test-Path -LiteralPath $Log) -and -not (Test-Path -LiteralPath $Done))) {
-  Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1; terminated $($terminated.Count) process(es)) ===" -Encoding utf8
+  Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1; terminated $($terminated.Count) process(es); .git/config $gitConfigVerdict) ===" -Encoding utf8
   if (-not (Test-Path -LiteralPath $Done)) {
     Set-Content -LiteralPath $Done -Value 'stopped' -Encoding ascii
   }
@@ -286,9 +344,13 @@ if ($terminated.Count -gt 0 -or ((Test-Path -LiteralPath $Log) -and -not (Test-P
 
 "task=$TaskName state=$($task.State)"
 if ($terminated.Count -gt 0) {
-  "terminated=$($terminated.Count) pids=$($terminated -join ',')"
+  "terminated=$($terminated.Count) pids=$($terminated -join ',') graceful=$gracefulExits forced=$($terminated.Count - $gracefulExits)"
 } else {
   "terminated=0 (lane was not running)"
 }
 "residual=$($residual.Count) (CommandLine match + process tree verification)"
+"gitconfig=$gitConfigVerdict"
+if ($gitConfigBroken) {
+  Fail "the shared .git/config for '$laneCwd' does not parse after the kill and no usable backup was available; every worktree sharing it has lost git until it is repaired (GH-715)"
+}
 exit 0
