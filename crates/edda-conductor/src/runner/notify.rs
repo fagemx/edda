@@ -17,6 +17,24 @@ pub trait Notifier: Send + Sync {
     /// so existing implementations stay unaffected and stdout behavior is
     /// byte-identical ([`StdoutNotifier`] keeps its default).
     async fn notify_phase_terminal(&self, _event: NotifyEvent) {}
+
+    /// GH-551/GH-751: progress signal for a phase awaiting external verdict.
+    /// Dispatched to configured notification channels matching `gate_progress`
+    /// and echoed to stdout (the always-on fallback).
+    async fn notify_gate_progress(&self, event: NotifyEvent) {
+        if let NotifyEvent::GateProgress {
+            subject,
+            gate_sha,
+            wait_label,
+            ..
+        } = &event
+        {
+            self.notify(&format!(
+                "Still waiting for verdict on \"{subject}\" (sha {gate_sha}) — {wait_label}"
+            ))
+            .await;
+        }
+    }
 }
 
 /// Prints to stdout.
@@ -69,12 +87,31 @@ impl Notifier for ChannelNotifier {
         // global timeout); keep it off the async executor threads.
         let _ = tokio::task::spawn_blocking(move || edda_notify::dispatch(&config, &event)).await;
     }
+
+    async fn notify_gate_progress(&self, event: NotifyEvent) {
+        if let NotifyEvent::GateProgress {
+            subject,
+            gate_sha,
+            wait_label,
+            ..
+        } = &event
+        {
+            self.fallback
+                .notify(&format!(
+                    "Still waiting for verdict on \"{subject}\" (sha {gate_sha}) — {wait_label}"
+                ))
+                .await;
+        }
+        let config = self.config.clone();
+        let _ = tokio::task::spawn_blocking(move || edda_notify::dispatch(&config, &event)).await;
+    }
 }
 
 /// Collects messages in memory (for testing).
 pub struct CollectNotifier {
     messages: std::sync::Mutex<Vec<String>>,
     terminal_events: std::sync::Mutex<Vec<NotifyEvent>>,
+    gate_progress_events: std::sync::Mutex<Vec<NotifyEvent>>,
 }
 
 impl Default for CollectNotifier {
@@ -88,6 +125,7 @@ impl CollectNotifier {
         Self {
             messages: std::sync::Mutex::new(Vec::new()),
             terminal_events: std::sync::Mutex::new(Vec::new()),
+            gate_progress_events: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -99,6 +137,11 @@ impl CollectNotifier {
     pub fn terminal_events(&self) -> Vec<NotifyEvent> {
         self.terminal_events.lock().unwrap().clone()
     }
+
+    /// GH-751: gate progress events observed by this notifier.
+    pub fn gate_progress_events(&self) -> Vec<NotifyEvent> {
+        self.gate_progress_events.lock().unwrap().clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -109,5 +152,20 @@ impl Notifier for CollectNotifier {
 
     async fn notify_phase_terminal(&self, event: NotifyEvent) {
         self.terminal_events.lock().unwrap().push(event);
+    }
+
+    async fn notify_gate_progress(&self, event: NotifyEvent) {
+        if let NotifyEvent::GateProgress {
+            subject,
+            gate_sha,
+            wait_label,
+            ..
+        } = &event
+        {
+            self.messages.lock().unwrap().push(format!(
+                "Still waiting for verdict on \"{subject}\" (sha {gate_sha}) — {wait_label}"
+            ));
+        }
+        self.gate_progress_events.lock().unwrap().push(event);
     }
 }
