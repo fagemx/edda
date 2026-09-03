@@ -105,8 +105,12 @@
    worktree 在 `$EDDA_FLEET_SCRATCH/wt-review-prN`；brief 超過 Windows 32767 字元 spawn 上限時，
    lane 的 fallback 以唯讀工具集 `--allowedTools "Read,Glob,Grep,Bash"` 經 `claude -p` stdin 跑同一份 brief，
    判決留言表頭印的是 `.done` `TRANSPORT=` 收據上的實際臂）並貼確認留言 `review: started on <full sha>`；
-   判決（含 observed model、cost、釘死的 head SHA）在審查者跑完後（約 5–15 分鐘）自動貼上 PR，
+   判決（含 observed model、cost、`reviewer_session`、釘死的 head SHA）在審查者跑完後（約 5–15 分鐘）自動貼上 PR，
    並加 label `review:lgtm`／`review:changes-requested`；push 後 head 變了自動再審一輪。
+   **一張 PR 一個審查者對話**：session id 由 PR 編號推導（`SHA-1("edda-review-pr<N>")` 排成 v5 UUID），
+   第 1 輪 `--session-id` 開，之後每輪 `--resume` 續，所以第 2 輪只讀 delta
+   （`fleet.reviewer-agent` 當初選 pi 就是為了這個性質，GH-708 把它帶進 Opus 路徑）；
+   worktree 一輪結束就刪、下輪原地重建（續談與 cwd 無關，實測過）。
    檢查方式：`Get-ScheduledTask edda-pr-review-watcher`、`tail ~/.edda/fleet/watch.log`、PR 留言與 label。
    provider 過載時：同模型探測通過後重試一次（同一 `edda dispatch --agent claude` 運輸），仍沒有判決就標
    `review:unreviewed` 並對該 head 停手

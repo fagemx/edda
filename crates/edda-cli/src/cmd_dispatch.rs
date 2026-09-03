@@ -35,12 +35,22 @@ pub struct DispatchArgs {
     pub prompt_file: Option<String>,
     /// Session id passed to the backend verbatim. Continuity semantics are
     /// per-backend, and all three persist conversations across invocations:
-    /// claude and pi delegate to their backends, and codex's session→thread
-    /// map is persisted in the per-user edda store (GH-535), so the same id
-    /// resumes the prior codex conversation. Generated and printed when
-    /// omitted so the caller can reuse it on the next call.
+    /// pi delegates to its backend, and codex's session→thread map is
+    /// persisted in the per-user edda store (GH-535), so for both the same
+    /// id resumes the prior conversation. claude is the exception — a
+    /// `--session-id` that already exists is refused ("Session ID <id> is
+    /// already in use"), so a second turn on the same conversation adds
+    /// `--resume` (GH-708). Generated and printed when omitted so the
+    /// caller can reuse it on the next call.
     #[arg(long)]
     pub session_id: Option<String>,
+    /// Continue the conversation `--session-id` names instead of starting a
+    /// new one (claude only, `claude --resume <id>`; GH-708). pi and codex
+    /// resume by repeating `--session-id` alone and refuse this flag rather
+    /// than accept a switch that does nothing. Requires --session-id: there
+    /// is nothing to resume without one.
+    #[arg(long, requires = "session_id")]
+    pub resume: bool,
     /// Working directory for the agent (default: current directory)
     #[arg(long)]
     pub cwd: Option<String>,
@@ -381,6 +391,7 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
             exclude_tools: args.exclude_tools.as_deref(),
             session_dir: args.session_dir.as_deref(),
             permission_mode: args.permission_mode.as_deref(),
+            resume: args.resume,
         },
     )?;
 
@@ -451,6 +462,7 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
             // recorded.
             persistent_codex_threads: true,
             session_dir: args.session_dir.as_ref().map(std::path::PathBuf::from),
+            resume: args.resume,
         },
     )?;
     let phase = build_phase(
@@ -1373,6 +1385,68 @@ mod tests {
             .expect_err("codex has no permission-mode concept; the value must be refused");
         assert!(error.to_string().contains("--permission-mode"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── GH-708: --resume ──
+
+    #[test]
+    fn resume_requires_a_session_id_to_resume() {
+        // Without an id there is nothing to continue, and claude would pick
+        // "the most recent conversation in this directory" — which for a
+        // review lane is whatever ran there last, not this PR's reviewer.
+        assert!(
+            TestCli::try_parse_from([
+                "edda",
+                "--agent",
+                "claude",
+                "--prompt-file",
+                "p.txt",
+                "--resume"
+            ])
+            .is_err(),
+            "--resume without --session-id must not parse"
+        );
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "claude",
+            "--prompt-file",
+            "p.txt",
+            "--session-id",
+            "7a9c6b1e-0000-4708-8000-000000000001",
+            "--resume",
+        ]);
+        assert!(args.resume);
+        assert_eq!(
+            args.session_id.as_deref(),
+            Some("7a9c6b1e-0000-4708-8000-000000000001")
+        );
+    }
+
+    #[test]
+    fn resume_is_refused_on_backends_that_resume_by_session_id_alone() {
+        for agent in ["pi", "codex"] {
+            let error = validate_dispatch_options(
+                match agent {
+                    "pi" => AgentKind::Pi,
+                    _ => AgentKind::Codex,
+                },
+                &DispatchOptions {
+                    resume: true,
+                    ..Default::default()
+                },
+            )
+            .expect_err("only claude needs a distinct resume spelling");
+            assert!(error.to_string().contains("--resume"), "{error}");
+        }
+        validate_dispatch_options(
+            AgentKind::Claude,
+            &DispatchOptions {
+                resume: true,
+                ..Default::default()
+            },
+        )
+        .expect("claude supports --resume");
     }
 
     // ── End-to-end-ish run through MockLauncher ──

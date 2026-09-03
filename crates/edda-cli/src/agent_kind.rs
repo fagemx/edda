@@ -82,6 +82,17 @@ impl AgentKind {
     pub fn supports_model_listing(self) -> bool {
         matches!(self, AgentKind::Pi)
     }
+
+    /// Whether the backend needs a distinct "continue this conversation"
+    /// spelling (`claude --resume <id>`). Only claude does: it refuses a
+    /// `--session-id` that already exists ("Session ID <id> is already in
+    /// use", exit 1), so repeating the id is a hard failure rather than a
+    /// resume. pi and codex resume by repeating `--session-id` — codex
+    /// through the persisted session→thread map (GH-535) — so `--resume`
+    /// there would claim a switch that does not exist (GH-708).
+    pub fn supports_resume(self) -> bool {
+        matches!(self, AgentKind::Claude)
+    }
 }
 
 // ── Backend × option support matrix (GH-574) ──
@@ -99,6 +110,9 @@ pub(crate) struct DispatchOptions<'a> {
     /// absent — there is no clap default masking explicitness, so nothing
     /// is claimed or dropped for backends that ignore the concept.
     pub permission_mode: Option<&'a str>,
+    /// `--resume`: continue the conversation the session id already names
+    /// (claude only; GH-708).
+    pub resume: bool,
 }
 
 /// Reject unsupported backend/option combinations with an explicit error.
@@ -139,6 +153,11 @@ pub(crate) fn validate_dispatch_options(
             options.permission_mode.map(|m| format!("{m:?}")),
             agent.supports_permission_mode(),
         ),
+        (
+            "--resume",
+            options.resume.then(|| "true".to_owned()),
+            agent.supports_resume(),
+        ),
     ];
     let refused: Vec<String> = unsupported
         .into_iter()
@@ -178,6 +197,10 @@ pub(crate) struct LauncherOptions {
     /// pi `--session-dir` (GH-574). Other backends manage their own session
     /// storage; dispatch rejects the flag for them before reaching here.
     pub session_dir: Option<PathBuf>,
+    /// Continue the conversation the session id already names, instead of
+    /// starting a new one (claude `--resume`; GH-708). Refused for the
+    /// other backends before reaching here.
+    pub resume: bool,
 }
 
 /// Construct and probe (`verify_available`) the launcher for `agent`.
@@ -194,7 +217,9 @@ pub(crate) fn build_launcher(
 ) -> Result<Box<dyn AgentLauncher>> {
     Ok(match agent {
         AgentKind::Claude => {
-            let mut launcher = ClaudeCodeLauncher::new().with_verbose(options.verbose);
+            let mut launcher = ClaudeCodeLauncher::new()
+                .with_verbose(options.verbose)
+                .with_resume(options.resume);
             launcher.transcript_dir = options.transcript_dir;
             launcher.verify_available()?;
             Box::new(launcher)
@@ -251,6 +276,7 @@ mod tests {
             exclude_tools,
             session_dir,
             permission_mode,
+            resume: false,
         }
     }
 

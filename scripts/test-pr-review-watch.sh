@@ -522,6 +522,49 @@ grep -qF 'transport `unknown — no TRANSPORT receipt in .done`' "$cfile" || {
     printf 'live: a missing TRANSPORT receipt must render as unknown, not a guessed transport, got header:\n%s\n' "$(head -1 "$cfile")" >&2
     exit 1
 }
+export GH_HEAD="$sha"
+
+# --- live loop: the header names the reviewer conversation (GH-708) ------------
+# The per-PR reviewer session is what makes round 2+ a delta review, so the
+# verdict header carries it. Two independent facts are compared, never merged:
+# SESSION=/SESSION_MODE= are what review-pr.sh LAUNCHED with, and the log's
+# `Session:` line is what the backend REPORTED. A disagreement means the resume
+# forked into a fresh conversation, and the header must say so.
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nSESSION=11111111-2222-4333-8444-555555555555\nSESSION_MODE=resume\nDISPATCH_EXIT=0\n' \
+    >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: session)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+grep -qF 'reviewer_session `11111111-2222-4333-8444-555555555555` (resumed)' "$cfile" || {
+    printf 'live: header must name the resumed reviewer conversation, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nSESSION=99999999-8888-4777-8666-555555555555\nSESSION_MODE=resume\nDISPATCH_EXIT=0\n' \
+    >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: session mismatch)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+grep -qF 'BACKEND REPORTED `11111111-2222-4333-8444-555555555555`' "$cfile" || {
+    printf 'live: a resume that ran in a different conversation must be reported, not hidden, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: no session receipt)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+grep -qF 'mode unknown — no SESSION_MODE receipt in .done' "$cfile" || {
+    printf 'live: a missing SESSION_MODE receipt must render as unknown, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
 unset GH_HEAD
 
 # --- offline guarantee: the real watcher log was never touched -----------------

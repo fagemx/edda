@@ -270,6 +270,29 @@ session_model_cost() { # $1=log file -> sets REQ, OBSERVED, COST, SIDO
   [ -n "${SIDO:-}" ] || SIDO="unknown"
 }
 
+# The reviewer conversation this round ran in, as a header fragment. Two
+# independent facts are compared, never merged (GH-708): SESSION=/SESSION_MODE=
+# are what review-pr.sh LAUNCHED with, and $2 is the id the backend REPORTED
+# in its own receipt. Round 2+ of a PR is supposed to continue round 1's
+# conversation, so a disagreement means the resume silently forked into a new
+# one — printed as the defect it is instead of quietly showing the launched id.
+reviewer_session_desc() { # $1=.done file  $2=session id observed in the log
+  sid=$(sed -n 's/^SESSION=//p' "$1" 2>/dev/null | tail -1)
+  mode=$(sed -n 's/^SESSION_MODE=//p' "$1" 2>/dev/null | tail -1)
+  [ -n "${sid:-}" ] || sid=${2:-unknown}
+  case "${mode:-}" in
+    resume) mdesc=resumed ;;
+    new)    mdesc=new ;;
+    *)      mdesc='mode unknown — no SESSION_MODE receipt in .done' ;;
+  esac
+  if [ -n "${2:-}" ] && [ "$2" != "unknown" ] && [ -n "${sid:-}" ] && [ "$2" != "$sid" ]; then
+    printf '`%s` (%s; BACKEND REPORTED `%s` — this round did not run in the launched conversation)' \
+      "$sid" "$mdesc" "$2"
+  else
+    printf '`%s` (%s)' "$sid" "$mdesc"
+  fi
+}
+
 pr_is_open() { # $1=pr
   [ "$(gh pr view "$1" --repo "$REPO" --json state --jq .state 2>/dev/null)" = "OPEN" ]
 }
@@ -421,7 +444,7 @@ settle_pending() {
         esac
         COMMENT="$SCRATCH/review-pr$pr-r$round-comment.md"
         {
-          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): transport \`$tdesc\`, model \`$REQ\` (observed \`$OBSERVED\`), session \`$SIDO\`, $costline, read-only, detached worktree at \`$sha\`. Reviewed head SHA: \`$sha\`."
+          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): transport \`$tdesc\`, model \`$REQ\` (observed \`$OBSERVED\`), reviewer_session $(reviewer_session_desc "$DONE" "$SIDO"), $costline, read-only, detached worktree at \`$sha\`. Reviewed head SHA: \`$sha\`."
           echo
           cat "$VERDICT"
         } > "$COMMENT"

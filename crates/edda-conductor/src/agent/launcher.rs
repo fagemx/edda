@@ -78,6 +78,13 @@ pub struct ClaudeCodeLauncher {
     pub verbose: bool,
     /// If set, raw agent stdout is captured to `{transcript_dir}/{phase_id}-{session_id_prefix}.jsonl`.
     pub transcript_dir: Option<PathBuf>,
+    /// Continue the conversation the session id already names instead of
+    /// starting a new one: `claude --resume <id>` rather than
+    /// `claude --session-id <id>` (GH-708). Claude Code refuses a
+    /// `--session-id` that already exists ("Session ID <id> is already in
+    /// use", exit 1), so a caller that wants a second turn on the same
+    /// conversation has no other spelling.
+    pub resume: bool,
     /// In-band model report from the most recent turn (stream-json
     /// `system/init`), for [`AgentLauncher::last_observed_model`].
     observed_model: std::sync::Mutex<Option<String>>,
@@ -102,12 +109,21 @@ impl ClaudeCodeLauncher {
         cwd: &Path,
     ) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new(&self.claude_bin);
+        // `--session-id` NAMES a new conversation; `--resume` continues the
+        // one already stored under that id. They are mutually exclusive, and
+        // reusing `--session-id` on an existing conversation is an error, not
+        // a resume (GH-708) — so the caller's intent picks the flag.
+        let session_flag = if self.resume {
+            "--resume"
+        } else {
+            "--session-id"
+        };
         cmd.arg("-p")
             .arg(prompt)
             .arg("--verbose")
             .arg("--output-format")
             .arg("stream-json")
-            .arg("--session-id")
+            .arg(session_flag)
             .arg(session_id)
             .arg("--permission-mode")
             .arg(&phase.permission_mode)
@@ -176,6 +192,7 @@ impl ClaudeCodeLauncher {
             claude_bin: PathBuf::from("claude"),
             verbose: false,
             transcript_dir: None,
+            resume: false,
             observed_model: std::sync::Mutex::new(None),
         }
     }
@@ -185,8 +202,16 @@ impl ClaudeCodeLauncher {
             claude_bin,
             verbose: false,
             transcript_dir: None,
+            resume: false,
             observed_model: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Continue the conversation named by the session id instead of
+    /// starting a new one (GH-708).
+    pub fn with_resume(mut self, resume: bool) -> Self {
+        self.resume = resume;
+        self
     }
 
     fn record_observed_model(&self, model: Option<String>) {
@@ -424,6 +449,42 @@ mod tests {
             .expect("test plan parses")
             .phases
             .remove(0)
+    }
+
+    // ── GH-708: a second turn on the same conversation ──
+
+    #[test]
+    fn claude_default_names_a_new_session() {
+        let args = args_of(&claude_command_for("  - id: a\n    prompt: x\n"));
+        let pos = args
+            .iter()
+            .position(|a| a == "--session-id")
+            .expect("--session-id must appear when not resuming");
+        assert_eq!(args[pos + 1], "sess-1");
+        assert!(
+            !args.contains(&"--resume".to_string()),
+            "a non-resuming spawn must not carry --resume: {args:?}"
+        );
+    }
+
+    #[test]
+    fn claude_resume_continues_the_session_instead_of_naming_it() {
+        // Claude Code refuses a --session-id that already exists ("Session
+        // ID <id> is already in use"), so round 2+ of a per-PR reviewer
+        // session must spell the same id as --resume (GH-708).
+        let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude")).with_resume(true);
+        let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
+        let args =
+            args_of(&launcher.build_command(&phase, "do the task", "", "sess-1", Path::new(".")));
+        let pos = args
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("--resume must appear in a resuming claude spawn");
+        assert_eq!(args[pos + 1], "sess-1");
+        assert!(
+            !args.contains(&"--session-id".to_string()),
+            "--resume and --session-id are mutually exclusive: {args:?}"
+        );
     }
 
     #[test]
