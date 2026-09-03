@@ -91,7 +91,7 @@ The output is a `PlanState` object (or array if multiple plans):
 ### Status values
 
 **Plan status:** `pending`, `running`, `blocked`, `completed`, `aborted`
-**Phase status:** `pending`, `running`, `checking`, `passed`, `failed`, `skipped`, `stale`
+**Phase status:** `pending`, `running`, `checking`, `passed`, `failed`, `skipped`, `stale`, `gate_timed_out`
 
 ### Report format (phone-optimized)
 
@@ -175,7 +175,7 @@ phases:
 
 ## 4. Handle Errors
 
-When plan status is `blocked`, a phase has failed beyond max attempts.
+When plan status is `blocked`, a phase has failed beyond max attempts or timed out at an unattended verdict gate (`gate_timed_out`).
 
 ### Read error details
 
@@ -183,7 +183,7 @@ When plan status is `blocked`, a phase has failed beyond max attempts.
 edda conduct status --json
 ```
 
-Look for phases with `"status": "failed"` and their `error` field:
+Or inspect `runner-status.json` (`failed` and `gate_timed_out` buckets). Look for phases with `"status": "failed"` or `"status": "gate_timed_out"` and their `error` field:
 
 ```json
 {
