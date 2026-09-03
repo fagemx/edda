@@ -303,6 +303,14 @@ impl SqliteStore {
         Ok(true)
     }
 
+    /// Return the total count of events in the events table.
+    pub fn count_events(&self) -> anyhow::Result<u64> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
     /// Read all events in insertion order.
     pub fn iter_events(&self) -> anyhow::Result<Vec<Event>> {
         let mut stmt = self.conn.prepare(

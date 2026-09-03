@@ -101,6 +101,23 @@ impl Ledger {
         Self::open(repo_root.to_path_buf())
     }
 
+    /// Return the total count of events in the ledger.
+    pub fn count_events(&self) -> anyhow::Result<u64> {
+        self.sqlite.count_events().context("Ledger::count_events")
+    }
+
+    /// Return the total count of decisions in the ledger.
+    pub fn count_decisions(&self) -> anyhow::Result<u64> {
+        self.sqlite
+            .count_decisions()
+            .context("Ledger::count_decisions")
+    }
+
+    /// Check whether the ledger contains any events.
+    pub fn is_empty(&self) -> anyhow::Result<bool> {
+        Ok(self.count_events()? == 0)
+    }
+
     // ── HEAD branch ─────────────────────────────────────────────────
 
     /// Read the current HEAD branch name.

@@ -31,7 +31,28 @@ pub fn execute(
         return execute_fleet(repo_root, q, &opts, json);
     }
 
-    let ledger = Ledger::open(repo_root)?;
+    let ledger = Ledger::open_existing(repo_root)?;
+    let event_count = ledger.count_events().unwrap_or(0);
+    let decision_count = ledger.count_decisions().unwrap_or(0);
+    let is_registered = edda_store::registry::is_registered(repo_root);
+
+    if !is_registered {
+        eprintln!(
+            "Warning: workspace at {} is not registered in edda registry (run `edda init`)",
+            repo_root.display()
+        );
+    }
+    if event_count == 0 {
+        eprintln!(
+            "Warning: workspace ledger at {} is empty (0 events recorded)",
+            repo_root.display()
+        );
+    } else if decision_count == 0 {
+        eprintln!(
+            "Warning: workspace ledger at {} has 0 decisions recorded",
+            repo_root.display()
+        );
+    }
 
     // Build transcript search callback
     let transcript_cb = build_transcript_callback(repo_root, None);
@@ -96,7 +117,7 @@ fn fleet_hint_for_ask(repo_root: &Path, q: &str, opts: &AskOptions) -> Option<St
     let home = edda_store::project_id(repo_root);
     crate::fleet::elsewhere_hint(&scope, &home, "result", |entry| {
         let root = Path::new(&entry.path);
-        let ledger = Ledger::open(root)?;
+        let ledger = Ledger::open_existing(root)?;
         let cb = build_transcript_callback(root, Some(&entry.name));
         let cb_ref: Option<&TranscriptSearchFn> = cb.as_ref().map(|f| f.as_ref());
         Ok(hit_count(&ask(&ledger, q, opts, cb_ref)?))
@@ -115,7 +136,7 @@ fn execute_fleet(repo_root: &Path, q: &str, opts: &AskOptions, json: bool) -> an
 
     let (hits, misses) = crate::fleet::fan_out(&scope, |entry| {
         let root = Path::new(&entry.path);
-        let ledger = Ledger::open(root)?;
+        let ledger = Ledger::open_existing(root)?;
         let cb = build_transcript_callback(root, Some(&entry.name));
         let cb_ref: Option<&TranscriptSearchFn> = cb.as_ref().map(|f| f.as_ref());
         let mut result = ask(&ledger, q, opts, cb_ref)?;
@@ -247,6 +268,7 @@ mod tests {
             tasks: Vec::new(),
             dependents: Vec::new(),
             override_risk: None,
+            ..Default::default()
         };
         assert_eq!(hit_count(&r), 0, "an empty result is empty");
 
@@ -284,6 +306,7 @@ mod tests {
             tasks: Vec::new(),
             dependents: Vec::new(),
             override_risk: None,
+            ..Default::default()
         };
 
         assert_eq!(hit_count(&empty), 0, "nothing was found");

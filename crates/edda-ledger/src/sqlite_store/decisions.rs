@@ -325,6 +325,14 @@ impl SqliteStore {
         Ok(count > 0)
     }
 
+    /// Return the total count of decisions in the decisions table.
+    pub fn count_decisions(&self) -> anyhow::Result<u64> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM decisions", [], |row| row.get(0))?;
+        Ok(count as u64)
+    }
+
     /// Insert an imported decision from another project.
     /// This writes both the event and the decisions table entry.
     pub fn insert_imported_decision(&self, p: ImportParams<'_>) -> anyhow::Result<()> {
