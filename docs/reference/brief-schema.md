@@ -310,7 +310,7 @@ Maps 1:1 from edda `PhaseStatus` enum:
 | Karvi Action | Edda Effect |
 |---|---|
 | Redispatch task | New `edda conduct run` (fresh plan) |
-| Manual block | `edda conduct abort {plan}` |
+| Manual block | `edda conduct abort --plan {plan}` |
 | No action needed | Edda retries are internal — no karvi intervention |
 
 ---

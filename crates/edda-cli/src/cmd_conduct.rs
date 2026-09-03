@@ -998,67 +998,33 @@ fn resolve_plan_name(repo_root: &Path, explicit: Option<&str>) -> Result<String>
         return Ok(name.to_string());
     }
 
-    // GH-557 review rounds 2–3: the auto-detection scope is the INVOKING
+    // GH-557 review rounds 2–7: the auto-detection scope is the INVOKING
     // store (repo_root), falling back to another store only when exactly
     // one store on the machine holds any plan. Once more than one store
     // contributes, a destructive verb requires an explicit --plan — bare
     // auto-detection across lanes is how `abort` hits the wrong plan.
-    // Corrupt state files propagate (they are errors, never "absent").
-    let mut contributing: Vec<(PathBuf, Vec<String>)> = Vec::new();
-    for store in plan_stores(repo_root) {
-        let conductor_dir = store.join(".edda").join("conductor");
-        if !conductor_dir.exists() {
-            continue;
-        }
-        let mut store_names = Vec::new();
-        for entry in std::fs::read_dir(&conductor_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                if let Some(n) = entry.file_name().to_str() {
-                    match load_state(&store, n) {
-                        Ok(Some(_)) => store_names.push(n.to_string()),
-                        Ok(None) => continue,
-                        Err(e) => {
-                            return Err(e.context(format!(
-                                "plan \"{n}\" state in {} is unreadable",
-                                store.display()
-                            )))
-                        }
-                    }
-                }
-            }
-        }
-        if !store_names.is_empty() {
-            contributing.push((store, store_names));
-        }
+    // Round-7 P0: discovery is the SAME pass `status` and `stores_holding`
+    // use — one rule, per-store name merging, no plan name discarded.
+    // Corrupt state files do not block auto-detection (the corrupt plan is
+    // not actionable anyway); targeting one errors in stores_holding.
+    let (found, corrupt) = discover_plans(repo_root)?;
+    for (name, store, e) in &corrupt {
+        eprintln!(
+            "⚠ plan \"{name}\" state in {} unreadable, excluded from auto-detection: {e:#}",
+            store.display()
+        );
     }
-
-    // Round-5: registry-referenced plans are contributors too — a plan
-    // launched from an external YAML directory is listed by `status`, so
-    // bare recovery verbs must see it (or refuse), never ignore it.
-    for store in plan_stores(repo_root) {
-        let registry = match registry_read(&store) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("⚠ store registry unreadable ({}): {e}", store.display());
-                continue;
+    let mut contributing: Vec<(PathBuf, Vec<String>)> = Vec::new();
+    for (name, store) in &found {
+        if let Some(entry) = contributing
+            .iter_mut()
+            .find(|(s, _)| normalize_store_path(s) == normalize_store_path(store))
+        {
+            if !entry.1.contains(name) {
+                entry.1.push(name.clone());
             }
-        };
-        for (name, referenced) in &registry {
-            if load_state(referenced, name)
-                .with_context(|| {
-                    format!(
-                        "plan \"{name}\" registry points to {}",
-                        referenced.display()
-                    )
-                })?
-                .is_some()
-                && !contributing
-                    .iter()
-                    .any(|(s, _)| normalize_store_path(s) == normalize_store_path(referenced))
-            {
-                contributing.push((referenced.clone(), vec![name.clone()]));
-            }
+        } else {
+            contributing.push((store.clone(), vec![name.clone()]));
         }
     }
 
@@ -1341,6 +1307,52 @@ mod tests {
 
         let reloaded = load_state(&store, "plan-x").unwrap().unwrap();
         assert_eq!(reloaded.phases[0].status, PhaseStatus::Pending);
+    }
+
+    /// GH-557 (independent-review round 7, P0-1): TWO registry plans in the
+    /// SAME external store — the exact wave-b-par-b4/b5 shape — must make a
+    /// bare destructive verb REFUSE ("Multiple plans found"), never act on
+    /// an arbitrary one. Regression for the per-store dedup that dropped
+    /// every plan name after the first.
+    #[test]
+    fn auto_detect_refuses_when_two_registry_plans_share_one_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let plans_dir = dir.path().join("scratchpad");
+        std::fs::create_dir_all(root.join(".edda").join("conductor")).unwrap();
+        std::fs::create_dir_all(&plans_dir).unwrap();
+
+        for name in ["plan-x", "plan-y"] {
+            let yaml = format!("name: {name}\nphases:\n  - id: a\n    prompt: x\n");
+            let plan = parse_plan(&yaml).unwrap();
+            let mut state = edda_conductor::state::machine::PlanState::from_plan(
+                &plan,
+                &format!("{name}.yaml"),
+            );
+            state.phases[0].status = PhaseStatus::Failed;
+            state.plan_status = PlanStatus::Blocked;
+            let state_dir = plans_dir.join(".edda").join("conductor").join(name);
+            std::fs::create_dir_all(&state_dir).unwrap();
+            std::fs::write(
+                state_dir.join("state.json"),
+                serde_json::to_string_pretty(&state).unwrap(),
+            )
+            .unwrap();
+            registry_record(&root, name, &plans_dir);
+        }
+
+        // status sees both (through discover_plans).
+        let text = status_impl(&root, None, false).unwrap();
+        assert!(text.contains("plan-x") && text.contains("plan-y"), "{text}");
+
+        // A bare destructive verb refuses instead of picking one.
+        let err = resolve_plan_name(&root, None).unwrap_err();
+        assert!(
+            err.to_string().contains("Multiple plans found"),
+            "bare verb must refuse with both names: {err}"
+        );
+        // Explicit --plan still resolves through the registry.
+        assert_eq!(resolve_plan_name(&root, Some("plan-y")).unwrap(), "plan-y");
     }
 
     /// GH-557 (independent-review round 3, P0-3): bare destructive verbs
