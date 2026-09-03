@@ -24,10 +24,7 @@ pub fn execute(repo_root: &Path, json: bool) -> anyhow::Result<()> {
             })),
             "uncommitted_events": snap.uncommitted_events,
         });
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&payload).expect("serialize status")
-        );
+        println!("{}", serde_json::to_string_pretty(&payload)?);
         return Ok(());
     }
 
@@ -156,9 +153,51 @@ mod tests {
             commit["event_id"].is_string(),
             "event_id must be a string: {v}"
         );
-        assert!(commit["ts"].is_string(), "ts must be a string: {v}");
+        // `ts` is the one field a consumer must machine-parse, so pin its
+        // shape and not merely its JSON type: `is_string()` alone would stay
+        // green if the format moved to, say, epoch seconds in a string.
+        // RFC 3339 UTC comes from `now_rfc3339` (edda-core/src/event.rs:19-22);
+        // sub-second precision is platform-dependent, so it is not asserted.
+        let ts = commit["ts"].as_str().expect("ts must be a string");
+        assert!(
+            ts.len() >= 20
+                && ts.as_bytes()[4] == b'-'
+                && ts.as_bytes()[7] == b'-'
+                && ts.as_bytes()[10] == b'T'
+                && ts.ends_with('Z'),
+            "ts must be RFC 3339 UTC — this is a stable contract; \
+             see COMPATIBILITY.md: {ts:?}"
+        );
         assert_eq!(commit["title"], Value::from("fixture commit"));
         assert_eq!(v["uncommitted_events"], Value::from(0));
+    }
+
+    /// COMPATIBILITY.md claims `--json` "adds no failure mode of its own".
+    /// That sentence is only worth having if something checks it: on a
+    /// directory that is not a workspace, both forms must agree on the exit
+    /// code, and the JSON form must not print a half-object consumers would
+    /// try to parse.
+    #[test]
+    fn status_json_adds_no_failure_mode() {
+        let empty = tempfile::tempdir().expect("empty tempdir");
+
+        let (text_code, text_out, _) = run_edda(&["status"], empty.path());
+        let (json_code, json_out, _) = run_edda(&["status", "--json"], empty.path());
+
+        assert_eq!(
+            text_code, json_code,
+            "--json changed the exit code on a failure path: \
+             text={text_code} json={json_code}"
+        );
+        assert_ne!(json_code, 0, "expected a failure on a non-workspace");
+        assert!(
+            json_out.trim().is_empty(),
+            "a failure must not print JSON on stdout: {json_out:?}"
+        );
+        assert!(
+            text_out.trim().is_empty(),
+            "a failure must not print status text on stdout: {text_out:?}"
+        );
     }
 
     /// The text form is the default and is not disturbed by the new flag.

@@ -94,7 +94,7 @@ is what "additive" means for them).
 
 One JSON object with exactly these keys (emitted at
 `crates/edda-cli/src/cmd_dispatch.rs:259-268`; mirrored in the long help,
-`crates/edda-cli/src/main.rs:483-489`):
+`crates/edda-cli/src/main.rs:489-495`):
 
 | Key | Type | Notes |
 |---|---|---|
@@ -181,7 +181,7 @@ One JSON object with exactly these keys (emitted at
 |---|---|---|
 | `branch` | string | the ledger's head branch |
 | `last_commit` | object \| null | null until the branch has a commit; keys below |
-| `uncommitted_events` | number | events on the branch since that commit |
+| `uncommitted_events` | integer | events on the branch since that commit |
 
 `last_commit`, when present, has exactly these keys — they are part of the
 same contract:
@@ -189,16 +189,29 @@ same contract:
 | Key | Type | Notes |
 |---|---|---|
 | `event_id` | string | the commit event's id |
-| `ts` | string | the commit event's timestamp |
+| `ts` | string | RFC 3339 UTC, as written by `now_rfc3339` (`crates/edda-core/src/event.rs:19-22`); sub-second precision is platform-dependent and not part of the contract |
 | `title` | string | the commit title |
 
-Exit code is `0` for a readable ledger; the flag adds no new failure mode.
+**Failure side.** `--json` adds no failure mode of its own: with and without
+it, `edda status` produces the same exit code and the same stderr in every
+state (measured). Success is exit `0` with the object on stdout. Failures do
+not emit JSON — a newer ledger schema exits `2` (§1.2), and every other
+failure (no `.edda/`, unreadable database) takes the CLI's shared error path
+and exits `1` (`crates/edda-cli/src/main.rs:1101-1108`).
+
+That last row differs from `edda verify --json`, which answers `2` to the
+same questions. The split is pre-existing and outside #730, but it is
+recorded here rather than left for a consumer to discover: do not assume one
+exit-code convention across these five surfaces.
+
 The text form (no `--json`) is unchanged and is not a contract.
 
 Golden fixture: `crates/edda-cli/src/cmd_status.rs` →
 `compat_golden_fixture_status_json_keys_and_types` (crate `edda`), which pins
 the key set and per-key types on both sides of `last_commit` — null before a
-commit exists, object after.
+commit exists, object after — including `ts` being RFC-3339-shaped rather
+than merely a string. `status_json_adds_no_failure_mode` pins the paragraph
+above: on a missing workspace both forms exit alike and neither prints JSON.
 
 ## 3. Layer 2/3 events are unstable
 
