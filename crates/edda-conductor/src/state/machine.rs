@@ -323,6 +323,18 @@ pub fn transition(
         bail!("invalid transition: {phase_id} {from:?} → {to:?}");
     }
     phase.status = to;
+    if to == PhaseStatus::Pending {
+        // GH-747 P1-1: transitioning to Pending (retry) clears transient terminal state
+        // from previous attempts (skip_reason/waiver, error, and gate metadata) so that
+        // a retried phase starts clean and never re-inherits a stale waiver.
+        phase.skip_reason = None;
+        phase.error = None;
+        phase.gate_sha = None;
+        phase.gate_entered_at = None;
+        phase.verdict_decision = None;
+        phase.verdict_actor = None;
+        phase.verdict_comment = None;
+    }
     if let Some(update) = side_effect {
         update.apply(phase);
     }

@@ -602,7 +602,7 @@ pub async fn run_plan(plan: &Plan, state: &mut PlanState, ctx: RunContext<'_>) -
                         let _ = tmux.update_phase_status(&gated_id, "GateTimedOut");
                     }
                     let gate_cost = state.get_phase(&gated_id).ok().and_then(|p| p.cost_usd);
-                    edda::record_phase_failed_with_plan(
+                    edda::record_phase_gate_timed_out(
                         cwd,
                         Some(&plan.name),
                         &gated_id,
@@ -4673,6 +4673,14 @@ phases:
             (tv[0].1.as_str(), tv[0].2.as_str(), tv[0].3),
             ("a", "GateTimedOut", 1)
         );
+
+        // GH-747: the workspace ledger must record the honest "gate_timed_out" classification, never "failed".
+        let notes = read_structured_notes(&root, "conductor_phase");
+        assert_eq!(notes.len(), 1, "exactly one structured phase note");
+        let payload = &notes[0].payload["conductor_phase"];
+        assert_eq!(payload["plan_id"], "gated");
+        assert_eq!(payload["status"], "gate_timed_out");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4735,6 +4743,112 @@ phases:
             events.contains("\"auto\":true"),
             "the auto waiver must be marked automatic: {events}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-747 P1-1: retrying a waived gate clears the stale waiver, so that
+    /// re-entering the gate and timing out again will block rather than auto-waiving.
+    #[tokio::test]
+    async fn retry_clears_stale_waiver_so_reentered_gate_timeout_blocks_again() {
+        let root = fresh_root("waiver_retry");
+        init_git_repo(&root);
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "b",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: Some("done".into()),
+            }],
+        );
+        let yaml = r#"
+name: waiverplan
+timeout_sec: 600
+phases:
+  - id: a
+    prompt: "do it"
+    gate: verdict
+    gate_timeout_sec: 1
+    on_gate_timeout: skip
+  - id: b
+    prompt: "next"
+    depends_on: [a]
+"#;
+        let plan = parse_plan(yaml).unwrap();
+        let state = PlanState::from_plan(&plan, "test.yaml");
+        let (mut state, _notifier, _launcher) = tokio::time::timeout(
+            GATE_TEST_DEADLINE,
+            spawn_runner(yaml, root.clone(), launcher, state),
+        )
+        .await
+        .expect("gate test exceeded 30s")
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(state.phases[0].status, PhaseStatus::GateTimedOut);
+        assert!(state.phases[0].skip_reason.is_some());
+        assert_eq!(state.plan_status, PlanStatus::Completed);
+
+        // Operator retries "a" (e.g. edda conduct retry a)
+        // Transitioning to Pending must clear the stale waiver (skip_reason) and error!
+        transition(
+            &mut state,
+            "a",
+            PhaseStatus::GateTimedOut,
+            PhaseStatus::Pending,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            state.phases[0].skip_reason.is_none(),
+            "skip_reason must be cleared on transition to Pending, got: {:?}",
+            state.phases[0].skip_reason
+        );
+        assert!(
+            state.phases[0].error.is_none(),
+            "error must be cleared on transition to Pending, got: {:?}",
+            state.phases[0].error
+        );
+
+        // Re-run plan without on_gate_timeout: skip.
+        // If a stale waiver had survived, the plan would have auto-proceeded;
+        // with the stale waiver cleared, the re-entered gate must block again upon timeout.
+        let yaml2 = r#"
+name: waiverplan
+timeout_sec: 600
+phases:
+  - id: a
+    prompt: "do it"
+    gate: verdict
+    gate_timeout_sec: 1
+  - id: b
+    prompt: "next"
+    depends_on: [a]
+"#;
+        let launcher2 = MockLauncher::new();
+        state.plan_status = PlanStatus::Running;
+        let (state2, _notifier2, launcher2) = tokio::time::timeout(
+            GATE_TEST_DEADLINE,
+            spawn_runner(yaml2, root.clone(), launcher2, state),
+        )
+        .await
+        .expect("gate test exceeded 30s")
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(state2.phases[0].status, PhaseStatus::GateTimedOut);
+        assert!(state2.phases[0].skip_reason.is_none(), "no stale waiver");
+        assert_eq!(
+            state2.plan_status,
+            PlanStatus::Blocked,
+            "plan must block on re-entered timeout"
+        );
+        assert_eq!(
+            launcher2.call_count("b"),
+            0,
+            "dependent phase b must not run"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 

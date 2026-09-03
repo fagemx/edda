@@ -3,7 +3,7 @@
 //! Writes append-only JSONL to `.edda/conductor/{plan}/events.jsonl`.
 //! Independent of edda/edda — works even if edda CLI is not installed.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -179,7 +179,7 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
 // ── RunnerStatus ──
 
 /// Lightweight status file for external tools to poll.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerStatus {
     pub plan: String,
     pub status: String,
@@ -189,6 +189,10 @@ pub struct RunnerStatus {
     /// Phases holding AWAITING_VERDICT (D4) — external actors poll this
     /// to learn the subject + gate_sha they must issue a verdict against.
     pub awaiting_verdict: Vec<String>,
+    /// Phases holding GATE_TIMED_OUT (GH-552, GH-747) — blocked awaiting operator
+    /// resolution (retry or waive).
+    #[serde(default)]
+    pub gate_timed_out: Vec<String>,
     pub updated_at: String,
 }
 
@@ -220,6 +224,12 @@ pub fn write_runner_status(
             .phases
             .iter()
             .filter(|p| p.status == PhaseStatus::AwaitingVerdict)
+            .map(|p| p.id.clone())
+            .collect(),
+        gate_timed_out: state
+            .phases
+            .iter()
+            .filter(|p| p.status == PhaseStatus::GateTimedOut)
             .map(|p| p.id.clone())
             .collect(),
         updated_at: now_rfc3339(),
@@ -397,17 +407,49 @@ mod tests {
     fn runner_status_serialization() {
         let status = RunnerStatus {
             plan: "my-plan".into(),
-            status: "running".into(),
-            current_phase: Some("build".into()),
+            status: "blocked".into(),
+            current_phase: None,
             completed: vec!["lint".into()],
             failed: vec![],
-            awaiting_verdict: vec!["build".into()],
+            awaiting_verdict: vec![],
+            gate_timed_out: vec!["build".into()],
             updated_at: "2026-02-18T10:00:00Z".into(),
         };
         let json = serde_json::to_string_pretty(&status).unwrap();
         assert!(json.contains(r#""plan": "my-plan""#));
-        assert!(json.contains(r#""current_phase": "build""#));
-        assert!(json.contains(r#""completed""#));
+        assert!(json.contains(r#""gate_timed_out""#));
+        assert!(json.contains(r#""build""#));
+
+        let deserialized: RunnerStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.gate_timed_out, vec!["build"]);
+    }
+
+    #[test]
+    fn write_runner_status_buckets_gate_timed_out() {
+        use crate::plan::parser::parse_plan;
+        use crate::state::machine::{PhaseStatus, PlanState, PlanStatus};
+
+        let dir = tempfile::tempdir().unwrap();
+        let plan = parse_plan(
+            "name: test-gated\nphases:\n  - id: p1\n    prompt: x\n  - id: p2\n    prompt: y\n",
+        )
+        .unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        state.plan_status = PlanStatus::Blocked;
+        state.get_phase_mut("p1").unwrap().status = PhaseStatus::GateTimedOut;
+        state.get_phase_mut("p2").unwrap().status = PhaseStatus::Failed;
+
+        write_runner_status(dir.path(), &state, None);
+        let path = dir
+            .path()
+            .join(".edda")
+            .join("conductor")
+            .join("test-gated")
+            .join("runner-status.json");
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: RunnerStatus = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.failed, vec!["p2"]);
+        assert_eq!(parsed.gate_timed_out, vec!["p1"]);
     }
 
     #[test]
