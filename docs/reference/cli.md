@@ -43,6 +43,29 @@ has one) and `uncommitted_events`. It is a stable contract: within 0.x keys
 may be added, never deleted, renamed, or retyped. The exact shape is in
 COMPATIBILITY.md § "Stable `--json` contracts".
 
+### `edda --version`
+
+Show installed CLI identity, including git commit and build date.
+
+```bash
+edda --version
+```
+
+Expected format:
+
+```text
+edda <semver> (<12-hex sha>[-dirty] <YYYY-MM-DD>)
+```
+
+The date is UTC. `-dirty` denotes tracked worktree or index changes present
+when the binary was built; untracked files do not change the build identity.
+
+In a build without git metadata (for example, from a source distribution), it prints:
+
+```text
+edda <semver> (unknown)
+```
+
 ### `edda doctor`
 
 Health check for bridge integration.
