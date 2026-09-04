@@ -51,6 +51,8 @@ mod cmd_user;
 mod cmd_verdict;
 mod cmd_verify;
 mod cmd_watch;
+mod detached_dispatch;
+mod dispatch_claim;
 mod fleet;
 mod pipeline_templates;
 #[cfg(test)]

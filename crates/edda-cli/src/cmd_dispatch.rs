@@ -26,6 +26,18 @@ use tokio_util::sync::CancellationToken;
 /// Arguments for `edda dispatch`.
 #[derive(Args, Debug)]
 pub struct DispatchArgs {
+    /// Owned write paths: refuse overlap with live peers before starting the agent.
+    #[arg(long, value_delimiter = ',')]
+    pub owns: Vec<String>,
+    /// Start outside the caller's process group/job and return a durable handle.
+    #[arg(long, conflicts_with = "list_models")]
+    pub detach: bool,
+    /// Named Cargo build lane for a detached worker; omit for work without builds.
+    #[arg(long, requires = "detach")]
+    pub build_lane: Option<String>,
+    /// Directory for detached logs and manifests (default: system temp/edda-dispatch).
+    #[arg(long, requires = "detach")]
+    pub detach_log_dir: Option<String>,
     /// Agent backend that runs the turn
     #[arg(long, value_enum)]
     pub agent: AgentKind,
@@ -397,7 +409,10 @@ pub fn generate_session_id() -> String {
 /// skips destructors, and a future launcher holding a live child across a
 /// non-zero outcome must not be orphaned.
 pub fn run(args: DispatchArgs) -> Result<()> {
-    let code = run_inner(args)?;
+    crate::detached_dispatch::update_worker_manifest(None)?;
+    let outcome = run_inner(args);
+    crate::detached_dispatch::update_worker_manifest(Some(outcome.as_ref().copied().unwrap_or(1)))?;
+    let code = outcome?;
     if code != 0 {
         std::process::exit(code);
     }
@@ -493,6 +508,22 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         }
         None => std::env::current_dir()?,
     };
+
+    if args.detach {
+        let detached = crate::detached_dispatch::launch(&args, &cwd, &session_id)?;
+        if args.json {
+            println!("{}", serde_json::to_string(&detached)?);
+        } else {
+            println!(
+                "handle={}\nlog={}\nmanifest={}",
+                detached.handle,
+                detached.log.display(),
+                detached.manifest.display()
+            );
+        }
+        return Ok(0);
+    }
+    let _claim = crate::dispatch_claim::acquire(&cwd, &session_id, &args.owns)?;
 
     if let Some(warning) = budget_warning_for_agent(args.agent, args.budget_usd.is_some()) {
         eprintln!("{warning}");

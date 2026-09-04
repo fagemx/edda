@@ -696,10 +696,29 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | `--permission-mode MODE` | Permission mode carried on the synthetic phase verbatim (default `bypassPermissions`); only the claude backend consumes it today, pi and codex ignore it |
 | `--issue N` | GitHub issue number for the cross-machine claim guard; refuses dispatch if claimed by another machine |
 | `--machine LABEL` | Machine label for the cross-machine claim guard (also via `EDDA_MACHINE`; requires `--issue`) |
+| `--owns PATHS` | Comma-separated paths this dispatch will write. A live overlapping writer is refused before the agent starts; the claim is released when the foreground worker exits. |
+| `--detach` | Start the dispatch outside the caller's process group or Windows Job Object and return a durable receipt immediately. |
+| `--build-lane NAME` | Optional Cargo lane for a detached worker: `worker-1`, `worker-2`, `verifier`, or `verifier-2`. Requires `--detach`. |
+| `--detach-log-dir DIR` | Directory for detached logs, manifests, and the prompt snapshot (default: system temp `edda-dispatch` directory). Requires `--detach`. |
 | `--json` | Print exactly one JSON object to stdout instead of text lines |
 
 With `--json` the object has the shape
 `{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded\|claim_refused", "result_text":string\|null, "cost_usd":number\|null, "session_id":string, "error":string\|null, "model_requested":string, "model_observed":string, "session_observed":string}`.
+
+`--detach` uses a Scheduled Task on Windows and a new process group on Unix.
+It copies the prompt into the receipt directory, explicitly sets `HOME`, and
+sets `CARGO_TARGET_DIR` only when `--build-lane` is named. Its JSON result is a
+receipt rather than a turn result:
+
+```json
+{"handle":"dispatch-…","log":"C:\\…\\dispatch-….log","manifest":"C:\\…\\dispatch-….json","task":"edda-dispatch-…"}
+```
+
+The manifest starts as `launching`, then records the worker PID and terminal
+`completed`, `timeout`, or `failed` state. A restarted controller can use the
+returned handle, log path, and manifest path without reconstructing a task
+name. On Windows, the generated task wrapper carries the controller PID and
+its actual creation time for safe stale-task recovery.
 When refused by the cross-machine claim guard (`outcome` is `"claim_refused"`), a reduced shape is emitted:
 `{"outcome":"claim_refused", "error":string, "issue":number, "machine":string}`.
 `session_id` is the id edda asked for; `session_observed` is the one the
