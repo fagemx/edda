@@ -56,7 +56,7 @@
   重複用同一個 `--session-id` 不是續談，是直接失敗：`Session ID <id> is already in use`。
 - 續談與 cwd 無關（GH-708 實測：從無關目錄 `--resume` 一樣續得到，而且是**同一個**
   transcript 繼續長，不會多出一個檔），所以 lane 每輪刪掉又重建 worktree 不影響它。
-- 判決表頭帶 `reviewer_session`：watcher 那一行印的是 lane 記在 `.done` 的
+- 判決表頭帶 `reviewer_session`——REVIEW.md §7 將它列為判決輸出表頭契約的一部分：watcher 那一行印的是 lane 記在 `.done` 的
   `SESSION=`／`SESSION_MODE=`（**發起時**的事實），並跟 log 裡的
   `Session observed:` 行對照 —— 那一行是**後端自己回報**的（`edda dispatch` 取自
   claude stream-json 的 `system/init`，fallback 臂取自 claude 的 JSON `session_id`），
