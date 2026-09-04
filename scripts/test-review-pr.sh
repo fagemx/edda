@@ -485,6 +485,14 @@ grep -q -- 'Session observed: ' "$lane" \
 grep -q -- "Session: $EXPECTED_SID_9999" "$lane" \
     || fail 'D9j: the fallback arm no longer records the launched session id alongside the observed one'
 
+# D10 (GH-733): the brief embeds the write-end swallow lens — the wiring-scan
+# section and the P1 statement the reviewer needs to act on it. Both asserted
+# on the generated brief so the lens cannot silently disappear from the brief.
+grep -q 'Wiring and write-end swallow scan' "$brief" \
+    || fail 'D10: the brief does not embed the Wiring and write-end swallow scan section (GH-733)'
+grep -q 'write-end swallow.*is \*\*P1\*\*' "$brief" \
+    || fail 'D10: the brief does not state that a write-end swallow on coordination/ledger/heartbeat/session-ledger/L3-store/digest paths is **P1** (GH-733)'
+
 # --- offline guarantee: the real fleet scratch carries none of our output -----
 # Only our own fixture PR is asserted, not the whole listing: a live watcher or
 # another lane may legitimately be writing its own review-pr<N>-* files there

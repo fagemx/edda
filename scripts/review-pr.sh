@@ -368,6 +368,13 @@ BRIEF="$SCRATCH/review-pr$PR-r$ROUND-brief.md"
     done
   fi
   echo
+  echo "### Wiring and write-end swallow scan (scripts/wiring-scan.sh)"
+  echo "Reviewer aid: scan for swallow patterns on added lines (\`let _ =\`, \`.ok();\`, \`unwrap_or_default()\`, \`best-effort\`, \`silently\`):"
+  echo '```'
+  sh "$SELF_REPO/scripts/wiring-scan.sh" "$BASE_SHA" "$SHA" 2>/dev/null | awk '/^== Swallow patterns/,0' || echo "(wiring scan unavailable)"
+  echo '```'
+  echo "A write-end swallow on a path where coordination, ledger, heartbeat, session-ledger, L3-store, or digest state is written is **P1** (REVIEW.md §5.5, GH-692, GH-733)."
+  echo
   echo "## Output"
   echo "Print the REVIEW.md §7 verdict — every field, the Rules table with one row per routed rule, the Wiring table — between the markers below, with this header line filled in:"
   echo "<<<VERDICT"
