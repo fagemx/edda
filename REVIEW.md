@@ -662,6 +662,14 @@ Internal verifier reports, task receipts and CI do not replace this comment
 (`loop`). For a local-only delivery with no PR, record the same fields in the
 strongest durable local carrier; do not invent a PR.
 
+The watcher also posts the merge gate's commit status: context
+`Independent Review`, pinned to the reviewed SHA in §7's heading. Its state
+is the union of every §7 verdict comment on that SHA plus the round just
+posted: `success` only when at least one verdict is `LGTM (P0=0, P1=0)` and
+no verdict on that SHA is anything else; any standing non-qualifying verdict
+is `failure`; no verdict at all is `error`. A later LGTM therefore does not
+override an earlier Changes Requested on the same SHA (GH-742).
+
 ## 9. Provenance of the check commands
 
 `RAN` means the command was executed on the authoring workstation

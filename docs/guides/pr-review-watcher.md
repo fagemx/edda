@@ -38,6 +38,17 @@
    label `review:post-failed`）。
 4. head 被 push 之後（SHA 變了）自動再審一輪（round+1，delta brief，`prev-sha` 帶入）。
 
+## Independent Review commit status（GH-742）
+
+判決留言貼出後，watcher 會對**被審的那個 SHA**（不是目前 head）發 commit status：
+context `Independent Review`，state 是該 SHA 上所有 §7 判決留言（加上這一輪）的聯集
+（union rule）——至少一筆 `LGTM (P0=0, P1=0)` 且沒有任何其他判決在場才是 `success`；
+有任一筆不合格判決就是 `failure`；一筆都沒有是 `error`。後到的 LGTM 不會蓋過先前的
+Changes Requested。貼 status 不用 best-effort：照判決留言同一條 bounded retry 路徑
+（`postfails`、`review:post-failed`）。這段聯集邏輯是暫時的 `#769` 區塊，退役方式是
+整塊換成 `edda review gate <sha>`，把 exit 0/1/2 對應到 success/failure/error；
+從 PR 留言讀判決的 `#671` 區塊同理，等帳本（ledger）能跨機器攜帶判決後退役。
+
 ## 一張 PR 一個審查者對話（GH-708）
 
 `fleet.reviewer-agent=pi-with-per-pr-resumable-session` 當初選 pi 只為一個量到的性質：
