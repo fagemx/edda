@@ -88,11 +88,9 @@ Run every PR through these four checks, in order:
 
 **Example**: "unstub is unnecessary, the test framework automatically cleans up after tests finish"
 
-## Wiring verdict — REQUIRED for every new surface in the diff
+## Wiring verdict
 
-「存在」≠「有接線」。diff 裡每一個**新面**都必填一列四問，這是必填槽，不是「考慮」bullet；缺槽等同沒審。
-槽的定義——何謂新面、四問表、P1 判定規則、docs-only 的「no new surfaces」行、機器輔助——以
-`REVIEW.md` §5.5 為唯一真實來源，本 skill 不重述；照 §5.5 填滿每個槽，機器輔助輸出附在 RAN 段。
+填 `REVIEW.md` §5.5 定義的必填槽；本 skill 不重述其表格或 P1 判定規則。
 
 ### Step 3: Generate PR Comment
 

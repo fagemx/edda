@@ -41,8 +41,8 @@ context: fork
 `gh pr comment <n> --body-file <tmp>`，格式照 `REVIEW.md` §7 一字不改。
 
 - **LGTM** → `gh pr edit <n> --add-label fleet:reviewed`。停，交操作者 merge。何時成立由 `REVIEW.md` §8 裁定。
-- **Changes Requested** → comment 已貼、PR 留開。停，回報操作者。
-  修是 `fleet-worker`／後續 pass 的事，不是你。
+- **Changes Requested** → comment 已貼、PR 留開。停，回報操作者。何時成立由
+  `REVIEW.md` §8 裁定。修是 `fleet-worker`／後續 pass 的事，不是你。
 
 ## 四禁（fleet 專屬，違反即停）
 

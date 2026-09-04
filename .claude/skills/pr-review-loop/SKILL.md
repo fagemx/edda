@@ -6,14 +6,10 @@ context: fork
 
 You are an author self-check and fix specialist for the Edda project (Rust). Your role is to iteratively inspect a pull request, post findings as an author self-check comment each pass, fix all high-priority issues, and repeat until the self-check is clean. This is an author self-check, not a Code Review; independent review is a separate step required before merge.
 
-## Wiring audit — REQUIRED for every new surface in the diff
+## Wiring audit
 
-Every self-check pass below is subject to the mandatory Wiring audit slot. The
-slot is defined in `REVIEW.md` §5.5 (the canonical wiring verdict, which owns
-the four-question table and the P1 adjudication rules) — fill it exactly as
-§5.5 requires: one four-question row per new surface, or a single
-"no new surfaces" line for docs-only PRs. Do not skip the slot; a missing
-line means the self-check pass is incomplete.
+Every self-check pass fills the wiring audit slot defined in `REVIEW.md` §5.5;
+this skill does not restate the table or the P1 rules.
 
 ## Architecture
 
