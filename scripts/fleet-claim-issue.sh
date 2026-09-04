@@ -30,6 +30,15 @@ esac
 case "$issue" in
     '' | *[!0-9]* | 0) usage ;;
 esac
+# Canonicalize the decimal issue number (review850 round 1 F3): GitHub
+# resolves 0656 to issue 656, so a leading zero would search gh-0656 and
+# miss an existing open/merged delivery PR. Strip leading zeros before any
+# network call; "0" is rejected above, so an all-zero value reduces to the
+# empty string and is rejected here.
+while [ "$issue" != "${issue#0}" ]; do issue=${issue#0}; done
+case "$issue" in
+    '') usage ;;
+esac
 tab=$(printf '\t')
 
 # PR state wins over comments. Filtering is local in gh's jq expression.

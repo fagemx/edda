@@ -49,6 +49,7 @@ impl Fixture {
             "gh",
             r#"@echo off
  echo called>>"%GH_TEST_ROOT%\reads.txt"
+ (echo %CD%)>>"%GH_TEST_ROOT%\gh-cwd.txt"
  if "%1"=="pr" goto prs
  if "%2"=="view" goto view
  if "%2"=="comment" goto comment
@@ -81,6 +82,7 @@ impl Fixture {
             r#"#!/bin/sh
 set -eu
 echo called >> "$GH_TEST_ROOT/reads.txt"
+pwd -P >> "$GH_TEST_ROOT/gh-cwd.txt"
 case "$1 $2" in
  'pr list') [ ! -f "$GH_TEST_ROOT/fail-pr" ] || exit 1; cat "$GH_TEST_ROOT/prs.json" ;;
  'issue view')
@@ -123,6 +125,12 @@ exit 1
     }
 
     fn run(&self, args: &[&str]) -> std::process::Output {
+        self.run_with_prompt(args, &self.root.path().join("prompt.txt"))
+    }
+
+    /// Same as [`Self::run`], but with an explicit prompt file so tests can
+    /// point at one that does not exist (round 2, F1).
+    fn run_with_prompt(&self, args: &[&str], prompt: &Path) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_edda"))
             .args([
                 "dispatch",
@@ -134,7 +142,7 @@ exit 1
             ])
             .args(args)
             .arg("--prompt-file")
-            .arg(self.root.path().join("prompt.txt"))
+            .arg(prompt)
             .env("EDDA_GH_BIN", &self.gh)
             .env("EDDA_CODEX_BIN", &self.agent)
             .env("GH_TEST_ROOT", self.root.path())
@@ -259,4 +267,118 @@ fn no_issue_skips_guard_and_explicit_machine_without_issue_is_rejected() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--issue"));
     assert_eq!(f.read("reads.txt"), "");
+}
+
+// ── Round 2 (review850 F1/F2/F4) ──
+
+/// F1: an unreadable prompt is a local prerequisite failure — it must fail
+/// before the durable claim writes, with no gh call and no agent started.
+#[test]
+fn missing_prompt_file_writes_no_claim_and_starts_no_agent() {
+    let f = Fixture::new(ROUTED, "[]");
+    let missing = f.root.path().join("no-such-prompt.txt");
+    let output = f.run_with_prompt(&["--issue", "656", "--machine", "4090/worker-1"], &missing);
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(f.read("reads.txt"), "", "gh must not be called");
+    assert_eq!(f.read("comment.txt"), "", "no claim comment may be written");
+    assert_eq!(f.read("agent-started.txt"), "");
+}
+
+/// F1: a nonexistent --cwd fails the same local-prerequisite gate.
+#[test]
+fn invalid_cwd_writes_no_claim_and_starts_no_agent() {
+    let f = Fixture::new(ROUTED, "[]");
+    let missing_dir = f.root.path().join("no-such-dir");
+    let cwd_arg = missing_dir.to_string_lossy().into_owned();
+    let output = f.run_with_prompt(
+        &[
+            "--cwd",
+            cwd_arg.as_str(),
+            "--issue",
+            "656",
+            "--machine",
+            "4090/worker-1",
+        ],
+        &f.root.path().join("prompt.txt"),
+    );
+    assert_ne!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(f.read("reads.txt"), "", "gh must not be called");
+    assert_eq!(f.read("comment.txt"), "");
+    assert_eq!(f.read("agent-started.txt"), "");
+}
+
+/// F2: every gh read and write must run in the selected dispatch
+/// repository (--cwd), not in whatever directory edda was started from.
+/// The stub gh records its working directory on every call.
+#[test]
+fn claim_guard_gh_calls_bind_to_the_selected_dispatch_cwd() {
+    let f = Fixture::new(ROUTED, "[]");
+    let dir_a = f.root.path().join("repo-a");
+    let dir_b = f.root.path().join("repo-b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    for dir in [&dir_a, &dir_b] {
+        let _ = std::fs::remove_file(f.root.path().join("gh-cwd.txt"));
+        let output = f.run_with_prompt(
+            &[
+                "--cwd",
+                dir.to_string_lossy().as_ref(),
+                "--issue",
+                "656",
+                "--machine",
+                "4090/worker-1",
+            ],
+            &f.root.path().join("prompt.txt"),
+        );
+        assert_ne!(
+            output.status.code(),
+            Some(2),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let recorded = f.read("gh-cwd.txt");
+        assert!(!recorded.is_empty(), "the guard must call gh");
+        let expected = std::fs::canonicalize(dir).unwrap();
+        for line in recorded.lines() {
+            assert_eq!(
+                std::fs::canonicalize(line).unwrap(),
+                expected,
+                "every gh call must run in the dispatch --cwd"
+            );
+        }
+    }
+}
+
+/// F4: a bare machine token (no role) is the #782 usage error — exit 2
+/// through the claim_refused JSON path, before any gh call or agent.
+#[test]
+fn bare_machine_identity_exits_2_as_usage_before_any_gh_call_or_agent() {
+    let f = Fixture::new(ROUTED, "[]");
+    let output = f.run(&["--issue", "656", "--machine", "4090"]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["outcome"], "claim_refused");
+    assert_eq!(value["machine"], "4090");
+    assert!(value["error"]
+        .as_str()
+        .unwrap()
+        .contains("<machine>/<role>"));
+    assert_eq!(f.read("reads.txt"), "", "gh must not be called");
+    assert_eq!(f.read("agent-started.txt"), "");
 }

@@ -446,8 +446,39 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         return Ok(0);
     }
 
-    // Check GitHub ownership and write the claim before starting any agent.
-    if let Some((issue, machine, reason)) = claim_guard_refusal(&args)? {
+    // Local prerequisites before any durable GitHub write (GH-782 round 2,
+    // F1): an unreadable --prompt-file or an invalid --cwd must fail with no
+    // claim comment/label/assignee mutation and no agent started, because a
+    // `taking:` claim cannot be withdrawn (GH-682).
+    let prompt_file = args
+        .prompt_file
+        .as_deref()
+        .context("--prompt-file is required unless --list-models is given")?;
+    let prompt = std::fs::read_to_string(prompt_file)
+        .with_context(|| format!("--prompt-file not readable: {prompt_file}"))?;
+
+    let cwd = match args.cwd.as_deref() {
+        Some(dir) => {
+            let path = std::path::PathBuf::from(dir);
+            if path.is_relative() {
+                std::env::current_dir()?.join(path)
+            } else {
+                path
+            }
+        }
+        None => std::env::current_dir()?,
+    };
+    if !cwd.is_dir() {
+        bail!(
+            "--cwd does not exist or is not a directory: {}",
+            cwd.display()
+        );
+    }
+
+    // Check GitHub ownership and write the claim before starting any agent,
+    // with every gh read/write bound to the selected dispatch repository
+    // (F2).
+    if let Some((issue, machine, reason)) = claim_guard_refusal(&args, &cwd)? {
         if args.json {
             println!(
                 "{}",
@@ -464,26 +495,7 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         return Ok(2);
     }
 
-    let prompt_file = args
-        .prompt_file
-        .as_deref()
-        .context("--prompt-file is required unless --list-models is given")?;
-    let prompt = std::fs::read_to_string(prompt_file)
-        .with_context(|| format!("--prompt-file not readable: {prompt_file}"))?;
-
     let session_id = args.session_id.clone().unwrap_or_else(generate_session_id);
-
-    let cwd = match args.cwd.as_deref() {
-        Some(dir) => {
-            let path = std::path::PathBuf::from(dir);
-            if path.is_relative() {
-                std::env::current_dir()?.join(path)
-            } else {
-                path
-            }
-        }
-        None => std::env::current_dir()?,
-    };
 
     if let Some(warning) = budget_warning_for_agent(args.agent, args.budget_usd.is_some()) {
         eprintln!("{warning}");
@@ -591,7 +603,10 @@ pub(crate) fn ingest_pi_session_post_dispatch(
 /// `--issue` is refused (it could never fire the guard, so accepting it
 /// would silently drop it — the GH-574 honesty rule). The machine label
 /// must be explicit: `--machine` or `EDDA_MACHINE`, never the hostname.
-fn claim_guard_refusal(args: &DispatchArgs) -> Result<Option<(u64, String, String)>> {
+fn claim_guard_refusal(
+    args: &DispatchArgs,
+    repo_cwd: &std::path::Path,
+) -> Result<Option<(u64, String, String)>> {
     let Some(issue) = args.issue else {
         if args.machine.is_some() {
             bail!(
@@ -612,8 +627,13 @@ fn claim_guard_refusal(args: &DispatchArgs) -> Result<Option<(u64, String, Strin
              or set EDDA_MACHINE (the hostname is never guessed)"
         );
     }
-    crate::claim_guard::validate_machine(&machine)?;
-    let state = match crate::claim_guard::fetch_claim_state(issue, &machine) {
+    // A malformed identity is a usage error (GH-782: exit 2), not a crash:
+    // route it through the same refusal path as every other admission
+    // failure so --json still prints exactly one JSON object (round 2, F4).
+    if let Err(error) = crate::claim_guard::validate_machine(&machine) {
+        return Ok(Some((issue, machine, error.to_string())));
+    }
+    let state = match crate::claim_guard::fetch_claim_state(issue, &machine, repo_cwd) {
         Ok(state) => state,
         Err(error) => return Ok(Some((issue, machine, error.to_string()))),
     };
@@ -621,7 +641,7 @@ fn claim_guard_refusal(args: &DispatchArgs) -> Result<Option<(u64, String, Strin
         crate::claim_guard::ClaimState::Unclaimed
         | crate::claim_guard::ClaimState::ClaimedBySelf => {
             let already_claimed = state == crate::claim_guard::ClaimState::ClaimedBySelf;
-            match crate::claim_guard::write_claim(issue, &machine, already_claimed) {
+            match crate::claim_guard::write_claim(issue, &machine, already_claimed, repo_cwd) {
                 Ok(()) => Ok(None),
                 Err(error) => Ok(Some((issue, machine, error.to_string()))),
             }
@@ -1206,7 +1226,8 @@ mod tests {
             "--issue",
             "656",
         ]);
-        let error = claim_guard_refusal(&args).expect_err("machine must be explicit");
+        let error =
+            claim_guard_refusal(&args, Path::new(".")).expect_err("machine must be explicit");
         assert!(error.to_string().contains("--machine"), "{error}");
         assert!(error.to_string().contains("EDDA_MACHINE"), "{error}");
     }
@@ -1224,7 +1245,8 @@ mod tests {
             "--machine",
             "docs",
         ]);
-        let error = claim_guard_refusal(&args).expect_err("--machine without --issue");
+        let error =
+            claim_guard_refusal(&args, Path::new(".")).expect_err("--machine without --issue");
         assert!(error.to_string().contains("--issue"), "{error}");
     }
 
@@ -1233,10 +1255,14 @@ mod tests {
     #[test]
     fn no_issue_means_no_guard_and_no_gh_call() {
         let args = parse(&["edda", "--agent", "pi", "--prompt-file", "p.txt"]);
-        assert!(claim_guard_refusal(&args).unwrap().is_none());
+        assert!(claim_guard_refusal(&args, Path::new("."))
+            .unwrap()
+            .is_none());
     }
 
-    /// Whitespace in an identity is refused before any gh call.
+    /// Whitespace in an identity is refused before any gh call. Round 2
+    /// (F4): the refusal is the admission path (exit 2), not an anyhow
+    /// error that would exit 1.
     #[test]
     fn guard_refuses_an_ill_formed_machine_label_before_gh() {
         let args = parse(&[
@@ -1250,8 +1276,33 @@ mod tests {
             "--machine",
             "docs lane",
         ]);
-        let error = claim_guard_refusal(&args).expect_err("whitespace machine label");
-        assert!(error.to_string().contains("without whitespace"), "{error}");
+        let (issue, machine, reason) = claim_guard_refusal(&args, Path::new("."))
+            .expect("refusal, not an error")
+            .expect("an ill-formed identity must refuse");
+        assert_eq!(issue, 656);
+        assert_eq!(machine, "docs lane");
+        assert!(reason.contains("without whitespace"), "{reason}");
+    }
+
+    /// A bare machine token (no role) is the #782 usage error: refused
+    /// before any gh call, through the exit-2 refusal path.
+    #[test]
+    fn guard_refuses_a_bare_machine_token_before_gh() {
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "pi",
+            "--prompt-file",
+            "p.txt",
+            "--issue",
+            "656",
+            "--machine",
+            "4090",
+        ]);
+        let (_, _, reason) = claim_guard_refusal(&args, Path::new("."))
+            .expect("refusal, not an error")
+            .expect("a bare token must refuse");
+        assert!(reason.contains("<machine>/<role>"), "{reason}");
     }
 
     // ── Outcome → exit-code mapping (all five PhaseResult variants) ──

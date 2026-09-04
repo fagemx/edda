@@ -690,7 +690,7 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | `--prompt-file FILE` | Path to the file containing the prompt, read verbatim (required) |
 | `--session-id ID` | Session id passed to the backend verbatim; generated and printed when omitted so the caller can reuse it on the next call. pi and codex resume a prior conversation by repeating the id; claude refuses an id that already exists (`Session ID <id> is already in use`) and needs `--resume` |
 | `--resume` | Continue the conversation `--session-id` names instead of starting a new one (`claude --resume <id>`). claude only — pi and codex resume by repeating `--session-id` alone and refuse this flag. Requires `--session-id` |
-| `--cwd DIR` | Working directory for the agent (default: current directory) |
+| `--cwd DIR` | Working directory for the agent (default: current directory); must exist. With `--issue`, this is also the repository context the claim guard's GitHub reads and writes run in |
 | `--budget-usd N` | Per-turn budget in USD (codex cannot enforce budgets) |
 | `--timeout-sec S` | Turn timeout in seconds (default: 1800, like a conduct phase) |
 | `--permission-mode MODE` | Permission mode carried on the synthetic phase verbatim (default `bypassPermissions`); only the claude backend consumes it today, pi and codex ignore it |
@@ -704,7 +704,10 @@ With `--issue`, dispatch reads `taking: <machine>/<role>` comments and PR
 history before starting the agent. Ownership compares the full token; routing
 labels (`lane:*`) are ignored. A matching open or merged PR blocks dispatch
 (title `GH-N` or branch `ghN`, case-insensitive). Closed, unmerged PRs do not
-block a retry. GitHub failures fail closed.
+block a retry. GitHub failures fail closed. The prompt file and the working
+directory are validated before any claim write, so an invalid local
+prerequisite produces no GitHub mutation; a malformed `--machine` identity is
+refused with exit 2 before any GitHub call.
 
 For an unclaimed issue, dispatch writes `taking: <machine>/<role> at <time>`,
 adds `fleet:claimed`, removes `fleet:ready`, and assigns `@me` before launch.
@@ -724,7 +727,7 @@ Exit codes:
 |------|---------|
 | `0` | agent done |
 | `1` | agent crash or any other failure (including pre-dispatch errors) |
-| `2` | timeout or GitHub claim refusal/read/write failure (distinguished by outcome) |
+| `2` | timeout or GitHub claim refusal/read/write failure, including a malformed `--machine` identity (distinguished by outcome) |
 | `3` | budget exceeded |
 | `4` | max turns |
 

@@ -6,7 +6,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimState {
@@ -75,13 +75,19 @@ pub fn validate_machine(machine: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_gh(args: &[&str]) -> Result<Vec<u8>> {
+/// Run gh bound to `repo_cwd`, the selected dispatch repository directory
+/// (GH-782 round 2, F2): gh resolves the repository from the working
+/// directory it is spawned in, so reads and writes without it would target
+/// whatever repo the edda process happened to start in instead of the
+/// `--cwd` the agent will run in.
+fn run_gh(args: &[&str], repo_cwd: &Path) -> Result<Vec<u8>> {
     let gh = std::env::var_os("EDDA_GH_BIN")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("gh"));
     let output = std::process::Command::new(&gh)
         .args(args)
+        .current_dir(repo_cwd)
         .output()
         .with_context(|| format!("claim guard: could not run {}", gh.display()))?;
     if !output.status.success() {
@@ -96,21 +102,27 @@ fn run_gh(args: &[&str]) -> Result<Vec<u8>> {
 
 /// Read comments and the PR history. gh's default 30-row page must not hide
 /// older deliveries, so request its full practical result limit explicitly.
-pub fn fetch_claim_state(issue: u64, ours: &str) -> Result<ClaimState> {
+pub fn fetch_claim_state(issue: u64, ours: &str, repo_cwd: &Path) -> Result<ClaimState> {
     validate_machine(ours)?;
-    let output = run_gh(&["issue", "view", &issue.to_string(), "--json", "comments"])?;
+    let output = run_gh(
+        &["issue", "view", &issue.to_string(), "--json", "comments"],
+        repo_cwd,
+    )?;
     let parsed: GhIssue = serde_json::from_slice(&output)
         .with_context(|| format!("claim guard: could not parse gh issue {issue}"))?;
-    let output = run_gh(&[
-        "pr",
-        "list",
-        "--state",
-        "all",
-        "--limit",
-        "1000000",
-        "--json",
-        "number,state,title,headRefName",
-    ])?;
+    let output = run_gh(
+        &[
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            "1000000",
+            "--json",
+            "number,state,title,headRefName",
+        ],
+        repo_cwd,
+    )?;
     let prs: Vec<GhPr> =
         serde_json::from_slice(&output).context("claim guard: could not parse gh PR history")?;
     Ok(pr_state(issue, &prs).unwrap_or_else(|| claim_state(ours, &parsed)))
@@ -119,31 +131,37 @@ pub fn fetch_claim_state(issue: u64, ours: &str) -> Result<ClaimState> {
 /// Complete the claim before starting an agent. Re-dispatch repairs a partial
 /// label/assignee write without adding another taking comment. GitHub provides
 /// no compare-and-swap across these calls; this is not a distributed lock.
-pub fn write_claim(issue: u64, ours: &str, already_claimed: bool) -> Result<()> {
+pub fn write_claim(issue: u64, ours: &str, already_claimed: bool, repo_cwd: &Path) -> Result<()> {
     validate_machine(ours)?;
     let issue = issue.to_string();
     if !already_claimed {
         let now = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)?;
-        run_gh(&[
-            "issue",
-            "comment",
-            &issue,
-            "--body",
-            &format!("taking: {ours} at {now}"),
-        ])?;
+        run_gh(
+            &[
+                "issue",
+                "comment",
+                &issue,
+                "--body",
+                &format!("taking: {ours} at {now}"),
+            ],
+            repo_cwd,
+        )?;
     }
-    run_gh(&[
-        "issue",
-        "edit",
-        &issue,
-        "--add-label",
-        "fleet:claimed",
-        "--remove-label",
-        "fleet:ready",
-        "--add-assignee",
-        "@me",
-    ])?;
+    run_gh(
+        &[
+            "issue",
+            "edit",
+            &issue,
+            "--add-label",
+            "fleet:claimed",
+            "--remove-label",
+            "fleet:ready",
+            "--add-assignee",
+            "@me",
+        ],
+        repo_cwd,
+    )?;
     Ok(())
 }
 

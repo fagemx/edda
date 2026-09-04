@@ -91,6 +91,16 @@ for invalid in 4090 '4090/worker 1' 4090//x /worker-1 4090/; do
 done
 run_case 2 "$UNCLAIMED" '[]'
 echo 'ok invalid identity and usage exit 2'
+run_case 1 "$UNCLAIMED" "$MERGED" --check 0656 4090/worker-1
+no_write
+grep -q 'delivered by #716 (merged)' "$out" || fail 'leading-zero issue must canonicalize to 656 for the PR read'
+run_case 0 "$UNCLAIMED" '[]' --check 0656 4090/worker-1
+no_write
+run_case 2 "$UNCLAIMED" '[]' --check 00 4090/worker-1
+no_write
+run_case 0 "$UNCLAIMED" '[]' 0656 4090/worker-1
+grep -q 'issue comment 656 --body taking: 4090/worker-1 at ' "$calls" || fail 'write mode must use the canonical issue number'
+echo 'ok leading-zero issue numbers canonicalize before any network or write'
 for mode in pr view comment edit; do
     GH_FAIL=$mode; export GH_FAIL
     run_case 2 "$UNCLAIMED" '[]' 656 4090/worker-1

@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 
 fn issue(comments: &[(&str, &str)]) -> GhIssue {
     GhIssue {
@@ -157,7 +158,7 @@ fn fetch_fails_closed_when_gh_is_missing() {
         .unwrap_or_else(|poison| poison.into_inner());
     let old = std::env::var_os("EDDA_GH_BIN");
     std::env::set_var("EDDA_GH_BIN", "definitely-no-such-gh-9f3a");
-    let result = fetch_claim_state(782, "4090/worker-1");
+    let result = fetch_claim_state(782, "4090/worker-1", Path::new("."));
     match old {
         Some(v) => std::env::set_var("EDDA_GH_BIN", v),
         None => std::env::remove_var("EDDA_GH_BIN"),
