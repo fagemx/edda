@@ -1,7 +1,7 @@
 use edda_core::Event;
 use edda_ledger::DecisionView;
 use edda_ledger::Ledger;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 pub mod staleness;
 
@@ -86,6 +86,27 @@ pub struct TaskHit {
     pub evidence_paths: Vec<String>,
 }
 
+/// Decision governance status (GH-806).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DecisionGovernance {
+    /// "ratified" | "unratified"
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ratified_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ratified_at: Option<String>,
+}
+
+impl Default for DecisionGovernance {
+    fn default() -> Self {
+        Self {
+            status: "unratified".to_string(),
+            ratified_by: None,
+            ratified_at: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DecisionHit {
     pub event_id: String,
@@ -96,6 +117,8 @@ pub struct DecisionHit {
     pub branch: String,
     pub ts: String,
     pub is_active: bool,
+    /// Governance status (GH-806).
+    pub governance: DecisionGovernance,
     /// Tags parsed from JSON array in the decision row.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
@@ -327,6 +350,7 @@ pub fn ask(
                                     branch: event.branch.clone(),
                                     ts: event.ts.clone(),
                                     is_active: false,
+                                    governance: DecisionGovernance::default(),
                                     tags: dp.tags.unwrap_or_default(),
                                     village_id: dp.village_id,
                                     staleness: None,
@@ -355,8 +379,13 @@ pub fn ask(
     let timeline = tags_filter(timeline);
 
     // Apply village filter across all code paths
-    let decisions = village_filter(decisions);
-    let timeline = village_filter(timeline);
+    let mut decisions = village_filter(decisions);
+    let mut timeline = village_filter(timeline);
+
+    // Annotate governance status (GH-806)
+    let ratifications = ledger.ratified_decisions_map()?;
+    annotate_governance(&mut decisions, &ratifications);
+    annotate_governance(&mut timeline, &ratifications);
 
     // Collect decision event_ids for evidence chain matching
     let decision_event_ids: Vec<&str> = decisions
@@ -794,9 +823,19 @@ pub fn format_human(result: &AskResult) -> String {
         out.push_str("── Decisions ──────────────────────────\n");
         for d in &result.decisions {
             let status = if d.is_active { "active" } else { "superseded" };
+            let gov = match d.governance.status.as_str() {
+                "ratified" => {
+                    if let Some(by) = &d.governance.ratified_by {
+                        format!("ratified (by {by})")
+                    } else {
+                        "ratified".to_string()
+                    }
+                }
+                _ => "unratified".to_string(),
+            };
             out.push_str(&format!(
-                "  {} = {} — {}\n  branch: {} | {} | {}\n",
-                d.key, d.value, d.reason, d.branch, d.ts, status
+                "  {} = {} — {}\n  branch: {} | {} | {} | {}\n",
+                d.key, d.value, d.reason, d.branch, d.ts, status, gov
             ));
             if let Some(st) = &d.staleness {
                 if st.is_stale {
@@ -822,9 +861,10 @@ pub fn format_human(result: &AskResult) -> String {
         out.push_str("── Timeline ───────────────────────────\n");
         for d in &result.timeline {
             let status = if d.is_active { "active" } else { "superseded" };
+            let gov = &d.governance.status;
             out.push_str(&format!(
-                "  {}  {} = {}  ({})\n",
-                d.ts, d.key, d.value, status
+                "  {}  {} = {}  ({}, {})\n",
+                d.ts, d.key, d.value, status, gov
             ));
         }
         out.push('\n');
@@ -941,9 +981,31 @@ fn to_decision_hit(row: &DecisionView) -> DecisionHit {
         branch: row.branch.clone(),
         ts: row.ts.clone().unwrap_or_default(),
         is_active: matches!(row.status.as_str(), "active" | "experimental"),
+        governance: DecisionGovernance::default(),
         tags: row.tags.clone(),
         village_id: row.village_id.clone(),
         staleness: None,
+    }
+}
+
+fn annotate_governance(
+    hits: &mut [DecisionHit],
+    ratifications: &std::collections::BTreeMap<String, edda_ledger::RatificationInfo>,
+) {
+    for hit in hits {
+        if let Some(info) = ratifications.get(&hit.event_id) {
+            hit.governance = DecisionGovernance {
+                status: "ratified".to_string(),
+                ratified_by: Some(info.ratified_by.clone()),
+                ratified_at: Some(info.ts.clone()),
+            };
+        } else {
+            hit.governance = DecisionGovernance {
+                status: "unratified".to_string(),
+                ratified_by: None,
+                ratified_at: None,
+            };
+        }
     }
 }
 
@@ -1498,6 +1560,81 @@ mod tests {
     }
 
     #[test]
+    fn ask_annotates_governance_tier() {
+        let (tmp, ledger) = setup();
+
+        // 1. Ratified decision: db.engine = postgres, ratified by alice
+        ledger
+            .append_event(&make_decision(
+                "main",
+                "db.engine",
+                "postgres",
+                Some("JSONB"),
+                None,
+            ))
+            .unwrap();
+        let ratify_ev =
+            edda_core::event::new_decision_ratify_event("main", None, "db.engine", "alice", None)
+                .unwrap();
+        ledger.append_event(&ratify_ev).unwrap();
+
+        // 2. Unratified decision: auth.method = jwt
+        ledger
+            .append_event(&make_decision(
+                "main",
+                "auth.method",
+                "jwt",
+                Some("stateless"),
+                None,
+            ))
+            .unwrap();
+
+        // Check db.engine hit
+        let r1 = ask(&ledger, "db.engine", &AskOptions::default(), None).unwrap();
+        assert_eq!(r1.decisions.len(), 1);
+        let d1 = &r1.decisions[0];
+        assert_eq!(d1.key, "db.engine");
+        assert_eq!(d1.governance.status, "ratified");
+        assert_eq!(d1.governance.ratified_by.as_deref(), Some("alice"));
+        assert!(d1.governance.ratified_at.is_some());
+
+        // Check human formatting includes ratification
+        let human1 = format_human(&r1);
+        assert!(human1.contains("ratified (by alice)"));
+
+        // Check auth.method hit
+        let r2 = ask(&ledger, "auth.method", &AskOptions::default(), None).unwrap();
+        assert_eq!(r2.decisions.len(), 1);
+        let d2 = &r2.decisions[0];
+        assert_eq!(d2.key, "auth.method");
+        assert_eq!(d2.governance.status, "unratified");
+        assert_eq!(d2.governance.ratified_by, None);
+        assert_eq!(d2.governance.ratified_at, None);
+
+        let human2 = format_human(&r2);
+        assert!(human2.contains("unratified"));
+
+        // 3. Re-decide db.engine = sqlite after ratify -> resets to unratified
+        ledger
+            .append_event(&make_decision(
+                "main",
+                "db.engine",
+                "sqlite",
+                Some("local dev"),
+                None,
+            ))
+            .unwrap();
+
+        let r3 = ask(&ledger, "db.engine", &AskOptions::default(), None).unwrap();
+        assert_eq!(r3.decisions.len(), 1);
+        let d3 = &r3.decisions[0];
+        assert_eq!(d3.value, "sqlite");
+        assert_eq!(d3.governance.status, "unratified");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn ask_branch_filter() {
         let (tmp, ledger) = setup();
         ledger
@@ -1549,6 +1686,7 @@ mod tests {
                 branch: "main".into(),
                 ts: "2026-02-15".into(),
                 is_active: true,
+                governance: DecisionGovernance::default(),
                 tags: vec![],
                 village_id: None,
                 staleness: None,
@@ -1977,6 +2115,7 @@ mod tests {
                 branch: "main".into(),
                 ts: "2026-02-15".into(),
                 is_active: true,
+                governance: DecisionGovernance::default(),
                 tags: vec![],
                 village_id: None,
                 staleness: None,

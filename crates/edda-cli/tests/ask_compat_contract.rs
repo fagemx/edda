@@ -121,6 +121,7 @@ fn compat_golden_fixture_ask_json_keys_and_types() {
             "branch",
             "domain",
             "event_id",
+            "governance",
             "is_active",
             "key",
             "reason",
@@ -138,4 +139,6 @@ fn compat_golden_fixture_ask_json_keys_and_types() {
     assert!(d["branch"].is_string());
     assert!(d["ts"].is_string());
     assert_eq!(d["is_active"], serde_json::Value::Bool(true));
+    assert!(d["governance"].is_object());
+    assert_eq!(d["governance"]["status"], "unratified");
 }

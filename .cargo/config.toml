@@ -1,0 +1,18 @@
+# Shared build configuration. Committed, so it must hold for every contributor
+# and every CI runner, not just this workstation.
+
+[target.x86_64-pc-windows-msvc]
+# rust-lld ships inside the toolchain, so no external install is required, and
+# a bare name resolves because rustc adds the sysroot target `bin` directory.
+#
+# Measured on this workstation (clean target, CARGO_INCREMENTAL=0,
+# debug = "line-tables-only", `cargo build --workspace --all-targets`):
+# 153s with rust-lld, against an MSVC link.exe arm whose three runs spanned
+# 173-193s. So the honest range is -12% to -21%, not a single figure -- the
+# direction is solid because both rust-lld runs (149s via -Clinker, 153s via
+# this file) sit below that arm's floor, but the magnitude is a range.
+#
+# Consumers beyond `cargo build`: `cargo test`, and release.yml's tagged
+# Windows binary, which is built with --release and is first exercised at tag
+# time. See GH-810.
+linker = "rust-lld.exe"

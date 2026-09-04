@@ -62,7 +62,7 @@ use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 
 #[derive(Parser)]
-#[command(name = "edda", version, about = "Decision memory for coding agents")]
+#[command(name = "edda", version = env!("EDDA_LONG_VERSION"), about = "Decision memory for coding agents")]
 struct Cli {
     #[command(subcommand)]
     cmd: Command,
@@ -412,6 +412,9 @@ enum Command {
         /// Include a notes.md file in addition to decisions/
         #[arg(long = "include-notes")]
         include_notes: bool,
+        /// Exporting machine identity (defaults to EDDA_MACHINE or host)
+        #[arg(long)]
+        machine: Option<String>,
     },
     /// Verify the ledger hash chain (tamper-evidence check; GH-647)
     Verify {
@@ -1320,11 +1323,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             format,
             out,
             include_notes,
+            machine,
         } => {
             if format != "md" {
                 anyhow::bail!("only 'md' export format is supported (got: {format})");
             }
-            cmd_export::execute(&repo_root, &out, include_notes)
+            cmd_export::execute(&repo_root, &out, include_notes, machine.as_deref())
         }
         Command::Verify { json } => cmd_verify::execute(&repo_root, json),
         Command::Bridge { cmd } => cmd_bridge::run_bridge(cmd, &repo_root),

@@ -147,7 +147,7 @@ module.exports = plugin;
 
 /// Default plugin directory.
 fn default_plugin_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".openclaw").join("extensions").join("edda-bridge"))
+    edda_core::paths::home_dir().map(|h| h.join(".openclaw").join("extensions").join("edda-bridge"))
 }
 
 /// Install the OpenClaw plugin files.

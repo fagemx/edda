@@ -113,10 +113,10 @@ $Cwd = (Resolve-Path -LiteralPath $Cwd).Path
 & (Join-Path $PSScriptRoot 'git-config-guard.ps1') -RepoPath $Cwd -Backup
 $guardExit = $LASTEXITCODE
 if ($guardExit -eq 2) {
-  Fail "the shared .git/config for '$Cwd' is not usable; repair it first (scripts/fleet/git-config-guard.ps1 -RepoPath '$Cwd' -Restore) — a lane launched against it cannot run git"
+  Fail "the shared git metadata (.git/config or refs) for '$Cwd' is not usable; repair it first (scripts/fleet/git-config-guard.ps1 -RepoPath '$Cwd' -Restore) — a lane launched against it cannot run git"
 }
 if ($guardExit -ne 0) {
-  [Console]::Error.WriteLine("lane-launch: warning: .git/config backup not written (git-config-guard exit $guardExit); launching anyway, but lane-stop will have nothing to restore from")
+  [Console]::Error.WriteLine("lane-launch: warning: git metadata backup/verify failed (git-config-guard exit $guardExit); launching anyway, but lane-stop will have nothing to restore from")
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null

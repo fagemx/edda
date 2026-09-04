@@ -15,7 +15,7 @@ const HOOK_EVENTS: &[&str] = &[
 ];
 
 fn default_hooks_path() -> anyhow::Result<PathBuf> {
-    dirs::home_dir()
+    edda_core::paths::home_dir()
         .map(|home| home.join(".cursor").join("hooks.json"))
         .ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))
 }
@@ -185,7 +185,7 @@ fn store_is_writable(store_root: &Path) -> bool {
 }
 
 fn claude_hook_detected() -> bool {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = edda_core::paths::home_dir() else {
         return false;
     };
     [

@@ -652,6 +652,7 @@ mod tests {
                 "branch",
                 "domain",
                 "event_id",
+                "governance",
                 "is_active",
                 "key",
                 "reason",
@@ -665,6 +666,8 @@ mod tests {
         assert_eq!(d["key"], "db.engine");
         assert_eq!(d["value"], "postgres");
         assert_eq!(d["is_active"], serde_json::Value::Bool(true));
+        assert!(d["governance"].is_object());
+        assert_eq!(d["governance"]["status"], "unratified");
     }
 
     /// GH-651 golden fixture for the `edda_tool_tier` MCP tool response —
