@@ -155,6 +155,37 @@ async fn resume_reuses_ledger_session_and_increments_round() {
     assert!(second.qualified);
 }
 
+#[tokio::test]
+async fn same_head_prior_p1_survives_later_lgtm() {
+    let (_temp, root, mut args) = fixture(true);
+    let rejected = Reviewer {
+        answer: "changes-requested",
+        session: Mutex::new(None),
+        cost: Some(0.12),
+    };
+    let first = run_with(prepare::prepare(&args, &root).unwrap(), &args, &rejected)
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(first.verdict, "changes-requested");
+    args.resume = true;
+    let approving = Reviewer {
+        answer: "lgtm",
+        session: Mutex::new(None),
+        cost: Some(0.12),
+    };
+    let second = run_with(prepare::prepare(&args, &root).unwrap(), &args, &approving)
+        .await
+        .unwrap()
+        .0;
+    assert!(second
+        .findings
+        .iter()
+        .any(|finding| finding.severity == "P1"));
+    assert_eq!(second.verdict, "changes-requested");
+    assert_ne!(verdict::exit_code(&second), 0);
+}
+
 #[test]
 fn empty_diff_and_author_session_refuse_before_launch_or_event() {
     let (_temp, root) = testrepo::init();
@@ -176,6 +207,10 @@ fn empty_diff_and_author_session_refuse_before_launch_or_event() {
     event.payload["session_id"] = serde_json::json!(author);
     event.payload["session_stats"] =
         serde_json::json!({"commits_made":["known author commit"],"model":"gpt-5.6-sol"});
+    // The digest is deliberately authored as a valid ledger event.  Mutating
+    // a finalized note without re-finalizing would test the hash-chain guard,
+    // not the reviewer/author independence refusal below.
+    edda_core::event::finalize_event(&mut event).unwrap();
     ledger.append_event(&event).unwrap();
     let args = ReviewArgs {
         session_id: Some(author.into()),

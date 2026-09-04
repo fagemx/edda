@@ -246,6 +246,15 @@ pub(crate) fn evidence_text(
         text.push_str(scan);
         text.push('\n');
     }
+    let measures = checklist_measures(ran, probes);
+    text.push_str("### Checklist measure IDs (copy exactly for checklist result=ran)\n");
+    if measures.is_empty() {
+        text.push_str("- none; use na for source inspection or escalate for unresolved judgment\n");
+    } else {
+        for measure in measures {
+            text.push_str(&format!("- {measure}\n"));
+        }
+    }
     text
 }
 

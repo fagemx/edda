@@ -205,6 +205,130 @@ ISSUES=$(
 FILES=$(gh pr diff "$PR" --repo "$REPO" --name-only)
 SURFACE=$(printf '%s\n' "$FILES" | paste -sd, - | sed 's/,$//')
 
+# Prefer the product-owned review command when the installed CLI exposes its
+# complete, machine-readable contract. The legacy dispatch path below remains
+# only for installations that cannot run that command yet.
+product_review_supported() {
+  product_help=$(edda review --help 2>&1) || return 1
+  for product_flag in --pr --agent --model --json --resume; do
+    printf '%s\n' "$product_help" | grep -qE -- "(^|[[:space:],])$product_flag([[:space:]=]|$)" || return 1
+  done
+}
+
+launch_product_review() {
+  LOG="$SCRATCH/review-pr$PR-r$ROUND.log"
+  DONE="$SCRATCH/review-pr$PR-r$ROUND.done"
+  LANE="$SCRATCH/review-pr$PR-r$ROUND-lane.ps1"
+  RUNNER="$SCRATCH/review-pr$PR-r$ROUND-run.sh"
+  PRODUCT_RESUME=""
+  [ "$ROUND" -gt 1 ] && PRODUCT_RESUME="--resume"
+  [ -n "$ROOT" ] || { echo "review-pr.sh: cannot locate main checkout (set EDDA_FLEET_ROOT)" >&2; exit 1; }
+
+  if [ "$IS_WIN" = "1" ]; then
+    command -v cygpath >/dev/null 2>&1 || { echo "review-pr.sh: cygpath not found" >&2; exit 1; }
+    ROOTW=$(cygpath -w "$ROOT")
+    LOGW=$(cygpath -w "$LOG")
+    DONEW=$(cygpath -w "$DONE")
+    LANEW=$(cygpath -w "$LANE")
+    PWSH_EXE="pwsh.exe"
+    command -v pwsh >/dev/null 2>&1 && PWSH_EXE=$(cygpath -w "$(command -v pwsh)")
+    cat > "$LANE" <<PS
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
+\$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
+Set-Location '$ROOTW'
+function Invoke-EddaReview {
+  & edda review --pr '$PR' --agent claude --model '$MODEL' --json $PRODUCT_RESUME
+  return \$LASTEXITCODE
+}
+\$json = Invoke-EddaReview
+\$code = \$LASTEXITCODE
+\$payload = \$null
+try { \$payload = \$json | ConvertFrom-Json } catch { }
+\$proof = \$payload -and \$payload.subject.head_sha -eq '$SHA' -and \$payload.subject.subject_seen -eq '$SHA' -and \$payload.subject.worktree_check -eq 'unchanged' -and \$payload.reviewer.tool_policy -eq 'hard'
+if (-not \$proof) {
+  'edda review product receipt failed subject, internal-worktree, or hard-policy validation' | Out-File '$LOGW' -Encoding utf8
+  \$json | Add-Content '$LOGW' -Encoding utf8
+  \$code = 2
+  \$tree = 'failed; product JSON lacked a matching internal worktree proof'
+  \$policy = 'missing'
+  \$session = 'unknown'
+} else {
+  \$p0 = @(\$payload.findings | Where-Object severity -eq 'P0').Count
+  \$p1 = @(\$payload.findings | Where-Object severity -eq 'P1').Count
+  \$label = if (\$payload.verdict -eq 'lgtm') { 'LGTM' } elseif (\$payload.verdict -eq 'changes-requested') { 'Changes Requested' } else { '' }
+  if (\$label) { "<<<VERDICT`n### Verdict`n\$label, P0=\$p0, P1=\$p1`nVERDICT>>>" | Out-File '$LOGW' -Encoding utf8 }
+  Add-Content '$LOGW' "Model requested: \$(\$payload.reviewer.model_requested)" -Encoding utf8
+  Add-Content '$LOGW' "Model observed: \$(\$payload.reviewer.model_observed)" -Encoding utf8
+  if (\$null -ne \$payload.cost.usd) { Add-Content '$LOGW' ("Cost: \$" + [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, '{0:0.####}', \$payload.cost.usd)) -Encoding utf8 }
+  Add-Content '$LOGW' "Session: \$(\$payload.reviewer.session_id)" -Encoding utf8
+  \$tree = 'unchanged'
+  \$policy = 'product-json:hard'
+  \$session = \$payload.reviewer.session_id
+}
+"TRANSPORT=edda-review" | Out-File '$DONEW' -Encoding utf8
+"POLICY_RECEIPT=\$policy" | Add-Content '$DONEW' -Encoding utf8
+"SESSION=\$session" | Add-Content '$DONEW' -Encoding utf8
+"SESSION_MODE=$( [ -n "$PRODUCT_RESUME" ] && echo resume || echo new )" | Add-Content '$DONEW' -Encoding utf8
+"DISPATCH_EXIT=\$code" | Add-Content '$DONEW' -Encoding utf8
+"WORKTREE_CHECK=\$tree" | Add-Content '$DONEW' -Encoding utf8
+exit \$code
+PS
+    echo "lane_file_arg=$LANEW"
+  else
+    cat > "$RUNNER" <<RUN
+#!/bin/sh
+export HOME="\${HOME:-$(getent passwd "\$(id -u)" 2>/dev/null | cut -d: -f6)}"
+cd '$ROOT' || exit 2
+run_edda_review() { edda review --pr '$PR' --agent claude --model '$MODEL' --json $PRODUCT_RESUME; }
+json='$LOG.json'
+run_edda_review > "\$json" 2>&1
+code=\$?
+if ! command -v jq >/dev/null 2>&1 || ! jq -e --arg sha '$SHA' '.subject.head_sha == \$sha and .subject.subject_seen == \$sha and .subject.worktree_check == "unchanged" and .reviewer.tool_policy == "hard"' "\$json" >/dev/null 2>&1; then
+  echo 'edda review product receipt failed subject, internal-worktree, or hard-policy validation' > '$LOG'
+  cat "\$json" >> '$LOG'
+  tree='failed; product JSON lacked a matching internal worktree proof'
+  policy=missing
+  session=unknown
+  code=2
+else
+  verdict=\$(jq -r '.verdict' "\$json")
+  p0=\$(jq '[.findings[] | select(.severity == "P0")] | length' "\$json")
+  p1=\$(jq '[.findings[] | select(.severity == "P1")] | length' "\$json")
+  case "\$verdict" in lgtm) label=LGTM;; changes-requested) label='Changes Requested';; *) label='';; esac
+  : > '$LOG'
+  [ -z "\$label" ] || printf '<<<VERDICT\n### Verdict\n%s, P0=%s, P1=%s\nVERDICT>>>\n' "\$label" "\$p0" "\$p1" >> '$LOG'
+  jq -r '"Model requested: " + .reviewer.model_requested, "Model observed: " + .reviewer.model_observed, (if .cost.usd == null then empty else "Cost: $" + (.cost.usd|tostring) end), "Session: " + .reviewer.session_id' "\$json" >> '$LOG'
+  tree=unchanged
+  policy=product-json:hard
+  session=\$(jq -r '.reviewer.session_id' "\$json")
+fi
+rm -f "\$json"
+printf 'TRANSPORT=edda-review\nPOLICY_RECEIPT=%s\nSESSION=%s\nSESSION_MODE=$( [ -n "$PRODUCT_RESUME" ] && echo resume || echo new )\nDISPATCH_EXIT=%s\nWORKTREE_CHECK=%s\n' "\$policy" "\$session" "\$code" "\$tree" > '$DONE'
+exit "\$code"
+RUN
+    sh -n "$RUNNER" || exit 1
+    chmod +x "$RUNNER"
+  fi
+  if [ "$DRY" = "1" ]; then echo "dry-run: product review adapter generated; nothing launched."; exit 0; fi
+  rm -f "$LOG" "$DONE"
+  if [ "$IS_WIN" = "1" ]; then
+    TASK="edda-review-pr$PR-r$ROUND"
+    pwsh -NoProfile -Command "Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue; \$a=New-ScheduledTaskAction -Execute '$PWSH_EXE' -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`\"$LANEW\`\"' -WorkingDirectory '$ROOTW'; Register-ScheduledTask -TaskName '$TASK' -Action \$a -RunLevel Limited | Out-Null; Start-ScheduledTask -TaskName '$TASK'" || exit 1
+  else
+    nohup "$RUNNER" >/dev/null 2>&1 &
+    pid=$!
+    sleep 1
+    kill -0 "$pid" 2>/dev/null || { echo "review-pr.sh: nohup process $pid died immediately" >&2; exit 1; }
+    echo "task=nohup pid=$pid state=Running"
+  fi
+  echo "log=$LOG"; echo "done=$DONE"
+  exit 0
+}
+
+if [ "${EDDA_REVIEW_PRODUCT_ADAPTER:-1}" != "0" ] && product_review_supported; then
+  launch_product_review
+fi
+
 # ---- the spec, read at the BASE SHA -----------------------------------------
 # review.brief-source: REVIEW.md is always the base_sha version, never the head,
 # so a PR cannot rewrite the rules it will be judged by. EDDA_REVIEW_SPEC is an

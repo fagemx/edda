@@ -11,6 +11,9 @@ pub(crate) fn render(p: &ReviewVerdictPayload, event: &str) -> String {
             f.evidence
         ));
     }
+    for escalation in &p.escalations {
+        out.push_str(&format!("escalation: {escalation}\n"));
+    }
     for reason in &p.disqualifiers {
         let action = match reason.as_str() {
             "spec-convention-only" => "pass --spec <path|#issue>",
@@ -55,4 +58,86 @@ pub(crate) fn render(p: &ReviewVerdictPayload, event: &str) -> String {
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use edda_core::{
+        ReviewBrief, ReviewCost, ReviewGates, ReviewRefs, ReviewReviewer, ReviewSpec, ReviewSubject,
+    };
+
+    fn payload() -> ReviewVerdictPayload {
+        ReviewVerdictPayload {
+            schema: "review_verdict/0".into(),
+            subject: ReviewSubject {
+                base_sha: "base".into(),
+                head_sha: "head".into(),
+                files: 1,
+                lines: 1,
+                coverage: "full".into(),
+                subject_seen: Some("head".into()),
+                worktree_check: Some("unchanged".into()),
+            },
+            refs: ReviewRefs {
+                pr: None,
+                issue: None,
+                supersedes: None,
+                previous: None,
+                round: Some(1),
+                history_rewritten: false,
+            },
+            spec: ReviewSpec {
+                mode: "spec-backed".into(),
+                source: "acceptance.txt".into(),
+                trust: "local".into(),
+            },
+            brief: ReviewBrief {
+                core: "review scope".into(),
+                review_md_sha: None,
+                classes: vec![],
+            },
+            reviewer: ReviewReviewer {
+                agent: "pi".into(),
+                transport: "rpc".into(),
+                model_requested: "gpt-5.6-sol".into(),
+                model_observed: "gpt-5.6-sol".into(),
+                observed_via: "provider".into(),
+                model_self_report: None,
+                session_id: "session".into(),
+                session_label: "review".into(),
+                tool_policy: "hard".into(),
+            },
+            independence: "verified".into(),
+            independence_policy: "session".into(),
+            gates: ReviewGates {
+                status: "verified".into(),
+                declared_by: vec![],
+                read: vec![],
+                ran: vec![],
+            },
+            probes: vec![],
+            verdict: "lgtm".into(),
+            outcome: "done".into(),
+            qualified: false,
+            disqualifiers: vec!["escalation-pending".into()],
+            findings: vec![],
+            checklist: vec![],
+            escalations: vec!["missing exact-head CI receipt".into()],
+            cost: ReviewCost {
+                usd: None,
+                measured: false,
+                duration_ms: 0,
+            },
+            parse: "ok".into(),
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn render_includes_the_actual_escalation() {
+        let text = render(&payload(), "evt_01");
+        assert!(text.contains("escalation: missing exact-head CI receipt"));
+        assert!(text.contains("escalation-pending → resolve the listed review escalations"));
+    }
 }

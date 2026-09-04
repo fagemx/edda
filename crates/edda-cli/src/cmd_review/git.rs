@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -75,6 +76,8 @@ pub(crate) struct WorktreeGuard {
     pub path: PathBuf,
     keep: bool,
     removed: bool,
+    pristine: String,
+    content_hash: String,
 }
 
 impl WorktreeGuard {
@@ -97,17 +100,34 @@ impl WorktreeGuard {
                 sha,
             ],
         )?;
-        let guard = Self {
+        let mut guard = Self {
             repo: repo.into(),
             path: dest.into(),
             keep,
             removed: false,
+            pristine: String::new(),
+            content_hash: String::new(),
         };
         if std::fs::symlink_metadata(guard.path.join(SUBJECT_MARKER)).is_ok() {
             bail!("review subject reserves {SUBJECT_MARKER}; committed marker is not allowed");
         }
         std::fs::write(guard.path.join(SUBJECT_MARKER), sha)?;
+        guard.pristine = git(
+            &guard.path,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )?;
+        guard.content_hash = content_hash(&guard.path)?;
         Ok(guard)
+    }
+
+    pub(crate) fn verify_unchanged(&self, sha: &str) -> Result<bool> {
+        let head = git(&self.path, &["rev-parse", "HEAD"])?;
+        let status = git(
+            &self.path,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )?;
+        let hash = content_hash(&self.path)?;
+        Ok(head == sha && status == self.pristine && hash == self.content_hash)
     }
 
     pub(crate) fn remove(&mut self) -> Result<()> {
@@ -127,6 +147,24 @@ impl WorktreeGuard {
         self.removed = true;
         Ok(())
     }
+}
+
+fn content_hash(root: &Path) -> Result<String> {
+    let listed = git(root, &["ls-files", "-z"])?;
+    let mut hasher = Sha256::new();
+    for path in listed.split('\0') {
+        if path.is_empty() {
+            continue;
+        }
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(std::fs::read(root.join(path))?);
+        hasher.update([0]);
+    }
+    hasher.update(SUBJECT_MARKER.as_bytes());
+    hasher.update([0]);
+    hasher.update(std::fs::read(root.join(SUBJECT_MARKER))?);
+    Ok(hex::encode(hasher.finalize()))
 }
 
 impl Drop for WorktreeGuard {
@@ -161,5 +199,19 @@ pub(crate) mod testrepo {
         run(root, &["add", "--", name]);
         run(root, &["commit", "-q", "-m", message]);
         commit(root, "HEAD").unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{content_hash, testrepo, SUBJECT_MARKER};
+
+    #[test]
+    fn content_proof_changes_when_tracked_content_changes() {
+        let (_temp, root) = testrepo::init();
+        std::fs::write(root.join(SUBJECT_MARKER), "subject").unwrap();
+        let before = content_hash(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "tampered\n").unwrap();
+        assert_ne!(before, content_hash(&root).unwrap());
     }
 }

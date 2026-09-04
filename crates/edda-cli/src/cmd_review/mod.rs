@@ -59,6 +59,12 @@ fn run_inner(args: &ReviewArgs, cwd: &Path) -> Result<(ReviewVerdictPayload, Str
         eprintln!("{warning}");
     }
     let session_dir = (args.agent == AgentKind::Pi).then(|| review_session_dir(&prepared));
+    if args.resume && args.agent == AgentKind::Pi {
+        let continued = session_dir.as_ref().is_some_and(|dir| {
+            pi_session_continues(dir, &prepared.session, &review_scratch(&prepared))
+        });
+        anyhow::ensure!(continued, "--resume requires the persisted Pi conversation; refusing a new session with the old UUID");
+    }
     let launcher = build_launcher(
         args.agent,
         LauncherOptions {
@@ -70,6 +76,34 @@ fn run_inner(args: &ReviewArgs, cwd: &Path) -> Result<(ReviewVerdictPayload, Str
         },
     )?;
     tokio::runtime::Runtime::new()?.block_on(run_with(prepared, args, launcher.as_ref()))
+}
+
+fn pi_session_continues(dir: &std::path::Path, session: &str, cwd: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "jsonl") {
+            return false;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        let mut lines = text.lines();
+        let Some(header) = lines.next() else {
+            return false;
+        };
+        let Ok(header) = serde_json::from_str::<serde_json::Value>(header) else {
+            return false;
+        };
+        header["type"] == "session"
+            && header["id"] == session
+            && header["cwd"]
+                .as_str()
+                .is_some_and(|stored| std::path::Path::new(stored) == cwd)
+            && lines.any(|line| !line.trim().is_empty())
+    })
 }
 
 fn review_session_dir(prepared: &prepare::Prepared) -> std::path::PathBuf {
@@ -90,6 +124,43 @@ fn review_scratch(prepared: &prepare::Prepared) -> std::path::PathBuf {
         .join("edda-review")
         .join(edda_store::project_id(&prepared.repo))
         .join(&prepared.session)
+}
+
+#[cfg(test)]
+mod pi_resume_tests {
+    use super::pi_session_continues;
+
+    #[test]
+    fn persisted_pi_history_must_match_session_cwd_and_have_a_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("scratch");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = "00000000-0000-4000-8000-000000000001";
+
+        let header = |id: &str| {
+            serde_json::json!({"type":"session", "id": id, "cwd": cwd})
+                .to_string()
+        };
+        assert!(!pi_session_continues(temp.path(), session, &cwd));
+        std::fs::write(
+            temp.path().join("empty.jsonl"),
+            format!("{}\n", header(session)),
+        )
+        .unwrap();
+        assert!(!pi_session_continues(temp.path(), session, &cwd));
+        std::fs::write(
+            temp.path().join("unrelated.jsonl"),
+            format!("{}\n{{\"type\":\"message\"}}\n", header("00000000-0000-4000-8000-000000000002")),
+        )
+        .unwrap();
+        assert!(!pi_session_continues(temp.path(), session, &cwd));
+        std::fs::write(
+            temp.path().join("empty.jsonl"),
+            format!("{}\n{{\"type\":\"message\"}}\n", header(session)),
+        )
+        .unwrap();
+        assert!(pi_session_continues(temp.path(), session, &cwd));
+    }
 }
 
 fn tools(agent: AgentKind) -> Option<Vec<String>> {
@@ -129,6 +200,9 @@ async fn run_with(
     )?;
     let (gates, probes, evidence_text) =
         prepare::collect_evidence(&mut prepared, args, &worktree.path)?;
+    if !worktree.verify_unchanged(&prepared.subject.head_sha)? {
+        anyhow::bail!("review evidence changed the detached subject worktree");
+    }
     let checklist_measures = evidence::checklist_measures(&gates.ran, &probes);
     let (assembled, classes) = prepare::assemble(&prepared, &evidence_text)?;
     if !assembled.dropped_files.is_empty() {
@@ -186,6 +260,7 @@ async fn run_with(
             lines: prepared.subject.lines,
             coverage: assembled.coverage,
             subject_seen: None,
+            worktree_check: None,
         },
         refs: prepared.refs.clone(),
         spec: prepared.spec.clone(),
@@ -278,8 +353,16 @@ async fn run_with(
                         payload.findings = union_findings(&prior.findings, &payload.findings);
                     }
                 }
-                payload.subject.subject_seen = Some(engine.subject_seen);
-                payload.verdict = engine.verdict;
+                payload.subject.subject_seen = Some(engine.subject_seen.clone());
+                payload.verdict = engine.verdict.clone();
+                if payload.verdict == "lgtm"
+                    && payload
+                        .findings
+                        .iter()
+                        .any(|finding| matches!(finding.severity.as_str(), "P0" | "P1"))
+                {
+                    payload.verdict = "changes-requested".into();
+                }
                 payload.checklist = engine.checklist();
                 payload.escalations = engine.escalations;
                 payload.reviewer.model_self_report = Some(engine.model_self_report);
@@ -304,6 +387,18 @@ async fn run_with(
     }
     if payload.verdict == "unreviewed" {
         payload.refs.round = None;
+    }
+    match worktree.verify_unchanged(&prepared.subject.head_sha) {
+        Ok(true) => payload.subject.worktree_check = Some("unchanged".into()),
+        Ok(false) => {
+            payload.subject.worktree_check = Some("failed".into());
+            payload.verdict = "unreviewed".into();
+            payload.outcome = "worktree-changed".into();
+            payload.parse = "failed".into();
+        }
+        Err(error) => prepared
+            .notes
+            .push(format!("worktree verification failed: {error}")),
     }
     if let Err(error) = worktree.remove() {
         prepared

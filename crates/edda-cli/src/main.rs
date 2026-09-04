@@ -538,7 +538,7 @@ enum Command {
         #[command(subcommand)]
         cmd: PipelineCmd,
     },
-    /// Create and manage review bundles for rapid approval
+    /// Deprecated: create and manage review bundles; use `edda review` for independent SHA-pinned reviews
     Bundle {
         #[command(subcommand)]
         cmd: BundleCmd,
@@ -696,6 +696,7 @@ enum PipelineCmd {
 }
 
 #[derive(Subcommand)]
+/// Deprecated: use `edda review` for independent SHA-pinned reviews.
 enum BundleCmd {
     /// Create a review bundle from current changes
     Create {

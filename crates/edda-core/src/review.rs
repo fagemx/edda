@@ -43,6 +43,9 @@ pub struct ReviewSubject {
     pub coverage: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject_seen: Option<String>,
+    /// Product-owned review worktree proof captured after the engine returns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_check: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

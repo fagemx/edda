@@ -468,9 +468,15 @@ settle_pending() {
         case "$tline" in
           edda-dispatch) tdesc='edda dispatch --agent claude' ;;
           claude-stdin)  tdesc='claude -p via stdin (oversized-brief fallback)' ;;
+          edda-review)   tdesc='edda review --json (product-owned review)' ;;
           *)             tdesc='unknown — no TRANSPORT receipt in .done' ;;
         esac
-        tool_flags=$(sed -n 's/^TOOL_FLAGS=//p' "$DONE" 2>/dev/null | tail -1)
+        if [ "$tline" = "edda-review" ]; then
+          tool_flags=$(sed -n 's/^POLICY_RECEIPT=//p' "$DONE" 2>/dev/null | tail -1)
+          [ -n "$tool_flags" ] || tool_flags='unknown — no product policy receipt'
+        else
+          tool_flags=$(sed -n 's/^TOOL_FLAGS=//p' "$DONE" 2>/dev/null | tail -1)
+        fi
         tree_check=$(sed -n 's/^WORKTREE_CHECK=//p' "$DONE" 2>/dev/null | tail -1)
         [ -n "$tool_flags" ] || tool_flags='unknown — no TOOL_FLAGS receipt'
         [ -n "$tree_check" ] || tree_check='unknown — no WORKTREE_CHECK receipt'

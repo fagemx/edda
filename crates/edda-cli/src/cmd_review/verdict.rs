@@ -45,7 +45,7 @@ pub(crate) fn parse(text: &str, head: &str, measures: &[String]) -> Result<Engin
     if !after.trim().is_empty() {
         bail!("verdict block must end the response");
     }
-    let verdict: EngineVerdict = serde_json::from_str(json.trim())?;
+    let mut verdict: EngineVerdict = serde_json::from_str(json.trim())?;
     if verdict.subject_seen != head {
         bail!("subject-mismatch: marker does not match reviewed HEAD");
     }
@@ -64,6 +64,14 @@ pub(crate) fn parse(text: &str, head: &str, measures: &[String]) -> Result<Engin
         }
         if item.result == "ran" && !measures.iter().any(|measure| measure == &item.measure) {
             bail!("checklist ran measure is not host-provided evidence");
+        }
+    }
+    // A scoped checklist escalation remains material even when the engine
+    // omitted it from the redundant summary list. Preserve it so qualification
+    // rejects an otherwise-LGTM verdict instead of losing the concern.
+    for item in &verdict.checklist {
+        if item.result == "escalate" && !verdict.escalations.contains(&item.item) {
+            verdict.escalations.push(item.item.clone());
         }
     }
     for finding in &verdict.findings {
@@ -133,6 +141,14 @@ pub(crate) fn qualify(payload: &mut ReviewVerdictPayload) {
         (payload.subject.coverage != "full", "coverage-partial"),
         (payload.reviewer.tool_policy != "hard", "tool-policy-none"),
         (!payload.escalations.is_empty(), "escalation-pending"),
+        (
+            payload.verdict == "lgtm"
+                && payload
+                    .findings
+                    .iter()
+                    .any(|finding| matches!(finding.severity.as_str(), "P0" | "P1")),
+            "blocking-findings-open",
+        ),
     ] {
         if bad {
             reasons.push(reason.to_owned());
@@ -168,6 +184,9 @@ pub(crate) fn exit_code(payload: &ReviewVerdictPayload) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use edda_core::{
+        ReviewBrief, ReviewCost, ReviewGates, ReviewRefs, ReviewReviewer, ReviewSpec, ReviewSubject,
+    };
     fn valid() -> serde_json::Value {
         serde_json::json!({"subject_seen":"head", "verdict":"lgtm", "findings":[],"checklist":[{"item":"scope","result":"na","measure":"no declared commands"}],"escalations":[],"model_self_report":"self-report", "notes":""})
     }
@@ -204,5 +223,106 @@ mod tests {
             &["EVIDENCE RAN: cargo test -p edda".into()]
         )
         .is_ok());
+    }
+
+    #[test]
+    fn escalated_checklist_item_is_preserved_when_summary_omits_it() {
+        let mut v = valid();
+        v["checklist"] = serde_json::json!([{
+            "item":"missing exact-head CI receipt",
+            "result":"escalate",
+            "measure":"CI receipt unavailable"
+        }]);
+        let parsed = parse(&fenced(v.clone()), "head", &[]).unwrap();
+        assert_eq!(parsed.escalations, ["missing exact-head CI receipt"]);
+        v["escalations"] = serde_json::json!(["missing exact-head CI receipt"]);
+        assert!(parse(&fenced(v), "head", &[]).is_ok());
+    }
+
+    fn qualified_payload_with_findings(findings: Vec<ReviewFinding>) -> ReviewVerdictPayload {
+        ReviewVerdictPayload {
+            schema: "review_verdict/0".into(),
+            subject: ReviewSubject {
+                base_sha: "base".into(),
+                head_sha: "head".into(),
+                files: 1,
+                lines: 1,
+                coverage: "full".into(),
+                subject_seen: Some("head".into()),
+                worktree_check: Some("unchanged".into()),
+            },
+            refs: ReviewRefs {
+                pr: None,
+                issue: None,
+                supersedes: None,
+                previous: Some("prior-event".into()),
+                round: Some(2),
+                history_rewritten: false,
+            },
+            spec: ReviewSpec {
+                mode: "spec-backed".into(),
+                source: "acceptance.txt".into(),
+                trust: "local".into(),
+            },
+            brief: ReviewBrief {
+                core: "review scope".into(),
+                review_md_sha: None,
+                classes: vec![],
+            },
+            reviewer: ReviewReviewer {
+                agent: "pi".into(),
+                transport: "rpc".into(),
+                model_requested: "gpt-5.6-sol".into(),
+                model_observed: "gpt-5.6-sol".into(),
+                observed_via: "provider".into(),
+                model_self_report: None,
+                session_id: "session".into(),
+                session_label: "review".into(),
+                tool_policy: "hard".into(),
+            },
+            independence: "verified".into(),
+            independence_policy: "session".into(),
+            gates: ReviewGates {
+                status: "verified".into(),
+                declared_by: vec![],
+                read: vec![],
+                ran: vec![],
+            },
+            probes: vec![],
+            verdict: "lgtm".into(),
+            outcome: "done".into(),
+            qualified: false,
+            disqualifiers: vec![],
+            findings,
+            checklist: vec![],
+            escalations: vec![],
+            cost: ReviewCost {
+                usd: None,
+                measured: false,
+                duration_ms: 0,
+            },
+            parse: "ok".into(),
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn final_blocking_findings_disqualify_lgtm_and_never_exit_zero() {
+        let mut payload = qualified_payload_with_findings(vec![ReviewFinding {
+            id: "f1".into(),
+            severity: "P1".into(),
+            file: "b.txt".into(),
+            line: Some(1),
+            claim: "prior same-head finding remains open".into(),
+            evidence: "b.txt:1".into(),
+            rule: "core".into(),
+            status: "open".into(),
+        }]);
+        qualify(&mut payload);
+        assert!(!payload.qualified);
+        assert!(payload
+            .disqualifiers
+            .contains(&"blocking-findings-open".into()));
+        assert_ne!(exit_code(&payload), 0);
     }
 }

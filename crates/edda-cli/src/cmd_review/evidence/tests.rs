@@ -143,7 +143,7 @@ fn required_ci_is_independent_and_pending_is_neutral() {
 
 #[test]
 fn ran_requires_all_commands_and_blobs_and_timeout_is_silent() {
-    let gates = vec!["echo hi".into()];
+    let gates: Vec<String> = vec!["echo hi".into()];
     let mut ran = vec![ReviewGateRan {
         cmd: gates[0].clone(),
         exit: 0,
