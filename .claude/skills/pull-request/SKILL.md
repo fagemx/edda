@@ -274,9 +274,13 @@ clear labels on its own:
 # Issues delivered by this PR: closing-keyword references in the PR body
 # ('Closes #N', 'Fixes #N', 'Resolves #N' with inflections). 'Issue: #N',
 # 'tracked in #N', 'see #N' are mentions, not delivery — never match them.
+# The second grep extracts only the number after '#': the first match's
+# leading boundary group is part of the -o output and may itself be a digit
+# ('v2Closes #20' matches '2Closes #20'), so extracting every digit run
+# would turn that digit into a second label target.
 for issue in $(gh pr view --json body -q .body \
     | grep -ioE '(^|[^A-Za-z])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
-    | grep -oE '[0-9]+' | sort -u); do
+    | grep -oE '#[0-9]+' | tr -d '#' | sort -u); do
     for label in fleet:ready fleet:claimed; do
         if gh issue view "$issue" --json labels -q '.labels[].name' \
             | grep -qx "$label"; then
