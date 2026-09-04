@@ -89,7 +89,7 @@ $reviewArgs = ''
 if ($isReview) {
   if ($Agent -ne 'claude') { Fail 'review lanes require -Agent claude (Opus); refusing an unsupported reviewer backend' }
   try { Assert-ReviewCapabilities } catch { Fail $_.Exception.Message }
-  $reviewArgs = " --model claude-opus-5 --tools $(PsQuote $ReviewTools) --exclude-tools $(PsQuote $ReviewDenied)"
+  $reviewArgs = " --model claude-opus-5 --permission-mode $(PsQuote $ReviewPermissionMode) --tools $(PsQuote $ReviewTools) --exclude-tools $(PsQuote $ReviewDenied)"
 }
 
 # --- guard rails ------------------------------------------------------------
@@ -197,13 +197,49 @@ $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
 $reviewPreflight = ''
 $reviewFinish = ''
 if ($isReview) {
-  $reviewPreflight = ". $(PsQuote (Join-Path $PSScriptRoot 'reviewer-capabilities.ps1')); Assert-ReviewCapabilities; Add-Content -LiteralPath $(PsQuote $Log) -Value $(PsQuote ('TOOL_FLAGS=' + $reviewArgs))"
-  $reviewPreflight += '; $reviewHead = & git rev-parse HEAD; if ($LASTEXITCODE -ne 0) { throw "review HEAD unavailable" }; $reviewStatus = (& git status --porcelain=v1 --untracked-files=all) -join "`n"; if ($LASTEXITCODE -ne 0) { throw "review status unavailable" }'
+  $reviewPreflight = @'
+. __CAPABILITIES__
+Assert-ReviewCapabilities
+Add-Content -LiteralPath __LOG__ -Value __TOOL_FLAGS__
+function Get-ReviewWorktreeSnapshot {
+  $entries = [System.Collections.Generic.List[string]]::new()
+  foreach ($scope in @(
+    @{ Name = 'tracked'; Args = @('--cached') },
+    @{ Name = 'untracked'; Args = @('--others', '--exclude-standard') },
+    @{ Name = 'ignored'; Args = @('--others', '--ignored', '--exclude-standard') }
+  )) {
+    $paths = & git ls-files @($scope.Args)
+    if ($LASTEXITCODE -ne 0) { throw "git ls-files failed for $($scope.Name) scope" }
+    foreach ($path in $paths) {
+      if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $hash = (& git hash-object -- $path)
+        if ($LASTEXITCODE -ne 0) { throw "git hash-object failed for $($scope.Name) path $path" }
+        [void]$entries.Add("$($scope.Name)`t$hash`t$path")
+      } elseif (Test-Path -LiteralPath $path -PathType Container) {
+        [void]$entries.Add("$($scope.Name)`tdirectory`t$path")
+      } else {
+        [void]$entries.Add("$($scope.Name)`tmissing-or-special`t$path")
+      }
+    }
+  }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes(($entries -join "`n"))
+  return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+$reviewHead = & git rev-parse HEAD
+if ($LASTEXITCODE -ne 0) { throw 'review HEAD unavailable' }
+$reviewStatus = (& git status --porcelain=v1 --untracked-files=all) -join "`n"
+if ($LASTEXITCODE -ne 0) { throw 'review status unavailable' }
+$reviewSnapshot = Get-ReviewWorktreeSnapshot
+'@
+  $reviewPreflight = $reviewPreflight.Replace('__CAPABILITIES__', (PsQuote (Join-Path $PSScriptRoot 'reviewer-capabilities.ps1')))
+  $reviewPreflight = $reviewPreflight.Replace('__TOOL_FLAGS__', (PsQuote ('TOOL_FLAGS=' + $reviewArgs)))
   $reviewFinish = @'
   $afterHead = & git rev-parse HEAD
   $headOk = $LASTEXITCODE -eq 0
   $afterStatus = (& git status --porcelain=v1 --untracked-files=all) -join "`n"
-  $treeOk = $LASTEXITCODE -eq 0 -and $headOk -and $reviewHead -and $afterHead -eq $reviewHead -and $afterStatus -eq $reviewStatus
+  $statusOk = $LASTEXITCODE -eq 0
+  try { $afterSnapshot = Get-ReviewWorktreeSnapshot; $snapshotOk = $true } catch { $_ | Out-File __LOG__ -Append -Encoding utf8; $snapshotOk = $false }
+  $treeOk = $statusOk -and $headOk -and $snapshotOk -and $reviewHead -and $afterHead -eq $reviewHead -and $afterStatus -eq $reviewStatus -and $afterSnapshot -eq $reviewSnapshot
   & git status --short | Out-File __LOG__ -Append -Encoding utf8
   & git log -1 --format=%H | Out-File __LOG__ -Append -Encoding utf8
   if ($treeOk) { Add-Content __LOG__ 'WORKTREE_CHECK=unchanged' } else { Add-Content __LOG__ 'WORKTREE_CHECK=failed; preserved for inspection'; $code = 2 }

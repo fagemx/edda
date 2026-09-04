@@ -510,8 +510,8 @@ unset EDDA_REVIEW_PRODUCT_ADAPTER TEST_PRODUCT_UNIX EDDA_FLEET_ROOT
 # next one — 14 stale wt-review-pr* trees were the reason (GH-708 comment).
 grep -q 'function Remove-ReviewWorktree' "$lane" \
     || fail 'D9i: the lane defines no worktree removal'
-if [ "$(grep -c 'Remove-ReviewWorktree$' "$lane")" -lt 2 ]; then
-    fail 'D9i: the lane does not remove the worktree on both arms'
+if [ "$(grep -cE '^[[:space:]]*if \(Test-ReviewWorktree\) \{ Remove-ReviewWorktree \} else \{ exit 2 \}$' "$lane")" -lt 2 ]; then
+    fail 'D9i: the lane does not guard worktree removal on both transport arms'
 fi
 # Anchored at the start of a line so the assertion cannot be satisfied by the
 # comment block above the call (round 1 P2: the loose grep matched prose).
