@@ -1,3 +1,4 @@
+use super::timing::ProcessTiming;
 use crate::agent::codex_app_server::{CodexAppServer, CodexTurnOutcome};
 use crate::agent::launcher::{AgentLauncher, PhaseResult};
 use crate::plan::schema::Phase;
@@ -5,6 +6,7 @@ use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -78,6 +80,7 @@ pub struct CodexLauncher {
     pub verbose: bool,
     thread_store: Option<ThreadStore>,
     state: Mutex<LauncherState>,
+    timing: Arc<ProcessTiming>,
 }
 
 /// File-backed cold-start store for the session→thread map.
@@ -192,6 +195,7 @@ impl CodexLauncher {
             codex_bin: default_codex_bin(),
             verbose: false,
             thread_store: None,
+            timing: Arc::default(),
             state: Mutex::new(LauncherState::default()),
         }
     }
@@ -201,6 +205,7 @@ impl CodexLauncher {
             codex_bin,
             verbose: false,
             thread_store: None,
+            timing: Arc::default(),
             state: Mutex::new(LauncherState::default()),
         }
     }
@@ -261,6 +266,7 @@ impl AgentLauncher for CodexLauncher {
         cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult> {
+        self.timing.reset();
         // GH-574 honesty: the codex app-server exposes no model/thinking/
         // tool-policy selection path edda can verify, so a phase declaring
         // any of them would be silently ignored — the exact failure mode
@@ -294,7 +300,7 @@ impl AgentLauncher for CodexLauncher {
         };
         let mut state = self.state.lock().await;
         if state.server.is_none() {
-            match CodexAppServer::spawn(&self.codex_bin).await {
+            match CodexAppServer::spawn_timed(&self.codex_bin, Arc::clone(&self.timing)).await {
                 // Cold start: merge the persisted session→thread map so a
                 // session id recorded by a previous process resumes instead
                 // of starting over. In-memory entries win (hot path).
@@ -349,6 +355,9 @@ impl AgentLauncher for CodexLauncher {
             // client so the next phase re-spawns a fresh app-server. The
             // thread map survives: codex persists threads and `thread/resume`
             // restores the conversation.
+            if let Some(server) = state.server.as_mut() {
+                server.terminate().await;
+            }
             state.server = None;
         }
         let result = if outcome.dropped_stale_binding {
@@ -358,7 +367,7 @@ impl AgentLauncher for CodexLauncher {
             // terminated the child, so spawn a fresh app-server first. The
             // bad binding was already removed from `threads`, so it is not
             // written back below.
-            match CodexAppServer::spawn(&self.codex_bin).await {
+            match CodexAppServer::spawn_timed(&self.codex_bin, Arc::clone(&self.timing)).await {
                 Ok(server) => state.server = Some(server),
                 Err(error) => {
                     return Ok(PhaseResult::AgentCrash {
@@ -388,6 +397,9 @@ impl AgentLauncher for CodexLauncher {
             )
             .await;
             if !retry.keep_server {
+                if let Some(server) = state.server.as_mut() {
+                    server.terminate().await;
+                }
                 state.server = None;
             }
             retry.result
@@ -401,6 +413,17 @@ impl AgentLauncher for CodexLauncher {
             store.persist(cwd, &state.threads, &state.removals);
         }
         Ok(result)
+    }
+
+    fn last_elapsed_ms(&self) -> Option<u64> {
+        self.timing.elapsed_ms()
+    }
+
+    async fn finish_dispatch(&self) {
+        let mut state = self.state.lock().await;
+        if let Some(mut server) = state.server.take() {
+            server.terminate().await;
+        }
     }
 }
 
@@ -644,39 +667,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn codex_bin_falls_back_to_the_platform_install() {
-        // npm ships codex as an extensionless sh launcher plus codex.cmd on
-        // Windows, with no codex.exe, and CreateProcess does not apply
-        // PATHEXT — the bare name never resolves there.
-        let expected = if cfg!(windows) { "codex.cmd" } else { "codex" };
-        assert_eq!(resolve_codex_bin(None), PathBuf::from(expected));
-    }
-
-    #[test]
-    fn edda_codex_bin_overrides_the_platform_default() {
-        let custom = "/opt/codex/bin/codex-custom";
-        assert_eq!(
-            resolve_codex_bin(Some(OsString::from(custom))),
-            PathBuf::from(custom)
-        );
-    }
-
-    #[test]
-    fn empty_edda_codex_bin_is_treated_as_unset() {
-        let expected = if cfg!(windows) { "codex.cmd" } else { "codex" };
-        assert_eq!(
-            resolve_codex_bin(Some(OsString::new())),
-            PathBuf::from(expected),
-            "an empty override must not produce an unspawnable empty path"
-        );
-    }
-
-    #[test]
-    fn with_bin_overrides_the_default() {
-        let custom = PathBuf::from("/opt/codex/bin/codex");
-        assert_eq!(CodexLauncher::with_bin(custom.clone()).codex_bin, custom);
-    }
+    include!("codex_rpc_config_tests.rs");
 
     #[test]
     fn persistence_is_opt_in() {
