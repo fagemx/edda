@@ -130,7 +130,9 @@ Manager 保管、都不進 env、都不落明文檔案。兩張單的封套與�
 不要各自長一套。GH-685 的節點是兩者天然的共同持有者（§7）。
 
 **共用的假設**：兩者都不保護「操作者機器被攻陷」（GH-609 doneWhen 第七條的
-誠實邊界與本文件 §4 一致）。
+誠實邊界與本文件 §4 一致）。GH-609 的提案稿另見
+`docs/architecture/actor-signing.md`（行內碼引用：該文件是另一張 PR 的提案，
+落地前刻意不留追蹤式連結以免斷鏈）。
 
 ## 6. 六個方向的取捨
 
@@ -217,9 +219,25 @@ GH-690 列了六個方向。以下逐條給取捨與提案值，合起來構成 
 
 ## 7. 節點作為憑證代管者（給 GH-685 設計稿的一節）
 
-> **銜接說明**：GH-685 的設計稿目前在 PR #686（branch `design/edda-mesh`），尚未合併，
-> 路徑 `docs/superpowers/specs/2026-09-02-edda-node-agent-transport-design.md`。
-> 本節不修改該分支。**待 #686 合併後，本節併入該設計稿，接在 §4「安全邊界」之後。**
+> **銜接說明（更新於 PR，GH-686 已合併）**：GH-685 的設計稿已隨 PR #686 合併，
+> 現位於 `docs/superpowers/specs/2026-09-02-edda-node-agent-transport-design.md`。
+> 本節保留在威脅模型內作為源文本；**把本節併入該設計稿（接在其 §4「安全邊界」之後）
+> 仍是待辦的跨文件編輯**，屬 GH-690 的後續實作，本 PR 不修改該設計稿。
+
+### 7.0 與節點設計稿的對照
+
+節點設計稿（`docs/superpowers/specs/2026-09-02-edda-node-agent-transport-design.md`）
+與本節的對應關係：
+
+| 本節 | 節點設計稿 | 關係 |
+|---|---|---|
+| §7.1 `node.toml` 共享 token 的升級路徑 | §2.1 節點（「共享 token 放 node.toml，不進 git」、沒有 token 的 POST 一律 401） | v0 行為的出處；本節為它補上 sunset 與 v0.5/v1 階段 |
+| §7.2 代管者的失敗訊號 | §3 失敗模式與訊號 | 表格形狀沿用 §3，新增代管職責三列 |
+| §6.4 store 只由節點寫 | §2.1 複製器 / §4 安全邊界 | 節點成為 store 的權威寫入者後，兩邊的安全邊界敘述要對齊 |
+| §6.2 GitHub App installation token | §2.6 GitHub 的角色（節點只註冊/搬事件，不代發 token） | **本節實質修訂**節點職責：代管者要按 lane 發短效 token；該修訂併入設計稿時必須連同 §6.3 v2 的「白名單 vendor 呼叫」一起裁定 |
+
+節點 v0（已合併的第一片）不含憑證代管端點——這正是 §8 的 spike 腳本把
+`edda-node://` token 引用分類為「明確不支援、不得造假」的依據。
 
 節點是每台機器上唯一的常駐可信程序，因此它是憑證代管者的天然位置：
 它比 lane 活得久（可以續期短效 token）、比操作者的互動 session 穩定（可以被排程任務看管）、
@@ -270,6 +288,15 @@ GH-690 doneWhen 第三條要求一個受限帳號的實測。**本單刻意不�
 這些是**操作者裁決之後的實作動作**，不是設計動作，而且不可逆性高。
 本單只交設計；spike 在 §9 的決策被批准後另開一張實作單。
 
+**腳手架已備（GH-690 後續 PR）**：`scripts/spikes/lane-privilege/` 放有一套
+fail-closed 的 spike 腳手架——無密鑰的 metadata preflight 與 fail-closed action
+分離、負向測試只做 open/dispose 不讀內容、push 只允許精確的 `spike/` 分支、
+principal 取自處理序 token 偽造不了、token 解析只做真實或明確不支援。
+其 fixture 測試（no-op preflight 與拒絕分支）已驗證；**受限帳號的正負向實測
+仍未執行（NOT RUN）**——主機上沒有受限帳號，也沒有 GitHub App installation
+token 來源。腳手架的存在不是實測證據；該單的 doneWhen 仍然要求實測本身。
+（`PRIVILEGE_HANDOFF.md` 記錄操作者需提供的確切設定。）
+
 spike 的驗收條件（先驗證 FAIL 再實作）：
 
 - **負向測試必須先在今天的機器上 FAIL**——也就是說，現在跑它，
@@ -307,7 +334,10 @@ fleet.lane-privilege = node-brokered-least-privilege-lane-account
 
 - **GH-690** — 本文件的來源單；§1 的實測表出自其 issue body。
 - **GH-609** — 密碼學身分（誰寫的）；與本文件的關係見 §5。
-- **GH-685** / PR #686 — edda node；§7 是給它的設計稿的一節，待合併後併入。
+- **GH-685** / PR #686（已合併）— edda node；§7 是給它的設計稿的一節，
+  併入仍是後續編輯（§7.0 有對照表）。
+- **GH-609 的簽章提案**：`docs/architecture/actor-signing.md`（以行內碼引用；
+  該文件是另一張 PR 的提案稿，落地前刻意不留追蹤式連結以免斷鏈）。
 - **GH-669** — 撤銷可見性；T2 的可見性部分依賴它。
 - **GH-593** — claude OAuth 撤銷事件；T2 的實證來源。
 - **GH-646** — store 污染；T3 的實證來源，由 §6.4 結構性解決。
