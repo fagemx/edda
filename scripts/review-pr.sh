@@ -747,6 +747,67 @@ if [ -z "$ISSUES" ]; then
   echo "review-pr.sh: WARNING: PR #$PR links no issue — the brief carries NO doneWhen, so this review has no acceptance ceiling (issue #683). The brief states this; obtain the issue before trusting the verdict." >&2
 fi
 
+write_windows_launcher() {
+  TASK="edda-review-pr$PR-r$ROUND"
+  cat > "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" <<PS
+foreach (\$f in @("$LOGW", "$DONEW", "$DONEW.err")) { if (Test-Path \$f) { [System.IO.File]::Delete(\$f) } }
+Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue
+\$action = New-ScheduledTaskAction -Execute "$PWSH_EXE" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$LANE_FILE_ARG\`"" -WorkingDirectory '$WTW'
+# The dispatch timeout is handled inside the child lane. Scheduler must not
+# preempt its finally block before it publishes the terminal receipt and
+# unregisters itself.
+\$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+try {
+  Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited -ErrorAction Stop | Out-Null
+  try { Start-ScheduledTask -TaskName '$TASK' -ErrorAction Stop }
+  catch {
+    \$startFailure = \$_.Exception.Message
+    \$taskCleanup = 'failed; task start did not reach cleanup'
+    try {
+      Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction Stop
+      \$taskCleanup = 'unregistered'
+    } catch {
+      \$taskCleanup = "failed; \$(\$_.Exception.Message)"
+      \$_ | Out-File '$LOGW' -Append -Encoding utf8
+    }
+    "review-pr launcher: Start-ScheduledTask failed: \$startFailure" | Out-File '$LOGW' -Append -Encoding utf8
+    \$receiptTmp = "$DONEW.pending-\$PID"
+    try {
+      [System.IO.File]::WriteAllLines(\$receiptTmp, [string[]]@(
+        'TRANSPORT=not-started',
+        'TOOL_FLAGS=not-started',
+        'SESSION=$SID',
+        'SESSION_MODE=$SESSION_MODE',
+        'DISPATCH_EXIT=2',
+        'FINAL_EXIT=2',
+        'WORKTREE_CHECK=not-started',
+        'WORKTREE_CLEANUP=preserved; scheduler start failed',
+        "TASK_CLEANUP=\$taskCleanup",
+        'TERMINAL_RECEIPT=complete'
+      ), [System.Text.UTF8Encoding]::new(\$false))
+      Move-Item -LiteralPath \$receiptTmp -Destination '$DONEW' -Force
+    } catch {
+      \$_ | Out-File '$LOGW' -Append -Encoding utf8
+    }
+    throw
+  }
+} catch { throw }
+\$st = ""
+for (\$i = 0; \$i -lt 20; \$i++) {
+  Start-Sleep -Seconds 1
+  \$st = (Get-ScheduledTask -TaskName '$TASK').State
+  if (\$st -eq 'Running') { break }
+}
+\$info = Get-ScheduledTaskInfo -TaskName '$TASK'
+"task=$TASK state=\$st lastTaskResult=\$(\$info.LastTaskResult)"
+PS
+
+}
+
+if [ "$DRY" = "1" ] && [ "$IS_WIN" = "1" ]; then
+  write_windows_launcher
+fi
+
 if [ "$DRY" = "1" ]; then
   echo "dry-run: brief and launcher generated; nothing launched, no worktree, no scheduled task."
   exit 0
@@ -799,33 +860,7 @@ if [ "$IS_WIN" = "1" ]; then
   # empty/CP950 in the scheduled-task environment; the lane script generated
   # above sets them explicitly before dispatching.
   command -v pwsh >/dev/null 2>&1 || { echo "review-pr.sh: pwsh not found" >&2; exit 1; }
-  TASK="edda-review-pr$PR-r$ROUND"
-
-  cat > "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" <<PS
-foreach (\$f in @("$LOGW", "$DONEW", "$DONEW.err")) { if (Test-Path \$f) { [System.IO.File]::Delete(\$f) } }
-Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue
-\$action = New-ScheduledTaskAction -Execute "$PWSH_EXE" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$LANE_FILE_ARG\`"" -WorkingDirectory '$WTW'
-# The dispatch timeout is handled inside the child lane. Scheduler must not
-# preempt its finally block before it publishes the terminal receipt and
-# unregisters itself.
-\$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-try {
-  Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited -ErrorAction Stop | Out-Null
-  try { Start-ScheduledTask -TaskName '$TASK' -ErrorAction Stop }
-  catch {
-    Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue
-    throw
-  }
-} catch { throw }
-\$st = ""
-for (\$i = 0; \$i -lt 20; \$i++) {
-  Start-Sleep -Seconds 1
-  \$st = (Get-ScheduledTask -TaskName '$TASK').State
-  if (\$st -eq 'Running') { break }
-}
-\$info = Get-ScheduledTaskInfo -TaskName '$TASK'
-"task=$TASK state=\$st lastTaskResult=\$(\$info.LastTaskResult)"
-PS
+  write_windows_launcher
 
   REVIEW_MAY_BE_RUNNING=1
   out=$(pwsh -NoProfile -ExecutionPolicy Bypass -File "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" 2>&1); rc=$?
