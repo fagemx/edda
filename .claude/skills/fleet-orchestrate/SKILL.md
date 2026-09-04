@@ -39,12 +39,15 @@ when changing or validating review policy.
 6. Record tasks, claims, rulings, and acceptance criteria in the durable truth
    layer before ringing host messaging as a doorbell.
 7. Gate every cross-machine dispatch mechanically (GH-656): before a lane
-   starts an issue, its claim goes through exactly one writer — either
+   starts an issue, its claim is written by exactly one command —
    `scripts/fleet-claim-issue.sh <issue> <machine>/<role>` (e.g.
-   `4090/worker-1`, `docs/reviewer`) or
-   `edda dispatch --issue <N> --machine <machine>/<role>`, which runs the
-   same check and refuses with exit 2. The token is an explicit
-   `<machine>/<role>` value from the brief, never a hostname guess.
+   `4090/worker-1`, `docs/reviewer`), which leaves the `taking:` comment
+   and `lane:*` label. `edda dispatch --issue <N> --machine
+   <machine>/<role>` is only a pre-spawn check: it refuses with exit 2 if
+   another machine already holds the issue, but until #782 lands it
+   writes no claim and does not substitute for the script. The token is
+   an explicit `<machine>/<role>` value from the brief, never a hostname
+   guess.
 8. Give self-contained briefs (including assigned build lane, verification
    budget, and cleanup authority), monitor compressed state, adjudicate
    conflicts, and close only against immutable full SHAs with proportional
