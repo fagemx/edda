@@ -1,0 +1,35 @@
+{
+  "acks": [],
+  "claims": [],
+  "requests": [],
+  "sessions": [
+    {
+      "age_secs": 1,
+      "branch": null,
+      "claimed_paths": [],
+      "current_phase": null,
+      "files_modified_count": 0,
+      "focus_files": [],
+      "label": "",
+      "last_heartbeat": "2026-09-04T08:05:24.2304736Z",
+      "recent_commits": [],
+      "session_id": "gh710-a",
+      "stale": false,
+      "task_subjects": []
+    },
+    {
+      "age_secs": 3,
+      "branch": null,
+      "claimed_paths": [],
+      "current_phase": null,
+      "files_modified_count": 0,
+      "focus_files": [],
+      "label": "changed-peer",
+      "last_heartbeat": "2026-09-04T08:05:22.8402576Z",
+      "recent_commits": [],
+      "session_id": "gh710-b",
+      "stale": false,
+      "task_subjects": []
+    }
+  ]
+}
