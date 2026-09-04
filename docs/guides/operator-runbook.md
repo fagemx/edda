@@ -24,10 +24,11 @@
    git status                              # 乾淨、on branch main
    git rev-list --count HEAD..origin/main  # 0 = 沒落後
    ```
-2. **接單**：`sh scripts/fleet-claim-issue.sh <N> <machine>/<role>`（例如 `4090/worker-1`、`docs/reviewer`）——
-   認領寫入只有這一個指令，它留 `taking:` 留言＋`lane:<machine>` 標籤；不手寫 lease 留言
-   （決策 `fleet.cross-machine-claim`、#783）。過渡步（#782 併入前保留；併入後刪除）：script exit 0 後跑
-   `gh issue edit <N> --add-label fleet:claimed --remove-label fleet:ready --add-assignee @me`——腳本目前不翻這兩個標籤。
+2. **接單**：手動認領用 `sh scripts/fleet-claim-issue.sh <N> <machine>/<role>`（例如
+   `4090/worker-1`、`docs/reviewer`）；`edda dispatch --issue <N> --machine <machine>/<role>`
+   也會在派發前做同一套認領。兩者都先查 PR 與完整 `taking:` 身分，再留 `taking:` 留言、加
+   `fleet:claimed`、移除 `fleet:ready`、指派 `@me`；不要另寫 lease 留言或另跑 `gh issue edit`。
+   `lane:*` 只供路由，不是認領憑證（#782）。
 3. **派 lane**（開 worktree 後）：
    ```bash
    pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> -Cwd <worktree>
