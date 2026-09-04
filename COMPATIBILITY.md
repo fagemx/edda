@@ -39,7 +39,7 @@ store version**:
   stability is governed by the v1 event spec (#608), not by this page.
 - Decide-snapshot rows additionally carry a per-row
   `"schema_version": "snapshot.v1"` string
-  (`crates/edda-ledger/src/sqlite_store/schema.rs:151`); it identifies the
+  (`crates/edda-ledger/src/sqlite_store/schema.rs:152`); it identifies the
   snapshot shape, not the ledger.
 
 ### 1.2 The policy
