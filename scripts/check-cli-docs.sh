@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# check-cli-docs.sh — machine-detectable coverage check for docs/reference/cli.md (GH-650).
+# check-cli-docs.sh — machine-detectable coverage check for docs/reference/cli.md (GH-650, GH-795).
 #
 # Every verb the built `edda` binary exposes must be documented in
 # docs/reference/cli.md, either as a `### edda <verb>` section or as a row in
-# the "Internal / experimental" table. Without this check the doc silently
-# falls behind the CLI surface (it stopped at 0.2 while the binary reached 0.4).
+# the "Internal / experimental" table. Furthermore, every long flag for a
+# documented verb must be documented in its section (GH-795), unless exempt in
+# scripts/cli-docs-ignore.txt.
 #
 # Exit codes:
-#   0 — every verb is documented
-#   1 — at least one verb is undocumented, or the documented version does not
-#       match the binary (each problem printed on stderr)
+#   0 — every verb and flag is documented
+#   1 — at least one verb or flag is undocumented, or the documented version
+#       does not match the binary (each problem printed on stderr)
 #   2 — the edda binary could not be found (build it, install it on PATH, or
 #       set EDDA_BIN)
 #
@@ -18,6 +19,7 @@
 set -u
 
 DOC="docs/reference/cli.md"
+IGNORE_FILE="scripts/cli-docs-ignore.txt"
 
 # Binary resolution order: explicit EDDA_BIN override, then target/debug/edda
 # (a local build), then `edda` on PATH. CI always sets EDDA_BIN to the freshly
@@ -71,10 +73,26 @@ internal=$(awk '
   }
 ' "$DOC")
 
+# Load grandfathered flag exclusions (GH-795)
+ignored_flags=""
+if [ -f "$IGNORE_FILE" ]; then
+  ignored_flags=$(awk '
+    $0 ~ /^[ \t]*#/ { next }
+    NF < 2 { next }
+    {
+      v = $1
+      f = $2
+      if (f !~ /^--/) f = "--" f
+      print v " " f
+    }
+  ' "$IGNORE_FILE")
+fi
+
 # The doc must state the version it was derived from, matching the binary.
 # Doc convention: a line `> Documented for edda <major.minor>` near the top.
 fail=0
 missing=""
+missing_flags=""
 bin_version=$("$EDDA_BIN" --version | awk '{ print $2 }')
 bin_mm=${bin_version%.*}
 if ! grep -qE "^> Documented for edda ${bin_mm//./\\.}\b" "$DOC"; then
@@ -83,7 +101,47 @@ if ! grep -qE "^> Documented for edda ${bin_mm//./\\.}\b" "$DOC"; then
 fi
 
 for verb in $verbs; do
-  if grep -qx "$verb" <<<"$sections" || grep -qx "$verb" <<<"$internal"; then
+  if grep -qx "$verb" <<<"$sections"; then
+    # For verbs documented as full sections, verify that each exposed long flag is mentioned (GH-795).
+    flags=$("$EDDA_BIN" "$verb" --help 2>/dev/null | awk '
+      /^Options:/ { in_opt = 1; next }
+      in_opt && /^[A-Z][a-zA-Z ]*:/ { in_opt = 0 }
+      in_opt {
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ /^--[a-z0-9-]+$/ && $i !~ /^--(help|version)$/) {
+            print $i
+          }
+        }
+      }
+    ' | sort -u)
+
+    if [ -n "$flags" ]; then
+      sec=$(awk -v verb="$verb" '
+        BEGIN { in_sec = 0 }
+        $0 ~ "^#[#]+[[:space:]]*`?edda[[:space:]]+`?" verb "`?[[:space:]]*$" {
+          in_sec = 1
+          next
+        }
+        in_sec && /^#{1,3} / {
+          in_sec = 0
+        }
+        in_sec {
+          print
+        }
+      ' "$DOC")
+
+      for flag in $flags; do
+        if [ -n "$ignored_flags" ] && grep -qx "${verb} ${flag}" <<<"$ignored_flags"; then
+          continue
+        fi
+        if ! grep -F -q -- "$flag" <<<"$sec"; then
+          echo "error: undocumented flag for '$verb': $flag" >&2
+          missing_flags="$missing_flags ${verb}:${flag}"
+          fail=1
+        fi
+      done
+    fi
+  elif grep -qx "$verb" <<<"$internal"; then
     :
   else
     missing="$missing $verb"
@@ -93,12 +151,15 @@ for verb in $verbs; do
 done
 
 if [ "$fail" -ne 0 ]; then
+  msg="check-cli-docs: FAIL"
   if [ -n "$missing" ]; then
-    echo "check-cli-docs: FAIL —$missing" >&2
-  else
-    echo "check-cli-docs: FAIL" >&2
+    msg="$msg — missing verbs:$missing"
   fi
+  if [ -n "$missing_flags" ]; then
+    msg="$msg — missing flags:$missing_flags"
+  fi
+  echo "$msg" >&2
   exit 1
 fi
 
-echo "check-cli-docs: OK — all $(printf '%s\n' "$verbs" | wc -l) verbs documented in $DOC"
+echo "check-cli-docs: OK — all $(printf '%s\n' "$verbs" | wc -l) verbs and flags documented in $DOC"
