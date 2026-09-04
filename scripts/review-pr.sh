@@ -486,8 +486,6 @@ if [ "$IS_WIN" = "1" ]; then
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 \$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 \$env:HOME = \$env:USERPROFILE
-Set-Location '$WTW'
-. '$CAPSW'
 # The .done file is a terminal receipt, not a progress log. Build it only in
 # finally and rename it once source proof, worktree removal, and this task's
 # self-unregister have all finished. A failed/partial publish intentionally
@@ -528,6 +526,8 @@ function Get-ReviewWorktreeSnapshot {
   return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData(\$bytes)).ToLowerInvariant()
 }
 try {
+  Set-Location '$WTW'
+  . '$CAPSW'
   \$beforeStatus = (& git status --porcelain=v1 --untracked-files=all) -join "\n"
   if (\$LASTEXITCODE -eq 0) { \$beforeSnapshot = Get-ReviewWorktreeSnapshot; \$sourceReady = \$true }
   else { throw 'git status unavailable before dispatch' }
@@ -809,8 +809,14 @@ Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction Silentl
 # preempt its finally block before it publishes the terminal receipt and
 # unregisters itself.
 \$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited | Out-Null
-Start-ScheduledTask -TaskName '$TASK'
+try {
+  Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited -ErrorAction Stop | Out-Null
+  try { Start-ScheduledTask -TaskName '$TASK' -ErrorAction Stop }
+  catch {
+    Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue
+    throw
+  }
+} catch { throw }
 \$st = ""
 for (\$i = 0; \$i -lt 20; \$i++) {
   Start-Sleep -Seconds 1
