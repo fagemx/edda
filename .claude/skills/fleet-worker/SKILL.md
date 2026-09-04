@@ -28,12 +28,13 @@ description: Use when running one lane of the Fleet execution loop — pick a si
 5. **驗證**：跑單上的 verify 指令，範圍照正典的驗證階梯（迭代時只跑觸及的 crate；全套留給凍結的 SHA）。
 6. **開 PR**：`gh pr create --title "<單標題>" --body "closes #<n>\n\n<測試輸出證據>"`。body 必須含自報接線表——填 `REVIEW.md` §5.5 定義的必填槽；本 skill 不重述其表格與判定規則。回到步驟 1。
 
-## 四禁（違反即停）
+## 五禁（違反即停）
 
 1. 不改 CI 設定（`.github/workflows/`）。
 2. 不直推 main。
 3. **不 merge 自己的 PR**（GATE-01：executor 不能自己過閘；merge 是操作者的驗收動作）。
 4. 不碰他人 claimed 的單（除非該單 lease 已超時 4 小時且 PR 無 push）。
+5. **不過審查閘（gate ownership）**：executor 不啟動或指示自己的審查者。不在自己的 PR 寫入 `Independent Review` commit status（或任何 status）。不執行 merge（無論是否帶 `--admin`）。工作於「PR 開立、Review Response 貼出」即結束；審查閘權限歸審查隊列與正典（`REVIEW.md`）所有。
 
 ## 卡住時（剎車）
 
