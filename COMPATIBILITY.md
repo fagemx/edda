@@ -97,7 +97,7 @@ is what "additive" means for them).
 
 One JSON object with exactly these keys (emitted at
 `crates/edda-cli/src/cmd_dispatch.rs#pub fn to_json(&self) -> String {`; mirrored in the long help,
-`crates/edda-cli/src/main.rs:492-497#With --json, exactly one object is printed to stdout:`):
+`crates/edda-cli/src/main.rs:480-485#With --json, exactly one object is printed to stdout:`):
 
 | Key | Type | Notes |
 |---|---|---|
@@ -179,7 +179,7 @@ Golden fixtures: `crates/edda-mcp/src/lib.rs` →
 
 One JSON object with exactly these keys (emitted at
 `crates/edda-cli/src/cmd_status.rs:18-29#let payload = serde_json::json!({`; flag declared at
-`crates/edda-cli/src/main.rs:290-295#Status {`, dispatched at `crates/edda-cli/src/main.rs#Command::Status { json } =>`):
+`crates/edda-cli/src/main.rs:278-283#Status {`, dispatched at `crates/edda-cli/src/main.rs#Command::Status { json } =>`):
 
 | Key | Type | Notes |
 |---|---|---|
@@ -201,7 +201,7 @@ it, `edda status` produces the same exit code and the same stderr in every
 state (measured). Success is exit `0` with the object on stdout. Failures do
 not emit JSON — a newer ledger schema exits `2` (§1.2), and every other
 failure (no `.edda/`, unreadable database) takes the CLI's shared error path
-and exits `1` (`crates/edda-cli/src/main.rs:1110-1117#if let Err(err) = run(cli) {`).
+and exits `1` (`crates/edda-cli/src/main.rs:1091-1098#if let Err(err) = run(cli) {`).
 
 That last row differs from `edda verify --json`, which answers `2` to the
 same questions. The split is pre-existing and outside #730, but it is

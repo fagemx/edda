@@ -272,17 +272,22 @@ fn print_phase_map(map: &AgentPhaseMap, current_session: Option<&str>) {
     println!("Summary: {}", map.summary);
 }
 
-/// Infer session ID from active heartbeats (same as other bridge commands).
+/// Infer session ID from heartbeats, through the ONE shared liveness
+/// criterion (`peers::infer_session_id`, GH-705).
+///
+/// The private copy this replaced counted every heartbeat file it found —
+/// dead sessions included — so a single expired session sitting next to a
+/// live one made the project read as ambiguous and inferred nothing (GH-780).
+/// The `EDDA_SESSION_ID` fallback is kept: it is what still names you when
+/// two sessions really are live.
 fn infer_session_id(project_id: &str) -> Option<String> {
-    let peers = edda_bridge_claude::peers::discover_all_sessions(project_id);
-    // If only one session, that's us
-    if peers.len() == 1 {
-        return Some(peers[0].session_id.clone());
-    }
-    // Otherwise, check env var
-    std::env::var("EDDA_SESSION_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
+    edda_bridge_claude::peers::infer_session_id(project_id)
+        .map(|(session_id, _label)| session_id)
+        .or_else(|| {
+            std::env::var("EDDA_SESSION_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
 }
 
 #[cfg(test)]
@@ -295,6 +300,31 @@ mod tests {
         let map = AgentPhaseMap::from_agents(vec![], vec![]);
         // Should not panic
         print_phase_map(&map, None);
+    }
+
+    #[test]
+    fn infer_session_id_uses_the_shared_liveness_criterion() {
+        // GH-780 finding 2, second site: `cmd_phase` kept a private
+        // `infer_session_id` that counts every discovered heartbeat, dead ones
+        // included, and only then falls back to `EDDA_SESSION_ID`. So one dead
+        // session sitting next to one live parented sub-agent makes it read as
+        // ambiguous and infer nothing, while
+        // `peers::discovery::infer_session_id` — moved onto the shared
+        // criterion by GH-705 — filters the dead one out and names the
+        // sub-agent.
+        let _store = crate::test_support::isolated_store();
+        let pid = "test_gh780_phase_infer";
+        let stale = edda_bridge_claude::peers::stale_secs();
+        // Long dead, and not a sub-agent: the shared criterion drops it.
+        crate::test_support::write_aged_heartbeat(pid, "dead-1", stale * 10, None);
+        // Quiet but parented, so inside the 15x window: live.
+        crate::test_support::write_aged_heartbeat(pid, "sub-agent-3", stale * 3, Some("parent-3"));
+
+        assert_eq!(
+            infer_session_id(pid).as_deref(),
+            Some("sub-agent-3"),
+            "exactly one session is live under the shared criterion, so it is inferable"
+        );
     }
 
     #[test]

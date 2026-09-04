@@ -901,7 +901,7 @@ documented surface cannot silently drift from the binary;
 | `unclaim` | Release this session's coordination scope | Counterpart of `edda claim`; hooks and reconciliation release scopes, so manual use is rarely needed |
 | `coord` | Show coordination state | Shortcut for `bridge claude render-coordination`; rendering plumbing meant for hooks |
 | `setup` | Setup a bridge integration | Shortcut for `bridge <platform> install`; use `edda init` or `edda bridge` instead |
-| `recap` | Chronicle synthesis — cognitive zoom across sessions | Experimental; output shape may change |
+| `recap` | Chronicle synthesis — cognitive zoom across sessions; --digest prints the deterministic operator digest (exceptions, cost, ready tasks) for the last window | Experimental; output shape may change |
 | `export` | Export the ledger as human-readable Markdown (read-only projection; SQLite stays authoritative) | A convenience projection; automation should query the ledger or `edda log`, not parse exports |
 | `hook` | Hook entrypoint (called by supported coding-agent hooks) | Internal: expects a hook payload on stdin; hand-invocation writes events with wrong attribution |
 | `intake` | Task intake — ingest external tasks into the ledger | Experimental ingest surface |
@@ -910,7 +910,7 @@ documented surface cannot silently drift from the binary;
 | `bundle` | Create and manage review bundles for rapid approval | Deprecated; use `edda review` |
 | `brief` | View task engineering briefs (materialized from ledger events) | Read-only viewer normally consumed via `edda task` workflows |
 | `policy` | Approval policy management (show, check, init) | Changes gate semantics; edit policy deliberately, not ad hoc |
-| `notify` | Push notification management | Plumbing for other verbs; needs a configured channel |
+| `notify` | Push notification management; notify send --title --file pushes free text as event "digest" | Plumbing for other verbs; needs a configured channel |
 | `pair` | Device pairing and token management | Security-sensitive: tokens grant access; manage from the pairing device |
 | `serve` | Start HTTP API server | Long-running process; run it as a managed service, not ad hoc in a shell |
 | `user` | User-level aggregation (cross-repo queries, rollup, config) | Experimental cross-project surface |

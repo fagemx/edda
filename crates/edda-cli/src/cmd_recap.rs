@@ -1,4 +1,5 @@
 use chrono::Utc;
+use clap::Args;
 use edda_chronicle::{
     get_attention_items, resolve_anchor, save_state, synthesize_recap, Anchor, LastRecap,
     RecapOptions, RecapState, SynthesisInput,
@@ -8,22 +9,48 @@ use edda_ledger::Ledger;
 use edda_store::{project_dir, project_id, store_root};
 use std::path::Path;
 
-pub fn execute(
-    repo_root: &Path,
-    query: Option<&str>,
-    project: Option<&str>,
-    week: bool,
-    since: Option<&str>,
-    all: bool,
-    json: bool,
-) -> anyhow::Result<()> {
+use crate::cmd_recap_digest;
+
+/// `edda recap` flags (flattened into the CLI enum).
+#[derive(Args, Debug)]
+pub struct RecapArgs {
+    /// Topic query (e.g. "auth", "postgres")
+    pub query: Option<String>,
+    /// Project name filter
+    #[arg(long)]
+    pub project: Option<String>,
+    /// Time filter: last week
+    #[arg(long)]
+    pub week: bool,
+    /// Time filter: since date (ISO 8601)
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Cross-repo: all projects
+    #[arg(long)]
+    pub all: bool,
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+    /// Operator digest: deterministic ledger sections (exceptions, cost, ready tasks); default window 24h; no LLM, writes nothing
+    #[arg(long, conflicts_with_all = ["json", "week", "all", "query"])]
+    pub digest: bool,
+}
+
+pub fn execute(repo_root: &Path, args: &RecapArgs) -> anyhow::Result<()> {
+    // GH-765: the operator digest is a deterministic, offline ledger
+    // projection — it must not touch the LLM path below, read
+    // EDDA_LLM_API_KEY, or write chronicle state.
+    if args.digest {
+        return cmd_recap_digest::execute(repo_root, args.since.as_deref());
+    }
+
     let opts = RecapOptions {
-        query: query.map(|s| s.to_string()),
-        project: project.map(|s| s.to_string()),
-        week,
-        since: since.map(|s| s.to_string()),
-        all,
-        json,
+        query: args.query.clone(),
+        project: args.project.clone(),
+        week: args.week,
+        since: args.since.clone(),
+        all: args.all,
+        json: args.json,
     };
 
     let anchor = Anchor::from_options(&opts);
@@ -97,7 +124,7 @@ pub fn execute(
     save_state(&edda_root, &state)?;
 
     // Output
-    if json {
+    if args.json {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else {
         print_human(&output);

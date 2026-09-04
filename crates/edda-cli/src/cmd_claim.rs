@@ -61,6 +61,14 @@ pub struct StaleClaim {
     pub age_secs: Option<u64>,
 }
 
+/// A bare-CLI claim standing outside the queried surface (GH-780).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct StandingBareClaim {
+    pub label: String,
+    pub session_id: String,
+    pub paths: Vec<String>,
+}
+
 /// Machine-readable result of a claim check (`--json`).
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
 pub struct CheckReport {
@@ -82,6 +90,9 @@ pub struct CheckReport {
     /// for death visibility — never counted toward the exit code.
     #[serde(default)]
     pub stale_claims: Vec<StaleClaim>,
+    /// Bare CLI claims outside the query are visible but never conflicts.
+    #[serde(default)]
+    pub standing_bare_claims: Vec<StandingBareClaim>,
 }
 
 /// `edda claim check <paths|globs>...` — read-only conflict query.
@@ -168,11 +179,25 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
             std::process::exit(2);
         }
     };
+    let standing_bare_claims = unjudgeable
+        .iter()
+        .filter(|claim| {
+            !unjudgeable_conflicts
+                .iter()
+                .any(|hit| hit.session_id == claim.session_id)
+        })
+        .map(|claim| StandingBareClaim {
+            label: claim.label.clone(),
+            session_id: claim.session_id.clone(),
+            paths: claim.paths.clone(),
+        })
+        .collect();
 
     let report = CheckReport {
         conflicts: report.conflicts,
         unjudgeable_claims: unjudgeable_conflicts,
         stale_claims,
+        standing_bare_claims,
     };
 
     if json {
@@ -188,6 +213,7 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
                 query.len()
             );
             print_stale_claims(&report.stale_claims);
+            print_standing_bare_claims(&report.standing_bare_claims);
         }
     } else {
         for conflict in &report.conflicts {
@@ -215,6 +241,7 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
             query.len()
         );
         print_stale_claims(&report.stale_claims);
+        print_standing_bare_claims(&report.standing_bare_claims);
     }
 
     if exit_code_for(&report) != 0 {
@@ -246,6 +273,24 @@ fn exit_code_for(report: &CheckReport) -> i32 {
 /// actor of a `cli-*` session.
 fn is_bare_cli_session(session_id: &str) -> bool {
     session_id.starts_with("cli-")
+}
+
+fn print_standing_bare_claims(standing: &[StandingBareClaim]) {
+    if standing.is_empty() {
+        return;
+    }
+    println!(
+        "note: {} bare-CLI claim(s) standing on the board outside the queried surface, not counted (--json lists them).",
+        standing.len()
+    );
+    for claim in standing {
+        eprintln!(
+            "  standing, not counted: claim \"{}\" (session {}) — occupies {}",
+            claim.label,
+            claim.session_id,
+            claim.paths.join(", ")
+        );
+    }
 }
 
 /// Death visibility (GH-617): reveal how many stale claims the liveness
@@ -421,6 +466,7 @@ pub fn check(
         conflicts: intersecting_claims(claims, query)?,
         unjudgeable_claims: Vec::new(),
         stale_claims: Vec::new(),
+        standing_bare_claims: Vec::new(),
     })
 }
 
@@ -1678,6 +1724,7 @@ mod tests {
                 session_id: "dead".into(),
                 age_secs: None,
             }],
+            standing_bare_claims: vec![],
         };
         // Stale claims never affect the exit code (GH-617).
         assert_eq!(exit_code_for(&conflict), 1);

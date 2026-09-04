@@ -70,6 +70,8 @@ pub fn discover_active_peers(project_id: &str, current_session_id: &str) -> Vec<
             session_id: hb.session_id,
             label: hb.label,
             age_secs: age,
+            // Everything reaching this point passed the criterion above.
+            is_live: true,
             last_heartbeat: hb.last_heartbeat,
             focus_files: hb.focus_files,
             task_subjects,
@@ -117,6 +119,11 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
 
         let hb_epoch = parse_rfc3339_to_epoch(&hb.last_heartbeat).unwrap_or(0);
         let age = now.saturating_sub(hb_epoch);
+        // Unlike `discover_active_peers` this function deliberately returns
+        // dead sessions as well, so it owes every caller the criterion's
+        // verdict rather than leaving each to re-derive one from `age_secs`
+        // (GH-780).
+        let is_live = liveness_from_heartbeat(&hb, now).is_live();
 
         let matching_claim = board.claims.iter().find(|c| c.session_id == hb.session_id);
         let claimed_paths = matching_claim.map(|c| c.paths.clone()).unwrap_or_default();
@@ -134,6 +141,7 @@ pub fn discover_all_sessions(project_id: &str) -> Vec<PeerSummary> {
             session_id: hb.session_id,
             label: hb.label,
             age_secs: age,
+            is_live,
             last_heartbeat: hb.last_heartbeat,
             focus_files: hb.focus_files,
             task_subjects,

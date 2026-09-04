@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn background_request_uses_default_model_without_override() {
+    let model = edda_core::background_model::resolve_background_model(None);
+    let request = background_request(&model, "prompt");
+    assert_eq!(
+        request.model,
+        edda_core::background_model::DEFAULT_BACKGROUND_MODEL
+    );
+    assert_eq!(DEFAULT_MODEL, request.model);
+}
+
+#[test]
+fn background_request_uses_override_as_outgoing_model() {
+    let model = edda_core::background_model::resolve_background_model(Some("claude-test-model"));
+    let request = background_request(&model, "prompt");
+    assert_eq!(request.model, "claude-test-model");
+}
+
+#[test]
+fn background_cost_matches_haiku_4_5_standard_token_rates() {
+    assert_eq!(background_cost_usd(500_000, 100_000), 1.0);
+}
+
+#[test]
 fn test_parse_llm_output_valid_json() {
     let _store = crate::isolated_store();
     let input = r#"[
