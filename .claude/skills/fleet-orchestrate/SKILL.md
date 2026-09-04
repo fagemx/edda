@@ -70,11 +70,15 @@ Run it verbatim:
 
 1. **Query candidates** — the machine check is the filter of record (GH-665);
    never a raw label listing as the only filter. The second query adds
-   routing fields:
+   routing fields; the third reads each candidate in full — the body and
+   comments carry the predicted write surface, `blocked-by` edges, and other
+   machines' `taking:` claims, so the rules below are applied from fetched
+   data, never from titles alone:
 
    ```bash
    sh scripts/fleet/ready-queue-lint.sh    # pickable ready issues, oldest first
-   gh issue list --label fleet:ready --state open --json number,title,createdAt,labels,comments,body
+   gh issue list --label fleet:ready --state open --json number,title,createdAt,labels
+   gh issue view <n> --json body,comments,labels,title,createdAt   # per candidate <n>
    ```
 
 2. **Exclude**, recording each issue's reason for the output table:
@@ -82,9 +86,11 @@ Run it verbatim:
      label naming a different workstation (`fleet.cross-machine-claim`). The
      same workstation (`docs` vs `docs/pipeline`) is **not** "another
      machine".
-   - (b) already in flight: an open PR
-     (`gh pr list --state open --search "<n>"`), **or** a remote branch
-     (`git ls-remote --heads origin "*gh<n>*" "*<n>*"`) — pushed-but-unopened
+   - (b) already in flight: an open PR — list open `headRefName`s
+     (`gh pr list --state open --json headRefName`) and treat any branch
+     name containing `gh<n>` as in flight (the repo's convention is
+     `<type>/gh<n>-…`; a `head:gh<n>` search misses it) — **or** a remote
+     branch (`git ls-remote --heads origin "*gh<n>*"`) — pushed-but-unopened
      branches are invisible to `gh pr list`.
    - (c) labeled `needs-operator`.
 
