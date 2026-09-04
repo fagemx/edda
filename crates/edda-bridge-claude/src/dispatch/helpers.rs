@@ -20,7 +20,7 @@ const PLAN_EXCERPT_MAX_LINES: usize = 30;
 pub(crate) fn render_active_plan(project_id: Option<&str>) -> Option<String> {
     let plans_dir = match std::env::var("EDDA_PLANS_DIR") {
         Ok(dir) => PathBuf::from(dir),
-        Err(_) => dirs::home_dir()?.join(".claude").join("plans"),
+        Err(_) => edda_core::paths::home_dir()?.join(".claude").join("plans"),
     };
     render_active_plan_from_dir(&plans_dir, project_id)
 }

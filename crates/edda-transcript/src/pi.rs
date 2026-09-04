@@ -53,7 +53,7 @@ pub fn pi_session_dir_for_cwd(cwd: &Path) -> Option<PathBuf> {
         }
     }
     safe.push_str("--");
-    let home = dirs::home_dir()?;
+    let home = edda_core::paths::home_dir()?;
     Some(home.join(".pi").join("agent").join("sessions").join(safe))
 }
 
