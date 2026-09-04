@@ -64,6 +64,14 @@ staged_z=$(mktemp)
 ratchet_violations=$(mktemp)
 trap 'rm -f "$staged_z" "$ratchet_violations"' EXIT
 git diff --cached --raw -z --no-renames --diff-filter=ACMR >"$staged_z"
+# Check the whole index, including source-only modifications and deletions.
+# Run before the ACMR early return: deleting a cited file must also be gated.
+lint_doc_citations=$(cd "$(dirname "$0")" && pwd)/../lint-doc-citations.sh
+echo "pre-commit: bash scripts/lint-doc-citations.sh --staged"
+bash "$lint_doc_citations" --staged || {
+    echo "pre-commit: documentation citation lint failed" >&2
+    exit 1
+}
 [ -s "$staged_z" ] || exit 0
 
 fail() {

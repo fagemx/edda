@@ -103,6 +103,11 @@ jobs:
         run: bash scripts/lint-file-length.sh --tree
       - name: Lint Markdown content
         run: sh scripts/lint-markdown-content.sh
+      - name: Lint documentation citations (GH-794)
+        run: |
+          bash -n scripts/lint-doc-citations.sh scripts/test-doc-citations.sh
+          bash scripts/lint-doc-citations.sh --tree
+          bash scripts/test-doc-citations.sh
       - name: Verify installer latest-version stdout
         shell: bash
         run: |
