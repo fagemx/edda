@@ -100,10 +100,9 @@ function Get-FleetTaskByName([string]$TaskName) {
   }
   return $null
 }
-$script:exportCount = 0
+$script:replacementActive = $false
 function Export-ScheduledTask { [CmdletBinding()] param([string]$TaskName, [string]$TaskPath)
-  $script:exportCount++
-  if ($script:exportCount -gt 1 -and $fx.PSObject.Properties['recheckIdentity']) { return [string]$fx.recheckIdentity }
+  if ($script:replacementActive -and $fx.PSObject.Properties['recheckIdentity']) { return [string]$fx.recheckIdentity }
   if ($fx.PSObject.Properties['identity']) { return [string]$fx.identity }
   return "fixture:$TaskName"
 }
@@ -112,6 +111,7 @@ function Remove-FleetTaskRegistration([string]$TaskName) {
   $script:unregistered.Add($TaskName)
 }
 function Invoke-FleetGh([string]$Kind, [int]$Number, [string]$Repo) {
+  if ($fx.PSObject.Properties['mutateDuringGh'] -and $fx.mutateDuringGh) { $script:replacementActive = $true }
   $key = "${Kind}:${Number}"
   $entry = $fx.gh.PSObject.Properties[$key]
   if (-not $entry) { return @{ Ok = $false; Error = "fixture missing for $key" } }
@@ -370,6 +370,7 @@ try {
     recheckTask = @{ taskName = 'edda-lane-race'; state = 'Ready'; actionArguments = "-File `"$wGh772`"" }
     identity = 'original-registration-xml'
     recheckIdentity = 'replacement-registration-xml'
+    mutateDuringGh = $true
     gh = @{ 'issue:772' = @{ state = 'CLOSED' } }
     processes = @{}
   } $true '' $logDir

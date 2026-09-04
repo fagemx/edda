@@ -401,6 +401,9 @@ function Invoke-LaneReap {
 
   foreach ($t in $candidates) {
     $tn = [string]$t.TaskName
+    # Capture identity before any gh/process work.  Those reads are the race
+    # window in which a same-name registration can be replaced.
+    $initialIdentity = Get-FleetTaskIdentity $t
     $assoc = Get-FleetTaskAssociation -Task $t -LogDir $LogDir
 
     foreach ($err in $assoc.Errors) {
@@ -486,13 +489,12 @@ function Invoke-LaneReap {
           $rows.Add((New-LaneReapRow @{ row = 'action'; task = $tn; verb = 'unregister'; mode = 'apply'; result = 'skipped-race'; detail = 'registration became Running at apply time' }))
           continue
         }
-        $originalIdentity = Get-FleetTaskIdentity $t
         $currentIdentity = Get-FleetTaskIdentity $current
-        if (-not $originalIdentity -or -not $currentIdentity) {
+        if (-not $initialIdentity -or -not $currentIdentity) {
           $rows.Add((New-LaneReapRow @{ row = 'action'; task = $tn; verb = 'unregister'; mode = 'apply'; result = 'skipped-race'; detail = 'registration identity unavailable at apply time' }))
           continue
         }
-        if ($currentIdentity -ne $originalIdentity) {
+        if ($currentIdentity -ne $initialIdentity) {
           $rows.Add((New-LaneReapRow @{ row = 'action'; task = $tn; verb = 'unregister'; mode = 'apply'; result = 'skipped-race'; detail = 'registration identity changed at apply time' }))
           continue
         }
