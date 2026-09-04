@@ -64,6 +64,7 @@ uuid = { version = "1", features = ["v5"] }
 rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+agent-client-protocol = { version = "=0.10.4", features = ["unstable_session_usage"] }
 
 [workspace.lints.clippy]
 too_many_lines = "warn"
