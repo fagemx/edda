@@ -152,10 +152,10 @@ pub(crate) struct Usage {
 /// - Daily budget is exhausted
 /// - Session was already extracted (idempotent guard)
 pub fn should_run(project_id: &str, session_id: &str) -> bool {
-    if std::env::var("EDDA_BG_ENABLED").unwrap_or_else(|_| "1".into()) == "0" {
+    if crate::env_var("EDDA_BG_ENABLED").unwrap_or_else(|| "1".into()) == "0" {
         return false;
     }
-    if std::env::var("EDDA_LLM_API_KEY")
+    if crate::env_var("EDDA_LLM_API_KEY")
         .unwrap_or_default()
         .is_empty()
     {
@@ -179,7 +179,7 @@ pub fn should_run(project_id: &str, session_id: &str) -> bool {
 /// Reads the stored transcript, calls the LLM, saves draft decisions,
 /// updates extraction state and daily cost tracking.
 pub fn run_extraction(project_id: &str, session_id: &str) -> Result<()> {
-    let api_key = std::env::var("EDDA_LLM_API_KEY").with_context(|| "EDDA_LLM_API_KEY not set")?;
+    let api_key = crate::env_var("EDDA_LLM_API_KEY").with_context(|| "EDDA_LLM_API_KEY not set")?;
 
     if api_key.is_empty() {
         anyhow::bail!("EDDA_LLM_API_KEY is empty");
@@ -1016,6 +1016,7 @@ mod tests {
 
     #[test]
     fn test_parse_llm_output_valid_json() {
+        let _store = crate::isolated_store();
         let input = r#"[
             {
                 "key": "db.engine",
@@ -1047,6 +1048,7 @@ mod tests {
 
     #[test]
     fn test_parse_llm_output_markdown_wrapped() {
+        let _store = crate::isolated_store();
         let input = r#"Here are the decisions I found:
 
 ```json
@@ -1062,18 +1064,21 @@ That's it."#;
 
     #[test]
     fn test_parse_llm_output_empty_array() {
+        let _store = crate::isolated_store();
         let decisions = parse_llm_decisions("[]");
         assert!(decisions.is_empty());
     }
 
     #[test]
     fn test_parse_llm_output_garbage() {
+        let _store = crate::isolated_store();
         let decisions = parse_llm_decisions("I couldn't find any decisions.");
         assert!(decisions.is_empty());
     }
 
     #[test]
     fn test_parse_llm_output_missing_fields() {
+        let _store = crate::isolated_store();
         let input = r#"[{"key": "db", "value": "pg"}]"#;
         let decisions = parse_llm_decisions(input);
         assert_eq!(decisions.len(), 1);
@@ -1161,6 +1166,7 @@ That's it."#;
 
     #[test]
     fn test_build_extraction_prompt() {
+        let _store = crate::isolated_store();
         let prompt = build_extraction_prompt("test transcript", &[]);
         assert!(prompt.contains("決策提取器"));
         assert!(prompt.contains("test transcript"));
@@ -1171,12 +1177,14 @@ That's it."#;
 
     #[test]
     fn test_extract_text_from_content_string() {
+        let _store = crate::isolated_store();
         let content = serde_json::json!("hello world");
         assert_eq!(extract_text_from_content(&content), "hello world");
     }
 
     #[test]
     fn test_extract_text_from_content_blocks() {
+        let _store = crate::isolated_store();
         let content = serde_json::json!([
             {"type": "text", "text": "part 1"},
             {"type": "tool_use", "name": "grep"},
@@ -1272,6 +1280,7 @@ That's it."#;
 
     #[test]
     fn test_parse_enhancement_output() {
+        let _store = crate::isolated_store();
         let input = r#"[{
             "kind": "enhancement",
             "key": "db.engine",
@@ -1291,6 +1300,7 @@ That's it."#;
 
     #[test]
     fn test_parse_mixed_output() {
+        let _store = crate::isolated_store();
         let input = r#"[
             {
                 "kind": "extraction",
@@ -1321,6 +1331,7 @@ That's it."#;
 
     #[test]
     fn test_prompt_with_vague_decisions() {
+        let _store = crate::isolated_store();
         let vague = vec![
             RecordedDecision {
                 key: "db.engine".to_string(),
@@ -1343,6 +1354,7 @@ That's it."#;
 
     #[test]
     fn test_prompt_without_vague_decisions() {
+        let _store = crate::isolated_store();
         let prompt = build_extraction_prompt("test transcript", &[]);
         assert!(!prompt.contains("增強模糊"));
         assert!(!prompt.contains("enhancement"));

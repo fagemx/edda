@@ -59,9 +59,9 @@ pub(super) fn dispatch_pre_tool_use(
     }
 
     // ── Off-limits enforcement: block Edit/Write on peer-claimed files ──
-    let enforce_offlimits = match std::env::var("EDDA_ENFORCE_OFFLIMITS") {
-        Ok(val) => val == "1",
-        Err(_) => read_workspace_config_bool(cwd, "bridge.enforce_offlimits").unwrap_or(false),
+    let enforce_offlimits = match crate::env_var("EDDA_ENFORCE_OFFLIMITS") {
+        Some(val) => val == "1",
+        None => read_workspace_config_bool(cwd, "bridge.enforce_offlimits").unwrap_or(false),
     };
     if enforce_offlimits {
         let tool_name_ol = get_str(raw, "tool_name");
@@ -93,7 +93,7 @@ pub(super) fn dispatch_pre_tool_use(
         }
     }
 
-    let auto_approve = std::env::var("EDDA_CLAUDE_AUTO_APPROVE").unwrap_or_else(|_| "1".into());
+    let auto_approve = crate::env_var("EDDA_CLAUDE_AUTO_APPROVE").unwrap_or_else(|| "1".into());
 
     // Pattern matching (only for Edit/Write)
     let pattern_ctx = match_tool_patterns(raw, cwd);
@@ -274,7 +274,7 @@ pub(super) fn evaluate_learned_rules(
     project_id: &str,
     cwd: &str,
 ) -> Option<String> {
-    if std::env::var("EDDA_POSTMORTEM").unwrap_or_else(|_| "1".into()) == "0" {
+    if crate::env_var("EDDA_POSTMORTEM").unwrap_or_else(|| "1".into()) == "0" {
         return None;
     }
 
@@ -569,9 +569,9 @@ pub(super) fn detect_git_branch_cached(cwd: &str) -> Option<String> {
 /// Check if patterns are enabled and match tool input against Pattern Store.
 pub(super) fn match_tool_patterns(raw: &serde_json::Value, cwd: &str) -> Option<String> {
     // Check if patterns feature is enabled
-    let enabled = match std::env::var("EDDA_PATTERNS_ENABLED") {
-        Ok(val) => val == "1",
-        Err(_) => read_workspace_config_bool(cwd, "patterns_enabled").unwrap_or(false),
+    let enabled = match crate::env_var("EDDA_PATTERNS_ENABLED") {
+        Some(val) => val == "1",
+        None => read_workspace_config_bool(cwd, "patterns_enabled").unwrap_or(false),
     };
     if !enabled {
         return None;

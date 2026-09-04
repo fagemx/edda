@@ -97,7 +97,7 @@ pub(super) fn scheduler_xml_utf16_bytes(xml: &str, little_endian: bool, bom: boo
 }
 
 pub(super) struct SchedulerManifestFixture {
-    _store_guard: crate::test_support::IsolatedStore,
+    _store_guard: edda_store::test_support::IsolatedStoreRoot,
     _root: tempfile::TempDir,
     store: PathBuf,
     repo: PathBuf,

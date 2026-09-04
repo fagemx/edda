@@ -145,12 +145,11 @@ pub fn increment_session_count(project_id: &str, session_id: &str) {
 /// Note: unlike bg_scan, this does NOT require `EDDA_LLM_API_KEY` because
 /// Layer 1 is purely deterministic.  The LLM key is only checked in Layer 2.
 pub fn should_run(project_id: &str) -> bool {
-    if std::env::var("EDDA_BG_ENABLED").unwrap_or_else(|_| "1".into()) == "0" {
+    if crate::env_var("EDDA_BG_ENABLED").unwrap_or_else(|| "1".into()) == "0" {
         return false;
     }
 
-    let interval = std::env::var("EDDA_DETECT_INTERVAL")
-        .ok()
+    let interval = crate::env_var("EDDA_DETECT_INTERVAL")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_DETECT_INTERVAL);
 
@@ -187,7 +186,7 @@ pub fn run_detect(project_id: &str, cwd: &str) -> Result<DetectResult> {
 
     if !raw_signals.is_empty() {
         // Try Layer 2 LLM correlation
-        let api_key = std::env::var("EDDA_LLM_API_KEY").unwrap_or_default();
+        let api_key = crate::env_var("EDDA_LLM_API_KEY").unwrap_or_default();
         if !api_key.is_empty() && check_daily_budget(project_id).unwrap_or(false) {
             match llm_correlate(project_id, &raw_signals, cwd, &api_key) {
                 Ok((llm_patterns, m, it, ot, c)) => {
@@ -700,8 +699,7 @@ fn write_detect_note(_project_id: &str, cwd: &str, result: &DetectResult) -> Res
 // ── Guard Helpers ──
 
 fn cooldown_elapsed(state: &DetectState) -> bool {
-    let cooldown_hours = std::env::var("EDDA_DETECT_COOLDOWN_HOURS")
-        .ok()
+    let cooldown_hours = crate::env_var("EDDA_DETECT_COOLDOWN_HOURS")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_DETECT_COOLDOWN_HOURS);
 
@@ -861,6 +859,7 @@ mod tests {
 
     #[test]
     fn should_run_returns_false_when_disabled() {
+        let _store = crate::isolated_store();
         crate::with_env_guard(&[("EDDA_BG_ENABLED", Some("0"))], || {
             assert!(!should_run("test_detect_disabled"));
         });
@@ -868,6 +867,7 @@ mod tests {
 
     #[test]
     fn should_run_returns_true_when_never_run() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_never_run";
         // Ensure no state file exists
         let _ = fs::remove_file(detect_state_path(pid));
@@ -879,6 +879,7 @@ mod tests {
 
     #[test]
     fn should_run_returns_false_below_interval() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_below_interval";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -905,6 +906,7 @@ mod tests {
 
     #[test]
     fn should_run_returns_false_within_cooldown() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_cooldown";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -932,6 +934,7 @@ mod tests {
 
     #[test]
     fn state_persistence_roundtrip() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_state_persist";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -952,6 +955,7 @@ mod tests {
 
     #[test]
     fn increment_session_count_works() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_increment";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -972,6 +976,7 @@ mod tests {
 
     #[test]
     fn audit_log_appends() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_audit";
         let _ = edda_store::ensure_dirs(pid);
         let _ = fs::remove_file(audit_log_path(pid));
@@ -1042,6 +1047,7 @@ mod tests {
 
     #[test]
     fn parse_detect_response_valid_json() {
+        let _store = crate::isolated_store();
         let signals = vec![RawSignal {
             kind: SignalKind::FailurePattern,
             severity: "high".to_string(),
@@ -1068,6 +1074,7 @@ mod tests {
 
     #[test]
     fn parse_detect_response_embedded_json() {
+        let _store = crate::isolated_store();
         let signals = vec![RawSignal {
             kind: SignalKind::CostAnomaly,
             severity: "medium".to_string(),
@@ -1088,6 +1095,7 @@ End."#;
 
     #[test]
     fn parse_detect_response_malformed_returns_empty() {
+        let _store = crate::isolated_store();
         let signals = vec![];
         let patterns = parse_detect_response("not json at all", &signals);
         assert!(patterns.is_empty());
@@ -1103,6 +1111,7 @@ End."#;
 
     #[test]
     fn detect_cost_anomalies_needs_min_data() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_cost_min";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1116,6 +1125,7 @@ End."#;
 
     #[test]
     fn detect_cost_anomalies_flags_spike() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_cost_spike";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1150,6 +1160,7 @@ End."#;
 
     #[test]
     fn detect_quality_degradation_empty_data() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_quality_empty";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1162,6 +1173,7 @@ End."#;
 
     #[test]
     fn detect_quality_degradation_flags_drop() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_quality_drop";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1201,6 +1213,7 @@ End."#;
 
     #[test]
     fn detect_result_storage_roundtrip() {
+        let _store = crate::isolated_store();
         let pid = "test_detect_result_store";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1238,6 +1251,7 @@ End."#;
 
     #[test]
     fn cooldown_expired_allows_run() {
+        let _store = crate::isolated_store();
         let state = DetectState {
             last_detect_at: "2020-01-01T00:00:00Z".to_string(), // Long ago
             sessions_since_last: 100,
@@ -1248,6 +1262,7 @@ End."#;
 
     #[test]
     fn cooldown_not_expired_blocks_run() {
+        let _store = crate::isolated_store();
         let state = DetectState {
             last_detect_at: now_rfc3339(), // Just now
             sessions_since_last: 100,
@@ -1260,6 +1275,7 @@ End."#;
 
     #[test]
     fn empty_last_detect_at_means_cooldown_elapsed() {
+        let _store = crate::isolated_store();
         let state = DetectState {
             last_detect_at: String::new(),
             sessions_since_last: 0,

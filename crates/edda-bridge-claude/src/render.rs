@@ -25,8 +25,7 @@ pub fn wrap_boundary(content: &str) -> String {
 
 /// Resolve the context char budget from env or config.
 pub fn context_budget(cwd: &str) -> usize {
-    std::env::var("EDDA_MAX_CONTEXT_CHARS")
-        .ok()
+    crate::env_var("EDDA_MAX_CONTEXT_CHARS")
         .and_then(|v| v.parse().ok())
         .or_else(|| config_usize(cwd, "bridge.max_context_chars"))
         .unwrap_or(DEFAULT_MAX_CONTEXT_CHARS)
@@ -379,6 +378,7 @@ mod tests {
 
     #[test]
     fn apply_budget_no_truncation() {
+        let _store = crate::isolated_store();
         let content = "short content";
         let result = apply_budget(content, 8000);
         assert_eq!(result, content);
@@ -386,6 +386,7 @@ mod tests {
 
     #[test]
     fn apply_budget_drops_long_content_as_one_item() {
+        let _store = crate::isolated_store();
         let content = "x".repeat(10000);
         let result = apply_budget(&content, 500);
         assert!(result.len() <= 500);
@@ -396,6 +397,7 @@ mod tests {
 
     #[test]
     fn apply_budget_keeps_schema_salient_section_and_drops_complete_items_deterministically() {
+        let _store = crate::isolated_store();
         let content = concat!(
             "## Coordination\nCOORDINATION_DROP_012345678901234567890123456789\n\n",
             "## Goals\nGOAL_KEEP\n"
@@ -414,6 +416,7 @@ mod tests {
 
     #[test]
     fn context_budget_uses_env_var() {
+        let _store = crate::isolated_store();
         crate::with_env_guard(&[("EDDA_MAX_CONTEXT_CHARS", Some("1234"))], || {
             let budget = context_budget("");
             assert_eq!(budget, 1234);
@@ -422,6 +425,7 @@ mod tests {
 
     #[test]
     fn context_budget_default_without_config() {
+        let _store = crate::isolated_store();
         crate::with_env_guard(&[("EDDA_MAX_CONTEXT_CHARS", None)], || {
             let budget = context_budget("/nonexistent/dir");
             assert_eq!(budget, DEFAULT_MAX_CONTEXT_CHARS);
@@ -437,6 +441,7 @@ mod tests {
 
     #[test]
     fn transform_context_strips_header_and_cite() {
+        let _store = crate::isolated_store();
         let raw = "# CONTEXT SNAPSHOT\n\n## Project (main)\n- head: main\n\n## How to cite evidence\n- Use event_id\n";
         let section = transform_context_to_section(raw);
         assert!(section.starts_with("## Workspace Context\n"));

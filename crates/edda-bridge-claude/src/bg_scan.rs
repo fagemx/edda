@@ -87,10 +87,10 @@ struct AuditEntry {
 /// - Daily budget is exhausted
 /// - Cooldown has not elapsed (default 7 days)
 pub fn should_run(project_id: &str) -> bool {
-    if std::env::var("EDDA_BG_ENABLED").unwrap_or_else(|_| "1".into()) == "0" {
+    if crate::env_var("EDDA_BG_ENABLED").unwrap_or_else(|| "1".into()) == "0" {
         return false;
     }
-    if std::env::var("EDDA_LLM_API_KEY")
+    if crate::env_var("EDDA_LLM_API_KEY")
         .unwrap_or_default()
         .is_empty()
     {
@@ -109,7 +109,7 @@ pub fn should_run(project_id: &str) -> bool {
 /// Assembles a project snapshot, calls the LLM for gap analysis, saves results
 /// as draft issues, and updates state/cost tracking.
 pub fn run_scan(project_id: &str, cwd: &str) -> Result<ScanResult> {
-    let api_key = std::env::var("EDDA_LLM_API_KEY").with_context(|| "EDDA_LLM_API_KEY not set")?;
+    let api_key = crate::env_var("EDDA_LLM_API_KEY").with_context(|| "EDDA_LLM_API_KEY not set")?;
     if api_key.is_empty() {
         anyhow::bail!("EDDA_LLM_API_KEY is empty");
     }
@@ -690,8 +690,7 @@ fn strip_markdown_fences(text: &str) -> String {
 // ── Guard and Cooldown Logic ──
 
 fn cooldown_elapsed(project_id: &str) -> bool {
-    let cooldown_days = std::env::var("EDDA_SCAN_COOLDOWN_DAYS")
-        .ok()
+    let cooldown_days = crate::env_var("EDDA_SCAN_COOLDOWN_DAYS")
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_SCAN_COOLDOWN_DAYS);
 
@@ -839,6 +838,7 @@ mod tests {
 
     #[test]
     fn two_tier_splits_ratified_from_unratified() {
+        let _store = crate::isolated_store();
         let decisions = vec![
             dv("db.engine", "postgres", "operator", "2026-07-14T00:00:00Z"),
             dv("api.style", "REST", "agent", "2026-07-14T00:00:00Z"),
@@ -859,6 +859,7 @@ mod tests {
 
     #[test]
     fn two_tier_annotates_unratified_authorship() {
+        let _store = crate::isolated_store();
         let decisions = vec![
             dv("a.b", "1", "agent", "2026-07-14T00:00:00Z"),
             dv("c.d", "2", "human", "2026-07-14T00:00:00Z"),
@@ -875,6 +876,7 @@ mod tests {
 
     #[test]
     fn two_tier_legacy_unratified_all_in_unratified_tier() {
+        let _store = crate::isolated_store();
         // Pre-401 decisions default to authority=human but have no ratify
         // event — they must land in the unratified tier, never binding.
         let decisions = vec![dv("legacy.key", "v", "human", "2026-01-01T00:00:00Z")];
@@ -887,11 +889,13 @@ mod tests {
 
     #[test]
     fn two_tier_empty_returns_none() {
+        let _store = crate::isolated_store();
         assert!(render_decisions_two_tier(&[], &std::collections::BTreeSet::new()).is_none());
     }
 
     #[test]
     fn two_tier_all_ratified_omits_unratified_section() {
+        let _store = crate::isolated_store();
         let decisions = vec![dv("k", "v", "operator", "2026-07-14T00:00:00Z")];
         let ratified: std::collections::BTreeSet<String> = ["evt_k".to_string()].into();
         let out = render_decisions_two_tier(&decisions, &ratified).unwrap();
@@ -962,6 +966,7 @@ mod tests {
 
     #[test]
     fn parse_scan_response_valid_json() {
+        let _store = crate::isolated_store();
         let input = r#"[
             {
                 "title": "Missing error handling",
@@ -981,6 +986,7 @@ mod tests {
 
     #[test]
     fn parse_scan_response_markdown_fenced() {
+        let _store = crate::isolated_store();
         let input = r#"Here are the gaps:
 ```json
 [
@@ -1002,6 +1008,7 @@ mod tests {
 
     #[test]
     fn parse_scan_response_malformed_returns_empty() {
+        let _store = crate::isolated_store();
         let input = "This is not JSON at all";
         let gaps = parse_scan_response(input);
         assert!(gaps.is_empty());
@@ -1009,6 +1016,7 @@ mod tests {
 
     #[test]
     fn parse_scan_response_embedded_json_array() {
+        let _store = crate::isolated_store();
         let input = r#"Analysis complete. Found gaps:
 [{"title":"Gap 1","category":"feature","severity":"low","description":"desc","evidence":[],"suggested_labels":[],"confidence":0.6}]
 End of analysis."#;
@@ -1027,6 +1035,7 @@ End of analysis."#;
 
     #[test]
     fn should_run_returns_false_when_disabled() {
+        let _store = crate::isolated_store();
         crate::with_env_guard(
             &[
                 ("EDDA_BG_ENABLED", Some("0")),
@@ -1040,6 +1049,7 @@ End of analysis."#;
 
     #[test]
     fn should_run_returns_false_without_api_key() {
+        let _store = crate::isolated_store();
         crate::with_env_guard(
             &[("EDDA_BG_ENABLED", Some("1")), ("EDDA_LLM_API_KEY", None)],
             || {
@@ -1050,6 +1060,7 @@ End of analysis."#;
 
     #[test]
     fn should_run_returns_false_within_cooldown() {
+        let _store = crate::isolated_store();
         let pid = "test_scan_cooldown_check";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1081,6 +1092,7 @@ End of analysis."#;
 
     #[test]
     fn cooldown_respects_env_override() {
+        let _store = crate::isolated_store();
         let pid = "test_scan_cooldown_override";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1115,6 +1127,7 @@ End of analysis."#;
 
     #[test]
     fn draft_storage_roundtrip() {
+        let _store = crate::isolated_store();
         let pid = "test_scan_drafts";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1177,6 +1190,7 @@ End of analysis."#;
 
     #[test]
     fn audit_log_appends() {
+        let _store = crate::isolated_store();
         let pid = "test_scan_audit";
         let _ = edda_store::ensure_dirs(pid);
         // Start from a known state (GH-415), as bg_detect's copy of this test
@@ -1220,6 +1234,7 @@ End of analysis."#;
 
     #[test]
     fn collect_crate_inventory_parses_workspace() {
+        let _store = crate::isolated_store();
         // Create a temp workspace
         let dir = tempfile::tempdir().unwrap();
         let cargo = dir.path().join("Cargo.toml");
@@ -1260,6 +1275,7 @@ members = [
 
     #[test]
     fn snapshot_assembly_with_nonexistent_cwd() {
+        let _store = crate::isolated_store();
         let result = assemble_project_snapshot("/nonexistent/path/xyz", "test_proj");
         assert!(result.is_err());
     }

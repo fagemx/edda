@@ -853,7 +853,7 @@ pub fn lookup_pricing(model: &str) -> Option<ModelPricing> {
 
 /// Parse EDDA_MODEL_PRICING env var for custom pricing.
 fn lookup_pricing_from_env(model: &str) -> Option<ModelPricing> {
-    let env_val = std::env::var("EDDA_MODEL_PRICING").ok()?;
+    let env_val = crate::env_var("EDDA_MODEL_PRICING")?;
     let lower_model = model.to_lowercase();
     for entry in env_val.split(',') {
         let parts: Vec<&str> = entry.trim().split(':').collect();
@@ -1234,6 +1234,7 @@ mod tests {
 
     #[test]
     fn signals_extract_tasks() {
+        let _store = crate::isolated_store();
         let records = vec![
             assistant_task_create("tu1", "Fix bug A"),
             assistant_task_create("tu2", "Add feature B"),
@@ -1261,7 +1262,8 @@ mod tests {
                 { "type": "tool_use", "id": "e2", "name": "Edit",
                   "input": { "file_path": "/repo/src/lib.rs", "old_string": "c", "new_string": "d" } },
                 { "type": "tool_use", "id": "w1", "name": "Write",
-                  "input": { "file_path": "/repo/src/new.rs", "content": "fn main() {}" } }
+                  "input": { "file_path": "/repo/src/new.rs", "content": "fn main() {
+        let _store = crate::isolated_store();}" } }
             ]}
         })];
         let path = make_transcript(&records);
@@ -1274,6 +1276,7 @@ mod tests {
 
     #[test]
     fn signals_extract_commits() {
+        let _store = crate::isolated_store();
         let records = vec![
             serde_json::json!({
                 "type": "assistant",
@@ -1300,6 +1303,7 @@ mod tests {
 
     #[test]
     fn signals_save_load_round_trip() {
+        let _store = crate::isolated_store();
         let pid = "test_signals_rt_00";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1339,6 +1343,7 @@ mod tests {
 
     #[test]
     fn extract_commit_msg_parses_m_flag() {
+        let _store = crate::isolated_store();
         assert_eq!(
             extract_commit_msg_from_cmd(r#"git commit -m "fix: something""#),
             "fix: something"
@@ -1371,6 +1376,7 @@ mod tests {
 
     #[test]
     fn signals_skip_noise_files() {
+        let _store = crate::isolated_store();
         let records = vec![serde_json::json!({
             "type": "assistant",
             "message": { "role": "assistant", "content": [
@@ -1397,6 +1403,7 @@ mod tests {
 
     #[test]
     fn focus_common_prefix_crates() {
+        let _store = crate::isolated_store();
         let files: &[(&str, usize)] = &[
             ("C:/repo/crates/edda-bridge-claude/src/dispatch.rs", 10),
             ("C:/repo/crates/edda-bridge-claude/src/signals.rs", 5),
@@ -1409,6 +1416,7 @@ mod tests {
 
     #[test]
     fn focus_common_prefix_src() {
+        let _store = crate::isolated_store();
         let files: &[(&str, usize)] = &[
             ("/project/src/components/Button.tsx", 1),
             ("/project/src/components/Modal.tsx", 1),
@@ -1420,6 +1428,7 @@ mod tests {
 
     #[test]
     fn focus_most_frequent_dir() {
+        let _store = crate::isolated_store();
         // 4 out of 5 files in edda-cli, 1 in edda-core
         let files: &[(&str, usize)] = &[
             ("/repo/crates/edda-cli/src/main.rs", 1),
@@ -1434,6 +1443,7 @@ mod tests {
 
     #[test]
     fn focus_too_few_files_returns_none() {
+        let _store = crate::isolated_store();
         // find_focus_label works with any count, but render_focus_section gates on >= 3
         let files: &[(&str, usize)] = &[
             ("/repo/crates/foo/src/a.rs", 1),
@@ -1445,12 +1455,14 @@ mod tests {
 
     #[test]
     fn focus_empty_returns_none() {
+        let _store = crate::isolated_store();
         let files: &[(&str, usize)] = &[];
         assert!(find_focus_label(files).is_none());
     }
 
     #[test]
     fn focus_windows_paths() {
+        let _store = crate::isolated_store();
         let files: &[(&str, usize)] = &[
             ("C:\\ai_agent\\edda\\crates\\edda-derive\\src\\types.rs", 3),
             (
@@ -1468,6 +1480,7 @@ mod tests {
 
     #[test]
     fn focus_edit_weighted_triggers_on_heavy_crate() {
+        let _store = crate::isolated_store();
         // Simulates real scenario: 60 files scattered, but one crate has 17% of edits
         // Old 50% file-count threshold would miss this; new 30% edit threshold catches it
         let mut files: Vec<(&str, usize)> = vec![
@@ -1506,6 +1519,7 @@ mod tests {
 
     #[test]
     fn focus_no_hot_files_when_edits_even() {
+        let _store = crate::isolated_store();
         let pid = "test_focus_no_hot";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1543,6 +1557,7 @@ mod tests {
 
     #[test]
     fn focus_hot_files_with_clear_outlier() {
+        let _store = crate::isolated_store();
         let pid = "test_focus_hot_outlier";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -1611,6 +1626,7 @@ mod tests {
 
     #[test]
     fn truncate_stderr_finds_error_line() {
+        let _store = crate::isolated_store();
         let text = "Compiling foo v0.1.0\nerror[E0308]: mismatched types\n  --> src/lib.rs:10:5";
         let snippet = truncate_stderr(text, 200);
         assert!(
@@ -1621,6 +1637,7 @@ mod tests {
 
     #[test]
     fn truncate_stderr_includes_source_location() {
+        let _store = crate::isolated_store();
         let text = "Compiling foo v0.1.0\nerror[E0308]: mismatched types\n  --> src/lib.rs:10:5";
         let snippet = truncate_stderr(text, 200);
         assert!(
@@ -1635,6 +1652,7 @@ mod tests {
 
     #[test]
     fn truncate_stderr_skips_irrelevant_next_line() {
+        let _store = crate::isolated_store();
         let text = "error: test failed\nCompiling bar v0.2.0";
         let snippet = truncate_stderr(text, 200);
         assert_eq!(snippet, "error: test failed");
@@ -1642,6 +1660,7 @@ mod tests {
 
     #[test]
     fn truncate_stderr_truncates_long_line() {
+        let _store = crate::isolated_store();
         let long_line = "error: ".to_string() + &"x".repeat(300);
         let snippet = truncate_stderr(&long_line, 100);
         assert!(snippet.len() <= 100);
@@ -1650,6 +1669,7 @@ mod tests {
 
     #[test]
     fn signals_extract_failed_commands() {
+        let _store = crate::isolated_store();
         let records = vec![
             // Bash tool_use
             serde_json::json!({
@@ -1702,6 +1722,7 @@ mod tests {
 
     #[test]
     fn signals_healing_success_clears_failures() {
+        let _store = crate::isolated_store();
         // Command fails 3 times, then succeeds → should NOT appear in failed_commands
         let records = vec![
             // Fail 1
@@ -1764,6 +1785,7 @@ mod tests {
 
     #[test]
     fn signals_healing_then_fail_again() {
+        let _store = crate::isolated_store();
         // Fail → Success (heals) → Fail again → should show count=1
         let records = vec![
             // Fail
@@ -1829,6 +1851,7 @@ mod tests {
 
     #[test]
     fn signals_successful_bash_not_tracked() {
+        let _store = crate::isolated_store();
         let records = vec![
             serde_json::json!({
                 "type": "assistant",
@@ -1984,6 +2007,7 @@ mod tests {
 
     #[test]
     fn signals_extract_usage_from_transcript() {
+        let _store = crate::isolated_store();
         let records = vec![
             serde_json::json!({
                 "type": "system",
@@ -2034,6 +2058,7 @@ mod tests {
 
     #[test]
     fn signals_usage_presence_recorded_independently_of_counters() {
+        let _store = crate::isolated_store();
         // GH-585 round 2 P1-1: presence must not be inferred from the token
         // counters. A usage record with all-zero tokens still sets the flag.
         let records = vec![serde_json::json!({
@@ -2063,6 +2088,7 @@ mod tests {
 
     #[test]
     fn signals_no_usage_record_means_no_presence() {
+        let _store = crate::isolated_store();
         let records = vec![
             serde_json::json!({
                 "type": "system",
@@ -2088,6 +2114,7 @@ mod tests {
 
     #[test]
     fn usage_save_and_read_round_trip() {
+        let _store = crate::isolated_store();
         let pid = "test_usage_rt_00";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -2118,6 +2145,7 @@ mod tests {
 
     #[test]
     fn usage_state_round_trips_measured_zero_presence() {
+        let _store = crate::isolated_store();
         // GH-585 round 2 P1-1: a usage snapshot with usage_observed=true and
         // all-zero counters must survive usage.json unchanged — that is the
         // measured-zero case the magnitude-based check used to lose.
@@ -2144,6 +2172,7 @@ mod tests {
 
     #[test]
     fn extract_subagent_summary_from_transcript() {
+        let _store = crate::isolated_store();
         let records = vec![
             serde_json::json!({
                 "type": "assistant",
@@ -2202,6 +2231,7 @@ mod tests {
 
     #[test]
     fn extract_subagent_summary_falls_back_to_last_message() {
+        let _store = crate::isolated_store();
         let summary = extract_subagent_summary(
             "",
             "Decision: adopt async queue\nAdditional details",
@@ -2234,7 +2264,8 @@ mod tests {
                     "type": "tool_use",
                     "id": "w1",
                     "name": "Write",
-                    "input": { "file_path": "/repo/src/new.rs", "content": "fn main() {}" }
+                    "input": { "file_path": "/repo/src/new.rs", "content": "fn main() {
+        let _store = crate::isolated_store();}" }
                 }
             ]}
         })];
