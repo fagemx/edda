@@ -78,6 +78,7 @@ SCRATCH=${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}
 # any cwd still reaches the same object database.
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SELF_REPO=$(CDPATH= cd -- "$SELF_DIR/.." && pwd)
+. "$SELF_DIR/reviewer-capabilities.sh"
 SPEC_OVERRIDE=${EDDA_REVIEW_SPEC:-}
 
 PR=""
@@ -449,6 +450,7 @@ if [ "$IS_WIN" = "1" ]; then
   # refuses that case below, and a dry-run never runs the lane.
   ROOTW=""
   [ -n "$ROOT" ] && ROOTW=$(cygpath -w "$ROOT")
+  CAPSW=$(cygpath -w "$SELF_DIR/fleet/reviewer-capabilities.ps1")
   # Resolve pwsh to a full Windows path for the task action: on a Store (MSIX)
   # install the bare "pwsh.exe" execution alias does not launch under Task
   # Scheduler — the task dies with LastTaskResult=0x80070002 before the lane
@@ -469,6 +471,23 @@ if [ "$IS_WIN" = "1" ]; then
 \$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 \$env:HOME = \$env:USERPROFILE
 Set-Location '$WTW'
+. '$CAPSW'
+\$beforeStatus = (& git status --porcelain=v1 --untracked-files=all) -join "\n"
+if (\$LASTEXITCODE -ne 0) { 'DISPATCH_EXIT=2' | Out-File '$DONEW'; exit 2 }
+function Test-ReviewWorktree {
+  \$afterHead = & git rev-parse HEAD
+  if (\$LASTEXITCODE -ne 0) { 'WORKTREE_CHECK=failed; git HEAD unavailable' | Out-File '$DONEW' -Append; return \$false }
+  \$afterStatus = (& git status --porcelain=v1 --untracked-files=all) -join "\n"
+  if (\$LASTEXITCODE -ne 0) { 'WORKTREE_CHECK=failed; git status unavailable' | Out-File '$DONEW' -Append; return \$false }
+  & git status --short | Out-File '$LOGW' -Append -Encoding utf8
+  & git log -1 --format=%H | Out-File '$LOGW' -Append -Encoding utf8
+  if (\$LASTEXITCODE -ne 0 -or \$afterHead -ne '$SHA' -or \$afterStatus -ne \$beforeStatus) {
+    'WORKTREE_CHECK=failed; preserved for inspection' | Out-File '$DONEW' -Append -Encoding utf8
+    return \$false
+  }
+  'WORKTREE_CHECK=unchanged' | Out-File '$DONEW' -Append -Encoding utf8
+  return \$true
+}
 function Remove-ReviewWorktree {
   # The verdict is in the log by the time this runs, so the detached worktree
   # has served its purpose. Left behind, they accumulate: 14 stale
@@ -489,23 +508,26 @@ function Remove-ReviewWorktree {
 # worktree), not inlined; the guard is the honest safety valve for a brief
 # that grows past it anyway (a giant doneWhen, say). The fallback runs the
 # recorded fleet.review-engine-model shape — the brief piped to claude via
-# stdin with the read-only allowlist --allowedTools Read,Glob,Grep,Bash —
+# stdin with the same restricted --tools capability allowlist —
 # never an unrestricted reviewer (GH-708 round 2, P1-2). Either arm writes a
 # TRANSPORT= receipt into .done, and the verdict header the watcher posts
 # prints that receipt verbatim instead of a hardcoded transport.
 \$briefChars = (Get-Content -Raw "$BRIEFW").Length
 if (\$briefChars -lt 30000) {
-  & edda dispatch --agent claude --model '$MODEL' --exclude-tools 'Edit,Write,NotebookEdit' $DISPATCH_SESSION_ARGS --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
+  try { Assert-ReviewCapabilities 'edda-dispatch' } catch { \$_ | Out-File '$LOGW'; 'DISPATCH_EXIT=2' | Out-File '$DONEW'; exit 2 }
+  & edda dispatch --agent claude --model '$MODEL' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
   \$code = \$LASTEXITCODE
   "TRANSPORT=edda-dispatch" | Out-File "$DONEW" -Encoding utf8
+  "TOOL_FLAGS=--tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED'" | Out-File "$DONEW" -Append -Encoding utf8
   "SESSION=$SID" | Out-File "$DONEW" -Append -Encoding utf8
   "SESSION_MODE=$SESSION_MODE" | Out-File "$DONEW" -Append -Encoding utf8
   "DISPATCH_EXIT=\$code" | Out-File "$DONEW" -Append -Encoding utf8
-  Remove-ReviewWorktree
+  if (Test-ReviewWorktree) { Remove-ReviewWorktree } else { exit 2 }
   exit \$code
 }
 \$raw = Get-Content -Raw "$BRIEFW"
-\$json = \$raw | & claude -p --model '$MODEL' --output-format json $CLAUDE_SESSION_ARGS --allowedTools 'Read,Glob,Grep,Bash' --disallowedTools 'Edit,Write,NotebookEdit' 2>"$ERRW"
+try { Assert-ReviewCapabilities 'claude-stdin' } catch { \$_ | Out-File '$LOGW'; 'DISPATCH_EXIT=2' | Out-File '$DONEW'; exit 2 }
+\$json = \$raw | & claude -p --model '$MODEL' --output-format json $CLAUDE_SESSION_ARGS --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED' 2>"$ERRW"
 \$code = \$LASTEXITCODE
 \$r = \$null
 try { \$r = \$json | ConvertFrom-Json } catch { }
@@ -527,10 +549,11 @@ if (\$r -and \$r.result) {
 }
 if (Test-Path "$ERRW") { Get-Content "$ERRW" | Add-Content -Path "$LOGW" -Encoding utf8; Remove-Item "$ERRW" -ErrorAction SilentlyContinue }
 "TRANSPORT=claude-stdin" | Out-File "$DONEW" -Encoding utf8
+"TOOL_FLAGS=--tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED'" | Out-File "$DONEW" -Append -Encoding utf8
 "SESSION=$SID" | Out-File "$DONEW" -Append -Encoding utf8
 "SESSION_MODE=$SESSION_MODE" | Out-File "$DONEW" -Append -Encoding utf8
 "DISPATCH_EXIT=\$code" | Out-File "$DONEW" -Append -Encoding utf8
-Remove-ReviewWorktree
+if (Test-ReviewWorktree) { Remove-ReviewWorktree } else { exit 2 }
 exit \$code
 PS
 else
@@ -539,6 +562,19 @@ else
 #!/bin/sh
 export HOME="\${HOME:-$(getent passwd "\$(id -u)" 2>/dev/null | cut -d: -f6)}"
 cd '$WT' || exit 1
+. '$SELF_DIR/reviewer-capabilities.sh'
+before_status=\$(git status --porcelain=v1 --untracked-files=all) || exit 2
+check_review_worktree() {
+  after_head=\$(git rev-parse HEAD) || { echo 'WORKTREE_CHECK=failed; git HEAD unavailable' >> '$DONE'; return 1; }
+  after_status=\$(git status --porcelain=v1 --untracked-files=all) || { echo 'WORKTREE_CHECK=failed; git status unavailable' >> '$DONE'; return 1; }
+  git status --short >> '$LOG'
+  git log -1 --format=%H >> '$LOG'
+  if [ "\$after_head" != '$SHA' ] || [ "\$after_status" != "\$before_status" ]; then
+    echo 'WORKTREE_CHECK=failed; preserved for inspection' >> '$DONE'
+    return 1
+  fi
+  echo 'WORKTREE_CHECK=unchanged' >> '$DONE'
+}
 # Same lifecycle as the Windows lane's Remove-ReviewWorktree (see there): the
 # verdict is in the log once the reviewer exits, so the detached worktree is
 # removed rather than left to accumulate. Never changes the round's exit code.
@@ -552,16 +588,19 @@ remove_review_worktree() {
 # claude-via-stdin fallback above it. TRANSPORT= names the arm that ran.
 chars=\$(wc -m < '$BRIEF')
 if [ "\$chars" -lt 30000 ]; then
-  edda dispatch --agent claude --model '$MODEL' --exclude-tools Edit,Write,NotebookEdit $DISPATCH_SESSION_ARGS --prompt-file '$BRIEF' > '$LOG' 2>&1
+  review_capabilities edda-dispatch > '$LOG' 2>&1 || { echo 'DISPATCH_EXIT=2' > '$DONE'; exit 2; }
+  edda dispatch --agent claude --model '$MODEL' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file '$BRIEF' > '$LOG' 2>&1
   code=\$?
   echo "TRANSPORT=edda-dispatch" > '$DONE'
+  echo "TOOL_FLAGS=--tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED'" >> '$DONE'
   echo "SESSION=$SID" >> '$DONE'
   echo "SESSION_MODE=$SESSION_MODE" >> '$DONE'
   echo "DISPATCH_EXIT=\$code" >> '$DONE'
-  remove_review_worktree
+  check_review_worktree && remove_review_worktree || exit 2
   exit \$code
 fi
-claude -p --model '$MODEL' --output-format json $CLAUDE_SESSION_ARGS --allowedTools Read,Glob,Grep,Bash --disallowedTools Edit,Write,NotebookEdit < '$BRIEF' > '$LOG.json' 2>'$LOG.err'
+review_capabilities claude-stdin > '$LOG' 2>&1 || { echo 'DISPATCH_EXIT=2' > '$DONE'; exit 2; }
+claude -p --model '$MODEL' --output-format json $CLAUDE_SESSION_ARGS --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED' < '$BRIEF' > '$LOG.json' 2>'$LOG.err'
 code=\$?
 if command -v jq >/dev/null 2>&1; then
   jq -r '.result // empty' '$LOG.json' > '$LOG'
@@ -585,10 +624,11 @@ fi
 [ -f '$LOG.err' ] && cat '$LOG.err' >> '$LOG'
 rm -f '$LOG.json' '$LOG.err'
 echo "TRANSPORT=claude-stdin" > '$DONE'
+echo "TOOL_FLAGS=--tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED'" >> '$DONE'
 echo "SESSION=$SID" >> '$DONE'
 echo "SESSION_MODE=$SESSION_MODE" >> '$DONE'
 echo "DISPATCH_EXIT=\$code" >> '$DONE'
-remove_review_worktree
+check_review_worktree && remove_review_worktree || exit 2
 exit \$code
 RUN
   sh -n "$RUNNER" || exit 1
@@ -613,6 +653,13 @@ command -v edda >/dev/null 2>&1 || {
   echo "review-pr.sh: edda not found on PATH — the review transport is 'edda dispatch --agent claude' (GH-708)" >&2
   exit 1
 }
+# Reject before creating the worktree or scheduling a job, then recheck in the
+# generated lane because its PATH (and installed binary) may differ.
+if [ "$(wc -m < "$BRIEF")" -lt 30000 ]; then
+  review_capabilities edda-dispatch || exit 2
+else
+  review_capabilities claude-stdin || exit 2
+fi
 
 # ---- detached worktree at the PR head ---------------------------------------
 # Prune first: the lane removes its worktree when the round ends, so a

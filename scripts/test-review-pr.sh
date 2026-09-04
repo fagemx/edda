@@ -149,7 +149,7 @@ dry_run() { # $1 = body text
     printf '%b' "$1" >"$tmp/body"
     export GH_BODY_FILE="$tmp/body"
     rm -f "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-"* 2>/dev/null || true
-    out=$(timeout 60 sh "$root/scripts/review-pr.sh" "$FIXTURE_PR" 1 --dry-run 2>"$tmp/err") || {
+    out=$(timeout "${EDDA_TEST_TIMEOUT_SECONDS:-60}" sh "$root/scripts/review-pr.sh" "$FIXTURE_PR" 1 --dry-run 2>"$tmp/err") || {
         printf 'review-pr.sh --dry-run exited non-zero; stderr:\n%s\n' "$(cat "$tmp/err")" >&2
         return 1
     }
@@ -163,12 +163,18 @@ dry_run_round() { # $1=body  $2=round  $3=prev sha (may be empty)  $4=HOME (may 
     printf '%b' "$1" >"$tmp/body"
     export GH_BODY_FILE="$tmp/body"
     rm -f "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-"* 2>/dev/null || true
-    out=$(HOME="${4:-$HOME}" timeout 60 sh "$root/scripts/review-pr.sh" \
-            "$FIXTURE_PR" "$2" ${3:+"$3"} --dry-run 2>"$tmp/err") || {
+    if [ -n "$3" ]; then
+        if ! out=$(HOME="${4:-$HOME}" timeout "${EDDA_TEST_TIMEOUT_SECONDS:-60}" sh "$root/scripts/review-pr.sh" \
+                "$FIXTURE_PR" "$2" "$3" --dry-run 2>"$tmp/err"); then rc=1; else rc=0; fi
+    else
+        if ! out=$(HOME="${4:-$HOME}" timeout "${EDDA_TEST_TIMEOUT_SECONDS:-60}" sh "$root/scripts/review-pr.sh" \
+                "$FIXTURE_PR" "$2" --dry-run 2>"$tmp/err"); then rc=1; else rc=0; fi
+    fi
+    if [ "$rc" -ne 0 ]; then
         printf 'review-pr.sh --dry-run (round %s) exited non-zero; stderr:\n%s\n' \
             "$2" "$(cat "$tmp/err")" >&2
         return 1
-    }
+    fi
     brief="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r$2-brief.md"
     lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r$2-lane.ps1"
 }
@@ -325,7 +331,7 @@ else
         || fail 'D5d: the lane does not run the edda dispatch claude transport'
     grep -q -- "--model 'claude-opus-5'" "$lane" \
         || fail 'D5e: the lane does not pin the review model with --model (default-only is not allowed)'
-    grep -q -- "--exclude-tools 'Edit,Write,NotebookEdit'" "$lane" \
+    grep -q -- "--exclude-tools 'Edit,Write,NotebookEdit,mcp__\*'" "$lane" \
         || fail 'D5f: the lane does not structurally deny the write tools'
     grep -q -- "--session-id '$sid'" "$lane" \
         || fail 'D5g: the lane does not pass the brief header session UUID'
@@ -383,8 +389,8 @@ if ! grep -q '.edda-review-spec.md' "$brief"; then
     fail 'D8d: the brief does not point the reviewer at the worktree spec copy .edda-review-spec.md'
 fi
 lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-lane.ps1"
-grep -q -- "--allowedTools 'Read,Glob,Grep,Bash'" "$lane" \
-    || fail 'D8e: the fallback arm does not restrict the reviewer to the read-only allowlist --allowedTools Read,Glob,Grep,Bash (round 2 P1-2)'
+grep -Fq -- "--tools 'Read,Grep,Glob,Bash(git *),Bash(gh *),Bash(edda *),Bash(sh *)'" "$lane" \
+    || fail 'D8e: the fallback arm lacks the measured restricted capability allowlist (GH-702)'
 if grep -q 'bypassPermissions' "$lane"; then
     fail 'D8f: the fallback arm still grants --permission-mode bypassPermissions — the recorded fleet.review-engine-model shape auto-approves only the read allowlist'
 fi
