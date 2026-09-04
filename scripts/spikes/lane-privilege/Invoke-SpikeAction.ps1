@@ -83,27 +83,17 @@ if (-not (Test-SpikePrincipalMatch -Expected $RestrictedPrincipal -Actual $curre
 Write-SpikeSafe -Text "OK: running as restricted principal."
 
 # --- 3. Protected-path target validation (Round1 F4). --------------------------
-# The probed files must be the OPERATOR's protected credentials, passed explicitly.
-# Defaults derived from the current USERPROFILE would probe the RESTRICTED profile
-# under the restricted account and prove nothing; a target inside the current
-# profile is refused outright.
-$currentProfile = $env:USERPROFILE
-$targetOk = $true
-foreach ($p in $ProtectedCredentialFiles) {
-    if ([string]::IsNullOrWhiteSpace($p)) { $targetOk = $false; continue }
-    $full = [System.IO.Path]::GetFullPath($p)
-    if (-not [System.IO.Path]::IsPathRooted($full)) {
-        Write-SpikeSafe -Text "FAIL: protected credential path is not absolute: '$p'."
-        $targetOk = $false
-    }
-    elseif ($currentProfile -and $full.StartsWith($currentProfile, [System.StringComparison]::OrdinalIgnoreCase)) {
-        Write-SpikeSafe -Text ("FAIL: protected path '{0}' is inside the CURRENT (restricted) profile. " +
-            "Pass the operator's credential paths explicitly; probing our own profile proves nothing." -f $p)
-        $targetOk = $false
-    }
+# Bind the exact documented set to trusted Windows SID/ProfileList resolution;
+# USERPROFILE is caller-controlled and is deliberately never consulted here.
+try {
+    $ProtectedCredentialFiles = Assert-ProtectedCredentialTargets -OperatorPrincipal $OperatorPrincipal `
+        -RestrictedPrincipal $RestrictedPrincipal -ProtectedCredentialFiles $ProtectedCredentialFiles
 }
-if (-not $targetOk) { exit $EXIT_PREFLIGHT_FAILED }
-Write-SpikeSafe -Text ("OK: protected-path targets validated (operator profile, explicitly passed): {0}" -f
+catch {
+    Write-SpikeSafe -Text ("FAIL: {0}" -f $_.Exception.Message)
+    exit $EXIT_PREFLIGHT_FAILED
+}
+Write-SpikeSafe -Text ("OK: protected-path targets validated (exact trusted operator profile set): {0}" -f
     ($ProtectedCredentialFiles -join '; '))
 
 # --- 4. Negative test A: protected credential files. ---------------------------
@@ -234,7 +224,7 @@ try {
 # cache (isolated helper list), push uses one explicit refspec with tag-following
 # disabled, and cleanup (cache entry rejection + daemon exit) is attempted
 # unconditionally and reported. No gh auth login/logout anywhere in this path.
-$publication = Invoke-SpikePublication -Token $token -WorkspacePath $WorkspacePath -RemoteName 'origin' -RefSpec "HEAD:refs/heads/$spikeBranch"
+$publication = Invoke-SpikePublication -Token $token -WorkspacePath $WorkspacePath -DestinationUrl $pushUrl -RefSpec "HEAD:refs/heads/$spikeBranch"
 $token = $null
 foreach ($note in $publication.Notes) { Write-SpikeSafe -Text ("publication note: {0}" -f $note) }
 Write-SpikeSafe -Text ("publication verdict: {0} (pushExit={1} cleanupExit={2}). " +

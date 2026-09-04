@@ -117,7 +117,7 @@ try {
     $destDetail = "origin resolves to an allowlisted repository: $destUrl"
 } catch [System.Exception] {
     $msg = $_.Exception.Message
-    if ($msg -match 'no resolvable URL') {
+    if ($msg -match 'no resolvable URL|exactly one effective push URL \(got 0\)') {
         # Workspace without a configured remote is acceptable at preflight time.
     }
     else { $destOk = $false; $destDetail = $msg }

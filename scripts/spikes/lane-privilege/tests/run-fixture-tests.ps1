@@ -208,22 +208,49 @@ try {
         if (-not (Test-PushUrlAllowed -Url $bad -RepoAllowList @('fagemx/edda'))) { $t11++ }
     }
     Assert-True -Name 'T11 matcher refuses all 6 disallowed/malformed destinations' -Condition ($t11 -eq 6) -Detail "refused=$t11"
-    Assert-True -Name 'T11 matcher accepts ssh form of allowlisted repo' `
-        -Condition (Test-PushUrlAllowed -Url 'git@github.com:fagemx/edda.git' -RepoAllowList @('fagemx/edda'))
-    Assert-True -Name 'T11 matcher accepts https form of allowlisted repo' `
+    Assert-True -Name 'T11 matcher refuses SSH (credential cache is HTTPS-only)' `
+        -Condition (-not (Test-PushUrlAllowed -Url 'git@github.com:fagemx/edda.git' -RepoAllowList @('fagemx/edda')))
+    Assert-True -Name 'T11 matcher refuses HTTPS userinfo alternate auth input' `
+        -Condition (-not (Test-PushUrlAllowed -Url 'https://embedded-user@github.com/fagemx/edda.git' -RepoAllowList @('fagemx/edda')))
+    Assert-True -Name 'T11 matcher accepts clean HTTPS form of allowlisted repo' `
         -Condition (Test-PushUrlAllowed -Url 'https://github.com/fagemx/edda' -RepoAllowList @('fagemx/edda'))
 
-    # Repo-level resolution against a real local git config (no network, no push).
-    git init -q (Join-Path $fxRoot 'wsrepo') 2>$null
-    git -C (Join-Path $fxRoot 'wsrepo') remote add origin 'git@github.com:evil/repo.git' 2>$null
+    # Isolated temporary repository config only: no shared .git/config is written.
+    $wsRepo = Join-Path $fxRoot 'wsrepo'; git init -q $wsRepo 2>$null
+    git -C $wsRepo remote add origin 'https://github.com/evil/repo.git' 2>$null
     $t11Repo = $false
-    try { Get-EffectivePushUrl -WorkspacePath (Join-Path $fxRoot 'wsrepo') -RepoAllowList @('fagemx/edda') | Out-Null }
-    catch { $t11Repo = ($_.Exception.Message -match 'does not resolve to an allowlisted') }
+    try { Get-EffectivePushUrl -WorkspacePath $wsRepo -RepoAllowList @('fagemx/edda') | Out-Null }
+    catch { $t11Repo = $true }
     Assert-True -Name 'T11 repo-level guard refuses disallowed configured origin' -Condition $t11Repo
-    git -C (Join-Path $fxRoot 'wsrepo') remote set-url origin 'git@github.com:fagemx/edda.git' 2>$null
+    git -C $wsRepo remote set-url origin 'https://github.com/fagemx/edda.git' 2>$null
     $t11Ok = $false
-    try { $t11Ok = (Get-EffectivePushUrl -WorkspacePath (Join-Path $fxRoot 'wsrepo') -RepoAllowList @('fagemx/edda')) -match 'fagemx/edda' } catch {}
-    Assert-True -Name 'T11 repo-level guard accepts allowlisted configured origin' -Condition ([bool]$t11Ok)
+    try { $t11Ok = (Get-EffectivePushUrl -WorkspacePath $wsRepo -RepoAllowList @('fagemx/edda')) -match 'fagemx/edda' } catch {}
+    Assert-True -Name 'T11 repo-level guard accepts one clean effective HTTPS destination' -Condition ([bool]$t11Ok)
+    git -C $wsRepo remote set-url --add --push origin 'https://github.com/evil/repo.git' 2>$null
+    git -C $wsRepo remote set-url --add --push origin 'https://github.com/fagemx/edda.git' 2>$null
+    $multipleRefused = $false
+    try { Get-EffectivePushUrl -WorkspacePath $wsRepo -RepoAllowList @('fagemx/edda') | Out-Null } catch { $multipleRefused = $true }
+    Assert-True -Name 'T11 all effective pushurls are required to be a single destination' -Condition $multipleRefused
+    git -C $wsRepo remote set-url --delete --push origin 'https://github.com/evil/repo.git' 2>$null
+    git -C $wsRepo remote set-url --delete --push origin 'https://github.com/fagemx/edda.git' 2>$null
+    git -C $wsRepo remote set-url origin 'https://github.com/fagemx/edda.git' 2>$null
+    git -C $wsRepo config 'url.https://github.com/evil/.pushInsteadOf' 'https://github.com/fagemx/' 2>$null
+    $rewriteRefused = $false
+    try { Get-EffectivePushUrl -WorkspacePath $wsRepo -RepoAllowList @('fagemx/edda') | Out-Null } catch { $rewriteRefused = $true }
+    Assert-True -Name 'T11 pushInsteadOf rewrite is resolved then refused' -Condition $rewriteRefused
+
+    # Trusted profile binding is injectable for safe synthetic boundary coverage.
+    $profiles = @{ 'MACHINE\operator' = 'C:\fixture\operator'; 'MACHINE\restricted' = 'C:\fixture\restricted' }
+    $resolver = { param($principal) $profiles[$principal] }
+    $exactTargets = @('C:\fixture\operator\.claude\.credentials.json', 'C:\fixture\operator\.codex\auth.json', 'C:\fixture\operator\.pi\agent\auth.json')
+    $targetOk = $false
+    try { Assert-ProtectedCredentialTargets -OperatorPrincipal 'MACHINE\operator' -RestrictedPrincipal 'MACHINE\restricted' -ProtectedCredentialFiles $exactTargets -ProfileResolver $resolver | Out-Null; $targetOk = $true } catch {}
+    Assert-True -Name 'T11 protected targets accept only the exact trusted operator set' -Condition $targetOk
+    foreach ($case in @(@(), @('relative-auth.json', $exactTargets[1], $exactTargets[2]), @('C:\fixture\restricted\.claude\.credentials.json', $exactTargets[1], $exactTargets[2]), @('C:\fixture\other\auth.json', $exactTargets[1], $exactTargets[2]))) {
+        $refused = $false
+        try { Assert-ProtectedCredentialTargets -OperatorPrincipal 'MACHINE\operator' -RestrictedPrincipal 'MACHINE\restricted' -ProtectedCredentialFiles $case -ProfileResolver $resolver | Out-Null } catch { $refused = $true }
+        Assert-True -Name 'T11 protected targets refuse empty/relative/restricted/wrong-profile inputs' -Condition $refused
+    }
 
     # --- T12 (Round1 F3): publication path with an INJECTED synthetic git invoker.
     # Records every invocation (args + stdin) and returns scripted results.
@@ -244,15 +271,19 @@ try {
 
     # T12a: happy path — approve, push, cleanup all succeed; token NEVER in argv.
     $calls.Clear()
-    $r = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -RemoteName 'origin' `
+    $r = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -DestinationUrl 'https://github.com/fagemx/edda.git' `
         -RefSpec 'HEAD:refs/heads/spike/lane-privilege-fixture' -GitInvoker $synthInvoker
     Assert-True -Name 'T12a publication verdict published' -Condition ($r.Verdict -eq 'published') -Detail "$($r.Verdict); $($r.Notes -join '; ')"
     $allArgs = ($calls | ForEach-Object { $_.Args -join ' ' }) -join "`n"
     Assert-True -Name 'T12a token NEVER appears in any git argv' -Condition (-not $allArgs.Contains($fakeToken))
+    Assert-True -Name 'T12a publication result retains no plaintext stdin property' `
+        -Condition ($null -eq $r.PSObject.Properties['Stdin'])
     $approveStdin = (@($calls | Where-Object { ($_.Args -join ' ') -match 'credential approve' })[0]).Stdin
     Assert-True -Name 'T12a token reaches git ONLY via credential-approve stdin' `
         -Condition ($null -ne $approveStdin -and $approveStdin.Contains($fakeToken))
     $pushCall = @($calls | Where-Object { ($_.Args -join ' ') -match ' push ' })[0]
+    Assert-True -Name 'T12a push consumes the validated literal URL, not an origin alias' `
+        -Condition (($pushCall.Args -contains 'https://github.com/fagemx/edda.git') -and -not ($pushCall.Args -contains 'origin'))
     Assert-True -Name 'T12a helper list is isolated (credential.helper= reset before cache)' `
         -Condition (($pushCall.Args -contains 'credential.helper=') -and
                     (@($pushCall.Args | Where-Object { $_ -match '^credential\.helper=cache' }).Count -ge 1))
@@ -275,7 +306,7 @@ try {
         if ($joined -match 'credential-cache exit') { return [pscustomobject]@{ ExitCode = 0; Output = @(); Args = $GitArgs; Stdin = $null } }
         return [pscustomobject]@{ ExitCode = 0; Output = @(); Args = $GitArgs; Stdin = $StdinInput }
     }
-    $r2 = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -RemoteName 'origin' `
+    $r2 = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -DestinationUrl 'https://github.com/fagemx/edda.git' `
         -RefSpec 'HEAD:refs/heads/spike/lane-privilege-fixture' -GitInvoker $failInvoker
     Assert-True -Name 'T12b approve failure => auth-failed' -Condition ($r2.Verdict -eq 'auth-failed')
     Assert-True -Name 'T12b push never invoked when approve fails' `
@@ -290,7 +321,7 @@ try {
         if ($joined -match ' push ') { return [pscustomobject]@{ ExitCode = 128; Output = @('synthetic push failure'); Args = $GitArgs; Stdin = $null } }
         return [pscustomobject]@{ ExitCode = 0; Output = @(); Args = $GitArgs; Stdin = $StdinInput }
     }
-    $r3 = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -RemoteName 'origin' `
+    $r3 = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -DestinationUrl 'https://github.com/fagemx/edda.git' `
         -RefSpec 'HEAD:refs/heads/spike/lane-privilege-fixture' -GitInvoker $pushFailInvoker
     Assert-True -Name 'T12c push failure => push-failed' -Condition ($r3.Verdict -eq 'push-failed')
     Assert-True -Name 'T12c cleanup still attempted after push failure' `
@@ -305,13 +336,28 @@ try {
         if ($joined -match ' push ') { return [pscustomobject]@{ ExitCode = 0; Output = @(); Args = $GitArgs; Stdin = $null } }
         return [pscustomobject]@{ ExitCode = 0; Output = @(); Args = $GitArgs; Stdin = $StdinInput }
     }
-    $r4 = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -RemoteName 'origin' `
+    $r4 = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -DestinationUrl 'https://github.com/fagemx/edda.git' `
         -RefSpec 'HEAD:refs/heads/spike/lane-privilege-fixture' -GitInvoker $cleanupFailInvoker
     Assert-True -Name 'T12d failed cleanup => cleanup-incomplete (observable)' -Condition ($r4.Verdict -eq 'cleanup-incomplete' -and $r4.CleanupExit -eq 1)
 
-    # T12e: token moves as SecureString; plaintext helper exists in memory only.
+    # T12e: a terminating push exception still reaches both cleanup operations.
+    $calls.Clear()
+    $throwingInvoker = {
+        param([string[]]$GitArgs, [string]$StdinInput, [string]$WorkingDirectory)
+        $joined = $GitArgs -join ' '; $calls.Add($joined)
+        if ($joined -match ' push ') { throw 'synthetic terminating push failure' }
+        return [pscustomobject]@{ ExitCode = 0; Output = @(); Args = $GitArgs }
+    }
+    $r5 = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -DestinationUrl 'https://github.com/fagemx/edda.git' `
+        -RefSpec 'HEAD:refs/heads/spike/lane-privilege-fixture' -GitInvoker $throwingInvoker
+    Assert-True -Name 'T12e terminating push exception still runs reject and cache exit' `
+        -Condition ((@($calls | Where-Object { $_ -match 'credential reject' }).Count -eq 1) -and (@($calls | Where-Object { $_ -match 'credential-cache exit' }).Count -eq 1))
+    Assert-True -Name 'T12e exception retains original failure while cleanup stays observable' `
+        -Condition ($r5.OriginalVerdict -eq 'push-failed' -and $r5.CleanupExit -eq 0)
+
+    # T12f: token moves as SecureString; plaintext helper exists in memory only.
     $plainRoundtrip = ConvertFrom-SecureStringInMemory -SecureValue $secure
-    Assert-True -Name 'T12e SecureString roundtrip yields the synthetic token in memory' -Condition ($plainRoundtrip -eq $fakeToken)
+    Assert-True -Name 'T12f SecureString roundtrip yields the synthetic token in memory' -Condition ($plainRoundtrip -eq $fakeToken)
 
 }
 finally {

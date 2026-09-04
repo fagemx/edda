@@ -66,13 +66,14 @@ setup (§ Operator setup below), executes the GH-690 spike:
 | 4 | protection property not met — credential readable or operator token visible; baseline-expected, run stopped |
 | 5 | token provider explicitly unsupported |
 | 6 | inconclusive (e.g. `gh` unavailable) |
+| 7 | publication failed or credential cleanup was incomplete |
 
 ## Evidence status (honest ledger)
 
 | Item | Status |
 |---|---|
 | Baseline FAIL evidence (lane can read operator credentials + org token) | **READ, not re-measured** — GH-690 issue body, 2026-09-02 22:5x on 4090, basis `a1dd3d8` (threat model §1). Rerunning equals re-touching credentials; the conclusion does not change by rerunning. |
-| Fixture tests of preflight + refusal branches | **RAN** — 19/19 pass (see run receipt in the PR). |
+| Fixture tests of preflight + refusal branches | **RAN** — 62/62 pass (safe synthetic fixtures; see run receipt in the PR). |
 | Restricted-account negative tests (AccessDenied observed) | **NOT RUN** — no restricted account exists on this host. |
 | Restricted-account positive test (broker token → build/test/push of the spike branch) | **NOT RUN** — no restricted account, no GitHub App installation-token broker. |
 
@@ -97,6 +98,7 @@ The harness needs exactly these four things; nothing else was assumed or faked:
    the restricted principal, e.g.:
 
    ```powershell
+   # Use edda-node://… instead of credman:// once the broker exists.
    pwsh -NoProfile -File scripts/spikes/lane-privilege/Invoke-SpikeAction.ps1 `
      -OperatorPrincipal      'MACHINE\fagem' `
      -RestrictedPrincipal    'MACHINE\edda-lane' `
@@ -104,8 +106,8 @@ The harness needs exactly these four things; nothing else was assumed or faked:
      -BuildLanePath          '<lane-root>\worker-N' `
      -RepoAllowList          'fagemx/edda' `
      -BranchAllowList        'spike/lane-privilege-<date>' `
-     -TokenProviderRef       'credman://gh-lane-spike'   `# or edda-node://… once the broker exists `
-  -ProtectedCredentialFiles @('C:\Users\fagem\.claude\.credentials.json', `
+     -TokenProviderRef       'credman://gh-lane-spike' `
+     -ProtectedCredentialFiles @('C:\Users\fagem\.claude\.credentials.json', `
                               'C:\Users\fagem\.codex\auth.json', `
                               'C:\Users\fagem\.pi\agent\auth.json')
    ```

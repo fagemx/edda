@@ -141,75 +141,85 @@ function Assert-SafeRepoTarget {
 }
 
 function Test-PushUrlAllowed {
-    <#
-        .SYNOPSIS
-        Pure matcher: decides whether a resolved git remote/push URL points at one
-        of the allowlisted repositories. Handles the common GitHub URL shapes
-        (ssh scp-like, ssh://, https://, git://). Anything it cannot parse with
-        confidence is refused (fail closed).
-    #>
+    <# Clean HTTPS only: credential-cache cannot control SSH or URL-embedded auth. #>
     param(
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string[]]$RepoAllowList
     )
     if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
-
-    # Extract OWNER/REPO from the known GitHub URL shapes, anchored at the end
-    # (optional .git suffix). The HOST is pinned to github.com — an allowlisted
-    # owner/repo on another host (e.g. gitlab.com) must not pass (Round1 F2).
-    $patterns = @(
-        '^git@github\.com:([A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.git)?$',
-        '^[a-z][a-z0-9+.-]*://(?:[^/@\s]+@)?github\.com/([A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.git)?$'
-    )
-    $ownerRepo = $null
-    foreach ($p in $patterns) {
-        $m = [regex]::Match($Url, $p)
-        if ($m.Success) { $ownerRepo = $m.Groups[1].Value; break }
-    }
-    if ($null -eq $ownerRepo) { return $false }
-    if ($ownerRepo.Contains('..')) { return $false }
-
-    $exact = $RepoAllowList | Where-Object {
-        [string]::Equals($_, $ownerRepo, [System.StringComparison]::OrdinalIgnoreCase)
-    }
-    return [bool]$exact
+    try { $uri = [uri]$Url } catch { return $false }
+    if ($uri.Scheme -ne 'https' -or $uri.Host -ne 'github.com' -or -not [string]::IsNullOrEmpty($uri.UserInfo) -or
+        $uri.Query -or $uri.Fragment -or $uri.Port -ne 443) { return $false }
+    $path = $uri.AbsolutePath.Trim('/')
+    if ($path.EndsWith('.git', [System.StringComparison]::OrdinalIgnoreCase)) { $path = $path.Substring(0, $path.Length - 4) }
+    if ($path -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$' -or $path.Contains('..')) { return $false }
+    return [bool]($RepoAllowList | Where-Object { [string]::Equals($_, $path, [System.StringComparison]::OrdinalIgnoreCase) })
 }
 
 function Get-EffectivePushUrl {
-    <#
-        .SYNOPSIS
-        Resolves the push URL git will actually use for the named remote in the
-        given workspace (pushurl if configured, else url), validates it against
-        the repo allowlist, and returns it. Local config reads only; no network.
-        Throws (fail closed) when the destination cannot be resolved to an
-        allowlisted repository.
-    #>
+    <# Resolves every rewritten target Git would use, requiring exactly one clean HTTPS URL. #>
     param(
         [Parameter(Mandatory)][string]$WorkspacePath,
         [Parameter(Mandatory)][string[]]$RepoAllowList,
         [string]$RemoteName = 'origin'
     )
-    $url = $null
-    foreach ($key in @("remote.$RemoteName.pushurl", "remote.$RemoteName.url")) {
-        $out = & git -C $WorkspacePath config --get --null $key 2>$null
-        if ($LASTEXITCODE -eq 0 -and $null -ne $out -and ("$out".Trim().Length -gt 0)) {
-            # --null returns NUL-delimited; take the first value, strip the terminator.
-            $url = ("$out" -split "`0")[0]
-            break
-        }
+    # `remote get-url --push --all` applies Git's url.*.pushInsteadOf rules and
+    # returns every pushurl (or every fallback URL), unlike config --get.
+    $urls = @(& git -C $WorkspacePath remote get-url --push --all $RemoteName 2>$null |
+        ForEach-Object { "$($_)".Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($LASTEXITCODE -ne 0 -or $urls.Count -ne 1) {
+        throw ("Push destination guard: remote '{0}' must resolve to exactly one effective push URL (got {1})." -f $RemoteName, $urls.Count)
     }
-    if ([string]::IsNullOrWhiteSpace($url)) {
-        $out = & git -C $WorkspacePath remote get-url $RemoteName 2>$null
-        if ($LASTEXITCODE -eq 0) { $url = "$out".Trim() }
-    }
-    if ([string]::IsNullOrWhiteSpace($url)) {
-        throw ("Push destination guard: remote '{0}' has no resolvable URL in '{1}'." -f $RemoteName, $WorkspacePath)
-    }
+    $url = $urls[0]
     if (-not (Test-PushUrlAllowed -Url $url -RepoAllowList $RepoAllowList)) {
-        throw ("Push destination guard: effective push URL '{0}' does not resolve to an allowlisted repository [{1}]." -f
+        throw ("Push destination guard: effective push URL '{0}' is not a clean allowlisted HTTPS destination [{1}]." -f
             (Hide-SecretPatterns -Text $url), ($RepoAllowList -join ', '))
     }
     return $url
+}
+
+function Resolve-SpikePrincipalProfile {
+    <# Resolves a principal's profile through its Windows SID/ProfileList mapping, not USERPROFILE. #>
+    param([Parameter(Mandatory)][string]$Principal)
+    try {
+        $sid = ([System.Security.Principal.NTAccount]$Principal).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        $key = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid"
+        $profile = (Get-ItemProperty -LiteralPath $key -Name ProfileImagePath -ErrorAction Stop).ProfileImagePath
+        if ([string]::IsNullOrWhiteSpace($profile) -or -not [System.IO.Path]::IsPathRooted($profile)) { throw 'profile path missing' }
+        return [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($profile))
+    }
+    catch { throw "Protected-target guard: cannot resolve trusted Windows profile for '$Principal'." }
+}
+
+function Assert-ProtectedCredentialTargets {
+    <# Requires exactly the documented operator credential files under the trusted operator profile. #>
+    param(
+        [Parameter(Mandatory)][string]$OperatorPrincipal,
+        [Parameter(Mandatory)][string]$RestrictedPrincipal,
+        [Parameter(Mandatory)][string[]]$ProtectedCredentialFiles,
+        [scriptblock]$ProfileResolver = ${function:Resolve-SpikePrincipalProfile}
+    )
+    $operatorProfile = & $ProfileResolver $OperatorPrincipal
+    $restrictedProfile = & $ProfileResolver $RestrictedPrincipal
+    $expected = @('.claude\.credentials.json', '.codex\auth.json', '.pi\agent\auth.json') |
+        ForEach-Object { [System.IO.Path]::GetFullPath((Join-Path $operatorProfile $_)) }
+    if ($ProtectedCredentialFiles.Count -ne $expected.Count) { throw 'Protected-target guard: exactly three explicit operator credential targets are required.' }
+    $actual = @()
+    foreach ($inputPath in $ProtectedCredentialFiles) {
+        if ([string]::IsNullOrWhiteSpace($inputPath) -or -not [System.IO.Path]::IsPathRooted($inputPath)) {
+            throw "Protected-target guard: credential target must be a nonempty absolute input path."
+        }
+        $full = [System.IO.Path]::GetFullPath($inputPath)
+        if ($full.StartsWith($restrictedProfile, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Protected-target guard: a target inside the trusted restricted profile is refused.'
+        }
+        $actual += $full
+    }
+    if (($actual | Select-Object -Unique).Count -ne $actual.Count -or
+        (@($actual | Where-Object { $expected -notcontains $_ }).Count -ne 0)) {
+        throw 'Protected-target guard: targets must be the exact explicit credential set under the trusted operator profile.'
+    }
+    return $actual
 }
 
 enum CredentialProbeResult {
@@ -481,7 +491,6 @@ function Invoke-GitProcess {
         ExitCode = $LASTEXITCODE
         Output   = @($out | ForEach-Object { "$_" })
         Args     = $GitArgs
-        Stdin    = $StdinInput
     }
 }
 
@@ -506,7 +515,7 @@ function Invoke-SpikePublication {
         .PARAMETER GitInvoker
         Injectable git delegate for fixture tests (default: Invoke-GitProcess).
         Receives the same parameter set and must return an object with ExitCode,
-        Output, Args, Stdin.
+        Output, Args. Stdin is intentionally never retained in result objects.
         .OUTPUTS
         PSCustomObject: Verdict ('published'|'auth-failed'|'push-failed'|
         'cleanup-incomplete'), PushExit, CleanupExit, Notes.
@@ -517,7 +526,7 @@ function Invoke-SpikePublication {
     param(
         [Parameter(Mandatory)][securestring]$Token,
         [Parameter(Mandatory)][string]$WorkspacePath,
-        [Parameter(Mandatory)][string]$RemoteName,
+        [Parameter(Mandatory)][string]$DestinationUrl,
         [Parameter(Mandatory)][string]$RefSpec,
         [string]$CredentialUsername = 'x-access-token',
         [string]$CredentialHost = 'github.com',
@@ -539,44 +548,59 @@ function Invoke-SpikePublication {
     $notes = [System.Collections.Generic.List[string]]::new()
     $pushExit = $null
     $cleanupExit = 0
-    $verdict = $null
+    $verdict = 'auth-failed'
+    $originalVerdict = $null
 
-    # 1. Approve the credential into the in-memory cache. On failure: NEVER push.
-    $approve = & $GitInvoker -GitArgs @($helperArgs + @('credential', 'approve')) -StdinInput $payload
-    if ($approve.ExitCode -ne 0) {
-        $notes.Add('credential approve failed; publication refused before any push')
-        $verdict = 'auth-failed'
-    }
-    else {
-        # 2. Push with the isolated helper list, one explicit refspec, tag-following
-        #    disabled, and the validated destination already resolved by the caller.
-        $push = & $GitInvoker -GitArgs @($helperArgs + @('-c', 'push.followTags=false', 'push', $RemoteName, $RefSpec)) -WorkingDirectory $WorkspacePath
-        $pushExit = $push.ExitCode
-        if ($push.ExitCode -ne 0) {
-            $notes.Add('git push exited nonzero')
-            $verdict = 'push-failed'
+    try {
+        # Approve failure and an invoker exception both refuse publication.
+        $approve = & $GitInvoker -GitArgs @($helperArgs + @('credential', 'approve')) -StdinInput $payload
+        if ($approve.ExitCode -ne 0) {
+            $notes.Add('credential approve failed; publication refused before any push')
         }
         else {
-            $verdict = 'published'
+            # Push the already validated literal URL, never the remote alias. Reset
+            # helpers/headers and suppress interactive/askpass fallback inputs.
+            $savedAskPass = $env:GIT_ASKPASS; $savedSshAskPass = $env:SSH_ASKPASS; $savedSshCommand = $env:GIT_SSH_COMMAND
+            try {
+                Remove-Item Env:GIT_ASKPASS,Env:SSH_ASKPASS,Env:GIT_SSH_COMMAND -ErrorAction SilentlyContinue
+                $env:GIT_TERMINAL_PROMPT = '0'
+                $push = & $GitInvoker -GitArgs @($helperArgs + @('-c', 'http.extraHeader=', '-c', 'core.askPass=', '-c', 'push.followTags=false', 'push', $DestinationUrl, $RefSpec)) -WorkingDirectory $WorkspacePath
+            }
+            finally {
+                $env:GIT_ASKPASS = $savedAskPass; $env:SSH_ASKPASS = $savedSshAskPass; $env:GIT_SSH_COMMAND = $savedSshCommand
+                Remove-Item Env:GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue
+            }
+            $pushExit = $push.ExitCode
+            if ($push.ExitCode -ne 0) { $notes.Add('git push exited nonzero'); $verdict = 'push-failed' }
+            else { $verdict = 'published' }
         }
     }
-
-    # 3. Cleanup is always attempted and its result is observable. `credential
-    #    reject` evicts the entry; `credential-cache exit` stops the daemon.
-    $reject = & $GitInvoker -GitArgs @($helperArgs + @('credential', 'reject')) -StdinInput $payload
-    $cacheExit = & $GitInvoker -GitArgs @(@('credential-cache', 'exit'))
-    $payload = $null
-    if ($reject.ExitCode -ne 0 -or $cacheExit.ExitCode -ne 0) {
-        $cleanupExit = 1
-        $notes.Add('cleanup incomplete: credential reject/cache daemon exit failed — inspect git credential-cache processes')
-        if ($verdict -eq 'published') { $verdict = 'cleanup-incomplete' }
+    catch {
+        $notes.Add('publication invocation threw; publication refused')
+        $verdict = 'push-failed'
     }
-
+    finally {
+        # Cleanup must run even after a terminating injected/native failure.
+        try {
+            $reject = & $GitInvoker -GitArgs @($helperArgs + @('credential', 'reject')) -StdinInput $payload
+            if ($reject.ExitCode -ne 0) { $cleanupExit = 1 }
+        }
+        catch { $cleanupExit = 1 }
+        try {
+            $cacheExit = & $GitInvoker -GitArgs @(@('credential-cache', 'exit'))
+            if ($cacheExit.ExitCode -ne 0) { $cleanupExit = 1 }
+        }
+        catch { $cleanupExit = 1 }
+        $payload = $null
+    }
+    $originalVerdict = $verdict
+    if ($cleanupExit -ne 0) {
+        $notes.Add('cleanup incomplete: credential reject/cache daemon exit failed — inspect git credential-cache processes')
+        $verdict = 'cleanup-incomplete'
+    }
     return [pscustomobject]@{
-        Verdict    = $verdict
-        PushExit   = $pushExit
-        CleanupExit = $cleanupExit
-        Notes      = $notes
+        Verdict = $verdict; OriginalVerdict = $originalVerdict; PushExit = $pushExit
+        CleanupExit = $cleanupExit; Notes = $notes
     }
 }
 
@@ -589,6 +613,8 @@ Export-ModuleMember -Function @(
     'Assert-SafeRepoTarget',
     'Test-PushUrlAllowed',
     'Get-EffectivePushUrl',
+    'Resolve-SpikePrincipalProfile',
+    'Assert-ProtectedCredentialTargets',
     'Get-CredentialFileProbe',
     'Get-TokenProviderKind',
     'Resolve-BrokerToken',
