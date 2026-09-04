@@ -8,6 +8,8 @@
 #        pr-review-watch.sh decide                 (offline helper; TSV on stdin)
 #        pr-review-watch.sh label-verdict <reviewed-sha> <current-head>
 #        pr-review-watch.sh ack-try <pr> <sha> <attempts>
+#        pr-review-watch.sh gate-state                  (offline helper; verdict TSV on stdin)
+#        pr-review-watch.sh collect-verdicts <pr> <sha> (offline helper; PR comments via gh)
 #
 # Environment:
 #   EDDA_REPO                  owner/repo            (default fagemx/edda)
@@ -57,6 +59,13 @@
 # attempts the PR is labeled `review:post-failed` (verdict file kept in
 # $EDDA_FLEET_SCRATCH for manual posting).
 #
+# After the verdict comment, the watcher also posts the "Independent Review"
+# commit status on the REVIEWED sha (never the current head). Its state is the
+# union rule over every §7 verdict comment on that sha plus this round's
+# verdict (see gate_state), so a later LGTM cannot override an earlier
+# Changes Requested on the same sha. Posting reuses the comment's bounded
+# retry path (postfails, POSTFAIL_CAP, review:post-failed) — never best-effort.
+#
 # The watcher NEVER merges. Merge stays behind operator authorization
 # (pr.merge-policy).
 set -u
@@ -76,6 +85,8 @@ LABEL_PR="$SCRIPT_DIR/review-pr.sh"   # always the real script (verdict-label is
 ONCE=0
 DRY=0
 TAB=$(printf '\t')   # literal tab; "\t" inside quotes is backslash-t in POSIX sh
+WATCHLOG=${PR_REVIEW_WATCH_LOG:-$SCRATCH/watch.log}   # set early: offline
+                     # subcommands log gh failures too, not just the main loop
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >> "$WATCHLOG"; }
 
 # ---- offline helpers (unit-tested by scripts/test-pr-review-watch.sh) --------
@@ -124,6 +135,108 @@ label_verdict() { # $1=reviewed sha  $2=current head
   if [ -n "${2:-}" ] && [ "$2" = "$1" ]; then echo apply; else echo skip; fi
 }
 
+# is_full_sha: true only for exactly 40 lowercase hex characters. Every SHA
+# that reaches a pin regex or a status URL is validated with this first
+# (REVIEW.md R5): a validated sha contains no regex metacharacters, so
+# concatenating it into an ERE matches it literally.
+is_full_sha() {
+  printf '%s\n' "${1:-}" | grep -Eq '^[0-9a-f]{40}$'
+}
+
+# gate-state: the union rule for the "Independent Review" commit status.
+# Input: one verdict per line, `verdict<TAB>p0<TAB>p1` (blank lines ignored).
+# Output, exactly one word:
+#   success — at least one verdict is LGTM with P0=0 and P1=0, and no other
+#             verdict on the input is anything other than that;
+#   failure — at least one verdict is present and any one of them does not
+#             qualify (a missing or non-numeric count counts as non-zero);
+#   error   — no verdict lines at all.
+# A later LGTM never overrides an earlier Changes Requested on the same sha:
+# while any non-qualifying verdict stands, the answer is failure.
+gate_state() {
+# D8-debt(#769)
+# The whole union rule lives in this one block so it can be lifted in one
+# piece and replaced by `edda review gate <sha>` (exit 0/1/2 mapped to
+# success/failure/error). No other code decides what a verdict means.
+  awk -F'\t' '
+    { sub(/\r$/, "") }
+    /^[[:space:]]*$/ { next }
+    {
+      n++
+      if ($1 == "LGTM" && $2 ~ /^[0-9]+$/ && $2 + 0 == 0 &&
+          $3 ~ /^[0-9]+$/ && $3 + 0 == 0) next
+      bad = 1
+    }
+    END {
+      if (n == 0)   print "error"
+      else if (bad) print "failure"
+      else          print "success"
+    }
+  '
+# /D8-debt
+}
+
+# D8-debt(#671)
+# Reading verdicts out of GitHub PR comments is a stand-in until the ledger
+# can carry them across machines. Comment shape is REVIEW.md §7 verbatim: the
+# heading `## Code Review: Round <N> — PR #<n> @ <full 40-hex SHA>` pins the
+# reviewed sha, and the first LGTM / Changes Requested line after the
+# `### Verdict` heading carries the verdict and its P0/P1 counts (the same
+# line scripts/review-pr.sh verdict-label reads). Missing counts are passed
+# through as empty fields — the union rule treats them as non-zero.
+verdict_body_lines() { # $1=reviewed sha; stdin: one body per <<<COMMENT>>>
+                       # block (a single raw body also works); stdout: verdict<TAB>p0<TAB>p1
+  awk -v sha="$1" '
+    function flush(   i, n, vline, v, p0, p1, inh, pinned) {
+      if (!inb) return
+      inb = 0
+      n = split(buf, L, "\n")
+      pinned = 0; inh = 0; vline = ""
+      for (i = 1; i <= n; i++) {
+        # $2 is validated with is_full_sha by every caller before it gets
+        # here, so it is exactly 40 lowercase hex characters — no regex
+        # metacharacters — and this pin match is literal.
+        if (L[i] ~ ("^## Code Review: Round [0-9]+ — PR #[0-9]+ @ " sha "$")) {
+          pinned = 1; continue
+        }
+        if (L[i] ~ /^#{1,}[[:space:]]*Verdict/) { inh = 1; continue }
+        if (pinned && inh && vline == "" && L[i] ~ /LGTM|Changes Requested/) {
+          vline = L[i]
+        }
+      }
+      if (!pinned || vline == "") return
+      v = "LGTM"
+      if (vline ~ /Changes Requested/) v = "Changes Requested"
+      p0 = ""; p1 = ""
+      if (match(vline, /P0=[0-9]+/)) p0 = substr(vline, RSTART + 3, RLENGTH - 3)
+      if (match(vline, /P1=[0-9]+/)) p1 = substr(vline, RSTART + 3, RLENGTH - 3)
+      print v "\t" p0 "\t" p1
+    }
+    { sub(/\r$/, "") }
+    /^<<<COMMENT>>>$/ { flush(); inb = 1; buf = ""; next }
+    { if (!inb) { inb = 1; buf = "" }
+      buf = buf $0 "\n" }
+    END { flush() }
+  '
+}
+
+collect_verdicts() { # $1=pr $2=reviewed sha — every verdict comment pinned to that sha
+  # Return codes: 0 = ok (verdict lines on stdout, possibly none); 3 = the
+  # comments fetch failed. An unreadable comment list is NOT "no prior
+  # verdicts" — callers must withhold the status, never let the union rule
+  # run on this round's verdict file alone (see post_review_status).
+  is_full_sha "$2" || { log "pr$1 collect-verdicts: $2 is not a full lowercase 40-hex SHA"; return 3; }
+  comments=$(gh pr view "$1" --repo "$REPO" --json comments \
+    --jq '.comments[] | "<<<COMMENT>>>", .body' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "pr$1 comments fetch failed (gh exit $rc): $comments"
+    return 3
+  fi
+  printf '%s\n' "$comments" | verdict_body_lines "$2"
+}
+# /D8-debt
+
 # ---- acknowledgement (retried, bounded; never best-effort) -------------------
 
 ack_register() { # $1=pr $2=sha $3=attempts $4=status(""=pending, "post-failed"=terminal)
@@ -169,6 +282,16 @@ ack_try() { # $1=pr $2=sha $3=attempts — one attempt.
 case "${1:-}" in
   decide) decide; exit 0 ;;
   label-verdict) label_verdict "${2:-}" "${3:-}"; exit 0 ;;
+  gate-state) gate_state; exit 0 ;;
+  collect-verdicts)
+    if [ $# -lt 3 ]; then echo "usage: pr-review-watch.sh collect-verdicts <pr> <reviewed-sha>" >&2; exit 1; fi
+    if ! is_full_sha "$3"; then
+      echo "pr-review-watch.sh: collect-verdicts: $3 is not a full lowercase 40-hex SHA" >&2
+      exit 2
+    fi
+    collect_verdicts "$2" "$3"
+    exit $?
+    ;;
   ack-try)
     if [ $# -lt 4 ]; then echo "usage: pr-review-watch.sh ack-try <pr> <sha> <attempts>" >&2; exit 1; fi
     mkdir -p "$SCRATCH"
@@ -360,6 +483,36 @@ mark_post_failed() { # $1=pr $2=sha $3=round $4=verdict file
   state_set "$1" "$2" "$3"
 }
 
+# The "Independent Review" commit status for the reviewed sha. The state is
+# the union rule (gate_state) over every §7 verdict comment on that sha plus
+# this round's verdict file (the comment carrying it was posted just before;
+# the union rule makes the duplicate harmless). The description names this
+# round's verdict; unreadable counts render as "?" — never a made-up number.
+# Returns non-zero WITHOUT posting anything when the sha is not a validated
+# 40-hex value or the comment list is unreadable: a withheld status is
+# retried on the same bounded path as a failed post, never replaced by a
+# union computed from this round's verdict alone.
+post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
+  is_full_sha "$2" || { log "pr$1 status: $2 is not a full lowercase 40-hex SHA; status withheld"; return 3; }
+  cur=$(verdict_body_lines "$2" < "$3" | head -1)
+  v=$(printf '%s\n' "$cur" | cut -f1)
+  p0=$(printf '%s\n' "$cur" | cut -f2)
+  p1=$(printf '%s\n' "$cur" | cut -f3)
+  [ -n "$v" ] || v=unknown
+  [ -n "$p0" ] || p0="?"
+  [ -n "$p1" ] || p1="?"
+  comments=$(collect_verdicts "$1" "$2")
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "pr$1 comments unreadable (gh exit $rc); status withheld, will retry next poll"
+    return 3
+  fi
+  state=$(printf '%s\n%s\n' "$comments" "$(verdict_body_lines "$2" < "$3")" | gate_state)
+  gh api "repos/$REPO/statuses/$2" \
+    -f state="$state" -f context="Independent Review" \
+    -f description="$v P0=$p0 P1=$p1" >/dev/null
+}
+
 # ---- in-flight handling ------------------------------------------------------
 settle_pending() {
   [ -s "$PENDING" ] || return 0
@@ -377,6 +530,7 @@ settle_pending() {
     LOG="$SCRATCH/review-pr$pr-r$round.log"
     VERDICT="$SCRATCH/review-pr$pr-r$round-verdict.md"
     POSTED="$VERDICT.posted"
+    STATUSOK="$POSTED.status-posted"
 
     # Apply the verdict label + record reviewed. The label goes on only if the
     # PR's current head still equals the reviewed SHA; a moved head keeps the
@@ -395,6 +549,28 @@ settle_pending() {
         state_set "$pr" "$sha" "$round"
         pending_drop "$pr"
         return 0
+      fi
+      # The Independent Review status goes to the REVIEWED sha, on the same
+      # bounded retry path as the comment (never best-effort): a failed post
+      # increments postfails and keeps the pending entry; at the cap the PR
+      # is labeled review:post-failed, exactly like the comment path. The
+      # posted state is the union over every verdict on this sha, so a later
+      # LGTM cannot override an earlier Changes Requested (GH-742).
+      if [ ! -f "$STATUSOK" ]; then
+        if post_review_status "$pr" "$sha" "$1"; then
+          : > "$STATUSOK"
+          log "pr$pr r$round status posted: Independent Review on $sha"
+        else
+          postfails=$((postfails + 1))
+          log "pr$pr r$round status post failed (attempt $postfails)"
+          if [ "$postfails" -ge "$POSTFAIL_CAP" ]; then
+            mark_post_failed "$pr" "$sha" "$round" "$1"
+            pending_drop "$pr"
+          else
+            pending_update "$pr" "$round" "$sha" "$attempts" "$launched" "$postfails"
+          fi
+          return 0
+        fi
       fi
       vl=$(sh "$LABEL_PR" verdict-label < "$1")
       if [ -n "$vl" ] && gh pr edit "$pr" --repo "$REPO" --add-label "$vl" >/dev/null 2>&1; then
