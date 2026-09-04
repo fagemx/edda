@@ -165,9 +165,9 @@ fn matches_trigger(trigger: &str, ctx: &HookContext) -> bool {
             return false;
         }
         return ctx.command.as_deref().is_some_and(|current| {
-            current
-                .split([';', '&', '|', '\n'])
-                .any(|segment| crate::rules::command_word(segment) == Some(cmd))
+            crate::rules::split_command_segments(current)
+                .iter()
+                .any(|segment| crate::rules::command_word(segment).as_deref() == Some(cmd))
         });
     }
 
@@ -390,6 +390,33 @@ mod tests {
             command: Some("echo python; grep python file.txt".to_string()),
         };
         assert_eq!(evaluate_rules(&store, &ctx).rules_matched, 0);
+    }
+
+    #[test]
+    fn command_failure_does_not_match_quoted_segment_content() {
+        let store = make_store(vec![active_rule(
+            "command_failure:python",
+            "Verify python is available",
+            RuleCategory::Workflow,
+        )]);
+
+        // GH-813: `python` inside a quoted argument is not a segment's
+        // command word — the only segment runs `printf` → no match.
+        let ctx = HookContext {
+            hook_event: "PreToolUse".to_string(),
+            tool_name: "Bash".to_string(),
+            files_touched: vec![],
+            cwd: "/project".to_string(),
+            command: Some("printf '%s' 'skip; python -V'".to_string()),
+        };
+        assert_eq!(evaluate_rules(&store, &ctx).rules_matched, 0);
+
+        // Quoted command word still keys: `"python" x.py` runs python.
+        let quoted_ctx = HookContext {
+            command: Some("\"python\" x.py".to_string()),
+            ..ctx
+        };
+        assert_eq!(evaluate_rules(&store, &quoted_ctx).rules_matched, 1);
     }
 
     #[test]
