@@ -36,7 +36,9 @@ Each archive contains the `edda` binary and a SHA256 checksum sidecar file.
 
 ## Build from source
 
-Requires [Rust toolchain](https://rustup.rs/) (1.75+).
+Requires a [Rust toolchain](https://rustup.rs/). Building from a checkout uses
+the pinned version in `rust-toolchain.toml`; the crates themselves declare
+`rust-version = "1.91"`, which is the minimum a consumer needs.
 
 ```bash
 cargo install --git https://github.com/fagemx/edda edda

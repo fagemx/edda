@@ -25,7 +25,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
+        # rust-toolchain.toml pins the version; `rustup show` installs it and
+        # prints it into the log.
+        run: rustup show
       - name: Get tag
         id: tag
         run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
@@ -165,7 +167,7 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup show
           rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
