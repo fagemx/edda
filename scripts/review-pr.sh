@@ -255,17 +255,21 @@ if (-not \$proof) {
   \$policy = 'missing'
   \$session = 'unknown'
 } else {
-  \$p0 = @(\$payload.findings | Where-Object severity -eq 'P0').Count
-  \$p1 = @(\$payload.findings | Where-Object severity -eq 'P1').Count
-  \$qualified = (\$payload.qualified -eq \$true) -and (@(\$payload.disqualifiers).Count -eq 0)
+  \$findings = if (\$null -eq \$payload.findings) { @() } else { @(\$payload.findings) }
+  \$disqualifierItems = if (\$null -eq \$payload.disqualifiers) { @() } else { @(\$payload.disqualifiers) }
+  \$checklist = if (\$null -eq \$payload.checklist) { @() } else { @(\$payload.checklist) }
+  \$escalations = if (\$null -eq \$payload.escalations) { @() } else { @(\$payload.escalations) }
+  \$p0 = @(\$findings | Where-Object severity -eq 'P0').Count
+  \$p1 = @(\$findings | Where-Object severity -eq 'P1').Count
+  \$qualified = (\$payload.qualified -eq \$true) -and (\$disqualifierItems.Count -eq 0)
   \$label = if (\$payload.verdict -eq 'lgtm' -and \$qualified) { 'LGTM' } elseif (\$payload.verdict -eq 'changes-requested') { 'Changes Requested' } else { '' }
   if (\$label) {
-    "<<<VERDICT\`n## Code Review: Round $ROUND — PR #$PR @ $SHA\`n\`n### Verdict\`n\$label, P0=\$p0, P1=\$p1\`nEvent identity: \$(\$payload.event_id ?? 'unknown')\`nQualification: \$qualified\`nDisqualifiers: \$((@(\$payload.disqualifiers) -join ', ') ?? 'none')\`n### Findings" | Out-File '$LOGW' -Encoding utf8
-    foreach (\$finding in @(\$payload.findings)) { Add-Content '$LOGW' ("finding: " + (\$finding | ConvertTo-Json -Compress)) -Encoding utf8 }
+    "<<<VERDICT\`n## Code Review: Round $ROUND — PR #$PR @ $SHA\`n\`n### Verdict\`n\$label, P0=\$p0, P1=\$p1\`nEvent identity: \$(\$payload.event_id ?? 'unknown')\`nQualification: \$qualified\`nDisqualifiers: \$((\$disqualifierItems -join ', ') ?? 'none')\`n### Findings" | Out-File '$LOGW' -Encoding utf8
+    foreach (\$finding in \$findings) { Add-Content '$LOGW' ("finding: " + (\$finding | ConvertTo-Json -Compress)) -Encoding utf8 }
     Add-Content '$LOGW' '### Checklist' -Encoding utf8
-    foreach (\$item in @(\$payload.checklist)) { Add-Content '$LOGW' ("checklist: " + (\$item | ConvertTo-Json -Compress)) -Encoding utf8 }
+    foreach (\$item in \$checklist) { Add-Content '$LOGW' ("checklist: " + (\$item | ConvertTo-Json -Compress)) -Encoding utf8 }
     Add-Content '$LOGW' '### Escalations' -Encoding utf8
-    foreach (\$escalation in @(\$payload.escalations)) { Add-Content '$LOGW' ("escalation: " + (\$escalation | ConvertTo-Json -Compress)) -Encoding utf8 }
+    foreach (\$escalation in \$escalations) { Add-Content '$LOGW' ("escalation: " + (\$escalation | ConvertTo-Json -Compress)) -Encoding utf8 }
     Add-Content '$LOGW' 'VERDICT>>>' -Encoding utf8
   }
   Add-Content '$LOGW' "Model requested: \$(\$payload.reviewer.model_requested)" -Encoding utf8
@@ -275,7 +279,7 @@ if (-not \$proof) {
   \$tree = 'unchanged'
   \$policy = 'product-json:hard'
   \$session = \$payload.reviewer.session_id
-  \$disqualifiers = @(\$payload.disqualifiers) -join ','
+  \$disqualifiers = \$disqualifierItems -join ','
 }
 "TRANSPORT=edda-review" | Out-File '$DONEW' -Encoding utf8
 "POLICY_RECEIPT=\$policy" | Add-Content '$DONEW' -Encoding utf8
