@@ -15,27 +15,27 @@ name = "edda"
 path = "src/main.rs"
 
 [dependencies]
-edda-aggregate = { path = "../edda-aggregate", version = "0.4.0" }
-edda-ask = { path = "../edda-ask", version = "0.4.0" }
-edda-chronicle = { path = "../edda-chronicle", version = "0.4.0" }
-edda-core = { path = "../edda-core", version = "0.4.0" }
-edda-ledger = { path = "../edda-ledger", version = "0.4.0" }
-edda-derive = { path = "../edda-derive", version = "0.4.0" }
-edda-store = { path = "../edda-store", version = "0.4.0" }
-edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.4.0" }
-edda-bridge-codex = { path = "../edda-bridge-codex", version = "0.4.0" }
-edda-bridge-cursor = { path = "../edda-bridge-cursor", version = "0.4.0" }
-edda-bridge-hermes = { path = "../edda-bridge-hermes", version = "0.4.0" }
-edda-bridge-openclaw = { path = "../edda-bridge-openclaw", version = "0.4.0" }
-edda-transcript = { path = "../edda-transcript", version = "0.4.0" }
-edda-index = { path = "../edda-index", version = "0.4.0" }
-edda-pack = { path = "../edda-pack", version = "0.4.0" }
-edda-mcp = { path = "../edda-mcp", version = "0.4.0" }
-edda-serve = { path = "../edda-serve", version = "0.4.0" }
-edda-notify = { path = "../edda-notify", version = "0.4.0" }
-edda-postmortem = { path = "../edda-postmortem", version = "0.4.0" }
-edda-search-fts = { path = "../edda-search-fts", version = "0.4.0" }
-edda-conductor = { path = "../edda-conductor", version = "0.4.0" }
+edda-aggregate = { path = "../edda-aggregate", version = "0.5.0" }
+edda-ask = { path = "../edda-ask", version = "0.5.0" }
+edda-chronicle = { path = "../edda-chronicle", version = "0.5.0" }
+edda-core = { path = "../edda-core", version = "0.5.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.5.0" }
+edda-derive = { path = "../edda-derive", version = "0.5.0" }
+edda-store = { path = "../edda-store", version = "0.5.0" }
+edda-bridge-claude = { path = "../edda-bridge-claude", version = "0.5.0" }
+edda-bridge-codex = { path = "../edda-bridge-codex", version = "0.5.0" }
+edda-bridge-cursor = { path = "../edda-bridge-cursor", version = "0.5.0" }
+edda-bridge-hermes = { path = "../edda-bridge-hermes", version = "0.5.0" }
+edda-bridge-openclaw = { path = "../edda-bridge-openclaw", version = "0.5.0" }
+edda-transcript = { path = "../edda-transcript", version = "0.5.0" }
+edda-index = { path = "../edda-index", version = "0.5.0" }
+edda-pack = { path = "../edda-pack", version = "0.5.0" }
+edda-mcp = { path = "../edda-mcp", version = "0.5.0" }
+edda-serve = { path = "../edda-serve", version = "0.5.0" }
+edda-notify = { path = "../edda-notify", version = "0.5.0" }
+edda-postmortem = { path = "../edda-postmortem", version = "0.5.0" }
+edda-search-fts = { path = "../edda-search-fts", version = "0.5.0" }
+edda-conductor = { path = "../edda-conductor", version = "0.5.0" }
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true }
 clap.workspace = true
@@ -68,7 +68,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # `test_support::isolated_store()` (GH-757). Ordinary (non-test) builds of
 # this crate and of the `edda` binary never enable it, so production and
 # subprocess store resolution is unchanged.
-edda-store = { path = "../edda-store", version = "0.4.0", features = [
+edda-store = { path = "../edda-store", version = "0.5.0", features = [
     "test-support",
 ] }
 

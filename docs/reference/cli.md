@@ -6,7 +6,7 @@ title: CLI Reference
 
 Complete reference for all `edda` commands.
 
-> Documented for edda 0.4 — the surface below was re-derived from the 0.4.0
+> Documented for edda 0.5 — the surface below is re-derived from the built binary by
 > binary, not copied from an older release. `scripts/check-cli-docs.sh`
 > enforces that every verb the binary exposes is documented here, either as a
 > full section or as a row in the [Internal / experimental](#internal--experimental-commands)
