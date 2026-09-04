@@ -16,7 +16,7 @@ description: Use when running one lane of the Fleet execution loop — pick a si
 ## 一圈流程
 
 1. **領單**（claim 協議，原子）：
-   - 找最老 ready 單：`gh issue list --label fleet:ready --state open --json number,title,createdAt --jq 'sort_by(.createdAt)[0]'`
+   - 找最老 ready 單：`sh scripts/fleet/ready-queue-lint.sh --oldest`——只回傳最老且**尚未交付**的 ready 單。腳本用合併 PR 機器檢查（GH-665）剔除已交付仍掛 `fleet:ready` 的單，不做記憶判斷；gh 失敗會 fail closed，絕不把壞掉的查詢誤判成「隊列空」。
    - 無單 → **idle 退避**，回報「隊列空」並結束。絕不自己發明工作。
    - 搶：`gh issue edit <n> --add-label fleet:claimed --remove-label fleet:ready --add-assignee @me`
    - 留 lease：`gh issue comment <n> --body "claimed by <session-id> at <ISO8601 now>"`

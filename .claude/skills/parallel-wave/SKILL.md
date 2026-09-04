@@ -21,6 +21,12 @@ invariant, API/schema order). Plan YAMLs live outside the repo (scratchpad or
 
 ## Layer 1 — static judgment (before dispatch)
 
+Ready-queue intake is a machine check, not memory (GH-665): source candidate
+issues from `scripts/fleet/ready-queue-lint.sh`, never a raw
+`gh issue list --label fleet:ready` — the script excludes open issues whose
+delivery PR already merged, so a delivered issue still carrying `fleet:ready`
+is never dispatched.
+
 Derive each issue's predicted write surface (paths + symbols) from its scope
 against the crate map. Pairwise intersect:
 
