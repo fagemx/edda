@@ -101,7 +101,7 @@ fn test_pi_transcript_ingested_and_idempotent() {
     // GH-757: thread-local store-root override instead of a process-global
     // `EDDA_STORE_ROOT` redirect — this binary is single-test today, but the
     // override cannot leak to a sibling test or a subprocess if one lands.
-    let _store = edda_store::test_support::isolated_store_root();
+    let _store = edda_store::test_support::isolated_store_root().expect("isolated store");
     let tmp_store = _store.path().to_path_buf();
     let tmp_sessions = tempfile::tempdir().unwrap();
 

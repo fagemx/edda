@@ -17,6 +17,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::{marker::PhantomData, rc::Rc};
 
 thread_local! {
     static THREAD_ROOT: std::cell::RefCell<Option<PathBuf>> =
@@ -32,12 +33,16 @@ pub(crate) fn current_override() -> Option<PathBuf> {
 /// restore whatever was installed before on drop (panic-safe).
 pub struct ThreadOverrideGuard {
     prev: Option<PathBuf>,
+    _thread_bound: PhantomData<Rc<()>>,
 }
 
 impl ThreadOverrideGuard {
     fn install(path: &Path) -> Self {
         let prev = THREAD_ROOT.with(|slot| slot.borrow_mut().replace(path.to_path_buf()));
-        ThreadOverrideGuard { prev }
+        ThreadOverrideGuard {
+            prev,
+            _thread_bound: PhantomData,
+        }
     }
 }
 
@@ -58,10 +63,10 @@ pub struct IsolatedStoreRoot {
 }
 
 impl IsolatedStoreRoot {
-    fn new() -> Self {
-        let dir = Arc::new(tempfile::tempdir().expect("tempdir for isolated store root"));
+    fn new() -> std::io::Result<Self> {
+        let dir = Arc::new(tempfile::tempdir()?);
         let guard = ThreadOverrideGuard::install(dir.path());
-        IsolatedStoreRoot { dir, _guard: guard }
+        Ok(IsolatedStoreRoot { dir, _guard: guard })
     }
 
     /// The isolated store root this test resolves into.
@@ -89,11 +94,11 @@ pub fn set_thread_override(path: &Path) -> ThreadOverrideGuard {
 /// for the lifetime of the returned guard.
 ///
 /// ```ignore
-/// let _store = edda_store::test_support::isolated_store_root();
+/// let _store = edda_store::test_support::isolated_store_root().expect("isolated store");
 /// // every edda_store::project_dir(...) call on this thread now resolves
 /// // into the temp directory; other threads are unaffected.
 /// ```
-pub fn isolated_store_root() -> IsolatedStoreRoot {
+pub fn isolated_store_root() -> std::io::Result<IsolatedStoreRoot> {
     IsolatedStoreRoot::new()
 }
 
@@ -104,7 +109,7 @@ mod tests {
     #[test]
     fn override_is_visible_through_store_root_and_restored_on_drop() {
         let before = current_override();
-        let guard = isolated_store_root();
+        let guard = isolated_store_root().expect("isolated store");
         assert_eq!(
             crate::store_root(),
             guard.path(),
@@ -130,7 +135,7 @@ mod tests {
     /// override must never leak across threads.
     #[test]
     fn override_never_leaks_to_spawned_threads() {
-        let guard = isolated_store_root();
+        let guard = isolated_store_root().expect("isolated store");
         let path = guard.path().to_path_buf();
         let seen = std::thread::spawn(move || (current_override(), crate::store_root()))
             .join()
@@ -144,7 +149,7 @@ mod tests {
 
     #[test]
     fn nested_overrides_restore_in_reverse_order() {
-        let outer = isolated_store_root();
+        let outer = isolated_store_root().expect("isolated store");
         let outer_path = outer.path().to_path_buf();
         let inner = set_thread_override(Path::new("C:/edda-test-nested-root"));
         assert_eq!(crate::store_root(), Path::new("C:/edda-test-nested-root"));
@@ -157,7 +162,7 @@ mod tests {
     fn override_is_restored_when_the_test_panics_while_holding_it() {
         let before = current_override();
         let path = {
-            let guard = isolated_store_root();
+            let guard = isolated_store_root().expect("isolated store");
             let path = guard.path().to_path_buf();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _keep = guard;
@@ -176,7 +181,7 @@ mod tests {
 
     #[test]
     fn shared_dir_keeps_the_root_alive_after_the_guard_drops() {
-        let guard = isolated_store_root();
+        let guard = isolated_store_root().expect("isolated store");
         let dir = guard.shared_dir();
         let path = dir.path().to_path_buf();
         drop(guard);

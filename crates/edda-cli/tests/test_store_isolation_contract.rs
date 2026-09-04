@@ -24,7 +24,7 @@ fn e2e_repo() -> tempfile::TempDir {
 #[test]
 fn child_subprocess_keeps_ordinary_resolution_while_the_parent_holds_an_override() {
     // Parent installs an in-process test root A on this thread.
-    let root_a = edda_store::test_support::isolated_store_root();
+    let root_a = edda_store::test_support::isolated_store_root().expect("isolated store");
     let a_registry = root_a.path().join("registry.json");
 
     // 1. A child passed an explicit root B writes only to B: the env var

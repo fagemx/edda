@@ -158,7 +158,7 @@ pub(crate) fn with_env_guard(vars: &[(&str, Option<&str>)], f: impl FnOnce()) {
 /// Restores on drop, including on panic.
 #[cfg(test)]
 pub(crate) fn isolated_store() -> edda_store::test_support::IsolatedStoreRoot {
-    edda_store::test_support::isolated_store_root()
+    edda_store::test_support::isolated_store_root().expect("isolated store")
 }
 
 #[cfg(test)]

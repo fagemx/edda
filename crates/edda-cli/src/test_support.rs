@@ -24,7 +24,7 @@ use edda_store::test_support::IsolatedStoreRoot;
 /// let _store = test_support::isolated_store();
 /// ```
 pub(crate) fn isolated_store() -> IsolatedStoreRoot {
-    edda_store::test_support::isolated_store_root()
+    edda_store::test_support::isolated_store_root().expect("isolated store")
 }
 
 // Guard-restore semantics (RAII on drop, panic safety, thread locality) are

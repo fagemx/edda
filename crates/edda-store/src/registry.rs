@@ -235,7 +235,7 @@ mod tests {
     use super::*;
     /// Run a closure with `EDDA_STORE_ROOT` pointing to an isolated tempdir.
     fn with_isolated_store(f: impl FnOnce()) {
-        let _store = crate::test_support::isolated_store_root();
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         f();
     }
 

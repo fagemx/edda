@@ -224,7 +224,7 @@ mod tests {
     fn heartbeat_path_confines_a_hostile_session_id_to_the_state_dir() {
         // Isolated store root: keeps this path-resolution test off the
         // operator's real store.
-        let _store = crate::test_support::isolated_store_root();
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         let state_dir = heartbeat_path("proj", "innocent")
             .parent()
             .unwrap()
@@ -257,7 +257,7 @@ mod tests {
     /// lane's heartbeat was destroyed.
     #[test]
     fn session_ids_differing_only_by_case_get_distinct_files() {
-        let _store = crate::test_support::isolated_store_root();
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         write_heartbeat("proj", &sample("Lane")).expect("write Lane");
         write_heartbeat("proj", &sample("lane")).expect("write lane");
         let state = crate::project_dir("proj").join("state");
@@ -287,7 +287,7 @@ mod tests {
     /// no folding can ever identify two of its outputs.
     #[test]
     fn unicode_folded_session_ids_get_distinct_files() {
-        let _store = crate::test_support::isolated_store_root();
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         let kelvin = "\u{212A}"; // KELVIN SIGN — NTFS folds onto ASCII K
         write_heartbeat("proj", &sample(kelvin)).expect("write Kelvin sign");
         write_heartbeat("proj", &sample("K")).expect("write K");
@@ -348,7 +348,7 @@ mod tests {
     /// named `escaped.json` appears outside it, and the record round-trips.
     #[test]
     fn hostile_session_id_round_trips_without_leaving_the_state_dir() {
-        let _store = crate::test_support::isolated_store_root();
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         let sid = "x\\..\\..\\..\\escaped";
         write_heartbeat("proj", &sample(sid)).expect("write");
         let project = crate::project_dir("proj");
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn heartbeat_roundtrips_through_the_shared_writer() {
-        let _store = crate::test_support::isolated_store_root();
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         let pid = "test_store_hb_roundtrip";
         write_heartbeat(pid, &sample("s1")).expect("write");
         let hb = read_heartbeat(pid, "s1").expect("read");
