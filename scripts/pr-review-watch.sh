@@ -16,6 +16,7 @@
 #   EDDA_FLEET_ROOT            main checkout path    (default: derived from git)
 #   EDDA_FLEET_SCRATCH         state/log dir         (default $HOME/.edda/fleet)
 #   EDDA_REVIEW_MODEL          review model          (default claude-opus-5)
+#   EDDA_REVIEW_AGENT          review backend        (default claude; pi allowed)
 #   EDDA_REVIEW_POLL_SECONDS   poll interval         (default 60)
 #   PR_REVIEW_WATCH_STATE      state file override   (used by tests)
 #   PR_REVIEW_WATCH_ACKS       acks file override    (used by tests)
@@ -72,6 +73,7 @@ set -u
 
 REPO=${EDDA_REPO:-fagemx/edda}
 MODEL=${EDDA_REVIEW_MODEL:-claude-opus-5}
+AGENT=${EDDA_REVIEW_AGENT:-claude}
 POLL=${EDDA_REVIEW_POLL_SECONDS:-60}
 SCRATCH=${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}
 STALE=${EDDA_REVIEW_STALE_SECONDS:-2700}   # 45 min: the scheduled-task limit is 30 min
@@ -441,13 +443,23 @@ pr_head() { # $1=pr
 # `edda dispatch --agent claude` (GH-708): pi's openrouter routing cannot
 # reach any Anthropic model on this fleet.
 PROBE_PROMPT="$SCRATCH/review-provider-probe.txt"
+# The probe uses the same transport the review would launch (GH-880): --agent
+# follows EDDA_REVIEW_AGENT, and the pi arm carries the read-only allowlist
+# instead of an exclude list (review.execution-policy).
+if [ "$AGENT" = pi ]; then
+  PROBE_TOOL_ARGS="--tools $PI_REVIEW_TOOLS"
+  PROBE_CAPARM=pi-dispatch
+else
+  PROBE_TOOL_ARGS="--tools $REVIEW_TOOLS --exclude-tools $REVIEW_DENIED"
+  PROBE_CAPARM=edda-dispatch
+fi
 probe_review_provider() {
-  review_capabilities edda-dispatch || return 2
+  review_capabilities "$PROBE_CAPARM" || return 2
   printf 'reply OK\n' > "$PROBE_PROMPT"
   if command -v timeout >/dev/null 2>&1; then
-    timeout 120 edda dispatch --agent claude --model "$MODEL" --tools "$REVIEW_TOOLS" --exclude-tools "$REVIEW_DENIED" --prompt-file "$PROBE_PROMPT" >/dev/null 2>&1
+    timeout 120 edda dispatch --agent "$AGENT" --model "$MODEL" $PROBE_TOOL_ARGS --prompt-file "$PROBE_PROMPT" >/dev/null 2>&1
   else
-    edda dispatch --agent claude --model "$MODEL" --tools "$REVIEW_TOOLS" --exclude-tools "$REVIEW_DENIED" --prompt-file "$PROBE_PROMPT" >/dev/null 2>&1
+    edda dispatch --agent "$AGENT" --model "$MODEL" $PROBE_TOOL_ARGS --prompt-file "$PROBE_PROMPT" >/dev/null 2>&1
   fi
 }
 
