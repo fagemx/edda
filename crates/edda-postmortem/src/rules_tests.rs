@@ -348,3 +348,22 @@ fn stats_counts_correctly() {
     assert_eq!(stats.dormant, 1);
     assert_eq!(stats.dead, 1);
 }
+
+#[test]
+fn split_command_segments_backslash_in_single_quotes_is_literal() {
+    let cmd = r"printf '%s\n' 'a\'; python -V";
+    let segments = split_command_segments(cmd);
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0], r"printf '%s\n' 'a\'");
+    assert_eq!(segments[1], " python -V");
+    assert_eq!(command_word(segments[1]), Some("python".into()));
+}
+
+#[test]
+fn trackable_and_command_word_with_quoted_command() {
+    assert!(is_trackable_command(r#""python" -V"#));
+    assert_eq!(command_word(r#""python" -V"#), Some("python".into()));
+    assert!(!is_trackable_command(r#""echo" hi"#));
+    assert!(!is_trackable_command("FOO=bar npm test"));
+    assert_eq!(command_word("FOO=bar npm test"), Some("npm".into()));
+}

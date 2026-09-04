@@ -580,7 +580,7 @@ pub fn split_command_segments(cmd: &str) -> Vec<&str> {
             continue;
         }
         match ch {
-            '\\' => escaped = true,
+            '\\' if !in_single => escaped = true,
             '\'' if !in_double => in_single = !in_single,
             '"' if !in_single => in_double = !in_double,
             ';' | '&' | '|' | '\n' if !in_single && !in_double => {

@@ -142,7 +142,9 @@ fn analyze_failures(
         .iter()
         .filter(|cmd| crate::rules::is_trackable_command(cmd))
     {
-        let short_cmd = cmd.split_whitespace().next().unwrap_or(cmd);
+        let Some(short_cmd) = crate::rules::command_word(cmd) else {
+            continue;
+        };
         rule_proposals.push(RuleProposal {
             trigger: format!("command_failure:{short_cmd}"),
             action: format!("Verify {short_cmd} is available and configured before running"),
@@ -371,6 +373,21 @@ mod tests {
         // rules that fired on every Bash call).
         assert_eq!(result.rule_proposals.len(), 1);
         assert_eq!(result.rule_proposals[0].trigger, "command_failure:npm");
+    }
+
+    #[test]
+    fn failed_command_normalizes_quoted_command_triggers() {
+        let trigger = trigger_with(vec![TriggerReason::SessionFailures]);
+        let mut input = base_input();
+        input.failed_commands = vec![r#""python" -V"#.to_string()];
+
+        let result = analyze(&trigger, &input);
+        assert_eq!(result.rule_proposals.len(), 1);
+        assert_eq!(result.rule_proposals[0].trigger, "command_failure:python");
+        assert_eq!(
+            result.rule_proposals[0].action,
+            "Verify python is available and configured before running"
+        );
     }
 
     #[test]
