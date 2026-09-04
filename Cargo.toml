@@ -58,6 +58,8 @@ dirs = "6"
 tempfile = "3"
 globset = "0.4"
 regex = "1"
+syn = { version = "2", features = ["full", "visit"] }
+jsonschema = { version = "0.33", default-features = false }
 uuid = { version = "1", features = ["v5"] }
 rand = "0.8"
 tracing = "0.1"

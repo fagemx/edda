@@ -112,6 +112,14 @@ pub fn record_matched_hits(store: &mut RulesStore, matched_ids: &[String]) {
     }
 }
 
+/// Record shows for matched rules: increments the show counter WITHOUT
+/// updating `last_hit`, promoting Proposed rules, or reactivating Dormant/
+/// Settled ones (GH-813: PreToolUse matches on every Bash call must not
+/// reset the rule's decay TTL).
+pub fn record_matched_shows(store: &mut RulesStore, matched_ids: &[String]) {
+    store.record_matched_shows(matched_ids);
+}
+
 /// Format enforcement results as a warning message for the user.
 pub fn format_warnings(result: &EvaluationResult) -> Option<String> {
     if result.enforcements.is_empty() {
@@ -140,32 +148,26 @@ fn matches_trigger(trigger: &str, ctx: &HookContext) -> bool {
     }
 
     if let Some(cmd) = trigger.strip_prefix("command_failure:") {
-        // Match only when the incoming Bash command actually contains the
-        // previously failed command token. Matching every Bash call floods
-        // hooks with irrelevant warnings AND record_hit() keeps resetting the
-        // rule's TTL, so noise rules never decay — a self-feeding loop.
+        // First-token keying (GH-813): match only when the previously failed
+        // command is the command word of a segment of the incoming Bash
+        // command (split on `;`, `&&`, `||`, `|`, newline). Matching every
+        // Bash call — or any whole-word occurrence — flooded hooks with
+        // irrelevant warnings AND record_hit() kept resetting the rule's
+        // TTL, so noise rules never decayed — a self-feeding loop.
         // No command available → no match (silence over noise).
         if ctx.tool_name != "Bash" {
             return false;
         }
         let cmd = cmd.trim();
-        if cmd.is_empty() {
+        if !crate::rules::is_trackable_command(cmd) {
+            // Builtins/keywords/assignments never match, even if a legacy
+            // store still holds such a rule; the decay cycle revokes it.
             return false;
         }
-        // Simple tokens (e.g., "ls", "python") match as whole words so they
-        // don't hit substrings like "tools"; complex tokens (e.g., "WS=$(cat")
-        // fall back to substring containment.
-        let is_simple_token = cmd
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-' || c == '.');
         return ctx.command.as_deref().is_some_and(|current| {
-            if is_simple_token {
-                current
-                    .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-' || c == '.'))
-                    .any(|word| word == cmd)
-            } else {
-                current.contains(cmd)
-            }
+            crate::rules::split_command_segments(current)
+                .iter()
+                .any(|segment| crate::rules::command_word(segment).as_deref() == Some(cmd))
         });
     }
 
@@ -200,6 +202,8 @@ mod tests {
             status: RuleStatus::Active,
             source_session: "test".to_string(),
             source_event: None,
+            shows: 0,
+            revoked_reason: None,
             category,
         }
     }
@@ -318,6 +322,160 @@ mod tests {
             ..hit_ctx
         };
         assert_eq!(evaluate_rules(&store, &write_ctx).rules_matched, 0);
+    }
+
+    #[test]
+    fn command_failure_keys_on_first_token_of_segments() {
+        let store = make_store(vec![active_rule(
+            "command_failure:python",
+            "Verify python is available",
+            RuleCategory::Workflow,
+        )]);
+
+        let ctx = HookContext {
+            hook_event: "PreToolUse".to_string(),
+            tool_name: "Bash".to_string(),
+            files_touched: vec![],
+            cwd: "/project".to_string(),
+            command: Some("python scripts/run.py".to_string()),
+        };
+        assert_eq!(evaluate_rules(&store, &ctx).rules_matched, 1);
+
+        // GH-813: `echo python` runs `echo`, not `python` — the failed
+        // command only keys when it is the command word of a segment.
+        let echo_ctx = HookContext {
+            command: Some("echo python".to_string()),
+            ..ctx.clone()
+        };
+        assert_eq!(evaluate_rules(&store, &echo_ctx).rules_matched, 0);
+
+        // Segment splitting on `&&`, `;`, `|`, and newline: the next
+        // segment's command word keys again.
+        let seg_ctx = HookContext {
+            command: Some("cd /tmp && python scripts/run.py".to_string()),
+            ..ctx.clone()
+        };
+        assert_eq!(evaluate_rules(&store, &seg_ctx).rules_matched, 1);
+
+        let pipe_ctx = HookContext {
+            command: Some("cat data.txt | python -\nprint('x')".to_string()),
+            ..ctx.clone()
+        };
+        assert_eq!(evaluate_rules(&store, &pipe_ctx).rules_matched, 1);
+
+        // Leading environment variable assignments are skipped, so the
+        // command word after them keys.
+        let env_ctx = HookContext {
+            command: Some("FOO=1 BAR=2 python scripts/run.py".to_string()),
+            ..ctx.clone()
+        };
+        assert_eq!(evaluate_rules(&store, &env_ctx).rules_matched, 1);
+    }
+
+    #[test]
+    fn command_failure_does_not_match_when_cmd_is_argument() {
+        let store = make_store(vec![active_rule(
+            "command_failure:python",
+            "Verify python is available",
+            RuleCategory::Workflow,
+        )]);
+
+        // GH-813: `python` appears only as an argument, never as a segment's
+        // command word → no match.
+        let ctx = HookContext {
+            hook_event: "PreToolUse".to_string(),
+            tool_name: "Bash".to_string(),
+            files_touched: vec![],
+            cwd: "/project".to_string(),
+            command: Some("echo python; grep python file.txt".to_string()),
+        };
+        assert_eq!(evaluate_rules(&store, &ctx).rules_matched, 0);
+    }
+
+    #[test]
+    fn command_failure_does_not_match_quoted_segment_content() {
+        let store = make_store(vec![active_rule(
+            "command_failure:python",
+            "Verify python is available",
+            RuleCategory::Workflow,
+        )]);
+
+        // GH-813: `python` inside a quoted argument is not a segment's
+        // command word — the only segment runs `printf` → no match.
+        let ctx = HookContext {
+            hook_event: "PreToolUse".to_string(),
+            tool_name: "Bash".to_string(),
+            files_touched: vec![],
+            cwd: "/project".to_string(),
+            command: Some("printf '%s' 'skip; python -V'".to_string()),
+        };
+        assert_eq!(evaluate_rules(&store, &ctx).rules_matched, 0);
+
+        // Quoted command word still keys: `"python" x.py` runs python.
+        let quoted_ctx = HookContext {
+            command: Some("\"python\" x.py".to_string()),
+            ..ctx
+        };
+        assert_eq!(evaluate_rules(&store, &quoted_ctx).rules_matched, 1);
+    }
+
+    #[test]
+    fn command_failure_builtin_rules_never_match() {
+        // Legacy stores may still hold rules for builtins/keywords/common
+        // utilities (GH-813: echo 1789, cd 1618 hits). They must not match.
+        let store = make_store(vec![
+            active_rule("command_failure:cd", "no", RuleCategory::Workflow),
+            active_rule("command_failure:echo", "no", RuleCategory::Workflow),
+            active_rule("command_failure:ls", "no", RuleCategory::Workflow),
+            active_rule("command_failure:grep", "no", RuleCategory::Workflow),
+        ]);
+        let ctx = HookContext {
+            hook_event: "PreToolUse".to_string(),
+            tool_name: "Bash".to_string(),
+            files_touched: vec![],
+            cwd: "/project".to_string(),
+            command: Some("cd /tmp; echo hi; ls -la | grep foo".to_string()),
+        };
+        assert_eq!(evaluate_rules(&store, &ctx).rules_matched, 0);
+    }
+
+    #[test]
+    fn command_failure_exact_command_word_matches_segment() {
+        let store = make_store(vec![active_rule(
+            "command_failure:git",
+            "Check git config",
+            RuleCategory::Workflow,
+        )]);
+        let ctx = HookContext {
+            hook_event: "PreToolUse".to_string(),
+            tool_name: "Bash".to_string(),
+            files_touched: vec![],
+            cwd: "/project".to_string(),
+            command: Some("cd /tmp; echo hi; git status".to_string()),
+        };
+        let result = evaluate_rules(&store, &ctx);
+        assert_eq!(result.rules_matched, 1);
+        assert_eq!(result.matched_rule_ids[0], "rule_test_command_failure_git");
+    }
+
+    #[test]
+    fn record_matched_shows_does_not_reset_ttl_or_status() {
+        let mut store = make_store(vec![active_rule(
+            "command_failure:python",
+            "Verify python is available",
+            RuleCategory::Workflow,
+        )]);
+        let last_hit = store.rules[0].last_hit.clone();
+        let hits = store.rules[0].hits;
+        let id = store.rules[0].id.clone();
+
+        record_matched_shows(&mut store, &["rule_missing".to_string(), id]);
+
+        let rule = &store.rules[0];
+        assert_eq!(rule.shows, 1);
+        assert_eq!(rule.hits, hits);
+        assert_eq!(rule.last_hit, last_hit);
+        assert_eq!(rule.status, RuleStatus::Active);
     }
 
     #[test]

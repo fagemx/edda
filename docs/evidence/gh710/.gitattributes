@@ -1,0 +1,2 @@
+# Captured streams are byte evidence; preserve CRLF/LF and zero-byte files.
+captured/** -text

@@ -24,7 +24,7 @@ context: fork
 | §5.5 | wiring verdict——每個新面一列的必填槽；無新面也要寫一行 |
 | §6 | `[判斷]` 項只能標「需升級」，不准自行裁定；升級紀錄進判決欄位 |
 | §7 | 判決的固定格式（規則表、wiring 表、findings、RAN vs READ） |
-| §8 | 裁定規則：任何 P0/P1 → Changes Requested；P0=0 且 P1=0 → LGTM |
+| §8 | 裁定規則：見 `REVIEW.md` §8（唯一真實來源，本 skill 不重述） |
 
 `REVIEW.md` 的每條規則都指回既有正典（`.claude/CLAUDE.md` 的 review-fix loop
 與驗證階梯、#629 的 wiring verdict、#618 的 brief 模板 v1）。這份 skill **不重述**
@@ -36,13 +36,26 @@ context: fork
 2. **定位 PR**：args 給的號碼／URL；或
    `gh pr list --head "$(git branch --show-current)" --json number --jq '.[0].number'`。
 
+## elapsed 來源
+
+verdict header 增列 `elapsed: <N> ms (pi session)`；來源和 `model_observed`
+相同的 pi session JSONL 檔。先將 `PI_SESSION_FILE` 設為該檔案，再執行：
+
+```sh
+node scripts/pi-session-elapsed.mjs "$PI_SESSION_FILE"
+```
+
+只在 `elapsed_measured=true` 時填入 `elapsed_ms`，否則寫
+`elapsed: unmeasured`，不以 0 代替缺值。此值是第一到最後一筆訊息的時間差，
+與 dispatch 的 spawn→exit 量測分開標示。brief 模板與 `REVIEW.md` 記有相同命令。
+
 ## 貼裁定
 
 `gh pr comment <n> --body-file <tmp>`，格式照 `REVIEW.md` §7 一字不改。
 
-- **LGTM**（P0=0、P1=0）→ `gh pr edit <n> --add-label fleet:reviewed`。停，交操作者 merge。
-- **Changes Requested**（有 P0 或 P1）→ comment 已貼、PR 留開。停，回報操作者。
-  修是 `fleet-worker`／後續 pass 的事，不是你。
+- **LGTM** → `gh pr edit <n> --add-label fleet:reviewed`。停，交操作者 merge。何時成立由 `REVIEW.md` §8 裁定。
+- **Changes Requested** → comment 已貼、PR 留開。停，回報操作者。何時成立由
+  `REVIEW.md` §8 裁定。修是 `fleet-worker`／後續 pass 的事，不是你。
 
 ## 四禁（fleet 專屬，違反即停）
 

@@ -1,0 +1,31 @@
+name: Crates publication check
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/publish-crates-check.yml'
+      - 'scripts/publish-crates*'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
+      - 'rust-toolchain.toml'
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: Workspace publish dry-run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-dry-run
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Test release ordering and registry failure boundaries
+        run: python3 scripts/publish-crates-test.py
+      - name: Verify every workspace package without uploading
+        run: cargo publish --dry-run --workspace --locked

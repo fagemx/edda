@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "task_intake payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "source": {
+      "type": "string"
+    },
+    "source_id": {
+      "type": "string"
+    },
+    "source_url": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "intent": {
+      "type": "string"
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "priority": {
+      "type": "string"
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "source",
+    "source_id",
+    "source_url",
+    "title",
+    "intent",
+    "labels",
+    "priority",
+    "constraints"
+  ],
+  "additionalProperties": true
+}

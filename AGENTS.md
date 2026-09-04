@@ -4,6 +4,18 @@ Before doing repository work, read `.claude/CLAUDE.md` completely. It is the
 canonical project guide for architecture, Rust conventions, tests, decisions,
 and multi-agent coordination.
 
+## Session start without edda hooks (pi, or any session edda did not launch)
+
+Claude Code and Codex sessions get the edda pack injected by a hook. If you are
+not one of those, run these three before touching any file, and treat their
+output as the pack:
+
+1. `edda context` — decisions, peers, off-limits paths.
+2. `edda task list` — the task rail; pick the task assigned to you.
+3. `edda task show <id>` — prints your brief (until `edda task start` lands in
+   #793). Follow it: it names your scope, who owns the gate, and what is out
+   of scope.
+
 ## Multi-session work
 
 - When two or more sessions are implementing in parallel, use

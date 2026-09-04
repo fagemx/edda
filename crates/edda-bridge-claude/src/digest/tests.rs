@@ -7,63 +7,6 @@ use super::orchestrate::*;
 use super::*;
 
 use std::io::Write;
-use std::sync::{MutexGuard, PoisonError};
-
-struct EnvGuard {
-    _lock: MutexGuard<'static, ()>,
-    previous_store_root: Option<std::ffi::OsString>,
-    _store_root: tempfile::TempDir,
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match self.previous_store_root.take() {
-            Some(root) => std::env::set_var("EDDA_STORE_ROOT", root),
-            None => std::env::remove_var("EDDA_STORE_ROOT"),
-        }
-    }
-}
-
-impl EnvGuard {
-    fn new(lock: MutexGuard<'static, ()>) -> Self {
-        let previous_store_root = std::env::var_os("EDDA_STORE_ROOT");
-        let store_root = tempfile::tempdir().unwrap();
-        std::env::set_var("EDDA_STORE_ROOT", store_root.path());
-        Self {
-            _lock: lock,
-            previous_store_root,
-            _store_root: store_root,
-        }
-    }
-}
-
-fn env_guard() -> EnvGuard {
-    let lock = crate::ENV_LOCK
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    EnvGuard::new(lock)
-}
-
-#[test]
-fn env_guard_isolates_store_root_and_restores_on_drop() {
-    let lock = crate::ENV_LOCK
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    let before = std::env::var_os("EDDA_STORE_ROOT");
-    let guard = EnvGuard::new(lock);
-    let inside = std::env::var_os("EDDA_STORE_ROOT");
-    assert_ne!(inside, before, "fixture needs a private store root");
-    drop(guard);
-
-    let _lock = crate::ENV_LOCK
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    assert_eq!(
-        std::env::var_os("EDDA_STORE_ROOT"),
-        before,
-        "fixture must restore the caller environment"
-    );
-}
 
 fn write_session_ledger(dir: &Path, lines: &[serde_json::Value]) -> std::path::PathBuf {
     let path = dir.join("test_session.jsonl");
@@ -112,6 +55,7 @@ fn make_envelope_at(
 
 #[test]
 fn digest_empty_session() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("empty.jsonl");
     std::fs::write(&path, "").unwrap();
@@ -127,6 +71,7 @@ fn digest_empty_session() {
 
 #[test]
 fn digest_counts_tools() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope("PostToolUse", "Bash", serde_json::json!({})),
@@ -158,6 +103,7 @@ fn digest_counts_tools() {
 
 #[test]
 fn digest_extracts_files() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope(
@@ -193,6 +139,7 @@ fn digest_extracts_files() {
 
 #[test]
 fn digest_extracts_failed_cmds() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope(
@@ -222,6 +169,7 @@ fn digest_extracts_failed_cmds() {
 
 #[test]
 fn digest_event_has_provenance() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("prov.jsonl");
     std::fs::write(&path, "").unwrap();
@@ -235,6 +183,7 @@ fn digest_event_has_provenance() {
 
 #[test]
 fn digest_payload_has_source() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![make_envelope("PostToolUse", "Bash", serde_json::json!({}))];
     let path = write_session_ledger(tmp.path(), &lines);
@@ -248,6 +197,7 @@ fn digest_payload_has_source() {
 
 #[test]
 fn digest_duration_computed() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope_at(
@@ -273,6 +223,7 @@ fn digest_duration_computed() {
 
 #[test]
 fn digest_extracts_commits_from_bash() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope(
@@ -307,6 +258,7 @@ fn digest_extracts_commits_from_bash() {
 
 #[test]
 fn digest_commits_in_payload() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![make_envelope(
         "PostToolUse",
@@ -332,6 +284,7 @@ fn digest_commits_in_payload() {
 
 #[test]
 fn outcome_completed_normal_session() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope("UserPromptSubmit", "", serde_json::json!({})),
@@ -345,6 +298,7 @@ fn outcome_completed_normal_session() {
 
 #[test]
 fn outcome_interrupted_last_is_user_prompt() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope("PostToolUse", "Read", serde_json::json!({})),
@@ -357,6 +311,7 @@ fn outcome_interrupted_last_is_user_prompt() {
 
 #[test]
 fn outcome_error_stuck_three_consecutive_failures() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope("PostToolUse", "Edit", serde_json::json!({})),
@@ -371,6 +326,7 @@ fn outcome_error_stuck_three_consecutive_failures() {
 
 #[test]
 fn outcome_not_stuck_if_success_resets_count() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope("PostToolUseFailure", "Bash", serde_json::json!({})),
@@ -385,6 +341,7 @@ fn outcome_not_stuck_if_success_resets_count() {
 
 #[test]
 fn outcome_in_digest_payload() {
+    let _store = crate::isolated_store();
     let stats = SessionStats {
         outcome: SessionOutcome::ErrorStuck,
         ..Default::default()
@@ -398,6 +355,7 @@ fn outcome_in_digest_payload() {
 
 #[test]
 fn digest_tasks_snapshot_in_payload() {
+    let _store = crate::isolated_store();
     let stats = SessionStats {
         tool_calls: 5,
         tasks_snapshot: vec![
@@ -433,6 +391,7 @@ fn digest_tasks_snapshot_in_payload() {
 
 #[test]
 fn extract_git_commit_msg_works() {
+    let _store = crate::isolated_store();
     assert_eq!(
         extract_git_commit_msg(r#"git commit -m "fix: something""#),
         "fix: something"
@@ -446,6 +405,7 @@ fn extract_git_commit_msg_works() {
 
 #[test]
 fn digest_nonexistent_file_returns_empty_stats() {
+    let _store = crate::isolated_store();
     let path = Path::new("/nonexistent/session.jsonl");
     let stats = extract_stats(path).unwrap();
     assert_eq!(stats.tool_calls, 0);
@@ -454,6 +414,7 @@ fn digest_nonexistent_file_returns_empty_stats() {
 
 #[test]
 fn digest_hash_chain_ready() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("chain.jsonl");
     std::fs::write(&path, "").unwrap();
@@ -500,7 +461,7 @@ fn write_store_session_ledger(project_id: &str, session_id: &str, lines: &[serde
 
 #[test]
 fn digest_writes_to_workspace_ledger() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -535,7 +496,7 @@ fn digest_writes_to_workspace_ledger() {
 
 #[test]
 fn digest_maintains_hash_chain() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -572,7 +533,7 @@ fn digest_maintains_hash_chain() {
 
 #[test]
 fn digest_skips_already_digested() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -605,7 +566,7 @@ fn digest_skips_already_digested() {
 
 #[test]
 fn digest_no_reduplicate_across_sessions() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -648,7 +609,7 @@ fn digest_no_reduplicate_across_sessions() {
 
 #[test]
 fn digest_no_workspace_records_failure() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     // Hermetic isolation: `find_root` climbs parents, so a bare tempdir
     // would silently resolve to whatever workspace exists above %TEMP%
     // (a probe scratch or the fleet coordination workspace) and the
@@ -691,7 +652,7 @@ fn digest_no_workspace_records_failure() {
 
 #[test]
 fn digest_permanent_failure_after_3_retries() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let project_id = "fake_project_perm_fail";
     let _ = edda_store::ensure_dirs(project_id);
@@ -726,7 +687,7 @@ fn digest_permanent_failure_after_3_retries() {
 
 #[test]
 fn digest_state_round_trip() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let project_id = "test_state_rt";
     // Writes to the real per-user store and, unlike its neighbours, never
     // cleaned up — so it left `projects/test_state_rt` on every developer
@@ -775,6 +736,7 @@ fn digest_state_round_trip() {
 
 #[test]
 fn failed_cmd_milestone_produced() {
+    let _store = crate::isolated_store();
     let failed = FailedCommand {
         command: "cargo test --fail".to_string(),
         cwd: "/project".to_string(),
@@ -792,6 +754,7 @@ fn failed_cmd_milestone_produced() {
 
 #[test]
 fn failed_cmd_milestone_has_provenance() {
+    let _store = crate::isolated_store();
     let failed = FailedCommand {
         command: "npm install".to_string(),
         cwd: ".".to_string(),
@@ -806,6 +769,7 @@ fn failed_cmd_milestone_has_provenance() {
 
 #[test]
 fn failed_cmd_milestone_chains_hash() {
+    let _store = crate::isolated_store();
     let failed = FailedCommand {
         command: "make build".to_string(),
         cwd: ".".to_string(),
@@ -820,6 +784,7 @@ fn failed_cmd_milestone_chains_hash() {
 
 #[test]
 fn extract_stats_captures_failed_cmd_detail() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("sess-detail.jsonl");
     let mut f = std::fs::File::create(&path).unwrap();
@@ -879,7 +844,7 @@ fn extract_exit_code_from_error_field() {
 
 #[test]
 fn digest_writes_cmd_milestones_to_workspace() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -928,7 +893,7 @@ fn digest_writes_cmd_milestones_to_workspace() {
 
 #[test]
 fn digest_skips_cmd_milestones_when_disabled() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -967,7 +932,7 @@ fn digest_skips_cmd_milestones_when_disabled() {
 
 #[test]
 fn manual_digest_specific_session() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -1001,7 +966,7 @@ fn manual_digest_specific_session() {
 
 #[test]
 fn manual_digest_zero_call_session_writes_no_event() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -1035,7 +1000,7 @@ fn manual_digest_zero_call_session_writes_no_event() {
 
 #[test]
 fn manual_digest_same_session_twice_writes_one_event() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -1071,7 +1036,7 @@ fn manual_digest_same_session_twice_writes_one_event() {
 
 #[test]
 fn auto_digest_zero_call_session_writes_no_event() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -1102,6 +1067,7 @@ fn auto_digest_zero_call_session_writes_no_event() {
 
 #[test]
 fn digest_duration_excludes_idle_gap() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope_at(
@@ -1141,7 +1107,7 @@ fn digest_duration_excludes_idle_gap() {
 
 #[test]
 fn prev_digest_roundtrip() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_prev_digest_rt";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -1183,7 +1149,7 @@ fn prev_digest_roundtrip() {
 
 #[test]
 fn prev_digest_empty_tasks() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_prev_digest_empty";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -1208,7 +1174,7 @@ fn prev_digest_empty_tasks() {
 
 #[test]
 fn prev_digest_with_decisions_and_notes() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_prev_digest_dn";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -1240,7 +1206,7 @@ fn prev_digest_with_decisions_and_notes() {
 
 #[test]
 fn prev_digest_backward_compat() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_prev_digest_compat";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -1279,6 +1245,7 @@ fn prev_digest_backward_compat() {
 
 #[test]
 fn collect_session_ledger_extras_basic() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().to_path_buf();
     let paths = edda_ledger::EddaPaths::discover(&workspace);
@@ -1328,6 +1295,7 @@ fn collect_session_ledger_extras_basic() {
 
 #[test]
 fn collect_session_ledger_extras_excludes_digest_notes() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().to_path_buf();
     let paths = edda_ledger::EddaPaths::discover(&workspace);
@@ -1359,6 +1327,7 @@ fn collect_session_ledger_extras_excludes_digest_notes() {
 
 #[test]
 fn collect_session_ledger_extras_no_workspace() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     // No .edda/ directory
     let (decisions, notes) =
@@ -1369,7 +1338,7 @@ fn collect_session_ledger_extras_no_workspace() {
 
 #[test]
 fn digest_skips_empty_session() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -1409,6 +1378,7 @@ fn digest_skips_empty_session() {
 
 #[test]
 fn digest_payload_has_recall_fields() {
+    let _store = crate::isolated_store();
     let stats = SessionStats {
         tool_calls: 10,
         nudge_count: 3,
@@ -1422,6 +1392,7 @@ fn digest_payload_has_recall_fields() {
 
 #[test]
 fn digest_event_contains_notes() {
+    let _store = crate::isolated_store();
     let stats = SessionStats {
         tool_calls: 5,
         outcome: SessionOutcome::Completed,
@@ -1449,6 +1420,7 @@ fn digest_event_contains_notes() {
 
 #[test]
 fn digest_event_empty_notes_backward_compat() {
+    let _store = crate::isolated_store();
     let stats = SessionStats::default();
     let event = build_digest_event("sess-no-notes", &stats, "main", None, &[], None).unwrap();
 
@@ -1460,7 +1432,7 @@ fn digest_event_empty_notes_backward_compat() {
 
 #[test]
 fn prev_digest_has_recall_fields() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_prev_digest_recall";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -1484,6 +1456,7 @@ fn prev_digest_has_recall_fields() {
 
 #[test]
 fn digest_payload_has_signal_count() {
+    let _store = crate::isolated_store();
     let stats = SessionStats {
         tool_calls: 10,
         nudge_count: 3,
@@ -1497,6 +1470,7 @@ fn digest_payload_has_signal_count() {
 
 #[test]
 fn digest_extracts_deps_added() {
+    let _store = crate::isolated_store();
     let dir = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope(
@@ -1536,6 +1510,7 @@ fn digest_extracts_deps_added() {
 
 #[test]
 fn digest_extracts_deps_added_dedup() {
+    let _store = crate::isolated_store();
     let dir = tempfile::tempdir().unwrap();
     let lines = vec![
         make_envelope(
@@ -1566,6 +1541,7 @@ fn digest_extracts_deps_added_dedup() {
 
 #[test]
 fn passive_harvest_writes_inferred_decision() {
+    let _store = crate::isolated_store();
     let dir = tempfile::tempdir().unwrap();
     let paths = edda_ledger::EddaPaths::discover(dir.path());
     edda_ledger::ledger::init_workspace(&paths).unwrap();
@@ -1614,6 +1590,7 @@ fn passive_harvest_writes_inferred_decision() {
 
 #[test]
 fn passive_harvest_skips_already_recorded() {
+    let _store = crate::isolated_store();
     let dir = tempfile::tempdir().unwrap();
     let paths = edda_ledger::EddaPaths::discover(dir.path());
     edda_ledger::ledger::init_workspace(&paths).unwrap();
@@ -1668,6 +1645,7 @@ fn passive_harvest_context_hint_fallback() {
 
 #[test]
 fn passive_harvest_empty_deps_no_events() {
+    let _store = crate::isolated_store();
     let dir = tempfile::tempdir().unwrap();
     let paths = edda_ledger::EddaPaths::discover(dir.path());
     edda_ledger::ledger::init_workspace(&paths).unwrap();
@@ -1684,7 +1662,7 @@ fn passive_harvest_empty_deps_no_events() {
 
 #[test]
 fn prev_digest_has_signal_count() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_prev_digest_signal";
     let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -1707,7 +1685,7 @@ fn prev_digest_has_signal_count() {
 
 #[test]
 fn prev_digest_has_tool_breakdown() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_prev_digest_tool_bd";
     let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -1849,7 +1827,7 @@ fn write_store_session_ledger_bytes(
 
 #[test]
 fn manual_digest_never_deletes_session_ledger() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -1872,7 +1850,7 @@ fn manual_digest_never_deletes_session_ledger() {
 
 #[test]
 fn auto_digest_never_deletes_session_ledger() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -1897,7 +1875,7 @@ fn auto_digest_never_deletes_session_ledger() {
 
 #[test]
 fn auto_digest_zero_call_keeps_session_ledger() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -1926,7 +1904,7 @@ fn auto_digest_zero_call_keeps_session_ledger() {
 
 #[test]
 fn manual_digest_retry_returns_that_sessions_own_event_id() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -1954,7 +1932,7 @@ fn manual_digest_retry_returns_that_sessions_own_event_id() {
 
 #[test]
 fn manual_digest_grown_session_digests_only_delta() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -2014,7 +1992,7 @@ fn manual_digest_grown_session_digests_only_delta() {
 
 #[test]
 fn manual_digest_truncated_final_line_is_not_consumed_early() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -2096,7 +2074,7 @@ fn manual_digest_truncated_final_line_is_not_consumed_early() {
 // swallowed.
 #[test]
 fn legacy_migration_re_reads_appended_tail() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -2196,7 +2174,7 @@ fn legacy_migration_re_reads_appended_tail() {
 
 #[test]
 fn legacy_re_read_cannot_resurrect_a_digest_loop() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -2249,6 +2227,7 @@ fn legacy_re_read_cannot_resurrect_a_digest_loop() {
 
 #[test]
 fn extract_recognizes_openclaw_after_tool_call() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let envelope = serde_json::json!({
         "ts": "2026-02-14T10:00:00Z",
@@ -2277,6 +2256,7 @@ fn extract_recognizes_openclaw_after_tool_call() {
 
 #[test]
 fn extract_recognizes_openclaw_after_tool_call_failure() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let envelope = serde_json::json!({
         "ts": "2026-02-14T10:00:00Z",
@@ -2300,6 +2280,7 @@ fn extract_recognizes_openclaw_after_tool_call_failure() {
 
 #[test]
 fn extract_recognizes_cursor_post_tool_use() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let envelope = serde_json::json!({
         "ts": "2026-02-14T10:00:00Z",
@@ -2319,6 +2300,7 @@ fn extract_recognizes_cursor_post_tool_use() {
 
 #[test]
 fn extract_recognizes_hermes_post_tool_call() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let envelope = serde_json::json!({
         "ts": "2026-02-14T10:00:00Z",
@@ -2339,7 +2321,7 @@ fn extract_recognizes_hermes_post_tool_call() {
 
 #[test]
 fn manual_digest_openclaw_session_writes_event() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -2396,7 +2378,7 @@ fn manual_digest_openclaw_session_writes_event() {
 // from zero, never skipped via the stale offset.
 #[test]
 fn replaced_ledger_same_session_id_is_reread_not_skipped() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -2449,7 +2431,7 @@ fn replaced_ledger_same_session_id_is_reread_not_skipped() {
 // and must also be caught by the identity proof.
 #[test]
 fn same_length_rewrite_is_reread_not_skipped() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -2516,7 +2498,7 @@ fn same_length_rewrite_is_reread_not_skipped() {
 // cost a re-scan on retry — never a duplicate digest note.
 #[test]
 fn lost_cache_recovered_from_ledger_without_duplicate() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -2631,7 +2613,7 @@ fn big_envelope_line(tool: &str) -> String {
 
 #[test]
 fn digest_note_proof_and_stats_come_from_one_read() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -2757,7 +2739,7 @@ fn digest_note_proof_and_stats_come_from_one_read() {
 // authoritative workspace ledger (rolled back / lost).
 #[test]
 fn rolled_back_ledger_cannot_be_suppressed_by_cache() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
 
@@ -2865,7 +2847,7 @@ fn rolled_back_ledger_cannot_be_suppressed_by_cache() {
 // reported pending and the Edit work MUST be re-emitted.
 #[test]
 fn rolled_back_ledger_with_zero_call_cache_must_re_report_and_re_emit() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
     let session_id = "sess-zc-rollback";
@@ -2959,7 +2941,7 @@ fn rolled_back_ledger_with_zero_call_cache_must_re_report_and_re_emit() {
 // semantic authority.
 #[test]
 fn hand_edited_cache_with_correct_hash_cannot_suppress_unnoted_session() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let (workspace, project_id) = setup_digest_workspace(tmp.path());
     let session_id = "sess-hand-edited";
@@ -3028,6 +3010,7 @@ fn hand_edited_cache_with_correct_hash_cannot_suppress_unnoted_session() {
 
 #[test]
 fn digest_cost_is_null_when_session_has_no_usage() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![make_envelope("PostToolUse", "Read", serde_json::json!({}))];
     let path = write_session_ledger(tmp.path(), &lines);
@@ -3042,6 +3025,7 @@ fn digest_cost_is_null_when_session_has_no_usage() {
 
 #[test]
 fn digest_text_omits_cost_when_unmeasured() {
+    let _store = crate::isolated_store();
     let tmp = tempfile::tempdir().unwrap();
     let lines = vec![make_envelope("PostToolUse", "Read", serde_json::json!({}))];
     let path = write_session_ledger(tmp.path(), &lines);
@@ -3127,7 +3111,7 @@ fn measured_cost_true_zero_usage_state_is_measured_zero() {
     // A usage observation with all-zero counters (e.g. zero pricing) is a
     // measured zero and must yield Some(0.0) — not None. Presence must be
     // carried independently of the counter magnitudes (round-2 P1-1).
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_gh585_zero_usage_state";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -3158,7 +3142,7 @@ fn prev_digest_measured_zero_usage_writes_measured_zero_cost() {
     // End to end: usage.json says usage was observed but every counter is
     // zero; the snapshot written for the next session must carry the
     // measured zero, not null (round-2 P1-1).
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_gh585_prev_zero_usage";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -3201,7 +3185,7 @@ fn prev_digest_measured_zero_cost_round_trips() {
     // This version writes measured zero as a distinguishable wire form
     // (round-2 P1-2); it must read back as Some(0.0), never be swallowed by
     // the legacy bare-0.0 rule.
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_gh585_zero_roundtrip";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -3243,7 +3227,7 @@ fn prev_digest_measured_zero_marker_deserializes() {
 
 #[test]
 fn prev_digest_measured_nonzero_cost_round_trips() {
-    let _env = env_guard();
+    let _store = crate::isolated_store();
     let pid = "test_gh585_nonzero_roundtrip";
     let _ = edda_store::ensure_dirs(pid);
 

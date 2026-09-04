@@ -1,0 +1,318 @@
+{
+  "source_sha": "16e5e46574424caf99b78d615583141a9dcc9334",
+  "command": [
+    "cargo",
+    "test",
+    "-p",
+    "edda-bridge-claude"
+  ],
+  "parallelism": "default; RUST_TEST_THREADS unset; no test-threads argument",
+  "lane": "C:/ai_agent/fleet-workstation/lanes/worker-1",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-pc-windows-msvc\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "runs": [
+    {
+      "run": 1,
+      "exit_code": 0,
+      "elapsed_seconds": 24.009,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.85s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "89ca81af410b93989fc57e6c681ff36a0a2d48e90716b94000e8afb13471c534",
+      "stderr_sha256": "98a8a17deec66be7b00f1b2a5abc1b0916b43a6730771d25aebf2ebd63f8c403"
+    },
+    {
+      "run": 2,
+      "exit_code": 0,
+      "elapsed_seconds": 18.185,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.15s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "7d47ba4bc8b774f909178880ea8cd29eecbe183a33382efa6bcf3ef29a2baa1d",
+      "stderr_sha256": "54f4744f2fc738d5881889eaa046504e9edd523e70035179000272b7fabf4495"
+    },
+    {
+      "run": 3,
+      "exit_code": 0,
+      "elapsed_seconds": 16.807,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.86s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "5a6e50fb2cb212b822fedefa4b4aecb02993c664e24aba5f7683e26f7a241209",
+      "stderr_sha256": "2d2fba3dee87edb6de125546fef621a9ebdf950699b2f9eaaef5e3e59b4de430"
+    },
+    {
+      "run": 4,
+      "exit_code": 0,
+      "elapsed_seconds": 18.793,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.85s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "3de69ff56b6c8ba491265925f7f825643b18fa9416aba7d9e072c2a65b00ffdc",
+      "stderr_sha256": "302cf2fee6aee128f8816e3e89cf88a0f2b281407ec52d9c621a61e1e615637b"
+    },
+    {
+      "run": 5,
+      "exit_code": 0,
+      "elapsed_seconds": 15.39,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.61s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "66940637ceaa90da5a971e9a255981de6188181a9a06152712b392df587a0f23",
+      "stderr_sha256": "a368c7f233ec1d82fcb1b0ec9ae4258eaea6d355f63c9bdf81ac8866de06ea84"
+    },
+    {
+      "run": 6,
+      "exit_code": 0,
+      "elapsed_seconds": 17.229,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.40s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "f421b1027eb424ce75d8453d3f85a86d6a3956f3825e9b8b448053a413a0d71a",
+      "stderr_sha256": "302cf2fee6aee128f8816e3e89cf88a0f2b281407ec52d9c621a61e1e615637b"
+    },
+    {
+      "run": 7,
+      "exit_code": 0,
+      "elapsed_seconds": 19.69,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.83s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "2a027b23d20194d19c33bacd1f1a9125b1807eb38324dc3f74380302c44abbd3",
+      "stderr_sha256": "5909bef3d4e2da97fccc6b9b43a62489af95b61a55103f318d5ea0596c1e4518"
+    },
+    {
+      "run": 8,
+      "exit_code": 0,
+      "elapsed_seconds": 19.274,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.22s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "0304b509192a22254057ad3ccd6b5ad479c102d662b854490d16b68c863ef39c",
+      "stderr_sha256": "3a710cc40d85a554a67ef64f1ea516f5e6f039085d50abc7ebaa0698427c45ac"
+    },
+    {
+      "run": 9,
+      "exit_code": 0,
+      "elapsed_seconds": 23.353,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.36s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "70bb39e52ddebb02aec42ac0e3c9384a4dd3539ee5c15de43a2dce13e776071e",
+      "stderr_sha256": "42a6214d85ca8005c353f7a61a1394d41f394b76be1836f59ba419dadf39d436"
+    },
+    {
+      "run": 10,
+      "exit_code": 0,
+      "elapsed_seconds": 24.032,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.73s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "7a38a7537120c966631264de39256a1d850a6f48522382c31a956105c84b1f61",
+      "stderr_sha256": "e4bff6bab94f77a4ad1f3094d5c73b74156b00ca786415387988ad4842e92398"
+    },
+    {
+      "run": 11,
+      "exit_code": 0,
+      "elapsed_seconds": 24.247,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.54s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "5d43afa91f629091d26f9a7c768d1242d5f740c95b28aefed5bee14cc3b08869",
+      "stderr_sha256": "f39450017220e5638b4b5bc867b89fe11cfa2f38a07d23dbd1c14db5fa9ee6f6"
+    },
+    {
+      "run": 12,
+      "exit_code": 0,
+      "elapsed_seconds": 26.906,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.45s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "a8cb87f57906f37ccf3f775f52f74a265e10e897a4fe6d464a4d5b61af82efb3",
+      "stderr_sha256": "28fc862020377f36b7786c5acce6fd3e8c6424866538caf6f2005055373b30f0"
+    },
+    {
+      "run": 13,
+      "exit_code": 0,
+      "elapsed_seconds": 21.633,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.35s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "52dfd6854ee43fbd6069fd432f0d74583129cfdf3ffed77e264e0fd3fc99d5ff",
+      "stderr_sha256": "fea60200b8d8592deb6ba21334a771d2afdfed125db2c08da708e7d6a6fbb7a8"
+    },
+    {
+      "run": 14,
+      "exit_code": 0,
+      "elapsed_seconds": 22.914,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.84s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "572d9b6822b2fc78b3e0fb8a49b5c34e01eb96276f1b98f067bf7763ef95e555",
+      "stderr_sha256": "a368c7f233ec1d82fcb1b0ec9ae4258eaea6d355f63c9bdf81ac8866de06ea84"
+    },
+    {
+      "run": 15,
+      "exit_code": 0,
+      "elapsed_seconds": 30.257,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 27.81s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "aa9c8e7b39102ccf40c9f79c1e03f4265f522039295b3e5896438e659a0bafaf",
+      "stderr_sha256": "9ba49e7809669d37c37e384b70ab833053d380bbe34eb18be4ad274ded678a40"
+    },
+    {
+      "run": 16,
+      "exit_code": 0,
+      "elapsed_seconds": 26.479,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.56s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "84d281d9389b2101f267bd1563f5668489f64f48d83870f2dd135d1479cf5441",
+      "stderr_sha256": "3ab52ee578115eed0ea2e7d3485d6a17d9a9f4ef5875840eca5e907a0fe7ffc5"
+    },
+    {
+      "run": 17,
+      "exit_code": 0,
+      "elapsed_seconds": 27.16,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.46s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "3c9e6c802a73c6009aeb8f629e0e0c3121f77bf3656b08de2105000633bdc9c4",
+      "stderr_sha256": "54f95c699841cc225b2d9420c766b88400d8ccd59c44dc2fa1b98ca18f4656f8"
+    },
+    {
+      "run": 18,
+      "exit_code": 0,
+      "elapsed_seconds": 23.513,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.47s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "c61882f9894b55da5087a2ef26d51bbf90ba43166c9346e8848ded83d046aec1",
+      "stderr_sha256": "f4590e1a707c5502cc38771cef412b7aa5dcb034aaba977c18594aa0d29358d0"
+    },
+    {
+      "run": 19,
+      "exit_code": 0,
+      "elapsed_seconds": 20.061,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.05s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "18904e796601d74944ecb1d3017e08a8dd7a06fabcf8137020d8cbbea06efb39",
+      "stderr_sha256": "e1dc34fa819b7346a2c1b56fad038c25b2a1214ad77d9bb246e935da23891338"
+    },
+    {
+      "run": 20,
+      "exit_code": 0,
+      "elapsed_seconds": 23.719,
+      "summaries": [
+        "test result: ok. 638 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.75s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "fallback_unchanged": true,
+      "fallback_after": {
+        "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+      },
+      "stdout_sha256": "8e6ee0a5fa1bfd4413895c0e6a4855a45d8077f08758d672ea6be26e269a0215",
+      "stderr_sha256": "3561f6a77580cff0a58220f4b725f417210c9bdd0fe6646af987d8af291fd33c"
+    }
+  ],
+  "complete": true,
+  "fallback_before": {
+    "sentinel.txt": "c9d29c8bc87a40865429c089526b55b63270326a119dbe7d2f94498e690de9a9"
+  }
+}

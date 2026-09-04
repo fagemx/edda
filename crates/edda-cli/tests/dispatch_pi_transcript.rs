@@ -98,10 +98,12 @@ fn write_sample_pi_transcript(dir: &Path, session_id: &str, cwd: &Path) -> PathB
 #[test]
 fn test_pi_transcript_ingested_and_idempotent() {
     let tmp_ws = tempfile::tempdir().unwrap();
-    let tmp_store = tempfile::tempdir().unwrap();
+    // GH-757: thread-local store-root override instead of a process-global
+    // `EDDA_STORE_ROOT` redirect — this binary is single-test today, but the
+    // override cannot leak to a sibling test or a subprocess if one lands.
+    let _store = edda_store::test_support::isolated_store_root().expect("isolated store");
+    let tmp_store = _store.path().to_path_buf();
     let tmp_sessions = tempfile::tempdir().unwrap();
-
-    std::env::set_var("EDDA_STORE_ROOT", tmp_store.path());
 
     let ws_path = tmp_ws.path();
     let ledger = edda_ledger::Ledger::open_or_init(ws_path).unwrap();
@@ -110,7 +112,7 @@ fn test_pi_transcript_ingested_and_idempotent() {
     write_sample_pi_transcript(tmp_sessions.path(), session_id, ws_path);
 
     let project_id = edda_store::project_id(ws_path);
-    let project_dir = tmp_store.path().join("projects").join(&project_id);
+    let project_dir = tmp_store.join("projects").join(&project_id);
     fs::create_dir_all(project_dir.join("ledger")).unwrap();
     fs::create_dir_all(project_dir.join("state")).unwrap();
     fs::create_dir_all(project_dir.join("transcripts")).unwrap();

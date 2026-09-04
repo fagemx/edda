@@ -129,6 +129,48 @@ pub fn find_next_phase(plan: &Plan, state: &PlanState, order: &[String]) -> Opti
     None
 }
 
+/// Restore latest-attempt timing from the append-only evidence, never timestamps.
+pub fn hydrate_durations(cwd: &std::path::Path, state: &mut PlanState) {
+    use std::io::BufRead;
+    let path = cwd
+        .join(".edda/conductor")
+        .join(&state.plan_name)
+        .join("events.jsonl");
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(id) = event["phase_id"].as_str() else {
+            continue;
+        };
+        let Some(phase) = state.phases.iter_mut().find(|p| p.id == id) else {
+            continue;
+        };
+        // Only evidence for the persisted current attempt may change its
+        // measurement. Legacy or malformed records without an attempt, and
+        // records from a later attempt, must not overwrite a serialized
+        // duration after restart.
+        if event["attempt"].as_u64() != Some(u64::from(phase.attempts)) {
+            continue;
+        }
+        match event["type"].as_str() {
+            Some("phase_start") => phase.duration_ms = None,
+            Some("phase_passed" | "phase_failed") => {
+                // Older gate rejections emitted a fabricated zero. It is not a measurement.
+                phase.duration_ms = if event["error_type"] == "gate_rejected" {
+                    None
+                } else {
+                    event["duration_ms"].as_u64()
+                };
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,8 +200,50 @@ mod tests {
                 verdict_comment: None,
                 env_retries: 0,
                 cost_usd: None,
+                duration_ms: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn hydrate_durations_uses_only_the_current_attempt() {
+        let root = tempfile::tempdir().unwrap();
+        let plan = parse_plan("name: measured\nphases:\n  - id: build\n    prompt: x\n").unwrap();
+        let mut state = PlanState::from_plan(&plan, "plan.yaml");
+        let phase = state.get_phase_mut("build").unwrap();
+        phase.attempts = 2;
+        // A retry was persisted immediately after its attempt boundary, before
+        // the new attempt wrote a start or terminal event.
+        phase.duration_ms = None;
+
+        let events_dir = root.path().join(".edda/conductor/measured");
+        std::fs::create_dir_all(&events_dir).unwrap();
+        std::fs::write(
+            events_dir.join("events.jsonl"),
+            concat!(
+                "{\"type\":\"phase_passed\",\"phase_id\":\"build\",\"attempt\":1,\"duration_ms\":100}\n",
+                "{\"type\":\"phase_start\",\"phase_id\":\"build\",\"attempt\":3}\n",
+                "{\"type\":\"phase_failed\",\"phase_id\":\"build\",\"duration_ms\":300}\n"
+            ),
+        )
+        .unwrap();
+
+        hydrate_durations(root.path(), &mut state);
+        assert_eq!(state.get_phase("build").unwrap().duration_ms, None);
+
+        // Hydration must preserve a serialized duration when every available
+        // record is malformed, missing an attempt, or for another attempt.
+        state.get_phase_mut("build").unwrap().duration_ms = Some(222);
+        hydrate_durations(root.path(), &mut state);
+        assert_eq!(state.get_phase("build").unwrap().duration_ms, Some(222));
+
+        std::fs::write(
+            events_dir.join("events.jsonl"),
+            "{\"type\":\"phase_start\",\"phase_id\":\"build\",\"attempt\":2}\n{\"type\":\"phase_failed\",\"phase_id\":\"build\",\"attempt\":2,\"duration_ms\":500}\n",
+        )
+        .unwrap();
+        hydrate_durations(root.path(), &mut state);
+        assert_eq!(state.get_phase("build").unwrap().duration_ms, Some(500));
     }
 
     #[test]

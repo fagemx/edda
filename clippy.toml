@@ -9,5 +9,5 @@ too-many-lines-threshold = 150
 # Methods banned workspace-wide, each with the failure it prevents.
 disallowed-methods = [
     { path = "dirs::home_dir", reason = "on Windows this is SHGetKnownFolderPath(FOLDERID_Profile) (dirs 6.0.0 src/win.rs:5 -> dirs-sys 0.5.0 src/lib.rs:172) and reads neither HOME nor USERPROFILE, so it disagrees with the lane wrapper that fleet.lane-launcher requires to set HOME, and with any Node tool's os.homedir(); resolve through edda_core::paths::home_dir" },
-    { path = "std::env::home_dir", reason = "resolve through edda_core::paths::home_dir so every home-anchored path in the workspace agrees" },
+    { path = "std::env::home_dir", reason = "on Windows reads USERPROFILE whereas dirs::home_dir reads SHGetKnownFolderPath, producing silent divergence across home-anchored paths; resolve through edda_core::paths::home_dir" },
 ]

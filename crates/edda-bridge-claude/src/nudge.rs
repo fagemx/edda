@@ -335,6 +335,7 @@ mod tests {
 
     #[test]
     fn detect_signal_git_commit() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "git commit -m \"feat: switch to postgres\"" }
@@ -348,6 +349,7 @@ mod tests {
 
     #[test]
     fn detect_signal_git_commit_heredoc() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "git commit -m \"$(cat <<'EOF'\nfeat: add postgres support\n\nDetailed body here.\n\nCo-Authored-By: Claude\nEOF\n)\"" }
@@ -361,6 +363,7 @@ mod tests {
 
     #[test]
     fn detect_signal_cargo_add() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "cargo add tokio --features full" }
@@ -371,6 +374,7 @@ mod tests {
 
     #[test]
     fn detect_signal_npm_install() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "npm install express" }
@@ -381,6 +385,7 @@ mod tests {
 
     #[test]
     fn detect_signal_edda_decide() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "edda decide \"db=postgres\" --reason \"need JSONB\"" }
@@ -391,6 +396,7 @@ mod tests {
 
     #[test]
     fn detect_signal_unrelated_bash() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "cargo test -p edda-cli" }
@@ -400,6 +406,7 @@ mod tests {
 
     #[test]
     fn detect_signal_edit_tool_ignored() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Edit",
             "tool_input": { "file_path": "Cargo.toml" }
@@ -409,6 +416,7 @@ mod tests {
 
     #[test]
     fn detect_signal_amend_ignored() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "git commit --amend --no-edit" }
@@ -418,6 +426,7 @@ mod tests {
 
     #[test]
     fn format_nudge_commit_gentle() {
+        let _store = crate::isolated_store();
         let nudge = format_nudge(&NudgeSignal::Commit("feat: switch to postgres".into()), 1);
         assert!(nudge.contains("switch to postgres"));
         assert!(nudge.contains("edda decide"));
@@ -426,6 +435,7 @@ mod tests {
 
     #[test]
     fn format_nudge_dependency_gentle() {
+        let _store = crate::isolated_store();
         let nudge = format_nudge(&NudgeSignal::DependencyAdd("tokio".into()), 1);
         assert!(nudge.contains("tokio"));
         assert!(nudge.contains("edda decide"));
@@ -434,6 +444,7 @@ mod tests {
 
     #[test]
     fn format_nudge_commit_strong_when_zero() {
+        let _store = crate::isolated_store();
         let nudge = format_nudge(&NudgeSignal::Commit("feat: add auth".into()), 0);
         assert!(nudge.contains("\u{26a0}\u{fe0f}"));
         assert!(nudge.contains("haven't recorded any decisions"));
@@ -443,6 +454,7 @@ mod tests {
 
     #[test]
     fn format_nudge_dependency_strong_when_zero() {
+        let _store = crate::isolated_store();
         let nudge = format_nudge(&NudgeSignal::DependencyAdd("tokio".into()), 0);
         assert!(nudge.contains("\u{26a0}\u{fe0f}"));
         assert!(nudge.contains("haven't recorded any decisions"));
@@ -451,6 +463,7 @@ mod tests {
 
     #[test]
     fn format_nudge_config_strong_when_zero() {
+        let _store = crate::isolated_store();
         let nudge = format_nudge(&NudgeSignal::ConfigChange("/project/.env".into()), 0);
         assert!(nudge.contains("\u{26a0}\u{fe0f}"));
         assert!(nudge.contains("modified config file '.env'"));
@@ -458,6 +471,7 @@ mod tests {
 
     #[test]
     fn npm_bare_install_not_detected() {
+        let _store = crate::isolated_store();
         // Bare npm install (no package) should not trigger
         let raw = serde_json::json!({
             "tool_name": "Bash",
@@ -468,6 +482,7 @@ mod tests {
 
     #[test]
     fn pnpm_add_detected() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "pnpm add zod" }
@@ -482,6 +497,7 @@ mod tests {
 
     #[test]
     fn detect_signal_edit_env_file() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Edit",
             "tool_input": { "file_path": "/project/.env.local" }
@@ -494,6 +510,7 @@ mod tests {
 
     #[test]
     fn detect_signal_write_migration() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Write",
             "tool_input": { "file_path": "/project/migrations/001_init.sql" }
@@ -508,6 +525,7 @@ mod tests {
 
     #[test]
     fn detect_signal_write_mod_rs() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Write",
             "tool_input": { "file_path": "src/auth/mod.rs" }
@@ -520,6 +538,7 @@ mod tests {
 
     #[test]
     fn detect_signal_edit_mod_rs_not_new_module() {
+        let _store = crate::isolated_store();
         // Edit (not Write) on mod.rs should NOT trigger NewModule
         let raw = serde_json::json!({
             "tool_name": "Edit",
@@ -530,6 +549,7 @@ mod tests {
 
     #[test]
     fn detect_signal_edit_cargo_toml_excluded() {
+        let _store = crate::isolated_store();
         // Cargo.toml is explicitly excluded from config detection
         let raw = serde_json::json!({
             "tool_name": "Edit",
@@ -540,6 +560,7 @@ mod tests {
 
     #[test]
     fn detect_signal_write_regular_rs() {
+        let _store = crate::isolated_store();
         // A regular .rs file should not trigger any file-based signal
         let raw = serde_json::json!({
             "tool_name": "Write",
@@ -550,6 +571,7 @@ mod tests {
 
     #[test]
     fn commit_message_truncated() {
+        let _store = crate::isolated_store();
         let long_msg = "a".repeat(120);
         let raw = serde_json::json!({
             "tool_name": "Bash",
@@ -566,6 +588,7 @@ mod tests {
 
     #[test]
     fn detect_signal_git_merge() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "git merge feature/auth" }
@@ -578,6 +601,7 @@ mod tests {
 
     #[test]
     fn detect_signal_git_merge_with_flags() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "git merge --no-ff feature/billing" }
@@ -590,6 +614,7 @@ mod tests {
 
     #[test]
     fn detect_signal_gh_pr_merge_squash() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "gh pr merge 42 --squash --delete-branch" }
@@ -602,6 +627,7 @@ mod tests {
 
     #[test]
     fn detect_signal_gh_pr_merge_default() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "gh pr merge 99" }
@@ -614,6 +640,7 @@ mod tests {
 
     #[test]
     fn detect_signal_gh_pr_merge_rebase() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_name": "Bash",
             "tool_input": { "command": "gh pr merge 7 --rebase" }
@@ -626,6 +653,7 @@ mod tests {
 
     #[test]
     fn format_nudge_merge_gentle() {
+        let _store = crate::isolated_store();
         let nudge = format_nudge(
             &NudgeSignal::Merge("feature/auth".into(), "merge".into()),
             1,
@@ -637,6 +665,7 @@ mod tests {
 
     #[test]
     fn format_nudge_merge_strong() {
+        let _store = crate::isolated_store();
         let nudge = format_nudge(&NudgeSignal::Merge("PR#42".into(), "squash".into()), 0);
         assert!(nudge.contains("\u{26a0}\u{fe0f}"));
         assert!(nudge.contains("merged 'PR#42'"));

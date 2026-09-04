@@ -10,6 +10,7 @@ use crate::signals::{CommitInfo, FileEditCount, SessionSignals, TaskSnapshot};
 
 #[test]
 fn heartbeat_write_read_roundtrip() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_hb_roundtrip";
     let sid = "test-session-001";
     let _ = edda_store::ensure_dirs(pid);
@@ -58,6 +59,7 @@ fn heartbeat_write_read_roundtrip() {
 
 #[test]
 fn coord_event_append_and_board_state() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_board_state";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -88,6 +90,7 @@ fn coord_event_append_and_board_state() {
 
 #[test]
 fn discover_peers_excludes_self() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_discover";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -106,6 +109,7 @@ fn discover_peers_excludes_self() {
 
 #[test]
 fn render_protocol_solo_no_bindings_returns_none() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_solo";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -118,6 +122,7 @@ fn render_protocol_solo_no_bindings_returns_none() {
 
 #[test]
 fn render_protocol_multi_session() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_multi";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -143,6 +148,7 @@ fn render_protocol_multi_session() {
 
 #[test]
 fn auto_label_from_crate_path() {
+    let _store = crate::isolated_store();
     let signals = SessionSignals {
         files_modified: vec![FileEditCount {
             path: "crates/edda-bridge-claude/src/peers.rs".into(),
@@ -155,6 +161,7 @@ fn auto_label_from_crate_path() {
 
 #[test]
 fn auto_label_from_src_module() {
+    let _store = crate::isolated_store();
     let signals = SessionSignals {
         files_modified: vec![FileEditCount {
             path: "src/auth/jwt.rs".into(),
@@ -167,6 +174,7 @@ fn auto_label_from_src_module() {
 
 #[test]
 fn auto_label_absolute_windows_path_uses_relative_parent() {
+    let _store = crate::isolated_store();
     let signals = SessionSignals {
         files_modified: vec![FileEditCount {
             path: r"C:\repo\docs\product\mission-runtime-control.json".into(),
@@ -179,6 +187,7 @@ fn auto_label_absolute_windows_path_uses_relative_parent() {
 
 #[test]
 fn auto_label_never_returns_drive_letter() {
+    let _store = crate::isolated_store();
     let signals = SessionSignals {
         files_modified: vec![FileEditCount {
             path: r"C:\stray.md".into(),
@@ -205,6 +214,7 @@ fn format_age_display() {
 /// UserPromptSubmit hook returns an empty result.
 #[test]
 fn per_turn_peer_block_hash_stable_across_small_age_delta() {
+    let _store = crate::isolated_store();
     let pid = "test_gh678_hash_stable";
     let sid = "me";
     let _ = edda_store::ensure_dirs(pid);
@@ -275,6 +285,7 @@ fn per_turn_peer_block_hash_stable_across_small_age_delta() {
 /// aging out) must still change the block.
 #[test]
 fn per_turn_peer_block_changes_on_real_staleness_transition() {
+    let _store = crate::isolated_store();
     let pid = "test_gh678_stale_transition";
     let sid = "me";
     let _ = edda_store::ensure_dirs(pid);
@@ -322,6 +333,7 @@ fn parse_rfc3339_basic() {
 
 #[test]
 fn compaction_preserves_current_state() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_compaction";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -364,6 +376,7 @@ fn compaction_preserves_current_state() {
 
 #[test]
 fn full_lifecycle_multi_session() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_lifecycle";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -446,6 +459,7 @@ fn full_lifecycle_multi_session() {
 
 #[test]
 fn binding_dedup_in_board() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_decision_dedup";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -462,6 +476,7 @@ fn binding_dedup_in_board() {
 
 #[test]
 fn migration_renames_decisions_to_coordination() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_migration";
     let _ = edda_store::ensure_dirs(pid);
     let state_dir = edda_store::project_dir(pid).join("state");
@@ -493,6 +508,7 @@ fn migration_renames_decisions_to_coordination() {
 
 #[test]
 fn migration_skips_if_coordination_exists() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_migration_skip";
     let _ = edda_store::ensure_dirs(pid);
     let state_dir = edda_store::project_dir(pid).join("state");
@@ -539,6 +555,7 @@ fn serde_new_binding_serializes_as_binding() {
 
 #[test]
 fn render_protocol_shows_peer_tasks() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_tasks_render";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -575,6 +592,7 @@ fn render_protocol_shows_peer_tasks() {
 
 #[test]
 fn render_protocol_shows_focus_files_when_no_tasks() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_focus_render";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -611,6 +629,7 @@ fn render_protocol_shows_focus_files_when_no_tasks() {
 
 #[test]
 fn render_peer_updates_shows_tasks() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_updates_tasks";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -639,6 +658,7 @@ fn render_peer_updates_shows_tasks() {
 
 #[test]
 fn render_peer_updates_shows_focus_files() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_updates_focus";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -671,6 +691,7 @@ fn render_peer_updates_shows_focus_files() {
 
 #[test]
 fn render_peer_updates_shows_bare_label() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_updates_bare";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -698,6 +719,7 @@ fn render_peer_updates_shows_bare_label() {
 
 #[test]
 fn render_peer_updates_includes_l2_instructions() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_updates_l2";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -724,6 +746,7 @@ fn render_peer_updates_includes_l2_instructions() {
 
 #[test]
 fn render_protocol_solo_with_bindings() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_solo_bindings";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -763,6 +786,7 @@ fn render_protocol_solo_with_bindings() {
 
 #[test]
 fn render_peer_updates_solo_with_bindings() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_updates_solo_bindings";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -785,6 +809,7 @@ fn render_peer_updates_solo_with_bindings() {
 
 #[test]
 fn render_peer_updates_solo_no_bindings() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_updates_solo_none";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -800,6 +825,7 @@ fn render_peer_updates_solo_no_bindings() {
 
 #[test]
 fn binding_conflict_detects_different_value() {
+    let _store = crate::isolated_store();
     let pid = "test_conflict_different";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -817,6 +843,7 @@ fn binding_conflict_detects_different_value() {
 
 #[test]
 fn binding_conflict_same_value_no_conflict() {
+    let _store = crate::isolated_store();
     let pid = "test_conflict_same";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -831,6 +858,7 @@ fn binding_conflict_same_value_no_conflict() {
 
 #[test]
 fn binding_conflict_no_existing_binding() {
+    let _store = crate::isolated_store();
     let pid = "test_conflict_none";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -848,6 +876,7 @@ fn binding_conflict_no_existing_binding() {
 
 #[test]
 fn infer_session_no_heartbeats() {
+    let _store = crate::isolated_store();
     let pid = "test_infer_none";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -859,6 +888,7 @@ fn infer_session_no_heartbeats() {
 
 #[test]
 fn infer_session_one_active() {
+    let _store = crate::isolated_store();
     let pid = "test_infer_one";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -879,6 +909,7 @@ fn infer_session_one_active() {
 
 #[test]
 fn infer_session_two_active_is_ambiguous() {
+    let _store = crate::isolated_store();
     let pid = "test_infer_two";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -895,6 +926,7 @@ fn infer_session_two_active_is_ambiguous() {
 
 #[test]
 fn infer_session_one_active_one_stale() {
+    let _store = crate::isolated_store();
     let pid = "test_infer_stale";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -936,6 +968,7 @@ fn infer_session_one_active_one_stale() {
 
 #[test]
 fn infer_session_only_stale() {
+    let _store = crate::isolated_store();
     let pid = "test_infer_all_stale";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -980,6 +1013,7 @@ fn rfc3339_now_minus(secs: u64) -> String {
 
 #[test]
 fn infer_session_counts_parented_subagent_by_shared_criterion() {
+    let _store = crate::isolated_store();
     // GH-705 defect B: the shared liveness criterion gives a parented
     // sub-agent a 15x staleness multiplier (no hook events fire during a
     // sub-agent run, so its heartbeat would otherwise age out mid-run).
@@ -1024,6 +1058,7 @@ fn infer_session_counts_parented_subagent_by_shared_criterion() {
 
 #[test]
 fn cross_session_binding_conflict_last_write_wins() {
+    let _store = crate::isolated_store();
     let pid = "test_cross_sess_conflict";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1065,6 +1100,7 @@ fn cross_session_binding_conflict_last_write_wins() {
 
 #[test]
 fn cross_session_different_keys_both_visible() {
+    let _store = crate::isolated_store();
     let pid = "test_cross_sess_diff_keys";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1114,6 +1150,7 @@ fn cross_session_different_keys_both_visible() {
 
 #[test]
 fn request_delivered_via_heartbeat_label_no_claim() {
+    let _store = crate::isolated_store();
     let pid = "test_hb_fallback_request";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1142,6 +1179,7 @@ fn request_delivered_via_heartbeat_label_no_claim() {
 
 #[test]
 fn explicit_claim_wins_over_heartbeat_for_requests() {
+    let _store = crate::isolated_store();
     let pid = "test_claim_wins_request";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1173,6 +1211,7 @@ fn explicit_claim_wins_over_heartbeat_for_requests() {
 
 #[test]
 fn no_heartbeat_no_claim_no_requests() {
+    let _store = crate::isolated_store();
     let pid = "test_no_identity_request";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1194,6 +1233,7 @@ fn no_heartbeat_no_claim_no_requests() {
 
 #[test]
 fn heartbeat_scope_display_without_claim() {
+    let _store = crate::isolated_store();
     let pid = "test_hb_scope_display";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1219,6 +1259,7 @@ fn heartbeat_scope_display_without_claim() {
 
 #[test]
 fn claim_scope_display_with_paths() {
+    let _store = crate::isolated_store();
     let pid = "test_claim_scope_display";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1240,6 +1281,7 @@ fn claim_scope_display_with_paths() {
 
 #[test]
 fn multi_session_shows_l2_instructions() {
+    let _store = crate::isolated_store();
     let pid = "test_l2_instructions";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1264,6 +1306,7 @@ fn multi_session_shows_l2_instructions() {
 
 #[test]
 fn solo_mode_no_l2_instructions() {
+    let _store = crate::isolated_store();
     let pid = "test_solo_no_l2_instr";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1285,6 +1328,7 @@ fn solo_mode_no_l2_instructions() {
 
 #[test]
 fn peer_updates_request_via_heartbeat_fallback() {
+    let _store = crate::isolated_store();
     let pid = "test_peer_updates_hb_req";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1308,6 +1352,7 @@ fn peer_updates_request_via_heartbeat_fallback() {
 
 #[test]
 fn derive_scope_from_crate_files() {
+    let _store = crate::isolated_store();
     let files = vec![
         FileEditCount {
             path: "crates/edda-store/src/lib.rs".into(),
@@ -1325,6 +1370,7 @@ fn derive_scope_from_crate_files() {
 
 #[test]
 fn derive_scope_from_src_module() {
+    let _store = crate::isolated_store();
     let files = vec![
         FileEditCount {
             path: "/repo/src/auth/jwt.rs".into(),
@@ -1342,6 +1388,7 @@ fn derive_scope_from_src_module() {
 
 #[test]
 fn derive_scope_empty_files() {
+    let _store = crate::isolated_store();
     assert!(derive_scope_from_files(&[], None).is_none());
 }
 
@@ -1351,6 +1398,7 @@ fn derive_scope_empty_files() {
 
 #[test]
 fn derive_scope_absolute_windows_path_relativized_by_cwd() {
+    let _store = crate::isolated_store();
     let files = vec![
         FileEditCount {
             path: r"C:\ai_project\AI Delivery Foundry\docs\product\mission-runtime-control.json"
@@ -1370,6 +1418,7 @@ fn derive_scope_absolute_windows_path_relativized_by_cwd() {
 
 #[test]
 fn derive_scope_absolute_path_outside_cwd_never_yields_drive_letter() {
+    let _store = crate::isolated_store();
     let files = vec![FileEditCount {
         path: r"D:\elsewhere\notes\todo.md".into(),
         count: 3,
@@ -1381,6 +1430,7 @@ fn derive_scope_absolute_path_outside_cwd_never_yields_drive_letter() {
 
 #[test]
 fn derive_scope_absolute_path_without_cwd_never_yields_drive_letter() {
+    let _store = crate::isolated_store();
     let files = vec![FileEditCount {
         path: r"C:\ai_project\repo\docs\a.md".into(),
         count: 2,
@@ -1390,6 +1440,7 @@ fn derive_scope_absolute_path_without_cwd_never_yields_drive_letter() {
 
 #[test]
 fn auto_claim_writes_claim_from_signals() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_writes";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1415,6 +1466,7 @@ fn auto_claim_writes_claim_from_signals() {
 
 #[test]
 fn auto_claim_skips_when_manual_claim_exists() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_skip_manual";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1445,6 +1497,7 @@ fn auto_claim_skips_when_manual_claim_exists() {
 
 #[test]
 fn auto_claim_dedup_no_repeated_writes() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_dedup";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1470,6 +1523,7 @@ fn auto_claim_dedup_no_repeated_writes() {
 
 #[test]
 fn auto_claim_updates_on_scope_change() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_scope_change";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1526,6 +1580,7 @@ fn git_repo_on_branch(branch: &str) -> tempfile::TempDir {
 
 #[test]
 fn auto_claim_writes_no_claim_for_a_fresh_session() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_branch_fallback";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1553,6 +1608,7 @@ fn auto_claim_writes_no_claim_for_a_fresh_session() {
 
 #[test]
 fn auto_claim_starts_claiming_once_files_are_edited() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_fallback_upgrade";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1582,6 +1638,7 @@ fn auto_claim_starts_claiming_once_files_are_edited() {
 
 #[test]
 fn heartbeat_label_falls_back_to_git_branch_for_a_fresh_session() {
+    let _store = crate::isolated_store();
     let pid = "test_hb_branch_label";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -1607,6 +1664,7 @@ fn heartbeat_label_falls_back_to_git_branch_for_a_fresh_session() {
 
 #[test]
 fn fresh_session_receives_requests_addressed_to_its_branch() {
+    let _store = crate::isolated_store();
     let pid = "test_hb_branch_request";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1643,6 +1701,7 @@ fn fresh_session_receives_requests_addressed_to_its_branch() {
 
 #[test]
 fn two_fresh_sessions_on_one_branch_do_not_block_each_other() {
+    let _store = crate::isolated_store();
     let pid = "test_two_fresh_no_block";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1669,6 +1728,7 @@ fn two_fresh_sessions_on_one_branch_do_not_block_each_other() {
 
 #[test]
 fn auto_claim_cleanup_removes_state_file() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_cleanup";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1699,6 +1759,7 @@ fn auto_claim_cleanup_removes_state_file() {
 
 #[test]
 fn render_shows_branch_when_present() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_branch_render";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1743,6 +1804,7 @@ fn render_shows_branch_when_present() {
 
 #[test]
 fn render_omits_branch_when_absent() {
+    let _store = crate::isolated_store();
     let pid = "test_peers_branch_absent";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1782,6 +1844,7 @@ fn render_omits_branch_when_absent() {
 
 #[test]
 fn render_peer_updates_with_matches_original() {
+    let _store = crate::isolated_store();
     let pid = "test_updates_with_match";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1806,8 +1869,15 @@ fn render_peer_updates_with_matches_original() {
     let board = compute_board_state(pid);
     let precomputed = render_peer_updates_with(&peers, &board, pid, "s2");
 
+    let normalize_age = |text: String| {
+        regex::Regex::new(r"\(\d+s ago\)")
+            .expect("valid age-display regex")
+            .replace_all(&text, "(age ago)")
+            .into_owned()
+    };
     assert_eq!(
-        original, precomputed,
+        original.map(&normalize_age),
+        precomputed.map(&normalize_age),
         "precomputed variant should match original"
     );
 
@@ -1818,6 +1888,7 @@ fn render_peer_updates_with_matches_original() {
 
 #[test]
 fn render_coordination_protocol_with_matches_original() {
+    let _store = crate::isolated_store();
     let pid = "test_protocol_with_match";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1842,8 +1913,15 @@ fn render_coordination_protocol_with_matches_original() {
     let board = compute_board_state(pid);
     let precomputed = render_coordination_protocol_with(&peers, &board, pid, "s2");
 
+    let normalize_age = |text: Option<String>| {
+        text.map(|text| {
+            text.replace("(2s ago)", "(age ago)")
+                .replace("(3s ago)", "(age ago)")
+        })
+    };
     assert_eq!(
-        original, precomputed,
+        normalize_age(original),
+        normalize_age(precomputed),
         "precomputed variant should match original"
     );
 
@@ -1854,6 +1932,7 @@ fn render_coordination_protocol_with_matches_original() {
 
 #[test]
 fn suggest_claim_command_from_focus_files() {
+    let _store = crate::isolated_store();
     let hb = SessionHeartbeat {
         session_id: "s1".into(),
         started_at: String::new(),
@@ -1883,6 +1962,7 @@ fn suggest_claim_command_from_focus_files() {
 
 #[test]
 fn suggest_claim_command_from_branch() {
+    let _store = crate::isolated_store();
     let hb = SessionHeartbeat {
         session_id: "s1".into(),
         started_at: String::new(),
@@ -1911,6 +1991,7 @@ fn suggest_claim_command_from_branch() {
 
 #[test]
 fn suggest_claim_command_fallback_label() {
+    let _store = crate::isolated_store();
     let result = suggest_claim_command("my-task", &None);
     assert!(
         result.contains("my-task"),
@@ -1920,6 +2001,7 @@ fn suggest_claim_command_fallback_label() {
 
 #[test]
 fn suggest_claim_command_generic_fallback() {
+    let _store = crate::isolated_store();
     let result = suggest_claim_command("", &None);
     assert!(
         result.contains("<your-task>"),
@@ -1929,6 +2011,7 @@ fn suggest_claim_command_generic_fallback() {
 
 #[test]
 fn protocol_no_claim_shows_nudge() {
+    let _store = crate::isolated_store();
     let pid = "test_protocol_no_claim_nudge";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -1966,6 +2049,7 @@ fn protocol_no_claim_shows_nudge() {
 
 #[test]
 fn protocol_with_claim_shows_scope() {
+    let _store = crate::isolated_store();
     let pid = "test_protocol_with_claim_scope";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2002,6 +2086,7 @@ fn protocol_with_claim_shows_scope() {
 
 #[test]
 fn protocol_nudge_uses_branch_context() {
+    let _store = crate::isolated_store();
     let pid = "test_protocol_nudge_branch";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2057,6 +2142,7 @@ fn protocol_nudge_uses_branch_context() {
 
 #[test]
 fn render_peer_updates_with_solo_bindings() {
+    let _store = crate::isolated_store();
     let pid = "test_updates_with_solo";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2076,6 +2162,7 @@ fn render_peer_updates_with_solo_bindings() {
 
 #[test]
 fn render_peer_updates_with_solo_no_bindings() {
+    let _store = crate::isolated_store();
     let pid = "test_updates_with_solo_empty";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2093,6 +2180,7 @@ fn render_peer_updates_with_solo_no_bindings() {
 
 #[test]
 fn auto_claim_file_incremental_same_crate() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_file_incr";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2123,6 +2211,7 @@ fn auto_claim_file_incremental_same_crate() {
 
 #[test]
 fn auto_claim_file_scope_change() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_file_scope_change";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2149,6 +2238,7 @@ fn auto_claim_file_scope_change() {
 
 #[test]
 fn auto_claim_file_skips_manual_claim() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_file_manual";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2172,6 +2262,7 @@ fn auto_claim_file_skips_manual_claim() {
 
 #[test]
 fn auto_claim_file_dedup_no_extra_writes() {
+    let _store = crate::isolated_store();
     let pid = "test_autoclaim_file_dedup";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2196,6 +2287,7 @@ fn auto_claim_file_dedup_no_extra_writes() {
 
 #[test]
 fn request_ack_filters_pending() {
+    let _store = crate::isolated_store();
     let pid = "test_req_ack_filters";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2224,6 +2316,7 @@ fn request_ack_filters_pending() {
 
 #[test]
 fn request_ack_only_for_acker_session() {
+    let _store = crate::isolated_store();
     let pid = "test_req_ack_session_scope";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2253,6 +2346,7 @@ fn request_ack_only_for_acker_session() {
 
 #[test]
 fn request_ack_in_board_state() {
+    let _store = crate::isolated_store();
     let pid = "test_req_ack_board";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2268,6 +2362,7 @@ fn request_ack_in_board_state() {
 
 #[test]
 fn compaction_preserves_request_acks() {
+    let _store = crate::isolated_store();
     let pid = "test_compaction_acks";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2349,6 +2444,7 @@ fn serde_subagent_completed_serializes_and_parses() {
 
 #[test]
 fn board_state_includes_subagent_completed_entries() {
+    let _store = crate::isolated_store();
     let pid = "test_subagent_board_state";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2382,6 +2478,7 @@ fn board_state_includes_subagent_completed_entries() {
 
 #[test]
 fn compaction_preserves_subagent_completed() {
+    let _store = crate::isolated_store();
     let pid = "test_subagent_compaction";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2415,6 +2512,7 @@ fn compaction_preserves_subagent_completed() {
 
 #[test]
 fn pending_requests_no_label_returns_empty() {
+    let _store = crate::isolated_store();
     let pid = "test_pending_no_label";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2432,6 +2530,7 @@ fn pending_requests_no_label_returns_empty() {
 
 #[test]
 fn write_subagent_heartbeat_sets_parent() {
+    let _store = crate::isolated_store();
     let pid = "test_subagent_heartbeat";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -2460,10 +2559,7 @@ fn write_subagent_heartbeat_sets_parent() {
 /// must preserve the lane fields it re-reads.
 #[test]
 fn teammate_idle_update_waits_for_the_sidecar_lock_and_preserves_lane_fields() {
-    // No EDDA_STORE_ROOT redirect: a redirect here races every concurrent
-    // store-writing test in this process that doesn't hold ENV_LOCK (the
-    // exact cross-store hazard this round is closing). Peers tests use
-    // unique pids against the default store instead.
+    let _store = crate::isolated_store();
     let pid = "test_teammate_phase_lock";
     let sid = "lane-1";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -2483,10 +2579,17 @@ fn teammate_idle_update_waits_for_the_sidecar_lock_and_preserves_lane_fields() {
     let guard =
         edda_store::lock_file(std::path::Path::new(&lock_path)).expect("acquire sidecar lock");
 
+    // The store-root override is thread-local: reinstall it in the spawned
+    // writer so its store writes stay inside this test's private root.
+    let store_root = edda_store::captured_store_root_for_spawn();
     let writer = {
         let pid = pid.to_string();
         let sid = sid.to_string();
-        std::thread::spawn(move || update_teammate_phase(&pid, &sid, "idle"))
+        let store_root = store_root.clone();
+        std::thread::spawn(move || {
+            let _store_scope = edda_store::install_captured_store_root(store_root.as_deref());
+            update_teammate_phase(&pid, &sid, "idle")
+        })
     };
     std::thread::sleep(std::time::Duration::from_millis(500));
 
@@ -2535,6 +2638,7 @@ fn teammate_idle_update_waits_for_the_sidecar_lock_and_preserves_lane_fields() {
 
 #[test]
 fn cleanup_subagent_heartbeats_selective() {
+    let _store = crate::isolated_store();
     let pid = "test_cleanup_subagent";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -2593,6 +2697,7 @@ fn heartbeat_backwards_compatible_no_parent() {
 
 #[test]
 fn subagent_stale_threshold_extended() {
+    let _store = crate::isolated_store();
     let pid = "test_subagent_stale";
     let _ = edda_store::ensure_dirs(pid);
 
@@ -2642,6 +2747,7 @@ mod derive_scope_tests {
 
     #[test]
     fn test_top_level_directory_basic() {
+        let _store = crate::isolated_store();
         let files = vec![
             FileEditCount {
                 path: "server/vault.js".to_string(),
@@ -2662,6 +2768,7 @@ mod derive_scope_tests {
 
     #[test]
     fn test_top_level_directory_mixed() {
+        let _store = crate::isolated_store();
         let files = vec![
             FileEditCount {
                 path: "app/hooks/useSSE.ts".to_string(),
@@ -2680,6 +2787,7 @@ mod derive_scope_tests {
 
     #[test]
     fn test_skip_hidden_directories() {
+        let _store = crate::isolated_store();
         let files = vec![
             FileEditCount {
                 path: ".github/workflows/ci.yml".to_string(),
@@ -2701,6 +2809,7 @@ mod derive_scope_tests {
 
     #[test]
     fn test_skip_root_level_files() {
+        let _store = crate::isolated_store();
         let files = vec![
             FileEditCount {
                 path: "README.md".to_string(),
@@ -2719,6 +2828,7 @@ mod derive_scope_tests {
 
     #[test]
     fn test_backward_compat_crates() {
+        let _store = crate::isolated_store();
         let files = vec![
             FileEditCount {
                 path: "crates/edda-store/src/lib.rs".to_string(),
@@ -2743,6 +2853,7 @@ mod derive_scope_tests {
 
     #[test]
     fn test_backward_compat_src() {
+        let _store = crate::isolated_store();
         let files = vec![
             FileEditCount {
                 path: "src/auth/login.rs".to_string(),
@@ -2764,6 +2875,7 @@ mod derive_scope_tests {
 
     #[test]
     fn test_windows_paths() {
+        let _store = crate::isolated_store();
         let files = vec![
             FileEditCount {
                 path: "server\\vault.js".to_string(),
@@ -2788,6 +2900,7 @@ mod derive_scope_tests {
 
 #[test]
 fn render_coordination_filters_acked_requests() {
+    let _store = crate::isolated_store();
     let pid = "test_render_coord_ack_filter";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2846,6 +2959,7 @@ fn render_coordination_filters_acked_requests() {
 
 #[test]
 fn peer_updates_filters_acked_requests() {
+    let _store = crate::isolated_store();
     let pid = "test_peer_updates_ack_filter";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -2899,6 +3013,7 @@ fn peer_updates_filters_acked_requests() {
 
 #[test]
 fn coord_diff_renders_new_events() {
+    let _store = crate::isolated_store();
     let pid = "test_coord_diff_new";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -2929,6 +3044,7 @@ fn coord_diff_renders_new_events() {
 
 #[test]
 fn coord_diff_filters_own_events() {
+    let _store = crate::isolated_store();
     let pid = "test_coord_diff_own";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -2949,6 +3065,7 @@ fn coord_diff_filters_own_events() {
 
 #[test]
 fn coord_diff_compaction_guard() {
+    let _store = crate::isolated_store();
     let pid = "test_coord_diff_compact";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -2973,6 +3090,7 @@ fn coord_diff_compaction_guard() {
 
 #[test]
 fn coord_diff_skips_when_no_offset_file() {
+    let _store = crate::isolated_store();
     let pid = "test_coord_diff_no_offset";
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     let _ = edda_store::ensure_dirs(pid);
@@ -3000,6 +3118,7 @@ fn coord_diff_skips_when_no_offset_file() {
 
 #[test]
 fn resolve_teammate_by_label() {
+    let _store = crate::isolated_store();
     let pid = "test_resolve_teammate";
     let sid = "teammate-session-123";
     let _ = edda_store::ensure_dirs(pid);
@@ -3026,6 +3145,7 @@ fn resolve_teammate_by_label() {
 
 #[test]
 fn teammate_idle_writes_coord_event_and_updates_phase() {
+    let _store = crate::isolated_store();
     let pid = "test_teammate_idle";
     let notifier_sid = "notifier-session";
     let teammate_sid = "teammate-session";
@@ -3099,6 +3219,7 @@ fn append_request_at(pid: &str, ts: &str, from_session: &str, from_label: &str, 
 
 #[test]
 fn second_request_from_same_peer_survives_first_ack() {
+    let _store = crate::isolated_store();
     let pid = "test_gh442_second_request";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3123,6 +3244,7 @@ fn second_request_from_same_peer_survives_first_ack() {
 
 #[test]
 fn render_does_not_auto_ack_requests() {
+    let _store = crate::isolated_store();
     let pid = "test_gh442_no_auto_ack";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3160,6 +3282,7 @@ fn render_does_not_auto_ack_requests() {
 
 #[test]
 fn resolve_request_targets_matches_only_live_labels() {
+    let _store = crate::isolated_store();
     let pid = "test_gh443_resolve_targets";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3183,6 +3306,7 @@ fn resolve_request_targets_matches_only_live_labels() {
 
 #[test]
 fn resolve_request_targets_reports_ambiguous_labels() {
+    let _store = crate::isolated_store();
     let pid = "test_gh443_ambiguous_targets";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3205,6 +3329,7 @@ fn resolve_request_targets_reports_ambiguous_labels() {
 
 #[test]
 fn expired_requests_are_not_pending_and_are_compacted_away() {
+    let _store = crate::isolated_store();
     let pid = "test_gh443_request_ttl";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3236,6 +3361,7 @@ fn expired_requests_are_not_pending_and_are_compacted_away() {
 
 #[test]
 fn render_surfaces_expired_requests_as_warning() {
+    let _store = crate::isolated_store();
     let pid = "test_gh443_expired_warning";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3264,6 +3390,7 @@ fn render_surfaces_expired_requests_as_warning() {
 
 #[test]
 fn render_pathless_claim_says_what_is_missing() {
+    let _store = crate::isolated_store();
     let pid = "test_pathless_claim_render";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3292,6 +3419,7 @@ fn render_pathless_claim_says_what_is_missing() {
 
 #[test]
 fn render_repo_wide_claim_explains_advisory_enforcement() {
+    let _store = crate::isolated_store();
     let pid = "test_repo_wide_claim_render";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3313,6 +3441,7 @@ fn render_repo_wide_claim_explains_advisory_enforcement() {
 
 #[test]
 fn render_protocol_teaches_host_doorbell() {
+    let _store = crate::isolated_store();
     let pid = "test_host_doorbell_render";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3368,6 +3497,7 @@ fn append_legacy_ack(pid: &str, ts: &str, acker_session: &str, from_label: &str)
 
 #[test]
 fn legacy_ackless_id_log_survives_compaction_without_swallowing_later_requests() {
+    let _store = crate::isolated_store();
     let pid = "test_gh442_legacy_compaction";
     let _ = edda_store::ensure_dirs(pid);
     let _ = fs::remove_file(coordination_path(pid));
@@ -3408,181 +3538,5 @@ fn legacy_ackless_id_log_survives_compaction_without_swallowing_later_requests()
     let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
-#[test]
-fn explicit_empty_ack_ids_retire_nothing() {
-    let pid = "test_gh454_empty_ack_ids";
-    let _ = edda_store::ensure_dirs(pid);
-    let _ = fs::remove_file(coordination_path(pid));
-
-    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
-    let request_ts = ts_secs_ago(1);
-    append_legacy_request(
-        pid,
-        &request_ts,
-        "billing",
-        "auth",
-        "request with explicit empty ack",
-    );
-    let ack_ts = ts_secs_ago(0);
-    append_coord_event(
-        pid,
-        &CoordEvent {
-            ts: ack_ts,
-            session_id: "s1".into(),
-            event_type: CoordEventType::RequestAck,
-            payload: serde_json::json!({"from_label": "billing", "request_ids": []}),
-        },
-    );
-
-    let pending = pending_requests_for_session(pid, "s1");
-    assert_eq!(
-        pending.len(),
-        1,
-        "an explicit empty id list must ack nothing"
-    );
-    assert_eq!(pending[0].message, "request with explicit empty ack");
-
-    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
-}
-
-#[test]
-fn legacy_ack_comparison_keeps_subsecond_order() {
-    let pid = "test_gh454_subsecond_ack";
-    let _ = edda_store::ensure_dirs(pid);
-    let _ = fs::remove_file(coordination_path(pid));
-
-    write_claim(pid, "s1", "auth", &["src/auth/*".into()]);
-    let now = time::OffsetDateTime::now_utc();
-    let request_ts = now
-        .replace_nanosecond(900_000_000)
-        .unwrap()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap();
-    let ack_ts = now
-        .replace_nanosecond(100_000_000)
-        .unwrap()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap();
-    append_legacy_request(pid, &request_ts, "billing", "auth", "later request");
-    append_legacy_ack(pid, &ack_ts, "s1", "billing");
-
-    let pending = pending_requests_for_session(pid, "s1");
-    assert_eq!(
-        pending.len(),
-        1,
-        "an earlier same-second ack must not retire a later request"
-    );
-
-    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
-}
-
-/// GH-569/GH-566: a lane that fires no bridge hooks (e.g. `edda dispatch
-/// --agent pi`) must still become a discoverable peer. The conductor runner
-/// writes the shared session heartbeat through the store-level writer
-/// (`edda-store`), NOT through any bridge API — that decoupling is the fix.
-/// Before it, the only production writer sat inside the Claude hook path, so
-/// such a lane never appeared in `edda peers` at all.
-#[test]
-fn lane_heartbeat_written_without_bridge_is_discovered_then_goes_stale() {
-    let pid = "test_lane_hb_discovery";
-    let sid = "lane-sess-001";
-    let _ = edda_store::ensure_dirs(pid);
-
-    let fmt = |t: time::OffsetDateTime| {
-        t.format(&time::format_description::well_known::Rfc3339)
-            .unwrap()
-    };
-    let now = time::OffsetDateTime::now_utc();
-    let make = |last: String| edda_store::SessionHeartbeat {
-        session_id: sid.into(),
-        started_at: fmt(now),
-        last_heartbeat: last,
-        label: "a".into(),
-        focus_files: vec![],
-        active_tasks: vec![],
-        files_modified_count: 0,
-        total_edits: 0,
-        recent_commits: vec![],
-        branch: None,
-        current_phase: Some("running".into()),
-        parent_session_id: None,
-        plan: Some("hbplan".into()),
-        phase: Some("a".into()),
-        attempt: Some(1),
-        stage: Some("running".into()),
-        pid: Some(4242),
-    };
-
-    edda_store::write_heartbeat(pid, &make(fmt(now))).expect("lane heartbeat write");
-
-    let peers = discover_active_peers(pid, "observer");
-    assert_eq!(
-        peers.len(),
-        1,
-        "a no-hook lane with a fresh heartbeat must be a peer"
-    );
-    assert_eq!(peers[0].label, "a");
-    assert_eq!(peers[0].current_phase.as_deref(), Some("running"));
-
-    // The lane stops: backdate beyond the stale threshold; discovery must
-    // drop it without any explicit removal call.
-    let stale = fmt(now - time::Duration::new(3600, 0));
-    edda_store::write_heartbeat(pid, &make(stale)).expect("stale heartbeat write");
-    assert!(
-        discover_active_peers(pid, "observer").is_empty(),
-        "a stopped lane goes stale naturally"
-    );
-
-    remove_heartbeat(pid, sid);
-    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
-}
-
-#[test]
-fn claim_with_process_subject_roundtrips_to_board_and_peer_summary() {
-    let pid = "test_gh581_subject_roundtrip";
-    let sid = "sess-pr-review";
-    let _ = edda_store::ensure_dirs(pid);
-    let _ = fs::remove_file(coordination_path(pid));
-
-    write_claim_with_subject(
-        pid,
-        sid,
-        "review-pr570",
-        &["docs/spec.md".into()],
-        Some("pr:570"),
-    );
-
-    let board = compute_board_state(pid);
-    assert_eq!(board.claims.len(), 1);
-    let claim = &board.claims[0];
-    assert_eq!(claim.session_id, sid);
-    assert_eq!(claim.label, "review-pr570");
-    assert_eq!(claim.paths, vec!["docs/spec.md".to_string()]);
-    assert_eq!(claim.subject.as_deref(), Some("pr:570"));
-
-    // Write heartbeat so discover_all_sessions finds the session
-    write_heartbeat_minimal(pid, sid, "review-pr570", "/path/to/repo");
-    let peers = discover_all_sessions(pid);
-    assert_eq!(peers.len(), 1);
-    assert_eq!(peers[0].claimed_subject.as_deref(), Some("pr:570"));
-    assert_eq!(peers[0].claimed_paths, vec!["docs/spec.md".to_string()]);
-
-    // GH-581 / Round 1 P1-4: Verify Off-limits rendering contains the claimed subject
-    let rendered = render_coordination_protocol(pid, "other-agent", "/path/to/repo")
-        .expect("renders protocol");
-    assert!(
-        rendered.contains("- pr:570, docs/spec.md → Agent review-pr570"),
-        "rendered: {rendered}"
-    );
-
-    // Also verify subject-only rendering without paths
-    write_claim_with_subject(pid, sid, "review-pr570", &[], Some("pr:570"));
-    let rendered_sub_only = render_coordination_protocol(pid, "other-agent", "/path/to/repo")
-        .expect("renders protocol");
-    assert!(
-        rendered_sub_only.contains("- pr:570 → Agent review-pr570"),
-        "rendered_sub_only: {rendered_sub_only}"
-    );
-
-    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
-}
+#[path = "tests_tail_gh757.rs"]
+mod tests_tail_gh757;

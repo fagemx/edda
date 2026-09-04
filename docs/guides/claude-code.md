@@ -12,19 +12,35 @@ Edda integrates with Claude Code through lifecycle hooks. After `edda init`, eve
 edda init
 ```
 
-This installs 5 hooks into `.claude/settings.local.json`:
+This installs 12 hooks into `.claude/settings.local.json` (the full event list
+is `HOOK_EVENTS` in `crates/edda-bridge-claude/src/admin.rs`; each row's
+behavior is the corresponding `hook_event_name` match arm in
+`crates/edda-bridge-claude/src/dispatch/mod.rs`):
 
-| Hook | Event | What it does |
-|------|-------|-------------|
-| SessionStart | Session begins | Digests previous session, injects context |
-| UserPromptSubmit | Each prompt | Updates peer heartbeat, injects peer status |
-| PreToolUse | Before tool call | Auto-approves edda commands, provides patterns |
-| PostToolUse | After tool call | Captures command output, file changes |
-| PostToolUseFailure | Tool fails | Records failed commands with exit codes |
+| Event | When it fires | What edda does |
+|-------|---------------|----------------|
+| PreToolUse | Before each tool call | Auto-approves `edda` commands (on by default; the `EDDA_CLAUDE_AUTO_APPROVE` env var gates it), blocks risky ones with a reason, and attaches pattern, learned-rule, and pending peer-request context |
+| PostToolUse | After each tool call | Captures command output and file changes as signals and auto-writes commit/merge events to the ledger; may inject a write-back nudge via `additionalContext` (cooldown-gated) |
+| PostToolUseFailure | A tool call fails | Installed, but the dispatch arm currently returns an empty result — no hook output. The raw payload is still recorded in the append-only session ledger |
+| SessionStart | Session begins | Auto-digests previous sessions, ingests the transcript, builds the full hot pack (turns + workspace), ensures the peer heartbeat, and injects the pack via `additionalContext` |
+| UserPromptSubmit | Each prompt | Injects lightweight workspace context (~2.5K budget) with peer status and a coordination diff; after a compaction it only re-ingests instead (the full pack was already injected by the preceding `SessionStart:compact` hook) |
+| PreCompact | Before context compaction | Side-effect only: ingests and rebuilds the pack and flags compaction pending; returns no output because Claude Code's hook schema does not allow `hookSpecificOutput` on this event. The next `SessionStart:compact` consumes the rebuilt pack |
+| SessionEnd | Session ends | Auto-digests the transcript and cleans up: removes the peer heartbeat, releases scope claims, resets per-session state |
+| Stop | Assistant turn ends | Delivers the task-rail nudge through the block/reason channel (this event cannot inject context); watermarked to at most once per task per session |
+| SubagentStart | A sub-agent spawns | Injects active-peer context via `additionalContext` before writing the sub-agent's heartbeat, so the sub-agent does not see itself in the peer list |
+| SubagentStop | A sub-agent finishes | Records the sub-agent's completion (summary, files touched, decisions, commits), optionally writes a ledger note event, removes its heartbeat |
+| TaskCompleted | A task completes | Records task completion in the coordination state and optionally writes a ledger note event |
+| TeammateIdle | A teammate goes idle | Marks the teammate's phase as idle and writes an idle event to `coordination.jsonl` |
+
+Independently of the per-event behavior above, every hook invocation is
+appended to the append-only session ledger before dispatch.
 
 ## Context injection
 
-At session start, Edda builds a context snapshot and injects it into the agent's system prompt. The agent sees:
+When Edda injects context, it returns a `hookSpecificOutput.additionalContext`
+payload to Claude Code (wrapped in `edda:` boundary markers). Claude Code
+decides where that content lands — Edda controls what is returned, not where
+the host places it. The injected pack includes:
 
 - **Recent decisions** from all prior sessions
 - **Previous session digest** (what was done, what's next)

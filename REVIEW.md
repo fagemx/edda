@@ -1,6 +1,10 @@
 ---
-edda_review: 1
+edda_review: 2
 gates:
+  # The Cargo workspace gates below are READ from exact-head CI job results —
+  # never RAN by the reviewer (`ladder` L1: CI is the workspace gate; C5 is
+  # the only Cargo gate RAN by a reviewer). Non-Cargo gates (such as
+  # lint-markdown-content.sh) follow their own rule in §5 (U5).
   - "cargo fmt --all --check"
   - "cargo clippy --workspace --all-targets -- -D warnings"
   - "cargo test --workspace"
@@ -10,6 +14,7 @@ ran_allowlist:
   - "gh "
   - "git "
   - "sh scripts/"
+  - "node scripts/pi-session-elapsed.mjs "
 independence: session
 classes:
   code-risk: ["crates/**", "scripts/**", "*.sh", "*.ps1", ".github/**", "install.sh", "Cargo.toml", "Cargo.lock", "*.rs"]
@@ -18,7 +23,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.2`
+- Spec version: `review-spec-v1.3`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -282,9 +287,15 @@ git log --format=%B "origin/$BASE..$SHA" \
   | grep -Ein '(^|[^a-z])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+'
 ```
 
-**U3 — the `Issue: #N` line exists. P1.** `scripts/review-pr.sh` parses exactly
-this line to load the `doneWhen` into the brief; without it the next round
-silently loses its acceptance ceiling. Empty output is the failure.
+**U3 — the `Issue: #N` line exists. P1.** This is a convention miss, not a data
+dependency: `scripts/review-pr.sh` collects issue numbers from **three**
+sources (see its issue-number collection block) — `Issue:`/`Issues:` lines,
+closing keywords anywhere in the body, and GitHub's
+closingIssuesReferences — so a body carrying only `Closes #N` still supplies
+the brief with the issue's `doneWhen`, and an empty ceiling is never a
+consequence of the missing line. Missing `Issue: #N` is still P1 because the
+repo wants the issue named in this exact conventional form. Empty output is
+the failure.
 
 ```sh
 gh pr view "$N" --json body --jq .body | awk 'tolower($0) ~ /^issues?[[:space:]]*:/'
@@ -306,12 +317,15 @@ git log --format=%s "origin/$BASE..$SHA" \
 sh scripts/lint-markdown-content.sh; echo "exit=$?"
 ```
 
-**U6 — gates: READ before RAN. P0 when CI is deterministically red.** Read the
-implementer's L1 gate receipt (full SHA, fmt / clippy / test) and exact-head
-CI. RAN only what they do not cover, and **state the reason for any rerun of a
-recorded gate** (`ladder`, L2 row). A coverage gap earns a focused check for
-that gap, not a full rerun; a full local rerun needs a stated reason (no
-receipt, red or absent CI, or grounds to distrust it). Deterministically red CI
+**U6 — gates: READ before RAN. P0 when CI is deterministically red.** The L1
+receipt is exact-head CI itself — `CI run <id> @ <sha>` — and the workspace
+Cargo `gates:` entries above are READ from its job results, never RAN by the
+reviewer (`ladder` L1: CI is the workspace gate; C5 is the only Cargo gate RAN
+here; non-Cargo gates such as U5 remain RAN where §5 routes them).
+RAN only what the CI jobs do not cover, and **state the reason for any rerun of
+a recorded gate** (`ladder`, L2 row). A coverage gap earns a focused check for
+that gap, not a full rerun; a full local rerun needs a stated reason (red or
+absent exact-head CI, or grounds to distrust it). Deterministically red CI
 already blocks the SHA — audit and request changes instead of spending a full
 run; if the red is environmental, rerun only the failed job.
 
@@ -601,9 +615,11 @@ One comment per round, pinned to the reviewed full SHA
 ```text
 ## Code Review: Round <N> — PR #<n> @ <full 40-hex SHA>
 
+- elapsed: <pi session first-to-last message elapsed_ms; unmeasured if unavailable>
 - model_requested: <the model dispatch asked for>
 - model_observed: <read from the system, or "unverified">
-- spec: review-spec-v1.2
+- reviewer_session: <per-PR UUID the lane was launched with>
+- spec: review-spec-v1.3
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
 - cost: <elapsed / tokens / tool calls, as available>
@@ -634,7 +650,7 @@ security or data-loss regressions introduced or exposed; current-base integratio
 
 ### RAN vs READ
 RAN:  <commands actually executed here, with their key outputs>
-READ: <L1 receipt SHA and gate set; exact-head CI result; what each covers and does not>
+READ: <L1 receipt — `CI run <id> @ <sha>`, pinned to the reviewed SHA — and the gate set READ from its exact-head CI job results; what each covers and does not>
 
 ### Verdict
 LGTM (P0=0, P1=0)  —  or  —  Changes Requested, P0=<n>, P1=<n> — <one-line reason>
@@ -643,7 +659,9 @@ LGTM (P0=0, P1=0)  —  or  —  Changes Requested, P0=<n>, P1=<n> — <one-line
 Every rule §4 routed you to gets a row in the `Rules` table. `N.A.` always
 carries a reason. The `Rules` table is the record that the whole scoped audit
 happened, which is what makes a later round's blocker auditable as fix-caused
-(`loop` items 2 and 3).
+(`loop` items 2 and 3). `reviewer_session` is the per-PR UUID the lane was
+launched with; the watcher records a mismatch with the backend-reported id
+rather than overwriting it.
 
 ## 8. Step 8 — the verdict
 
@@ -661,6 +679,14 @@ happened, which is what makes a later round's blocker auditable as fix-caused
 Internal verifier reports, task receipts and CI do not replace this comment
 (`loop`). For a local-only delivery with no PR, record the same fields in the
 strongest durable local carrier; do not invent a PR.
+
+The watcher also posts the merge gate's commit status: context
+`Independent Review`, pinned to the reviewed SHA in §7's heading. Its state
+is the union of every §7 verdict comment on that SHA plus the round just
+posted: `success` only when at least one verdict is `LGTM (P0=0, P1=0)` and
+no verdict on that SHA is anything else; any standing non-qualifying verdict
+is `failure`; no verdict at all is `error`. A later LGTM therefore does not
+override an earlier Changes Requested on the same SHA (GH-742).
 
 ## 9. Provenance of the check commands
 
@@ -728,3 +754,20 @@ mechanical.
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
 were measured under.
+
+### Review elapsed source (GH-644)
+
+Read elapsed from the **same pi session JSONL file** used for `model_observed`:
+
+```sh
+node scripts/pi-session-elapsed.mjs "$PI_SESSION_FILE"
+```
+
+Set `PI_SESSION_FILE` to the session file already located for this review.
+Copy `elapsed_ms` into the verdict header as `elapsed: <N> ms (pi session)`
+only when `elapsed_measured` is true; otherwise write `elapsed: unmeasured`.
+The helper measures the first through last **message** timestamps, excluding
+session headers. Missing, malformed, single-message, or a last timestamp before
+the first timestamp
+remain unmeasured. This session interval and dispatch's process lifetime are
+different observations; always identify the source in the header.

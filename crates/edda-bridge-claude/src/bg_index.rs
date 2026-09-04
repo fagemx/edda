@@ -18,7 +18,7 @@ use std::path::Path;
 
 /// Run only when there is already an index to top up.
 pub fn should_run(project_id: &str) -> bool {
-    if std::env::var("EDDA_BG_ENABLED").unwrap_or_else(|_| "1".into()) == "0" {
+    if crate::env_var("EDDA_BG_ENABLED").unwrap_or_else(|| "1".into()) == "0" {
         return false;
     }
     index_exists(&project_dir(project_id))
@@ -53,9 +53,8 @@ mod tests {
     use super::*;
 
     // Deliberately tests `index_exists` rather than `should_run`: the latter
-    // resolves the store root from the environment, and setting that here would
-    // redirect it for every other test in this process (cargo runs them in
-    // parallel threads), breaking bg_detect/bg_scan/bg_digest.
+    // reads the store, and this test asserts on a directory it created
+    // itself rather than on any store state.
     #[test]
     fn index_exists_only_when_the_tantivy_dir_is_present() {
         let tmp = tempfile::tempdir().unwrap();

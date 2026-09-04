@@ -238,6 +238,7 @@ mod tests {
     /// under "Fleet" would be noise dressed as news.
     #[test]
     fn the_home_project_is_not_its_own_sibling() {
+        let _store = crate::isolated_store();
         let (a, b) = (live_repo(), live_repo());
         let scope = vec![
             entry("edda", &a.path().to_string_lossy()),
@@ -256,6 +257,7 @@ mod tests {
     /// A sibling with nothing decided and nothing waiting contributes no line.
     #[test]
     fn a_quiet_sibling_takes_up_no_room() {
+        let _store = crate::isolated_store();
         let (a, b) = (live_repo(), live_repo());
         let scope = vec![
             entry("edda", &a.path().to_string_lossy()),
@@ -273,6 +275,7 @@ mod tests {
     /// Acceptance: no Fleet section when there are no siblings.
     #[test]
     fn a_solo_project_renders_no_section_at_all() {
+        let _store = crate::isolated_store();
         let a = live_repo();
         let scope = vec![entry("edda", &a.path().to_string_lossy())];
 
@@ -301,6 +304,7 @@ mod tests {
     /// promise `--fleet` makes.
     #[test]
     fn an_unreachable_sibling_gets_a_line_rather_than_vanishing() {
+        let _store = crate::isolated_store();
         let here = live_repo();
         let gone = live_repo();
         let gone_path = gone.path().to_string_lossy().into_owned();

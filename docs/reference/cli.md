@@ -690,17 +690,58 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | `--prompt-file FILE` | Path to the file containing the prompt, read verbatim (required) |
 | `--session-id ID` | Session id passed to the backend verbatim; generated and printed when omitted so the caller can reuse it on the next call. pi and codex resume a prior conversation by repeating the id; claude refuses an id that already exists (`Session ID <id> is already in use`) and needs `--resume` |
 | `--resume` | Continue the conversation `--session-id` names instead of starting a new one (`claude --resume <id>`). claude only — pi and codex resume by repeating `--session-id` alone and refuse this flag. Requires `--session-id` |
-| `--cwd DIR` | Working directory for the agent (default: current directory) |
+| `--cwd DIR` | Working directory for the agent (default: current directory); must exist. With `--issue`, this is also the repository context the claim guard's GitHub reads and writes run in |
 | `--budget-usd N` | Per-turn budget in USD (codex cannot enforce budgets) |
 | `--timeout-sec S` | Turn timeout in seconds (default: 1800, like a conduct phase) |
 | `--permission-mode MODE` | Permission mode carried on the synthetic phase verbatim (default `bypassPermissions`); only the claude backend consumes it today, pi and codex ignore it |
-| `--issue N` | GitHub issue number for the cross-machine claim guard; refuses dispatch if claimed by another machine |
-| `--machine LABEL` | Machine label for the cross-machine claim guard (also via `EDDA_MACHINE`; requires `--issue`) |
+| `--issue N` | Check and claim the GitHub issue before launch; refuses another owner, an open PR, or a merged delivery |
+| `--machine MACHINE/ROLE` | Full claim identity, e.g. `4090/worker-1` (also via `EDDA_MACHINE`; requires `--issue`). Bare machine names are invalid |
+| `--owns PATHS` | Comma-separated paths this dispatch will write. A live overlapping writer is refused before the agent starts; the claim is released when the foreground worker exits. |
+| `--detach` | Start the dispatch outside the caller's process group or Windows Job Object and return a durable receipt immediately. |
+| `--build-lane NAME` | Optional Cargo lane for a detached worker: `worker-1`, `worker-2`, `verifier`, or `verifier-2`. Requires `--detach`. |
+| `--detach-log-dir DIR` | Directory for detached logs, manifests, and the prompt snapshot (default: system temp `edda-dispatch` directory). Requires `--detach`. |
 | `--json` | Print exactly one JSON object to stdout instead of text lines |
+
+A `codex` agent that must reach the network — posting a PR comment with
+`gh`, pushing a branch — should be launched through
+`edda dispatch --agent codex` (GH-565): the backend sets no sandbox or
+approval flags, so the user's global Codex configuration is inherited
+unchanged. The Claude Code codex plugin is not a substitute for that role;
+it defaults to a `read-only` sandbox that overrides `~/.codex/config.toml`,
+and a read-only sandbox has no network access.
 
 With `--json` the object has the shape
 `{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded\|claim_refused", "result_text":string\|null, "cost_usd":number\|null, "session_id":string, "error":string\|null, "model_requested":string, "model_observed":string, "session_observed":string}`.
-When refused by the cross-machine claim guard (`outcome` is `"claim_refused"`), a reduced shape is emitted:
+With `--issue`, dispatch reads `taking: <machine>/<role>` comments and PR
+history before starting the agent. Ownership compares the full token; routing
+labels (`lane:*`) are ignored. A matching open or merged PR blocks dispatch
+(title `GH-N` or branch `ghN`, case-insensitive). Closed, unmerged PRs do not
+block a retry. GitHub failures fail closed. The prompt file and the working
+directory are validated before any claim write, so an invalid local
+prerequisite produces no GitHub mutation; a malformed `--machine` identity is
+refused with exit 2 before any GitHub call.
+
+For an unclaimed issue, dispatch writes `taking: <machine>/<role> at <time>`,
+adds `fleet:claimed`, removes `fleet:ready`, and assigns `@me` before launch.
+Self-claims add no duplicate comment and repair the queue labels/assignee after
+a partial write. The check and writes are sequential GitHub calls, not a
+cross-session lock. Release/reassignment is handled separately.
+
+`--detach` uses a Scheduled Task on Windows and a new process group on Unix.
+It copies the prompt into the receipt directory, explicitly sets `HOME`, and
+sets `CARGO_TARGET_DIR` only when `--build-lane` is named. Its JSON result is a
+receipt rather than a turn result:
+
+```json
+{"handle":"dispatch-…","log":"C:\\…\\dispatch-….log","manifest":"C:\\…\\dispatch-….json","task":"edda-dispatch-…"}
+```
+
+The manifest starts as `launching`, then records the worker PID and terminal
+`completed`, `timeout`, or `failed` state. A restarted controller can use the
+returned handle, log path, and manifest path without reconstructing a task
+name. On Windows, the generated task wrapper carries the controller PID and
+its actual creation time for safe stale-task recovery.
+When refused by the GitHub claim guard (`outcome` is `"claim_refused"`), a reduced shape is emitted:
 `{"outcome":"claim_refused", "error":string, "issue":number, "machine":string}`.
 `session_id` is the id edda asked for; `session_observed` is the one the
 backend reported in-band, or `"unknown"`. They differ when a `--resume` forked
@@ -712,7 +753,7 @@ Exit codes:
 |------|---------|
 | `0` | agent done |
 | `1` | agent crash or any other failure (including pre-dispatch errors) |
-| `2` | timeout or cross-machine claim refusal (distinguished by outcome) |
+| `2` | timeout or GitHub claim refusal/read/write failure, including a malformed `--machine` identity (distinguished by outcome) |
 | `3` | budget exceeded |
 | `4` | max turns |
 

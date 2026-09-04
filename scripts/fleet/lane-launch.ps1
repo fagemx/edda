@@ -7,10 +7,11 @@
 # that sets UTF-8 encodings, HOME and GIT_CONFIG_PARAMETERS explicitly (empty
 # or hostile in the task environment), then runs `edda dispatch`.
 #
-# CARGO_TARGET_DIR is set ONLY when -BuildLane names one of the four ratified
-# build lanes (see below): a session that compiles nothing has no build lane
-# (.claude/CLAUDE.md, verification.cost-discipline), while a compiling session
-# must be given one of the four — the launcher refuses any other name.
+# CARGO env is set in the wrapper ONLY when -BuildLane names one of the four
+# ratified build lanes (see below): a session that compiles nothing has no
+# build lane (.claude/CLAUDE.md, verification.cost-discipline), while a
+# compiling session must be given one of the four — the launcher refuses any
+# other name.
 #
 # Every artifact the launcher writes lives under -LogDir (resolved to an
 # absolute path before anything is written or embedded — the task runs from a
@@ -26,11 +27,15 @@
 #
 # -BuildLane is optional and accepts exactly the ratified build lanes
 # worker-1|worker-2|verifier|verifier-2 (verification.cost-discipline); when
-# given, the wrapper sets CARGO_TARGET_DIR to <lane root>\<BuildLane> (lane
-# root = $env:LOCALAPPDATA\fleet-workstation\lanes unless FLEET_LANE_ROOT is
-# set). When omitted, the wrapper sets NO CARGO_TARGET_DIR at all — the
-# launcher never synthesizes a build lane; docs lanes compile nothing and
-# pass none.
+# given, the wrapper gets the lane env contract — CARGO_TARGET_DIR set to the
+# FIXED lane dir <lane root>\<BuildLane> (lane root =
+# $env:LOCALAPPDATA\fleet-workstation\lanes unless FLEET_LANE_ROOT is set),
+# CARGO_INCREMENTAL (1 worker / 0 verifier) and the CI-matching
+# CARGO_PROFILE_{DEV,TEST}_DEBUG=line-tables-only trim (GH-626). That contract
+# has one owner — lane-warm.ps1 Get-LaneBuildEnv, exposed via -PrintEnv — and
+# the launcher consumes it instead of duplicating a drifting literal. When
+# omitted, the wrapper sets NO CARGO env at all — the launcher never
+# synthesizes a build lane; docs lanes compile nothing and pass none.
 #
 # Prints, one line each: the .git/config backup verdict (GH-715), then task
 # name, state, wrapper path, log path, done path.
@@ -49,7 +54,12 @@
 # lane would get (printed verbatim), schedules the wrapper with a trivial
 # real process (Start-Sleep 20) in place of the agent, proves the task
 # process's parent is the Task Scheduler service (svchost.exe, doneWhen 3),
-# then unregisters. No agent spend.
+# then unregisters. No agent spend. Every dry-run artifact is named
+# `$Name.dryrun*` inside -LogDir (log, done-file, wrapper, brief) — the real
+# lane's `$Name.log` and `$Name.done` are never touched, so a real launch
+# after a dry run starts with a clean log and no stale done-file. That
+# namespace is why any -Name containing the dryrun segment is rejected by
+# the guard rails below.
 param(
   [Parameter(Mandatory = $true)][string]$Name,
   [string]$Brief = '',
@@ -60,6 +70,9 @@ param(
   [string]$SessionId = '',
   [string]$LogDir = "$env:TEMP\edda-lanes",
   [string]$BuildLane = '',
+  # Explicit for arbitrary lane names; conventional review/reviewer names
+  # imply it so historical review-pr<N> callers cannot omit the restriction.
+  [switch]$Review,
   [switch]$DryRun
 )
 
@@ -75,11 +88,26 @@ function Fail([string]$Msg) {
 function PsQuote([string]$s) {
   return "'" + ($s -replace "'", "''") + "'"
 }
+. (Join-Path $PSScriptRoot 'reviewer-capabilities.ps1')
+$isReview = $Review -or $Name -match '(?i)(^|[._-])review(er)?([._-]|$)'
+$reviewArgs = ''
+if ($isReview) {
+  if ($Agent -ne 'claude') { Fail 'review lanes require -Agent claude (Opus); refusing an unsupported reviewer backend' }
+  try { Assert-ReviewCapabilities } catch { Fail $_.Exception.Message }
+  $reviewArgs = " --model claude-opus-5 --permission-mode $(PsQuote $ReviewPermissionMode) --tools $(PsQuote $ReviewTools) --exclude-tools $(PsQuote $ReviewDenied)"
+}
 
 # --- guard rails ------------------------------------------------------------
 
 if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
   Fail "-Name '$Name' may contain only letters, digits, dot, underscore, hyphen"
+}
+# Dry-run artifacts are always $Name.dryrun* inside -LogDir, so a real lane
+# named '<X>.dryrun' would resolve its $Name.log / $Name.done onto the
+# dry-run artifacts of '<X>' and re-create exactly the GH-822 collision —
+# the segment is reserved (GH-822 P1-1).
+if ($Name -match '(?i)(^|[._-])dryrun($|[._-])') {
+  Fail "-Name '$Name' may not contain 'dryrun'; reserved for dry-run artifacts"
 }
 $allowedBuildLanes = @('worker-1', 'worker-2', 'verifier', 'verifier-2')
 if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {
@@ -124,7 +152,20 @@ $LogDir = (Resolve-Path -LiteralPath $LogDir).Path
 if (-not $SessionId) { $SessionId = "lane-$Name" }
 if ($BuildLane) {
   $laneRoot = if ($env:FLEET_LANE_ROOT) { $env:FLEET_LANE_ROOT } else { "$env:LOCALAPPDATA\fleet-workstation\lanes" }
-  $CargoTargetDir = Join-Path $laneRoot $BuildLane
+  # GH-626: the lane env contract lives in lane-warm.ps1 (-PrintEnv), the same
+  # source lane-warm builds with — the wrapper cannot drift from prepare/warm.
+  # In-process call: 'exit 0/1' in a child script returns here with
+  # $LASTEXITCODE set (verified), so no extra pwsh process is needed.
+  $helperOut = @(& (Join-Path $PSScriptRoot 'lane-warm.ps1') -BuildLane $BuildLane -LaneRoot $laneRoot -PrintEnv)
+  if ($LASTEXITCODE -ne 0) { Fail "lane-warm.ps1 -PrintEnv failed for build lane '$BuildLane'" }
+  $laneEnv = [ordered]@{}
+  foreach ($line in $helperOut) {
+    if ($line -match '^([A-Z][A-Z0-9_]+)=(.*)$') { $laneEnv[$Matches[1]] = $Matches[2] }
+  }
+  if (-not $laneEnv.Contains('CARGO_TARGET_DIR')) {
+    Fail "lane-warm.ps1 -PrintEnv reported no CARGO_TARGET_DIR for build lane '$BuildLane'"
+  }
+  $laneEnvText = ($laneEnv.Keys | ForEach-Object { ('{0} = {1}' -f "`$env:$_", (PsQuote $laneEnv[$_])) }) -join "`r`n"
 }
 $Log = Join-Path $LogDir "$Name.log"
 $Done = Join-Path $LogDir "$Name.done"
@@ -137,6 +178,7 @@ if (-not $PwshExe) { Fail 'pwsh.exe not found on PATH; cannot register the task'
 
 # The real `edda dispatch` command line (also printed verbatim by -DryRun).
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
+$argLine += $reviewArgs
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 
 # Wrapper the scheduled task actually runs: outside the controller's job
@@ -150,15 +192,18 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $env:HOME = $env:USERPROFILE
 # keep `git --help` from opening a browser inside the hidden task
 $env:GIT_CONFIG_PARAMETERS = "'help.format=man'"
-$env:CARGO_TARGET_DIR = __CARGO__
+__LANEENV__
 Set-Location -LiteralPath __CWD__
 $code = $null
 try {
+  __REVIEW_PREFLIGHT__
   __RUN__
   $code = $LASTEXITCODE
 } catch {
+  $_ | Out-File __LOG__ -Append -Encoding utf8
   $code = 1
 } finally {
+  __REVIEW_FINISH__
   # The end record is written no matter how the run ends (GH-672): a log
   # with START but no === EXIT === line means the lane was killed mid-flight.
   Add-Content -LiteralPath __LOG__ -Value "=== EXIT code=$code ===" -Encoding utf8
@@ -167,6 +212,59 @@ try {
 exit $code
 '@
 $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
+$reviewPreflight = ''
+$reviewFinish = ''
+if ($isReview) {
+  $reviewPreflight = @'
+. __CAPABILITIES__
+Assert-ReviewCapabilities
+Add-Content -LiteralPath __LOG__ -Value __TOOL_FLAGS__
+function Get-ReviewWorktreeSnapshot {
+  $entries = [System.Collections.Generic.List[string]]::new()
+  foreach ($scope in @(
+    @{ Name = 'tracked'; Args = @('--cached') },
+    @{ Name = 'untracked'; Args = @('--others', '--exclude-standard') },
+    @{ Name = 'ignored'; Args = @('--others', '--ignored', '--exclude-standard') }
+  )) {
+    $paths = & git ls-files @($scope.Args)
+    if ($LASTEXITCODE -ne 0) { throw "git ls-files failed for $($scope.Name) scope" }
+    foreach ($path in $paths) {
+      if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $hash = (& git hash-object -- $path)
+        if ($LASTEXITCODE -ne 0) { throw "git hash-object failed for $($scope.Name) path $path" }
+        [void]$entries.Add("$($scope.Name)`t$hash`t$path")
+      } elseif (Test-Path -LiteralPath $path -PathType Container) {
+        [void]$entries.Add("$($scope.Name)`tdirectory`t$path")
+      } else {
+        [void]$entries.Add("$($scope.Name)`tmissing-or-special`t$path")
+      }
+    }
+  }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes(($entries -join "`n"))
+  return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+$reviewHead = & git rev-parse HEAD
+if ($LASTEXITCODE -ne 0) { throw 'review HEAD unavailable' }
+$reviewStatus = (& git status --porcelain=v1 --untracked-files=all) -join "`n"
+if ($LASTEXITCODE -ne 0) { throw 'review status unavailable' }
+$reviewSnapshot = Get-ReviewWorktreeSnapshot
+'@
+  $reviewPreflight = $reviewPreflight.Replace('__CAPABILITIES__', (PsQuote (Join-Path $PSScriptRoot 'reviewer-capabilities.ps1')))
+  $reviewPreflight = $reviewPreflight.Replace('__TOOL_FLAGS__', (PsQuote ('TOOL_FLAGS=' + $reviewArgs)))
+  $reviewFinish = @'
+  $afterHead = & git rev-parse HEAD
+  $headOk = $LASTEXITCODE -eq 0
+  $afterStatus = (& git status --porcelain=v1 --untracked-files=all) -join "`n"
+  $statusOk = $LASTEXITCODE -eq 0
+  try { $afterSnapshot = Get-ReviewWorktreeSnapshot; $snapshotOk = $true } catch { $_ | Out-File __LOG__ -Append -Encoding utf8; $snapshotOk = $false }
+  $treeOk = $statusOk -and $headOk -and $snapshotOk -and $reviewHead -and $afterHead -eq $reviewHead -and $afterStatus -eq $reviewStatus -and $afterSnapshot -eq $reviewSnapshot
+  & git status --short | Out-File __LOG__ -Append -Encoding utf8
+  & git log -1 --format=%H | Out-File __LOG__ -Append -Encoding utf8
+  if ($treeOk) { Add-Content __LOG__ 'WORKTREE_CHECK=unchanged' } else { Add-Content __LOG__ 'WORKTREE_CHECK=failed; preserved for inspection'; $code = 2 }
+'@
+}
+$wrapperText = $wrapperText.Replace('__REVIEW_PREFLIGHT__', $reviewPreflight)
+$wrapperText = $wrapperText.Replace('__REVIEW_FINISH__', $reviewFinish)
 
 if ($DryRun) {
   # Generate our own temporary brief — no caller-supplied untracked input.
@@ -176,20 +274,29 @@ if ($DryRun) {
     "Generated by lane-launch.ps1 -DryRun at $(Get-Date -Format o); proves the launcher, starts no agent."
   )
   $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
+  $argLine += $reviewArgs
   if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
+  # Dry-run artifacts carry their own names: teeing into $Name.log or writing
+  # $Name.done here would put a foreign === EXIT === record in the real lane's
+  # log and leave a stale done-file, so a following real launch would look
+  # already-exited and a killed lane would look cleanly finished (GH-672).
+  $Log = Join-Path $LogDir "$Name.dryrun.log"
+  $Done = Join-Path $LogDir "$Name.dryrun.done"
   $runDry = "& pwsh -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 20' 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
   $Wrapper = Join-Path $LogDir "$Name.dryrun-wrapper.ps1"
 
   "dry-run real command line (verbatim, as a real lane would run it):"
   "  edda $argLine"
   if ($BuildLane) {
-    $wrapperText = $wrapperText.Replace('__CARGO__', (PsQuote $CargoTargetDir))
+    $wrapperText = $wrapperText.Replace('__LANEENV__', $laneEnvText)
   } else {
-    $wrapperText = $wrapperText -replace '(?m)^.*__CARGO__.*\r?\n', ''
+    $wrapperText = $wrapperText -replace '(?m)^.*__LANEENV__.*\r?\n', ''
   }
   $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runDry).Replace('__DONE__', (PsQuote $Done)) |
     Set-Content -LiteralPath $Wrapper -Encoding utf8
   "dry-run wrapper=$Wrapper (identical to the real wrapper except __RUN__ runs the trivial process)"
+  "dry-run log=$Log"
+  "dry-run done=$Done"
 
   $action = New-ScheduledTaskAction -Execute $PwshExe `
     -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
@@ -236,13 +343,14 @@ if (-not (Test-Path -LiteralPath $Brief -PathType Leaf)) {
 }
 $Brief = (Resolve-Path -LiteralPath $Brief).Path
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
+$argLine += $reviewArgs
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
 
 if ($BuildLane) {
-  $wrapperText = $wrapperText.Replace('__CARGO__', (PsQuote $CargoTargetDir))
+  $wrapperText = $wrapperText.Replace('__LANEENV__', $laneEnvText)
 } else {
-  $wrapperText = $wrapperText -replace '(?m)^.*__CARGO__.*\r?\n', ''
+  $wrapperText = $wrapperText -replace '(?m)^.*__LANEENV__.*\r?\n', ''
 }
 $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runReal).Replace('__DONE__', (PsQuote $Done)) |
   Set-Content -LiteralPath $Wrapper -Encoding utf8

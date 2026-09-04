@@ -222,7 +222,7 @@ printf '%s\n' "$out" | grep -qF -- '- 看板：needs-operator: relogin gh on 409
 # it must come under 例外 (after the heading, before 成本)
 printf '%s\n' "$out" | awk '/^## 例外/{f=1;next} /^## /{f=0} f' | grep -qF -- '- 看板：needs-operator: relogin gh on 4090 (https://github.com/fagemx/edda/issues/613#issuecomment-1)' \
     || fail 'case 4: board line is not inside the 例外 section'
-if printf '%s\n' "$out" | grep -qF 'status header\|other details'; then
+if printf '%s\n' "$out" | grep -qF -e 'status header' -e 'other details'; then
     fail 'case 4: unrelated board lines must not be rendered'
 fi
 

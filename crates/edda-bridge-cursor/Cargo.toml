@@ -17,7 +17,6 @@ edda-pack = { path = "../edda-pack", version = "0.4.0" }
 edda-postmortem = { path = "../edda-postmortem", version = "0.4.0" }
 edda-store = { path = "../edda-store", version = "0.4.0" }
 anyhow.workspace = true
-dirs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
