@@ -109,8 +109,8 @@ impl Brief {
                 } else {
                     None
                 },
-                duration_ms: None, // Not tracked in PlanState
-                cost_usd: None,    // Not tracked in PlanState per-phase
+                duration_ms: ps.duration_ms,
+                cost_usd: ps.cost_usd,
                 started_at: ps.started_at.clone(),
                 completed_at: ps.completed_at.clone(),
                 error: ps.error.as_ref().map(|e| e.message.clone()),
@@ -168,7 +168,9 @@ pub fn brief_path(cwd: &Path, plan_name: &str) -> PathBuf {
 /// `write_runner_status` pattern — a brief-write failure must never abort
 /// the run.
 pub fn write_brief(cwd: &Path, state: &PlanState, meta: Option<BriefMeta>) {
-    let brief = Brief::from_state(state, meta);
+    let mut measured = state.clone();
+    super::derive::hydrate_durations(cwd, &mut measured);
+    let brief = Brief::from_state(&measured, meta);
     let path = brief_path(cwd, &state.plan_name);
     if let Ok(data) = serde_json::to_string_pretty(&brief) {
         if let Err(e) = edda_store::write_atomic(&path, data.as_bytes()) {
@@ -482,6 +484,62 @@ phases:
         assert_eq!(
             brief.phases["build"].error.as_deref(),
             Some("cargo test exited 1"),
+        );
+    }
+    #[test]
+    fn event_duration_reaches_derived_brief_without_inventing_missing_measurements() {
+        use crate::runner::event_log::{Event, EventLogger};
+        use crate::state::persist::{load_state, save_state};
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_plan_state();
+        // Real semantics: the attempt counter is incremented and persisted
+        // before the matching PhaseStart/terminal events are appended, so
+        // attempt-1 evidence always coexists with a persisted attempts == 1.
+        state.get_phase_mut("build").unwrap().attempts = 1;
+        save_state(dir.path(), &state).unwrap();
+        let mut events = EventLogger::new(dir.path(), &state.plan_name);
+        for failed in [false, true] {
+            events.record(if failed {
+                Event::PhaseFailed {
+                    phase_id: "build".into(),
+                    attempt: 1,
+                    duration_ms: 5000,
+                    error: "fixture".into(),
+                    error_type: None,
+                    env_retries: 0,
+                    attempt_charged: true,
+                }
+            } else {
+                Event::PhasePassed {
+                    phase_id: "build".into(),
+                    attempt: 1,
+                    duration_ms: 5000,
+                    cost_usd: None,
+                }
+            });
+            let restored = load_state(dir.path(), &state.plan_name).unwrap().unwrap();
+            assert_eq!(restored.phases[0].duration_ms, Some(5000));
+            write_brief(dir.path(), &state, None);
+            let brief: Brief = serde_json::from_str(
+                &std::fs::read_to_string(brief_path(dir.path(), &state.plan_name)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(brief.phases["build"].duration_ms, Some(5000));
+            assert_eq!(brief.phases["test"].duration_ms, None);
+        }
+        // Retry boundary: the new attempt number is persisted before its
+        // PhaseStart, and the stale prior-attempt duration was already
+        // cleared by the runner.
+        state.get_phase_mut("build").unwrap().attempts = 2;
+        save_state(dir.path(), &state).unwrap();
+        events.record(Event::PhaseStart {
+            phase_id: "build".into(),
+            attempt: 2,
+        });
+        let restored = load_state(dir.path(), &state.plan_name).unwrap().unwrap();
+        assert_eq!(
+            Brief::from_state(&restored, None).phases["build"].duration_ms,
+            None
         );
     }
 }

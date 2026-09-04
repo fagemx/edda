@@ -124,6 +124,7 @@ fn run_dispatch(
             "dispatch",
             "--agent",
             "codex",
+            "--json",
             "--session-id",
             "sess-cross-proc",
             "--prompt-file",
@@ -147,6 +148,9 @@ fn run_dispatch(
             output.status
         ));
     }
+    let receipt: serde_json::Value = serde_json::from_str(&stdout).expect("dispatch JSON");
+    assert_eq!(receipt["elapsed_measured"], true);
+    assert!(receipt["elapsed_ms"].as_u64().unwrap() > 0);
     Ok(stdout)
 }
 

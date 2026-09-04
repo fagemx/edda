@@ -36,6 +36,19 @@ context: fork
 2. **定位 PR**：args 給的號碼／URL；或
    `gh pr list --head "$(git branch --show-current)" --json number --jq '.[0].number'`。
 
+## elapsed 來源
+
+verdict header 增列 `elapsed: <N> ms (pi session)`；來源和 `model_observed`
+相同的 pi session JSONL 檔。先將 `PI_SESSION_FILE` 設為該檔案，再執行：
+
+```sh
+node scripts/pi-session-elapsed.mjs "$PI_SESSION_FILE"
+```
+
+只在 `elapsed_measured=true` 時填入 `elapsed_ms`，否則寫
+`elapsed: unmeasured`，不以 0 代替缺值。此值是第一到最後一筆訊息的時間差，
+與 dispatch 的 spawn→exit 量測分開標示。brief 模板與 `REVIEW.md` 記有相同命令。
+
 ## 貼裁定
 
 `gh pr comment <n> --body-file <tmp>`，格式照 `REVIEW.md` §7 一字不改。

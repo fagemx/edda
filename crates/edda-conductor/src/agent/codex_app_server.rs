@@ -1,5 +1,8 @@
+use super::timing::ProcessTiming;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
@@ -7,6 +10,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 pub struct CodexAppServer {
+    started: Instant,
+    reaped: bool,
+    timing: Arc<ProcessTiming>,
     child: Child,
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
@@ -22,16 +28,35 @@ pub struct CodexTurnOutcome {
 impl CodexAppServer {
     pub async fn spawn(bin: &Path) -> Result<Self> {
         let mut command = Command::new(bin);
+        // No sandbox or approval flags are set here on purpose (GH-565): the
+        // app-server inherits the user's global Codex configuration
+        // (~/.codex/config.toml) unchanged, which is what lets networked
+        // roles — a reviewer posting a PR comment with `gh`, an implementer
+        // pushing a branch — work. Do not add a read-only default: the
+        // Claude Code codex plugin's hardcoded `sandbox: "read-only"` is
+        // exactly the failure this deliberate inheritance avoids.
         command.arg("app-server");
-        Self::spawn_with_command(command).await
+        Self::spawn_with_timing(command, Arc::default()).await
     }
 
-    async fn spawn_with_command(mut command: Command) -> Result<Self> {
+    pub(crate) async fn spawn_timed(bin: &Path, timing: Arc<ProcessTiming>) -> Result<Self> {
+        let mut command = Command::new(bin);
+        command.arg("app-server");
+        Self::spawn_with_timing(command, timing).await
+    }
+
+    #[cfg(test)]
+    async fn spawn_with_command(command: Command) -> Result<Self> {
+        Self::spawn_with_timing(command, Arc::default()).await
+    }
+
+    async fn spawn_with_timing(mut command: Command, timing: Arc<ProcessTiming>) -> Result<Self> {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .kill_on_drop(true);
 
+        let started = Instant::now();
         let mut child = command
             .spawn()
             .context("failed to spawn Codex App Server")?;
@@ -44,6 +69,9 @@ impl CodexAppServer {
             .take()
             .context("Codex App Server stdout was not piped")?;
         let mut server = Self {
+            started,
+            reaped: false,
+            timing,
             child,
             stdin,
             stdout: BufReader::new(stdout).lines(),
@@ -204,9 +232,12 @@ impl CodexAppServer {
         Ok(())
     }
 
-    async fn terminate(&mut self) {
+    pub(crate) async fn terminate(&mut self) {
         let _ = self.child.kill().await;
-        let _ = self.child.wait().await;
+        if self.child.wait().await.is_ok() && !self.reaped {
+            self.reaped = true;
+            self.timing.record(self.started);
+        }
     }
 
     fn take_id(&mut self) -> u64 {
@@ -772,37 +803,7 @@ mod tests {
         assert!(error.to_string().contains("tasklist.exe exited"));
     }
 
-    #[test]
-    fn correlates_response_ids_while_skipping_notifications() -> anyhow::Result<()> {
-        let lines = [
-            r#"{"method":"thread/started","params":{"thread":{"id":"t-1"}}}"#,
-            r#"{"id":1,"result":{"ignored":true}}"#,
-            r#"{"id":2,"result":{"thread":{"id":"t-1"}}}"#,
-        ];
-
-        let result = response_for_id(lines.iter().copied(), 2)?;
-
-        assert_eq!(result["thread"]["id"], "t-1");
-        Ok(())
-    }
-
-    #[test]
-    fn rejects_malformed_app_server_json() {
-        let error = response_for_id(["not-json"], 2).expect_err("malformed JSON should fail");
-
-        assert!(error.to_string().contains("invalid app-server JSON"));
-    }
-
-    #[test]
-    fn preserves_json_rpc_error_message() {
-        let error = response_for_id(
-            [r#"{"id":2,"error":{"code":-32602,"message":"bad params"}}"#],
-            2,
-        )
-        .expect_err("JSON-RPC error should fail");
-
-        assert!(error.to_string().contains("bad params"));
-    }
+    include!("codex_app_server_json_tests.rs");
 
     #[test]
     fn reports_unexpected_eof() {
