@@ -11,6 +11,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+
+const here = dirname(fileURLToPath(import.meta.url));
 import { spawnSync } from "node:child_process";
 import { EddaClient, OPERATIONS } from "../src/client.ts";
 import { HttpTransport } from "../src/transport-http.ts";
@@ -59,23 +63,37 @@ test("contract: ask/note/decide round-trip over MCP", { skip: !EDDA_BIN && "EDDA
   }
 });
 
-test("contract: timeout and cancellation are typed", { skip: !EDDA_BIN && "EDDA_BIN not set" }, async () => {
-  const { root, storeRoot } = makeEnv();
-  const { client, cleanup } = await makeClient(root, storeRoot);
+test("contract: timeout and cancellation are typed, deterministic", { skip: !EDDA_BIN && "EDDA_BIN not set" }, async () => {
+  // Deterministic: a synthetic MCP server that delays every response — no
+  // race against a fast real CLI. Deadline, cancellation and child-reaping
+  // are asserted against the REAL transport machinery; the real edda
+  // round-trip stays in the live tests above.
+  const synth = join(here, "synth-mcp-server.mjs");
+  const client = new EddaClient({ mcp: { command: process.execPath, args: [synth, "--delay-ms", "30000"] } });
   try {
     await assert.rejects(
-      client.call("ask", { query: "timeout-probe" }, { timeoutMs: 1 }),
+      client.call("ask", { query: "timeout-probe" }, { timeoutMs: 300 }),
       (err: unknown) => (err as { kind?: string }).kind === "Timeout",
     );
     const ac = new AbortController();
-    ac.abort();
+    setTimeout(() => ac.abort(), 300);
     await assert.rejects(
-      client.call("ask", { query: "cancel-probe" }, { signal: ac.signal }),
+      client.call("ask", { query: "cancel-probe" }, { signal: ac.signal, timeoutMs: 30000 }),
       (err: unknown) => (err as { kind?: string }).kind === "Cancelled",
     );
   } finally {
-    await cleanup();
+    await client.close();
   }
+});
+
+test("contract: dead child surfaces TransportError and close reaps", async () => {
+  const synth = join(here, "synth-mcp-server.mjs");
+  const client = new EddaClient({ mcp: { command: process.execPath, args: [synth, "--exit-immediately"] } });
+  await assert.rejects(
+    client.call("ask", { query: "error-probe" }, { timeoutMs: 10000 }),
+    (err: unknown) => (err as { kind?: string }).kind === "TransportError",
+  );
+  await client.close();
 });
 
 test("contract: HTTP transport is read-only and reads work", { skip: !EDDA_BIN && "EDDA_BIN not set" }, async () => {

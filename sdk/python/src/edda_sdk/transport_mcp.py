@@ -213,16 +213,44 @@ class McpTransport:
             return text_content
 
     def close(self) -> None:
+        """Reap the child and close all owned pipes. Idempotent; safe from
+        error/timeout paths — a timed-out or cancelled operation leaves the
+        transport usable, and close() must never leak a running child or an
+        open pipe."""
         proc = self._proc
         self._proc = None
-        if proc is not None and proc.poll() is None:
-            try:
-                if proc.stdin is not None:
-                    proc.stdin.close()
-            except OSError:
-                pass
+        # fail any still-pending requests so callers do not hang on a dead child
+        with self._lock:
+            pendings = list(self._pending.values())
+            self._pending.clear()
+        for pending in pendings:
+            if not pending.event.is_set():
+                pending.error = TransportError("transport closed")
+                pending.event.set()
+        if proc is None:
+            return
+        # reap the child FIRST (terminate/kill + wait), then close the pipes:
+        # closing a pipe another thread is reading can block on Windows.
+        if proc.poll() is None:
+            proc.terminate()
             try:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 proc.kill()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+                    pass
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+    def __enter__(self) -> "McpTransport":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 

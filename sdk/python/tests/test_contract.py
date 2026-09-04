@@ -22,14 +22,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from edda_sdk.client import EddaClient, OPERATIONS  # noqa: E402
 from edda_sdk.errors import (  # noqa: E402
     CancelledError_,
-    CapabilityNotAvailable,
+    TransportError,
     HttpWriteRefused,
     RpcError,
     TimeoutError_,
 )
 from edda_sdk.transport_http import HttpTransport  # noqa: E402
 from edda_sdk.transport_mcp import CallOptions as CallOpts  # noqa: E402
-from edda_sdk.transport_mcp import McpSpawnSpec  # noqa: E402
+from edda_sdk.transport_mcp import McpSpawnSpec, McpTransport  # noqa: E402
 
 EDDA_BIN = os.environ.get("EDDA_BIN", "")
 
@@ -150,19 +150,46 @@ class RoundTripTests(unittest.TestCase):
             client.close()
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_timeout_and_cancellation_are_typed(self):
-        root, store_root = _make_env()
-        client = _make_client(root, store_root)
+    def test_timeout_and_cancellation_are_typed_deterministic(self):
+        # Deterministic: a synthetic MCP server that delays every response
+        # (never racing a fast real CLI). Deadline, cancellation and the
+        # child-reaping/error path are asserted against the REAL transport
+        # machinery (pipes, poll loop, close()); the real edda round-trip
+        # stays in the live tests above.
+        synth = str(Path(__file__).resolve().parent / "synth_mcp_server.py")
+        transport = McpTransport(
+            McpSpawnSpec(command=sys.executable, args=[synth, "--delay", "30"])
+        )
         try:
             with self.assertRaises(TimeoutError_):
-                client.call("ask", {"query": "timeout-probe"}, CallOpts(timeout_s=0.001))
-            cancel = threading.Event()
-            cancel.set()
-            with self.assertRaises(CancelledError_):
-                client.call("ask", {"query": "cancel-probe"}, CallOpts(timeout_s=5, cancel=cancel))
+                transport.call_tool("anything", {}, CallOpts(timeout_s=0.3))
         finally:
-            client.close()
-            shutil.rmtree(root, ignore_errors=True)
+            transport.close()
+        # close() reaped the child even after a deadline abort:
+        self.assertIsNone(transport._proc)
+
+        transport = McpTransport(McpSpawnSpec(command=sys.executable, args=[synth, "--delay", "30"]))
+        try:
+            cancel = threading.Event()
+            timer = threading.Timer(0.3, cancel.set)
+            timer.start()
+            with self.assertRaises(CancelledError_):
+                transport.call_tool("anything", {}, CallOpts(timeout_s=30, cancel=cancel))
+            timer.join()
+        finally:
+            transport.close()
+
+    def test_dead_child_surfaces_transport_error_and_reaps(self):
+        synth = str(Path(__file__).resolve().parent / "synth_mcp_server.py")
+        transport = McpTransport(
+            McpSpawnSpec(command=sys.executable, args=[synth, "--exit-immediately"])
+        )
+        try:
+            with self.assertRaises(TransportError):
+                transport.call_tool("anything", {}, CallOpts(timeout_s=10))
+        finally:
+            transport.close()
+        self.assertTrue(transport._proc is None)
 
 
 @unittest.skipIf(not EDDA_BIN, "EDDA_BIN not set")

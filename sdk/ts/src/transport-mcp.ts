@@ -235,11 +235,17 @@ export class McpTransport {
   async close(): Promise<void> {
     const child = this.child;
     this.child = null;
+    // fail pending requests so callers do not hang on a dead child
+    this.failAll(new TransportError("transport closed"));
     if (child && child.exitCode === null) {
       const exited = new Promise<void>((resolve) => child.on("exit", () => resolve()));
       child.stdin!.end();
       child.kill();
       await Promise.race([exited, new Promise<void>((r) => setTimeout(r, 2000))]);
     }
+    // fully release owned pipes so no fd outlives close()
+    child?.stdin?.destroy();
+    child?.stdout?.destroy();
+    child?.stderr?.destroy();
   }
 }
