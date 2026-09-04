@@ -41,6 +41,15 @@ pub fn launch(args: &DispatchArgs, cwd: &Path, session: &str) -> Result<Detached
         &prompt,
     )?;
     let cwd = fs::canonicalize(cwd)?;
+    // Win32's extended-path prefix is useful to filesystem APIs but is not
+    // preserved by a Scheduled Task's child current directory. Keep the
+    // durable config and worker argv on the ordinary spelling so cleanup
+    // commands resolve the same coordination project.
+    #[cfg(windows)]
+    let cwd = match cwd.to_str().and_then(|path| path.strip_prefix("\\\\?\\")) {
+        Some(path) => PathBuf::from(path),
+        None => cwd,
+    };
     let argv = foreground_argv(args, &cwd, &prompt, session);
     let task = cfg!(windows).then(|| format!("edda-{handle}"));
     let receipt = DetachedOutput {
@@ -60,6 +69,8 @@ pub fn launch(args: &DispatchArgs, cwd: &Path, session: &str) -> Result<Detached
         &receipt,
         &argv,
         &cwd,
+        session,
+        &args.owns,
         cargo.as_deref(),
         args.timeout_sec.unwrap_or(1800),
     )?;
@@ -184,6 +195,9 @@ fn launch_unix(
     } else {
         command.env_remove("CARGO_TARGET_DIR");
     }
+    // This capability belongs to the one worker process. `run` consumes it
+    // before launching an agent, so an agent or nested ordinary dispatch never
+    // inherits authority over this parent's manifest.
     command.env("EDDA_DETACHED_MANIFEST", &receipt.manifest);
     command.spawn().context("spawn detached dispatch")?;
     Ok(())
@@ -194,6 +208,8 @@ fn launch_windows(
     receipt: &DetachedOutput,
     argv: &[OsString],
     cwd: &Path,
+    session: &str,
+    owned_paths: &[String],
     cargo: Option<&Path>,
     timeout: u64,
 ) -> Result<()> {
@@ -208,6 +224,7 @@ fn launch_windows(
         "manifest": receipt.manifest, "log": receipt.log, "task": receipt.task,
         "cwd": cwd, "executable": executable,
         "controller_pid": std::process::id(),
+        "session": session, "owned_paths": owned_paths,
         "argv": argv.iter().map(|v| v.to_string_lossy()).collect::<Vec<_>>(),
         "cargo": cargo,
         "timeout": timeout.min(2_000_000),
@@ -240,6 +257,37 @@ fn launch_windows(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static MANIFEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn worker_manifest_capability_is_consumed_before_a_nested_dispatch() {
+        let _guard = MANIFEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let previous = std::env::var_os("EDDA_DETACHED_MANIFEST");
+        let dir = tempfile::tempdir().expect("manifest directory");
+        let manifest = dir.path().join("parent.json");
+        std::env::set_var("EDDA_DETACHED_MANIFEST", &manifest);
+
+        let taken = take_worker_manifest().expect("worker receives manifest capability");
+        assert_eq!(taken, manifest);
+        assert!(
+            std::env::var_os("EDDA_DETACHED_MANIFEST").is_none(),
+            "a nested ordinary dispatch must not inherit the parent manifest"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("EDDA_DETACHED_MANIFEST", value),
+            None => std::env::remove_var("EDDA_DETACHED_MANIFEST"),
+        }
+    }
+}
+
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::scheduled_worker_environment;
@@ -265,13 +313,20 @@ mod windows_tests {
     }
 }
 
+/// Take the private manifest capability for this detached worker and remove
+/// it from the process environment before any backend can inherit it.
+pub fn take_worker_manifest() -> Option<PathBuf> {
+    let path = std::env::var_os("EDDA_DETACHED_MANIFEST").map(PathBuf::from);
+    std::env::remove_var("EDDA_DETACHED_MANIFEST");
+    path
+}
+
 /// Unix workers own manifest writes; the launcher never races their completion.
-pub fn update_worker_manifest(code: Option<i32>) -> Result<()> {
-    let Some(path) = std::env::var_os("EDDA_DETACHED_MANIFEST") else {
+pub fn update_worker_manifest(path: Option<&Path>, code: Option<i32>) -> Result<()> {
+    let Some(path) = path else {
         return Ok(());
     };
-    let path = PathBuf::from(path);
-    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
     value["worker_pid"] = std::process::id().into();
     value["state"] = if code.is_some() {
         "completed"

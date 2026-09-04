@@ -14,12 +14,12 @@ crates/edda-bridge-claude/src/peers/tests.rs 3588
 crates/edda-bridge-claude/src/signals.rs 2252
 crates/edda-cli/src/cmd_bridge/tests.rs 1208
 crates/edda-cli/src/cmd_claim.rs 1685
-crates/edda-cli/src/cmd_dispatch.rs 1996
+crates/edda-cli/src/cmd_dispatch.rs 2038
 crates/edda-cli/src/cmd_draft.rs 1705
 crates/edda-cli/src/cmd_gc.rs 1117
 crates/edda-cli/src/cmd_plan.rs 1022
 crates/edda-cli/src/cmd_prs/merge_gate.rs 1295
-crates/edda-cli/src/main.rs 1460
+crates/edda-cli/src/main.rs 1462
 crates/edda-conductor/src/agent/codex_app_server.rs 1061
 crates/edda-conductor/src/agent/codex_rpc.rs 1378
 crates/edda-conductor/src/agent/pi_rpc.rs 1480

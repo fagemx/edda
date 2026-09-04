@@ -32,6 +32,7 @@ function Quote([string]$Value) { return "'" + $Value.Replace("'","''") + "'" }
 $taskNames = [Collections.Generic.List[string]]::new()
 $controllers = [Collections.Generic.List[Diagnostics.Process]]::new()
 $jobs = [Collections.Generic.List[IntPtr]]::new()
+$supervisorHelper = $null
 try {
   $laneRoot=if($env:FLEET_LANE_ROOT){$env:FLEET_LANE_ROOT}else{Join-Path $env:LOCALAPPDATA 'fleet-workstation/lanes'}
   $fixtureBuild=Join-Path (Join-Path $laneRoot $BuildLane) 'gh605-fixtures'
@@ -52,7 +53,7 @@ fn main() {
   Assert ($LASTEXITCODE -eq 0) 'fake backend compiler failed'
   $cases=@(
     @{name='detached';exe=$Edda;detach=$true;timeout=40;build=$true;expectTimeout=$false},
-    @{name='timeout';exe=$Edda;detach=$true;timeout=2;build=$false;expectTimeout=$true}
+    @{name='timeout';exe=$Edda;detach=$true;timeout=5;build=$false;expectTimeout=$true}
   )
   if($BaselineEdda){
     $cases=@(@{name='baseline';exe=(Resolve-Path $BaselineEdda).Path;detach=$false;timeout=40;build=$false;expectTimeout=$false})+$cases
@@ -86,11 +87,12 @@ $env:PATH=__CWD__ + ';' + $env:PATH
 $env:EDDA_STORE_ROOT=__STORE__
 $env:HOME='poison-home'
 $env:CARGO_TARGET_DIR='poison-target'
-    & __EDDA__ dispatch --agent claude --prompt-file __PROMPT__ --cwd __CWD__ --timeout-sec __TIMEOUT__ --json __DETACH__ > __OUTPUT__
+    & __EDDA__ dispatch --agent claude --prompt-file __PROMPT__ --cwd __CWD__ --timeout-sec __TIMEOUT__ --json __DETACH__ __OWNS__ > __OUTPUT__
 Start-Sleep -Seconds 120
 '@
     $detachArgs=if($case.detach){'--detach --build-lane '+$BuildLane+' --detach-log-dir '+(Quote (Join-Path $dir 'logs'))}else{''}
-    $control=$control.Replace('__GO__',(Quote $go)).Replace('__FAKE__',(Quote $fake)).Replace('__STORE__',(Quote (Join-Path $dir 'store'))).Replace('__EDDA__',(Quote $case.exe)).Replace('__PROMPT__',(Quote (Join-Path $dir 'prompt.txt'))).Replace('__CWD__',(Quote $dir)).Replace('__DETACH__',$detachArgs).Replace('__TIMEOUT__',$case.timeout).Replace('__OUTPUT__',(Quote $output))
+    $ownsArgs=if($case.expectTimeout){'--owns crates/fixture/timeout'}else{''}
+    $control=$control.Replace('__GO__',(Quote $go)).Replace('__FAKE__',(Quote $fake)).Replace('__STORE__',(Quote (Join-Path $dir 'store'))).Replace('__EDDA__',(Quote $case.exe)).Replace('__PROMPT__',(Quote (Join-Path $dir 'prompt.txt'))).Replace('__CWD__',(Quote $dir)).Replace('__DETACH__',$detachArgs).Replace('__OWNS__',$ownsArgs).Replace('__TIMEOUT__',$case.timeout).Replace('__OUTPUT__',(Quote $output))
     Set-Content -LiteralPath $controllerScript -Value $control
     $controller=Start-Process -FilePath $pwsh -ArgumentList @('-NoProfile','-File',('"'+$controllerScript+'"')) -WindowStyle Hidden -PassThru
     $controllers.Add($controller)
@@ -108,7 +110,8 @@ Start-Sleep -Seconds 120
       $taskNames.Add($receipt.task)
       $scheduled = Get-ScheduledTask -TaskName $receipt.task -ErrorAction Stop
       Assert ($null -ne $scheduled) 'detached task was not registered'
-      $wrapper = Get-Content -Raw -LiteralPath ($receipt.manifest -replace '\.json$','.task.ps1')
+      $supervisorHelper = $receipt.manifest -replace '\.json$','.task.ps1'
+      $wrapper = Get-Content -Raw -LiteralPath $supervisorHelper
       $launchConfig = Get-Content -Raw -LiteralPath ($receipt.manifest -replace '\.json$','.launch.json') | ConvertFrom-Json
       Assert ($wrapper -match '(?m)^# lane-reap: controller-pid=\d+ controller-started=.+$') 'generated wrapper must expose canonical reaper metadata'
       $metadataPattern = '(?m)^# lane-reap: controller-pid=' + [regex]::Escape([string]$launchConfig.controller_pid) + '\s'
@@ -131,11 +134,24 @@ Start-Sleep -Seconds 120
     elseif(-not $case.detach) {Assert ($after -eq $before) 'baseline should die with its controller Job'}
     "PASS $($case.name): job_inside=$inside ticks_before=$before ticks_after=$after"
     if($case.detach) {
-      Wait-Until { -not(Get-ScheduledTask -TaskName $receipt.task -ErrorAction SilentlyContinue) } 'task was not unregistered on completion' 70
+      Wait-Until {
+        if(Get-ScheduledTask -TaskName $receipt.task -ErrorAction SilentlyContinue){return $false}
+        $terminal=Get-Content -Raw -LiteralPath $receipt.manifest | ConvertFrom-Json
+        return $terminal.state -in @('completed','timeout','failed')
+      } 'task was not unregistered with a terminal manifest' 70
       $manifest=Get-Content -Raw -LiteralPath $receipt.manifest | ConvertFrom-Json
       if($case.expectTimeout){
         Assert ($manifest.state -eq 'timeout' -and $manifest.exit_code -eq 2) 'timeout did not terminate the worker'
-        "PASS timeout: handle=$($receipt.handle) task_absent=true state=$($manifest.state)"
+        $oldStore=$env:EDDA_STORE_ROOT
+        try {
+          $env:EDDA_STORE_ROOT=Join-Path $dir 'store'
+          & $Edda claim check 'crates/fixture/timeout'
+          Assert ($LASTEXITCODE -eq 0) 'timeout left its owned claim active'
+        } finally {
+          if($null -eq $oldStore){$env:EDDA_STORE_ROOT=$null}
+          else{$env:EDDA_STORE_ROOT=$oldStore}
+        }
+        "PASS timeout: handle=$($receipt.handle) task_absent=true claim_released=true state=$($manifest.state)"
       } else {
         Assert ($manifest.state -eq 'completed' -and $manifest.exit_code -eq 0) 'terminal manifest missing or unsuccessful'
         Assert ((Get-Item -LiteralPath $receipt.log).Length -gt 0) 'returned log path has no result'
@@ -143,6 +159,20 @@ Start-Sleep -Seconds 120
       }
     }
   }
+  # Force only terminal persistence to fail after an owned scheduled task has
+  # started. The helper must still unregister that exact task and exit nonzero.
+  $terminalDir=Join-Path $testRoot 'terminal-manifest-failure'; [void](New-Item -ItemType Directory -Path $terminalDir)
+  $terminalManifest=Join-Path $terminalDir 'manifest.json'; $terminalConfig=Join-Path $terminalDir 'launch.json'
+  $terminalTask='edda-gh605-terminal-'+[guid]::NewGuid().ToString('N')
+  $terminalAction=New-ScheduledTaskAction -Execute $pwsh -Argument '-NoProfile -Command exit 0'
+  Register-ScheduledTask -TaskName $terminalTask -Action $terminalAction | Out-Null
+  $terminal=@{manifest=$terminalManifest;log=(Join-Path $terminalDir 'worker.log');task=$terminalTask;cwd=$terminalDir;executable=$Edda;argv=@('--version');environment=@{};home=$env:USERPROFILE;cargo=$null;timeout=20;session='cli-terminal';owned_paths=@();test_fail_terminal_manifest_write=$true}
+  @{state='launching';worker_pid=$null;exit_code=$null;error=$null} | ConvertTo-Json | Set-Content -LiteralPath $terminalManifest -Encoding utf8
+  $terminal | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $terminalConfig -Encoding utf8
+  & $supervisorHelper -Mode Run -Config $terminalConfig
+  Assert ($LASTEXITCODE -ne 0) 'terminal manifest write failure must return a nonzero supervisor result'
+  Assert ($null -eq (Get-ScheduledTask -TaskName $terminalTask -ErrorAction SilentlyContinue)) 'terminal manifest failure left its task registered'
+  "PASS terminal-manifest-failure: task_absent=true exit=$LASTEXITCODE"
 } catch {
   # Keep the failing assertion beside the retained fixture evidence.  A
   # detached process can outlive this harness, so terminal output alone is

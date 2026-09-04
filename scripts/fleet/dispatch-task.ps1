@@ -27,17 +27,42 @@ if ($Mode -eq 'Launch') {
   exit 0
 }
 
-$m = Get-Content -Raw -LiteralPath $c.manifest | ConvertFrom-Json
+$m = $null
 $p = $null
 $outFile = $null
 $errFile = $null
 $code = 1
-function Write-Manifest([object]$Value) {
+$needsSupervisorRelease = $false
+$cleanupFailures = [Collections.Generic.List[string]]::new()
+function Write-Manifest([object]$Value, [bool]$Terminal = $false) {
+  if ($Terminal -and $c.test_fail_terminal_manifest_write) {
+    throw 'injected terminal manifest write failure'
+  }
   $temporary = "$($c.manifest).new"
   $Value | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporary -Encoding utf8
   Move-Item -LiteralPath $temporary -Destination $c.manifest -Force
 }
+function Release-OwnedWorker {
+  if (-not $c.owned_paths -or $c.owned_paths.Count -eq 0) { return }
+  Push-Location -LiteralPath $c.cwd
+  $previousStore = $env:EDDA_STORE_ROOT
+  $store = $c.environment.PSObject.Properties['EDDA_STORE_ROOT']
+  if ($store) { $env:EDDA_STORE_ROOT = [string]$store.Value }
+  try {
+    $unclaim = & $c.executable unclaim --session ([string]$c.session) 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "owned claim release failed: $unclaim" }
+    $check = & $c.executable claim check @($c.owned_paths) 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "owned claim release was not confirmed: $check" }
+    $heartbeat = & $c.executable bridge claude heartbeat-remove --session ([string]$c.session) 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "owned heartbeat removal failed: $heartbeat" }
+  } finally {
+    if ($null -eq $previousStore) { $env:EDDA_STORE_ROOT = $null }
+    else { $env:EDDA_STORE_ROOT = $previousStore }
+    Pop-Location
+  }
+}
 try {
+  $m = Get-Content -Raw -LiteralPath $c.manifest | ConvertFrom-Json
   $start = [Diagnostics.ProcessStartInfo]::new($c.executable)
   $start.WorkingDirectory = $c.cwd
   $start.UseShellExecute = $false
@@ -62,19 +87,42 @@ try {
   if (-not $p.WaitForExit([int]($c.timeout * 1000))) {
     $p.Kill($true)
     $p.WaitForExit()
+    $needsSupervisorRelease = $true
     $m.state = 'timeout'
     $code = 2
   } else { $code = $p.ExitCode; $m.state = 'completed' }
   [Threading.Tasks.Task]::WaitAll(@($outCopy, $errCopy))
 } catch {
-  $m.state = 'failed'
-  $m.error = $_.Exception.Message
-  if ($p -and -not $p.HasExited) { $p.Kill($true); $p.WaitForExit() }
+  if ($m) { $m.state = 'failed'; $m.error = $_.Exception.Message }
+  if ($p -and -not $p.HasExited) {
+    $p.Kill($true)
+    $p.WaitForExit()
+    $needsSupervisorRelease = $true
+  }
 } finally {
   if ($outFile) { $outFile.Dispose() }
   if ($errFile) { $errFile.Dispose() }
-  $m.exit_code = $code
-  Write-Manifest $m
-  Unregister-ScheduledTask -TaskName $c.task -Confirm:$false -ErrorAction Continue
+  if ($needsSupervisorRelease) {
+    try { Release-OwnedWorker }
+    catch { [void]$cleanupFailures.Add("ownership cleanup: $($_.Exception.Message)") }
+  }
+  # Task removal must happen even when manifest persistence is unavailable.
+  try { Unregister-ScheduledTask -TaskName $c.task -Confirm:$false -ErrorAction Stop }
+  catch { [void]$cleanupFailures.Add("task cleanup: $($_.Exception.Message)") }
+  if ($cleanupFailures.Count -gt 0) {
+    $code = 1
+    if ($m) { $m.state = 'failed'; $m.error = $cleanupFailures -join '; ' }
+  }
+  if ($m) {
+    $m.exit_code = $code
+    try { Write-Manifest $m $true }
+    catch {
+      $code = 1
+      [void]$cleanupFailures.Add("terminal manifest: $($_.Exception.Message)")
+    }
+  }
+  if ($cleanupFailures.Count -gt 0) {
+    [Console]::Error.WriteLine("detached supervisor cleanup failed: $($cleanupFailures -join '; ')")
+  }
 }
 exit $code

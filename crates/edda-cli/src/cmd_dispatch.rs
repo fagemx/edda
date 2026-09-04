@@ -409,9 +409,16 @@ pub fn generate_session_id() -> String {
 /// skips destructors, and a future launcher holding a live child across a
 /// non-zero outcome must not be orphaned.
 pub fn run(args: DispatchArgs) -> Result<()> {
-    crate::detached_dispatch::update_worker_manifest(None)?;
+    // Consume the detached-worker control value before the backend is built:
+    // nested ordinary dispatches inherit this process environment otherwise and
+    // could overwrite their parent's manifest.
+    let worker_manifest = crate::detached_dispatch::take_worker_manifest();
+    crate::detached_dispatch::update_worker_manifest(worker_manifest.as_deref(), None)?;
     let outcome = run_inner(args);
-    crate::detached_dispatch::update_worker_manifest(Some(outcome.as_ref().copied().unwrap_or(1)))?;
+    crate::detached_dispatch::update_worker_manifest(
+        worker_manifest.as_deref(),
+        Some(outcome.as_ref().copied().unwrap_or(1)),
+    )?;
     let code = outcome?;
     if code != 0 {
         std::process::exit(code);
@@ -523,7 +530,7 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         }
         return Ok(0);
     }
-    let _claim = crate::dispatch_claim::acquire(&cwd, &session_id, &args.owns)?;
+    let claim = crate::dispatch_claim::acquire(&cwd, &session_id, &args.owns)?;
 
     if let Some(warning) = budget_warning_for_agent(args.agent, args.budget_usd.is_some()) {
         eprintln!("{warning}");
@@ -572,15 +579,6 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         cancel,
     ))?;
 
-    if args.json {
-        println!("{}", output.to_json());
-    } else {
-        print!("{}", output.render_text());
-        if let Some(error) = &output.error {
-            eprintln!("Error: {error}");
-        }
-    }
-
     // GH-577: Ingest Pi session transcripts after the turn completes.
     // Observation surface cannot kill work surface (GH-566/GH-577): errors degrade to warnings.
     if args.agent == AgentKind::Pi {
@@ -594,6 +592,19 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
     }
 
     let code = output.exit_code();
+    if let Some(claim) = claim {
+        // A coordination release is load-bearing: never print a successful
+        // machine result while its writer claim remains active.
+        claim.release()?;
+    }
+    if args.json {
+        println!("{}", output.to_json());
+    } else {
+        print!("{}", output.render_text());
+        if let Some(error) = &output.error {
+            eprintln!("Error: {error}");
+        }
+    }
     Ok(code)
 }
 
