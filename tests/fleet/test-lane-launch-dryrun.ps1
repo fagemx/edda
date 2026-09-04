@@ -29,8 +29,9 @@
 #      derived from scheduled tasks only, never from artifact files, so a
 #      leftover dry-run cannot look like a lane.
 #   6. Guard rail (P1-1): a -Name containing the dryrun segment (e.g.
-#      'X.dryrun') is rejected, so a real lane can never resolve its
-#      $Name.log / $Name.done onto another lane's dry-run artifacts.
+#      'X.dryrun', 'X_dryrun', 'X-dryrun') is rejected, so a real lane can
+#      never resolve its $Name.log / $Name.done onto another lane's dry-run
+#      artifacts.
 #
 # The real-launch leg runs one trivial `edda dispatch` and polls up to 45s
 # for the wrapper to finish on its own (bounded by -TimeoutSec 90); if
@@ -196,6 +197,16 @@ try {
   $collision = Invoke-ChildScript $launch @("-Name", "$name.dryrun", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"")
   Assert-True ($collision.ExitCode -ne 0) "guard rail: lane-launch rejects -Name '$name.dryrun' (GH-822 P1-1)"
   Assert-True ($collision.StdErr -match "may not contain 'dryrun'") "guard rail: the rejection names the dryrun reservation (stderr: $($collision.StdErr.Trim()))"
+
+  # The reservation must hold regardless of the delimiter that glues the
+  # dryrun segment onto the lane name — dot, underscore, and hyphen all end
+  # in a distinct $Name.dryrun.log/$Name.dryrun.done-style artifact family,
+  # so each must be rejected too.
+  $collisionUnder = Invoke-ChildScript $launch @("-Name", "${name}_dryrun", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"")
+  Assert-True ($collisionUnder.ExitCode -ne 0) "guard rail: lane-launch rejects underscore delimiter -Name '${name}_dryrun' (GH-822 P1-1)"
+
+  $collisionHyphen = Invoke-ChildScript $launch @("-Name", "$name-dryrun", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"")
+  Assert-True ($collisionHyphen.ExitCode -ne 0) "guard rail: lane-launch rejects hyphen delimiter -Name '$name-dryrun' (GH-822 P1-1)"
 
   # --- leg 4: lane-status after unregister (AC5) ------------------------------
 
