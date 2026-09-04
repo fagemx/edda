@@ -312,9 +312,11 @@ pub(super) fn evaluate_learned_rules(
 
     let result = edda_postmortem::hooks::evaluate_rules(&rules_store, &hook_ctx);
 
-    // Record hits so matched rules get their TTL reset
+    // Record shows for matched rules. PreToolUse matches on every Bash call
+    // must NOT reset the rule's TTL (GH-813) — shows are counted instead of
+    // hits, so noise rules still decay on schedule.
     if !result.matched_rule_ids.is_empty() {
-        edda_postmortem::hooks::record_matched_hits(&mut rules_store, &result.matched_rule_ids);
+        edda_postmortem::hooks::record_matched_shows(&mut rules_store, &result.matched_rule_ids);
         let _ = rules_store.save_project(project_id);
     }
 

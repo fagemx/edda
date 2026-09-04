@@ -25,6 +25,14 @@ pub enum RulesCmd {
     Stats,
     /// Garbage-collect dead rules
     Gc,
+    /// Revoke a rule by ID (marks it Dead with a reason)
+    Revoke {
+        /// Rule ID (rule_*)
+        id: String,
+        /// Why the rule is being revoked
+        #[arg(long)]
+        reason: String,
+    },
 }
 
 pub fn execute(cmd: RulesCmd, repo_root: &Path) -> anyhow::Result<()> {
@@ -57,14 +65,20 @@ pub fn execute(cmd: RulesCmd, repo_root: &Path) -> anyhow::Result<()> {
                 );
                 println!("{}", "-".repeat(70));
                 for rule in &rules {
+                    let revoked = rule
+                        .revoked_reason
+                        .as_deref()
+                        .map(|r| format!("  [revoked: {r}]"))
+                        .unwrap_or_default();
                     println!(
-                        "{:<12} {:<10} {:<12} {:<5} {} → {}",
+                        "{:<12} {:<10} {:<12} {:<5} {} → {}{}",
                         rule.status,
                         rule.category,
                         rule.hits,
                         rule.ttl_days,
                         rule.trigger,
                         rule.action,
+                        revoked,
                     );
                 }
                 println!("\n{} rules shown.", rules.len());
@@ -116,6 +130,16 @@ pub fn execute(cmd: RulesCmd, repo_root: &Path) -> anyhow::Result<()> {
             let removed = store.gc_dead_rules();
             store.save_project(&project_id)?;
             println!("Removed {removed} dead rules.");
+        }
+
+        RulesCmd::Revoke { id, reason } => {
+            let mut store = edda_postmortem::RulesStore::load_project(&project_id);
+            if store.revoke_rule(&id, reason.clone()) {
+                store.save_project(&project_id)?;
+                println!("Rule {id} revoked: {reason}");
+            } else {
+                anyhow::bail!("Rule not found: {id}");
+            }
         }
     }
 

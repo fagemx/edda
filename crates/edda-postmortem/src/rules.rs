@@ -112,6 +112,15 @@ pub struct Rule {
     pub source_session: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_event: Option<String>,
+    /// Times this rule's enforcement was shown to a user (e.g. PreToolUse
+    /// matches). Unlike `hits`, shows never update `last_hit`, never promote
+    /// Proposed -> Active, and never reactivate Dormant/Settled rules
+    /// (GH-813: hit-on-every-Bash-call kept noise rules alive forever).
+    #[serde(default)]
+    pub shows: u64,
+    /// Why this rule was revoked (only set when revoked via `revoke`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_reason: Option<String>,
     pub category: RuleCategory,
 }
 
@@ -138,6 +147,21 @@ impl Rule {
         if matches!(self.status, RuleStatus::Dormant | RuleStatus::Settled) {
             self.status = RuleStatus::Active;
         }
+    }
+
+    /// Record that this rule's enforcement was shown to the user.
+    ///
+    /// Increments the show counter only: `last_hit` is NOT updated, Proposed
+    /// rules are NOT promoted, and Dormant/Settled rules are NOT reactivated
+    /// (GH-813: shows are pure statistics and must not reset the TTL).
+    pub fn record_shown(&mut self) {
+        self.shows += 1;
+    }
+
+    /// Revoke this rule: mark it Dead with a reason.
+    pub fn revoke(&mut self, reason: String) {
+        self.status = RuleStatus::Dead;
+        self.revoked_reason = Some(reason);
     }
 
     /// Compute days since last hit.
@@ -283,6 +307,8 @@ impl RulesStore {
             status: RuleStatus::Proposed,
             source_session,
             source_event,
+            shows: 0,
+            revoked_reason: None,
             category,
         };
 
@@ -296,6 +322,15 @@ impl RulesStore {
     /// 2. Anchor decay: check if anchored file changed
     /// 3. Enforce active window cap (~15)
     pub fn run_decay_cycle(&mut self) {
+        // 0. Reclaim disallowed command triggers (GH-813): shell
+        // builtins/keywords/common utilities and variable assignments never
+        // make meaningful learned rules — revoke them outright.
+        for rule in &mut self.rules {
+            if rule.is_alive() && is_disallowed_trigger(&rule.trigger) {
+                rule.revoke("disallowed command trigger (builtin/keyword/assignment)".to_string());
+            }
+        }
+
         // 1. Time decay
         for rule in &mut self.rules {
             rule.apply_time_decay();
@@ -340,6 +375,27 @@ impl RulesStore {
         }
 
         self.last_decay_run = Some(now_rfc3339());
+    }
+
+    /// Record shows for matched rules. Unlike `record_matched_hits`, this
+    /// never resets the TTL or reactivates decayed rules (GH-813).
+    pub fn record_matched_shows(&mut self, matched_ids: &[String]) {
+        for id in matched_ids {
+            if let Some(rule) = self.get_mut(id) {
+                rule.record_shown();
+            }
+        }
+    }
+
+    /// Revoke a rule by ID. Returns false when the ID is unknown.
+    pub fn revoke_rule(&mut self, id: &str, reason: String) -> bool {
+        match self.get_mut(id) {
+            Some(rule) => {
+                rule.revoke(reason);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Garbage-collect dead rules (remove from store entirely).
@@ -399,6 +455,70 @@ pub struct StoreStats {
 
 // -- Helpers --
 
+/// Shell builtins, keywords, and ubiquitous utilities whose failures are
+/// environmental noise rather than a missing-tool signal. They must never
+/// become learned-rule command triggers (GH-813: echo 1789 / cd 1618 hits).
+pub const DISALLOWED_TRIGGER_WORDS: &[&str] = &[
+    "cd", "echo", "ls", "pwd", "set", "for", "if", "while", "do", "done", "export", "test",
+    "printf", "cat", "sed", "grep", "head", "tail", "wc", "find", "true", "false",
+];
+
+/// True when a bare token is a variable assignment (`NAME=value`).
+pub fn is_var_assignment(token: &str) -> bool {
+    let Some(eq) = token.find('=') else {
+        return false;
+    };
+    let name = &token[..eq];
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Command word of a command segment: trim, skip leading `VAR=val`
+/// environment assignments, return the first token. Returns None when the
+/// segment contains no command (empty or a bare assignment).
+pub fn command_word(segment: &str) -> Option<&str> {
+    let mut rest = segment.trim();
+    while let Some((first, tail)) = rest.split_once(char::is_whitespace) {
+        if !is_var_assignment(first) {
+            break;
+        }
+        rest = tail.trim_start();
+    }
+    let word = rest.split_whitespace().next()?;
+    if is_var_assignment(word) {
+        return None;
+    }
+    Some(word)
+}
+
+/// True when a command may become a learned-rule command trigger.
+///
+/// Rejects empty/whitespace commands, compound commands (`;`, `&&`, `||`,
+/// `|`, newline), commands starting with variable assignments, and shell
+/// builtins/keywords/common utilities (GH-813).
+pub fn is_trackable_command(cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd.is_empty() || cmd.contains([';', '|', '&', '\n']) {
+        return false;
+    }
+    let Some(word) = cmd.split_whitespace().next() else {
+        return false;
+    };
+    !is_var_assignment(word) && !DISALLOWED_TRIGGER_WORDS.contains(&word)
+}
+
+/// True when a stored rule trigger is disallowed and should be reclaimed by
+/// the decay cycle. Superset of `!is_trackable_command`: any `=` in the
+/// trigger (assignment fragments) is also reclaimed (GH-813).
+pub fn is_disallowed_trigger(trigger: &str) -> bool {
+    let cmd = trigger.strip_prefix("command_failure:").unwrap_or(trigger);
+    cmd.contains('=') || !is_trackable_command(cmd)
+}
+
 fn new_rule_id() -> String {
     format!("rule_{}", ulid::Ulid::new().to_string().to_lowercase())
 }
@@ -439,8 +559,16 @@ mod tests {
             status,
             source_session: "test-session".to_string(),
             source_event: None,
+            shows: 0,
+            revoked_reason: None,
             category: RuleCategory::PreCommit,
         }
+    }
+
+    fn rfc3339_days_ago(days: i64) -> String {
+        (OffsetDateTime::now_utc() - time::Duration::days(days))
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("RFC3339 formatting should not fail")
     }
 
     #[test]
@@ -569,6 +697,74 @@ mod tests {
         let removed = store.gc_dead_rules();
         assert_eq!(removed, 1);
         assert_eq!(store.rules.len(), 2);
+    }
+
+    #[test]
+    fn record_shown_never_resets_ttl_or_promotes() {
+        // Proposed rule shown 100 times: still Proposed, hits untouched.
+        let mut proposed = make_rule("trigger", "action", RuleStatus::Proposed);
+        for _ in 0..100 {
+            proposed.record_shown();
+        }
+        assert_eq!(proposed.shows, 100);
+        assert_eq!(proposed.hits, 2);
+        assert_eq!(proposed.status, RuleStatus::Proposed);
+
+        // Active rule whose TTL already elapsed still decays on schedule:
+        // shows never refresh last_hit (GH-813).
+        let mut active = make_rule("trigger", "action", RuleStatus::Active);
+        active.last_hit = rfc3339_days_ago(31);
+        let last_hit = active.last_hit.clone();
+        for _ in 0..100 {
+            active.record_shown();
+        }
+        active.apply_time_decay();
+        assert_eq!(active.shows, 100);
+        assert_eq!(active.status, RuleStatus::Dormant);
+        assert_eq!(active.last_hit, last_hit);
+    }
+
+    #[test]
+    fn revoke_marks_dead_with_reason() {
+        let mut store = RulesStore::default();
+        store.rules.push(make_rule("a", "b", RuleStatus::Active));
+        let id = store.rules[0].id.clone();
+        assert!(store.revoke_rule(&id, "superseded by policy".to_string()));
+        let rule = store.get(&id).unwrap();
+        assert_eq!(rule.status, RuleStatus::Dead);
+        assert_eq!(rule.revoked_reason.as_deref(), Some("superseded by policy"));
+        assert!(!store.revoke_rule("rule_missing", "x".to_string()));
+    }
+
+    #[test]
+    fn decay_cycle_reclaims_disallowed_command_triggers() {
+        let mut store = RulesStore::default();
+        for trigger in [
+            "command_failure:cd",
+            "command_failure:echo",
+            "command_failure:ls",
+            "command_failure:FOO=1",
+            "command_failure:a && b",
+            "cd /tmp && echo hi",
+            "command_failure:npm",
+        ] {
+            store
+                .rules
+                .push(make_rule(trigger, "action", RuleStatus::Active));
+        }
+        store.run_decay_cycle();
+        for rule in &store.rules {
+            if rule.trigger == "command_failure:npm" {
+                assert!(rule.is_alive(), "npm rule should survive: {}", rule.trigger);
+                assert_eq!(rule.revoked_reason, None);
+            } else {
+                assert_eq!(rule.status, RuleStatus::Dead, "{}", rule.trigger);
+                assert_eq!(
+                    rule.revoked_reason.as_deref(),
+                    Some("disallowed command trigger (builtin/keyword/assignment)")
+                );
+            }
+        }
     }
 
     #[test]
