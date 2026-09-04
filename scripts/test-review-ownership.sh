@@ -50,22 +50,31 @@ if sh "$root/scripts/review-round.sh" reserve 12 "$other" 1 "$tmp/two"; then
   echo 'FAIL: in-progress round (worktree still present) admitted a new reviewer' >&2; exit 1
 fi
 rmdir "$tmp/one/wt-review-pr12"
+# A legacy DISPATCH_EXIT-only receipt remains blocked even after the old tree
+# is gone; model an operator-confirmed final worker receipt before the next
+# round can be reserved.
+printf 'TRANSPORT=edda-dispatch\nSESSION=test\nSESSION_MODE=new\nDISPATCH_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' > "$tmp/one/review-pr12-r5.done"
 round=$(sh "$root/scripts/review-round.sh" reserve 12 "$other" 1 "$tmp/two")
 [ "$round" = 6 ]
-# A receipt carrying a non-clean WORKTREE_CHECK preserves the failure and keeps
-# the slot closed even though the worktree is gone — cleanup ownership is
-# uncertain, so an operator resolves the round; no reviewer is auto-admitted.
-printf 'DISPATCH_EXIT=0\nWORKTREE_CHECK=failed: worktree remove failed (file locked)\n' > "$tmp/two/review-pr12-r6.done"
+# A receipt carrying a non-clean worktree check, or a legacy/partial receipt
+# missing cleanup and terminal proof, keeps the slot closed even when the
+# worktree is gone. Only the worker's atomically published final shape admits
+# the next reviewer.
+printf 'DISPATCH_EXIT=0\nWORKTREE_CHECK=failed; worktree remove failed (file locked)\n' > "$tmp/two/review-pr12-r6.done"
 if sh "$root/scripts/review-round.sh" reserve 12 "$sha" 1 "$tmp/one"; then
   echo 'FAIL: failed worktree cleanup admitted a new reviewer' >&2; exit 1
 fi
-printf 'DISPATCH_EXIT=0\nWORKTREE_CHECK=ok\n' > "$tmp/two/review-pr12-r6.done"
+printf 'DISPATCH_EXIT=0\nWORKTREE_CHECK=unchanged\n' > "$tmp/two/review-pr12-r6.done"
+if sh "$root/scripts/review-round.sh" reserve 12 "$sha" 1 "$tmp/one"; then
+  echo 'FAIL: partial terminal receipt admitted a new reviewer' >&2; exit 1
+fi
+printf 'TRANSPORT=edda-dispatch\nSESSION=test\nSESSION_MODE=new\nDISPATCH_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' > "$tmp/two/review-pr12-r6.done"
 round=$(sh "$root/scripts/review-round.sh" reserve 12 "$sha" 1 "$tmp/one")
 [ "$round" = 7 ]
-if sh "$root/scripts/review-round.sh" release 12 "$sha" 6; then
-  echo 'FAIL: wrong SHA released another owner' >&2; exit 1
+if sh "$root/scripts/review-round.sh" release 12 "$other" 6; then
+  echo 'FAIL: wrong owner released the current round' >&2; exit 1
 fi
-sh "$root/scripts/review-round.sh" release 12 "$other" 6
+sh "$root/scripts/review-round.sh" release 12 "$sha" 7
 touch "$tmp/api-fail"
 if sh "$root/scripts/review-round.sh" reserve 12 "$sha" 1 "$tmp/one"; then
   echo 'FAIL: API outage accepted as empty round history' >&2; exit 1

@@ -394,10 +394,12 @@ grep -Fq -- "--tools 'Read,Grep,Glob,Bash(git *),Bash(gh *),Bash(edda *),Bash(sh
 if grep -q 'bypassPermissions' "$lane"; then
     fail 'D8f: the fallback arm still grants --permission-mode bypassPermissions — the recorded fleet.review-engine-model shape auto-approves only the read allowlist'
 fi
-grep -q 'TRANSPORT=edda-dispatch' "$lane" \
-    || fail 'D8g: the dispatch arm writes no TRANSPORT=edda-dispatch receipt — the verdict header cannot name the transport that actually ran'
-grep -q 'TRANSPORT=claude-stdin' "$lane" \
-    || fail 'D8h: the fallback arm writes no TRANSPORT=claude-stdin receipt'
+grep -q "\$transport = 'edda-dispatch'" "$lane" \
+    || fail 'D8g: the dispatch arm does not name edda-dispatch for the terminal receipt'
+grep -q "\$transport = 'claude-stdin'" "$lane" \
+    || fail 'D8h: the fallback arm does not name claude-stdin for the terminal receipt'
+grep -q '"TRANSPORT=\$transport"' "$lane" \
+    || fail 'D8h: the atomic terminal receipt carries no TRANSPORT field'
 
 # --- D9 (GH-708 scope addition): one resumable reviewer conversation per PR ---
 # fleet.reviewer-agent=pi-with-per-pr-resumable-session chose pi for one
@@ -470,13 +472,31 @@ if ! grep -q 'carries no prior transcript' "$brief"; then
     fail 'D9h: a delta round with no recorded conversation does not warn that the earlier rounds are missing from context'
 fi
 
-# D9i: the per-PR worktree is removed when the round ends and pruned before the
-# next one — 14 stale wt-review-pr* trees were the reason (GH-708 comment).
+# D9i: the per-PR worktree is removed only after a successful source proof,
+# then the complete receipt is atomically published. A partial/legacy receipt
+# cannot release the next reviewer while this lane is still cleaning up.
 grep -q 'function Remove-ReviewWorktree' "$lane" \
     || fail 'D9i: the lane defines no worktree removal'
-if [ "$(grep -c 'Remove-ReviewWorktree$' "$lane")" -lt 2 ]; then
-    fail 'D9i: the lane does not remove the worktree on both arms'
-fi
+grep -q 'if (Remove-ReviewWorktree)' "$lane" \
+    || fail 'D9i: the Windows lane does not attempt removal after source proof'
+grep -q 'WORKTREE_CLEANUP=\$worktreeCleanup' "$lane" \
+    || fail 'D9i: the lane receipt does not carry worktree cleanup status'
+grep -q 'TERMINAL_RECEIPT=complete' "$lane" \
+    || fail 'D9i: the lane writes no terminal receipt proof'
+grep -q 'WriteAllLines(\$receiptTmp' "$lane" \
+    || fail 'D9i: the Windows lane does not buffer its terminal receipt'
+grep -q 'Move-Item -LiteralPath \$receiptTmp' "$lane" \
+    || fail 'D9i: the Windows lane does not atomically publish the terminal receipt'
+# The scheduled child, not merely its launcher, unregisters itself in both
+# normal and exception paths (the surrounding finally is the exception path).
+grep -q 'finally {' "$lane" \
+    || fail 'D9i: the Windows lane has no finally cleanup path'
+grep -q "Unregister-ScheduledTask -TaskName 'edda-review-pr$FIXTURE_PR-r" "$lane" \
+    || fail 'D9i: the Windows scheduled child does not unregister itself'
+grep -q "\$taskCleanup = 'unregistered'" "$lane" \
+    || fail 'D9i: the normal task cleanup receipt is absent'
+grep -q 'TASK_CLEANUP=\$taskCleanup' "$lane" \
+    || fail 'D9i: exception cleanup failures are not visible in the terminal receipt'
 # Anchored at the start of a line so the assertion cannot be satisfied by the
 # comment block above the call (round 1 P2: the loose grep matched prose).
 grep -qE '^[[:space:]]*git -C "\$ROOT" worktree prune' "$root/scripts/review-pr.sh" \

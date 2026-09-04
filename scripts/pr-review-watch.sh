@@ -447,14 +447,19 @@ settle_pending() {
         continue
       fi
       if extract_verdict "$LOG" "$VERDICT" && verdict_ok "$VERDICT"; then
-        # .done is written incrementally by legacy wrappers. Do not publish
-        # before the final worktree check, or trust a legacy missing check.
-        if ! grep -q '^WORKTREE_CHECK=unchanged' "$DONE" 2>/dev/null; then
+        # A terminal receipt is one atomically published object, never an
+        # incremental DISPATCH_EXIT line. Legacy and partial receipts fail
+        # closed: source verification, worktree removal and task teardown must
+        # all be proven before this watcher publishes a verdict.
+        if ! grep -qx 'WORKTREE_CHECK=unchanged' "$DONE" 2>/dev/null \
+          || ! grep -qx 'WORKTREE_CLEANUP=removed' "$DONE" 2>/dev/null \
+          || ! grep -Eq '^TASK_CLEANUP=(unregistered|not-applicable)$' "$DONE" 2>/dev/null \
+          || ! grep -qx 'TERMINAL_RECEIPT=complete' "$DONE" 2>/dev/null; then
           if [ $((now - launched)) -gt "$STALE" ]; then
-            mark_unreviewed "$pr" "$sha" "$round" 'review has no completed worktree verification receipt'
+            mark_unreviewed "$pr" "$sha" "$round" 'review has no clean atomic terminal receipt'
             pending_drop "$pr"
           else
-            log "pr$pr r$round waiting for completed worktree verification receipt"
+            log "pr$pr r$round waiting for clean atomic terminal receipt"
           fi
           continue
         fi

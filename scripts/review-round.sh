@@ -44,21 +44,17 @@ if [ -f "$active" ]; then
   if ! grep -qE '^DISPATCH_EXIT=[0-9]+[[:space:]]*$' "$olddone" 2>/dev/null; then
     die "PR #$pr round $oldround at $oldsha still owns review; receipt: $olddone"
   fi
-  # DISPATCH_EXIT alone is the IN-PROGRESS receipt, not a terminal one: the
-  # round's worker may still be checking and cleaning the shared review
-  # worktree at this scratch path, and admitting a new reviewer now would put
-  # two writers in the same tree. The terminal receipt is the single
-  # WORKTREE_CHECK line written (atomically, last) after all worktree check
-  # and cleanup: ok admits the next round; any other value preserves the
-  # failure info and keeps the slot closed for the operator to resolve.
-  # Legacy receipts (pre-WORKTREE_CHECK) fall back to the filesystem: their
-  # round ended cleanly only if the worktree is actually gone.
-  if grep -qE '^WORKTREE_CHECK=' "$olddone" 2>/dev/null; then
-    if ! grep -qE '^WORKTREE_CHECK=ok[[:space:]]*$' "$olddone" 2>/dev/null; then
-      die "PR #$pr round $oldround at $oldsha has a non-clean terminal receipt; worktree cleanup not confirmed for $olddone — resolve the round below before reviewing ($(grep -E '^WORKTREE_CHECK=' "$olddone" | tail -1))"
-    fi
-  elif [ -e "$oldscratch/wt-review-pr$pr" ]; then
-    die "PR #$pr round $oldround at $oldsha owns review: receipt $olddone has no terminal WORKTREE_CHECK and the review worktree still exists ($oldscratch/wt-review-pr$pr) — the old worker may still be checking or cleaning it"
+  # DISPATCH_EXIT is deliberately not terminal: the reviewer may still be
+  # checking and removing the shared worktree, then unregistering its scheduled
+  # task. The worker buffers the complete receipt and atomically renames it
+  # only after those steps. Do not infer completion from a missing worktree:
+  # legacy or partial receipts fail closed until an operator resolves them.
+  terminal=$(cat "$olddone" 2>/dev/null) || die "cannot read active receipt $olddone"
+  if ! printf '%s\n' "$terminal" | grep -qx 'WORKTREE_CHECK=unchanged' \
+    || ! printf '%s\n' "$terminal" | grep -qx 'WORKTREE_CLEANUP=removed' \
+    || ! printf '%s\n' "$terminal" | grep -Eq '^TASK_CLEANUP=(unregistered|not-applicable)$' \
+    || ! printf '%s\n' "$terminal" | grep -qx 'TERMINAL_RECEIPT=complete'; then
+    die "PR #$pr round $oldround at $oldsha has no clean atomic terminal receipt; preserve its source/log/worktree and resolve it before reviewing ($olddone)"
   fi
 fi
 comments=$(gh pr view "$pr" --repo "$repo" --json comments --jq '.comments[].body') || die 'cannot read published rounds'

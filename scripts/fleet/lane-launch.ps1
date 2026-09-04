@@ -200,7 +200,12 @@ try {
   $_ | Out-File __LOG__ -Append -Encoding utf8
   $code = 1
 } finally {
-  __REVIEW_FINISH__
+  # A review source-check failure must survive later cleanup failures: run all
+  # teardown steps, but only replace a successful/null exit code.
+  try { __REVIEW_FINISH__ } catch {
+    $_ | Out-File __LOG__ -Append -Encoding utf8
+    if ($null -eq $code -or $code -eq 0) { $code = 2 }
+  }
   $unregisterVerdict = 'unregistered'
   try {
     Unregister-ScheduledTask -TaskName __TASK__ -Confirm:$false -ErrorAction Stop
@@ -209,10 +214,18 @@ try {
     $_ | Out-File __LOG__ -Append -Encoding utf8
     if ($null -eq $code -or $code -eq 0) { $code = 1 }
   }
-  # The end record is written no matter how the run ends (GH-672): a log
-  # with START but no === EXIT === line means the lane was killed mid-flight.
-  Add-Content -LiteralPath __LOG__ -Value "=== EXIT code=$code registration=$unregisterVerdict ===" -Encoding utf8
-  Set-Content -LiteralPath __DONE__ -Value $code -Encoding ascii
+  # Publish only after source checking and task teardown. A receipt-write
+  # failure is visible in the log and does not skip teardown or turn a source
+  # failure into success.
+  $doneVerdict = 'written'
+  try {
+    Set-Content -LiteralPath __DONE__ -Value $code -Encoding ascii
+  } catch {
+    $doneVerdict = "FAILED ($($_.Exception.Message))"
+    $_ | Out-File __LOG__ -Append -Encoding utf8
+    if ($null -eq $code -or $code -eq 0) { $code = 1 }
+  }
+  Add-Content -LiteralPath __LOG__ -Value "=== EXIT code=$code registration=$unregisterVerdict done=$doneVerdict ===" -Encoding utf8
 }
 exit $code
 '@

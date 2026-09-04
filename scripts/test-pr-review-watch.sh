@@ -482,7 +482,11 @@ header_comment_path() {
 }
 
 verdict_log_fixture() {
-    echo 'WORKTREE_CHECK=unchanged' >> "$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+    # A completed review receipt is published as one final object. These lines
+    # deliberately model the complete contract, not the old incremental
+    # DISPATCH_EXIT/WORKTREE_CHECK shape that the watcher must fail closed.
+    printf 'WORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' \
+        >> "$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
     {
         printf '<<<VERDICT\n'
         printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha"
