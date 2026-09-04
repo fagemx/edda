@@ -76,7 +76,7 @@
 # GitHub read, or metadata read/parse failure — the report is then incomplete
 # and every affected task was preserved (fail closed).
 #
-# Testability: Get-FleetScheduledTasks, Remove-FleetTaskRegistration,
+# Testability: Get-FleetScheduledTasks, Get-FleetTaskByName, Remove-FleetTaskRegistration,
 # Invoke-FleetGh and Test-FleetControllerAlive are the seams into the Windows
 # task service, gh and the process table. test-lane-reap.ps1 dot-sources this
 # file in a child pwsh ($env:LANE_REAP_LIBRARY='1' suppresses the main run)
@@ -135,6 +135,22 @@ function Get-FleetScheduledTasks {
     }
   }
   return ,$out
+}
+
+function Get-FleetTaskByName([string]$TaskName) {
+  # Re-read immediately before unregistering.  The first enumeration is only
+  # evidence for the report; a scheduler action can replace or start that
+  # registration before -Apply reaches it.
+  return @(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+function Get-FleetTaskIdentity($Task) {
+  # Task name alone is not a registration identity: a replacement can reuse
+  # it.  The registered wrapper argument is the stable identity this reaper
+  # already consumes for its metadata.
+  if (-not $Task) { return $null }
+  if ($Task.Actions -and $Task.Actions.Count -gt 0) { return [string]$Task.Actions[0].Arguments }
+  return ''
 }
 
 function Remove-FleetTaskRegistration([string]$TaskName) {
@@ -457,6 +473,22 @@ function Invoke-LaneReap {
       }
       $removeDecisions++
       if ($Apply) {
+        # Re-check both state and registration identity at the point of the
+        # mutation.  A Ready stale task can be replaced by a new Running
+        # worker between the report read and this call; never unregister it.
+        $current = Get-FleetTaskByName -TaskName $tn
+        if (-not $current) {
+          $rows.Add((New-LaneReapRow @{ row = 'action'; task = $tn; verb = 'unregister'; mode = 'apply'; result = 'skipped-race'; detail = 'registration absent at apply time' }))
+          continue
+        }
+        if ([string]$current.State -eq 'Running') {
+          $rows.Add((New-LaneReapRow @{ row = 'action'; task = $tn; verb = 'unregister'; mode = 'apply'; result = 'skipped-race'; detail = 'registration became Running at apply time' }))
+          continue
+        }
+        if ((Get-FleetTaskIdentity $current) -ne (Get-FleetTaskIdentity $t)) {
+          $rows.Add((New-LaneReapRow @{ row = 'action'; task = $tn; verb = 'unregister'; mode = 'apply'; result = 'skipped-race'; detail = 'registration identity changed at apply time' }))
+          continue
+        }
         try {
           Remove-FleetTaskRegistration -TaskName $tn
           $applied.Add($tn)

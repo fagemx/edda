@@ -455,7 +455,7 @@ launch() { pwsh -NoProfile -NonInteractive -File "$root/scripts/fleet/lane-launc
 llog="$tmp/launch-logs"; mkdir -p "$llog"
 
 expect_ok "launch dry-run with build lane" launch -Name gh626envcheck -Cwd "$repo" \
-  -BuildLane worker-1 -LogDir "$llog" -TimeoutSec 60 -DryRun
+  -BuildLane worker-1 -LogDir "$llog" -TimeoutSec 60 -DryRun -Owns scripts/fleet/lane-launch.ps1
 lw="$llog/gh626envcheck.dryrun-wrapper.ps1"
 [ -f "$lw" ] || fail "launch dry-run produced no wrapper"
 grep -F "\$env:CARGO_TARGET_DIR = " "$lw" | grep -F "worker-1" >/dev/null \
@@ -467,11 +467,24 @@ n=$(grep -cF 'line-tables-only' "$lw" || true)
 ok "lane-launch -BuildLane wrapper carries the lane env contract from lane-warm -PrintEnv"
 
 expect_ok "launch dry-run without build lane" launch -Name gh626noenv -Cwd "$repo" \
-  -LogDir "$llog" -TimeoutSec 60 -DryRun
+  -LogDir "$llog" -TimeoutSec 60 -DryRun -Owns docs/guides/operator-runbook.md
 if grep -q 'CARGO_' "$llog/gh626noenv.dryrun-wrapper.ps1"; then
   fail "launch wrapper set CARGO_* env without a build lane"
 fi
 ok "lane-launch without -BuildLane sets no CARGO env (docs lanes compile nothing)"
+
+out=$(launch -Name gh772ownsargv -Cwd "$repo" -LogDir "$llog" -TimeoutSec 60 \
+  -DryRun -Owns scripts/fleet/lane-launch.ps1 docs/guides/operator-runbook.md 2>&1) ||
+  fail "launch accepts repeated -Owns values after -File binding: $out"
+case "$out" in
+  *"--owns 'scripts/fleet/lane-launch.ps1'"*"--owns 'docs/guides/operator-runbook.md'"*) : ;;
+  *) fail "launch did not forward both -Owns values verbatim :: $out" ;;
+esac
+expect_fail "launch absolute owns" "repository-relative" launch -Name gh772ownsabs -Cwd "$repo" \
+  -LogDir "$llog" -DryRun -Owns 'C:\\outside'
+expect_fail "launch traversal owns" "repository-relative" launch -Name gh772ownstraversal -Cwd "$repo" \
+  -LogDir "$llog" -DryRun -Owns '../outside'
+ok "lane-launch binds every -Owns value and rejects absolute or traversal aliases"
 
 echo "1..$case_number"
 echo "PASS: lane helper self-test ($case_number cases)"

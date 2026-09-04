@@ -37,10 +37,10 @@
 # omitted, the wrapper sets NO CARGO env at all — the launcher never
 # synthesizes a build lane; docs lanes compile nothing and pass none.
 #
-# -Owns is optional. Pass only the smallest repository-relative path scopes the
-# implementation needs to claim (for example `crates/edda-cli/src/cmd.rs`);
-# read-only lanes omit it. The launcher forwards each supplied value to
-# `edda dispatch --owns` and does not invent a global ownership policy.
+# Write-enabled lanes require the smallest canonical repository-relative path
+# scopes they need to claim (for example `crates/edda-cli/src/cmd_dispatch.rs`);
+# read-only review lanes omit them. The launcher forwards each supplied value
+# to `edda dispatch --owns` and does not invent a global ownership policy.
 #
 # Prints, one line each: the .git/config backup verdict (GH-715), then task
 # name, state, wrapper path, log path, done path.
@@ -75,6 +75,9 @@ param(
   [string]$SessionId = '',
   [string]$LogDir = "$env:TEMP\edda-lanes",
   [string]$BuildLane = '',
+  # PowerShell -File binds only the first whitespace-separated value to an
+  # array parameter; unbound trailing values remain in automatic $args and
+  # are folded into this public parameter below.
   [string[]]$Owns = @(),
   # Explicit for arbitrary lane names; conventional review/reviewer names
   # imply it so historical review-pr<N> callers cannot omit the restriction.
@@ -83,6 +86,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Capture unbound `-File -Owns a b` values before dot-sourcing helper code;
+# a helper has its own automatic $args and must not become dispatch scope.
+$remainingOwns = @($args)
 
 function Fail([string]$Msg) {
   [Console]::Error.WriteLine("lane-launch: $Msg")
@@ -119,9 +125,16 @@ $allowedBuildLanes = @('worker-1', 'worker-2', 'verifier', 'verifier-2')
 if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {
   Fail "-BuildLane '$BuildLane' is not an allowed build lane (verification.cost-discipline allows only: $($allowedBuildLanes -join ', ')); omit the parameter for lanes that compile nothing"
 }
+$Owns = @(@($Owns) + $remainingOwns | Where-Object { $null -ne $_ -and $_ -ne '' })
 foreach ($scope in $Owns) {
-  if ([string]::IsNullOrWhiteSpace($scope) -or $scope -match '[\r\n]') {
-    Fail '-Owns entries must be non-empty one-line repository-relative path scopes'
+  # Dispatch claims are compared lexically, so allow exactly one portable
+  # spelling: a non-empty slash-separated repository-relative path.  Reject
+  # drive-relative forms too (`C:foo` is not rooted on Windows).
+  if ([string]::IsNullOrWhiteSpace($scope) -or $scope -match '[\r\n\\]' -or
+      [IO.Path]::IsPathRooted($scope) -or $scope -match '^[A-Za-z]:' -or
+      $scope -match '(^|/)\.\.(/|$)' -or $scope -match '(^|/)\./' -or
+      $scope -match '//' -or $scope.EndsWith('/')) {
+    Fail "-Owns entry '$scope' must be a canonical non-empty slash-separated repository-relative path scope"
   }
 }
 if (-not $isReview -and $Owns.Count -eq 0) {
@@ -208,12 +221,15 @@ $env:HOME = $env:USERPROFILE
 # keep `git --help` from opening a browser inside the hidden task
 $env:GIT_CONFIG_PARAMETERS = "'help.format=man'"
 __LANEENV__
-Set-Location -LiteralPath __CWD__
-$controller = Get-Process -Id $PID -ErrorAction Stop
-$controllerStarted = $controller.StartTime.ToUniversalTime().ToString('o')
-Add-Content -LiteralPath $PSCommandPath -Value "# lane-reap: controller-pid=$PID controller-started=$controllerStarted" -Encoding utf8
 $code = $null
 try {
+  # All setup belongs inside the terminal-receipt try/finally.  A failure
+  # resolving the worktree or controller used to leave a registered task with
+  # no done file for lane-status/reap to reason about (GH-772 P0-1).
+  Set-Location -LiteralPath __CWD__
+  $controller = Get-Process -Id $PID -ErrorAction Stop
+  $controllerStarted = $controller.StartTime.ToUniversalTime().ToString('o')
+  Add-Content -LiteralPath $PSCommandPath -Value "# lane-reap: controller-pid=$PID controller-started=$controllerStarted" -Encoding utf8
   __REVIEW_PREFLIGHT__
   __RUN__
   $code = $LASTEXITCODE
@@ -401,26 +417,58 @@ $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log
   Set-Content -LiteralPath $Wrapper -Encoding utf8
 
 Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue  # stale done-file from a previous run must not masquerade as this run
+$registered = $false
+try {
+  $action = New-ScheduledTaskAction -Execute $PwshExe `
+    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
+    -WorkingDirectory $Cwd
+  # Keep Task Scheduler from preempting the wrapper; edda dispatch owns the
+  # requested timeout and its return reaches the wrapper's teardown.
+  $settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
+    -MultipleInstances IgnoreNew `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Settings $settings -RunLevel Limited | Out-Null
+  $registered = $true
+  Start-ScheduledTask -TaskName $TaskName
+  Start-Sleep -Seconds 2
 
-$action = New-ScheduledTaskAction -Execute $PwshExe `
-  -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
-  -WorkingDirectory $Cwd
-# Keep Task Scheduler from preempting the wrapper; edda dispatch owns the
-# requested timeout and its return reaches the wrapper's teardown.
-$settings = New-ScheduledTaskSettingsSet `
-  -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
-  -MultipleInstances IgnoreNew `
-  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $TaskName -Action $action -Settings $settings -RunLevel Limited | Out-Null
-Start-ScheduledTask -TaskName $TaskName
-Start-Sleep -Seconds 2
-
-# A launch that writes its scripts but registers no task must not report
-# success having started nothing (failure mode recorded on #606).
-$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if (-not $task) { Fail "task $TaskName is absent after Start-ScheduledTask; nothing was launched" }
-if ($task.State -ne 'Running') { Fail "task $TaskName did not reach Running after Start-ScheduledTask (state: $($task.State))" }
+  # A launch that writes its scripts but registers no task must not report
+  # success having started nothing (failure mode recorded on #606).
+  $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  if (-not $task) { throw "task $TaskName is absent after Start-ScheduledTask; nothing was launched" }
+  if ($task.State -ne 'Running') { throw "task $TaskName did not reach Running after Start-ScheduledTask (state: $($task.State))" }
+} catch {
+  $launchError = $_.Exception.Message
+  # The wrapper did not start cleanly, so publish the same terminal shape it
+  # would have written.  Never unregister a task that turned Running while we
+  # observed the failure: it may be a replacement launched concurrently.
+  $registrationVerdict = 'not-registered'
+  if ($registered) {
+    try {
+      $current = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+      if ($current -and $current.State -ne 'Running') {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+        $registrationVerdict = 'unregistered-after-launch-failure'
+      } elseif ($current) {
+        $registrationVerdict = 'preserved-running-after-launch-failure'
+      } else {
+        $registrationVerdict = 'already-absent-after-launch-failure'
+      }
+    } catch {
+      $registrationVerdict = "cleanup-failed ($($_.Exception.Message))"
+    }
+  }
+  try {
+    Add-Content -LiteralPath $Log -Value "lane-launch: setup/start failed: $launchError" -Encoding utf8
+    Set-Content -LiteralPath $Done -Value '1' -Encoding ascii
+    Add-Content -LiteralPath $Log -Value "=== EXIT code=1 registration=$registrationVerdict done=written ===" -Encoding utf8
+  } catch {
+    [Console]::Error.WriteLine("lane-launch: could not publish failed-launch receipt: $($_.Exception.Message)")
+  }
+  Fail "setup/start failed for ${TaskName}: $launchError (registration $registrationVerdict)"
+}
 
 "task=$TaskName state=$($task.State)"
 "wrapper=$Wrapper"

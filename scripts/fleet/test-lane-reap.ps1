@@ -83,6 +83,21 @@ function Get-FleetScheduledTasks {
     }
   }
 }
+function Get-FleetTaskByName([string]$TaskName) {
+  # The reaper must read again immediately before unregistering.  A fixture
+  # can supply the replacement observed on that second read.
+  $source = if ($fx.PSObject.Properties['recheckTask']) { @($fx.recheckTask) } else { @($fx.tasks) }
+  foreach ($t in $source) {
+    if ($t.taskName -eq $TaskName) {
+      return [pscustomobject]@{
+        TaskName = $t.taskName
+        State    = $t.state
+        Actions  = @([pscustomobject]@{ Arguments = $t.actionArguments })
+      }
+    }
+  }
+  return $null
+}
 $script:unregistered = [System.Collections.Generic.List[string]]::new()
 function Remove-FleetTaskRegistration([string]$TaskName) {
   $script:unregistered.Add($TaskName)
@@ -338,6 +353,18 @@ try {
   Assert-Rows $r { $_.row -eq 'reason' -and $_.rule -eq 'task-running' -and $_.decision -eq 'retain' } 1 "15: retained with rule task-running"
   Assert-Rows $r { $_.row -eq 'action' } 0 "15: no unregister action while the worker is Running"
   Assert-True (@($r.applied).Count -eq 0) "15: nothing applied"
+
+  # --- 16. a replacement running task must win the apply-time re-read ------
+  "=== 16. apply-time state/identity race preserves replacement ==="
+  $r = Invoke-Scenario @{
+    tasks = @( @{ taskName = 'edda-lane-race'; state = 'Ready'; actionArguments = "-File `"$wGh772`"" } )
+    recheckTask = @{ taskName = 'edda-lane-race'; state = 'Running'; actionArguments = "-File `"$wAlpha`"" }
+    gh = @{ 'issue:772' = @{ state = 'CLOSED' } }
+    processes = @{}
+  } $true '' $logDir
+  Assert-True ($r.exitCode -eq 0) "16: race observation exits 0"
+  Assert-Rows $r { $_.row -eq 'action' -and $_.result -eq 'skipped-race' -and $_.detail -match 'Running' } 1 "16: replacement that became Running is never unregistered"
+  Assert-True (@($r.applied).Count -eq 0) "16: no replacement registration was removed"
 
   # --- 14. the reaper never deletes: fixtures survive every run -------------
   "=== 14. fixture files survive every run ==="

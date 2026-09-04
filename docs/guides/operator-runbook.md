@@ -34,7 +34,10 @@
    （決策 `verification.cost-discipline`），給了就在 wrapper 設
    `CARGO_TARGET_DIR = <lane root>\<BuildLane>`（lane root =
    `$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）；
-   寫入 lane 也要傳它實際會改的最小 `-Owns` repo path；review lane 是唯讀可省略。
+   寫入 lane 也要傳它實際會改的最小 `-Owns` repo path；可在最後一個 `-Owns`
+   後列多個 scope，例如 `-Owns crates/edda-cli/src/cmd_dispatch.rs docs/guides/operator-runbook.md`。
+   scope 必須是 canonical repository-relative path：不可用 absolute、drive/UNC、`..` 或 `./`
+   alias；review lane 是唯讀可省略。
    Rust lane 要明確傳，如 `-BuildLane worker-1`；docs lane 只寫文件不編譯，
    不傳 build lane，wrapper 就不設 `CARGO_TARGET_DIR`（見 §六）。
 4. **盯進度**（不用再翻檔案時間戳）：

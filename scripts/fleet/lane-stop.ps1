@@ -305,8 +305,9 @@ $residual = @($residualSet)
 if ($residual.Count -gt 0) {
   Fail "residual lane processes survive the kill: $($residual -join ',')"
 }
-$task = Get-ScheduledTask -TaskName $TaskName
-if ($task.State -eq 'Running') { Fail "task $TaskName still reports State = Running after the stop" }
+$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+$taskState = if ($task) { [string]$task.State } else { 'Absent' }
+if ($task -and $task.State -eq 'Running') { Fail "task $TaskName still reports State = Running after the stop" }
 
 # --- 5b. unregister the registration now that stopping is verified (GH-772) --
 # Reached only when the task is not Running and no lane process survived, so
@@ -316,18 +317,25 @@ if ($task.State -eq 'Running') { Fail "task $TaskName still reports State = Runn
 # as a verdict and reported (and failed) after step 7.
 $unregisterVerdict = 'skipped'
 $unregisterFailed = $false
-try {
-  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
-  $unregisterVerdict = 'unregistered'
-} catch {
-  # A concurrent stop may have removed the registration between the state
-  # check above and this call; that is success, not a failure.
-  if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
-    $unregisterVerdict = 'already-absent (unregistered concurrently)'
-  } else {
-    $unregisterVerdict = "FAILED ($($_.Exception.Message))"
-    $unregisterFailed = $true
-    [Console]::Error.WriteLine("lane-stop: could not unregister $TaskName (GH-772): $($_.Exception.Message)")
+if (-not $task) {
+  # Stop-ScheduledTask may have completed a concurrent stop by removing the
+  # registration.  The process-tree proof above is still required, but this
+  # is a successful terminal state and must reach the receipt below.
+  $unregisterVerdict = 'already-absent (unregistered concurrently)'
+} else {
+  try {
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+    $unregisterVerdict = 'unregistered'
+  } catch {
+    # A concurrent stop may have removed the registration between the state
+    # check above and this call; that is success, not a failure.
+    if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+      $unregisterVerdict = 'already-absent (unregistered concurrently)'
+    } else {
+      $unregisterVerdict = "FAILED ($($_.Exception.Message))"
+      $unregisterFailed = $true
+      [Console]::Error.WriteLine("lane-stop: could not unregister $TaskName (GH-772): $($_.Exception.Message)")
+    }
   }
 }
 
@@ -415,7 +423,7 @@ if ($terminated.Count -gt 0 -or ((Test-Path -LiteralPath $Log) -and -not (Test-P
 
 # --- report -----------------------------------------------------------------
 
-"task=$TaskName state=$($task.State)"
+"task=$TaskName state=$taskState"
 if ($terminated.Count -gt 0) {
   "terminated=$($terminated.Count) pids=$($terminated -join ',')"
 } else {
