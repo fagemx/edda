@@ -57,8 +57,15 @@ if [ -f "$active" ]; then
     die "PR #$pr round $oldround at $oldsha has no clean atomic terminal receipt; preserve its source/log/worktree and resolve it before reviewing ($olddone)"
   fi
 fi
-comments=$(gh pr view "$pr" --repo "$repo" --json comments --jq '.comments[].body') || die 'cannot read published rounds'
-floor=$(printf '%s\n' "$comments" | sed -n 's/^## Code Review: Round \([0-9][0-9]*\).*/\1/p' | sort -n | tail -1)
+# REST issue comments expose author_association; only the merge guard's
+# trusted associations may advance the shared round floor.
+comments=$(gh api --paginate --slurp "repos/$repo/issues/$pr/comments?per_page=100") || die 'cannot read published rounds'
+floor=$(printf '%s\n' "$comments" | jq -er '
+  [ .[] | .[] | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")
+    | .body | select(type == "string")
+    | capture("(?m)^## Code Review: Round (?<round>[0-9]+)").round | tonumber ]
+  | if length == 0 then 0 else max end
+' 2>/dev/null) || die 'cannot parse trusted published rounds'
 floor=${floor:-0}
 last=0
 [ ! -f "$dir/counter" ] || last=$(cat "$dir/counter")

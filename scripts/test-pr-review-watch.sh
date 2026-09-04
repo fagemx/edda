@@ -485,7 +485,7 @@ verdict_log_fixture() {
     # A completed review receipt is published as one final object. These lines
     # deliberately model the complete contract, not the old incremental
     # DISPATCH_EXIT/WORKTREE_CHECK shape that the watcher must fail closed.
-    printf 'WORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' \
+    printf 'FINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' \
         >> "$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
     {
         printf '<<<VERDICT\n'

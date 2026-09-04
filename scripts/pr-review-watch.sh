@@ -448,10 +448,13 @@ settle_pending() {
       fi
       if extract_verdict "$LOG" "$VERDICT" && verdict_ok "$VERDICT"; then
         # A terminal receipt is one atomically published object, never an
-        # incremental DISPATCH_EXIT line. Legacy and partial receipts fail
+        # incremental DISPATCH_EXIT line. Legacy receipts without FINAL_EXIT
+        # and partial receipts fail
         # closed: source verification, worktree removal and task teardown must
         # all be proven before this watcher publishes a verdict.
-        if ! grep -qx 'WORKTREE_CHECK=unchanged' "$DONE" 2>/dev/null \
+        if ! grep -qx 'DISPATCH_EXIT=0' "$DONE" 2>/dev/null \
+          || ! grep -qx 'FINAL_EXIT=0' "$DONE" 2>/dev/null \
+          || ! grep -qx 'WORKTREE_CHECK=unchanged' "$DONE" 2>/dev/null \
           || ! grep -qx 'WORKTREE_CLEANUP=removed' "$DONE" 2>/dev/null \
           || ! grep -Eq '^TASK_CLEANUP=(unregistered|not-applicable)$' "$DONE" 2>/dev/null \
           || ! grep -qx 'TERMINAL_RECEIPT=complete' "$DONE" 2>/dev/null; then

@@ -30,7 +30,13 @@ cat > "$tmp/comments-api" <<EOF
       "id": 10,
       "author_association": "MEMBER",
       "updated_at": "2026-09-04T00:00:00Z",
-      "body": "## Code Review: Round 7 — PR #12 @ $sha\n- escalations: none\n### Verdict\nLGTM (P0=0, P1=0)"
+      "body": "## Code Review: Round 4 — PR #12 @ $sha\n- escalations: none\n### Verdict\nLGTM (P0=0, P1=0)"
+    },
+    {
+      "id": 9,
+      "author_association": "NONE",
+      "updated_at": "2026-09-04T00:01:00Z",
+      "body": "## Code Review: Round 999999999 — PR #12 @ $sha"
     }
   ]
 ]
@@ -53,7 +59,7 @@ rmdir "$tmp/one/wt-review-pr12"
 # A legacy DISPATCH_EXIT-only receipt remains blocked even after the old tree
 # is gone; model an operator-confirmed final worker receipt before the next
 # round can be reserved.
-printf 'TRANSPORT=edda-dispatch\nSESSION=test\nSESSION_MODE=new\nDISPATCH_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' > "$tmp/one/review-pr12-r5.done"
+printf 'TRANSPORT=edda-dispatch\nSESSION=test\nSESSION_MODE=new\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' > "$tmp/one/review-pr12-r5.done"
 round=$(sh "$root/scripts/review-round.sh" reserve 12 "$other" 1 "$tmp/two")
 [ "$round" = 6 ]
 # A receipt carrying a non-clean worktree check, or a legacy/partial receipt
@@ -68,7 +74,7 @@ printf 'DISPATCH_EXIT=0\nWORKTREE_CHECK=unchanged\n' > "$tmp/two/review-pr12-r6.
 if sh "$root/scripts/review-round.sh" reserve 12 "$sha" 1 "$tmp/one"; then
   echo 'FAIL: partial terminal receipt admitted a new reviewer' >&2; exit 1
 fi
-printf 'TRANSPORT=edda-dispatch\nSESSION=test\nSESSION_MODE=new\nDISPATCH_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' > "$tmp/two/review-pr12-r6.done"
+printf 'TRANSPORT=edda-dispatch\nSESSION=test\nSESSION_MODE=new\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' > "$tmp/two/review-pr12-r6.done"
 round=$(sh "$root/scripts/review-round.sh" reserve 12 "$sha" 1 "$tmp/one")
 [ "$round" = 7 ]
 if sh "$root/scripts/review-round.sh" release 12 "$other" 6; then
