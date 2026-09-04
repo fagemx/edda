@@ -27,6 +27,45 @@ pub(crate) fn isolated_store() -> IsolatedStoreRoot {
     edda_store::test_support::isolated_store_root().expect("isolated store")
 }
 
+pub(crate) fn write_aged_heartbeat(
+    project_id: &str,
+    session_id: &str,
+    age_secs: u64,
+    parent_session_id: Option<&str>,
+) {
+    let _ = edda_store::ensure_dirs(project_id);
+    let state_dir = edda_store::project_dir(project_id).join("state");
+    std::fs::create_dir_all(&state_dir).expect("state dir");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs()
+        .saturating_sub(age_secs);
+    let ts = time::OffsetDateTime::from_unix_timestamp(now as i64)
+        .expect("unix timestamp")
+        .format(&time::format_description::well_known::Rfc3339)
+        .expect("rfc3339");
+    let mut heartbeat = serde_json::json!({
+        "session_id": session_id,
+        "started_at": ts,
+        "last_heartbeat": ts,
+        "label": session_id,
+        "focus_files": [],
+        "active_tasks": [],
+        "files_modified_count": 0,
+        "total_edits": 0,
+        "recent_commits": [],
+    });
+    if let Some(parent) = parent_session_id {
+        heartbeat["parent_session_id"] = serde_json::json!(parent);
+    }
+    std::fs::write(
+        state_dir.join(format!("session.{session_id}.json")),
+        heartbeat.to_string(),
+    )
+    .expect("heartbeat file");
+}
+
 // Guard-restore semantics (RAII on drop, panic safety, thread locality) are
 // tested at the source in `edda-store::test_support`; a duplicate here could
 // only re-prove them through an extra indirection.
