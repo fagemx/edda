@@ -86,9 +86,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-# Capture unbound `-File -Owns a b` values before dot-sourcing helper code;
-# a helper has its own automatic $args and must not become dispatch scope.
+# PowerShell's -File binder silently leaves all but the first `-Owns a b`
+# value unbound.  Read the process argv before helper code runs, replacing the
+# binder result with the documented trailing scope list.  -Owns is deliberately
+# documented as the final option, so every remaining token is a scope.
 $remainingOwns = @($args)
+$rawArgv = [Environment]::GetCommandLineArgs()
+$ownsAt = [Array]::LastIndexOf($rawArgv, '-Owns')
+if ($ownsAt -ge 0) {
+  $remainingOwns = @()
+  for ($i = $ownsAt + 1; $i -lt $rawArgv.Length; $i++) { $remainingOwns += $rawArgv[$i] }
+  $Owns = @()
+}
 
 function Fail([string]$Msg) {
   [Console]::Error.WriteLine("lane-launch: $Msg")
@@ -125,7 +134,10 @@ $allowedBuildLanes = @('worker-1', 'worker-2', 'verifier', 'verifier-2')
 if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {
   Fail "-BuildLane '$BuildLane' is not an allowed build lane (verification.cost-discipline allows only: $($allowedBuildLanes -join ', ')); omit the parameter for lanes that compile nothing"
 }
-$Owns = @(@($Owns) + $remainingOwns | Where-Object { $null -ne $_ -and $_ -ne '' })
+$allOwns = [System.Collections.Generic.List[string]]::new()
+foreach ($scope in @($Owns)) { if ($null -ne $scope -and $scope -ne '') { $allOwns.Add([string]$scope) } }
+foreach ($scope in $remainingOwns) { if ($null -ne $scope -and $scope -ne '') { $allOwns.Add([string]$scope) } }
+$Owns = @($allOwns)
 foreach ($scope in $Owns) {
   # Dispatch claims are compared lexically, so allow exactly one portable
   # spelling: a non-empty slash-separated repository-relative path.  Reject
@@ -382,11 +394,32 @@ if ($DryRun) {
   if ($parentName -ne 'svchost.exe') { Fail "dry-run task parent is $parentName, expected svchost.exe (Task Scheduler service)" }
 
   $deadline = (Get-Date).AddSeconds(60)
+  $selfUnregistered = $false
   do {
     Start-Sleep -Seconds 2
-    $task = Get-ScheduledTask -TaskName $TaskName
-    $info = Get-ScheduledTaskInfo -TaskName $TaskName
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $task) {
+      # The owned wrapper unregisters itself in its finally block.  That is a
+      # successful dry-run only when its terminal receipt exists and reports
+      # zero; absence without that receipt remains an unknown launch failure.
+      if (-not (Test-Path -LiteralPath $Done -PathType Leaf)) {
+        Fail "dry-run task $TaskName disappeared without its terminal receipt"
+      }
+      $terminalCode = (Get-Content -LiteralPath $Done -Raw -ErrorAction Stop).Trim()
+      if ($terminalCode -ne '0') {
+        Fail "dry-run task $TaskName self-unregistered with terminal receipt '$terminalCode', expected 0"
+      }
+      $selfUnregistered = $true
+      break
+    }
+    $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $info) { Fail "dry-run task $TaskName exists but its scheduler result is unavailable" }
   } while (($task.State -eq 'Running' -or $info.LastTaskResult -eq 267009) -and (Get-Date) -lt $deadline)
+
+  if ($selfUnregistered) {
+    "dry-run task=$TaskName state=unregistered-by-owned-wrapper receipt=0"
+    exit 0
+  }
 
   "dry-run task=$TaskName state=$($task.State)"
   "LastRunTime=$($info.LastRunTime) LastTaskResult=$($info.LastTaskResult)"
