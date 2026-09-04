@@ -226,7 +226,8 @@ across 88,789 files:
 Two thirds of that is avoidable rather than intrinsic. Every one of the 509
 incremental session directories was older than 24 hours — orphans left by
 interrupted or killed builds, which nothing in Cargo ever reclaims. The
-workspace tunes `[profile.release]` only, so debug builds carry full symbols
+workspace sets `debug = "line-tables-only"` for dev builds (GH-810); before
+that it tuned `[profile.release]` only and debug builds carried full symbols
 into every statically linked test binary.
 
 **Any lane pool ceiling stated before that footprint is fixed is provisional.**
