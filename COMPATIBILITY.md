@@ -39,7 +39,7 @@ store version**:
   stability is governed by the v1 event spec (#608), not by this page.
 - Decide-snapshot rows additionally carry a per-row
   `"schema_version": "snapshot.v1"` string
-  (`crates/edda-ledger/src/sqlite_store/schema.rs:151`); it identifies the
+  (`crates/edda-ledger/src/sqlite_store/schema.rs:152`); it identifies the
   snapshot shape, not the ledger.
 
 ### 1.2 The policy
@@ -93,12 +93,12 @@ is what "additive" means for them).
 ### `edda dispatch --json`
 
 One JSON object with exactly these keys (emitted at
-`crates/edda-cli/src/cmd_dispatch.rs:259-268`; mirrored in the long help,
-`crates/edda-cli/src/main.rs:488-494`):
+`crates/edda-cli/src/cmd_dispatch.rs:298-310`; mirrored in the long help,
+`crates/edda-cli/src/main.rs:492-497`):
 
 | Key | Type | Notes |
 |---|---|---|
-| `outcome` | string | one of `done`, `crash`, `timeout`, `max_turns`, `budget_exceeded` (`cmd_dispatch.rs:114-122`) |
+| `outcome` | string | one of `done`, `crash`, `timeout`, `max_turns`, `budget_exceeded` (`cmd_dispatch.rs:129-135`) |
 | `result_text` | string \| null | agent summary; null except `done` |
 | `cost_usd` | number \| null | honest cost; null when the backend reported no usage |
 | `session_id` | string | id to reuse for continuity |
@@ -108,7 +108,7 @@ One JSON object with exactly these keys (emitted at
 | `session_observed` | string | the session id the backend reported in-band, or `unknown` |
 
 Exit-code table (contract, mirrors the long help; mapping at
-`cmd_dispatch.rs:127-134`): `0` done · `1` crash or any other failure ·
+`cmd_dispatch.rs:151-159`): `0` done · `1` crash or any other failure ·
 `2` timeout · `3` budget exceeded · `4` max turns.
 
 Golden fixture: `crates/edda-cli/src/cmd_dispatch.rs` →
@@ -118,7 +118,7 @@ Golden fixture: `crates/edda-cli/src/cmd_dispatch.rs` →
 ### `edda verify --json`
 
 One JSON object with exactly these keys (emitted at
-`crates/edda-cli/src/cmd_verify.rs:63-69`):
+`crates/edda-cli/src/cmd_verify.rs:68-72`):
 
 | Key | Type | Notes |
 |---|---|---|
@@ -176,7 +176,7 @@ Golden fixtures: `crates/edda-mcp/src/lib.rs` →
 
 One JSON object with exactly these keys (emitted at
 `crates/edda-cli/src/cmd_status.rs:10-29`; flag declared at
-`crates/edda-cli/src/main.rs:290-295`, dispatched at `:1260`):
+`crates/edda-cli/src/main.rs:290-295`, dispatched at `:1263`):
 
 | Key | Type | Notes |
 |---|---|---|
@@ -198,7 +198,7 @@ it, `edda status` produces the same exit code and the same stderr in every
 state (measured). Success is exit `0` with the object on stdout. Failures do
 not emit JSON — a newer ledger schema exits `2` (§1.2), and every other
 failure (no `.edda/`, unreadable database) takes the CLI's shared error path
-and exits `1` (`crates/edda-cli/src/main.rs:1100-1107`).
+and exits `1` (`crates/edda-cli/src/main.rs:1103-1110`).
 
 That last row differs from `edda verify --json`, which answers `2` to the
 same questions. The split is pre-existing and outside #730, but it is
