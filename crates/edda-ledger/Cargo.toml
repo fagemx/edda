@@ -3,6 +3,7 @@ name = "edda-ledger"
 description = "Append-only SQLite ledger with hash-chained events for Edda"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -24,7 +25,6 @@ sha2.workspace = true
 hex.workspace = true
 tracing.workspace = true
 globset.workspace = true
-dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

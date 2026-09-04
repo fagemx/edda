@@ -64,6 +64,14 @@ staged_z=$(mktemp)
 ratchet_violations=$(mktemp)
 trap 'rm -f "$staged_z" "$ratchet_violations"' EXIT
 git diff --cached --raw -z --no-renames --diff-filter=ACMR >"$staged_z"
+# Check the whole index, including source-only modifications and deletions.
+# Run before the ACMR early return: deleting a cited file must also be gated.
+lint_doc_citations=$(cd "$(dirname "$0")" && pwd)/../lint-doc-citations.sh
+echo "pre-commit: bash scripts/lint-doc-citations.sh --staged"
+bash "$lint_doc_citations" --staged || {
+    echo "pre-commit: documentation citation lint failed" >&2
+    exit 1
+}
 [ -s "$staged_z" ] || exit 0
 
 fail() {
@@ -121,7 +129,7 @@ done <"$staged_z"
 # narrowed to hook-path write calls):
 #   1. let _ = .*(append_event|append_to_session_ledger|save_project|
 #                  save_digest_state|save_detect_state|update_heartbeat|
-#                  write_heartbeat|fs::write|writeln!)
+#                  write_heartbeat|write_phase_state|fs::write|writeln!)
 #   2. the same write calls ending in .ok();
 # An added line matching either is rejected unless that line — or the line
 # directly above it — carries '// swallow-ok: <reason>'.
@@ -161,8 +169,8 @@ while IFS= read -r -d '' meta; do
         /^\+/ {
             line++
             text = substr($0, 2)
-            if (text ~ /let _ = .*(append_event|append_to_session_ledger|save_project|save_digest_state|save_detect_state|update_heartbeat|write_heartbeat|fs::write|writeln!)/ ||
-                text ~ /(append_event|append_to_session_ledger|save_project|save_digest_state|save_detect_state|update_heartbeat|write_heartbeat|fs::write|writeln!).*\.ok\(\);/) {
+            if (text ~ /let _ = .*(append_event|append_to_session_ledger|save_project|save_digest_state|save_detect_state|update_heartbeat|write_heartbeat|write_phase_state|fs::write|writeln!)/ ||
+                text ~ /(append_event|append_to_session_ledger|save_project|save_digest_state|save_detect_state|update_heartbeat|write_heartbeat|write_phase_state|fs::write|writeln!).*\.ok\(\);/) {
                 if (text !~ /swallow-ok/ && prev !~ /swallow-ok/) {
                     print file ":" line ": " text
                 }
@@ -175,7 +183,7 @@ done <"$staged_z"
 if [ -s "$ratchet_violations" ]; then
     echo "pre-commit: GH-692 ratchet — swallowed hook-path write on ADDED line(s):" >&2
     cat "$ratchet_violations" >&2
-    fail "style: 'let _ = <write-call>(...)' or '<write-call>(...).ok();' on added lines under crates/*/src (tests.rs / tests/ excluded), where <write-call> is one of append_event, append_to_session_ledger, save_project, save_digest_state, save_detect_state, update_heartbeat, write_heartbeat, fs::write, writeln! — propagate the error, or justify with '// swallow-ok: <reason>' on the same or previous line"
+    fail "style: 'let _ = <write-call>(...)' or '<write-call>(...).ok();' on added lines under crates/*/src (tests.rs / tests/ excluded), where <write-call> is one of append_event, append_to_session_ledger, save_project, save_digest_state, save_detect_state, update_heartbeat, write_heartbeat, write_phase_state, fs::write, writeln! — propagate the error, or justify with '// swallow-ok: <reason>' on the same or previous line"
 fi
 
 if [ "$fmt_needed" -eq 1 ]; then

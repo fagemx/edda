@@ -3,6 +3,7 @@ name = "edda-store"
 description = "Per-user store with atomic writes for Edda"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -20,6 +21,12 @@ dirs.workspace = true
 tempfile.workspace = true
 fs2.workspace = true
 time.workspace = true
+
+[features]
+# Test-only: enables the thread-local store-root override used by consumer
+# crates' test suites (GH-757). Never enabled by default; ordinary builds and
+# subprocesses keep production env/default resolution.
+test-support = []
 
 [lints]
 workspace = true

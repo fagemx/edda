@@ -35,7 +35,7 @@ const HOOK_EVENTS: &[&str] = &[
 ];
 
 fn default_hooks_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".codex").join("hooks.json"))
+    edda_core::paths::home_dir().map(|h| h.join(".codex").join("hooks.json"))
 }
 
 /// Write (or merge) edda hooks into the Codex hooks config.

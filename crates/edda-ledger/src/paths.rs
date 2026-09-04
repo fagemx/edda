@@ -189,7 +189,7 @@ impl EddaPaths {
     }
 
     fn find_root_walk(start: &Path, ceiling: Option<&Path>) -> Option<PathBuf> {
-        let home = dirs::home_dir();
+        let home = edda_core::paths::home_dir();
 
         // Normalisation belongs to `find_root_bounded`, not here: the
         // unbounded `find_root` is production API and this PR does not

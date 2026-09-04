@@ -117,8 +117,7 @@ const NUDGE_COOLDOWN_SECS: i64 = 180; // 3 minutes
 
 /// Read the effective cooldown, allowing `EDDA_NUDGE_COOLDOWN_SECS` env override.
 fn nudge_cooldown_secs() -> i64 {
-    std::env::var("EDDA_NUDGE_COOLDOWN_SECS")
-        .ok()
+    crate::env_var("EDDA_NUDGE_COOLDOWN_SECS")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(NUDGE_COOLDOWN_SECS)
 }
@@ -232,6 +231,7 @@ mod tests {
 
     #[test]
     fn dropped_writes_round_trip() {
+        let _store = crate::isolated_store();
         let pid = "test_state_dropped_writes";
         let sid = "s-dw";
         let _ = edda_store::ensure_dirs(pid);
@@ -250,6 +250,7 @@ mod tests {
 
     #[test]
     fn counter_round_trip() {
+        let _store = crate::isolated_store();
         let pid = "test_state_counter_rt";
         let sid = "s1";
         let _ = edda_store::ensure_dirs(pid);
@@ -265,6 +266,7 @@ mod tests {
 
     #[test]
     fn dedup_hash_round_trip() {
+        let _store = crate::isolated_store();
         let pid = "test_state_dedup_rt";
         let sid = "s1";
         let _ = edda_store::ensure_dirs(pid);
@@ -280,6 +282,7 @@ mod tests {
 
     #[test]
     fn compact_pending_lifecycle() {
+        let _store = crate::isolated_store();
         let pid = "test_state_compact_lc";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -311,6 +314,7 @@ mod tests {
 
     #[test]
     fn peer_count_round_trip() {
+        let _store = crate::isolated_store();
         let pid = "test_state_peer_ct";
         let sid = "s1";
         let _ = edda_store::ensure_dirs(pid);
@@ -324,6 +328,7 @@ mod tests {
 
     #[test]
     fn coord_offset_round_trip() {
+        let _store = crate::isolated_store();
         let pid = "test_state_coord_off";
         let sid = "s1";
         let _ = edda_store::ensure_dirs(pid);

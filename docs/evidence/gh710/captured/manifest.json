@@ -1,0 +1,163 @@
+{
+  "binary": "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+  "binary_sha256": "3b930e658613ea2e6f3e0130bd41d90a4751a8aed52444be16fb943e5eb0678e",
+  "runtime": "C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-gh710-hgx4_253",
+  "cwd": "C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-gh710-hgx4_253\\repo",
+  "environment_overrides": {
+    "EDDA_STORE_ROOT": "C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-gh710-hgx4_253\\store",
+    "EDDA_BRIDGE_AUTO_DIGEST": "0",
+    "EDDA_PLANS_DIR": "C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-gh710-hgx4_253\\plans"
+  },
+  "records": [
+    {
+      "name": "00-git-init",
+      "command": [
+        "git",
+        "init",
+        "--initial-branch=main"
+      ],
+      "started_unix": 1788509108.6106656,
+      "exit_code": 0,
+      "stdout_bytes": 101,
+      "stdout_sha256": "9a581d0984e2b36503450a05b17dca981261a3b5ea5b1827dc66609e281fd156"
+    },
+    {
+      "name": "01-edda-init",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "init",
+        "--no-hooks"
+      ],
+      "started_unix": 1788509109.4200907,
+      "exit_code": 0,
+      "stdout_bytes": 64,
+      "stdout_sha256": "41a3f156e1845d38b25fbba73820d8fa30a2ed1c71bd67983f7f2f756a7768e7"
+    },
+    {
+      "name": "02-session-a",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "hook",
+        "claude"
+      ],
+      "started_unix": 1788509110.1318927,
+      "exit_code": 0,
+      "stdout_bytes": 1616,
+      "stdout_sha256": "8df992f13dea9f14f8593b39c0d007ae6d667225289657ebe2b54f526fd68664"
+    },
+    {
+      "name": "03-session-b",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "hook",
+        "claude"
+      ],
+      "started_unix": 1788509111.8849108,
+      "exit_code": 0,
+      "stdout_bytes": 1981,
+      "stdout_sha256": "8dee1cb8f575431cf89c67c1be7fd0e3efa764b20cced6fc6835238f451c8bdd"
+    },
+    {
+      "name": "04-first-contact",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "hook",
+        "claude"
+      ],
+      "started_unix": 1788509113.63494,
+      "exit_code": 0,
+      "stdout_bytes": 804,
+      "stdout_sha256": "6be6a0718016549fa7558280b958b13be6c6ec58aab37a752944c3edda09757a"
+    },
+    {
+      "name": "05-baseline",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "hook",
+        "claude"
+      ],
+      "started_unix": 1788509114.6316442,
+      "exit_code": 0,
+      "stdout_bytes": 565,
+      "stdout_sha256": "5d7099d844732d6865bdc64fe2c87de2493d805a3f2829064a7b00d81f48933c"
+    },
+    {
+      "name": "06-dedup",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "hook",
+        "claude"
+      ],
+      "started_unix": 1788509117.3659794,
+      "exit_code": 0,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "07-dedup",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "hook",
+        "claude"
+      ],
+      "started_unix": 1788509120.5292122,
+      "exit_code": 0,
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "08-change-peer",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "bridge",
+        "claude",
+        "heartbeat-write",
+        "--label",
+        "changed-peer",
+        "--session",
+        "gh710-b"
+      ],
+      "started_unix": 1788509121.9850037,
+      "exit_code": 0,
+      "stdout_bytes": 42,
+      "stdout_sha256": "439dacc34ec17fd318f15d4f001e339e1f66707d6873ab90553ed41143817edc"
+    },
+    {
+      "name": "09-changed",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "hook",
+        "claude"
+      ],
+      "started_unix": 1788509123.9578388,
+      "exit_code": 0,
+      "stdout_bytes": 577,
+      "stdout_sha256": "81e180bb1ce49436304c68146a0fecca2a8108de9929e8519b5ceb6322a23633"
+    },
+    {
+      "name": "10-peers",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "bridge",
+        "claude",
+        "peers",
+        "--json"
+      ],
+      "started_unix": 1788509125.3894486,
+      "exit_code": 0,
+      "stdout_bytes": 787,
+      "stdout_sha256": "f33c43647df113f23641458bf374e1e91d2453c237f5640e583f7af041729239"
+    },
+    {
+      "name": "11-version",
+      "command": [
+        "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+        "--version"
+      ],
+      "started_unix": 1788509125.7736924,
+      "exit_code": 0,
+      "stdout_bytes": 11,
+      "stdout_sha256": "d99c902d780ee31afbcaa323fc31f1fd2aea0ab1a29b3a21fece4065bd69740b"
+    }
+  ]
+}

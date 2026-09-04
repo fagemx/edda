@@ -19,6 +19,7 @@
   <a href="#為什麼需要-edda">為什麼需要 Edda？</a> ·
   <a href="#第一層記憶跨-session-活著">記憶</a> ·
   <a href="#第二層協調跨-agent-活著">艦隊</a> ·
+  <a href="#第三層控制決定接下來跑什麼">控制</a> ·
   <a href="#安裝">安裝</a> ·
   <a href="#快速開始">快速開始</a> ·
   <a href="#運作原理">運作原理</a> ·
@@ -45,14 +46,15 @@ Agent 的工作有兩種消失法。
 
 **Agent 死了，工作狀態跟著死。** 你同時跑兩三個 agent，其中一個 session 半路掛掉。它剛剛在做什麼？做完了哪些？有沒有做到一半的？如果答案只存在一個已經不存在的程序裡，你就得手工重建現場——或更糟，重做已經做完的工。
 
-Edda 用同一個原語治這兩種病：**append-only 的本地狀態，放在 `.edda/`、在你自己的機器上，比任何 session、任何 agent、任何工具都活得久。** 一個 workspace，兩層應用：
+Edda 用同一個原語治這兩種病：**append-only 的本地狀態，放在 `.edda/`、在你自己的機器上，比任何 session、任何 agent、任何工具都活得久。** 一個 workspace，三層應用：
 
 | 層 | 回答的問題 | 原語 |
 |---|---|---|
 | **記憶** | *決定了什麼、為什麼？* | 決策、筆記、session 摘要、自動注入 |
 | **艦隊** | *誰在做什麼、實際發生了什麼？* | claims、任務＋receipt、計畫、gate、verdict |
+| **控制** | *接下來該跑什麼、值不值得、還活著嗎？* | 訊號（heartbeat、freshness、cost、verdict、佇列深度、surface 交集）；動詞 watch / report / promote / intake——進行中，[#560](https://github.com/fagemx/edda/issues/560) |
 
-第一層從第一天就能單獨用。第二層不用另外裝——同一個 workspace、同一個 CLI——當你開始跑多個 agent，它就在那裡。
+第一層從第一天就能單獨用。第二層不用另外裝——同一個 workspace、同一個 CLI——當你開始跑多個 agent，它就在那裡。第三層——控制層——正在同一個地基上成形。
 
 **分開的持久化平面，這是刻意的。** 決策、筆記、session 摘要、任務、verdict 是 hash-chained SQLite 帳本裡的事件——防篡改、可重播。即時協調狀態在那條鏈之外，放在使用者層 store：claims 附加進一份協調 log，而每個 session 的心跳是一個小快照檔，工作時持續覆寫、正常結束時移除——沒走到正常結束就死掉的 session 會把快照留下，`edda peers` 會把它報成 stale，`edda gc` 之後可以回收。每個 `edda conduct` 計畫又各自保有自己的狀態檔與事件記錄。全部都在本地、都查得到；hash chain 覆蓋的是帳本那一份。
 
@@ -146,7 +148,15 @@ edda dispatch --agent codex --prompt-file task.md
 
 **兩層權限——記錄不等於生效。** Agent 可以自由記錄決策，但記錄下來的決策在操作者用 `edda ratify` 追認之前都是 *unratified*——追認是另一筆 append-only 事件，從不改寫原決策，所以權限軌跡查得到。這個分層存在於資料模型，也存在於 agent 被教的內容（只教 `decide`，不教 `ratify`）；但它今天是流程慣例，還不是存取控制邊界——身分尚未做加密強制。加上帳本上的 hash chain，這就是整層存在的目的：**agent 跑在你的機器上，而你永遠查得到它做過什麼——按順序、附權限軌跡。**
 
-> **成熟度說明：** 第一層是穩定的日用等級。第二層今天就能用（claims、task、conduct、dispatch、verdict gate、ratify），也是 edda 成長最快的地方——進行中的 liveness 心跳、統一艦隊狀態面、事件推播都追蹤在 [#560](https://github.com/fagemx/edda/issues/560)。它是用出來的：edda 自己的多 agent 艦隊就用它蓋 edda。
+> **成熟度說明：** 第一層是穩定的日用等級。第二層今天就能用（claims、task、conduct、dispatch、verdict gate、ratify），也是 edda 成長最快的地方。第三層——控制層——正在進行中：[epic #560](https://github.com/fagemx/edda/issues/560) 追蹤把它的訊號與動詞（liveness 心跳、freshness、cost、統一狀態面、watch / report / promote / intake）變成產品的工作。它是用出來的：edda 自己的多 agent 艦隊就用它蓋 edda。
+
+## 第三層——控制決定接下來跑什麼
+
+記憶存紀錄，艦隊跑工作。當多條 lane 同時在飛，難的問題往上移一層：*接下來該跑什麼、值不值得跑、還有沒有東西活著？* 回答這題需要它自己的物件與動詞：從帳本與艦隊量出來的**訊號**——heartbeat、freshness、cost、verdict、佇列深度、surface 交集——以及作用在訊號上的動詞：**watch**、**report**、**promote**、**intake**。
+
+讓這一層站得住的邊界：**機械半邊**進產品——surface 交集判斷、heartbeat 與 freshness 偵測、cost 彙總——controller 直接向 edda 讀艦隊狀態，而不是手工重建現場。**判斷半邊**留在操作者手上：方向、把 pending 工作升級成 ready、追認。操作者不在三層裡面——操作者在三層之上。
+
+第三層已命名、已定界，但還沒出貨：這些動詞是概念，不是子命令（現有的 `edda watch` TUI 與 `edda intake github` 範圍都比概念窄）；把它們產品化——統一狀態面、liveness 心跳、cost 回報——就是 Layer 3 epic，追蹤在 [#560](https://github.com/fagemx/edda/issues/560)。
 
 ## 安裝
 

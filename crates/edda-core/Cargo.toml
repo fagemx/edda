@@ -3,6 +3,7 @@ name = "edda-core"
 description = "Core event model, hash chain, and schema for Edda"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -19,11 +20,14 @@ hex.workspace = true
 ulid.workspace = true
 time.workspace = true
 serde_yaml.workspace = true
+dirs.workspace = true
 globset.workspace = true
 regex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+syn.workspace = true
+jsonschema.workspace = true
 
 [lints]
 workspace = true

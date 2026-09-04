@@ -124,6 +124,14 @@ pub enum NotifyEvent {
         attempt: u32,
         final_output: Option<String>,
     },
+    /// GH-551/GH-751: progress notification for a gated phase awaiting verdict.
+    GateProgress {
+        plan: String,
+        phase: String,
+        subject: String,
+        gate_sha: String,
+        wait_label: String,
+    },
 }
 
 impl NotifyEvent {
@@ -136,6 +144,7 @@ impl NotifyEvent {
             NotifyEvent::RequestPending { .. } => "request_pending",
             NotifyEvent::TaskAssigned { .. } => "task_assigned",
             NotifyEvent::PhaseTerminal { .. } => "phase_terminal",
+            NotifyEvent::GateProgress { .. } => "gate_progress",
         }
     }
 
@@ -213,6 +222,19 @@ impl NotifyEvent {
                 "state": state,
                 "attempt": attempt,
                 "final_output": final_output,
+            }),
+            NotifyEvent::GateProgress {
+                plan,
+                phase,
+                subject,
+                gate_sha,
+                wait_label,
+            } => serde_json::json!({
+                "plan": plan,
+                "phase": phase,
+                "subject": subject,
+                "gate_sha": gate_sha,
+                "wait_label": wait_label,
             }),
         }
     }
@@ -370,6 +392,16 @@ fn format_ntfy(event: &NotifyEvent) -> (String, String, String) {
                 priority.to_string(),
             )
         }
+        NotifyEvent::GateProgress {
+            subject,
+            gate_sha,
+            wait_label,
+            ..
+        } => (
+            format!("Verdict needed: {subject}"),
+            format!("Waiting on sha {gate_sha} — {wait_label}"),
+            "default".to_string(),
+        ),
     }
 }
 
@@ -495,6 +527,17 @@ fn format_telegram(event: &NotifyEvent) -> String {
                 text.push_str(&escape_html(out));
             }
             text
+        }
+        NotifyEvent::GateProgress {
+            subject,
+            gate_sha,
+            wait_label,
+            ..
+        } => {
+            let s = escape_html(subject);
+            let g = escape_html(gate_sha);
+            let w = escape_html(wait_label);
+            format!("<b>Verdict needed: {s}</b>\nsha <code>{g}</code> — {w}")
         }
     }
 }
@@ -689,6 +732,33 @@ mod tests {
         assert_eq!(payload["event_type"], "phase_terminal");
         assert_eq!(payload["data"]["plan"], "p");
         assert_eq!(payload["data"]["attempt"], 3);
+    }
+
+    #[test]
+    fn format_gate_progress_events() {
+        let event = NotifyEvent::GateProgress {
+            plan: "p".into(),
+            phase: "a".into(),
+            subject: "p/a".into(),
+            gate_sha: "1234567890abcdef".into(),
+            wait_label: "9m0s remaining".into(),
+        };
+        let (title, body, priority) = format_ntfy(&event);
+        assert_eq!(title, "Verdict needed: p/a");
+        assert_eq!(body, "Waiting on sha 1234567890abcdef — 9m0s remaining");
+        assert_eq!(priority, "default");
+
+        let text = format_telegram(&event);
+        assert!(text.contains("<b>Verdict needed: p/a</b>"));
+        assert!(text.contains("sha <code>1234567890abcdef</code> — 9m0s remaining"));
+
+        let payload = format_webhook(&event);
+        assert_eq!(payload["event_type"], "gate_progress");
+        assert_eq!(payload["data"]["plan"], "p");
+        assert_eq!(payload["data"]["phase"], "a");
+        assert_eq!(payload["data"]["subject"], "p/a");
+        assert_eq!(payload["data"]["gate_sha"], "1234567890abcdef");
+        assert_eq!(payload["data"]["wait_label"], "9m0s remaining");
     }
 
     #[test]

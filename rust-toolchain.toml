@@ -1,0 +1,19 @@
+# The toolchain this workspace is built and linted with, everywhere.
+#
+# Pinned because the merge gate is `-D warnings` over a workspace clippy run:
+# on a floating channel a Rust release can turn `main` red with no commit, and
+# the failure looks like it belongs to whichever PR notices first.
+#
+# Before this pin, CI installed floating `stable` while this workstation ran
+# 1.93.1 (2026-02-11) — five releases apart — so every local gate receipt was
+# produced by a different compiler than the one CI judged with.
+#
+# Bump policy: one release at a time, and not immediately after it ships. Run
+# `cargo check --all-targets --workspace` and
+# `cargo clippy --workspace --all-targets -- -D warnings` before committing a
+# bump, and fix what the new lints find in that same change — never land a
+# bump with a known-red gate and a follow-up promise.
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

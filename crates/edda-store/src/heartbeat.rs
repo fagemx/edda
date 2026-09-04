@@ -222,11 +222,9 @@ mod tests {
     /// drive-letter forms, on both separator styles.
     #[test]
     fn heartbeat_path_confines_a_hostile_session_id_to_the_state_dir() {
-        // Serialize with the other heartbeat tests: they mutate
-        // EDDA_STORE_ROOT, and this test compares paths against it.
-        let _lock = crate::ENV_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        // Isolated store root: keeps this path-resolution test off the
+        // operator's real store.
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         let state_dir = heartbeat_path("proj", "innocent")
             .parent()
             .unwrap()
@@ -259,12 +257,7 @@ mod tests {
     /// lane's heartbeat was destroyed.
     #[test]
     fn session_ids_differing_only_by_case_get_distinct_files() {
-        let _lock = crate::ENV_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("EDDA_STORE_ROOT");
-        std::env::set_var("EDDA_STORE_ROOT", tmp.path());
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         write_heartbeat("proj", &sample("Lane")).expect("write Lane");
         write_heartbeat("proj", &sample("lane")).expect("write lane");
         let state = crate::project_dir("proj").join("state");
@@ -286,11 +279,6 @@ mod tests {
         let lane_lower = read_heartbeat("proj", "lane").expect("lane heartbeat survives");
         assert_eq!(lane_upper.session_id, "Lane");
         assert_eq!(lane_lower.session_id, "lane");
-        match previous {
-            Some(v) => std::env::set_var("EDDA_STORE_ROOT", v),
-            None => std::env::remove_var("EDDA_STORE_ROOT"),
-        }
-        let _ = std::fs::remove_dir_all(tmp.path());
     }
 
     /// P0 regression (review round 2): a Unicode pair NTFS folds onto the
@@ -299,12 +287,7 @@ mod tests {
     /// no folding can ever identify two of its outputs.
     #[test]
     fn unicode_folded_session_ids_get_distinct_files() {
-        let _lock = crate::ENV_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("EDDA_STORE_ROOT");
-        std::env::set_var("EDDA_STORE_ROOT", tmp.path());
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         let kelvin = "\u{212A}"; // KELVIN SIGN — NTFS folds onto ASCII K
         write_heartbeat("proj", &sample(kelvin)).expect("write Kelvin sign");
         write_heartbeat("proj", &sample("K")).expect("write K");
@@ -327,11 +310,6 @@ mod tests {
         let b = read_heartbeat("proj", "K").expect("K heartbeat survives");
         assert_eq!(a.session_id, kelvin);
         assert_eq!(b.session_id, "K");
-        match previous {
-            Some(v) => std::env::set_var("EDDA_STORE_ROOT", v),
-            None => std::env::remove_var("EDDA_STORE_ROOT"),
-        }
-        let _ = std::fs::remove_dir_all(tmp.path());
     }
 
     /// P0 regression (review round 2), the injectivity argument as a pinned
@@ -370,12 +348,7 @@ mod tests {
     /// named `escaped.json` appears outside it, and the record round-trips.
     #[test]
     fn hostile_session_id_round_trips_without_leaving_the_state_dir() {
-        let _lock = crate::ENV_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("EDDA_STORE_ROOT");
-        std::env::set_var("EDDA_STORE_ROOT", tmp.path());
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         let sid = "x\\..\\..\\..\\escaped";
         write_heartbeat("proj", &sample(sid)).expect("write");
         let project = crate::project_dir("proj");
@@ -400,21 +373,11 @@ mod tests {
             read_heartbeat("proj", sid).is_some(),
             "heartbeat round-trips through the sanitized path"
         );
-        match previous {
-            Some(v) => std::env::set_var("EDDA_STORE_ROOT", v),
-            None => std::env::remove_var("EDDA_STORE_ROOT"),
-        }
-        let _ = std::fs::remove_dir_all(tmp.path());
     }
 
     #[test]
     fn heartbeat_roundtrips_through_the_shared_writer() {
-        let _lock = crate::ENV_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("EDDA_STORE_ROOT");
-        std::env::set_var("EDDA_STORE_ROOT", tmp.path());
+        let _store = crate::test_support::isolated_store_root().expect("isolated store");
         let pid = "test_store_hb_roundtrip";
         write_heartbeat(pid, &sample("s1")).expect("write");
         let hb = read_heartbeat(pid, "s1").expect("read");
@@ -422,10 +385,5 @@ mod tests {
         assert_eq!(hb.attempt, Some(1));
         assert_eq!(hb.pid, Some(42));
         assert!(heartbeat_path(pid, "s1").exists());
-        match previous {
-            Some(v) => std::env::set_var("EDDA_STORE_ROOT", v),
-            None => std::env::remove_var("EDDA_STORE_ROOT"),
-        }
-        let _ = std::fs::remove_dir_all(tmp.path());
     }
 }

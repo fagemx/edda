@@ -17,84 +17,63 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  prepare-crates:
+    name: Prepare crates.io publication
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.token.outputs.enabled }}
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup show
+      - name: Validate tag and derive workspace publish order
+        run: python3 scripts/publish-crates.py plan --tag "$GITHUB_REF_NAME"
+      - name: Check publication credential
+        id: token
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -n "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::CARGO_REGISTRY_TOKEN is absent; publish-crates and downstream GitHub Release jobs are skipped."
+            echo "CARGO_REGISTRY_TOKEN is absent. Crates publication and GitHub Release are skipped; configure the repository secret and rerun." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  publish-crates:
+    name: Publish workspace to crates.io
+    needs: prepare-crates
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.prepare-crates.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: publish-crates
+      - run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Publish in dependency order and verify immutable source
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: python3 scripts/publish-crates.py publish --tag "$GITHUB_REF_NAME"
+
   create-release:
     name: Create Release
+    needs: publish-crates
     runs-on: ubuntu-latest
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
-        run: rustup toolchain install stable --profile minimal
+        # rust-toolchain.toml pins the version; `rustup show` installs it and
+        # prints it into the log.
+        run: rustup show
       - name: Get tag
         id: tag
         run: echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-      - name: Validate release metadata
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Tag must use vMAJOR.MINOR.PATCH, got ${GITHUB_REF_NAME}"
-            exit 1
-          fi
-
-          metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-          mismatches="$(jq -r --arg version "$version" '
-            .workspace_members as $members
-            | .packages[]
-            | select(.id as $id | $members | index($id))
-            | select(.version != $version)
-            | "\(.name)=\(.version)"
-          ' <<<"$metadata")"
-          if [ -n "$mismatches" ]; then
-            echo "::error::Workspace package versions do not match tag $version"
-            printf '%s\n' "$mismatches"
-            exit 1
-          fi
-      - name: Verify crates.io release parity
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          mapfile -t crates < <(
-            cargo metadata --locked --no-deps --format-version 1 \
-              | jq -r '
-                  .workspace_members as $members
-                  | .packages[]
-                  | select(.id as $id | $members | index($id))
-                  | select(.publish != [])
-                  | .name
-                ' \
-              | tr -d '\r'
-          )
-
-          if ((${#crates[@]} == 0)); then
-            echo "::error::No publishable workspace crates found"
-            exit 1
-          fi
-
-          missing=()
-          yanked=()
-          for crate in "${crates[@]}"; do
-            response="$RUNNER_TEMP/crates-io-${crate}.json"
-            if ! curl --fail --silent --show-error \
-              --retry 3 --retry-all-errors --retry-delay 2 \
-              --user-agent "edda-release-ci/${GITHUB_REPOSITORY}" \
-              "https://crates.io/api/v1/crates/${crate}/${version}" \
-              --output "$response"; then
-              missing+=("$crate")
-            elif [ "$(jq -r '.version.yanked' "$response")" != "false" ]; then
-              yanked+=("$crate")
-            fi
-          done
-
-          if (( ${#missing[@]} || ${#yanked[@]} )); then
-            echo "::error::Publish every workspace crate to crates.io before pushing the release tag"
-            ((${#missing[@]})) && printf 'missing %s: %s\n' "$version" "${missing[*]}"
-            ((${#yanked[@]})) && printf 'yanked %s: %s\n' "$version" "${yanked[*]}"
-            exit 1
-          fi
-          printf 'crates.io parity verified for %s workspace crates at %s\n' \
-            "${#crates[@]}" "$version"
+      - name: Verify crates.io release parity and tag source
+        run: python3 scripts/publish-crates.py verify --tag "$GITHUB_REF_NAME"
       - name: Prepare release notes
         shell: bash
         run: |
@@ -165,7 +144,7 @@ jobs:
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal
+          rustup show
           rustup target add ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2

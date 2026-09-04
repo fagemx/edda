@@ -1,0 +1,15 @@
+name: research-carrier-preview
+strategy_run_id: review-587
+phases:
+  - id: review
+    prompt: Audit the frozen skill contract; record evidence with its original executor.
+    isolation: scratch
+    owns_objects: [finding:finding-587]
+    deliverable:
+      kind: finding
+      finding_id: finding-587
+      basis: {kind: git, sha: 580e98678fe6a39f57ad7a4dcbff74ecf47f2be4}
+    check:
+      - type: finding_verdict
+        finding_id: finding-587
+        basis: {kind: git, sha: 580e98678fe6a39f57ad7a4dcbff74ecf47f2be4}

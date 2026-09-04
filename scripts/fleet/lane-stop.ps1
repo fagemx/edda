@@ -297,16 +297,18 @@ if ($residual.Count -gt 0) {
 $task = Get-ScheduledTask -TaskName $TaskName
 if ($task.State -eq 'Running') { Fail "task $TaskName still reports State = Running after the stop" }
 
-# --- 6. the shared .git/config must still parse after the kill (GH-715) -----
-# The lane's worktree shares one .git/config with the main checkout and every
-# other worktree; a kill landing on git's write to it NULs the file and takes
+# --- 6. the shared .git/config and refs must still be healthy after the kill (GH-715, GH-797) -----
+# The lane's worktree shares one .git/config and refs with the main checkout and every
+# other worktree; a kill landing on git's write to it NULs the files and takes
 # them all down. Check it here — the one moment we know a kill just happened —
-# and restore from the backup lane-launch took before the lane could write.
+# and restore from the backup/reflogs.
 # The end record below is written either way, so the verdict never costs the
 # log its === EXIT === line.
 
 $gitConfigVerdict = 'skipped (lane cwd not resolvable from the wrapper)'
+$gitRefsVerdict = 'skipped (lane cwd not resolvable from the wrapper)'
 $gitConfigBroken = $false
+$gitRefsBroken = $false
 if ($laneCwd -and (Test-Path -LiteralPath $laneCwd)) {
   # $ErrorActionPreference is Stop for this script, so an exception raised
   # inside the guard — a config held open by another process makes
@@ -316,23 +318,54 @@ if ($laneCwd -and (Test-Path -LiteralPath $laneCwd)) {
   try {
     $guardOut = & (Join-Path $PSScriptRoot 'git-config-guard.ps1') -RepoPath $laneCwd -VerifyOrRestore 2>&1
     $guardExit = $LASTEXITCODE
+    $restoredConfigLine = @($guardOut | Where-Object { "$_" -match 'RESTORED config=' })
+    $healthyConfigLine = @($guardOut | Where-Object { "$_" -match 'config=.*healthy' })
+    $restoredRefLine = @($guardOut | Where-Object { "$_" -match 'RESTORED ref=' })
+
     if ($guardExit -eq 0) {
-      $restoredLine = @($guardOut | Where-Object { "$_" -match 'RESTORED' })
-      $gitConfigVerdict = if ($restoredLine.Count -gt 0) { "$($restoredLine[0])" } else { 'healthy' }
+      $gitConfigVerdict = if ($restoredConfigLine.Count -gt 0) { "$($restoredConfigLine[0])" } else { 'healthy' }
+      $gitRefsVerdict = if ($restoredRefLine.Count -gt 0) { "$($restoredRefLine[0])" } else { 'healthy' }
     } else {
-      # Exit 4 means the guard declined to judge the file (it could not read
-      # it), which is not the same claim as "corrupt and unrepairable".
-      $gitConfigBroken = $true
-      $gitConfigVerdict = if ($guardExit -eq 4) {
-        'UNVERIFIED (git-config-guard could not read the config; nothing was changed)'
+      # Guard exited non-zero. Accurately report what was actually measured (GH-797, P1-1).
+      if ($restoredConfigLine.Count -gt 0) {
+        $gitConfigVerdict = "$($restoredConfigLine[0])"
+        $gitConfigBroken = $false
+      } elseif ($healthyConfigLine.Count -gt 0) {
+        $gitConfigVerdict = 'healthy'
+        $gitConfigBroken = $false
       } else {
-        "UNREPAIRABLE (git-config-guard exit $guardExit)"
+        $gitConfigBroken = $true
+        $gitConfigVerdict = if ($guardExit -eq 4) {
+          'UNVERIFIED (git-config-guard could not read the config; nothing was changed)'
+        } else {
+          "UNREPAIRABLE (git-config-guard exit $guardExit)"
+        }
+      }
+
+      if ($gitConfigBroken) {
+        # Config failed or was unreadable, so refs verification was not reached.
+        $gitRefsBroken = $true
+        $gitRefsVerdict = if ($guardExit -eq 4) {
+          'UNVERIFIED (config unreadable; refs not checked)'
+        } else {
+          'UNVERIFIED (config failed; refs not checked)'
+        }
+      } else {
+        # Config is confirmed healthy/restored; the failure was specifically in refs!
+        $gitRefsBroken = $true
+        $gitRefsVerdict = if ($restoredRefLine.Count -gt 0) {
+          "$($restoredRefLine[0]); UNREPAIRABLE (git-config-guard exit $guardExit)"
+        } else {
+          "UNREPAIRABLE (git-config-guard exit $guardExit)"
+        }
       }
     }
     $guardOut | ForEach-Object { [Console]::Error.WriteLine("lane-stop: git-config-guard: $_") }
   } catch {
     $gitConfigBroken = $true
+    $gitRefsBroken = $true
     $gitConfigVerdict = "CHECK FAILED ($($_.Exception.Message))"
+    $gitRefsVerdict = "CHECK FAILED ($($_.Exception.Message))"
     [Console]::Error.WriteLine("lane-stop: git-config-guard threw: $($_.Exception.Message)")
   }
 }
@@ -340,7 +373,7 @@ if ($laneCwd -and (Test-Path -LiteralPath $laneCwd)) {
 # --- 7. write the end record the killed wrapper cannot write ----------------
 
 if ($terminated.Count -gt 0 -or ((Test-Path -LiteralPath $Log) -and -not (Test-Path -LiteralPath $Done))) {
-  Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1; terminated $($terminated.Count) process(es); .git/config $gitConfigVerdict) ===" -Encoding utf8
+  Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1; terminated $($terminated.Count) process(es); .git/config $gitConfigVerdict; refs $gitRefsVerdict) ===" -Encoding utf8
   if (-not (Test-Path -LiteralPath $Done)) {
     Set-Content -LiteralPath $Done -Value 'stopped' -Encoding ascii
   }
@@ -356,7 +389,8 @@ if ($terminated.Count -gt 0) {
 }
 "residual=$($residual.Count) (CommandLine match + process tree verification)"
 "gitconfig=$gitConfigVerdict"
-if ($gitConfigBroken) {
-  Fail "the shared .git/config for '$laneCwd' was not confirmed healthy after the kill ($gitConfigVerdict); every worktree sharing it depends on that file, so check it before starting anything else (GH-715)"
+"gitrefs=$gitRefsVerdict"
+if ($gitConfigBroken -or $gitRefsBroken) {
+  Fail "the shared git metadata for '$laneCwd' was not confirmed healthy after the kill (config: $gitConfigVerdict; refs: $gitRefsVerdict); every worktree sharing it depends on those files, so check it before starting anything else (GH-715, GH-797)"
 }
 exit 0

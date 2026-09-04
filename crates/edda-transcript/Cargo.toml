@@ -3,6 +3,7 @@ name = "edda-transcript"
 description = "Transcript delta ingest and classification for Edda"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -10,13 +11,13 @@ categories.workspace = true
 keywords.workspace = true
 
 [dependencies]
+edda-core = { path = "../edda-core", version = "0.4.0" }
 edda-store = { path = "../edda-store", version = "0.4.0" }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 fs2.workspace = true
-dirs.workspace = true
 time.workspace = true
 
 [dev-dependencies]

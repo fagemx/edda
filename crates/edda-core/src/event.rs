@@ -5,8 +5,8 @@ use crate::types::{
     SCHEMA_VERSION,
 };
 
-/// Compute the hash for an event: serialize without the `hash` field,
-/// canonical JSON sort, then SHA-256.
+/// Canonical JSON then SHA-256; this helper does not remove envelope fields.
+/// Input projection: `docs/reference/ledger-event-spec.md#canonical-hash`.
 pub fn compute_event_hash(event_without_hash: &serde_json::Value) -> anyhow::Result<String> {
     let bytes = canonical_json_bytes(event_without_hash)?;
     Ok(sha256_hex(&bytes))

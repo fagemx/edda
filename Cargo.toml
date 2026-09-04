@@ -29,6 +29,12 @@ members = [
 [workspace.package]
 version = "0.4.0"
 edition = "2021"
+# Bisected 2026-09-04, not copied from the toolchain pin: 1.87 fails on
+# dependency floors (darling, instability, time all require 1.88), and
+# 1.88/1.89/1.90 fail on this workspace's own use of `str::floor_char_boundary`
+# (`round_char_boundary`, rust-lang/rust#93743), which stabilised in 1.91.
+# `cargo check --workspace` passes on 1.91.0.
+rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fagemx/edda"
 homepage = "https://edda.sh"
@@ -52,6 +58,8 @@ dirs = "6"
 tempfile = "3"
 globset = "0.4"
 regex = "1"
+syn = { version = "2", features = ["full", "visit"] }
+jsonschema = { version = "0.33", default-features = false }
 uuid = { version = "1", features = ["v5"] }
 rand = "0.8"
 tracing = "0.1"
@@ -64,3 +72,12 @@ too_many_lines = "warn"
 lto = true
 codegen-units = 1
 strip = true
+
+[profile.dev]
+# Debug info is 64% of a clean `--all-targets` build here (2.64 GB of 4.14 GB,
+# `edda.pdb` alone 312 MB against a 53 MB `edda.exe`), because every one of the
+# workspace's test and binary executables links statically and carries full
+# symbols. `line-tables-only` keeps file and line numbers in backtraces — what
+# a failing test actually needs — and drops the type and variable information
+# that a debugger would use. Measured before/after in GH-810.
+debug = "line-tables-only"

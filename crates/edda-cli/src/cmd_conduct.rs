@@ -120,7 +120,14 @@ pub fn run(
     tmux: bool,
     agent: AgentKind,
 ) -> Result<()> {
-    let plan = load_plan(plan_file)?;
+    let plan = if dry_run {
+        eprintln!(
+            "Schema preview only: draft carriers/checks are validated, not executed or accepted."
+        );
+        edda_conductor::plan::preview::load_preview(plan_file)?
+    } else {
+        load_plan(plan_file)?
+    };
     let cwd = cwd_override
         .map(|p| p.to_path_buf())
         .or_else(|| {
@@ -638,7 +645,14 @@ fn print_status(state: &PlanState) {
             }
             _ => String::new(),
         };
-        println!("  {icon} {:<24} {:?} {detail}", ps.id, ps.status);
+        let elapsed = ps
+            .duration_ms
+            .map(|ms| format!("{ms} ms"))
+            .unwrap_or_else(|| "—".into());
+        println!(
+            "  {icon} {:<24} {:?} {detail} elapsed={elapsed}",
+            ps.id, ps.status
+        );
     }
     println!();
 }
@@ -871,6 +885,67 @@ mod tests {
             request.contains("phase_terminal")
                 && request.contains("PR: https://github.com/x/y/pull/620"),
             "configured webhook channel must receive the terminal event, got: {request}"
+        );
+    }
+
+    /// GH-751 P1-2: `conduct run` builds its notifier through
+    /// `ChannelNotifier::for_repo`, so a `gate_progress` channel configured
+    /// in `.edda/config.json` actually receives progress events instead of
+    /// being dropped by ChannelNotifier.
+    #[test]
+    fn run_notifier_delivers_gate_progress_to_configured_channel() {
+        use edda_conductor::runner::notify::Notifier;
+        use std::io::Read;
+        use std::time::Duration;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".edda")).unwrap();
+        std::fs::write(
+            dir.path().join(".edda").join("config.json"),
+            format!(
+                r#"{{"notify_channels":[{{"type":"webhook","url":"http://127.0.0.1:{port}","events":["gate_progress"]}}]}}"#
+            ),
+        )
+        .unwrap();
+
+        let notifier = ChannelNotifier::for_repo(dir.path());
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            notifier
+                .notify_gate_progress(edda_notify::NotifyEvent::GateProgress {
+                    plan: "gh751".into(),
+                    phase: "review".into(),
+                    subject: "gh751/review".into(),
+                    gate_sha: "c".repeat(40),
+                    wait_label: "9m0s remaining".into(),
+                })
+                .await;
+        });
+
+        // Dispatch finished before notify_gate_progress returned; the local
+        // webhook must have received the event.
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = String::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => request.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+            if request.contains("gate_progress") {
+                break;
+            }
+        }
+        assert!(
+            request.contains("gate_progress")
+                && request.contains("gh751/review")
+                && request.contains("9m0s remaining"),
+            "configured webhook channel must receive the gate_progress event, got: {request}"
         );
     }
 }

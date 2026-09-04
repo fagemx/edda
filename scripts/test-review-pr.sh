@@ -149,7 +149,7 @@ dry_run() { # $1 = body text
     printf '%b' "$1" >"$tmp/body"
     export GH_BODY_FILE="$tmp/body"
     rm -f "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-"* 2>/dev/null || true
-    out=$(timeout 60 sh "$root/scripts/review-pr.sh" "$FIXTURE_PR" 1 --dry-run 2>"$tmp/err") || {
+    out=$(timeout "${EDDA_TEST_TIMEOUT_SECONDS:-60}" sh "$root/scripts/review-pr.sh" "$FIXTURE_PR" 1 --dry-run 2>"$tmp/err") || {
         printf 'review-pr.sh --dry-run exited non-zero; stderr:\n%s\n' "$(cat "$tmp/err")" >&2
         return 1
     }
@@ -163,12 +163,18 @@ dry_run_round() { # $1=body  $2=round  $3=prev sha (may be empty)  $4=HOME (may 
     printf '%b' "$1" >"$tmp/body"
     export GH_BODY_FILE="$tmp/body"
     rm -f "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-"* 2>/dev/null || true
-    out=$(HOME="${4:-$HOME}" timeout 60 sh "$root/scripts/review-pr.sh" \
-            "$FIXTURE_PR" "$2" ${3:+"$3"} --dry-run 2>"$tmp/err") || {
+    if [ -n "$3" ]; then
+        if ! out=$(HOME="${4:-$HOME}" timeout "${EDDA_TEST_TIMEOUT_SECONDS:-60}" sh "$root/scripts/review-pr.sh" \
+                "$FIXTURE_PR" "$2" "$3" --dry-run 2>"$tmp/err"); then rc=1; else rc=0; fi
+    else
+        if ! out=$(HOME="${4:-$HOME}" timeout "${EDDA_TEST_TIMEOUT_SECONDS:-60}" sh "$root/scripts/review-pr.sh" \
+                "$FIXTURE_PR" "$2" --dry-run 2>"$tmp/err"); then rc=1; else rc=0; fi
+    fi
+    if [ "$rc" -ne 0 ]; then
         printf 'review-pr.sh --dry-run (round %s) exited non-zero; stderr:\n%s\n' \
             "$2" "$(cat "$tmp/err")" >&2
         return 1
-    }
+    fi
     brief="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r$2-brief.md"
     lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r$2-lane.ps1"
 }
@@ -325,7 +331,7 @@ else
         || fail 'D5d: the lane does not run the edda dispatch claude transport'
     grep -q -- "--model 'claude-opus-5'" "$lane" \
         || fail 'D5e: the lane does not pin the review model with --model (default-only is not allowed)'
-    grep -q -- "--exclude-tools 'Edit,Write,NotebookEdit'" "$lane" \
+    grep -q -- "--exclude-tools 'Edit,Write,NotebookEdit,mcp__\*'" "$lane" \
         || fail 'D5f: the lane does not structurally deny the write tools'
     grep -q -- "--session-id '$sid'" "$lane" \
         || fail 'D5g: the lane does not pass the brief header session UUID'
@@ -383,8 +389,8 @@ if ! grep -q '.edda-review-spec.md' "$brief"; then
     fail 'D8d: the brief does not point the reviewer at the worktree spec copy .edda-review-spec.md'
 fi
 lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-lane.ps1"
-grep -q -- "--allowedTools 'Read,Glob,Grep,Bash'" "$lane" \
-    || fail 'D8e: the fallback arm does not restrict the reviewer to the read-only allowlist --allowedTools Read,Glob,Grep,Bash (round 2 P1-2)'
+grep -Fq -- "--tools 'Read,Grep,Glob,Bash(git *),Bash(gh *),Bash(edda *),Bash(sh *)'" "$lane" \
+    || fail 'D8e: the fallback arm lacks the measured restricted capability allowlist (GH-702)'
 if grep -q 'bypassPermissions' "$lane"; then
     fail 'D8f: the fallback arm still grants --permission-mode bypassPermissions — the recorded fleet.review-engine-model shape auto-approves only the read allowlist'
 fi
@@ -421,8 +427,10 @@ grep -q "SESSION=$EXPECTED_SID_9999" "$lane" \
     || fail 'D9c: the lane writes no SESSION= receipt, so the watcher cannot report which conversation ran'
 grep -q 'SESSION_MODE=new' "$lane" \
     || fail 'D9c: the lane writes no SESSION_MODE= receipt'
-grep -q "reviewer_session: $EXPECTED_SID_9999" "$brief" \
-    || fail 'D9d: the brief does not tell the reviewer to carry reviewer_session in the REVIEW.md §7 header'
+grep -qE "reviewer_session: $EXPECTED_SID_9999.*directly under \`model_observed\`" "$brief" \
+    || fail 'D9d: the brief does not specify reviewer_session directly under model_observed'
+awk '/- model_observed:/{getline; print}' "$EDDA_REVIEW_SPEC" | grep -q 'reviewer_session:' \
+    || fail 'D9d: REVIEW.md §7 does not place reviewer_session directly below model_observed'
 
 # The same id on the next round — that is the whole point of deriving it.
 dry_run_round 'Issue: #650\n' 2 'cccccccccccccccccccccccccccccccccccccccc' ''
@@ -466,8 +474,8 @@ fi
 # next one — 14 stale wt-review-pr* trees were the reason (GH-708 comment).
 grep -q 'function Remove-ReviewWorktree' "$lane" \
     || fail 'D9i: the lane defines no worktree removal'
-if [ "$(grep -c 'Remove-ReviewWorktree$' "$lane")" -lt 2 ]; then
-    fail 'D9i: the lane does not remove the worktree on both arms'
+if [ "$(grep -cE '^[[:space:]]*if \(Test-ReviewWorktree\) \{ Remove-ReviewWorktree \} else \{ exit 2 \}$' "$lane")" -lt 2 ]; then
+    fail 'D9i: the lane does not guard worktree removal on both transport arms'
 fi
 # Anchored at the start of a line so the assertion cannot be satisfied by the
 # comment block above the call (round 1 P2: the loose grep matched prose).
@@ -482,6 +490,16 @@ grep -q -- 'Session observed: ' "$lane" \
     || fail 'D9j: the fallback arm records no `Session observed:` line, so the watcher has nothing to cross-check the launched id against'
 grep -q -- "Session: $EXPECTED_SID_9999" "$lane" \
     || fail 'D9j: the fallback arm no longer records the launched session id alongside the observed one'
+
+# D10 (GH-733): the brief embeds the write-end swallow lens — the wiring-scan
+# section and the P1 statement the reviewer needs to act on it. Both asserted
+# on the generated brief so the lens cannot silently disappear from the brief.
+grep -q 'Wiring and write-end swallow scan' "$brief" \
+    || fail 'D10: the brief does not embed the Wiring and write-end swallow scan section (GH-733)'
+grep -q 'write-end swallow.*is \*\*P1\*\*' "$brief" \
+    || fail 'D10: the brief does not state that a write-end swallow on coordination/ledger/heartbeat/session-ledger/L3-store/digest paths is **P1** (GH-733)'
+grep -q '(wiring scan unavailable)' "$brief" \
+    || fail 'D10: the brief does not surface (wiring scan unavailable) when revisions cannot be resolved (GH-733)'
 
 # --- offline guarantee: the real fleet scratch carries none of our output -----
 # Only our own fixture PR is asserted, not the whole listing: a live watcher or

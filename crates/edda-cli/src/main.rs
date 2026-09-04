@@ -51,6 +51,8 @@ mod cmd_user;
 mod cmd_verdict;
 mod cmd_verify;
 mod cmd_watch;
+mod detached_dispatch;
+mod dispatch_claim;
 mod fleet;
 mod pipeline_templates;
 #[cfg(test)]
@@ -62,7 +64,7 @@ use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 
 #[derive(Parser)]
-#[command(name = "edda", version, about = "Decision memory for coding agents")]
+#[command(name = "edda", version = env!("EDDA_LONG_VERSION"), about = "Decision memory for coding agents")]
 struct Cli {
     #[command(subcommand)]
     cmd: Command,
@@ -287,7 +289,12 @@ enum Command {
         argv: Vec<String>,
     },
     /// Show workspace status
-    Status,
+    Status {
+        /// Emit one JSON object on stdout instead of text. Stable contract —
+        /// see COMPATIBILITY.md § "Stable `--json` contracts".
+        #[arg(long)]
+        json: bool,
+    },
     /// Create a commit event
     Commit {
         /// Commit title
@@ -407,6 +414,9 @@ enum Command {
         /// Include a notes.md file in addition to decisions/
         #[arg(long = "include-notes")]
         include_notes: bool,
+        /// Exporting machine identity (defaults to EDDA_MACHINE or host)
+        #[arg(long)]
+        machine: Option<String>,
     },
     /// Verify the ledger hash chain (tamper-evidence check; GH-647)
     Verify {
@@ -1252,7 +1262,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             json,
         ),
         Command::Run { argv } => cmd_run::execute(&repo_root, &argv),
-        Command::Status => cmd_status::execute(&repo_root),
+        Command::Status { json } => cmd_status::execute(&repo_root, json),
         Command::Commit {
             title,
             purpose,
@@ -1315,11 +1325,12 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             format,
             out,
             include_notes,
+            machine,
         } => {
             if format != "md" {
                 anyhow::bail!("only 'md' export format is supported (got: {format})");
             }
-            cmd_export::execute(&repo_root, &out, include_notes)
+            cmd_export::execute(&repo_root, &out, include_notes, machine.as_deref())
         }
         Command::Verify { json } => cmd_verify::execute(&repo_root, json),
         Command::Bridge { cmd } => cmd_bridge::run_bridge(cmd, &repo_root),
@@ -1446,6 +1457,6 @@ mod tests {
     fn parses_cli_through_stack_safe_entrypoint() {
         let cli = parse_cli_from(vec![OsString::from("edda"), OsString::from("status")]);
 
-        assert!(matches!(cli.cmd, Command::Status));
+        assert!(matches!(cli.cmd, Command::Status { json: false }));
     }
 }

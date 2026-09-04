@@ -49,10 +49,10 @@ struct AuditEntry {
 /// - Daily budget is exhausted
 /// - Session was already digested (idempotent guard)
 pub fn should_run(project_id: &str, session_id: &str) -> bool {
-    if std::env::var("EDDA_BG_ENABLED").unwrap_or_else(|_| "1".into()) == "0" {
+    if crate::env_var("EDDA_BG_ENABLED").unwrap_or_else(|| "1".into()) == "0" {
         return false;
     }
-    if std::env::var("EDDA_LLM_API_KEY")
+    if crate::env_var("EDDA_LLM_API_KEY")
         .unwrap_or_default()
         .is_empty()
     {
@@ -76,7 +76,7 @@ pub fn should_run(project_id: &str, session_id: &str) -> bool {
 /// Reads the stored transcript, calls the LLM for a summary, writes an
 /// `edda note` event to the workspace ledger, and updates state tracking.
 pub fn run_digest(project_id: &str, session_id: &str, cwd: &str) -> Result<()> {
-    let api_key = std::env::var("EDDA_LLM_API_KEY").with_context(|| "EDDA_LLM_API_KEY not set")?;
+    let api_key = crate::env_var("EDDA_LLM_API_KEY").with_context(|| "EDDA_LLM_API_KEY not set")?;
     if api_key.is_empty() {
         anyhow::bail!("EDDA_LLM_API_KEY is empty");
     }
@@ -320,6 +320,7 @@ mod tests {
 
     #[test]
     fn should_run_returns_false_when_disabled() {
+        let _store = crate::isolated_store();
         crate::with_env_guard(
             &[
                 ("EDDA_BG_ENABLED", Some("0")),
@@ -333,6 +334,7 @@ mod tests {
 
     #[test]
     fn should_run_returns_false_without_api_key() {
+        let _store = crate::isolated_store();
         crate::with_env_guard(
             &[("EDDA_BG_ENABLED", Some("1")), ("EDDA_LLM_API_KEY", None)],
             || {
@@ -343,6 +345,7 @@ mod tests {
 
     #[test]
     fn should_run_returns_false_without_transcript() {
+        let _store = crate::isolated_store();
         crate::with_env_guard(
             &[
                 ("EDDA_BG_ENABLED", Some("1")),
@@ -357,6 +360,7 @@ mod tests {
 
     #[test]
     fn should_run_returns_false_when_already_digested() {
+        let _store = crate::isolated_store();
         let pid = "test_digest_idempotent";
         let sid = "sess-digest-1";
         let _ = edda_store::ensure_dirs(pid);
@@ -393,6 +397,7 @@ mod tests {
 
     #[test]
     fn build_digest_prompt_includes_transcript() {
+        let _store = crate::isolated_store();
         let prompt = build_digest_prompt("hello world transcript", "");
         assert!(prompt.contains("hello world transcript"));
         assert!(prompt.contains("session 摘要器"));
@@ -400,6 +405,7 @@ mod tests {
 
     #[test]
     fn build_digest_prompt_includes_stats() {
+        let _store = crate::isolated_store();
         let stats = "Duration: 30 minutes\nFiles modified: 5";
         let prompt = build_digest_prompt("transcript text", stats);
         assert!(prompt.contains("Duration: 30 minutes"));
@@ -409,6 +415,7 @@ mod tests {
 
     #[test]
     fn build_digest_prompt_omits_stats_section_when_empty() {
+        let _store = crate::isolated_store();
         let prompt = build_digest_prompt("transcript text", "");
         assert!(!prompt.contains("## Session Stats"));
     }
@@ -430,18 +437,11 @@ mod tests {
 
     #[test]
     fn idempotency_guard_works() {
-        // GH-646: the default store root is the real per-user store, so a
-        // bare pid inherits leftovers from an environment this test did not
-        // create: a previous run that panicked before its cleanup leaves a
-        // "completed" digest state behind and the first assertion fails on
-        // every later run (the GH-415 self-perpetuating-leftover shape).
-        // The premise is therefore established here: wipe this test's own
-        // pid directory before asserting anything. No EDDA_STORE_ROOT
-        // redirect — mutating the process-wide root while holding ENV_LOCK
-        // strands sibling tests that resolve `project_dir` WITHOUT that
-        // lock into a store this test then deletes, turning one hermetic
-        // test into NotFound failures everywhere else (see agent_phase's
-        // heartbeat test for the same cross-store hazard).
+        let _store = crate::isolated_store();
+        // GH-646: the store this test writes to must be one it created. The
+        // isolated store root below (GH-757) establishes that premise
+        // without a process-global redirect that sibling tests could
+        // resolve into.
         let pid = "test_digest_guard";
         let sid = "sess-guard-1";
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
@@ -460,6 +460,7 @@ mod tests {
 
     #[test]
     fn build_stats_context_handles_missing_digest() {
+        let _store = crate::isolated_store();
         // No prev_digest.json for a nonexistent project
         let ctx = build_stats_context("nonexistent_proj_ctx");
         assert!(ctx.is_empty());
@@ -467,6 +468,7 @@ mod tests {
 
     #[test]
     fn audit_log_appends() {
+        let _store = crate::isolated_store();
         let pid = "test_digest_audit";
 
         // Start from a known state (GH-415). This test asserts an exact row

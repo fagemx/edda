@@ -21,6 +21,18 @@ invariant, API/schema order). Plan YAMLs live outside the repo (scratchpad or
 
 ## Layer 1 — static judgment (before dispatch)
 
+Layer 1's input **is** the select-this-batch table from fleet-orchestrate's
+ready-batch selection procedure — a batch never appears from nowhere. That
+table already applied the exclusion checklist (cross-machine claims, in-flight
+PRs/remote branches, `needs-operator`); this layer starts from its selected
+rows and does not repeat those checks.
+
+Ready-queue intake is a machine check, not memory (GH-665): source candidate
+issues from `scripts/fleet/ready-queue-lint.sh`, never a raw
+`gh issue list --label fleet:ready` — the script excludes open issues whose
+delivery PR already merged, so a delivered issue still carrying `fleet:ready`
+is never dispatched.
+
 Derive each issue's predicted write surface (paths + symbols) from its scope
 against the crate map. Pairwise intersect:
 
@@ -33,22 +45,34 @@ against the crate map. Pairwise intersect:
 
 ## Layer 2 — in-flight containment
 
-- Worktree per bundle: `git worktree add <root>-wt-ghNNN -b <branch> origin/main`.
-- Fixed lane pool only (`worker-1`, `worker-2`, `verifier`): set
-  `CARGO_TARGET_DIR=<lane-root>/<lane>` for the whole lane lifetime. Never an
-  ad-hoc build dir — that is the 194 GB failure.
-- Worktree prompts must say: already on branch X, do NOT `checkout main`, do
-  NOT pull, do NOT create branches (checkout of main fails in a worktree anyway).
+- Each active bundle has one lane-bound fixed worktree. The fixed pool is
+  `worker-1`, `worker-2`, `verifier`, and `verifier-2`, at
+  `<root>-wt-<lane>`; use `scripts/fleet/lane-prepare.ps1` to create it or
+  switch to a new branch from `origin/main`. It refuses a busy or dirty lane,
+  and refuses to switch until the previous branch's local tip matches the
+  remote tip. It never force-checks out or removes a worktree, branch, or
+  source.
+- Use the canonical environment policy in [`.claude/CLAUDE.md` Build
+  lanes](../../CLAUDE.md#build-lanes); `lane-warm.ps1 -PrintEnv` is the helper
+  contract consumed by `lane-launch.ps1`. Do not duplicate that policy in wave
+  plans or worktree prompts.
+- Worktree prompts must name the prepared fixed worktree and current branch:
+  do NOT `checkout main`, pull, create branches, remove branches, or create a
+  second worktree. The controller prepares the next branch only after the lane
+  is idle and its prior branch has been pushed.
 - No verdict gates in parallel plans (`cleanup.review-gate=pr-not-verdict-gate`;
   gates assume an attached controller — wave1 timed out 2 of 3). This also makes
   the GH-543 worktree-ledger trap inapplicable.
 - Record `edda claim --paths` per lane.
-- Cross-machine claim before dispatch (GH-656): for each bundle run
-  `scripts/fleet-claim-issue.sh <issue> <machine>` — machine label from the
-  lane brief, never a hostname guess. Exit 1 (another machine's `taking:`
-  comment or `lane:*` label) means that lane does not dispatch;
-  `edda dispatch --issue <N> --machine <machine>` enforces the same check at
-  dispatch time and refuses with exit 2.
+- Cross-machine claim before dispatch (GH-656): each bundle's claim is
+  written by one command — `scripts/fleet-claim-issue.sh
+  <issue> <machine>/<role>` with the explicit `<machine>/<role>` token
+  from the lane brief (e.g. `4090/worker-1`, `docs/reviewer`), never a
+  hostname guess. Exit 1: another lane's `taking:` comment or `lane:*`
+  label — that lane does not dispatch. `edda dispatch --issue <N>
+  --machine <machine>/<role>` is only a pre-spawn check that refuses with
+  exit 2 if another machine already holds the issue; until #782 lands it
+  writes no claim and does not substitute for the script.
 
 ## Layer 3 — post-hoc net (before merge)
 

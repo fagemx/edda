@@ -168,6 +168,7 @@ mod tests {
 
     #[test]
     fn match_glob_test_files() {
+        let _store = crate::isolated_store();
         let patterns = vec![sample_pattern(
             "test-no-db",
             &["**/*.test.*"],
@@ -180,6 +181,7 @@ mod tests {
 
     #[test]
     fn no_match_non_test_files() {
+        let _store = crate::isolated_store();
         let patterns = vec![sample_pattern(
             "test-no-db",
             &["**/*.test.*"],
@@ -191,6 +193,7 @@ mod tests {
 
     #[test]
     fn render_respects_budget() {
+        let _store = crate::isolated_store();
         let p1 = sample_pattern("p1", &["**/*"], "rule 1");
         let p2 = sample_pattern("p2", &["**/*"], "rule 2");
         let patterns = vec![&p1, &p2];
@@ -203,6 +206,7 @@ mod tests {
 
     #[test]
     fn load_skips_underscore_files() {
+        let _store = crate::isolated_store();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         // Write a normal pattern
@@ -222,12 +226,14 @@ mod tests {
 
     #[test]
     fn load_from_nonexistent_dir() {
+        let _store = crate::isolated_store();
         let loaded = load_patterns(Path::new("/nonexistent/patterns"));
         assert!(loaded.is_empty());
     }
 
     #[test]
     fn match_windows_path() {
+        let _store = crate::isolated_store();
         let patterns = vec![sample_pattern(
             "test-no-db",
             &["**/*.test.*"],

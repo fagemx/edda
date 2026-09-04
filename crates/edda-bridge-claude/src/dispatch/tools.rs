@@ -59,9 +59,9 @@ pub(super) fn dispatch_pre_tool_use(
     }
 
     // ── Off-limits enforcement: block Edit/Write on peer-claimed files ──
-    let enforce_offlimits = match std::env::var("EDDA_ENFORCE_OFFLIMITS") {
-        Ok(val) => val == "1",
-        Err(_) => read_workspace_config_bool(cwd, "bridge.enforce_offlimits").unwrap_or(false),
+    let enforce_offlimits = match crate::env_var("EDDA_ENFORCE_OFFLIMITS") {
+        Some(val) => val == "1",
+        None => read_workspace_config_bool(cwd, "bridge.enforce_offlimits").unwrap_or(false),
     };
     if enforce_offlimits {
         let tool_name_ol = get_str(raw, "tool_name");
@@ -93,7 +93,7 @@ pub(super) fn dispatch_pre_tool_use(
         }
     }
 
-    let auto_approve = std::env::var("EDDA_CLAUDE_AUTO_APPROVE").unwrap_or_else(|_| "1".into());
+    let auto_approve = crate::env_var("EDDA_CLAUDE_AUTO_APPROVE").unwrap_or_else(|| "1".into());
 
     // Pattern matching (only for Edit/Write)
     let pattern_ctx = match_tool_patterns(raw, cwd);
@@ -274,7 +274,7 @@ pub(super) fn evaluate_learned_rules(
     project_id: &str,
     cwd: &str,
 ) -> Option<String> {
-    if std::env::var("EDDA_POSTMORTEM").unwrap_or_else(|_| "1".into()) == "0" {
+    if crate::env_var("EDDA_POSTMORTEM").unwrap_or_else(|| "1".into()) == "0" {
         return None;
     }
 
@@ -312,9 +312,11 @@ pub(super) fn evaluate_learned_rules(
 
     let result = edda_postmortem::hooks::evaluate_rules(&rules_store, &hook_ctx);
 
-    // Record hits so matched rules get their TTL reset
+    // Record shows for matched rules. PreToolUse matches on every Bash call
+    // must NOT reset the rule's TTL (GH-813) — shows are counted instead of
+    // hits, so noise rules still decay on schedule.
     if !result.matched_rule_ids.is_empty() {
-        edda_postmortem::hooks::record_matched_hits(&mut rules_store, &result.matched_rule_ids);
+        edda_postmortem::hooks::record_matched_shows(&mut rules_store, &result.matched_rule_ids);
         let _ = rules_store.save_project(project_id);
     }
 
@@ -445,39 +447,62 @@ pub(super) fn try_update_agent_phase(
         crate::agent_phase::detect_transition(&current, previous.as_ref(), &config)
     {
         // Write updated phase state
-        let _ = crate::agent_phase::write_phase_state(project_id, &transition.state);
+        if let Err(e) = crate::agent_phase::write_phase_state(project_id, &transition.state) {
+            crate::state::record_dropped_write(
+                project_id,
+                session_id,
+                "agent phase state",
+                &format!("{e:#}"),
+            );
+        }
 
         // Emit ledger event (best-effort, try-lock)
-        try_write_phase_change_event(raw, &transition);
+        if let Err(e) = try_write_phase_change_event(raw, &transition) {
+            crate::state::record_dropped_write(
+                project_id,
+                session_id,
+                "ledger event (agent-phase-change)",
+                &format!("{e:#}"),
+            );
+        }
     } else {
         // Always persist latest state (updates detected_at for staleness tracking)
-        let _ = crate::agent_phase::write_phase_state(project_id, &current);
+        if let Err(e) = crate::agent_phase::write_phase_state(project_id, &current) {
+            crate::state::record_dropped_write(
+                project_id,
+                session_id,
+                "agent phase state",
+                &format!("{e:#}"),
+            );
+        }
     }
 }
 
-/// Write an agent_phase_change event to the workspace ledger (best-effort).
-fn try_write_phase_change_event(
+/// Write an agent_phase_change event to the workspace ledger (best-effort, try-lock).
+///
+/// GH-745: failed ledger open or append propagates as an error instead of being
+/// silently swallowed — only a missing workspace and a contended lock are
+/// legitimate silent skips.
+pub(super) fn try_write_phase_change_event(
     raw: &serde_json::Value,
     transition: &edda_core::agent_phase::AgentPhaseTransition,
-) {
+) -> anyhow::Result<()> {
     let cwd = get_str(raw, "cwd");
     if cwd.is_empty() {
-        return;
+        return Ok(());
     }
     let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(&cwd)) else {
-        return;
+        return Ok(());
     };
-    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
-        return;
-    };
+    let ledger = edda_ledger::Ledger::open(&root)?;
     let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
-        return; // locked by another process — skip
+        return Ok(()); // locked by another process — skip
     };
     let Ok(branch) = ledger.head_branch() else {
-        return;
+        return Ok(());
     };
     let Ok(parent_hash) = ledger.last_event_hash() else {
-        return;
+        return Ok(());
     };
     let params = edda_core::event::AgentPhaseChangeParams {
         branch: &branch,
@@ -491,7 +516,7 @@ fn try_write_phase_change_event(
         signals: &transition.state.signals,
     };
     if let Ok(event) = edda_core::event::new_agent_phase_change_event(&params) {
-        let _ = ledger.append_event(&event);
+        ledger.append_event(&event)?;
     }
 
     // Push notification (best-effort)
@@ -507,6 +532,7 @@ fn try_write_phase_change_event(
             },
         );
     }
+    Ok(())
 }
 
 /// Read active task names from state file for phase detection heuristics.
@@ -545,9 +571,9 @@ pub(super) fn detect_git_branch_cached(cwd: &str) -> Option<String> {
 /// Check if patterns are enabled and match tool input against Pattern Store.
 pub(super) fn match_tool_patterns(raw: &serde_json::Value, cwd: &str) -> Option<String> {
     // Check if patterns feature is enabled
-    let enabled = match std::env::var("EDDA_PATTERNS_ENABLED") {
-        Ok(val) => val == "1",
-        Err(_) => read_workspace_config_bool(cwd, "patterns_enabled").unwrap_or(false),
+    let enabled = match crate::env_var("EDDA_PATTERNS_ENABLED") {
+        Some(val) => val == "1",
+        None => read_workspace_config_bool(cwd, "patterns_enabled").unwrap_or(false),
     };
     if !enabled {
         return None;

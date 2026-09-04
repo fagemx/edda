@@ -38,6 +38,17 @@
    label `review:post-failed`）。
 4. head 被 push 之後（SHA 變了）自動再審一輪（round+1，delta brief，`prev-sha` 帶入）。
 
+## Independent Review commit status（GH-742）
+
+判決留言貼出後，watcher 會對**被審的那個 SHA**（不是目前 head）發 commit status：
+context `Independent Review`，state 是該 SHA 上所有 §7 判決留言（加上這一輪）的聯集
+（union rule）——至少一筆 `LGTM (P0=0, P1=0)` 且沒有任何其他判決在場才是 `success`；
+有任一筆不合格判決就是 `failure`；一筆都沒有是 `error`。後到的 LGTM 不會蓋過先前的
+Changes Requested。貼 status 不用 best-effort：照判決留言同一條 bounded retry 路徑
+（`postfails`、`review:post-failed`）。這段聯集邏輯是暫時的 `#769` 區塊，退役方式是
+整塊換成 `edda review gate <sha>`，把 exit 0/1/2 對應到 success/failure/error；
+從 PR 留言讀判決的 `#671` 區塊同理，等帳本（ledger）能跨機器攜帶判決後退役。
+
 ## 一張 PR 一個審查者對話（GH-708）
 
 `fleet.reviewer-agent=pi-with-per-pr-resumable-session` 當初選 pi 只為一個量到的性質：
@@ -56,7 +67,7 @@
   重複用同一個 `--session-id` 不是續談，是直接失敗：`Session ID <id> is already in use`。
 - 續談與 cwd 無關（GH-708 實測：從無關目錄 `--resume` 一樣續得到，而且是**同一個**
   transcript 繼續長，不會多出一個檔），所以 lane 每輪刪掉又重建 worktree 不影響它。
-- 判決表頭帶 `reviewer_session`：watcher 那一行印的是 lane 記在 `.done` 的
+- 判決表頭帶 `reviewer_session`——REVIEW.md §7 將它列為判決輸出表頭契約的一部分：watcher 那一行印的是 lane 記在 `.done` 的
   `SESSION=`／`SESSION_MODE=`（**發起時**的事實），並跟 log 裡的
   `Session observed:` 行對照 —— 那一行是**後端自己回報**的（`edda dispatch` 取自
   claude stream-json 的 `system/init`，fallback 臂取自 claude 的 JSON `session_id`），
@@ -188,7 +199,7 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 ## 它不做什麼
 
 - **不合併**。合併永遠照 `pr.merge-policy`（final current-head LGTM、P0=0/P1=0、
-  7 格 CI 綠、SHA 窗檢查）由操作者授權後執行。
+  required check「`CI Gate`」綠（`ci.merge-gate`）、SHA 窗檢查）由操作者授權後執行。
 - 不 push、不開 issue、不回留言、不動 `.github/workflows/**`。
 - 不用 codex 當審查運輸（做不到唯讀）；不編造 model_observed／cost。
 - 不審 draft PR；fork PR 的 head 拿不到 worktree 時會在 watch.log 留下失敗紀錄。
