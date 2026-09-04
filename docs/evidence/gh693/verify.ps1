@@ -39,6 +39,22 @@ try {
     foreach ($field in $requiredFields) {
         if ($sourceText -notmatch [regex]::Escape($field)) { throw "missing source field: $field" }
     }
+
+    $fixture = Join-Path $unpacked "base-sha-fixture"
+    git init -q --initial-branch main $fixture
+    git -C $fixture config user.email "gh693@example.invalid"
+    git -C $fixture config user.name "GH-693 fixture"
+    Set-Content -LiteralPath (Join-Path $fixture "Cargo.toml") -Value "[workspace.package]`nversion = `"0.3.0`""
+    git -C $fixture add Cargo.toml
+    git -C $fixture commit -qm "base version"
+    $baseSha = git -C $fixture rev-parse HEAD
+    Set-Content -LiteralPath (Join-Path $fixture "Cargo.toml") -Value "[workspace.package]`nversion = `"0.4.0`""
+    git -C $fixture commit -am "advance local main" -q
+    $mutableBranchVersion = (git -C $fixture show "main:Cargo.toml") -join "`n"
+    $pinnedBaseVersion = (git -C $fixture show "$baseSha`:Cargo.toml") -join "`n"
+    if ($mutableBranchVersion -notmatch '0.4.0' -or $pinnedBaseVersion -notmatch '0.3.0') {
+        throw "full base SHA did not isolate the version read from local main"
+    }
 } finally {
     if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force }
 }

@@ -46,4 +46,6 @@ Run `verify.ps1` with the official release ZIP. It verifies the archive digest,
 executes the official binary's version and missing-dispatch probes, and asserts
 that the full PR #684 source SHA contains every cited field. The script fails
 on any unexpected runtime result or missing source field; it does not print a
-hardcoded pass.
+hardcoded pass. It also creates a disposable Git fixture where local `main`
+advances after a recorded base commit, proving that `git show <base SHA>` reads
+the frozen base version rather than the mutable branch.

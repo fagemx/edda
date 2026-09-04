@@ -342,7 +342,8 @@ the workspace version at the reviewed base SHA:
 
 ```sh
 edda --version
-git show "$BASE:Cargo.toml" | sed -n '/^\[workspace.package\]/,/^\[/p' | grep '^version'
+BASE_SHA=$(gh pr view "$N" --json baseRefOid --jq .baseRefOid)
+git show "$BASE_SHA:Cargo.toml" | sed -n '/^\[workspace.package\]/,/^\[/p' | grep '^version'
 ```
 
 They identify the subject of a later measurement: the first is an installed
