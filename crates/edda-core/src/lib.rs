@@ -1,5 +1,6 @@
 pub mod agent_phase;
 pub mod approval;
+pub mod background_model;
 pub mod bundle;
 pub mod canon;
 pub mod decision;

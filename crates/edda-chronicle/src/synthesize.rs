@@ -58,14 +58,8 @@ async fn synthesize_with_llm(api_key: &str, input: SynthesisInput) -> Result<cra
 
     let prompt = build_prompt(&input);
 
-    let request = AnthropicRequest {
-        model: "claude-3-5-haiku-20241022".to_string(),
-        max_tokens: 1024,
-        messages: vec![Message {
-            role: "user".to_string(),
-            content: prompt,
-        }],
-    };
+    let model_override = std::env::var("EDDA_BG_MODEL").ok();
+    let request = background_request(model_override.as_deref(), prompt);
 
     let response = client
         .post("https://api.anthropic.com/v1/messages")
@@ -96,6 +90,17 @@ async fn synthesize_with_llm(api_key: &str, input: SynthesisInput) -> Result<cra
         .unwrap_or("");
 
     parse_llm_output(text)
+}
+
+fn background_request(model_override: Option<&str>, prompt: String) -> AnthropicRequest {
+    AnthropicRequest {
+        model: edda_core::background_model::resolve_background_model(model_override),
+        max_tokens: 1024,
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: prompt,
+        }],
+    }
 }
 
 fn synthesize_with_template(input: SynthesisInput) -> Result<crate::RecapOutput> {
@@ -292,6 +297,21 @@ mod tests {
             commits: vec![],
             decisions: vec![],
         }
+    }
+
+    #[test]
+    fn background_request_uses_default_model_without_override() {
+        let request = background_request(None, "prompt".to_string());
+        assert_eq!(
+            request.model,
+            edda_core::background_model::DEFAULT_BACKGROUND_MODEL
+        );
+    }
+
+    #[test]
+    fn background_request_uses_override_as_outgoing_model() {
+        let request = background_request(Some("claude-test-model"), "prompt".to_string());
+        assert_eq!(request.model, "claude-test-model");
     }
 
     #[tokio::test]
