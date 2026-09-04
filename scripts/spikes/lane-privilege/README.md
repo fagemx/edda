@@ -104,7 +104,10 @@ The harness needs exactly these four things; nothing else was assumed or faked:
      -BuildLanePath          '<lane-root>\worker-N' `
      -RepoAllowList          'fagemx/edda' `
      -BranchAllowList        'spike/lane-privilege-<date>' `
-     -TokenProviderRef       'credman://gh-lane-spike'   # or edda-node://… once the broker exists
+     -TokenProviderRef       'credman://gh-lane-spike'   `# or edda-node://… once the broker exists `
+  -ProtectedCredentialFiles @('C:\Users\fagem\.claude\.credentials.json', `
+                              'C:\Users\fagem\.codex\auth.json', `
+                              'C:\Users\fagem\.pi\agent\auth.json')
    ```
 
    The spike branch is created by the run itself (`HEAD:refs/heads/spike/…`);

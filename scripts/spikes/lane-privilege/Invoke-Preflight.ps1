@@ -62,7 +62,9 @@ Add-Check -Name 'workspace-exists' -Passed:$workspaceOk -Detail $WorkspacePath
 $laneOk = Test-Path -LiteralPath $BuildLanePath -PathType Container
 Add-Check -Name 'build-lane-exists' -Passed:$laneOk -Detail $BuildLanePath
 
-# 4. Allowlists: exact names only; a main-targeting allowlist is refused outright.
+# 4. Allowlists: exact names only; a main-targeting allowlist is refused outright;
+#    each repo entry must be a well-formed owner/repo pair (Round1 F2: the actual
+#    publication destination is bound again immediately before the push).
 $repoOk = $true
 $repoDetail = 'ok'
 try {
@@ -104,6 +106,23 @@ foreach ($tool in @('git', 'gh', 'cargo')) {
     Add-Check -Name "tool-$tool" -Passed:($null -ne $cmd) `
         -Detail $(if ($null -ne $cmd) { $cmd.Source } else { 'not found in PATH' })
 }
+
+# 7. Configured publication destination (metadata only; no network). If the
+#    workspace has a resolvable origin URL it must already match the allowlist.
+#    The authoritative binding happens in the action immediately before the push.
+$destOk = $true
+$destDetail = 'no remote configured (publication binding happens in the action)'
+try {
+    $destUrl = Get-EffectivePushUrl -WorkspacePath $WorkspacePath -RepoAllowList $RepoAllowList -RemoteName 'origin'
+    $destDetail = "origin resolves to an allowlisted repository: $destUrl"
+} catch [System.Exception] {
+    $msg = $_.Exception.Message
+    if ($msg -match 'no resolvable URL') {
+        # Workspace without a configured remote is acceptable at preflight time.
+    }
+    else { $destOk = $false; $destDetail = $msg }
+}
+Add-Check -Name 'push-destination-configured' -Passed:$destOk -Detail $destDetail
 
 # Emit the metadata record, scrubbed of anything token-shaped.
 $report = [pscustomobject]@{

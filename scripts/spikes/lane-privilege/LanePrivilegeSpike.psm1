@@ -4,11 +4,18 @@
 #   1. Principal comes from WindowsIdentity, never from environment variables —
 #      a spoofed USERNAME/USERPROFILE must never let an unrestricted caller pass.
 #   2. Protected-credential probes only open and immediately dispose a read handle;
-#      they never read, log, or print file content.
+#      they never read, log, or print file content. Only real access-denied evidence
+#      satisfies the negative property; sharing violations and other IO errors are
+#      INCONCLUSIVE, never protection proof (Round1 F5).
 #   3. Token values never appear in output, argv, environment, or files. All emitted
-#      text passes through Hide-SecretPatterns.
+#      text passes through Hide-SecretPatterns. The publication path moves the token
+#      exclusively through a stdin pipe into git's in-memory credential cache (Round1 F3).
 #   4. secret-ref resolution is real or explicitly UNSUPPORTED — never a mock value.
-#   5. Push targets only the exact allowlisted spike branch; main is always refused.
+#   5. Publication binds the actual destination (resolved push URL) to the repo
+#      allowlist immediately before the push, and emits exactly one explicit refspec
+#      with tag-following disabled (Round1 F2).
+#   6. Uncertain gh metadata (parse failure, error exit, login-without-token) is
+#      INCONCLUSIVE, never a pass (Round1 F1).
 
 Set-StrictMode -Version 3.0
 
@@ -16,9 +23,10 @@ Set-StrictMode -Version 3.0
 $script:EXIT_OK                 = 0
 $script:EXIT_PREFLIGHT_FAILED   = 2
 $script:EXIT_PRINCIPAL_REFUSED  = 3
-$script:EXIT_PROTECTION_FAIL    = 4   # negative test observed READABLE / token present
+$script:EXIT_PROTECTION_FAIL    = 4   # negative test observed READABLE / reachable token
 $script:EXIT_PROVIDER_UNSUPPORTED = 5
 $script:EXIT_INCONCLUSIVE       = 6
+$script:EXIT_PUBLICATION_FAILED = 7
 
 # Token shapes: GitHub OAuth/user/server/fine-grained PATs and generic bearer-ish
 # values. Used ONLY to scrub output; never to validate a token.
@@ -105,12 +113,22 @@ function Assert-SafeSpikeBranch {
 }
 
 function Assert-SafeRepoTarget {
+    <#
+        .SYNOPSIS
+        Validates one allowlist entry as a well-formed 'owner/repo' pair (no
+        wildcards, no traversal). The ACTUAL publication destination is bound
+        separately by Get-EffectivePushUrl / Test-PushUrlAllowed immediately
+        before the push (Round1 F2).
+    #>
     param(
         [Parameter(Mandatory)][string]$Repo,
         [Parameter(Mandatory)][string[]]$RepoAllowList
     )
     if ([string]::IsNullOrWhiteSpace($Repo) -or $Repo.Contains('*')) {
         throw "Repo guard: empty or wildcard repo refused."
+    }
+    if ($Repo -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$') {
+        throw "Repo guard: '$Repo' is not a well-formed owner/repo pair."
     }
     $exact = $RepoAllowList | Where-Object {
         [string]::Equals($_, $Repo, [System.StringComparison]::OrdinalIgnoreCase)
@@ -122,10 +140,83 @@ function Assert-SafeRepoTarget {
     return $true
 }
 
+function Test-PushUrlAllowed {
+    <#
+        .SYNOPSIS
+        Pure matcher: decides whether a resolved git remote/push URL points at one
+        of the allowlisted repositories. Handles the common GitHub URL shapes
+        (ssh scp-like, ssh://, https://, git://). Anything it cannot parse with
+        confidence is refused (fail closed).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string[]]$RepoAllowList
+    )
+    if ([string]::IsNullOrWhiteSpace($Url)) { return $false }
+
+    # Extract OWNER/REPO from the known GitHub URL shapes, anchored at the end
+    # (optional .git suffix). The HOST is pinned to github.com — an allowlisted
+    # owner/repo on another host (e.g. gitlab.com) must not pass (Round1 F2).
+    $patterns = @(
+        '^git@github\.com:([A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.git)?$',
+        '^[a-z][a-z0-9+.-]*://(?:[^/@\s]+@)?github\.com/([A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*?)(?:\.git)?$'
+    )
+    $ownerRepo = $null
+    foreach ($p in $patterns) {
+        $m = [regex]::Match($Url, $p)
+        if ($m.Success) { $ownerRepo = $m.Groups[1].Value; break }
+    }
+    if ($null -eq $ownerRepo) { return $false }
+    if ($ownerRepo.Contains('..')) { return $false }
+
+    $exact = $RepoAllowList | Where-Object {
+        [string]::Equals($_, $ownerRepo, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    return [bool]$exact
+}
+
+function Get-EffectivePushUrl {
+    <#
+        .SYNOPSIS
+        Resolves the push URL git will actually use for the named remote in the
+        given workspace (pushurl if configured, else url), validates it against
+        the repo allowlist, and returns it. Local config reads only; no network.
+        Throws (fail closed) when the destination cannot be resolved to an
+        allowlisted repository.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$WorkspacePath,
+        [Parameter(Mandatory)][string[]]$RepoAllowList,
+        [string]$RemoteName = 'origin'
+    )
+    $url = $null
+    foreach ($key in @("remote.$RemoteName.pushurl", "remote.$RemoteName.url")) {
+        $out = & git -C $WorkspacePath config --get --null $key 2>$null
+        if ($LASTEXITCODE -eq 0 -and $null -ne $out -and ("$out".Trim().Length -gt 0)) {
+            # --null returns NUL-delimited; take the first value, strip the terminator.
+            $url = ("$out" -split "`0")[0]
+            break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        $out = & git -C $WorkspacePath remote get-url $RemoteName 2>$null
+        if ($LASTEXITCODE -eq 0) { $url = "$out".Trim() }
+    }
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        throw ("Push destination guard: remote '{0}' has no resolvable URL in '{1}'." -f $RemoteName, $WorkspacePath)
+    }
+    if (-not (Test-PushUrlAllowed -Url $url -RepoAllowList $RepoAllowList)) {
+        throw ("Push destination guard: effective push URL '{0}' does not resolve to an allowlisted repository [{1}]." -f
+            (Hide-SecretPatterns -Text $url), ($RepoAllowList -join ', '))
+    }
+    return $url
+}
+
 enum CredentialProbeResult {
-    AccessDenied    # protection property MET (fail-closed success for the negative test)
+    AccessDenied    # real access-denied evidence — protection property MET
     Readable        # protection property NOT met — baseline failure signal
-    NotFound        # inconclusive: nothing was proven
+    NotFound        # inconclusive: target absent, nothing proven
+    Inconclusive    # inconclusive: sharing violation / transient IO state, NOT access control (Round1 F5)
     ProbeError      # probe itself failed for an unexpected reason
 }
 
@@ -135,7 +226,8 @@ function Get-CredentialFileProbe {
         Attempts to open a read handle on a protected credential file and immediately
         disposes it. NEVER reads, stores, or prints any byte of file content.
         .OUTPUTS
-        [CredentialProbeResult]
+        [CredentialProbeResult]. Only UnauthorizedAccessException maps to AccessDenied;
+        sharing violations and other IO failures map to Inconclusive (Round1 F5).
     #>
     param([Parameter(Mandatory)][string]$Path)
 
@@ -157,8 +249,9 @@ function Get-CredentialFileProbe {
             return [CredentialProbeResult]::AccessDenied
         }
         catch [System.IO.IOException] {
-            # Sharing violation or an ACL-mediated IO error is still "denied to us".
-            return [CredentialProbeResult]::AccessDenied
+            # Sharing violation or transient IO state: we could not open the file,
+            # but that is NOT proof of an ACL denial. Inconclusive, never evidence.
+            return [CredentialProbeResult]::Inconclusive
         }
         finally {
             if ($null -ne $stream) { $stream.Dispose() }
@@ -205,9 +298,10 @@ function Resolve-BrokerToken {
         Resolves a token provider reference to a SecureString — for real, or fails
         with an explicit UNSUPPORTED classification. Never returns a mock value.
         .NOTES
-        The returned SecureString must stay in memory and be consumed by the one
-        authorized sink (currently: `gh auth login --with-token` stdin). Callers
-        must not persist, log, or pass it through argv/environment.
+        The returned SecureString stays in memory and is consumed only by
+        Invoke-SpikePublication, which moves it through a stdin pipe into git's
+        in-memory credential cache. It must never be persisted, logged, or passed
+        through argv/environment.
     #>
     param([Parameter(Mandatory)][string]$ProviderRef)
 
@@ -252,42 +346,238 @@ function Resolve-BrokerToken {
 function Get-GhTokenSourceMetadata {
     <#
         .SYNOPSIS
-        Runs `gh auth status` and reduces it to identity/token-SOURCE metadata only.
-        Token values (even the masked ones gh prints) are dropped before anything
-        is returned or printed.
-        .OUTPUTS
-        PSCustomObject with LoggedIn (bool), Host, Account, TokenPresent (bool),
-        TokenSource (string: 'keyring' | 'infile' | 'env' | 'unknown' | 'none').
+        Reduces `gh auth status` output to identity/token-SOURCE metadata only.
+        Token values (even the masked forms gh prints) are dropped BEFORE anything
+        is returned or printed. The source class is parsed FROM the token line
+        before it is discarded (Round1 F1).
+        .PARAMETER StatusText
+        Synthetic injection point for fixture tests: when supplied, these lines are
+        reduced instead of invoking gh. The real action path omits this parameter.
+        .NOTES
+        Throws (fail closed) when gh is missing or `gh auth status` exits nonzero —
+        a failed status must never be read as "no token".
     #>
+    param([string[]]$StatusText)
+
     $meta = [pscustomobject]@{
         LoggedIn     = $false
         Host         = $null
         Account      = $null
         TokenPresent = $false
         TokenSource  = 'none'
+        GhExit       = 0
     }
-    if ($null -eq (Get-Command gh -ErrorAction SilentlyContinue)) {
-        throw "INCONCLUSIVE: gh CLI not found; token-source metadata cannot be collected."
+
+    if ($null -eq $StatusText -or $StatusText.Count -eq 0) {
+        if ($null -eq (Get-Command gh -ErrorAction SilentlyContinue)) {
+            throw "INCONCLUSIVE: gh CLI not found; token-source metadata cannot be collected."
+        }
+        $raw = & gh auth status 2>&1
+        $meta.GhExit = $LASTEXITCODE
+        if ($meta.GhExit -ne 0) {
+            throw ("INCONCLUSIVE: gh auth status exited {0}; token-source state unknown." -f $meta.GhExit)
+        }
     }
-    $raw = & gh auth status 2>&1
-    $meta | Add-Member -NotePropertyName GhExit -NotePropertyValue $LASTEXITCODE
+    else {
+        $raw = $StatusText
+        $meta.GhExit = 0
+    }
+
     foreach ($line in @($raw)) {
         $text = "$line"
-        # Drop every line that could carry token material before it can escape.
-        if ($text -match 'Token:') { 
-            if ($text -notmatch 'no token|token: none') { $meta.TokenPresent = $true }
+        if ($text -match '(?i)token') {
+            # Parse the source class from the token line BEFORE discarding it.
+            # An annotated token line is BOTH present and sourced (Round1 F1).
+            if ($text -match '(?i)no token|token: none') {
+                # An explicit absence statement is not a token.
+            }
+            else {
+                $meta.TokenPresent = $true
+                if ($text -match '\((keyring|infile|env|oauth_token)\)') {
+                    $meta.TokenSource = $Matches[1]
+                }
+                else {
+                    $meta.TokenSource = 'unknown'
+                }
+            }
+            # Any other token-bearing line is dropped here; it never reaches output.
             continue
         }
         if ($text -match 'github\.com') { $meta.Host = 'github.com' }
-        if ($text -match 'Logged in to github\.com as ([A-Za-z0-9-]+)') {
+        if ($text -match 'Logged in to github\.com (?:as|account) ([A-Za-z0-9-]+)') {
             $meta.LoggedIn = $true
             $meta.Account = $Matches[1]
         }
-        if ($text -match 'Token: .*\((keyring|infile|env)\)') {
-            $meta.TokenSource = $Matches[1]
-        }
     }
     return $meta
+}
+
+function Get-GhMetadataVerdict {
+    <#
+        .SYNOPSIS
+        Adjudicates gh metadata for the negative property "no token is reachable
+        from the restricted lane". Fail closed: any present token is a violation
+        (including unparsable source); logged-in-without-token and error exits are
+        inconclusive, never a pass (Round1 F1).
+        .OUTPUTS
+        'ok-no-login' | 'deny-token-present' | 'inconclusive-ambiguous' | 'inconclusive-error'
+    #>
+    param(
+        [Parameter(Mandatory)]$Metadata,
+        [int]$GhExitCode = 0
+    )
+    if ($GhExitCode -ne 0) { return 'inconclusive-error' }
+    if ($Metadata.TokenPresent) { return 'deny-token-present' }
+    if ($Metadata.LoggedIn) { return 'inconclusive-ambiguous' }
+    return 'ok-no-login'
+}
+
+function ConvertFrom-SecureStringInMemory {
+    <#
+        .SYNOPSIS
+        Decrypts a SecureString to plaintext for immediate, in-process use only.
+        The caller must consume the value without storing, logging, or passing it
+        through argv/environment, and must drop the reference immediately.
+    #>
+    param([Parameter(Mandatory)][securestring]$SecureValue)
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
+    try {
+        return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    }
+    finally {
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+}
+
+function Invoke-GitProcess {
+    <#
+        .SYNOPSIS
+        Real git invoker: runs git with the given argument array and optional stdin
+        payload, and returns an observable result object. Arguments are passed as
+        an array (never interpolated into a command line string).
+    #>
+    param(
+        [Parameter(Mandatory)][string[]]$GitArgs,
+        [string]$StdinInput,
+        [string]$WorkingDirectory
+    )
+    $out = $null
+    if ($PSBoundParameters.ContainsKey('WorkingDirectory') -and -not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        if ($PSBoundParameters.ContainsKey('StdinInput') -and $null -ne $StdinInput) {
+            $out = $StdinInput | & git @GitArgs 2>&1
+        }
+        else {
+            Push-Location $WorkingDirectory
+            try { $out = & git @GitArgs 2>&1 } finally { Pop-Location }
+        }
+    }
+    elseif ($PSBoundParameters.ContainsKey('StdinInput') -and $null -ne $StdinInput) {
+        $out = $StdinInput | & git @GitArgs 2>&1
+    }
+    else {
+        $out = & git @GitArgs 2>&1
+    }
+    return [pscustomobject]@{
+        ExitCode = $LASTEXITCODE
+        Output   = @($out | ForEach-Object { "$_" })
+        Args     = $GitArgs
+        Stdin    = $StdinInput
+    }
+}
+
+function Test-GitCredentialCacheAvailable {
+    <#
+        .SYNOPSIS
+        True only when git ships the in-memory credential-cache helper on this host.
+        The publication path is UNSUPPORTED without it (no persistent fallback).
+    #>
+    return ($null -ne (Get-Command 'git-credential-cache' -ErrorAction SilentlyContinue))
+}
+
+function Invoke-SpikePublication {
+    <#
+        .SYNOPSIS
+        Publishes the spike branch using a NONPERSISTENT, process-local credential
+        path (Round1 F3): the resolved token is moved through a stdin pipe into
+        git's in-memory credential-cache daemon (isolated helper list, short
+        timeout), the push uses that cache and ONLY that cache, and the entry is
+        rejected and the daemon stopped afterwards. No `gh auth login` is involved;
+        nothing is written to disk, keyring, environment, or argv.
+        .PARAMETER GitInvoker
+        Injectable git delegate for fixture tests (default: Invoke-GitProcess).
+        Receives the same parameter set and must return an object with ExitCode,
+        Output, Args, Stdin.
+        .OUTPUTS
+        PSCustomObject: Verdict ('published'|'auth-failed'|'push-failed'|
+        'cleanup-incomplete'), PushExit, CleanupExit, Notes.
+        A 'published' verdict proves ONLY that git published the ref; it does not
+        by itself prove the token was broker-scoped — that requires the broker's
+        own audit trail (documented in README.md).
+    #>
+    param(
+        [Parameter(Mandatory)][securestring]$Token,
+        [Parameter(Mandatory)][string]$WorkspacePath,
+        [Parameter(Mandatory)][string]$RemoteName,
+        [Parameter(Mandatory)][string]$RefSpec,
+        [string]$CredentialUsername = 'x-access-token',
+        [string]$CredentialHost = 'github.com',
+        [int]$CacheTimeoutSeconds = 120,
+        [scriptblock]$GitInvoker = ${function:Invoke-GitProcess}
+    )
+
+    $helperArgs = @(
+        '-c', 'credential.helper=',
+        '-c', "credential.helper=cache --timeout=$CacheTimeoutSeconds"
+    )
+
+    # Build the credential payload; the plaintext token exists only here, in
+    # process memory, and only long enough to pipe it to `git credential approve`.
+    $plain = ConvertFrom-SecureStringInMemory -SecureValue $Token
+    $payload = "protocol=https`nhost=$CredentialHost`nusername=$CredentialUsername`npassword=$plain`n`n"
+    $plain = $null   # drop the reference; the cached copy is evicted in cleanup
+
+    $notes = [System.Collections.Generic.List[string]]::new()
+    $pushExit = $null
+    $cleanupExit = 0
+    $verdict = $null
+
+    # 1. Approve the credential into the in-memory cache. On failure: NEVER push.
+    $approve = & $GitInvoker -GitArgs @($helperArgs + @('credential', 'approve')) -StdinInput $payload
+    if ($approve.ExitCode -ne 0) {
+        $notes.Add('credential approve failed; publication refused before any push')
+        $verdict = 'auth-failed'
+    }
+    else {
+        # 2. Push with the isolated helper list, one explicit refspec, tag-following
+        #    disabled, and the validated destination already resolved by the caller.
+        $push = & $GitInvoker -GitArgs @($helperArgs + @('-c', 'push.followTags=false', 'push', $RemoteName, $RefSpec)) -WorkingDirectory $WorkspacePath
+        $pushExit = $push.ExitCode
+        if ($push.ExitCode -ne 0) {
+            $notes.Add('git push exited nonzero')
+            $verdict = 'push-failed'
+        }
+        else {
+            $verdict = 'published'
+        }
+    }
+
+    # 3. Cleanup is always attempted and its result is observable. `credential
+    #    reject` evicts the entry; `credential-cache exit` stops the daemon.
+    $reject = & $GitInvoker -GitArgs @($helperArgs + @('credential', 'reject')) -StdinInput $payload
+    $cacheExit = & $GitInvoker -GitArgs @(@('credential-cache', 'exit'))
+    $payload = $null
+    if ($reject.ExitCode -ne 0 -or $cacheExit.ExitCode -ne 0) {
+        $cleanupExit = 1
+        $notes.Add('cleanup incomplete: credential reject/cache daemon exit failed — inspect git credential-cache processes')
+        if ($verdict -eq 'published') { $verdict = 'cleanup-incomplete' }
+    }
+
+    return [pscustomobject]@{
+        Verdict    = $verdict
+        PushExit   = $pushExit
+        CleanupExit = $cleanupExit
+        Notes      = $notes
+    }
 }
 
 Export-ModuleMember -Function @(
@@ -297,12 +587,20 @@ Export-ModuleMember -Function @(
     'Write-SpikeSafe',
     'Assert-SafeSpikeBranch',
     'Assert-SafeRepoTarget',
+    'Test-PushUrlAllowed',
+    'Get-EffectivePushUrl',
     'Get-CredentialFileProbe',
     'Get-TokenProviderKind',
     'Resolve-BrokerToken',
-    'Get-GhTokenSourceMetadata'
+    'Get-GhTokenSourceMetadata',
+    'Get-GhMetadataVerdict',
+    'ConvertFrom-SecureStringInMemory',
+    'Invoke-GitProcess',
+    'Test-GitCredentialCacheAvailable',
+    'Invoke-SpikePublication'
 )
 Export-ModuleMember -Variable @(
     'EXIT_OK', 'EXIT_PREFLIGHT_FAILED', 'EXIT_PRINCIPAL_REFUSED',
-    'EXIT_PROTECTION_FAIL', 'EXIT_PROVIDER_UNSUPPORTED', 'EXIT_INCONCLUSIVE'
+    'EXIT_PROTECTION_FAIL', 'EXIT_PROVIDER_UNSUPPORTED', 'EXIT_INCONCLUSIVE',
+    'EXIT_PUBLICATION_FAILED'
 )
