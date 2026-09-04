@@ -11,15 +11,17 @@ use std::path::{Path, PathBuf};
 
 // ── Configuration ──
 
-pub(crate) const DEFAULT_MODEL: &str = "claude-3-5-haiku-20241022";
+/// Shared default retained for existing background companions.
+pub(crate) const DEFAULT_MODEL: &str = edda_core::background_model::DEFAULT_BACKGROUND_MODEL;
 pub(crate) const DEFAULT_MAX_TRANSCRIPT_CHARS: usize = 30_000;
 const DEFAULT_DAILY_BUDGET_USD: f64 = 0.50;
 const DEFAULT_CONFIDENCE_THRESHOLD: f64 = 0.7;
 const API_TIMEOUT_SECS: u64 = 30;
 
-// Haiku pricing (per token)
-pub(crate) const HAIKU_INPUT_COST_PER_TOKEN: f64 = 0.000_001; // $1 / 1M input tokens
-pub(crate) const HAIKU_OUTPUT_COST_PER_TOKEN: f64 = 0.000_005; // $5 / 1M output tokens
+// Claude Haiku 4.5 pricing (per token), current at GH-679 implementation:
+// https://platform.claude.com/docs/en/about-claude/pricing
+pub(crate) const HAIKU_INPUT_COST_PER_TOKEN: f64 = 0.000_001; // $1 / MTok
+pub(crate) const HAIKU_OUTPUT_COST_PER_TOKEN: f64 = 0.000_005; // $5 / MTok
 
 // ── Data Structures ──
 
@@ -272,15 +274,15 @@ pub fn extract_decisions(
     let prompt = build_extraction_prompt(&truncated, &vague);
 
     // Call LLM
-    let model = std::env::var("EDDA_BG_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
+    let model_override = crate::env_var("EDDA_BG_MODEL");
+    let model = edda_core::background_model::resolve_background_model(model_override.as_deref());
     let (response_text, input_tokens, output_tokens) =
         call_anthropic_sync(api_key, &model, &prompt)?;
 
     // Parse LLM output
     let decisions = parse_llm_decisions(&response_text);
 
-    let cost_usd = (input_tokens as f64 * HAIKU_INPUT_COST_PER_TOKEN)
-        + (output_tokens as f64 * HAIKU_OUTPUT_COST_PER_TOKEN);
+    let cost_usd = background_cost_usd(input_tokens, output_tokens);
 
     Ok(ExtractionResult {
         session_id: session_id.to_string(),
@@ -838,14 +840,7 @@ pub(crate) fn call_anthropic_sync(
     model: &str,
     prompt: &str,
 ) -> Result<(String, u64, u64)> {
-    let request = AnthropicRequest {
-        model: model.to_string(),
-        max_tokens: 2048,
-        messages: vec![ApiMessage {
-            role: "user".to_string(),
-            content: prompt.to_string(),
-        }],
-    };
+    let request = background_request(model, prompt);
 
     let body = serde_json::to_string(&request)?;
 
@@ -882,6 +877,22 @@ pub(crate) fn call_anthropic_sync(
     };
 
     Ok((text.to_string(), input_tokens, output_tokens))
+}
+
+fn background_request(model: &str, prompt: &str) -> AnthropicRequest {
+    AnthropicRequest {
+        model: model.to_string(),
+        max_tokens: 2048,
+        messages: vec![ApiMessage {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        }],
+    }
+}
+
+fn background_cost_usd(input_tokens: u64, output_tokens: u64) -> f64 {
+    (input_tokens as f64 * HAIKU_INPUT_COST_PER_TOKEN)
+        + (output_tokens as f64 * HAIKU_OUTPUT_COST_PER_TOKEN)
 }
 
 /// Parse LLM output as JSON array of decisions.
