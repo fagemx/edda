@@ -1,5 +1,5 @@
 ---
-edda_review: 1
+edda_review: 2
 gates:
   - "cargo fmt --all --check"
   - "cargo clippy --workspace --all-targets -- -D warnings"
@@ -18,7 +18,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.2`
+- Spec version: `review-spec-v1.3`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -603,7 +603,8 @@ One comment per round, pinned to the reviewed full SHA
 
 - model_requested: <the model dispatch asked for>
 - model_observed: <read from the system, or "unverified">
-- spec: review-spec-v1.2
+- reviewer_session: <per-PR UUID the lane was launched with>
+- spec: review-spec-v1.3
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
 - cost: <elapsed / tokens / tool calls, as available>
@@ -643,7 +644,9 @@ LGTM (P0=0, P1=0)  —  or  —  Changes Requested, P0=<n>, P1=<n> — <one-line
 Every rule §4 routed you to gets a row in the `Rules` table. `N.A.` always
 carries a reason. The `Rules` table is the record that the whole scoped audit
 happened, which is what makes a later round's blocker auditable as fix-caused
-(`loop` items 2 and 3).
+(`loop` items 2 and 3). `reviewer_session` is the per-PR UUID the lane was
+launched with; the watcher records a mismatch with the backend-reported id
+rather than overwriting it.
 
 ## 8. Step 8 — the verdict
 

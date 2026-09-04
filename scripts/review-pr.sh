@@ -375,8 +375,7 @@ BRIEF="$SCRATCH/review-pr$PR-r$ROUND-brief.md"
   echo "…the rest exactly as REVIEW.md §7 specifies (model_requested: $MODEL, spec: $SPEC_VERSION, class: $CANON_CLASS)…"
   echo "VERDICT>>>"
   echo
-  echo "Add one field to that header, directly under \`model_observed\`, so a reader can tell which reviewer conversation judged this round (GH-708):"
-  echo "\`reviewer_session: $SID\` (this round: **$SESSION_MODE**)"
+  echo "The REVIEW.md §7 header specifies \`reviewer_session: $SID\` (this round: **$SESSION_MODE**) directly under \`model_observed\` (GH-708, GH-756)."
   echo
   echo "---"
   echo

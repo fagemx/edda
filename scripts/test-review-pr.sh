@@ -421,8 +421,10 @@ grep -q "SESSION=$EXPECTED_SID_9999" "$lane" \
     || fail 'D9c: the lane writes no SESSION= receipt, so the watcher cannot report which conversation ran'
 grep -q 'SESSION_MODE=new' "$lane" \
     || fail 'D9c: the lane writes no SESSION_MODE= receipt'
-grep -q "reviewer_session: $EXPECTED_SID_9999" "$brief" \
-    || fail 'D9d: the brief does not tell the reviewer to carry reviewer_session in the REVIEW.md §7 header'
+grep -qE "reviewer_session: $EXPECTED_SID_9999.*directly under \`model_observed\`" "$brief" \
+    || fail 'D9d: the brief does not specify reviewer_session directly under model_observed'
+awk '/- model_observed:/{getline; print}' "$EDDA_REVIEW_SPEC" | grep -q 'reviewer_session:' \
+    || fail 'D9d: REVIEW.md §7 does not place reviewer_session directly below model_observed'
 
 # The same id on the next round — that is the whole point of deriving it.
 dry_run_round 'Issue: #650\n' 2 'cccccccccccccccccccccccccccccccccccccccc' ''
