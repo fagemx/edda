@@ -109,32 +109,61 @@ EDDA_BIN=<built-edda-binary> bash scripts/check-cli-docs.sh
   built binary. The old `check_cli_reference.py` no longer exists.
 - Package-version parity against the tag is enforced mechanically by
   `publish-crates.py plan` in Step 3, once the local tag exists.
+Version bump checklist (every release — do this before the CHANGELOG edit):
+
+```bash
+rg -n '^version = "' Cargo.toml                 # workspace version -> <VERSION>
+rg '"<OLD>"' crates/*/Cargo.toml                # internal dependency pins
+sed -i 's/"<OLD>"/"<VERSION>"/g' crates/*/Cargo.toml
+cargo update -w                                  # fails until every pin matches
+```
+
+Crate manifests pin internal dependencies with explicit versions, so bumping
+only the workspace version makes `cargo update -w` fail with "candidate
+versions found which didn't match". Update every pin, resync the lock, and
+move the `[Unreleased]` CHANGELOG entries into a `## [<VERSION>] - <date>`
+section (release.yml's awk extracts exactly that heading for release notes).
+
 - Follow the L0/L1/L2 verification ladder in `.claude/CLAUDE.md`. Reuse a valid
   L1 receipt and exact-head CI for the frozen full SHA. Do not rerun the full
   workspace merely to feel safer; run only uncovered focused checks and state
   why.
 
-### Step 3: Prove packaging, then create a local-only immutable release point
+### Step 3: Commit the prep, prove packaging, then carry it through the ruleset-gated PR
 
-Mirror the `publish-crates-check.yml` dry-run gate locally:
+Two ordering facts the flow depends on: `cargo package` refuses a dirty tree
+(commit the prep first, then package from the clean release commit), and
+`main` is protected by the repository ruleset (`Protect main`: pull-request
+rule + required status checks `CI Gate` and `Independent Review`), so direct
+pushes are declined and the prep travels on a branch.
 
 ```bash
+git checkout -b chore/release-prep-v<VERSION>
+git commit -m "chore(release): prepare v<VERSION>"    # hooks run L0
 cargo package --workspace --locked --no-verify
-cargo publish --dry-run --workspace --locked
+cargo publish --dry-run --workspace --locked          # must reach "Uploading edda"
+# optionally: local archive provenance via the skill helper
+python scripts/crates_release_plan.py --version <VERSION> \
+  --package-dir target/package --expected-sha <FULL_SHA>
 ```
 
-Optionally verify the local archives would carry the tag SHA (skill-local
-helper, kept only for this check):
+Open the prep PR, run the independent review lane (REVIEW.md round), post the
+SHA-pinned verdict, then compute and post the `Independent Review` commit
+status from the §7 verdicts with the watcher helpers:
 
 ```bash
-python scripts/crates_release_plan.py \
-  --version <VERSION> --package-dir target/package --expected-sha <FULL_SHA>
+sh scripts/pr-review-watch.sh collect-verdicts <PR> <FULL_SHA> |
+  sh scripts/pr-review-watch.sh gate-state            # success | failure | error
+gh api "repos/$REPO/statuses/<FULL_SHA>" -f state=<state> \
+  -f context="Independent Review" -f description="LGTM P0=0 P1=0"
 ```
 
-Only after packaging is green, create an annotated tag locally. Do not push it,
-then run the plan gate — it requires HEAD to be the tag's exact commit on a
-clean tree, validates the tag shape, and prints the dependency-first publish
-order (`python` instead of `python3` on Windows):
+Merge, then wait for the `main` push CI to go green — that run is the
+exact-head receipt for the tag target. Only now create an annotated tag
+locally (do not push it yet), then run the plan gate — it requires HEAD to be
+the tag's exact commit on a clean tree, validates the tag shape, and prints
+the dependency-first publish order (`python` instead of `python3` on
+Windows):
 
 ```bash
 git tag -a "v<VERSION>" <FULL_SHA> -m "Release v<VERSION>"
@@ -178,7 +207,7 @@ Require all five jobs green — a green run with skipped jobs is BLOCKED:
 | `publish-crates` | `SUCCESS: all <N> workspace versions verified` |
 | `create-release` | parity gate `verify --tag` passed; draft release created from the CHANGELOG section |
 | `build-release` | all five platform archives + `.sha256` uploaded to the draft |
-| `publish-release` | exact 10-asset set, no empty assets, checksums verified, native binary canary without credentials, release published `--latest` |
+| `publish-release` | exact 10-asset set, no empty assets, checksums verified, native binary canary without credentials (version core after stripping the optional build identity suffix), release published `--latest` |
 
 Never repair a failed run by moving the tag.
 
@@ -318,6 +347,15 @@ lag. After three failures with the same stable cause, stop and report
 10. **Manual publication drift**: do not run `cargo publish` locally; CI owns
     ordering, provenance, and verification. Local helpers only prove packaging
     and verify public state.
+11. **Bump the workspace version only**: crate manifests pin internal
+    dependencies explicitly; an unmatched pin fails `cargo update -w` at prep
+    time — catch it there, not at the tag.
+12. **Package a dirty tree**: `cargo package` and `cargo publish --dry-run`
+    refuse uncommitted changes; commit the prep, then prove packaging from the
+    clean release commit.
+13. **Assume a direct push to main**: the ruleset declines it; budget the prep
+    PR, its review round, and the `Independent Review` status into the release
+    timeline.
 
 ## References
 
