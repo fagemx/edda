@@ -554,17 +554,9 @@ function Invoke-SpikePublication {
     $savedGitEnvironment = @{}
 
     try {
-        # Build a disposable bare repository as the sole local configuration source.
-        # It has no remotes, url.* rewrite rules, or http.* headers. Global/system
-        # config and inherited GIT_* config injection are excluded for every call.
-        $head = @(& git -C $WorkspacePath rev-parse HEAD 2>$null)
-        $head = ("$head").Trim()
-        $objects = @(& git -C $WorkspacePath rev-parse --git-path objects 2>$null)
-        $objects = ("$objects").Trim()
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($head) -or [string]::IsNullOrWhiteSpace($objects) -or $RefSpec -notmatch '^HEAD:') {
-            throw 'publication transport isolation could not resolve the workspace HEAD/object store.'
-        }
-        if (-not [System.IO.Path]::IsPathRooted($objects)) { $objects = Join-Path $WorkspacePath $objects }
+        # Bind the named workspace before resolving its source object. Snapshot and
+        # clear every inherited GIT_* routing/config variable FIRST: `git -C` alone
+        # does not defeat GIT_DIR, GIT_WORK_TREE, or GIT_OBJECT_DIRECTORY.
         $globalConfig = Join-Path $transportDir 'global.gitconfig'
         New-Item -ItemType Directory -Path $transportDir -Force | Out-Null
         New-Item -ItemType File -Path $globalConfig -Force | Out-Null
@@ -573,6 +565,15 @@ function Invoke-SpikePublication {
             Remove-Item ("Env:" + $_.Name) -ErrorAction Stop
         }
         $env:GIT_CONFIG_NOSYSTEM = '1'; $env:GIT_CONFIG_GLOBAL = $globalConfig
+        $head = @(& git -C $WorkspacePath rev-parse HEAD 2>$null); $head = ("$head").Trim()
+        $commonDir = @(& git -C $WorkspacePath rev-parse --path-format=absolute --git-common-dir 2>$null); $commonDir = ("$commonDir").Trim()
+        $objects = @(& git -C $WorkspacePath rev-parse --path-format=absolute --git-path objects 2>$null); $objects = ("$objects").Trim()
+        $expectedObjects = if ([string]::IsNullOrWhiteSpace($commonDir)) { $null } else { [System.IO.Path]::GetFullPath((Join-Path $commonDir 'objects')) }
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($head) -or [string]::IsNullOrWhiteSpace($objects) -or
+            $null -eq $expectedObjects -or -not [string]::Equals([System.IO.Path]::GetFullPath($objects), $expectedObjects, [System.StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $objects -PathType Container) -or $RefSpec -notmatch '^HEAD:') {
+            throw 'publication transport isolation could not bind the named workspace HEAD/object store.'
+        }
         $env:GIT_ALTERNATE_OBJECT_DIRECTORIES = $objects; $env:GIT_TERMINAL_PROMPT = '0'
         & git init --bare --quiet $transportDir 2>$null
         if ($LASTEXITCODE -ne 0) { throw 'publication transport isolation could not create its disposable git directory.' }

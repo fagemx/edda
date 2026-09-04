@@ -43,6 +43,9 @@ New-Item -ItemType Directory -Path (Join-Path $fxRoot 'lane') -Force | Out-Null
 # network access; this is never the real worktree/config.
 git init -q $fixtureWorkspace 2>$null
 git -C $fixtureWorkspace -c user.name=fixture -c user.email=fixture@example.invalid commit --allow-empty -qm fixture 2>$null
+$otherWorkspace = Join-Path $fxRoot 'other-source'
+git init -q $otherWorkspace 2>$null
+git -C $otherWorkspace -c user.name=fixture -c user.email=fixture@example.invalid commit --allow-empty -qm other 2>$null
 try {
 
     $baseArgs = @{
@@ -281,10 +284,23 @@ try {
         return [pscustomobject]@{ ExitCode = 1; Output = @("unexpected git invocation: $joined"); Args = $GitArgs; Stdin = $StdinInput }
     }
 
-    # T12a: happy path — approve, push, cleanup all succeed; token NEVER in argv.
+    # T12a: hostile Git routing must not change the named workspace source.
+    $sourceHead = @(& git -C $fixtureWorkspace rev-parse HEAD); $sourceHead = ("$sourceHead").Trim()
+    $otherHead = @(& git -C $otherWorkspace rev-parse HEAD); $otherHead = ("$otherHead").Trim()
+    $savedGitDir = $env:GIT_DIR; $savedGitWorkTree = $env:GIT_WORK_TREE; $savedGitObjects = $env:GIT_OBJECT_DIRECTORY
+    $env:GIT_DIR = Join-Path $otherWorkspace '.git'
+    $env:GIT_WORK_TREE = $otherWorkspace
+    $env:GIT_OBJECT_DIRECTORY = Join-Path (Join-Path $otherWorkspace '.git') 'objects'
     $calls.Clear()
-    $r = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -DestinationUrl 'https://github.com/fagemx/edda.git' `
+    try {
+        $r = Invoke-SpikePublication -Token $secure -WorkspacePath (Join-Path $fxRoot 'ws') -DestinationUrl 'https://github.com/fagemx/edda.git' `
         -RefSpec 'HEAD:refs/heads/spike/lane-privilege-fixture' -GitInvoker $synthInvoker
+        $publicationRestoredRouting = ($env:GIT_DIR -eq (Join-Path $otherWorkspace '.git') -and
+            $env:GIT_WORK_TREE -eq $otherWorkspace -and $env:GIT_OBJECT_DIRECTORY -eq (Join-Path (Join-Path $otherWorkspace '.git') 'objects'))
+    }
+    finally {
+        $env:GIT_DIR = $savedGitDir; $env:GIT_WORK_TREE = $savedGitWorkTree; $env:GIT_OBJECT_DIRECTORY = $savedGitObjects
+    }
     Assert-True -Name 'T12a publication verdict published' -Condition ($r.Verdict -eq 'published') -Detail "$($r.Verdict); $($r.Notes -join '; ')"
     $allArgs = ($calls | ForEach-Object { $_.Args -join ' ' }) -join "`n"
     Assert-True -Name 'T12a token NEVER appears in any git argv' -Condition (-not $allArgs.Contains($fakeToken))
@@ -296,6 +312,8 @@ try {
     $pushCall = @($calls | Where-Object { ($_.Args -join ' ') -match ' push ' })[0]
     Assert-True -Name 'T12a push consumes the validated literal URL, not an origin alias' `
         -Condition (($pushCall.Args -contains 'https://github.com/fagemx/edda.git') -and -not ($pushCall.Args -contains 'origin'))
+    Assert-True -Name 'T12a GIT_DIR/work-tree/object redirects cannot replace the named workspace source and are restored' `
+        -Condition (($pushCall.Args -join ' ') -match $sourceHead -and ($pushCall.Args -join ' ') -notmatch $otherHead -and $publicationRestoredRouting)
     Assert-True -Name 'T12a chained rewrites and URL-specific header source are isolated from push' `
         -Condition ($pushCall.WorkingDirectory -ne $fixtureWorkspace -and @($pushCall.TransportConfig).Count -eq 0)
     Assert-True -Name 'T12a helper list is isolated (credential.helper= reset before cache)' `
