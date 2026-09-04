@@ -90,7 +90,13 @@ function Test-WtRegistered([string]$MainRepo, [string]$WtPath) {
 # lane, not a busy one. Windows-only by design — the fleet runs on Windows.
 function Test-LaneTaskBusy([string]$WtPath) {
   $want = ConvertTo-NormPath $WtPath
-  foreach ($t in @(Get-ScheduledTask -TaskName 'edda-lane-*' -ErrorAction SilentlyContinue)) {
+  try {
+    # An empty result proves no matching tasks; a failed query proves nothing.
+    $tasks = @(Get-ScheduledTask -TaskName 'edda-lane-*' -ErrorAction Stop)
+  } catch {
+    Fail "cannot query Task Scheduler for lane activity: $($_.Exception.Message); refusing to switch a lane whose idle state cannot be proven"
+  }
+  foreach ($t in $tasks) {
     if ($t.State -ne 'Running') { continue }
     foreach ($a in $t.Actions) {
       $wd = if ($a.WorkingDirectory) { $a.WorkingDirectory.TrimEnd('\') } else { '' }
@@ -101,8 +107,20 @@ function Test-LaneTaskBusy([string]$WtPath) {
 }
 
 function Get-WtBranch([string]$WtPath) {
-  # Empty output = detached HEAD (nothing to verify as pushed).
+  # Empty output = detached HEAD; its commit gets a separate durability gate.
   return (& git -C $WtPath symbolic-ref --quiet HEAD 2>$null)
+}
+
+# A detached worktree is safe to switch only when its current commit is still
+# reachable from origin's remote-tracking refs. Cleanliness alone does not
+# protect a unique detached commit from becoming reflog-only after checkout.
+function Test-DetachedHeadDurable([string]$WtPath) {
+  $head = (& git -C $WtPath rev-parse --verify 'HEAD^{commit}').Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $head) {
+    Fail "cannot resolve detached HEAD in '$WtPath'; refusing to switch it"
+  }
+  $remoteRefs = @(& git -C $WtPath for-each-ref --contains $head --format='%(refname)' 'refs/remotes/origin/')
+  return (@($remoteRefs | Where-Object { $_ }).Count -gt 0)
 }
 
 # The unpushed gate: the local tip must MATCH THE REMOTE TIP
@@ -181,9 +199,9 @@ if (Test-Path -LiteralPath $WtPath) {
       $remoteState = if (& git -C $WtPath rev-parse --verify --quiet "refs/remotes/origin/$curBranch^{commit}") { 'differs from' } else { 'is missing from' }
       Fail "branch '$curBranch' ($(& git -C $WtPath rev-parse --short HEAD)) is not pushed: the remote tip $remoteState refs/remotes/origin/$curBranch. A configured upstream alone is not sufficient; push the branch before switching the lane worktree"
     }
+  } elseif (-not (Test-DetachedHeadDurable $WtPath)) {
+    Fail "detached HEAD $(& git -C $WtPath rev-parse --short HEAD) is not reachable from an origin remote-tracking ref; attach and push it before switching the lane worktree"
   }
-  # detached HEAD is safe to switch away from: the worktree is clean and no
-  # branch ref is involved.
 }
 
 # --- 4. dry-run: report the exact commands, change nothing -------------------

@@ -87,7 +87,13 @@ function Test-WtRegistered([string]$MainRepo, [string]$WtPath) {
 
 function Test-LaneTaskBusy([string]$WtPath) {
   $want = ConvertTo-NormPath $WtPath
-  foreach ($t in @(Get-ScheduledTask -TaskName 'edda-lane-*' -ErrorAction SilentlyContinue)) {
+  try {
+    # An empty result proves no matching tasks; a failed query proves nothing.
+    $tasks = @(Get-ScheduledTask -TaskName 'edda-lane-*' -ErrorAction Stop)
+  } catch {
+    Fail "cannot query Task Scheduler for lane activity: $($_.Exception.Message); refusing to warm a lane whose idle state cannot be proven"
+  }
+  foreach ($t in $tasks) {
     if ($t.State -ne 'Running') { continue }
     foreach ($a in $t.Actions) {
       $wd = if ($a.WorkingDirectory) { $a.WorkingDirectory.TrimEnd('\') } else { '' }
@@ -99,6 +105,18 @@ function Test-LaneTaskBusy([string]$WtPath) {
 
 function Get-WtBranch([string]$WtPath) {
   return (& git -C $WtPath symbolic-ref --quiet HEAD 2>$null)
+}
+
+# Warm will detach at main, so an existing detached commit must first be
+# reachable from origin. Otherwise checkout would strand unique work in a
+# reflog even though the worktree is clean.
+function Test-DetachedHeadDurable([string]$WtPath) {
+  $head = (& git -C $WtPath rev-parse --verify 'HEAD^{commit}').Trim()
+  if ($LASTEXITCODE -ne 0 -or -not $head) {
+    Fail "cannot resolve detached HEAD in '$WtPath'; refusing to warm it"
+  }
+  $remoteRefs = @(& git -C $WtPath for-each-ref --contains $head --format='%(refname)' 'refs/remotes/origin/')
+  return (@($remoteRefs | Where-Object { $_ }).Count -gt 0)
 }
 
 function Test-BranchPushed([string]$WtPath, [string]$Branch) {
@@ -195,6 +213,8 @@ if ($cur) {
     $remoteState = if (& git -C $WtPath rev-parse --verify --quiet "refs/remotes/origin/$curBranch^{commit}") { 'differs from' } else { 'is missing from' }
     $reasons += "branch '$curBranch' is not pushed: the remote tip $remoteState refs/remotes/origin/$curBranch; an upstream configuration alone is not sufficient"
   }
+} elseif (-not (Test-DetachedHeadDurable $WtPath)) {
+  $reasons += "detached HEAD $(& git -C $WtPath rev-parse --short HEAD) is not reachable from an origin remote-tracking ref; attach and push it before warming"
 }
 $rustLld = Get-RustLldState
 

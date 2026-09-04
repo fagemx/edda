@@ -108,8 +108,8 @@
     # 首次準備或切到下一張 issue：固定路徑，不建 per-issue worktree
     pwsh -NoProfile -File scripts/fleet/lane-prepare.ps1 -BuildLane <worker-1|worker-2|verifier|verifier-2> -Branch <branch> -Repo C:/ai_agent/edda
    edda claim "ghNNN" --paths "crates/<crate>/src/*"
-   edda conduct run <plan.yaml> --agent pi --cwd C:/ai_agent/edda-wt-ghNNN      # 多 phase
-   edda dispatch --agent pi --prompt-file brief.md --cwd C:/ai_agent/edda-wt-ghNNN --budget-usd 5   # 單輪
+   edda conduct run <plan.yaml> --agent pi --cwd C:/ai_agent/edda-wt-<lane>      # 多 phase
+   edda dispatch --agent pi --prompt-file brief.md --cwd C:/ai_agent/edda-wt-<lane> --budget-usd 5   # 單輪
    ```
     plan YAML 放 scratchpad 或 `.tmp/plans/`，不進 repo。lane worktree 固定為
     `C:\ai_agent\edda-wt-<worker-1|worker-2|verifier|verifier-2>`；prepare 只在閒置、乾淨

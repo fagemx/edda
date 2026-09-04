@@ -46,9 +46,10 @@ against the crate map. Pairwise intersect:
   and refuses to switch until the previous branch's local tip matches the
   remote tip. It never force-checks out or removes a worktree, branch, or
   source.
-- Set `CARGO_TARGET_DIR=<lane-root>/<lane>` for that lane's entire lifetime.
-  Never an ad-hoc build dir — that is the 194 GB failure. Worker lanes use
-  incremental compilation; verifier lanes use `CARGO_INCREMENTAL=0`.
+- Use the canonical environment policy in [`.claude/CLAUDE.md` Build
+  lanes](../../CLAUDE.md#build-lanes); `lane-warm.ps1 -PrintEnv` is the helper
+  contract consumed by `lane-launch.ps1`. Do not duplicate that policy in wave
+  plans or worktree prompts.
 - Worktree prompts must name the prepared fixed worktree and current branch:
   do NOT `checkout main`, pull, create branches, remove branches, or create a
   second worktree. The controller prepares the next branch only after the lane

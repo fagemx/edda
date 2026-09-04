@@ -11,11 +11,12 @@
 #     and is idempotent for the same branch,
 #   * prepare refuses: dirty worktree, unpushed previous branch (upstream
 #     configuration alone is not accepted — the remote TIP must match), a
-#     running lane task bound to the worktree, an existing branch, a path
-#     collision, a bad lane/branch name — always loudly, never force-checkout,
-#     never deletion,
-#   * warm refuses: worktree not prepared, dirty, unpushed, busy, rust-lld
-#     absent from the active toolchain — and never starts cargo in those cases,
+#     running or unreadable lane task state, an unpublished detached commit,
+#     an existing branch, a path collision, a bad lane/branch name — always
+#     loudly, never force-checkout, never deletion,
+#   * warm refuses: worktree not prepared, dirty, unpushed, unpublished
+#     detached work, busy or unreadable Task Scheduler state, rust-lld absent
+#     from the active toolchain — and never starts cargo in those cases,
 #   * warm -DryRun and prepare -DryRun have ZERO side effects (no fetch, no
 #     refs, no checkout, no cargo) and print the exact commands,
 #   * env contract: CARGO_TARGET_DIR=<lane-root>\<lane> (fixed lane dir, never
@@ -147,6 +148,29 @@ expect_fail() {
   esac
 }
 
+# Run a helper under a deliberately failing Task Scheduler query. A function
+# defined in the pwsh caller shadows the cmdlet in the child script scope, so
+# this covers the actual fail-closed catch rather than a textual mock.
+scheduler_fail_prepare() {
+  repo_win=$(cygpath -w "$1")
+  prepare_win=$(cygpath -w "$PREPARE")
+  pwsh -NoProfile -NonInteractive -Command "
+    function Get-ScheduledTask { [CmdletBinding()] param([string]\$TaskName); throw 'fixture scheduler query failed' }
+    & '$prepare_win' -BuildLane worker-1 -Branch codex/scheduler-fail -Repo '$repo_win' -DryRun
+    exit \$LASTEXITCODE
+  "
+}
+
+scheduler_fail_warm() {
+  repo_win=$(cygpath -w "$1")
+  warm_win=$(cygpath -w "$WARM")
+  pwsh -NoProfile -NonInteractive -Command "
+    function Get-ScheduledTask { [CmdletBinding()] param([string]\$TaskName); throw 'fixture scheduler query failed' }
+    & '$warm_win' -BuildLane worker-1 -Repo '$repo_win' -DryRun
+    exit \$LASTEXITCODE
+  "
+}
+
 # ---------------------------------------------------------------------------
 # lane-prepare.ps1
 
@@ -260,6 +284,33 @@ expect_fail "prepare dry-run dirty" "dirty" prepare -BuildLane worker-1 -Branch 
 [ "$(refs_snapshot "$repo")" = "$before_refs" ] || fail "dry-run refusal mutated refs"
 rm "$(wt_posix "$repo" worker-1)/dirty.txt"
 ok "prepare -DryRun on a dirty lane reports the refusal and mutates nothing"
+
+# A clean detached HEAD still needs a durable remote ref. The warmer normally
+# creates detached main checkouts, but a unique commit in that state must not
+# be stranded in a reflog by prepare or warm.
+detrepo=$(new_repo detached)
+detlane=$(wt_posix "$detrepo" worker-1)
+git -C "$detrepo" worktree add -q --detach "$detlane" origin/main
+echo detached >"$detlane/f.txt"
+git -C "$detlane" add f.txt
+git -C "$detlane" commit -qm detached-unique
+dethead=$(git -C "$detlane" rev-parse HEAD)
+expect_fail "prepare detached unique" "not reachable" \
+  prepare -BuildLane worker-1 -Branch codex/detached-next -Repo "$detrepo" -DryRun
+expect_fail "warm detached unique" "not reachable" warm -BuildLane worker-1 -Repo "$detrepo" -DryRun
+[ "$(git -C "$detlane" rev-parse HEAD)" = "$dethead" ] || fail "detached refusal moved HEAD"
+[ "$(git -C "$detrepo" for-each-ref --contains "$dethead" --format='%(refname)' refs/remotes/origin/)" = "" ] \
+  || fail "detached fixture accidentally gained a remote containing ref"
+ok "prepare and warm refuse a clean detached commit without an origin ref"
+
+# A scheduler query failure cannot be treated as an empty task list. These
+# helpers must fail before a dry-run could report a switch or warm command.
+srepo=$(new_repo scheduler)
+expect_fail "prepare scheduler query failure" "cannot query Task Scheduler" scheduler_fail_prepare "$srepo"
+expect_ok "scheduler warm fixture prepare" prepare -BuildLane worker-1 -Branch codex/scheduler-base -Repo "$srepo"
+git -C "$(wt_posix "$srepo" worker-1)" push -q origin codex/scheduler-base
+expect_fail "warm scheduler query failure" "cannot query Task Scheduler" scheduler_fail_warm "$srepo"
+ok "prepare and warm fail closed when Task Scheduler cannot be queried"
 
 # ---------------------------------------------------------------------------
 # lane-warm.ps1
