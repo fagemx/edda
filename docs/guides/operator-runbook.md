@@ -187,6 +187,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 一 issue ＝ 一單 phase plan ＝ 一 worktree ＝ 一 build lane；並行在 plan 之間；plan 裡不寫沒理由的 `depends_on`；並行 plan 不用 verdict gate | `cleanup.parallel-exec`、`cleanup.review-gate` |
 | 派工前跨機器認領一律走機械守門（GH-656）：開工步先跑 `scripts/fleet-claim-issue.sh <issue> <machine>`（未認領→貼 `taking:` 留言＋加 `lane:<machine>` 標籤，exit 0；**別台已認領→exit 1 不動**；本機已認領→冪等 exit 0；`--check` 唯讀），或用 `edda dispatch --issue <N> --machine <label>` 派發——它在啟動 agent 前跑同一檢查，**別台已認領 → exit 2、不啟動 agent、`--json.error` 說明原因**；machine 只認顯式值（旗標或 `EDDA_MACHINE`），不猜 hostname | `fleet.cross-machine-claim`（GH-656 把約定變成守門） |
 | build lane 只用 `worker-1|worker-2|verifier|verifier-2`；永不建 ad-hoc `CARGO_TARGET_DIR`；L1 與 verifier 設 `CARGO_INCREMENTAL=0` | `verification.cost-discipline` |
+| 操作者在場的小批量併行走 `/issue-pipeline`（in-session 子代理：開工先貼 `taking: <machine>/pipeline`、審查是 house review——審查者不修自己審的 PR、子代理隨 session 死，長時間無人值守改派 Task Scheduler lane）；一次最多兩張要編譯的單 | `fleet.parallel-modes=in-session-pipeline-when-operator-present-lanes-when-unattended` |
 | 審查釘 full SHA；**每次 push 使前一個判決失效**；一個 PR 一個審查者身分 | `fleet.review-protocol` |
 | 合併＝final current-head LGTM、P0=0/P1=0、required check「`CI Gate`」綠（`ci.merge-gate`）、SHA 窗檢查為空；docs-only PR 的 clippy／test job 顯示 skipped 而 `CI Gate` 仍綠＝`ci.path-filter` 正常跳過，不是漏跑 | `pr.merge-policy`、`ci.merge-gate` |
 | worktree／branch／source 永不刪；build cache 可清、按年齡回收 | CLAUDE.md Build lanes |
