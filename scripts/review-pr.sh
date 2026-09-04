@@ -495,16 +495,41 @@ Set-Location '$WTW'
 \$receiptTmp = "$DONEW.pending-\$PID"
 \$dispatchCode = 2
 \$rawDispatchExit = 2
-\$toolFlags = "--tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED'"
+\$toolFlags = "--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED'"
 \$transport = 'none'
 \$worktreeCheck = 'failed; source check not reached'
 \$worktreeCleanup = 'not-attempted'
 \$taskCleanup = 'not-attempted'
 \$sourceReady = \$false
 \$beforeStatus = \$null
+\$beforeSnapshot = \$null
+function Get-ReviewWorktreeSnapshot {
+  \$entries = [System.Collections.Generic.List[string]]::new()
+  foreach (\$scope in @(
+    @{ Name = 'tracked'; Args = @('--cached') },
+    @{ Name = 'untracked'; Args = @('--others', '--exclude-standard') },
+    @{ Name = 'ignored'; Args = @('--others', '--ignored', '--exclude-standard') }
+  )) {
+    \$paths = & git ls-files @(\$scope.Args)
+    if (\$LASTEXITCODE -ne 0) { throw "git ls-files failed for \$(\$scope.Name) scope" }
+    foreach (\$path in \$paths) {
+      if (Test-Path -LiteralPath \$path -PathType Leaf) {
+        \$hash = (& git hash-object -- \$path)
+        if (\$LASTEXITCODE -ne 0) { throw "git hash-object failed for \$(\$scope.Name) path \$path" }
+        [void]\$entries.Add("\$(\$scope.Name)\`t\$hash\`t\$path")
+      } elseif (Test-Path -LiteralPath \$path -PathType Container) {
+        [void]\$entries.Add("\$(\$scope.Name)\`tdirectory\`t\$path")
+      } else {
+        [void]\$entries.Add("\$(\$scope.Name)\`tmissing-or-special\`t\$path")
+      }
+    }
+  }
+  \$bytes = [System.Text.Encoding]::UTF8.GetBytes((\$entries -join "\`n"))
+  return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData(\$bytes)).ToLowerInvariant()
+}
 try {
   \$beforeStatus = (& git status --porcelain=v1 --untracked-files=all) -join "\n"
-  if (\$LASTEXITCODE -eq 0) { \$sourceReady = \$true }
+  if (\$LASTEXITCODE -eq 0) { \$beforeSnapshot = Get-ReviewWorktreeSnapshot; \$sourceReady = \$true }
   else { throw 'git status unavailable before dispatch' }
 } catch { \$_ | Out-File '$LOGW' -Append -Encoding utf8 }
 function Test-ReviewWorktree {
@@ -512,9 +537,10 @@ function Test-ReviewWorktree {
   if (\$LASTEXITCODE -ne 0) { return 'failed; git HEAD unavailable' }
   \$afterStatus = (& git status --porcelain=v1 --untracked-files=all) -join "\n"
   if (\$LASTEXITCODE -ne 0) { return 'failed; git status unavailable' }
+  try { \$afterSnapshot = Get-ReviewWorktreeSnapshot } catch { return 'failed; source snapshot unavailable' }
   & git status --short | Out-File '$LOGW' -Append -Encoding utf8
   & git log -1 --format=%H | Out-File '$LOGW' -Append -Encoding utf8
-  if (\$afterHead -ne '$SHA' -or \$afterStatus -ne \$beforeStatus) {
+  if (\$afterHead -ne '$SHA' -or \$afterStatus -ne \$beforeStatus -or \$afterSnapshot -ne \$beforeSnapshot) {
     return 'failed; preserved for inspection'
   }
   return 'unchanged'
@@ -543,15 +569,15 @@ try {
   if (\$briefChars -lt 30000) {
     Assert-ReviewCapabilities 'edda-dispatch'
     \$transport = 'edda-dispatch'
-    & edda dispatch --agent claude --model '$MODEL' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
+    & edda dispatch --agent claude --model '$MODEL' --permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
     \$rawDispatchExit = \$LASTEXITCODE
     \$dispatchCode = \$rawDispatchExit
   } else {
     Assert-ReviewCapabilities 'claude-stdin'
     \$transport = 'claude-stdin'
-    \$toolFlags = "--tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED'"
+    \$toolFlags = "--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED'"
     \$raw = Get-Content -Raw "$BRIEFW"
-    \$json = \$raw | & claude -p --model '$MODEL' --output-format json $CLAUDE_SESSION_ARGS --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED' 2>"$ERRW"
+    \$json = \$raw | & claude -p --model '$MODEL' --output-format json --permission-mode '$REVIEW_PERMISSION_MODE' $CLAUDE_SESSION_ARGS --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED' 2>"$ERRW"
     \$rawDispatchExit = \$LASTEXITCODE
     \$dispatchCode = \$rawDispatchExit
     \$r = \$null
@@ -626,17 +652,29 @@ cd '$WT' || exit 1
 raw_dispatch_exit=2
 final_exit=2
 transport=none
-tool_flags="--tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED'"
+tool_flags="--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED'"
 worktree_check='failed; source check not reached'
 worktree_cleanup=not-attempted
+review_hash_scope() {
+  scope=\$1; shift
+  git ls-files -z "\$@" | while IFS= read -r -d '' path; do
+    if [ -f "\$path" ]; then hash=\$(git hash-object -- "\$path") || exit 1; printf '%s\t%s\t%s\0' "\$scope" "\$hash" "\$path"
+    elif [ -L "\$path" ]; then printf '%s\tsymlink\t%s\t%s\0' "\$scope" "\$(readlink "\$path")" "\$path"
+    else printf '%s\tmissing-or-special\t%s\0' "\$scope" "\$path"; fi
+  done
+}
+review_worktree_snapshot() { snapshot_file=\$1; : > "\$snapshot_file" || return 1; review_hash_scope tracked --cached > "\$snapshot_file" || return 1; review_hash_scope untracked --others --exclude-standard >> "\$snapshot_file" || return 1; review_hash_scope ignored --others --ignored --exclude-standard >> "\$snapshot_file" || return 1; git hash-object --stdin < "\$snapshot_file"; }
 before_status=\$(git status --porcelain=v1 --untracked-files=all)
-if [ \$? -eq 0 ]; then source_ready=1; else source_ready=0; echo 'review-pr runner: git status unavailable before dispatch' >> '$LOG'; fi
+before_snapshot=\$(review_worktree_snapshot '$DONE.before-snapshot')
+if [ \$? -eq 0 ]; then source_ready=1; else source_ready=0; echo 'review-pr runner: source snapshot unavailable before dispatch' >> '$LOG'; fi
 check_review_worktree() {
   after_head=\$(git rev-parse HEAD) || { echo 'failed; git HEAD unavailable'; return; }
   after_status=\$(git status --porcelain=v1 --untracked-files=all) || { echo 'failed; git status unavailable'; return; }
+  after_snapshot=\$(review_worktree_snapshot '$DONE.after-snapshot') || { echo 'failed; source snapshot unavailable'; return; }
+  rm -f '$DONE.before-snapshot' '$DONE.after-snapshot'
   git status --short >> '$LOG'
   git log -1 --format=%H >> '$LOG'
-  if [ "\$after_head" != '$SHA' ] || [ "\$after_status" != "\$before_status" ]; then echo 'failed; preserved for inspection'; else echo unchanged; fi
+  if [ "\$after_head" != '$SHA' ] || [ "\$after_status" != "\$before_status" ] || [ "\$after_snapshot" != "\$before_snapshot" ]; then echo 'failed; preserved for inspection'; else echo unchanged; fi
 }
 remove_review_worktree() {
   [ -n '$ROOT' ] || return 1
@@ -650,14 +688,14 @@ if [ "\$source_ready" = 1 ]; then
   if [ "\$chars" -lt 30000 ]; then
     if review_capabilities edda-dispatch > '$LOG' 2>&1; then
       transport=edda-dispatch
-      edda dispatch --agent claude --model '$MODEL' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file '$BRIEF' > '$LOG' 2>&1
+      edda dispatch --agent claude --model '$MODEL' --permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file '$BRIEF' > '$LOG' 2>&1
       raw_dispatch_exit=\$?
       final_exit=\$raw_dispatch_exit
     fi
   elif review_capabilities claude-stdin > '$LOG' 2>&1; then
     transport=claude-stdin
-    tool_flags="--tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED'"
-    claude -p --model '$MODEL' --output-format json $CLAUDE_SESSION_ARGS --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED' < '$BRIEF' > '$LOG.json' 2>'$LOG.err'
+    tool_flags="--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED'"
+    claude -p --model '$MODEL' --output-format json --permission-mode '$REVIEW_PERMISSION_MODE' $CLAUDE_SESSION_ARGS --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED' < '$BRIEF' > '$LOG.json' 2>'$LOG.err'
     raw_dispatch_exit=\$?
     final_exit=\$raw_dispatch_exit
     if command -v jq >/dev/null 2>&1; then

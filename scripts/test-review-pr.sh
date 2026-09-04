@@ -389,8 +389,10 @@ if ! grep -q '.edda-review-spec.md' "$brief"; then
     fail 'D8d: the brief does not point the reviewer at the worktree spec copy .edda-review-spec.md'
 fi
 lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-lane.ps1"
-grep -Fq -- "--tools 'Read,Grep,Glob,Bash(git *),Bash(gh *),Bash(edda *),Bash(sh *)'" "$lane" \
+grep -Fq -- "--tools 'Read,Grep,Glob,Bash'" "$lane" \
     || fail 'D8e: the fallback arm lacks the measured restricted capability allowlist (GH-702)'
+grep -Fq -- "--permission-mode 'plan'" "$lane" \
+    || fail 'D8e: the fallback arm lacks the plan-mode write barrier (GH-702)'
 if grep -q 'bypassPermissions' "$lane"; then
     fail 'D8f: the fallback arm still grants --permission-mode bypassPermissions — the recorded fleet.review-engine-model shape auto-approves only the read allowlist'
 fi
