@@ -23,10 +23,15 @@ after that label has been removed.
   (worker-2), #761 (docs/worker-1), #764 (docs/worker-1), #765
   (docs/worker-2), and #800 (4090/infra-controller). They were not changed.
   `lane:*` remains routing-only, including #761 and #764's `lane:4090`.
-- **1 open claim with unproven present ownership:** #690 has an older
-  `taking: 4090/lane-gh690` comment but no current `fleet:claimed` label. The
-  audit neither calls it released from age nor withdraws it; its owner must
-  reconcile it before a future dispatch.
+- **1 owner-confirmed live exception:** #690 has an older
+  `taking: 4090/lane-gh690` comment but no current `fleet:claimed` label.
+  Task 27's infra-controller confirmed the claim is live: its harness merged,
+  but the restricted-account build/test/push and fail-first credential/token
+  denial proof remain undelivered (issue comment
+  `IC_kwDORT1v6c8AAAABSYdvYw`, item 3). The owner explicitly retained
+  `fleet:pending`, and directed this audit not to add `fleet:claimed` or strike
+  the taking line. That pending-plus-live state is an owner-retained
+  discrepancy for follow-up, not evidence of a released claim.
 
 The separately known released-without-delivery claims #591, #634, #650, and
 #651 already contain explicit `RELEASED` withdrawals. They no longer match the
