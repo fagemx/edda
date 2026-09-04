@@ -82,15 +82,25 @@ prompt: |
   The plan has been posted as a comment on the issue — read it with `gh issue view {number} --comments`.
   IMPORTANT: You are in a worktree. Do NOT run `git pull origin main` — never pull main
   into a worktree.
-  BEFORE any other work, check whether the issue is already claimed across machines:
-  `sh scripts/fleet-claim-issue.sh --check {number} {machine}` (or read the issue for a
-  `taking:` comment or a `lane:*` label from another machine), where `{machine}` is this
-  controller's machine label (`EDDA_SESSION_LABEL`). If another machine holds the claim,
-  do NOT comment and do NOT start — skip and report it.
-  Only if the issue is unclaimed, claim it —
-  `sh scripts/fleet-claim-issue.sh {number} {machine}` (or
-  `gh issue comment {number} --body "taking: {machine}/pipeline"`) — then load the
-  issue-action skill and implement.
+  BEFORE any other work, check whether the issue is already claimed across machines —
+  check first, and write nothing until the check is done. Read the issue's existing
+  `taking:` comments and `lane:*` labels (`gh issue view {number} --comments`,
+  `gh issue view {number} --json labels`), where `{machine}` is this controller's
+  machine label (`EDDA_SESSION_LABEL`). Compare WORKSTATIONS, not raw tokens: strip a
+  trailing `/pipeline` or `/role` from each claim token before comparing, so
+  `{machine}` and `{machine}/pipeline` are the same workstation. You may run
+  `sh scripts/fleet-claim-issue.sh --check {number} {machine}` as a read-only extra,
+  but never let it decide: it compares the token after `taking:` verbatim, so it
+  treats `{machine}` and `{machine}/pipeline` as different machines.
+  If another workstation holds the issue, do NOT comment and do NOT start — skip and
+  report it. If this same workstation already holds it, do not write a second claim
+  comment; report the existing claim.
+  Only if the issue is unclaimed, claim it with EXACTLY one command and no other
+  writer — `gh issue comment {number} --body "taking: {machine}/pipeline"` — then
+  load the issue-action skill and implement. Do NOT claim via
+  `sh scripts/fleet-claim-issue.sh {number} {machine}`: it writes
+  `taking: {machine} at {now}` (no `/pipeline`), and verbatim token comparison reads
+  that as a different workstation.
 ```
 
 **Wait for all agents to complete.** Collect PR URLs. Report results to user.
@@ -109,6 +119,7 @@ reviewers in a SINGLE message:
    model and `--exclude-tools Edit,Write,NotebookEdit` (decision `fleet.review-backend`):
 
    ```bash
+   # Round 1 — the one-argument form (round defaults to 1, no previous SHA):
    sh scripts/review-pr.sh {pr_number}
    ```
 
@@ -120,9 +131,22 @@ reviewers in a SINGLE message:
    a new round.
 3. **On Changes Requested:** dispatch a fresh fix sub-agent that loads the
    `issue-action` skill and addresses the blocking findings on the PR's branch.
-   The fix sub-agent is never the reviewer. After it pushes, run a new house-review
-   round on the new full SHA (`sh scripts/review-pr.sh {pr_number}` again, next
-   round number).
+   The fix sub-agent is never the reviewer. After it pushes, launch the next
+   house-review round on the new full SHA. `review-pr.sh` usage is
+   `review-pr.sh <PR> [round] [prev-sha]` and ROUND defaults to 1, so the two
+   invocations are:
+
+   ```bash
+   # First review of a PR — one argument; round defaults to 1:
+   sh scripts/review-pr.sh {pr_number}
+   # Every later round, after a fix push — pass the next round number and the
+   # previous full SHA (the SHA the last verdict pinned). Round 2 of PR 834:
+   sh scripts/review-pr.sh 834 2 eab0db42b628ce0df44894af31afe183ddebeee4
+   ```
+
+   Repeating the one-argument command does NOT start the next round — it runs
+   Round 1 again. `{prev_full_sha}` is always the full SHA the previous round's
+   verdict pinned; every push invalidates that verdict.
 
 **Wait for all reviewers to complete.** Report verdicts.
 
