@@ -106,7 +106,7 @@ fn digest_lists_unratified_decision_ready_task_and_session_cost() {
         "decision line missing, got:\n{stdout}"
     );
     assert!(
-        stdout.contains("task #1 x"),
+        stdout.contains("local task `#1` x"),
         "ready task missing, got:\n{stdout}"
     );
     assert!(
