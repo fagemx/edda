@@ -188,7 +188,7 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 ## 它不做什麼
 
 - **不合併**。合併永遠照 `pr.merge-policy`（final current-head LGTM、P0=0/P1=0、
-  7 格 CI 綠、SHA 窗檢查）由操作者授權後執行。
+  required check「`CI Gate`」綠（`ci.merge-gate`）、SHA 窗檢查）由操作者授權後執行。
 - 不 push、不開 issue、不回留言、不動 `.github/workflows/**`。
 - 不用 codex 當審查運輸（做不到唯讀）；不編造 model_observed／cost。
 - 不審 draft PR；fork PR 的 head 拿不到 worktree 時會在 watch.log 留下失敗紀錄。
