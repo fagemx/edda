@@ -21,6 +21,12 @@ invariant, API/schema order). Plan YAMLs live outside the repo (scratchpad or
 
 ## Layer 1 — static judgment (before dispatch)
 
+Layer 1's input **is** the select-this-batch table from fleet-orchestrate's
+ready-batch selection procedure — a batch never appears from nowhere. That
+table already applied the exclusion checklist (cross-machine claims, in-flight
+PRs/remote branches, `needs-operator`); this layer starts from its selected
+rows and does not repeat those checks.
+
 Ready-queue intake is a machine check, not memory (GH-665): source candidate
 issues from `scripts/fleet/ready-queue-lint.sh`, never a raw
 `gh issue list --label fleet:ready` — the script excludes open issues whose

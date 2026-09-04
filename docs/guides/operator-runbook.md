@@ -98,7 +98,10 @@
 1. **開場**：在 `C:\ai_agent\edda` 開 Claude Code。pack 自動列出決策、peers、任務。說：
    「`/fleet-orchestrate` 今天跑 ready 的單」。控制者先做 fleet-orchestrate 的 controller sequence
    第 1–2 步：定目標、排除、證據門檻、開單與合併授權、停止條件；看 revision、dirty state、peers、claims、issue/PR 狀態。
-2. **判併行**：`/parallel-wave`——每張 ready issue 推 predicted write surface，兩兩交集：
+   **Standing 授權（不必逐批請示）**：`fleet:ready` 標籤就是操作者的簽名——控制者接著自己跑
+   fleet-orchestrate 的 ready-batch selection 程序選出這一批、產出選/排表，不回頭問編號；
+   操作者的介入點是 promote 與裁決，不是每批打字給編號（程序正典在 fleet-orchestrate，這裡不重述）。
+2. **判併行**：`/parallel-wave`——輸入就是上一步選單程序的選/排表；每張選中的 ready issue 推 predicted write surface，兩兩交集：
    disjoint → 一起派；同檔不同符號 → 兩邊 brief 寫 FORBIDDEN 符號清單；同符號 → 串成一條；scope 太糊 → 退回佇列。
    `edda claim check`（#576，2026-09-02 已合進 main）把這步變成機器判——**但要用從 main 重建的二進位**：
    PATH 上的 `edda.exe` 可能比 #576 舊，`edda claim --help` 沒列出 `check` 就是舊的（它會把 `check` 當成 claim 的 label）。
