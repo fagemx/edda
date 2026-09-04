@@ -20,7 +20,7 @@
 - **R10 訊息**：真相先寫在 issue 或 PR，host 訊息只做門鈴；永不向人提問。
 - **R11 認證失效**：該運輸的 lane 停派，在 board 記一筆 `needs-operator: relogin <tool> on <machine>`，只記一次；不重試、不換帳號。來源：#593、#669。
 - **R12 核准的計畫步驟**：操作者已核准的設計稿步驟直接以 `fleet:ready` 開單。
-- **R13 交還**：交還必須附 R3 三證與 `git ls-remote` 結果；交還後 15 分鐘再查一次。若是**未交付即釋放**，必須將原 `taking:` 留言劃線並在同一則留言加 `RELEASED — this claim is withdrawn`，再移除與釋放事實矛盾的 `fleet:claimed`／機器 `lane:*` 標籤；已交付的 claim 是正確歷史，進行中的 claim 不得因時間推測為過期。完整規則見帳本 `fleet.cross-machine-claim`。來源：#650、#682。
+- **R13 交還**：交還必須附 R3 三證與 `git ls-remote` 結果；交還後 15 分鐘再查一次。若是**未交付即釋放**，必須**編輯、不得刪除**原認領留言：將原本的 `taking:` 行劃線，並在**同一則留言**加 `RELEASED — this claim is withdrawn`，再移除與釋放事實矛盾的 `fleet:claimed`／機器 `lane:*` 標籤。活認領的機器判準與 `scripts/fleet-claim-issue.sh` 相同：逐行去前導空白後，只有開頭仍是 `taking:` 的行算活；獨立的 `RELEASED` 行不會使原 `taking:` 行失效。已交付的 claim 是正確歷史，進行中的 claim 不得因時間推測為過期。完整規則見帳本 `fleet.cross-machine-claim`。來源：#650、#682。
 - **R14 每日預算**：管理者自身每日 5 美元；lane 照 brief。
 - **R15 認證失敗的機器判準**：一輪 agent 回合若 `Cost: $0.00`，一律當失敗處理，不論 exit code。理由：認證失敗的回合成本必為零，而 `edda dispatch` 目前回 exit 0（#669）。#669 落地後改以 exit code 為準，本條保留為交叉檢查。
 - **R16 存活面的已知污染**：`edda peers` 在 `cargo test -p edda-bridge-claude` 執行期間會出現非 UUID 形狀的假 session（測試 fixture 寫進真實 store，#646）。判存活時忽略 session id 不是 UUID 形狀的條目。心跳判活的視窗是 120 秒（`stale_secs()`），所以兩次查詢相隔超過該視窗可能得到不同答案 —— 這是時序，不是 store 分裂。
