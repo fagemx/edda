@@ -127,6 +127,7 @@ pub fn doctor(repo_root: &Path) -> anyhow::Result<()> {
     edda_bridge_claude::doctor(repo_root)
 }
 
+/// `edda bridge claude digest --session <id>` or `--all`
 pub fn digest(repo_root: &Path, session: Option<&str>, all: bool) -> anyhow::Result<()> {
     let project_id = edda_store::project_id(repo_root);
     let cwd = repo_root.to_str().unwrap_or(".");
