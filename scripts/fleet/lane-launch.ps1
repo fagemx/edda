@@ -452,6 +452,7 @@ $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log
 Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue  # stale done-file from a previous run must not masquerade as this run
 $registered = $false
 $scheduledActionArguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`""
+$registrationDescription = "edda lane registration $([guid]::NewGuid().ToString('N'))"
 try {
   $action = New-ScheduledTaskAction -Execute $PwshExe `
     -Argument $scheduledActionArguments `
@@ -463,7 +464,7 @@ try {
     -MultipleInstances IgnoreNew `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-  Register-ScheduledTask -TaskName $TaskName -Action $action -Settings $settings -RunLevel Limited | Out-Null
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Settings $settings -Description $registrationDescription -RunLevel Limited | Out-Null
   $registered = $true
   Start-ScheduledTask -TaskName $TaskName
   Start-Sleep -Seconds 2
@@ -483,7 +484,8 @@ try {
     try {
       $current = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
       $currentArguments = if ($current -and $current.Actions -and $current.Actions.Count -gt 0) { [string]$current.Actions[0].Arguments } else { $null }
-      if ($current -and $current.State -ne 'Running' -and $currentArguments -eq $scheduledActionArguments) {
+      $currentDescription = if ($current) { [string]$current.Description } else { $null }
+      if ($current -and $current.State -ne 'Running' -and $currentArguments -eq $scheduledActionArguments -and $currentDescription -eq $registrationDescription) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
         $registrationVerdict = 'unregistered-after-launch-failure'
       } elseif ($current) {

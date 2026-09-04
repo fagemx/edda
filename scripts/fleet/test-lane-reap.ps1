@@ -78,9 +78,9 @@ function Get-FleetScheduledTasks {
   foreach ($t in $fx.tasks) {
     [pscustomobject]@{
       TaskName = $t.taskName
+      TaskPath = '\\'
       State    = $t.state
       Actions  = @([pscustomobject]@{ Arguments = $t.actionArguments })
-      Xml      = if ($t.identity) { $t.identity } else { "fixture:$($t.taskName):$($t.actionArguments)" }
     }
   }
 }
@@ -92,13 +92,20 @@ function Get-FleetTaskByName([string]$TaskName) {
     if ($t.taskName -eq $TaskName) {
       return [pscustomobject]@{
         TaskName = $t.taskName
+        TaskPath = '\\'
         State    = $t.state
         Actions  = @([pscustomobject]@{ Arguments = $t.actionArguments })
-        Xml      = if ($t.identity) { $t.identity } else { "fixture:$($t.taskName):$($t.actionArguments)" }
       }
     }
   }
   return $null
+}
+$script:exportCount = 0
+function Export-ScheduledTask { [CmdletBinding()] param([string]$TaskName, [string]$TaskPath)
+  $script:exportCount++
+  if ($script:exportCount -gt 1 -and $fx.PSObject.Properties['recheckIdentity']) { return [string]$fx.recheckIdentity }
+  if ($fx.PSObject.Properties['identity']) { return [string]$fx.identity }
+  return "fixture:$TaskName"
 }
 $script:unregistered = [System.Collections.Generic.List[string]]::new()
 function Remove-FleetTaskRegistration([string]$TaskName) {
@@ -360,7 +367,9 @@ try {
   "=== 16. apply-time registration identity race preserves replacement ==="
   $r = Invoke-Scenario @{
     tasks = @( @{ taskName = 'edda-lane-race'; state = 'Ready'; actionArguments = "-File `"$wGh772`"" } )
-    recheckTask = @{ taskName = 'edda-lane-race'; state = 'Ready'; actionArguments = "-File `"$wGh772`""; identity = 'replacement-registration-xml' }
+    recheckTask = @{ taskName = 'edda-lane-race'; state = 'Ready'; actionArguments = "-File `"$wGh772`"" }
+    identity = 'original-registration-xml'
+    recheckIdentity = 'replacement-registration-xml'
     gh = @{ 'issue:772' = @{ state = 'CLOSED' } }
     processes = @{}
   } $true '' $logDir

@@ -145,12 +145,10 @@ function Get-FleetTaskByName([string]$TaskName) {
 }
 
 function Get-FleetTaskIdentity($Task) {
-  # Task name and action arguments are reusable.  Task Scheduler exposes the
-  # registration XML for the concrete registration; hash that actual metadata
-  # rather than inventing a task-service field.  Legacy/provider objects that
-  # do not expose XML are unknown and must not be removed under -Apply.
+  # MSFT_ScheduledTask has no Xml property.  Export-ScheduledTask is the real
+  # Scheduler API for the registration document; hash it at each observation.
   if (-not $Task) { return $null }
-  $xml = [string]$Task.Xml
+  try { $xml = [string](Export-ScheduledTask -TaskName $Task.TaskName -TaskPath $Task.TaskPath -ErrorAction Stop) } catch { return $null }
   if (-not $xml) { return $null }
   $bytes = [Text.Encoding]::UTF8.GetBytes($xml)
   return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
