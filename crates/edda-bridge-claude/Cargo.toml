@@ -29,7 +29,6 @@ serde_json.workspace = true
 time.workspace = true
 ulid.workspace = true
 globset.workspace = true
-dirs.workspace = true
 regex.workspace = true
 blake3.workspace = true
 ureq = "3"
