@@ -89,7 +89,9 @@ no merge.
    <doneWhen verbatim, plus any comment that changes the fix>
 3. Read code WITHOUT touching the working tree (agents occupy it):
    gh pr diff P, plus git fetch + git show origin/<branch>:<path>.
-4. Evidence: 7/7 CI green on the head SHA — READ it. Know the coverage gap:
+4. Evidence: required check "CI Gate" green on the head SHA — READ it
+   (ci.merge-gate). Docs-only PRs may show skipped clippy/test jobs — that is
+   ci.path-filter, not a missed run. Know the coverage gap:
    Windows CI tests only the 7-crate subset; a changed crate outside it earns
    a focused local check, otherwise do NOT build (lanes occupied).
 5. IN SCOPE (bounded complete review — audit ALL of it): changed
@@ -115,7 +117,8 @@ no merge.
 ## Merge-tail check (per PR, after LGTM)
 
 1. Current-head LGTM comment, P0=0/P1=0.
-2. 7/7 required CI green on that head.
+2. Required check "CI Gate" green on that head (ci.merge-gate; docs-only
+   PRs may show skipped clippy/test jobs — ci.path-filter, not a missed run).
 3. SHA window: verdict SHA == headRefOid right now.
 4. Authorization window covers this PR.
 5. After merging: for each remaining open PR, intersect its
