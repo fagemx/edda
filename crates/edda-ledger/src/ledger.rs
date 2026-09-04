@@ -201,7 +201,7 @@ impl Ledger {
         self.sqlite.iter_events().context("Ledger::iter_events")
     }
 
-    /// Verify parent linkage and canonical hashes for the complete event log.
+    /// Verify linkage/hashes: `docs/reference/ledger-event-spec.md#chain-verification`.
     pub fn verify_chain(&self) -> anyhow::Result<()> {
         self.sqlite.verify_chain().context("Ledger::verify_chain")
     }

@@ -75,7 +75,7 @@ jobs:
                 printf '%s\n' "$f"
                 # Whitelist: any match means code changed (err on running more).
                 case "$f" in
-                  crates/*|Cargo.toml|Cargo.lock|rust-toolchain*|.cargo/*|.github/workflows/*|scripts/*|install.sh|build.rs)
+                  crates/*|spec/events/*|tests/fixtures/events/*|Cargo.toml|Cargo.lock|rust-toolchain*|.cargo/*|.github/workflows/*|scripts/*|install.sh|build.rs)
                     code=true ;;
                 esac
               done < "$diffout"

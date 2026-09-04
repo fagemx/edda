@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "review_bundle payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "bundle_id": {
+      "type": "string"
+    },
+    "change_summary": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "added": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "deleted": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "path",
+              "added",
+              "deleted"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "total_added": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_deleted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "diff_ref": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "files",
+        "total_added",
+        "total_deleted",
+        "diff_ref"
+      ],
+      "additionalProperties": true
+    },
+    "test_results": {
+      "type": "object",
+      "properties": {
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ignored": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failures": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "command": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "passed",
+        "failed",
+        "ignored",
+        "total",
+        "failures",
+        "command"
+      ],
+      "additionalProperties": true
+    },
+    "risk_assessment": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "factors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "signal": {
+                "type": "string"
+              },
+              "level": {
+                "enum": [
+                  "low",
+                  "medium",
+                  "high",
+                  "critical"
+                ]
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "signal",
+              "level",
+              "detail"
+            ],
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": [
+        "level",
+        "factors"
+      ],
+      "additionalProperties": true
+    },
+    "suggested_action": {
+      "enum": [
+        "approve",
+        "review",
+        "request_changes",
+        "reject"
+      ]
+    },
+    "suggested_reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "bundle_id",
+    "change_summary",
+    "test_results",
+    "risk_assessment",
+    "suggested_action",
+    "suggested_reason"
+  ],
+  "additionalProperties": true
+}
