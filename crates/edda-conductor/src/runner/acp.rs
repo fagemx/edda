@@ -439,8 +439,12 @@ impl acp::Client for AcpClient {
 /// agent itself: if neither is present the turn is honestly `measured:
 /// false` — never a zero-cost guess.
 fn effective_usage(response: &acp::PromptResponse) -> Option<AcpUsage> {
-    if let Some(usage) = response.usage {
-        return Some(usage.into());
+    if let Some(usage) = response.usage.as_ref() {
+        return Some(AcpUsage {
+            total_tokens: usage.total_tokens,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+        });
     }
     let usage = response.meta.as_ref()?.get("usage")?;
     Some(AcpUsage {

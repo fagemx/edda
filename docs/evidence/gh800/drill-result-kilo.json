@@ -3,15 +3,14 @@
   "verifier": false,
   "supported": false,
   "failingMethod": "spawn",
-  "error": "spawn: program 'kilo' exited immediately (exit code 1); not installed or not resolvable",
+  "failureStatus": "spawn_failed",
   "steps": [
     {
       "failingMethod": "spawn",
-      "sessionId": null,
       "stopReason": null,
+      "status": "spawn_failed",
       "step": "1",
-      "ok": false,
-      "error": "spawn: program 'kilo' exited immediately (exit code 1); not installed or not resolvable"
+      "ok": false
     }
   ]
 }

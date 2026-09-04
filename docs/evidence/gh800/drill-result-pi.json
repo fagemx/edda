@@ -2,16 +2,15 @@
   "target": "pi",
   "verifier": false,
   "supported": false,
-  "failingMethod": "Exception calling \"WriteLine\" with \"1\" argument(s)",
-  "error": "Exception calling \"WriteLine\" with \"1\" argument(s): \"管道正關閉中。\"",
+  "failingMethod": "initialize",
+  "failureStatus": "write_failed",
   "steps": [
     {
+      "failingMethod": "initialize",
       "stopReason": null,
+      "status": "write_failed",
       "step": "1",
-      "failingMethod": "Exception calling \"WriteLine\" with \"1\" argument(s)",
-      "sessionId": null,
-      "ok": false,
-      "error": "Exception calling \"WriteLine\" with \"1\" argument(s): \"管道正關閉中。\""
+      "ok": false
     }
   ]
 }

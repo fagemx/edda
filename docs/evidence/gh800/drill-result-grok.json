@@ -3,15 +3,14 @@
   "verifier": false,
   "supported": false,
   "failingMethod": "session/new",
-  "error": "session/new: no response within timeout",
+  "failureStatus": "timeout",
   "steps": [
     {
       "failingMethod": "session/new",
       "stopReason": null,
+      "status": "timeout",
       "step": "1",
-      "error": "session/new: no response within timeout",
-      "ok": false,
-      "sessionId": null
+      "ok": false
     }
   ]
 }

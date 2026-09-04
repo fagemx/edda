@@ -66,10 +66,7 @@ impl AcpTarget {
         let (program, mut args): (PathBuf, Vec<String>) = match self {
             Self::Grok => (
                 PathBuf::from("grok"),
-                ["agent", "stdio"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect(),
+                ["agent", "stdio"].into_iter().map(String::from).collect(),
             ),
             Self::Kilo => (PathBuf::from("kilo"), vec!["acp".to_string()]),
             Self::Pi => (PathBuf::from("pi-acp"), Vec::new()),
@@ -154,7 +151,12 @@ mod tests {
 
     #[test]
     fn keys_round_trip() {
-        for target in [AcpTarget::Grok, AcpTarget::Kilo, AcpTarget::Pi, AcpTarget::Claude] {
+        for target in [
+            AcpTarget::Grok,
+            AcpTarget::Kilo,
+            AcpTarget::Pi,
+            AcpTarget::Claude,
+        ] {
             assert_eq!(AcpTarget::parse(target.key()), Some(target));
         }
     }

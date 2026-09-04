@@ -1,0 +1,5 @@
+# command: cargo clippy -p edda-conductor --all-targets -- -D warnings
+    Checking edda-conductor v0.4.0 (C:\ai_agent\edda-wt-infra-acp\crates\edda-conductor)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 7.50s
+
+# exit_code: 0
