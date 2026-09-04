@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "verdict.recorded payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "subject": {
+      "type": "string"
+    },
+    "decision": {
+      "enum": [
+        "approved",
+        "rejected"
+      ]
+    },
+    "sha": {
+      "type": "string"
+    },
+    "comment": {
+      "type": "string"
+    },
+    "actor": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "subject",
+    "decision",
+    "sha",
+    "actor"
+  ],
+  "additionalProperties": true
+}

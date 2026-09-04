@@ -8,6 +8,10 @@ This document defines the consistency model between Edda's state layers. It is t
 authoritative reference for which layer owns which data, durability guarantees,
 staleness expectations, and recovery behavior.
 
+The [ledger event specification](../reference/ledger-event-spec.md) defines the
+Layer 1 envelope, payload inventory, canonical hash and chain verification.
+SQLite is the current event authority; JSONL fixtures describe interchange.
+
 ## State Layers
 
 Edda maintains three distinct state layers, each with different storage mechanisms,

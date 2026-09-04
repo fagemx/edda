@@ -13,3 +13,6 @@ pub mod tool_tier;
 pub mod types;
 
 pub use types::*;
+
+#[cfg(test)]
+mod event_conformance;

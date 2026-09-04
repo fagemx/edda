@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decision_ratify payload",
+  "description": "Layer 1 v1 payload.",
+  "type": "object",
+  "properties": {
+    "key": {
+      "type": "string"
+    },
+    "ratified_by": {
+      "type": "string"
+    },
+    "note": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "key",
+    "ratified_by"
+  ],
+  "additionalProperties": true
+}

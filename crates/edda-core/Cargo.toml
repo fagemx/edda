@@ -26,6 +26,8 @@ regex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+syn.workspace = true
+jsonschema.workspace = true
 
 [lints]
 workspace = true
