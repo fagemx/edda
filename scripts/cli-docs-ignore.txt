@@ -1,0 +1,24 @@
+# GH-795 CLI docs flag exclusions.
+# Format: <verb> <flag>
+# Removing an entry when documenting the flag is free; adding one is a reviewable diff.
+
+ask --fleet
+ask --impact
+claim --subject
+commit --max-evidence
+decide --paths
+decide --refs
+decide --scope
+decide --tags
+dispatch --exclude-tools
+dispatch --list-models
+dispatch --model
+dispatch --session-dir
+dispatch --thinking
+dispatch --tools
+gc --archive-keep-days
+init --force-skills
+log --fleet
+log --tool
+rebuild --reason
+request-ack --session
