@@ -229,6 +229,8 @@ The edda brief uses karvi's scoped board format (`meta` + `controls` + `log` ske
 }
 ```
 
+> **Note**: The `cost` field is optional and omitted when execution is unmeasured (`cost_measured == false`); see Field Reference below.
+
 ### Field Reference
 
 | Field | Type | Source | Update Frequency |
@@ -252,10 +254,13 @@ The edda brief uses karvi's scoped board format (`meta` + `controls` + `log` ske
 | `phases.{id}.reason` | string | PhaseSkipped.reason | On skip |
 | `currentPhase` | string | Latest PhaseStart.phase_id | Per PhaseStart |
 | `completedPhases` | number | Count of Passed + Skipped | Per pass/skip |
-| `cost.total_usd` | number | PlanCompleted.total_cost_usd | On plan complete |
-| `cost.by_phase.{id}` | number | PhasePassed.cost_usd | Per pass |
+| `cost` | object (optional) | Aggregated phase/plan costs | Omitted when unmeasured (`cost_measured == false`) |
+| `cost.total_usd` | number (optional) | PlanCompleted.total_cost_usd | On plan complete when measured; omitted when unmeasured |
+| `cost.by_phase.{id}` | number | PhasePassed.cost_usd | Per pass, when measured |
 | `artifacts` | string[] | Agent output (parsed) | Per pass |
 | `log[]` | array | All events | Per event |
+
+**Cost measured-ness**: When running without cost measurement (`cost_measured == false`), the `cost` field is omitted from `brief.json` to distinguish unmeasured execution from a measured zero ($0.00). When cost measurement is active, measured zero is preserved as `"total_usd": 0.0`.
 
 ### Phase Status Values
 
@@ -326,7 +331,7 @@ How each `events.jsonl` event translates to a brief PATCH:
 | `PhasePassed { phase_id, attempt, duration_ms, cost_usd }` | `{ phases: { [phase_id]: { status: "passed", attempts: attempt, duration_ms, cost_usd, completedAt: ts } }, completedPhases: N, cost: { by_phase: { [phase_id]: cost_usd } } }` |
 | `PhaseFailed { phase_id, attempt, duration_ms, error }` | `{ phases: { [phase_id]: { status: "failed", attempts: attempt, error } } }` |
 | `PhaseSkipped { phase_id, reason }` | `{ phases: { [phase_id]: { status: "skipped", reason } }, completedPhases: N }` |
-| `PlanCompleted { phases_passed, total_cost_usd }` | `{ cost: { total_usd: total_cost_usd } }` |
+| `PlanCompleted { phases_passed, total_cost_usd }` | `{ cost: { total_usd: total_cost_usd } }` — populated when cost is measured; omitted when unmeasured (`total_cost_usd` null) |
 | `PlanAborted { phases_passed, phases_pending }` | No brief update — task status changes instead |
 
 **Note**: `completedPhases` counts phases with status `"passed"` or `"skipped"`.
