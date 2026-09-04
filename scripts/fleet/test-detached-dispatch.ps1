@@ -1,6 +1,7 @@
 # GH605 real Windows Job test. Uses only disposable fixture processes/tasks.
 param([Parameter(Mandatory)][string]$Edda, [string]$BaselineEdda = '',
-  [ValidateSet('worker-1','worker-2')][string]$BuildLane = 'worker-2')
+  [ValidateSet('worker-1','worker-2')][string]$BuildLane = 'worker-2',
+  [switch]$TerminalOnly, [string]$SupervisorHelperPath = '')
 $ErrorActionPreference = 'Stop'
 $Edda = (Resolve-Path -LiteralPath $Edda).Path
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('edda-detach-test-' + [guid]::NewGuid().ToString('N'))
@@ -34,6 +35,12 @@ $controllers = [Collections.Generic.List[Diagnostics.Process]]::new()
 $jobs = [Collections.Generic.List[IntPtr]]::new()
 $supervisorHelper = $null
 try {
+  if($TerminalOnly) {
+    if(-not $SupervisorHelperPath){throw '-SupervisorHelperPath is required with -TerminalOnly'}
+    $sourceHelper=(Resolve-Path -LiteralPath $SupervisorHelperPath).Path
+    $supervisorHelper=Join-Path $testRoot 'terminal-helper.ps1'
+    Copy-Item -LiteralPath $sourceHelper -Destination $supervisorHelper
+  } else {
   $laneRoot=if($env:FLEET_LANE_ROOT){$env:FLEET_LANE_ROOT}else{Join-Path $env:LOCALAPPDATA 'fleet-workstation/lanes'}
   $fixtureBuild=Join-Path (Join-Path $laneRoot $BuildLane) 'gh605-fixtures'
   [void](New-Item -ItemType Directory -Force -Path $fixtureBuild)
@@ -159,20 +166,29 @@ Start-Sleep -Seconds 120
       }
     }
   }
-  # Force only terminal persistence to fail after an owned scheduled task has
-  # started. The helper must still unregister that exact task and exit nonzero.
+  }
+  # Force only terminal persistence to fail through the actual Scheduled Task
+  # action. The task must be gone and its retained config/manifest must still
+  # lead a restarted controller to the supervisor error log.
   $terminalDir=Join-Path $testRoot 'terminal-manifest-failure'; [void](New-Item -ItemType Directory -Path $terminalDir)
   $terminalManifest=Join-Path $terminalDir 'manifest.json'; $terminalConfig=Join-Path $terminalDir 'launch.json'
   $terminalTask='edda-gh605-terminal-'+[guid]::NewGuid().ToString('N')
-  $terminalAction=New-ScheduledTaskAction -Execute $pwsh -Argument '-NoProfile -Command exit 0'
-  Register-ScheduledTask -TaskName $terminalTask -Action $terminalAction | Out-Null
-  $terminal=@{manifest=$terminalManifest;log=(Join-Path $terminalDir 'worker.log');task=$terminalTask;cwd=$terminalDir;executable=$Edda;argv=@('--version');environment=@{};home=$env:USERPROFILE;cargo=$null;timeout=20;session='cli-terminal';owned_paths=@();test_fail_terminal_manifest_write=$true}
-  @{state='launching';worker_pid=$null;exit_code=$null;error=$null} | ConvertTo-Json | Set-Content -LiteralPath $terminalManifest -Encoding utf8
+  $terminalSupervisorLog=Join-Path $terminalDir 'supervisor.log'
+  $terminal=@{manifest=$terminalManifest;log=(Join-Path $terminalDir 'worker.log');supervisor_log=$terminalSupervisorLog;task=$terminalTask;cwd=$terminalDir;executable=$Edda;controller_pid=$PID;argv=@('--version');environment=@{};home=$env:USERPROFILE;cargo=$null;timeout=20;session='cli-terminal';owned_paths=@();test_fail_terminal_manifest_write=$true}
+  @{state='launching';worker_pid=$null;exit_code=$null;error=$null;supervisor_log=$terminalSupervisorLog} | ConvertTo-Json | Set-Content -LiteralPath $terminalManifest -Encoding utf8
   $terminal | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $terminalConfig -Encoding utf8
-  & $supervisorHelper -Mode Run -Config $terminalConfig
-  Assert ($LASTEXITCODE -ne 0) 'terminal manifest write failure must return a nonzero supervisor result'
-  Assert ($null -eq (Get-ScheduledTask -TaskName $terminalTask -ErrorAction SilentlyContinue)) 'terminal manifest failure left its task registered'
-  "PASS terminal-manifest-failure: task_absent=true exit=$LASTEXITCODE"
+  & $supervisorHelper -Mode Launch -Config $terminalConfig
+  Assert ($LASTEXITCODE -eq 0) 'terminal fixture task did not launch'
+  Wait-Until {
+    ($null -eq (Get-ScheduledTask -TaskName $terminalTask -ErrorAction SilentlyContinue)) -and
+    (Test-Path -LiteralPath $terminalSupervisorLog)
+  } 'terminal manifest failure left its task registered or no durable supervisor log' 70
+  $retainedManifest=Get-Content -Raw -LiteralPath $terminalManifest | ConvertFrom-Json
+  Assert ($retainedManifest.state -eq 'running') 'injected terminal failure should leave the prior manifest unchanged'
+  Assert ($retainedManifest.supervisor_log -eq $terminalSupervisorLog) 'manifest must retain the discoverable supervisor log path'
+  $supervisorError=Get-Content -Raw -LiteralPath $terminalSupervisorLog
+  Assert (($supervisorError -join [Environment]::NewLine) -match 'terminal manifest: injected terminal manifest write failure') 'scheduled supervisor error was not durable'
+  "PASS terminal-manifest-failure: task_absent=true supervisor_error_durable=true"
 } catch {
   # Keep the failing assertion beside the retained fixture evidence.  A
   # detached process can outlive this harness, so terminal output alone is

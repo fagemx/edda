@@ -17,9 +17,15 @@ if ($Mode -eq 'Launch') {
   # Append the canonical metadata before registering the task so a PID can
   # never be confused with a later process that reused its numeric value.
   Add-Content -LiteralPath $PSCommandPath -Value $description -Encoding utf8
-  $quotedScript = $PSCommandPath.Replace('"', '\"')
-  $quotedConfig = $Config.Replace('"', '\"')
-  $action = New-ScheduledTaskAction -Execute $pwsh -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$quotedScript`" -Mode Run -Config `"$quotedConfig`"" -WorkingDirectory $c.cwd
+  $taskScript = if ($PSCommandPath.StartsWith('\\?\')) { $PSCommandPath.Substring(4) } else { $PSCommandPath }
+  $taskConfig = if ($Config.StartsWith('\\?\')) { $Config.Substring(4) } else { $Config }
+  $taskLog = [string]$c.supervisor_log
+  if ($taskLog.StartsWith('\\?\')) { $taskLog = $taskLog.Substring(4) }
+  $runner = "$taskConfig.supervisor.ps1"
+  $runnerText = "& '$($taskScript.Replace("'", "''"))' -Mode Run -Config '$($taskConfig.Replace("'", "''"))'"
+  Set-Content -LiteralPath $runner -Value $runnerText -Encoding utf8
+  $quotedRunner = $runner.Replace('"', '\"')
+  $action = New-ScheduledTaskAction -Execute $pwsh -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$quotedRunner`"" -WorkingDirectory $c.cwd
   $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds ($c.timeout + 30)) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   Register-ScheduledTask -TaskName $c.task -Action $action -Settings $settings -Description $description -RunLevel Limited | Out-Null
   try { Start-ScheduledTask -TaskName $c.task }
@@ -106,23 +112,26 @@ try {
     try { Release-OwnedWorker }
     catch { [void]$cleanupFailures.Add("ownership cleanup: $($_.Exception.Message)") }
   }
-  # Task removal must happen even when manifest persistence is unavailable.
-  try { Unregister-ScheduledTask -TaskName $c.task -Confirm:$false -ErrorAction Stop }
-  catch { [void]$cleanupFailures.Add("task cleanup: $($_.Exception.Message)") }
-  if ($cleanupFailures.Count -gt 0) {
-    $code = 1
-    if ($m) { $m.state = 'failed'; $m.error = $cleanupFailures -join '; ' }
-  }
   if ($m) {
     $m.exit_code = $code
     try { Write-Manifest $m $true }
     catch {
       $code = 1
-      [void]$cleanupFailures.Add("terminal manifest: $($_.Exception.Message)")
+      $terminalFailure = "terminal manifest: $($_.Exception.Message)"
+      [void]$cleanupFailures.Add($terminalFailure)
+      try { Add-Content -LiteralPath $c.supervisor_log -Value "detached supervisor cleanup failed: $terminalFailure" -Encoding utf8 }
+      catch { [Console]::Error.WriteLine("detached supervisor cleanup failed: $terminalFailure; supervisor log: $($_.Exception.Message)") }
     }
   }
+  # Task removal must happen even when manifest persistence is unavailable.
+  try { Unregister-ScheduledTask -TaskName $c.task -Confirm:$false -ErrorAction Stop }
+  catch { [void]$cleanupFailures.Add("task cleanup: $($_.Exception.Message)") }
   if ($cleanupFailures.Count -gt 0) {
-    [Console]::Error.WriteLine("detached supervisor cleanup failed: $($cleanupFailures -join '; ')")
+    $code = 1
+    $supervisorError = "detached supervisor cleanup failed: $($cleanupFailures -join '; ')"
+    try { Add-Content -LiteralPath $c.supervisor_log -Value $supervisorError -Encoding utf8 }
+    catch { [Console]::Error.WriteLine("$supervisorError; supervisor log: $($_.Exception.Message)") }
+    [Console]::Error.WriteLine($supervisorError)
   }
 }
 exit $code

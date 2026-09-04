@@ -31,6 +31,7 @@ pub fn launch(args: &DispatchArgs, cwd: &Path, session: &str) -> Result<Detached
     let root = fs::canonicalize(root)?;
     let handle = format!("dispatch-{}", ulid::Ulid::new());
     let log = root.join(format!("{handle}.log"));
+    let supervisor_log = root.join(format!("{handle}.supervisor.log"));
     let manifest = root.join(format!("{handle}.json"));
     let cargo = lane.map(|name| lane_root().join(name));
     // Snapshot the prompt so a restarted controller cannot remove or replace
@@ -60,7 +61,8 @@ pub fn launch(args: &DispatchArgs, cwd: &Path, session: &str) -> Result<Detached
     };
     let value = serde_json::json!({
         "version": 1, "handle": receipt.handle, "controller_pid": std::process::id(),
-        "cwd": cwd, "log": receipt.log, "task": receipt.task, "state": "launching",
+        "cwd": cwd, "log": receipt.log, "supervisor_log": supervisor_log,
+        "task": receipt.task, "state": "launching",
         "cargo_target_dir": cargo, "worker_pid": null, "exit_code": null, "error": null,
     });
     fs::write(&receipt.manifest, serde_json::to_vec_pretty(&value)?)?;
@@ -221,7 +223,8 @@ fn launch_windows(
         include_str!("../../../scripts/fleet/dispatch-task.ps1"),
     )?;
     let config_value = serde_json::json!({
-        "manifest": receipt.manifest, "log": receipt.log, "task": receipt.task,
+        "manifest": receipt.manifest, "log": receipt.log,
+        "supervisor_log": receipt.log.with_extension("supervisor.log"), "task": receipt.task,
         "cwd": cwd, "executable": executable,
         "controller_pid": std::process::id(),
         "session": session, "owned_paths": owned_paths,
