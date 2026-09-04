@@ -150,6 +150,8 @@ and call `finalize_event`; retain the original for comparisons.
 
 ## Chain verification
 
+<a id="chain-verification"></a>
+
 [`Ledger::verify_chain` in ledger.rs:205](../../crates/edda-ledger/src/ledger.rs#L205)
 delegates to [`SqliteStore::verify_chain` in events.rs:715](../../crates/edda-ledger/src/sqlite_store/events.rs#L715).
 Both reference this algorithm:
