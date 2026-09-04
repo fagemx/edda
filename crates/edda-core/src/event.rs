@@ -12,11 +12,11 @@ pub fn compute_event_hash(event_without_hash: &serde_json::Value) -> anyhow::Res
     Ok(sha256_hex(&bytes))
 }
 
-fn new_event_id() -> String {
+pub(crate) fn new_event_id() -> String {
     format!("evt_{}", ulid::Ulid::new().to_string().to_lowercase())
 }
 
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     let now = time::OffsetDateTime::now_utc();
     now.format(&time::format_description::well_known::Rfc3339)
         .expect("RFC3339 formatting should not fail")
@@ -313,58 +313,38 @@ pub fn new_verdict_event(
     Ok(event)
 }
 
-/// Parameters for creating a `cmd` event.
-pub struct CmdEventParams<'a> {
-    pub branch: &'a str,
-    pub parent_hash: Option<&'a str>,
-    pub argv: &'a [String],
-    pub cwd: &'a str,
-    pub exit_code: i32,
-    pub duration_ms: u64,
-    pub stdout_blob: &'a str,
-    pub stderr_blob: &'a str,
-}
-
-/// Create a new `cmd` event.
-pub fn new_cmd_event(params: &CmdEventParams<'_>) -> anyhow::Result<Event> {
-    let payload = serde_json::json!({
-        "argv": params.argv,
-        "cwd": params.cwd,
-        "exit_code": params.exit_code,
-        "duration_ms": params.duration_ms,
-        "stdout_blob": params.stdout_blob,
-        "stderr_blob": params.stderr_blob,
-    });
-
-    let mut blob_refs = Vec::new();
-    if !params.stdout_blob.is_empty() {
-        blob_refs.push(params.stdout_blob.to_string());
-    }
-    if !params.stderr_blob.is_empty() {
-        blob_refs.push(params.stderr_blob.to_string());
-    }
-
+/// Independent review evidence, separate from the operator's `verdict.recorded`.
+pub fn new_review_verdict_event(
+    branch: &str,
+    parent_hash: Option<&str>,
+    payload: &crate::review::ReviewVerdictPayload,
+    supersedes: Option<&str>,
+    previous: Option<&str>,
+    blobs: &[String],
+) -> anyhow::Result<Event> {
+    let mut refs = Refs::default();
+    refs.events.extend(supersedes.map(str::to_string));
+    refs.events.extend(previous.map(str::to_string));
+    refs.blobs.extend(blobs.iter().cloned());
     let mut event = Event {
         event_id: new_event_id(),
         ts: now_rfc3339(),
-        event_type: "cmd".to_string(),
-        branch: params.branch.to_string(),
-        parent_hash: params.parent_hash.map(|s| s.to_string()),
+        event_type: "review_verdict".to_string(),
+        branch: branch.to_string(),
+        parent_hash: parent_hash.map(str::to_string),
         hash: String::new(),
-        payload,
-        refs: Refs {
-            blobs: blob_refs,
-            ..Default::default()
-        },
+        payload: serde_json::to_value(payload)?,
+        refs,
         schema_version: SCHEMA_VERSION,
         digests: Vec::new(),
         event_family: None,
         event_level: None,
     };
-
     finalize(&mut event)?;
     Ok(event)
 }
+
+pub use crate::cmd_event::{new_cmd_event, new_cmd_event_with_git_context, CmdEventParams};
 
 /// Parameters for creating a `commit` event.
 pub struct CommitEventParams<'a> {

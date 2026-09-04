@@ -66,6 +66,8 @@ pub struct PiRpcLauncher {
     /// In-band model report from the most recent settled turn (RPC
     /// `get_state`), for [`AgentLauncher::last_observed_model`].
     observed_model: std::sync::Mutex<Option<String>>,
+    /// In-band session id from the same `get_state` response.
+    observed_session: std::sync::Mutex<Option<String>>,
 }
 
 impl Default for PiRpcLauncher {
@@ -82,6 +84,7 @@ impl PiRpcLauncher {
             model: None,
             session_dir: None,
             observed_model: std::sync::Mutex::new(None),
+            observed_session: std::sync::Mutex::new(None),
         }
     }
 
@@ -92,12 +95,19 @@ impl PiRpcLauncher {
             model: None,
             session_dir: None,
             observed_model: std::sync::Mutex::new(None),
+            observed_session: std::sync::Mutex::new(None),
         }
     }
 
     fn record_observed_model(&self, model: Option<String>) {
         if let Ok(mut slot) = self.observed_model.lock() {
             *slot = model;
+        }
+    }
+
+    fn record_observed_session(&self, session: Option<String>) {
+        if let Ok(mut slot) = self.observed_session.lock() {
+            *slot = session;
         }
     }
 
@@ -220,7 +230,7 @@ impl AgentLauncher for PiRpcLauncher {
         self.validate_phase(phase)?;
         let command = self.build_command(phase, session_id, cwd);
         let timeout_sec = phase.timeout_sec.unwrap_or(1800);
-        let (result, observed) = run_command(
+        let (result, observed_model, observed_session) = run_command(
             command,
             phase,
             prompt,
@@ -232,12 +242,20 @@ impl AgentLauncher for PiRpcLauncher {
         .await?;
         // In-band model observation: whatever pi itself reported via RPC
         // `get_state`, or nothing. Never inferred from config or sessions.
-        self.record_observed_model(observed);
+        self.record_observed_model(observed_model);
+        self.record_observed_session(observed_session);
         Ok(result)
     }
 
     fn last_observed_model(&self) -> Option<String> {
         self.observed_model
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    fn last_observed_session(&self) -> Option<String> {
+        self.observed_session
             .lock()
             .ok()
             .and_then(|slot| slot.clone())
@@ -255,7 +273,7 @@ async fn run_command(
     verbose: bool,
     timeout: Duration,
     cancel: CancellationToken,
-) -> Result<(PhaseResult, Option<String>)> {
+) -> Result<(PhaseResult, Option<String>, Option<String>)> {
     let mut session = PiRpcSession::spawn_command(command).await?;
     // pi has no system-prompt flag in RPC mode; carry plan context inline.
     let message = if plan_context.is_empty() {
@@ -268,14 +286,15 @@ async fn run_command(
         .await;
     // Only a settled turn is asked for state; a crashed turn has nothing
     // trustworthy to report.
-    let observed = if matches!(result, Ok(PhaseResult::AgentDone { .. })) {
-        session.observed_model().await
+    let (observed_model, observed_session) = if matches!(result, Ok(PhaseResult::AgentDone { .. }))
+    {
+        session.observed_state().await
     } else {
-        None
+        (None, None)
     };
     session.terminate().await;
     let result = result?;
-    Ok((result, observed))
+    Ok((result, observed_model, observed_session))
 }
 
 /// Run `pi --list-models [search]` and return its stdout verbatim — the
@@ -541,16 +560,15 @@ impl PiRpcSession {
         })
     }
 
-    /// Ask pi for its current state and extract the in-band model report
-    /// (`provider/id`) per the RPC `get_state` contract. Any failure —
+    /// Ask pi for its current state and extract the in-band model and session
+    /// reports per the RPC `get_state` contract. Any failure —
     /// transport error, missing fields — renders as `None` ("unknown"),
     /// never a guess (GH-574 honesty rule).
-    async fn observed_model(&mut self) -> Option<String> {
-        let state = self.request(json!({ "type": "get_state" })).await.ok()?;
-        let model = state.get("model")?;
-        let provider = model.get("provider").and_then(Value::as_str)?;
-        let id = model.get("id").and_then(Value::as_str)?;
-        Some(format!("{provider}/{id}"))
+    async fn observed_state(&mut self) -> (Option<String>, Option<String>) {
+        let Ok(state) = self.request(json!({ "type": "get_state" })).await else {
+            return (None, None);
+        };
+        state_observation(&state)
     }
 
     /// Send one RPC command and wait for its matching response.
@@ -591,6 +609,20 @@ impl PiRpcSession {
             }
         }
     }
+}
+
+fn state_observation(state: &Value) -> (Option<String>, Option<String>) {
+    let model = state.get("model").and_then(|model| {
+        let provider = model.get("provider").and_then(Value::as_str)?;
+        let id = model.get("id").and_then(Value::as_str)?;
+        Some(format!("{provider}/{id}"))
+    });
+    let session = state
+        .get("sessionId")
+        .or_else(|| state.get("session_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    (model, session)
 }
 
 /// Strip a single trailing `\n` and optional `\r`.
@@ -784,7 +816,7 @@ mod tests {
     const SETTLED: &str = r#"{"type":"agent_settled"}"#;
     const STATS_042: &str = r#"{"id":"req-2","type":"response","command":"get_session_stats","success":true,"data":{"cost":0.42}}"#;
     const STATS_990: &str = r#"{"id":"req-2","type":"response","command":"get_session_stats","success":true,"data":{"cost":9.9}}"#;
-    const STATE_GPT56: &str = r#"{"id":"req-3","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"openai-codex","id":"gpt-5.6-sol"},"thinkingLevel":"high"}}"#;
+    const STATE_GPT56: &str = r#"{"id":"req-3","type":"response","command":"get_state","success":true,"data":{"model":{"provider":"openai-codex","id":"gpt-5.6-sol"},"sessionId":"00000000-0000-4000-8000-000000000001","thinkingLevel":"high"}}"#;
     const STATE_NULL: &str = r#"{"id":"req-3","type":"response","command":"get_state","success":true,"data":{"model":null}}"#;
     const STARTUP_DIAGNOSTIC: &str = "pi: no API key configured for provider openrouter";
     /// The `turn_end` pi emits when the provider rejects its credentials,
@@ -936,7 +968,7 @@ sleep 60"
         phase: &Phase,
     ) -> Result<(PhaseResult, Option<String>)> {
         let (_dir, command) = fake_pi_command(scenario)?;
-        let outcome = tokio::time::timeout(
+        let (result, observed, _session) = tokio::time::timeout(
             Duration::from_secs(30),
             run_command(
                 command,
@@ -950,7 +982,7 @@ sleep 60"
         )
         .await
         .context("test timed out waiting for run_command")??;
-        Ok(outcome)
+        Ok((result, observed))
     }
 
     #[tokio::test]
@@ -970,6 +1002,22 @@ sleep 60"
         // GH-574: the model pi reported in-band via get_state.
         assert_eq!(observed.as_deref(), Some("openai-codex/gpt-5.6-sol"));
         Ok(())
+    }
+
+    #[test]
+    fn state_observation_reads_session_without_inferring_it() {
+        let state = serde_json::json!({
+            "model":{"provider":"openai-codex","id":"gpt-5.6-sol"},
+            "sessionId":"00000000-0000-4000-8000-000000000001"
+        });
+        assert_eq!(
+            state_observation(&state),
+            (
+                Some("openai-codex/gpt-5.6-sol".into()),
+                Some("00000000-0000-4000-8000-000000000001".into())
+            )
+        );
+        assert_eq!(state_observation(&serde_json::json!({})), (None, None));
     }
 
     #[tokio::test]
@@ -1083,8 +1131,12 @@ sleep 60"
         )
         .await
         .context("test timed out waiting for run_command")??;
-        let (result, observed) = result;
+        let (result, observed, observed_session) = result;
         assert!(observed.is_none(), "a cancelled turn reports no model");
+        assert!(
+            observed_session.is_none(),
+            "a cancelled turn reports no session"
+        );
         match result {
             PhaseResult::AgentCrash { error } => assert_eq!(error, "conductor shutdown"),
             other => panic!("expected AgentCrash, got {other:?}"),

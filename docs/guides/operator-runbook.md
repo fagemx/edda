@@ -222,3 +222,5 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | 跨機器／跨人不能信收據 | #608、#609 |
 
 這張表清空的那天，本頁會縮成一屏。
+
+Fleet 使用 edda run -- <gate> 在乾淨的受審 SHA 記錄收據；edda review 讀取收據與 exact-head CI，reviewer 不重跑已涵蓋的 workspace gates。
