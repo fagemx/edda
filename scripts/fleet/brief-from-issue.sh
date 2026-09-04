@@ -84,7 +84,7 @@ body=$(printf '%s' "$json" | jq -r .body)
 # brief (steps 15 and 21), so double quotes, backticks, and dollar signs are
 # stripped: a backtick or $(...) surviving into step 15 would be expanded by
 # the lane's shell when it runs that step.
-title_safe=$(printf '%s' "$title" | tr -d '"`$')
+title_safe=$(printf '%s' "$title" | tr -d '"\\`$')
 
 section=$(printf '%s\n' "$body" | tr -d '\r' | awk '
     /^##[ \t]+Predicted surface[ \t]*$/ { p=1; next }
@@ -226,15 +226,17 @@ ${status_lines}
     output: one 40-character hexadecimal SHA; retain as delivery_sha.
 19. git push --porcelain -u origin ${branch}
     output: Git porcelain push status, exit 0, no rejected ref. A normal push; no force option is authorized.
-20. write({"path":".git/gh${issue}-pr-body.md","content":PR_BODY}) with PR_BODY containing exactly these sections in this order: ## Problem and change; ## Validation with ### RAN and ### READ; then the line Issue: #${issue}. pr.closing-keyword: a closing keyword is allowed only when every doneWhen item of #${issue} is delivered.
-    output: Successfully wrote bytes to .git/gh${issue}-pr-body.md.
-21. gh pr create --repo ${repo} --base main --head ${branch} --title "${title_safe}" --body-file .git/gh${issue}-pr-body.md
+20. git rev-parse --git-path gh${issue}-pr-body.md
+    output: one path ending in gh${issue}-pr-body.md, exit 0. Retain it as pr_body_path. A linked worktree's .git is a pointer file, so the body is written into the resolved git dir, never into .git/ itself.
+21. write({"path":"<pr_body_path>","content":PR_BODY}) where <pr_body_path> is the path retained from step 20 and PR_BODY contains exactly these sections in this order: ## Problem and change; ## Validation with ### RAN and ### READ; then the line Issue: #${issue}. pr.closing-keyword: a closing keyword is allowed only when every doneWhen item of #${issue} is delivered.
+    output: Successfully wrote bytes to <pr_body_path>.
+22. gh pr create --repo ${repo} --base main --head ${branch} --title "${title_safe}" --body-file "\$(git rev-parse --git-path gh${issue}-pr-body.md)"
     output: one https://github.com/${repo}/pull/<integer> URL, exit 0. Retain as pr_url.
-22. gh pr view ${branch} --repo ${repo} --json headRefOid --jq .headRefOid
+23. gh pr view ${branch} --repo ${repo} --json headRefOid --jq .headRefOid
     output: delivery_sha from step 18, exactly.
-23. edda task done ${task} --receipt "PR <pr_url> @ <delivery_sha>"
+24. edda task done ${task} --receipt "PR <pr_url> @ <delivery_sha>"
     output: task ${task} marked done, exit 0.
-24. Report, as the final message, exactly these five lines and nothing else:
+25. Report, as the final message, exactly these five lines and nothing else:
     DONE issue=#${issue} task=${task}
     pr=<pr_url>
     sha=<delivery_sha>

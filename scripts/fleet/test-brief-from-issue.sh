@@ -122,6 +122,15 @@ assert_skeleton() {
     grep -q 'scripts/review-pr.sh' "$out" || fail "git status finish missing a scope path"
     grep -q 'DONE issue=#880 task=128' "$out" || fail "missing five-line report"
     grep -q 'stop=controller issues the next brief' "$out" || fail "missing report last line"
+    grep -q '20. git rev-parse --git-path gh880-pr-body.md' "$out" \
+        || fail "missing pr-body path resolution step"
+    grep -q 'write({"path":"<pr_body_path>"' "$out" \
+        || fail "write step must target the retained git-dir path"
+    if grep -qF '.git/gh880-pr-body.md' "$out"; then
+        fail "hardcoded .git/ pr-body path still present (linked worktree .git is a file)"
+    fi
+    grep -qF 'body-file "$(git rev-parse --git-path gh880-pr-body.md)"' "$out" \
+        || fail "step 22 must carry the literal git-path expansion for the lane"
     if grep -Ei 'as needed|if relevant|use (your )?judg|where appropriate' "$out"; then
         fail "discretionary phrasing in output"
     fi
