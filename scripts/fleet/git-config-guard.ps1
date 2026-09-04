@@ -279,11 +279,13 @@ function Get-RefsHealth([string]$Repo, [string]$CommonDir) {
       BrokenRefs = @()
       Reason = "git fsck failed: $firstLine"
       CanRepair = $false
+      CanRepairAny = $false
     }
   }
 
   $brokenList = New-Object System.Collections.Generic.List[hashtable]
   $allHaveRepairs = $true
+  $anyHaveRepairs = $false
   $reasons = @()
   foreach ($r in $brokenMap.Keys) {
     $repairInfo = Resolve-RefRepairSha $Repo $CommonDir $r
@@ -295,6 +297,7 @@ function Get-RefsHealth([string]$Repo, [string]$CommonDir) {
     }
     $brokenList.Add($item)
     if ($repairInfo.Sha) {
+      $anyHaveRepairs = $true
       $reasons += "$r is broken ($($brokenMap[$r])); repair available from $($repairInfo.Source): $($repairInfo.Sha)"
     } else {
       $allHaveRepairs = $false
@@ -307,18 +310,25 @@ function Get-RefsHealth([string]$Repo, [string]$CommonDir) {
     BrokenRefs = @($brokenList)
     Reason = ($reasons -join '; ')
     CanRepair = $allHaveRepairs
+    CanRepairAny = $anyHaveRepairs
   }
 }
 
 function Restore-BrokenRefs([string]$Repo, [string]$CommonDir, $BrokenRefs) {
+  if (@($BrokenRefs).Count -eq 0) {
+    return @{
+      Success = $false
+      Restored = @()
+      Reason = "no broken refs identified to restore"
+    }
+  }
+
   $restored = @()
+  $failedRefs = @()
   foreach ($b in $BrokenRefs) {
     if (-not $b.RepairSha) {
-      return @{
-        Success = $false
-        Restored = $restored
-        Reason = "no repair SHA available for ref $($b.Ref)"
-      }
+      $failedRefs += "$($b.Ref) (no repair SHA available)"
+      continue
     }
     $refName = $b.Ref
     $sha = $b.RepairSha
@@ -337,13 +347,18 @@ function Restore-BrokenRefs([string]$Repo, [string]$CommonDir, $BrokenRefs) {
 
     & git -C $Repo update-ref $refName $sha
     if ($LASTEXITCODE -ne 0) {
-      return @{
-        Success = $false
-        Restored = $restored
-        Reason = "git update-ref $refName $sha failed with exit $LASTEXITCODE"
-      }
+      $failedRefs += "$refName (git update-ref failed with exit $LASTEXITCODE)"
+      continue
     }
     $restored += "RESTORED ref=$refName to sha=$sha from $($b.RepairSource); corrupt file preserved at $preserved"
+  }
+
+  if ($failedRefs.Count -gt 0) {
+    return @{
+      Success = $false
+      Restored = $restored
+      Reason = "cannot repair refs: $($failedRefs -join '; ')"
+    }
   }
 
   $after = Get-RefsHealth $Repo $CommonDir
@@ -369,6 +384,8 @@ if ($VerifyRefs) {
   if (-not $refsHealth.Healthy) {
     $repairHint = if ($refsHealth.CanRepair) {
       "repair available from reflog: run scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs"
+    } elseif ($refsHealth.CanRepairAny) {
+      "partial repair available via scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs; unrepairable refs require manual inspection of .git"
     } else {
       "automatic reflog repair unavailable; inspect repo manually"
     }
@@ -387,9 +404,6 @@ if ($RestoreRefs) {
     exit 0
   }
   [Console]::Error.WriteLine("git-config-guard: refs UNHEALTHY: $($refsHealth.Reason)")
-  if (-not $refsHealth.CanRepair) {
-    Fail "cannot repair refs automatically: $($refsHealth.Reason)" 2
-  }
   $restoreResult = Restore-BrokenRefs $RepoPath $commonDir $refsHealth.BrokenRefs
   foreach ($r in $restoreResult.Restored) {
     "$r"
@@ -415,6 +429,8 @@ if ($Verify) {
   if (-not $refsHealth.Healthy) {
     $repairHint = if ($refsHealth.CanRepair) {
       "repair available from reflog: run scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs"
+    } elseif ($refsHealth.CanRepairAny) {
+      "partial repair available via scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs; unrepairable refs require manual inspection of .git"
     } else {
       "automatic reflog repair unavailable; inspect repo manually"
     }
@@ -438,6 +454,8 @@ if ($Backup) {
   if (-not $refsHealth.Healthy) {
     $repairHint = if ($refsHealth.CanRepair) {
       "repair with scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs"
+    } elseif ($refsHealth.CanRepairAny) {
+      "partial repair available via scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs; unrepairable refs require manual inspection of .git"
     } else {
       "automatic repair from reflog unavailable; manual inspection of .git required"
     }
@@ -492,9 +510,6 @@ if (-not $configHealth.Healthy) {
 $refsHealth = Get-RefsHealth $RepoPath $commonDir
 if (-not $refsHealth.Healthy) {
   [Console]::Error.WriteLine("git-config-guard: refs UNHEALTHY: $($refsHealth.Reason)")
-  if (-not $refsHealth.CanRepair) {
-    Fail "cannot repair refs automatically: $($refsHealth.Reason)" 2
-  }
   $restoreResult = Restore-BrokenRefs $RepoPath $commonDir $refsHealth.BrokenRefs
   foreach ($r in $restoreResult.Restored) {
     "$r"

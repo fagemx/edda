@@ -321,7 +321,6 @@ if ($laneCwd -and (Test-Path -LiteralPath $laneCwd)) {
     $restoredConfigLine = @($guardOut | Where-Object { "$_" -match 'RESTORED config=' })
     $healthyConfigLine = @($guardOut | Where-Object { "$_" -match 'config=.*healthy' })
     $restoredRefLine = @($guardOut | Where-Object { "$_" -match 'RESTORED ref=' })
-    $healthyRefLine = @($guardOut | Where-Object { "$_" -match '^refs healthy' -or "$_" -match '^refs=healthy' })
 
     if ($guardExit -eq 0) {
       $gitConfigVerdict = if ($restoredConfigLine.Count -gt 0) { "$($restoredConfigLine[0])" } else { 'healthy' }

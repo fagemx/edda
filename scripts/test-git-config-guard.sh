@@ -267,7 +267,7 @@ corrupt_ref_count=$(ls "$repo_ref1/.git/" | grep -c '^ref\.CORRUPT\.' || true)
   fail "corrupt ref file was not preserved outside .git/refs"
 ok "-Restore repairs a NUL branch ref from reflog and preserves forensic backup"
 
-# --- case 14: restore with no reflog fails loudly and preserves state --------
+# --- case 14: restore with no reflog fails loudly, and mixed repairability restores what it can
 repo_ref2=$(new_repo ref-noreflog)
 ref2=$(git -C "$repo_ref2" symbolic-ref HEAD)
 ref2_file="$repo_ref2/.git/$ref2"
@@ -277,9 +277,45 @@ rm -rf "$repo_ref2/.git/logs"
 if guard -RepoPath "$repo_ref2" -RestoreRefs >"$tmp/out14" 2>&1; then
   fail "-RestoreRefs exited 0 when no reflog was available"
 fi
-grep -q -E 'cannot repair refs automatically|RESTORE FAILED' "$tmp/out14" ||
+grep -q 'RESTORE FAILED' "$tmp/out14" ||
   fail "-RestoreRefs did not report failure when reflog was missing: $(cat "$tmp/out14")"
-ok "-RestoreRefs fails loudly when no reflog is available"
+
+# Mixed repairability: one repairable ref and one unrepairable ref (GH-797 / F-2).
+# The recoverable ref must be restored and archived; the unrepairable one must fail loudly.
+repo_mixed=$(new_repo ref-mixed)
+head_ref=$(git -C "$repo_mixed" symbolic-ref HEAD)
+head_file="$repo_mixed/.git/$head_ref"
+head_sha=$(git -C "$repo_mixed" rev-parse HEAD)
+git -C "$repo_mixed" branch dead -q
+dead_file="$repo_mixed/.git/refs/heads/dead"
+rm -f "$repo_mixed/.git/logs/refs/heads/dead"
+nul_ise "$head_file"
+nul_ise "$dead_file"
+
+# Verify that -Backup and -Verify report partial repair advisory, not "unavailable"
+guard -RepoPath "$repo_mixed" -Backup >"$tmp/out14_bk" 2>&1 || true
+grep -q 'partial repair available' "$tmp/out14_bk" ||
+  fail "-Backup did not report partial repair for mixed refs: $(cat "$tmp/out14_bk")"
+
+guard -RepoPath "$repo_mixed" -Verify >"$tmp/out14_vf" 2>&1 || true
+grep -q 'partial repair available' "$tmp/out14_vf" ||
+  fail "-Verify did not report partial repair for mixed refs: $(cat "$tmp/out14_vf")"
+
+if guard -RepoPath "$repo_mixed" -RestoreRefs >"$tmp/out14_rest" 2>&1; then
+  fail "-RestoreRefs exited 0 when unrepairable refs remained"
+fi
+grep -q "RESTORED ref=$head_ref" "$tmp/out14_rest" ||
+  fail "-RestoreRefs did not restore the repairable ref: $(cat "$tmp/out14_rest")"
+grep -q 'RESTORE FAILED: cannot repair refs: refs/heads/dead' "$tmp/out14_rest" ||
+  fail "-RestoreRefs did not report unrepairable ref: $(cat "$tmp/out14_rest")"
+git -C "$repo_mixed" cat-file -e "$head_sha" >/dev/null 2>&1 ||
+  fail "head ref was not restored on disk"
+head_sanitized=$(echo "$head_ref" | tr '/' '_')
+mixed_corrupt_count=$(ls "$repo_mixed/.git/" | grep -c "^ref\\.CORRUPT\\.$head_sanitized\\." || true)
+[ "$mixed_corrupt_count" -ge 1 ] ||
+  fail "corrupt ref for $head_ref was not preserved outside .git/refs"
+
+ok "-RestoreRefs fails loudly when no reflog is available, and restores recoverable refs in mixed sets"
 
 # --- case 15: linked worktree ref corruption is detected and repaired -------
 repo_main=$(new_repo wt-main)
