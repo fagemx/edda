@@ -7,10 +7,11 @@
 # that sets UTF-8 encodings, HOME and GIT_CONFIG_PARAMETERS explicitly (empty
 # or hostile in the task environment), then runs `edda dispatch`.
 #
-# CARGO_TARGET_DIR is set ONLY when -BuildLane names one of the four ratified
-# build lanes (see below): a session that compiles nothing has no build lane
-# (.claude/CLAUDE.md, verification.cost-discipline), while a compiling session
-# must be given one of the four — the launcher refuses any other name.
+# CARGO env is set in the wrapper ONLY when -BuildLane names one of the four
+# ratified build lanes (see below): a session that compiles nothing has no
+# build lane (.claude/CLAUDE.md, verification.cost-discipline), while a
+# compiling session must be given one of the four — the launcher refuses any
+# other name.
 #
 # Every artifact the launcher writes lives under -LogDir (resolved to an
 # absolute path before anything is written or embedded — the task runs from a
@@ -26,11 +27,15 @@
 #
 # -BuildLane is optional and accepts exactly the ratified build lanes
 # worker-1|worker-2|verifier|verifier-2 (verification.cost-discipline); when
-# given, the wrapper sets CARGO_TARGET_DIR to <lane root>\<BuildLane> (lane
-# root = $env:LOCALAPPDATA\fleet-workstation\lanes unless FLEET_LANE_ROOT is
-# set). When omitted, the wrapper sets NO CARGO_TARGET_DIR at all — the
-# launcher never synthesizes a build lane; docs lanes compile nothing and
-# pass none.
+# given, the wrapper gets the lane env contract — CARGO_TARGET_DIR set to the
+# FIXED lane dir <lane root>\<BuildLane> (lane root =
+# $env:LOCALAPPDATA\fleet-workstation\lanes unless FLEET_LANE_ROOT is set),
+# CARGO_INCREMENTAL (1 worker / 0 verifier) and the CI-matching
+# CARGO_PROFILE_{DEV,TEST}_DEBUG=line-tables-only trim (GH-626). That contract
+# has one owner — lane-warm.ps1 Get-LaneBuildEnv, exposed via -PrintEnv — and
+# the launcher consumes it instead of duplicating a drifting literal. When
+# omitted, the wrapper sets NO CARGO env at all — the launcher never
+# synthesizes a build lane; docs lanes compile nothing and pass none.
 #
 # -Owns is optional. Pass only the smallest repository-relative path scopes the
 # implementation needs to claim (for example `crates/edda-cli/src/cmd.rs`);
@@ -161,7 +166,20 @@ $LogDir = (Resolve-Path -LiteralPath $LogDir).Path
 if (-not $SessionId) { $SessionId = "lane-$Name" }
 if ($BuildLane) {
   $laneRoot = if ($env:FLEET_LANE_ROOT) { $env:FLEET_LANE_ROOT } else { "$env:LOCALAPPDATA\fleet-workstation\lanes" }
-  $CargoTargetDir = Join-Path $laneRoot $BuildLane
+  # GH-626: the lane env contract lives in lane-warm.ps1 (-PrintEnv), the same
+  # source lane-warm builds with — the wrapper cannot drift from prepare/warm.
+  # In-process call: 'exit 0/1' in a child script returns here with
+  # $LASTEXITCODE set (verified), so no extra pwsh process is needed.
+  $helperOut = @(& (Join-Path $PSScriptRoot 'lane-warm.ps1') -BuildLane $BuildLane -LaneRoot $laneRoot -PrintEnv)
+  if ($LASTEXITCODE -ne 0) { Fail "lane-warm.ps1 -PrintEnv failed for build lane '$BuildLane'" }
+  $laneEnv = [ordered]@{}
+  foreach ($line in $helperOut) {
+    if ($line -match '^([A-Z][A-Z0-9_]+)=(.*)$') { $laneEnv[$Matches[1]] = $Matches[2] }
+  }
+  if (-not $laneEnv.Contains('CARGO_TARGET_DIR')) {
+    Fail "lane-warm.ps1 -PrintEnv reported no CARGO_TARGET_DIR for build lane '$BuildLane'"
+  }
+  $laneEnvText = ($laneEnv.Keys | ForEach-Object { ('{0} = {1}' -f "`$env:$_", (PsQuote $laneEnv[$_])) }) -join "`r`n"
 }
 $Log = Join-Path $LogDir "$Name.log"
 $Done = Join-Path $LogDir "$Name.done"
@@ -189,7 +207,7 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $env:HOME = $env:USERPROFILE
 # keep `git --help` from opening a browser inside the hidden task
 $env:GIT_CONFIG_PARAMETERS = "'help.format=man'"
-$env:CARGO_TARGET_DIR = __CARGO__
+__LANEENV__
 Set-Location -LiteralPath __CWD__
 $controller = Get-Process -Id $PID -ErrorAction Stop
 $controllerStarted = $controller.StartTime.ToUniversalTime().ToString('o')
@@ -311,9 +329,9 @@ if ($DryRun) {
   "dry-run real command line (verbatim, as a real lane would run it):"
   "  edda $argLine"
   if ($BuildLane) {
-    $wrapperText = $wrapperText.Replace('__CARGO__', (PsQuote $CargoTargetDir))
+    $wrapperText = $wrapperText.Replace('__LANEENV__', $laneEnvText)
   } else {
-    $wrapperText = $wrapperText -replace '(?m)^.*__CARGO__.*\r?\n', ''
+    $wrapperText = $wrapperText -replace '(?m)^.*__LANEENV__.*\r?\n', ''
   }
   $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runDry).Replace('__DONE__', (PsQuote $Done)) |
     Set-Content -LiteralPath $Wrapper -Encoding utf8
@@ -375,9 +393,9 @@ if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
 
 if ($BuildLane) {
-  $wrapperText = $wrapperText.Replace('__CARGO__', (PsQuote $CargoTargetDir))
+  $wrapperText = $wrapperText.Replace('__LANEENV__', $laneEnvText)
 } else {
-  $wrapperText = $wrapperText -replace '(?m)^.*__CARGO__.*\r?\n', ''
+  $wrapperText = $wrapperText -replace '(?m)^.*__LANEENV__.*\r?\n', ''
 }
 $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runReal).Replace('__DONE__', (PsQuote $Done)) |
   Set-Content -LiteralPath $Wrapper -Encoding utf8
