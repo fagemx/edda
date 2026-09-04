@@ -141,10 +141,13 @@ $Owns = @($allOwns)
 foreach ($scope in $Owns) {
   # Dispatch claims are compared lexically, so allow exactly one portable
   # spelling: a non-empty slash-separated repository-relative path.  Reject
-  # drive-relative forms too (`C:foo` is not rooted on Windows).
+  # drive-relative forms too (`C:foo` is not rooted on Windows), and every
+  # dot component in any position — leading, interior, terminal (`a/.`), or
+  # standalone (`.`) — since those alias a canonical directory scope while
+  # the lexical claim consumer treats the spellings as distinct.
   if ([string]::IsNullOrWhiteSpace($scope) -or $scope -match '[\r\n\\]' -or
       [IO.Path]::IsPathRooted($scope) -or $scope -match '^[A-Za-z]:' -or
-      $scope -match '(^|/)\.\.(/|$)' -or $scope -match '(^|/)\./' -or
+      $scope -match '(^|/)\.{1,2}(/|$)' -or
       $scope -match '//' -or $scope.EndsWith('/')) {
     Fail "-Owns entry '$scope' must be a canonical non-empty slash-separated repository-relative path scope"
   }

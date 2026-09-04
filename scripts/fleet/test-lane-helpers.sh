@@ -484,7 +484,11 @@ expect_fail "launch absolute owns" "repository-relative" launch -Name gh772ownsa
   -LogDir "$llog" -DryRun -Owns 'C:\\outside'
 expect_fail "launch traversal owns" "repository-relative" launch -Name gh772ownstraversal -Cwd "$repo" \
   -LogDir "$llog" -DryRun -Owns '../outside'
-ok "lane-launch binds every -Owns value and rejects absolute or traversal aliases"
+expect_fail "launch standalone dot owns" "repository-relative" launch -Name gh772ownsdot -Cwd "$repo" \
+  -LogDir "$llog" -DryRun -Owns '.'
+expect_fail "launch terminal dot owns" "repository-relative" launch -Name gh772ownstermdot -Cwd "$repo" \
+  -LogDir "$llog" -DryRun -Owns 'scripts/fleet/.'
+ok "lane-launch binds every -Owns value and rejects absolute, traversal, and dot-component aliases"
 
 echo "1..$case_number"
 echo "PASS: lane helper self-test ($case_number cases)"
