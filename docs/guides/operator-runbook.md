@@ -24,8 +24,8 @@
    git status                              # 乾淨、on branch main
    git rev-list --count HEAD..origin/main  # 0 = 沒落後
    ```
-2. **接單**：`gh issue edit <N> --add-label fleet:claimed --remove-label fleet:ready --add-assignee @me`，
-   並在 issue 留 lease 留言。
+2. **接單**：`sh scripts/fleet-claim-issue.sh <N> <machine>/<role>`（例如 `4090/worker-1`、`docs/reviewer`），
+   該腳本會留下 `taking:` 留言並原子化切換標籤與 assignee。不使用手動 lease 留言（決策 `fleet.cross-machine-claim`、#783）。
 3. **派 lane**（開 worktree 後）：
    ```bash
    pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> -Cwd <worktree>

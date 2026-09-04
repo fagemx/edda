@@ -74,7 +74,7 @@ Run it verbatim:
 
    ```bash
    sh scripts/fleet/ready-queue-lint.sh    # pickable ready issues, oldest first
-   gh issue list --label fleet:ready --state open --json number,title,createdAt,labels
+   gh issue list --label fleet:ready --state open --json number,title,createdAt,labels,comments,body
    ```
 
 2. **Exclude**, recording each issue's reason for the output table:
@@ -83,8 +83,8 @@ Run it verbatim:
      same workstation (`docs` vs `docs/pipeline`) is **not** "another
      machine".
    - (b) already in flight: an open PR
-     (`gh pr list --search "head:gh<n>"`), **or** a remote branch
-     (`git ls-remote --heads origin "gh<n>*" "*gh<n>*"`) — pushed-but-unopened
+     (`gh pr list --state open --search "<n>"`), **or** a remote branch
+     (`git ls-remote --heads origin "*gh<n>*" "*<n>*"`) — pushed-but-unopened
      branches are invisible to `gh pr list`.
    - (c) labeled `needs-operator`.
 
