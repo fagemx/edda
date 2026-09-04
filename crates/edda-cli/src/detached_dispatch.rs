@@ -218,10 +218,7 @@ fn launch_windows(
     let executable = std::env::current_exe()?;
     let config = receipt.manifest.with_extension("launch.json");
     let helper = receipt.manifest.with_extension("task.ps1");
-    fs::write(
-        &helper,
-        include_str!("../../../scripts/fleet/dispatch-task.ps1"),
-    )?;
+    fs::write(&helper, include_str!("../resources/dispatch-task.ps1"))?;
     let config_value = serde_json::json!({
         "manifest": receipt.manifest, "log": receipt.log,
         "supervisor_log": receipt.log.with_extension("supervisor.log"), "task": receipt.task,
