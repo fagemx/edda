@@ -335,9 +335,14 @@ impl AgentLauncher for ClaudeCodeLauncher {
                     // cancellation branches still own this child lifecycle.
                     let (monitor_result, prompt_write) = tokio::join!(
                         monitor.run(),
-                        async {
+                        async move {
                             stdin.write_all(prompt.as_bytes()).await?;
-                            stdin.shutdown().await
+                            // Tokio's ChildStdin::shutdown is a no-op for a
+                            // process pipe. Drop the write end instead, so a
+                            // print-mode backend that reads all input sees
+                            // EOF before it decides whether to emit output.
+                            drop(stdin);
+                            Ok::<(), std::io::Error>(())
                         },
                     );
                     prompt_write?;
@@ -683,7 +688,7 @@ mod tests {
     /// the real child there while the session and tool policy stay in argv.
     #[cfg(windows)]
     #[tokio::test]
-    async fn claude_large_prompt_reaches_windows_child_on_stdin() {
+    async fn claude_large_prompt_reaches_windows_child_through_eof() {
         let temp = tempfile::tempdir().expect("fixture directory");
         let prompt_path = temp.path().join("received-prompt.txt");
         let launcher_path = temp.path().join("claude.cmd");
@@ -698,13 +703,14 @@ mod tests {
             r#"$expected = [int]$env:CLAUDE_STDIN_EXPECTED
 $builder = [Text.StringBuilder]::new()
 $buffer = New-Object char[] 4096
-while ($builder.Length -lt $expected) {
-  $read = [Console]::In.Read($buffer, 0, [Math]::Min($buffer.Length, $expected - $builder.Length))
+while ($true) {
+  $read = [Console]::In.Read($buffer, 0, $buffer.Length)
   if ($read -le 0) { break }
   [void]$builder.Append($buffer, 0, $read)
 }
 $prompt = $builder.ToString()
 [IO.File]::WriteAllText($env:CLAUDE_STDIN_FIXTURE, $prompt)
+if ($prompt.Length -ne $expected) { throw "expected $expected characters before EOF, received $($prompt.Length)" }
 Write-Output '{"type":"system","subtype":"init","session_id":"sess-1","model":"fixture-model"}'
 Write-Output '{"type":"result","subtype":"success","total_cost_usd":0,"result":"done"}'
 "#,

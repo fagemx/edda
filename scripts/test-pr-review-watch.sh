@@ -550,7 +550,7 @@ unset GH_FAIL_COMMENT_ALWAYS
 reset_stubs
 sha=d29dc8f5861322ed664e39900273b0681396da50
 pending_set 42 1 "$sha" 0 0
-printf '## Code Review: Round 1 — PR #42 @ %s (gpt-5.6-sol, read-only)\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" \
+printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1-verdict.md.posted"
 export GH_FAIL_HEAD=1
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (unknown head)\n' >&2; exit 1; }

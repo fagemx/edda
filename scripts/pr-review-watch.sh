@@ -503,6 +503,10 @@ mark_post_failed() { # $1=pr $2=sha $3=round $4=verdict file
 post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
   is_full_sha "$2" || { log "pr$1 status: $2 is not a full lowercase 40-hex SHA; status withheld"; return 3; }
   cur=$(verdict_body_lines "$2" < "$3" | head -1)
+  if [ -z "$cur" ]; then
+    log "pr$1 status: verdict carrier is missing a SHA-pinned REVIEW.md §7 heading; status withheld"
+    return 3
+  fi
   v=$(printf '%s\n' "$cur" | cut -f1)
   p0=$(printf '%s\n' "$cur" | cut -f2)
   p1=$(printf '%s\n' "$cur" | cut -f3)
@@ -558,6 +562,17 @@ settle_pending() {
         pending_drop "$pr"
         return 0
       fi
+      vl=$(sh "$LABEL_PR" verdict-label < "$1")
+      if ! verdict_body_lines "$sha" < "$1" | grep -q .; then
+        mark_unreviewed "$pr" "$sha" "$round" 'verdict carrier lacked the SHA-pinned REVIEW.md §7 heading'
+        pending_drop "$pr"
+        return 0
+      fi
+      if [ "$vl" = "review:lgtm" ] && [ "$(sed -n 's/^TRANSPORT=//p' "$DONE" 2>/dev/null | tail -1)" = "edda-review" ] && ! product_lgtm_qualified "$DONE"; then
+        mark_unreviewed "$pr" "$sha" "$round" 'product LGTM was unqualified or exited non-zero'
+        pending_drop "$pr"
+        return 0
+      fi
       # The Independent Review status goes to the REVIEWED sha, on the same
       # bounded retry path as the comment (never best-effort): a failed post
       # increments postfails and keeps the pending entry; at the cap the PR
@@ -579,12 +594,6 @@ settle_pending() {
           fi
           return 0
         fi
-      fi
-      vl=$(sh "$LABEL_PR" verdict-label < "$1")
-      if [ "$vl" = "review:lgtm" ] && [ "$(sed -n 's/^TRANSPORT=//p' "$DONE" 2>/dev/null | tail -1)" = "edda-review" ] && ! product_lgtm_qualified "$DONE"; then
-        mark_unreviewed "$pr" "$sha" "$round" 'product LGTM was unqualified or exited non-zero'
-        pending_drop "$pr"
-        return 0
       fi
       if [ -n "$vl" ] && gh pr edit "$pr" --repo "$REPO" --add-label "$vl" >/dev/null 2>&1; then
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed"  >/dev/null 2>&1 || true
@@ -634,6 +643,11 @@ settle_pending() {
         continue
       fi
       if extract_verdict "$LOG" "$VERDICT" && verdict_ok "$VERDICT"; then
+        if ! verdict_body_lines "$sha" < "$VERDICT" | grep -q .; then
+          mark_unreviewed "$pr" "$sha" "$round" 'verdict carrier lacked the SHA-pinned REVIEW.md §7 heading'
+          pending_drop "$pr"
+          continue
+        fi
         # .done is written incrementally by legacy wrappers. Do not publish
         # before the final worktree check, or trust a legacy missing check.
         if ! grep -q '^WORKTREE_CHECK=unchanged' "$DONE" 2>/dev/null; then

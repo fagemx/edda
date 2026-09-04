@@ -240,10 +240,10 @@ launch_product_review() {
 Set-Location '$ROOTW'
 function Invoke-EddaReview {
   & edda review --pr '$PR' --agent claude --model '$MODEL' --json $PRODUCT_RESUME
-  return \$LASTEXITCODE
+  \$script:reviewExit = \$LASTEXITCODE
 }
 \$json = Invoke-EddaReview
-\$code = \$LASTEXITCODE
+\$code = \$script:reviewExit
 \$payload = \$null
 try { \$payload = \$json | ConvertFrom-Json } catch { }
 \$proof = \$payload -and \$payload.subject.head_sha -eq '$SHA' -and \$payload.subject.subject_seen -eq '$SHA' -and \$payload.subject.worktree_check -eq 'unchanged' -and \$payload.reviewer.tool_policy -eq 'hard'
@@ -257,10 +257,10 @@ if (-not \$proof) {
 } else {
   \$p0 = @(\$payload.findings | Where-Object severity -eq 'P0').Count
   \$p1 = @(\$payload.findings | Where-Object severity -eq 'P1').Count
-  \$qualified = \$payload.qualified -eq \$true -and @(\$payload.disqualifiers).Count -eq 0
+  \$qualified = (\$payload.qualified -eq \$true) -and (@(\$payload.disqualifiers).Count -eq 0)
   \$label = if (\$payload.verdict -eq 'lgtm' -and \$qualified) { 'LGTM' } elseif (\$payload.verdict -eq 'changes-requested') { 'Changes Requested' } else { '' }
   if (\$label) {
-    "<<<VERDICT\`n### Verdict\`n\$label, P0=\$p0, P1=\$p1\`nEvent identity: \$(\$payload.event_id ?? 'unknown')\`nQualification: \$qualified\`nDisqualifiers: \$((@(\$payload.disqualifiers) -join ', ') ?? 'none')\`n### Findings" | Out-File '$LOGW' -Encoding utf8
+    "<<<VERDICT\`n## Code Review: Round $ROUND — PR #$PR @ $SHA\`n\`n### Verdict\`n\$label, P0=\$p0, P1=\$p1\`nEvent identity: \$(\$payload.event_id ?? 'unknown')\`nQualification: \$qualified\`nDisqualifiers: \$((@(\$payload.disqualifiers) -join ', ') ?? 'none')\`n### Findings" | Out-File '$LOGW' -Encoding utf8
     foreach (\$finding in @(\$payload.findings)) { Add-Content '$LOGW' ("finding: " + (\$finding | ConvertTo-Json -Compress)) -Encoding utf8 }
     Add-Content '$LOGW' '### Checklist' -Encoding utf8
     foreach (\$item in @(\$payload.checklist)) { Add-Content '$LOGW' ("checklist: " + (\$item | ConvertTo-Json -Compress)) -Encoding utf8 }
@@ -283,7 +283,7 @@ if (-not \$proof) {
 "SESSION_MODE=$( [ -n "$PRODUCT_RESUME" ] && echo resume || echo new )" | Add-Content '$DONEW' -Encoding utf8
 "DISPATCH_EXIT=\$code" | Add-Content '$DONEW' -Encoding utf8
 "WORKTREE_CHECK=\$tree" | Add-Content '$DONEW' -Encoding utf8
-"QUALIFIED=\$qualified" | Add-Content '$DONEW' -Encoding utf8
+"QUALIFIED=\$(if (\$qualified) { 'true' } else { 'false' })" | Add-Content '$DONEW' -Encoding utf8
 "DISQUALIFIERS=\$disqualifiers" | Add-Content '$DONEW' -Encoding utf8
 exit \$code
 PS
@@ -307,15 +307,15 @@ if ! command -v jq >/dev/null 2>&1 || ! jq -e --arg sha '$SHA' '.subject.head_sh
   code=2
 else
   verdict=\$(jq -r '.verdict' "\$json")
-  p0=\$(jq '[.findings[] | select(.severity == "P0")] | length' "\$json")
-  p1=\$(jq '[.findings[] | select(.severity == "P1")] | length' "\$json")
+  p0=\$(jq '[(.findings // [])[] | select(.severity == "P0")] | length' "\$json")
+  p1=\$(jq '[(.findings // [])[] | select(.severity == "P1")] | length' "\$json")
   qualified=\$(jq -r '.qualified == true and ((.disqualifiers // []) | length == 0)' "\$json")
   disqualifiers=\$(jq -r '(.disqualifiers // []) | join(",")' "\$json")
   case "\$verdict" in lgtm) label=LGTM;; changes-requested) label='Changes Requested';; *) label='';; esac
   [ "\$label" != LGTM ] || [ "\$qualified" = true ] || label=''
   : > '$LOG'
   if [ -n "\$label" ]; then
-    printf '<<<VERDICT\n### Verdict\n%s, P0=%s, P1=%s\n' "\$label" "\$p0" "\$p1" >> '$LOG'
+    printf '<<<VERDICT\n## Code Review: Round $ROUND — PR #$PR @ $SHA\n\n### Verdict\n%s, P0=%s, P1=%s\n' "\$label" "\$p0" "\$p1" >> '$LOG'
     jq -r '
       "Event identity: " + (.event_id // "unknown"),
       "Qualification: " + ((.qualified == true and ((.disqualifiers // []) | length == 0)) | tostring),

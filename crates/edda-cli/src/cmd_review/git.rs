@@ -181,13 +181,29 @@ fn content_hash(root: &Path) -> Result<String> {
         hasher.update(path.as_bytes());
         hasher.update([0]);
         match mode {
-            // A symlink's Git payload is its link target. `read` follows the
-            // link and fails for a valid dangling link, so use `read_link`.
-            "120000" => hasher.update(
-                std::fs::read_link(root.join(path))?
-                    .as_os_str()
-                    .as_encoded_bytes(),
-            ),
+            // A symlink's Git payload is its link target. Native links must
+            // use `read_link`, because `read` follows a valid dangling link.
+            // With core.symlinks=false, though, Git materializes the same
+            // mode-120000 entry as a regular file containing that payload.
+            // Hash that supported checkout representation directly.
+            "120000" => {
+                let checkout_path = root.join(path);
+                let metadata = std::fs::symlink_metadata(&checkout_path)?;
+                if metadata.file_type().is_symlink() {
+                    hasher.update(
+                        std::fs::read_link(checkout_path)?
+                            .as_os_str()
+                            .as_encoded_bytes(),
+                    );
+                } else if metadata.file_type().is_file() {
+                    hasher.update(std::fs::read(checkout_path)?);
+                } else {
+                    bail!(
+                        "mode-120000 entry is neither a symlink nor a regular file: {}",
+                        checkout_path.display()
+                    );
+                }
+            }
             // The index records the submodule commit. Do not traverse it.
             "160000" => {}
             _ => hasher.update(std::fs::read(root.join(path))?),
@@ -277,5 +293,34 @@ mod tests {
         testrepo::run(&root, &["commit", "-q", "-m", "dangling link"]);
         std::fs::write(root.join(SUBJECT_MARKER), "subject").unwrap();
         assert!(content_hash(&root).is_ok());
+    }
+
+    #[test]
+    fn content_proof_accepts_symlink_materialized_as_regular_file() {
+        let (_temp, root) = testrepo::init();
+        testrepo::run(&root, &["config", "core.symlinks", "false"]);
+        std::fs::write(root.join("link-payload"), "missing-target").unwrap();
+        let oid = testrepo::run(&root, &["hash-object", "-w", "--", "link-payload"]);
+        testrepo::run(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("120000,{},link", oid.trim()),
+            ],
+        );
+        testrepo::run(&root, &["commit", "-q", "-m", "materialized link"]);
+        testrepo::run(&root, &["checkout", "-q", "-f"]);
+
+        let link = root.join("link");
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_file());
+        std::fs::write(root.join(SUBJECT_MARKER), "subject").unwrap();
+        let before = content_hash(&root).unwrap();
+        std::fs::write(&link, "changed-target").unwrap();
+        assert_ne!(before, content_hash(&root).unwrap());
     }
 }

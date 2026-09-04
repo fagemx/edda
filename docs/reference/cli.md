@@ -942,8 +942,13 @@ The reviewer receives the base version of REVIEW.md, scoped decisions,
 evidence, and the diff in a unique detached checkout. pi and Claude use a
 read-only tool allowlist without a shell. Requested and observed model/session
 identities remain distinct. Same-author sessions are refused; model diversity
-is optional with `--require-model-diversity`. `--resume` requires a prior
-ledger review and reuses its reviewer session; a backend fork disqualifies it.
+is optional with `--require-model-diversity`. `--session-id` sets the reviewer
+UUID explicitly; it must be a UUID and cannot name an author session. When
+resuming, an explicit `--session-id` must match the prior ledger-recorded
+reviewer session. `--resume` requires that prior review and reuses its
+reviewer session; a backend fork disqualifies it. `--thinking` selects pi's
+thinking level; Claude and Codex reject the option rather than silently
+ignoring it.
 
 Gates are READ from clean exact-SHA command receipts and required exact-SHA CI.
 Missing checks remain unverified; any red evidence wins. `--run-gates` opts in
