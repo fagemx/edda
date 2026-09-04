@@ -383,7 +383,7 @@ pub fn ask(
     let mut timeline = village_filter(timeline);
 
     // Annotate governance status (GH-806)
-    let ratifications = ledger.ratified_decisions_map().unwrap_or_default();
+    let ratifications = ledger.ratified_decisions_map()?;
     annotate_governance(&mut decisions, &ratifications);
     annotate_governance(&mut timeline, &ratifications);
 

@@ -333,7 +333,7 @@ impl Ledger {
                 .payload
                 .get("ratified_by")
                 .and_then(|v| v.as_str())
-                .unwrap_or("operator")
+                .unwrap_or("unknown")
                 .to_string();
             let info = RatificationInfo {
                 ratified_by,
