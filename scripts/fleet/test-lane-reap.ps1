@@ -30,6 +30,10 @@
 #      never deletes filesystem content)
 #  15  closed-issue evidence on a task whose state is Running -> retained
 #      (task-running), never unregistered while a worker is live
+#  17  two candidates, replacement happens during the FIRST candidate's gh
+#      check: the second candidate's initial identity was snapshotted before
+#      any gh call, so its same-name/same-action replacement (new XML) is
+#      skipped-race, never unregistered
 #
 # usage:
 #   pwsh -NoProfile -File scripts/fleet/test-lane-reap.ps1
@@ -377,6 +381,26 @@ try {
   Assert-True ($r.exitCode -eq 0) "16: race observation exits 0"
   Assert-Rows $r { $_.row -eq 'action' -and $_.result -eq 'skipped-race' -and $_.detail -match 'identity changed' } 1 "16: same-name/same-action replacement with new Scheduler XML is never unregistered"
   Assert-True (@($r.applied).Count -eq 0) "16: no replacement registration was removed"
+
+  # --- 17. identity snapshots for ALL candidates are taken before any gh
+  # --- check: an earlier candidate's network gap must not make the reaper
+  # --- accept a replacement of a later same-name/same-action task
+  "=== 17. all identities snapshotted before any gh check ==="
+  $r = Invoke-Scenario @{
+    tasks = @(
+      @{ taskName = 'edda-b-lane-snap1'; state = 'Ready'; actionArguments = "-File `"$wGh772`"" },
+      @{ taskName = 'edda-b-lane-snap2'; state = 'Ready'; actionArguments = "-File `"$wGh772`"" }
+    )
+    identity = 'original-registration-xml'
+    recheckIdentity = 'replacement-registration-xml'
+    mutateDuringGh = $true
+    gh = @{ 'issue:772' = @{ state = 'CLOSED' } }
+    processes = @{}
+  } $true '' $logDir
+  Assert-True ($r.exitCode -eq 0) "17: exits 0"
+  Assert-True ($r.candidateCount -eq 2) "17: two candidates"
+  Assert-Rows $r { $_.row -eq 'action' -and $_.result -eq 'skipped-race' -and $_.detail -match 'identity changed' } 2 "17: both candidates skipped-race on identity change"
+  Assert-True (@($r.applied).Count -eq 0) "17: no replacement unregistered — the later task's stale initial identity cannot match (applied: $(@($r.applied) -join ','))"
 
   # --- 14. the reaper never deletes: fixtures survive every run -------------
   "=== 14. fixture files survive every run ==="

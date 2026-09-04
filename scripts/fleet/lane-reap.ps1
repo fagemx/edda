@@ -399,11 +399,17 @@ function Invoke-LaneReap {
     $candidates += $t
   }
 
+  # Snapshot every registration before *any* gh/process check.  Processing an
+  # earlier candidate can otherwise replace a later same-name task before its
+  # supposedly initial export is taken.
+  $initialIdentities = @{}
+  foreach ($candidate in $candidates) {
+    $initialIdentities[[string]$candidate.TaskName] = Get-FleetTaskIdentity $candidate
+  }
+
   foreach ($t in $candidates) {
     $tn = [string]$t.TaskName
-    # Capture identity before any gh/process work.  Those reads are the race
-    # window in which a same-name registration can be replaced.
-    $initialIdentity = Get-FleetTaskIdentity $t
+    $initialIdentity = $initialIdentities[$tn]
     $assoc = Get-FleetTaskAssociation -Task $t -LogDir $LogDir
 
     foreach ($err in $assoc.Errors) {
