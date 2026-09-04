@@ -383,6 +383,11 @@ When edda detects multiple agents, it injects peer information into your context
 
 Ignoring these rules causes merge conflicts and duplicated work.
 
+**Fleet standing authorization:** a `fleet:ready` label is the operator's
+signature — the controller selects the batch itself (fleet-orchestrate's
+ready-batch selection procedure) without asking the operator for issue
+numbers; the operator intervenes at promote and adjudication.
+
 ### PR review-fix loop
 
 **How to review is `REVIEW.md` at the repo root — run it top to bottom.** It is
