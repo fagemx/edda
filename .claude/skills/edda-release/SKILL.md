@@ -282,7 +282,7 @@ Use the decision table below, then resume at the earliest missing safe step.
 | Observed state | Action |
 |---|---|
 | No tag pushed, nothing published | Return to preflight |
-| `prepare-crates` reports `enabled=false` | BLOCKED until the operator configures `CARGO_REGISTRY_TOKEN`, then rerun failed jobs |
+| `prepare-crates` reports `enabled=false` | BLOCKED until the operator configures `CARGO_REGISTRY_TOKEN`, then rerun the whole run (`gh run rerun <id>` without `--failed` — nothing failed; downstream jobs were skipped) |
 | Tag pushed, run failed at `publish-crates` | Rerun failed jobs (`gh run rerun <id> --failed`); verified crates are NO-OP |
 | Run failed at `create-release` (parity) | Inspect registry with `verify --tag`; rerun only after the cause is gone |
 | Run failed at `create-release` (CHANGELOG section missing) | BLOCKED; repair means a new commit and tag — operator decision, never move the tag |
