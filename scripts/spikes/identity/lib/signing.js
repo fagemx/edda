@@ -230,7 +230,7 @@ function verifyChain(events) {
     if (ev.event_family !== family || ev.event_level !== level) {
       return { ok: false, reason: `taxonomy mismatch at ${ev.event_id}` };
     }
-    if (ev.hash !== expectedHash || !sameJson(ev.digests, expectedDigests)) {
+    if (ev.hash !== expectedHash || !sameDigests(ev.digests, expectedDigests)) {
       return { ok: false, reason: `hash or digest mismatch at ${ev.event_id}` };
     }
     if ((ev.parent_hash ?? null) !== parent) {
@@ -273,7 +273,16 @@ function classifyEventType(type) {
 }
 
 function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
-function sameJson(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
+
+// Mirrors serde's typed Vec<Digest> equality: array order and multiplicity
+// matter; object member order and unknown deserialized members do not.
+function sameDigests(actual, expected) {
+  return Array.isArray(actual) && actual.length === expected.length &&
+    actual.every((digest, index) => isRecord(digest) &&
+      digest.alg === expected[index].alg &&
+      digest.canon === expected[index].canon &&
+      digest.value === expected[index].value);
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 

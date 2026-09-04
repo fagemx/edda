@@ -61,6 +61,11 @@ test('golden event hashes produced by Rust (edda 0.4.0) reproduce in Node', () =
 test('golden chain mirrors Rust: hash, complete digest, taxonomy, and linkage all verify', () => {
   assert.equal(GOLDEN_NOTE.parent_hash, GOLDEN_HEAD.hash);
   assert.deepEqual(verifyChain(golden.events), { ok: true });
+  // Rust deserializes a Digest then compares typed fields: JSON member order
+  // and unknown object members are not part of Vec<Digest> equality.
+  const reorderedDigest = { value: GOLDEN_NOTE.hash, ignored_by_serde: true, canon: 'edda-canon-v1', alg: 'sha256' };
+  const reordered = { ...GOLDEN_NOTE, digests: [reorderedDigest] };
+  assert.deepEqual(verifyChain([GOLDEN_HEAD, reordered]), { ok: true });
   for (const [field, value, reason] of [
     ['digests', [{ alg: 'sha256', canon: 'edda-canon-v1', value: '0'.repeat(64) }], /digest/],
     ['event_family', 'governance', /taxonomy/],
