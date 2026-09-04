@@ -122,7 +122,8 @@ cargo test -p edda-core
 # Run a specific test
 cargo test -p edda-core test_name
 
-# Run all tests (once per frozen SHA — see Verification ladder)
+# Run all tests — CI's job on Linux + macOS at every push; locally only with a
+# stated reason (see Verification ladder)
 cargo test --workspace
 ```
 
@@ -135,8 +136,9 @@ cargo test --workspace
 
 Verify once per frozen SHA; cite that result everywhere else. Full workspace
 gates are expensive (23 crates; a long-lived target directory for this
-workspace measured 40.9 GB — see Build lanes), and CI already re-runs most of
-them independently on every push.
+workspace measured 40.9 GB — see Build lanes), and CI runs the full workspace
+set independently on every push — the ladder's local Cargo work is focused
+checks only.
 
 **Know exactly what CI does and does not cover** (`.github/workflows/ci.yml`):
 
@@ -157,14 +159,14 @@ What Windows does **not** exercise is the other 16 crates' own test targets:
 their runtime behavior goes unrun, and their test-only code and dev-dependencies
 are never linked. So a Windows-only defect in a path, a file lock, a spawned
 process, or a temp directory in those crates is caught by no CI job. That is a
-stated reason for the verifier to run it locally, and it is why the L1 receipt
-from a Windows workstation is load-bearing rather than redundant.
+stated reason for the verifier to run it locally, and it is why the verifier's
+focused Windows-gap run is load-bearing rather than redundant.
 
 | Level | When | Run |
 |---|---|---|
 | L0 iterate | while editing | `cargo fmt --all --check`; `cargo clippy -p <crate> --all-targets -- -D warnings`; `cargo test -p <crate>` for each touched crate; `scripts/lint-file-length.sh --tree` |
-| L1 freeze | once per frozen full SHA, clean tree, before push / PR update | `cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace`, with `CARGO_INCREMENTAL=0`; record the result together with the full SHA (gate receipt) |
-| L2 review | verifier, once per frozen full SHA | READ the L1 receipt and exact-head CI; RAN only focused or adversarial checks they do not cover — **including Windows behavior in any crate outside the CI Windows subset above**. A full local rerun needs a stated reason: no receipt, red or absent CI, or grounds to distrust the receipt. A coverage gap earns a **focused** check for that gap, not a full rerun — running the workspace to reach one uncovered crate is the cost this ladder exists to remove. Deterministically red CI already blocks the SHA — audit and request changes instead of spending a full run; if the red is environmental, re-run only the failed job |
+| L1 freeze | once per frozen full SHA, clean tree | **exact-head CI** — Format; Clippy ×3 OS; Test on Linux + macOS full workspace; Test on the Windows 7-crate subset — **plus one focused local run by the verifier**, once per frozen SHA, of `cargo test -p <crate>` on Windows for each touched crate outside the subset (the C5 selector — every touched crate minus the 7-subset; the loop is quoted in the Pre-commit Checklist L1 block and the two are kept identical). The implementer / fix lane runs L0 on touched crates, pushes, posts the `Review Response`, and does not run the workspace gate. Record the CI run id together with the full SHA (gate receipt: `CI run <id> @ <sha>`) |
+| L2 review | verifier, once per frozen full SHA | READ the L1 receipt (exact-head CI, `CI run <id> @ <sha>`) and its job results; RAN only focused or adversarial checks they do not cover — **including Windows behavior in any crate outside the CI Windows subset above**, which L1 itself assigns to the verifier as the C5 selector run. A full local rerun needs a stated reason: red or absent exact-head CI, or grounds to distrust it. A coverage gap earns a **focused** check for that gap, not a full rerun — running the workspace to reach one uncovered crate is the cost this ladder exists to remove. Deterministically red CI already blocks the SHA — audit and request changes instead of spending a full run; if the red is environmental, re-run only the failed job |
 | L3 pre-merge | merge authority | READ exact-head CI and the final current-head LGTM; RAN only a merge check against the current base. A draft/ready, label, or status flip is not a push — nothing reruns |
 
 Docs-only changes (no code/product blob, `Cargo.lock`, or toolchain change)
@@ -202,7 +204,12 @@ A fleet session that runs no local build has no lane and needs none.
   `<lane-root>\<assigned-lane>` yourself and reuse it every round. If your brief
   names no lane or no lane root and you are about to build for a fleet, ask the
   controller first rather than creating a directory.
-- Verifier lanes and every L1 run set `CARGO_INCREMENTAL=0`.
+- Verifier lanes set `CARGO_INCREMENTAL=0` — that covers the focused
+  Windows-gap run, which is L1's only local Cargo work. Fix lanes run only L0
+  on touched crates, with the incremental cache left enabled: a focused `-p`
+  build is a small fraction of the workspace footprint, and the orphaned
+  incremental sessions in the Footprint section below came from workspace-scale
+  runs, not focused ones.
 - Build output is disposable and non-destructive to delete; per
   `fleet.merged-artifact-cleanup`, an artifact whose PR is **merged** — the
   merged PR's remote branch and its lane worktree — may also be reclaimed,
@@ -248,16 +255,22 @@ cargo test -p <touched crate>
 # GH-779 file-length ratchet: scripts/lint-file-length.sh --tree (CI / L0);
 # pre-commit runs --staged on each staged *.rs blob.
 
-# Before freezing a SHA for push / PR update (L1 — once per frozen SHA,
-# clean tree, incremental off). Record the result with the full SHA.
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-# then record the gate receipt: full SHA, gate set, toolchain, lane, result
+# L1 (once per frozen full SHA, clean tree) = exact-head CI (Format; Clippy
+# ×3 OS; Test on Linux + macOS full workspace; Test on the Windows 7-crate
+# subset) + one focused local run by the verifier: `cargo test -p <crate>` on
+# Windows for each touched crate outside the subset — the C5 selector loop.
+# The implementer / fix lane runs L0 on touched crates, pushes, posts the
+# `Review Response`, and does not run the workspace gate.
+for crate in $(git diff --name-only "origin/$BASE...$SHA" \
+  | grep '^crates/' | cut -d/ -f2 | sort -u \
+  | grep -Ev '^(edda-store|edda-ledger|edda-search-fts|edda-transcript|edda-bridge-claude|edda-conductor|edda-cli)$'); do
+  cargo test -p "$crate"   # on Windows, verifier lane, CARGO_INCREMENTAL=0
+done
+# then record the gate receipt: full SHA, CI run id, toolchain, lane, result
 ```
 
-Set `CARGO_INCREMENTAL=0` in the environment for the whole L1 run — not as an
-inline prefix, which only POSIX shells accept:
+Set `CARGO_INCREMENTAL=0` in the environment for the verifier's focused C5 run
+— not as an inline prefix, which only POSIX shells accept:
 
 ```powershell
 $env:CARGO_INCREMENTAL = "0"   # PowerShell
@@ -267,9 +280,10 @@ $env:CARGO_INCREMENTAL = "0"   # PowerShell
 export CARGO_INCREMENTAL=0     # bash / Git Bash
 ```
 
-The L1 block is the ladder's L1 row — keep the two identical. Skipping the
-receipt is not a shortcut: without it the reviewer has nothing to READ and must
-run the whole set again, which is the cost this ladder exists to remove.
+The L1 block is the ladder's L1 row — keep the two identical. The gate receipt
+is `CI run <id> @ <full SHA>`; the fix lane posts it in the `Review Response`.
+Skipping the receipt is not a shortcut: without it the reviewer has nothing to
+READ, which is the cost this ladder exists to remove.
 
 ## Commit Conventions
 
@@ -406,8 +420,8 @@ Rules regulate cost and reclamation, not only evidence:
 - Verify once per frozen SHA on the ladder above. READ recorded gate results
   and exact-head CI before any RAN, and state the reason whenever you rerun a
   recorded gate.
-- Every worker/verifier brief names a verification budget (L0 while iterating;
-  L1 once per frozen SHA) and cleanup authority (build output is disposable and
+- Every worker/verifier brief names a verification budget (L0 in the fix lane;
+  L1 = CI + focused Windows-gap run by the verifier) and cleanup authority (build output is disposable and
   stale cache should be reclaimed by age; per `fleet.merged-artifact-cleanup`,
   an artifact whose PR is **merged** — the merged PR's remote branch and its
   lane worktree — may be reclaimed, since the squash commit is on `main` and

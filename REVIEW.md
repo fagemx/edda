@@ -1,6 +1,10 @@
 ---
 edda_review: 2
 gates:
+  # The Cargo workspace gates below are READ from exact-head CI job results —
+  # never RAN by the reviewer (`ladder` L1: CI is the workspace gate; C5 is
+  # the only Cargo gate RAN by a reviewer). Non-Cargo gates (such as
+  # lint-markdown-content.sh) follow their own rule in §5 (U5).
   - "cargo fmt --all --check"
   - "cargo clippy --workspace --all-targets -- -D warnings"
   - "cargo test --workspace"
@@ -306,12 +310,15 @@ git log --format=%s "origin/$BASE..$SHA" \
 sh scripts/lint-markdown-content.sh; echo "exit=$?"
 ```
 
-**U6 — gates: READ before RAN. P0 when CI is deterministically red.** Read the
-implementer's L1 gate receipt (full SHA, fmt / clippy / test) and exact-head
-CI. RAN only what they do not cover, and **state the reason for any rerun of a
-recorded gate** (`ladder`, L2 row). A coverage gap earns a focused check for
-that gap, not a full rerun; a full local rerun needs a stated reason (no
-receipt, red or absent CI, or grounds to distrust it). Deterministically red CI
+**U6 — gates: READ before RAN. P0 when CI is deterministically red.** The L1
+receipt is exact-head CI itself — `CI run <id> @ <sha>` — and the workspace
+Cargo `gates:` entries above are READ from its job results, never RAN by the
+reviewer (`ladder` L1: CI is the workspace gate; C5 is the only Cargo gate RAN
+here; non-Cargo gates such as U5 remain RAN where §5 routes them).
+RAN only what the CI jobs do not cover, and **state the reason for any rerun of
+a recorded gate** (`ladder`, L2 row). A coverage gap earns a focused check for
+that gap, not a full rerun; a full local rerun needs a stated reason (red or
+absent exact-head CI, or grounds to distrust it). Deterministically red CI
 already blocks the SHA — audit and request changes instead of spending a full
 run; if the red is environmental, rerun only the failed job.
 
@@ -635,7 +642,7 @@ security or data-loss regressions introduced or exposed; current-base integratio
 
 ### RAN vs READ
 RAN:  <commands actually executed here, with their key outputs>
-READ: <L1 receipt SHA and gate set; exact-head CI result; what each covers and does not>
+READ: <L1 receipt — `CI run <id> @ <sha>`, pinned to the reviewed SHA — and the gate set READ from its exact-head CI job results; what each covers and does not>
 
 ### Verdict
 LGTM (P0=0, P1=0)  —  or  —  Changes Requested, P0=<n>, P1=<n> — <one-line reason>
