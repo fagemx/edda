@@ -222,7 +222,18 @@ fn parse_preview(yaml: &str) -> Result<Plan> {
                         if !matches!(kind, "finding" | "source" | "draft") {
                             bail!("unknown object claim kind: {kind}");
                         }
-                        nonempty(id, "object claim id")?;
+                        if kind == "source" {
+                            // carrier.md: source claims must be instance-scoped
+                            // as `source:<source>/<instance>` with both parts
+                            // present and nonempty.
+                            let Some((source, instance)) = id.split_once('/') else {
+                                bail!("source object claim requires source/instance");
+                            };
+                            nonempty(source, "source object claim source")?;
+                            nonempty(instance, "source object claim instance")?;
+                        } else {
+                            nonempty(id, "object claim id")?;
+                        }
                     }
                 }
             }
@@ -327,6 +338,21 @@ mod tests {
         ] {
             let yaml = format!("name: guarded\nphases:\n  - id: one\n    prompt: hi\n{fields}");
             assert!(parse_plan(&yaml).unwrap_err().to_string().contains("preview"));
+        }
+    }
+
+    #[test]
+    fn source_object_claims_require_source_and_instance() {
+        let yaml = "name: src\nphases:\n  - id: one\n    prompt: hi\n    owns_objects: [source:heartbeat/lane-2]\n";
+        parse_preview(yaml).unwrap();
+        for bad in [
+            "source:heartbeat",
+            "source:/lane-2",
+            "source:heartbeat/",
+            "source:/",
+        ] {
+            let bad_yaml = yaml.replace("source:heartbeat/lane-2", bad);
+            assert!(parse_preview(&bad_yaml).is_err(), "accepted {bad}");
         }
     }
 
