@@ -583,15 +583,27 @@ if (Test-ReviewWorktree) { Remove-ReviewWorktree } else { exit 2 }
 exit \$code
 PS
 else
-  # Linux: no job-object trap, plain nohup is enough.
+  # Linux: no job-object trap, plain nohup is enough. The source snapshot
+  # consumes Git's NUL-delimited path inventory, so this runner requires Bash
+  # rather than silently parsing it with POSIX `read`.
   cat > "$RUNNER" <<RUN
-#!/bin/sh
+#!/usr/bin/env bash
+set -o pipefail
 export HOME="\${HOME:-$(getent passwd "\$(id -u)" 2>/dev/null | cut -d: -f6)}"
 cd '$WT' || exit 1
 . '$SELF_DIR/reviewer-capabilities.sh'
+before_snapshot_file='$DONE.before-snapshot'
+after_snapshot_file='$DONE.after-snapshot'
+cleanup_review_snapshots() {
+  rm -f -- "\$before_snapshot_file" "\$after_snapshot_file"
+}
+trap cleanup_review_snapshots EXIT
+trap 'cleanup_review_snapshots; exit 130' HUP INT TERM
 review_hash_scope() {
   scope=\$1
   shift
+  # Bash's read -d keeps Git's NUL inventory intact, including newline paths.
+  # pipefail makes a failed git ls-files command fail this snapshot too.
   git ls-files -z "\$@" | while IFS= read -r -d '' path; do
     if [ -f "\$path" ]; then
       hash=\$(git hash-object -- "\$path") || exit 1
@@ -612,12 +624,11 @@ review_worktree_snapshot() {
   git hash-object --stdin < "\$snapshot_file"
 }
 before_status=\$(git status --porcelain=v1 --untracked-files=all) || exit 2
-before_snapshot=\$(review_worktree_snapshot '$DONE.before-snapshot') || { echo 'DISPATCH_EXIT=2' > '$DONE'; exit 2; }
+before_snapshot=\$(review_worktree_snapshot "\$before_snapshot_file") || { echo 'DISPATCH_EXIT=2' > '$DONE'; exit 2; }
 check_review_worktree() {
   after_head=\$(git rev-parse HEAD) || { echo 'WORKTREE_CHECK=failed; git HEAD unavailable' >> '$DONE'; return 1; }
   after_status=\$(git status --porcelain=v1 --untracked-files=all) || { echo 'WORKTREE_CHECK=failed; git status unavailable' >> '$DONE'; return 1; }
-  after_snapshot=\$(review_worktree_snapshot '$DONE.after-snapshot') || { echo 'WORKTREE_CHECK=failed; source snapshot unavailable' >> '$DONE'; return 1; }
-  rm -f '$DONE.before-snapshot' '$DONE.after-snapshot'
+  after_snapshot=\$(review_worktree_snapshot "\$after_snapshot_file") || { echo 'WORKTREE_CHECK=failed; source snapshot unavailable' >> '$DONE'; return 1; }
   git status --short >> '$LOG'
   git log -1 --format=%H >> '$LOG'
   if [ "\$after_head" != '$SHA' ] || [ "\$after_status" != "\$before_status" ] || [ "\$after_snapshot" != "\$before_snapshot" ]; then
@@ -682,7 +693,8 @@ echo "DISPATCH_EXIT=\$code" >> '$DONE'
 check_review_worktree && remove_review_worktree || exit 2
 exit \$code
 RUN
-  sh -n "$RUNNER" || exit 1
+  command -v bash >/dev/null 2>&1 || { echo "review-pr.sh: bash is required for the Linux NUL-safe source snapshot" >&2; exit 1; }
+  bash -n "$RUNNER" || exit 1
   chmod +x "$RUNNER"
 fi
 
