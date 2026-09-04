@@ -82,6 +82,7 @@ FOLLOW-UP ISSUE，不擴大本輪。
 判決格式（照抄此節，替換角括號）：
 
 ## Code Review: Round N
+- elapsed: <pi session first-to-last message elapsed_ms; unmeasured if unavailable>
 - model_requested: <dispatch 指定的模型>
 - model_observed: <由系統取得：pi 讀 session 檔的 "model" 欄；claude 讀
   `claude -p --output-format json` 的頂層 **modelUsage** 鍵（其 key 就是模型 id，
@@ -147,3 +148,20 @@ claude 讀 `--output-format json` 的 **`modelUsage`** 鍵（RAN 2026-09-02：
   （`PI_MODEL`）不算系統觀察值。
 - 變更紀錄會附在每次判決的 `brief:` 欄（如 `reviewer-brief-template-v1.2`），
   讓抓取率可以對著 brief 版本解讀。
+
+### Review elapsed source (GH-644)
+
+Read elapsed from the **same pi session JSONL file** used for `model_observed`:
+
+```sh
+node scripts/pi-session-elapsed.mjs "$PI_SESSION_FILE"
+```
+
+Set `PI_SESSION_FILE` to the session file already located for this review.
+Copy `elapsed_ms` into the verdict header as `elapsed: <N> ms (pi session)`
+only when `elapsed_measured` is true; otherwise write `elapsed: unmeasured`.
+The helper measures the first through last **message** timestamps, excluding
+session headers. Missing, malformed, single-message, or a last timestamp before
+the first timestamp
+remain unmeasured. This session interval and dispatch's process lifetime are
+different observations; always identify the source in the header.

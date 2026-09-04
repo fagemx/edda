@@ -13,6 +13,7 @@ pub fn load_plan(path: &Path) -> Result<Plan> {
 pub fn parse_plan(yaml: &str) -> Result<Plan> {
     // Step 1: Parse into raw Value for short-format normalization
     let mut raw: serde_yml::Value = serde_yml::from_str(yaml).context("invalid YAML syntax")?;
+    super::preview::reject_runtime_extensions(&raw)?;
 
     // Step 2: Normalize short-format checks
     normalize_checks(&mut raw)?;

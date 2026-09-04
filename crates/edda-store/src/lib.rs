@@ -2,6 +2,8 @@ pub mod fleet;
 pub mod heartbeat;
 pub mod registry;
 pub mod skill_registry;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 pub mod user_config;
 
 pub use heartbeat::{
@@ -50,7 +52,17 @@ fn normalize_path(p: &Path) -> String {
 /// Windows: `%APPDATA%\edda\` (falls back to `%USERPROFILE%\.edda\`)
 ///
 /// Override with `EDDA_STORE_ROOT` env var (useful for testing).
+///
+/// In test-support builds, a thread-local test override installed by
+/// `test_support` takes precedence over the env var, so a test's private
+/// store root is invisible to every other thread in the process (GH-757).
+/// In production builds the override is always `None` and this function
+/// behaves exactly as before.
 pub fn store_root() -> PathBuf {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(root) = test_support::current_override() {
+        return root;
+    }
     if let Ok(custom) = std::env::var("EDDA_STORE_ROOT") {
         return PathBuf::from(custom);
     }
@@ -134,9 +146,54 @@ pub fn try_lock_file(path: &Path) -> anyhow::Result<Option<LockGuard>> {
     }
 }
 
-/// Serialize tests that mutate `EDDA_STORE_ROOT` env var to avoid races.
-#[cfg(test)]
-pub(crate) static ENV_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Capture the test-scoped store-root override installed on the current
+/// thread, so a spawned thread can reinstall it with
+/// [`install_captured_store_root`] (GH-757).
+///
+/// Background threads spawned by production code would otherwise resolve the
+/// ordinary env/default root while their spawning test holds a private root.
+/// In production builds no override can be installed, so this always returns
+/// `None` and the spawned-thread scope is a no-op.
+pub fn captured_store_root_for_spawn() -> Option<PathBuf> {
+    #[cfg(any(test, feature = "test-support"))]
+    let captured = test_support::current_override();
+    #[cfg(not(any(test, feature = "test-support")))]
+    let captured: Option<PathBuf> = None;
+    captured
+}
+
+/// Scope guard reinstalling a captured test store root on the current thread.
+/// No-op in production builds.
+pub struct SpawnedThreadStoreRoot(
+    #[cfg(any(test, feature = "test-support"))] Option<test_support::ThreadOverrideGuard>,
+);
+
+impl Drop for SpawnedThreadStoreRoot {
+    fn drop(&mut self) {
+        #[cfg(any(test, feature = "test-support"))]
+        {
+            // Restores the prior thread override, including on panic.
+            drop(self.0.take());
+        }
+    }
+}
+
+/// Reinstall a captured store-root override ([`captured_store_root_for_spawn`])
+/// on the current thread for the lifetime of the returned guard.
+///
+/// Call this at the top of a spawned background thread; it keeps the thread's
+/// store resolution identical to the spawning test's. No-op in production
+/// builds.
+pub fn install_captured_store_root(captured: Option<&Path>) -> SpawnedThreadStoreRoot {
+    #[cfg(any(test, feature = "test-support"))]
+    let scope = SpawnedThreadStoreRoot(captured.map(test_support::set_thread_override));
+    #[cfg(not(any(test, feature = "test-support")))]
+    let scope = {
+        let _ = captured;
+        SpawnedThreadStoreRoot()
+    };
+    scope
+}
 
 #[cfg(test)]
 mod tests {

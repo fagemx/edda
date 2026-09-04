@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "task.session payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "acp_session_id": {
+      "type": "string"
+    },
+    "agent_kind": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "task_id"
+  ],
+  "additionalProperties": true,
+  "anyOf": [
+    {
+      "required": [
+        "acp_session_id"
+      ]
+    },
+    {
+      "required": [
+        "agent_kind",
+        "session_id",
+        "attempt"
+      ]
+    }
+  ]
+}

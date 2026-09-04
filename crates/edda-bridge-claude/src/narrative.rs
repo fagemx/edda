@@ -172,6 +172,7 @@ mod tests {
 
     #[test]
     fn narrative_empty_returns_none() {
+        let _store = crate::isolated_store();
         let pid = "test_narrative_empty";
         let _ = edda_store::ensure_dirs(pid);
         let result = compose_narrative(pid);
@@ -181,6 +182,7 @@ mod tests {
 
     #[test]
     fn compose_narrative_minimal_returns_activity_only() {
+        let _store = crate::isolated_store();
         let pid = "test_narrative_minimal";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -225,6 +227,7 @@ mod tests {
 
     #[test]
     fn compose_narrative_minimal_none_when_empty() {
+        let _store = crate::isolated_store();
         let pid = "test_narrative_minimal_empty";
         let _ = edda_store::ensure_dirs(pid);
         let result = compose_narrative_minimal(pid);
@@ -287,6 +290,7 @@ mod tests {
 
         // Focus before blocking before tasks before activity
         if let (Some(f), Some(b)) = (focus_pos, blocking_pos) {
+            let _store = crate::isolated_store();
             assert!(f < b, "Focus should come before Blocking");
         }
         if let (Some(b), Some(t)) = (blocking_pos, tasks_pos) {
@@ -319,6 +323,7 @@ mod tests {
 
     #[test]
     fn activity_summary_compact() {
+        let _store = crate::isolated_store();
         let pid = "test_activity_compact";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -358,6 +363,7 @@ mod tests {
 
     #[test]
     fn activity_summary_with_velocity() {
+        let _store = crate::isolated_store();
         let pid = "test_activity_velocity";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -406,6 +412,7 @@ mod tests {
 
     #[test]
     fn activity_summary_renders_subagent_only() {
+        let _store = crate::isolated_store();
         let pid = "test_activity_subagent_only";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -432,6 +439,7 @@ mod tests {
 
     #[test]
     fn activity_summary_renders_subagent_with_files() {
+        let _store = crate::isolated_store();
         let pid = "test_activity_subagent_with_files";
         let _ = edda_store::ensure_dirs(pid);
 

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "merge payload",
+  "description": "Layer 1 v1 payload.",
+  "type": "object",
+  "properties": {
+    "src": {
+      "type": "string"
+    },
+    "dst": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "adopted_commits": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "src",
+    "dst",
+    "reason",
+    "adopted_commits"
+  ],
+  "additionalProperties": true
+}

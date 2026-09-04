@@ -1,0 +1,42 @@
+{
+  "provenance": {
+    "source": "edda 0.4.0 binary (Rust, crates/edda-core) — isolated workspace, EDDA_STORE_ROOT-tempdir, `edda init` + `edda note`; events read from .edda/ledger.db via node:sqlite and reconstructed in serde field shape",
+    "generated": "2026-09-04T08:14:40Z",
+    "purpose": "Golden events whose `hash` was computed by the ACTUAL Rust canonical algorithm (event.rs finalize + canon.rs edda-canon-v1). scripts/spikes/identity must reproduce these hashes byte-for-byte; this is the cross-language guard for canonicalization divergence, not a prose description.",
+    "note": "The `type` field is the serde rename of event_type. Empty refs serialize as {}. digests.event hash values equal `hash` (alg sha256, canon edda-canon-v1)."
+  },
+  "events": [
+    {
+      "event_id": "evt_01m1nqqvyxgz2cfmxrd1sfxppn",
+      "ts": "2026-09-04T08:14:39.5819687Z",
+      "type": "note",
+      "branch": "main",
+      "parent_hash": null,
+      "hash": "086c4d6bd623584bfe581cfb3ceed4a2ccef9bf57a71f6e6b1db31dce89755b0",
+      "payload": { "role": "system", "tags": [], "text": "init edda workspace" },
+      "refs": {},
+      "schema_version": 1,
+      "digests": [
+        { "alg": "sha256", "canon": "edda-canon-v1", "value": "086c4d6bd623584bfe581cfb3ceed4a2ccef9bf57a71f6e6b1db31dce89755b0" }
+      ],
+      "event_family": "signal",
+      "event_level": "info"
+    },
+    {
+      "event_id": "evt_01m1nqqx0jf404qbne5b9s9dv8",
+      "ts": "2026-09-04T08:14:40.6588944Z",
+      "type": "note",
+      "branch": "main",
+      "parent_hash": "086c4d6bd623584bfe581cfb3ceed4a2ccef9bf57a71f6e6b1db31dce89755b0",
+      "hash": "37aebec77d2ac9c40af14a459b7a4ccf30123af78e96cbae37f77d224009ee02",
+      "payload": { "role": "user", "tags": ["golden", "gh609"], "text": "golden fixture event for GH609 signing spike" },
+      "refs": {},
+      "schema_version": 1,
+      "digests": [
+        { "alg": "sha256", "canon": "edda-canon-v1", "value": "37aebec77d2ac9c40af14a459b7a4ccf30123af78e96cbae37f77d224009ee02" }
+      ],
+      "event_family": "signal",
+      "event_level": "info"
+    }
+  ]
+}

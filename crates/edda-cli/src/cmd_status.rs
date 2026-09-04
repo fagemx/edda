@@ -181,7 +181,7 @@ mod tests {
     /// Covers the two states reachable without hand-building a ledger: no
     /// workspace at all, and a `.edda/ledger.db` that is not a database. The
     /// third — a ledger whose schema is newer than the binary — is pinned for
-    /// the text form by `tests/schema_refusal_contract.rs`.
+    /// the text form by `crates/edda-cli/tests/schema_refusal_contract.rs`.
     #[test]
     fn status_json_adds_no_failure_mode() {
         let no_workspace = tempfile::tempdir().expect("no-workspace tempdir");

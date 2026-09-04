@@ -326,17 +326,9 @@ pub fn load_rules() -> Vec<ThresholdRule> {
 // ── Storage Helpers ──
 
 #[cfg(test)]
-thread_local! {
-    static TEST_STORE_ROOT: std::cell::RefCell<Option<PathBuf>> =
-        const { std::cell::RefCell::new(None) };
-}
+thread_local! {}
 
 fn controls_project_dir(project_id: &str) -> PathBuf {
-    #[cfg(test)]
-    if let Some(root) = TEST_STORE_ROOT.with(|root| root.borrow().clone()) {
-        return root.join("projects").join(project_id);
-    }
-
     edda_store::project_dir(project_id)
 }
 
@@ -413,45 +405,19 @@ mod tests {
     use super::*;
     use edda_aggregate::quality::{ModelQuality, QualityReport};
 
-    struct StoreGuard {
-        _store_root: tempfile::TempDir,
-    }
-
-    impl Drop for StoreGuard {
-        fn drop(&mut self) {
-            TEST_STORE_ROOT.with(|root| {
-                root.replace(None);
-            });
-        }
-    }
-
-    impl StoreGuard {
-        fn new() -> Self {
-            let store_root = tempfile::tempdir().unwrap();
-            TEST_STORE_ROOT.with(|root| {
-                assert!(
-                    root.borrow().is_none(),
-                    "test store guard must not be nested"
-                );
-                root.replace(Some(store_root.path().to_path_buf()));
-            });
-            Self {
-                _store_root: store_root,
-            }
-        }
-    }
-
-    fn store_guard() -> StoreGuard {
-        StoreGuard::new()
-    }
-
     #[test]
-    fn store_guard_isolates_storage_without_mutating_process_env() {
+    fn isolated_store_redirects_controls_paths_without_mutating_process_env() {
         let before_env = std::env::var_os("EDDA_STORE_ROOT");
         let default_path = edda_store::project_dir("test_controls_guard");
-        let guard = store_guard();
+        let guard = crate::isolated_store();
         let isolated_path = controls_project_dir("test_controls_guard");
         assert_ne!(isolated_path, default_path, "fixture needs a private store");
+        assert_eq!(
+            isolated_path,
+            guard.path().join("projects").join("test_controls_guard")
+        );
+        // The thread-local override must never touch the process environment
+        // (GH-757): a sibling thread resolving the store must not observe it.
         assert_eq!(std::env::var_os("EDDA_STORE_ROOT"), before_env);
         drop(guard);
         assert_eq!(controls_project_dir("test_controls_guard"), default_path);
@@ -485,6 +451,7 @@ mod tests {
 
     #[test]
     fn patch_serde_roundtrip() {
+        let _store = crate::isolated_store();
         let patch = ControlsPatch {
             patch_id: "cpatch_test123".to_string(),
             created_at: "2026-03-13T10:00:00Z".to_string(),
@@ -508,6 +475,7 @@ mod tests {
 
     #[test]
     fn suggest_returns_none_when_no_triggers() {
+        let _store = crate::isolated_store();
         let report = make_report(0.80, 20, 2.0);
         let rules = default_rules();
         let result = suggest_controls_patch("test_suggest_none", &report, &rules, None).unwrap();
@@ -516,7 +484,7 @@ mod tests {
 
     #[test]
     fn suggest_returns_patch_when_triggered() {
-        let _store = store_guard();
+        let _store = crate::isolated_store();
         let report = make_report(0.30, 20, 2.0);
         let rules = default_rules();
         let result = suggest_controls_patch("test_suggest_some", &report, &rules, None).unwrap();
@@ -529,7 +497,7 @@ mod tests {
 
     #[test]
     fn crud_roundtrip() {
-        let _store = store_guard();
+        let _store = crate::isolated_store();
         let pid = "test_controls_crud";
 
         let patch = ControlsPatch {
@@ -557,7 +525,7 @@ mod tests {
 
     #[test]
     fn approve_and_dismiss_transitions() {
-        let _store = store_guard();
+        let _store = crate::isolated_store();
         let pid = "test_controls_transitions";
 
         // Approve path
@@ -606,7 +574,7 @@ mod tests {
 
     #[test]
     fn mark_applied_requires_approved() {
-        let _store = store_guard();
+        let _store = crate::isolated_store();
         let pid = "test_controls_applied";
 
         let p1 = ControlsPatch {
@@ -634,7 +602,7 @@ mod tests {
 
     #[test]
     fn audit_log_records_actions() {
-        let _store = store_guard();
+        let _store = crate::isolated_store();
         let pid = "test_controls_audit";
 
         let patch = ControlsPatch {
@@ -661,6 +629,7 @@ mod tests {
 
     #[test]
     fn new_patch_id_format() {
+        let _store = crate::isolated_store();
         let id = new_patch_id();
         assert!(id.starts_with("cpatch_"));
         assert_eq!(id.len(), 19); // "cpatch_" (7) + 12 chars

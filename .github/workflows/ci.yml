@@ -14,8 +14,8 @@ env:
 
 jobs:
   # Path-aware triage (#631): decide once whether the diff touches code. If it
-  # does not (docs-only), clippy/test are skipped and the CI Gate treats those
-  # skips as a pass. When in doubt — any diff-computation error or unknown
+  # does not (docs-only), clippy/test/msrv are skipped and the CI Gate treats
+  # those skips as a pass. When in doubt — any diff-computation error or unknown
   # base — we set code=true and run everything.
   detect:
     name: Detect code changes
@@ -75,7 +75,7 @@ jobs:
                 printf '%s\n' "$f"
                 # Whitelist: any match means code changed (err on running more).
                 case "$f" in
-                  crates/*|Cargo.toml|Cargo.lock|rust-toolchain*|.cargo/*|.github/workflows/*|scripts/*|install.sh|build.rs)
+                  crates/*|spec/events/*|tests/fixtures/events/*|Cargo.toml|Cargo.lock|rust-toolchain*|.cargo/*|.github/workflows/*|scripts/*|install.sh|build.rs)
                     code=true ;;
                 esac
               done < "$diffout"
@@ -103,6 +103,11 @@ jobs:
         run: bash scripts/lint-file-length.sh --tree
       - name: Lint Markdown content
         run: sh scripts/lint-markdown-content.sh
+      - name: Lint documentation citations (GH-794)
+        run: |
+          bash -n scripts/lint-doc-citations.sh scripts/test-doc-citations.sh
+          bash scripts/lint-doc-citations.sh --tree
+          bash scripts/test-doc-citations.sh
       - name: Verify installer latest-version stdout
         shell: bash
         run: |
@@ -173,16 +178,34 @@ jobs:
           cargo build -p edda
           EDDA_BIN=target/debug/edda bash scripts/check-cli-docs.sh
 
+  # MSRV gate (GH-824): Cargo.toml declares rust-version = "1.91", but the
+  # pinned build toolchain (rust-toolchain.toml) is newer, so no other CI job
+  # would catch code using 1.92+ APIs. Compile the workspace with exactly
+  # 1.91.0 — check only, no tests — so downstream consumers on 1.91 keep
+  # building when the crates are published.
+  msrv:
+    name: MSRV (1.91.0)
+    needs: [detect]
+    if: needs.detect.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup toolchain install 1.91.0 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.91.0
+      - run: cargo +1.91.0 check --workspace --all-targets --locked
+
   # Aggregate gate: the single check the branch ruleset will pin instead of
-  # enumerating the seven individual jobs. `if: always()` keeps it running even
+  # enumerating the eight individual jobs. `if: always()` keeps it running even
   # when an upstream job fails or is skipped, so the verdict table is always
-  # printed. #631: clippy/test being skipped is accepted only when detect
+  # printed. #631: clippy/test/msrv being skipped is accepted only when detect
   # decided the change was docs-only (code=false); any other skip, failure,
   # or cancellation still fails the gate.
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
-    needs: [detect, fmt, clippy, test]
+    needs: [detect, fmt, clippy, test, msrv]
     if: always()
     steps:
       - name: Evaluate upstream job results
@@ -192,20 +215,22 @@ jobs:
           FMT_RESULT: ${{ needs.fmt.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          MSRV_RESULT: ${{ needs.msrv.result }}
         run: |
           fail() { echo "::error::$1"; exit 1; }
           printf '%-10s -> %s\n' detect "$DETECT_RESULT"
           printf '%-10s -> %s\n' fmt "$FMT_RESULT"
           printf '%-10s -> %s\n' clippy "$CLIPPY_RESULT"
           printf '%-10s -> %s\n' test "$TEST_RESULT"
+          printf '%-10s -> %s\n' msrv "$MSRV_RESULT"
           [ "$DETECT_RESULT" = "success" ] || fail "detect did not succeed (result: $DETECT_RESULT)."
           [ "$FMT_RESULT" = "success" ] || fail "fmt did not succeed (result: $FMT_RESULT)."
-          if [ "$CLIPPY_RESULT" = "success" ] && [ "$TEST_RESULT" = "success" ]; then
+          if [ "$CLIPPY_RESULT" = "success" ] && [ "$TEST_RESULT" = "success" ] && [ "$MSRV_RESULT" = "success" ]; then
             echo "All upstream jobs succeeded."
             exit 0
           fi
-          if [ "$CLIPPY_RESULT" = "skipped" ] && [ "$TEST_RESULT" = "skipped" ] && [ "$CODE" = "false" ]; then
-            echo "Docs-only change (detect: code=false): clippy/test skipped, gate passes."
+          if [ "$CLIPPY_RESULT" = "skipped" ] && [ "$TEST_RESULT" = "skipped" ] && [ "$MSRV_RESULT" = "skipped" ] && [ "$CODE" = "false" ]; then
+            echo "Docs-only change (detect: code=false): clippy/test/msrv skipped, gate passes."
             exit 0
           fi
-          fail "clippy/test did not succeed (clippy: $CLIPPY_RESULT, test: $TEST_RESULT, detect.code: $CODE)."
+          fail "clippy/test/msrv did not succeed (clippy: $CLIPPY_RESULT, test: $TEST_RESULT, msrv: $MSRV_RESULT, detect.code: $CODE)."

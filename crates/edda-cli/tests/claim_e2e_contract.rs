@@ -325,6 +325,59 @@ fn e2e_aged_bare_cli_claim_still_conflicts() {
 }
 
 #[test]
+fn e2e_non_intersecting_bare_cli_claim_is_still_named() {
+    let repo = e2e_repo();
+    let store = tempfile::tempdir().expect("store tempdir");
+    let (code, stdout, stderr) = run_edda_bare(
+        &["claim", "other-lane", "--paths", "src/auth/*"],
+        repo.path(),
+        store.path(),
+    );
+    assert_eq!(code, 0, "claim failed: {stdout:?} {stderr:?}");
+
+    let (code, stdout, stderr) = run_edda_bare(
+        &["claim", "check", "docs/guide.md"],
+        repo.path(),
+        store.path(),
+    );
+    assert_eq!(
+        code, 0,
+        "non-intersection is not a conflict: {stdout:?} {stderr:?}"
+    );
+    assert!(stdout.contains("other-lane") || stderr.contains("other-lane"));
+}
+
+#[test]
+fn e2e_non_intersecting_bare_cli_claim_is_listed_in_json() {
+    let repo = e2e_repo();
+    let store = tempfile::tempdir().expect("store tempdir");
+    let (code, stdout, stderr) = run_edda_bare(
+        &["claim", "other-lane", "--paths", "src/auth/*"],
+        repo.path(),
+        store.path(),
+    );
+    assert_eq!(code, 0, "claim failed: {stdout:?} {stderr:?}");
+
+    let (code, stdout, stderr) = run_edda_bare(
+        &["claim", "check", "docs/guide.md", "--json"],
+        repo.path(),
+        store.path(),
+    );
+    assert_eq!(
+        code, 0,
+        "non-intersection is not a conflict: {stdout:?} {stderr:?}"
+    );
+    let report: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
+    assert_eq!(
+        report["standing_bare_claims"][0]["session_id"],
+        "cli-other-lane"
+    );
+    assert!(report["unjudgeable_claims"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+}
+
+#[test]
 fn e2e_never_heartbeated_bare_cli_claim_conflicts() {
     // The same fail-closed verdict when the one-shot claim left no
     // heartbeat at all: for a session id this binary itself mints,

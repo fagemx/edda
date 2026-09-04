@@ -36,6 +36,16 @@ The whole formation — you included — produces delivery candidates and
 proves what was done and how it was verified; sign-off belongs to whoever
 holds merge authority outside the formation, unless explicitly delegated.
 
+## How to launch networked roles
+
+When a dispatched role must reach the network — a reviewer posting a verdict
+to a PR with `gh`, an implementer pushing a branch — launch it with
+`edda dispatch --agent codex` (GH-565): the codex backend sets no sandbox or
+approval flags, so the user's global Codex configuration is inherited
+unchanged. Do not use the Claude Code codex plugin for that role; it defaults
+to a `read-only` sandbox that overrides `~/.codex/config.toml`, and a
+read-only sandbox has no network access, so every outbound call fails.
+
 ## Review scope contract
 
 Before every review, freeze `IN SCOPE`: changed behavior/paths, directly

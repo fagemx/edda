@@ -496,10 +496,10 @@ async fn run_next_phase(
 
     // Clear retry_context on new attempt start (it was already consumed for prompt building)
     let retry_ctx = phase_state.retry_context.take();
-    // GH-584 round-2 P1-3: a fresh attempt starts unmeasured — the
-    // previous attempt's cost belongs to its own (already written)
-    // terminal event, not to this one.
+    // A fresh attempt starts unmeasured; prior cost belongs to its terminal event.
     phase_state.cost_usd = None;
+    // Duration has the same boundary; never render prior-attempt timing while this runs.
+    phase_state.duration_ms = None;
 
     // 3. Transition: pending → running
     transition(

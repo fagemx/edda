@@ -24,8 +24,11 @@
    git status                              # 乾淨、on branch main
    git rev-list --count HEAD..origin/main  # 0 = 沒落後
    ```
-2. **接單**：`gh issue edit <N> --add-label fleet:claimed --remove-label fleet:ready --add-assignee @me`，
-   並在 issue 留 lease 留言。
+2. **接單**：手動認領用 `sh scripts/fleet-claim-issue.sh <N> <machine>/<role>`（例如
+   `4090/worker-1`、`docs/reviewer`）；`edda dispatch --issue <N> --machine <machine>/<role>`
+   也會在派發前做同一套認領。兩者都先查 PR 與完整 `taking:` 身分，再留 `taking:` 留言、加
+   `fleet:claimed`、移除 `fleet:ready`、指派 `@me`；不要另寫 lease 留言或另跑 `gh issue edit`。
+   `lane:*` 只供路由，不是認領憑證（#782）。
 3. **派 lane**（開 worktree 後）：
    ```bash
    pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> -Cwd <worktree> -Owns <repo-path> [<repo-path>...]
@@ -102,7 +105,10 @@
 1. **開場**：在 `C:\ai_agent\edda` 開 Claude Code。pack 自動列出決策、peers、任務。說：
    「`/fleet-orchestrate` 今天跑 ready 的單」。控制者先做 fleet-orchestrate 的 controller sequence
    第 1–2 步：定目標、排除、證據門檻、開單與合併授權、停止條件；看 revision、dirty state、peers、claims、issue/PR 狀態。
-2. **判併行**：`/parallel-wave`——每張 ready issue 推 predicted write surface，兩兩交集：
+   **Standing 授權（不必逐批請示）**：`fleet:ready` 標籤就是操作者的簽名——控制者接著自己跑
+   fleet-orchestrate 的 ready-batch selection 程序選出這一批、產出選/排表，不回頭問編號；
+   操作者的介入點是 promote 與裁決，不是每批打字給編號（程序正典在 fleet-orchestrate，這裡不重述）。
+2. **判併行**：`/parallel-wave`——輸入就是上一步選單程序的選/排表；每張選中的 ready issue 推 predicted write surface，兩兩交集：
    disjoint → 一起派；同檔不同符號 → 兩邊 brief 寫 FORBIDDEN 符號清單；同符號 → 串成一條；scope 太糊 → 退回佇列。
    `edda claim check`（#576，2026-09-02 已合進 main）把這步變成機器判——**但要用從 main 重建的二進位**：
    PATH 上的 `edda.exe` 可能比 #576 舊，`edda claim --help` 沒列出 `check` 就是舊的（它會把 `check` 當成 claim 的 label）。
@@ -198,6 +204,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | **停 lane 一律走 `scripts/fleet/lane-stop.ps1 -Name <lane>`**：`Stop-ScheduledTask` 與 `Unregister-ScheduledTask` 都只終止任務的 wrapper，**不殺它 spawn 的 process tree**（GH-672：被「停」的 lane 照樣 commit／push／開 PR，任務卻顯示 `State = Ready`）。`lane-stop.ps1` 停任務、殺整棵樹（wrapper 已死時依 `CommandLine` 比對 wrapper／brief 路徑抓孤兒）、驗證無殘留、回報實際終止了什麼，並補寫結束記錄（done-file + lane log 的 `=== EXIT ===` 行）——wrapper 本身也在 `finally` 寫同樣的結束記錄，所以正常結束、出錯、被停三種 endings 都有 EXIT。**殺完要驗共用 `.git/config`**：硬殺撞上 git 寫 config 會把它變成整片 NUL，主 checkout 加全部 worktree 同時失去 git；2026-09-02／03 各發生一次，而當時的 `.bak` 是**損毀後**才複製的，所以也是整片 NUL——備份不驗證等於沒有備份（GH-715）。殺完 `lane-stop.ps1` 驗證 config 仍可解析，壞了就從 `lane-launch.ps1` 開跑前存的**已驗證**備份還原（`scripts/fleet/git-config-guard.ps1`），還不回來就 exit 1；結束記錄一定先寫。沒有優雅關閉窗口：不帶 `/F` 的 `taskkill` 對沒有視窗的隱藏 console 程序無效（實測 exit 128、目標存活），加一段等待只會讓每次停 lane 多付秒數而擋不住任何損毀 | `fleet.lane-stop-4090` |
 | 一 issue ＝ 一單 phase plan ＝ 一 worktree ＝ 一 build lane；並行在 plan 之間；plan 裡不寫沒理由的 `depends_on`；並行 plan 不用 verdict gate | `cleanup.parallel-exec`、`cleanup.review-gate` |
 | 任何 session 開始一張 issue 前的起手守門（`--check`、認領憑證、拒絕條件）：見 `docs/fleet/rules.md` R21，本表不重述 | #784（R21；`fleet.cross-machine-claim` 的舊 carrier 已被取代） |
+| `edda dispatch --issue N --machine 4090/worker-1` 自動先查 PR／完整角色認領，再寫 `taking:`、將 `fleet:ready` 換成 `fleet:claimed` 並指派 `@me`；單獨查核用 `sh scripts/fleet-claim-issue.sh --check N 4090/worker-1`，唯讀，0 可接／1 已有人或 PR／2 使用或 GitHub 錯誤。裸機器名不接受；`lane:*` 僅供路由 | #782 |
 | build lane 只用 `worker-1|worker-2|verifier|verifier-2`；永不建 ad-hoc `CARGO_TARGET_DIR`；L1 與 verifier 設 `CARGO_INCREMENTAL=0` | `verification.cost-discipline` |
 | 操作者在場的小批量併行走 `/issue-pipeline`（in-session 子代理：開工先貼 `taking: <machine>/pipeline`、審查是 house review——審查者不修自己審的 PR、子代理隨 session 死，長時間無人值守改派 Task Scheduler lane）；一次最多兩張要編譯的單 | `fleet.parallel-modes=in-session-pipeline-when-operator-present-lanes-when-unattended` |
 | 審查釘 full SHA；**每次 push 使前一個判決失效**；一個 PR 一個審查者身分 | `fleet.review-protocol` |

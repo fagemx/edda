@@ -1,0 +1,12 @@
+name: loop-carrier-preview
+strategy_run_id: watch-run-2
+phases:
+  - id: tick
+    prompt: Observe the registered lane heartbeat for this bounded tick.
+    isolation: none
+    owns_objects: [source:heartbeat/lane-2]
+    check:
+      - type: fresh
+        source: heartbeat
+        instance: lane-2
+        within_sec: 60
