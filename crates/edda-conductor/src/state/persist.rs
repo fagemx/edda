@@ -88,8 +88,9 @@ pub fn load_state(cwd: &Path, plan_name: &str) -> Result<Option<PlanState>> {
     }
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("reading state: {}", path.display()))?;
-    let state: PlanState = serde_json::from_str(&content)
+    let mut state: PlanState = serde_json::from_str(&content)
         .with_context(|| format!("parsing state: {}", path.display()))?;
+    super::derive::hydrate_durations(cwd, &mut state);
     Ok(Some(state))
 }
 

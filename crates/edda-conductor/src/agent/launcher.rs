@@ -1,9 +1,10 @@
+use super::timing::ProcessTiming;
 use crate::agent::stream::{classify_result, StreamMonitor};
 use crate::plan::schema::Phase;
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -40,6 +41,14 @@ pub trait AgentLauncher: Send + Sync {
         cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult>;
+
+    /// Wall-clock spawn through confirmed process exit for the last call.
+    fn last_elapsed_ms(&self) -> Option<u64> {
+        None
+    }
+
+    /// Release a dispatch-owned persistent process before reading its timing.
+    async fn finish_dispatch(&self) {}
 
     /// The model the backend reported **in-band** during the most recent
     /// turn on this launcher, if any. Observation, not inference: a
@@ -103,6 +112,7 @@ pub struct ClaudeCodeLauncher {
     /// In-band session id from the same `system/init` message, for
     /// [`AgentLauncher::last_observed_session`] (GH-708).
     observed_session: std::sync::Mutex<Option<String>>,
+    timing: ProcessTiming,
 }
 
 impl Default for ClaudeCodeLauncher {
@@ -210,6 +220,7 @@ impl ClaudeCodeLauncher {
             resume: false,
             observed_model: std::sync::Mutex::new(None),
             observed_session: std::sync::Mutex::new(None),
+            timing: ProcessTiming::default(),
         }
     }
 
@@ -221,6 +232,7 @@ impl ClaudeCodeLauncher {
             resume: false,
             observed_model: std::sync::Mutex::new(None),
             observed_session: std::sync::Mutex::new(None),
+            timing: ProcessTiming::default(),
         }
     }
 
@@ -278,6 +290,7 @@ impl AgentLauncher for ClaudeCodeLauncher {
         cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult> {
+        self.timing.reset();
         if phase.thinking.is_some() {
             // GH-574 honesty: claude's CLI exposes no thinking-level flag,
             // so a phase that declares one would otherwise be silently
@@ -290,6 +303,7 @@ impl AgentLauncher for ClaudeCodeLauncher {
         }
         let mut cmd = self.build_command(phase, prompt, plan_context, session_id, cwd);
 
+        let started = Instant::now();
         let mut child = cmd.spawn()?;
         let stdout = child
             .stdout
@@ -305,29 +319,41 @@ impl AgentLauncher for ClaudeCodeLauncher {
             .with_tee(tee_path);
         let timeout_sec = phase.timeout_sec.unwrap_or(1800);
 
-        let result = tokio::select! {
-            result = monitor.run() => {
-                let monitor_result = result?;
-                // In-band model observation: whatever the backend itself
-                // reported, or nothing. Never inferred from config.
-                self.record_observed_model(monitor_result.model.clone());
-                // Same terms for the session id: what claude says it ran,
-                // which is the only way to see a --resume that forked
-                // instead of continuing (GH-708).
-                self.record_observed_session(monitor_result.session_id.clone());
-                let exit = child.wait().await?;
-                Ok(classify_result(&monitor_result, exit.code()))
+        let result = async {
+            tokio::select! {
+                result = monitor.run() => {
+                    let monitor_result = result?;
+                    // In-band model observation: whatever the backend itself
+                    // reported, or nothing. Never inferred from config.
+                    self.record_observed_model(monitor_result.model.clone());
+                    // Same terms for the session id: what claude says it ran,
+                    // which is the only way to see a --resume that forked
+                    // instead of continuing (GH-708).
+                    self.record_observed_session(monitor_result.session_id.clone());
+                    let exit = child.wait().await?;
+                    Ok(classify_result(&monitor_result, exit.code()))
+                }
+                _ = tokio::time::sleep(Duration::from_secs(timeout_sec)) => {
+                    child.kill().await.ok();
+                    Ok(PhaseResult::Timeout)
+                }
+                _ = cancel.cancelled() => {
+                    child.kill().await.ok();
+                    Ok(PhaseResult::AgentCrash { error: "conductor shutdown".into() })
+                }
             }
-            _ = tokio::time::sleep(Duration::from_secs(timeout_sec)) => {
-                child.kill().await.ok();
-                Ok(PhaseResult::Timeout)
-            }
-            _ = cancel.cancelled() => {
-                child.kill().await.ok();
-                Ok(PhaseResult::AgentCrash { error: "conductor shutdown".into() })
-            }
-        };
+        }
+        .await;
+        if child.try_wait()?.is_none() {
+            child.kill().await?;
+        }
+        child.wait().await?;
+        self.timing.record(started);
         result
+    }
+
+    fn last_elapsed_ms(&self) -> Option<u64> {
+        self.timing.elapsed_ms()
     }
 
     fn last_observed_model(&self) -> Option<String> {
