@@ -28,7 +28,7 @@ try {
   @'
 $ErrorActionPreference = 'Stop'
 $global:registered = $false; $global:unregistered = $false
-function Get-ScheduledTask { [CmdletBinding()] param([string]$TaskName) if ($global:registered) { [pscustomobject]@{ TaskName=$TaskName; State='Ready'; Actions=@() } } }
+function Get-ScheduledTask { [CmdletBinding()] param([string]$TaskName) if ($global:registered) { [pscustomobject]@{ TaskName=$TaskName; State='Ready'; Actions=@([pscustomobject]@{ Arguments='replacement-action' }) } } }
 function New-ScheduledTaskAction { [pscustomobject]@{} }
 function New-ScheduledTaskSettingsSet { [pscustomobject]@{} }
 function Register-ScheduledTask { param([string]$TaskName) $global:registered = $true; [pscustomobject]@{} }
@@ -43,7 +43,7 @@ exit 99
   $launchDone = Join-Path $launchLog 'terminal-start-failure.done'; $launchOut = Join-Path $launchLog 'terminal-start-failure.log'
   Assert-True ($launchExit -ne 0) 'launch Start failure exits nonzero'
   Assert-True ((Test-Path $launchDone) -and (Get-Content $launchDone -Raw).Trim() -eq '1') 'launch Start failure writes done=1 receipt'
-  Assert-True ((Get-Content $launchOut -Raw) -match 'registration=unregistered-after-launch-failure') 'launch Start failure unregisters its Ready registration'
+  Assert-True ((Get-Content $launchOut -Raw) -match 'registration=preserved-replaced-or-running-after-launch-failure') 'launch Start failure preserves same-name replacement with different action identity'
 
   # --- lane-stop task disappears after the process-tree proof --------------
   $stopLog = Join-Path $scratch 'stop'; New-Item -ItemType Directory -Force -Path $stopLog | Out-Null

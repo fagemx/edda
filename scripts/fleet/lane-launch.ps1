@@ -451,9 +451,10 @@ $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log
 
 Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue  # stale done-file from a previous run must not masquerade as this run
 $registered = $false
+$scheduledActionArguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`""
 try {
   $action = New-ScheduledTaskAction -Execute $PwshExe `
-    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
+    -Argument $scheduledActionArguments `
     -WorkingDirectory $Cwd
   # Keep Task Scheduler from preempting the wrapper; edda dispatch owns the
   # requested timeout and its return reaches the wrapper's teardown.
@@ -481,11 +482,12 @@ try {
   if ($registered) {
     try {
       $current = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-      if ($current -and $current.State -ne 'Running') {
+      $currentArguments = if ($current -and $current.Actions -and $current.Actions.Count -gt 0) { [string]$current.Actions[0].Arguments } else { $null }
+      if ($current -and $current.State -ne 'Running' -and $currentArguments -eq $scheduledActionArguments) {
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
         $registrationVerdict = 'unregistered-after-launch-failure'
       } elseif ($current) {
-        $registrationVerdict = 'preserved-running-after-launch-failure'
+        $registrationVerdict = 'preserved-replaced-or-running-after-launch-failure'
       } else {
         $registrationVerdict = 'already-absent-after-launch-failure'
       }

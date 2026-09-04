@@ -145,12 +145,15 @@ function Get-FleetTaskByName([string]$TaskName) {
 }
 
 function Get-FleetTaskIdentity($Task) {
-  # Task name alone is not a registration identity: a replacement can reuse
-  # it.  The registered wrapper argument is the stable identity this reaper
-  # already consumes for its metadata.
+  # Task name and action arguments are reusable.  Task Scheduler exposes the
+  # registration XML for the concrete registration; hash that actual metadata
+  # rather than inventing a task-service field.  Legacy/provider objects that
+  # do not expose XML are unknown and must not be removed under -Apply.
   if (-not $Task) { return $null }
-  if ($Task.Actions -and $Task.Actions.Count -gt 0) { return [string]$Task.Actions[0].Arguments }
-  return ''
+  $xml = [string]$Task.Xml
+  if (-not $xml) { return $null }
+  $bytes = [Text.Encoding]::UTF8.GetBytes($xml)
+  return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
 }
 
 function Remove-FleetTaskRegistration([string]$TaskName) {
@@ -485,7 +488,13 @@ function Invoke-LaneReap {
           $rows.Add((New-LaneReapRow @{ row = 'action'; task = $tn; verb = 'unregister'; mode = 'apply'; result = 'skipped-race'; detail = 'registration became Running at apply time' }))
           continue
         }
-        if ((Get-FleetTaskIdentity $current) -ne (Get-FleetTaskIdentity $t)) {
+        $originalIdentity = Get-FleetTaskIdentity $t
+        $currentIdentity = Get-FleetTaskIdentity $current
+        if (-not $originalIdentity -or -not $currentIdentity) {
+          $rows.Add((New-LaneReapRow @{ row = 'action'; task = $tn; verb = 'unregister'; mode = 'apply'; result = 'skipped-race'; detail = 'registration identity unavailable at apply time' }))
+          continue
+        }
+        if ($currentIdentity -ne $originalIdentity) {
           $rows.Add((New-LaneReapRow @{ row = 'action'; task = $tn; verb = 'unregister'; mode = 'apply'; result = 'skipped-race'; detail = 'registration identity changed at apply time' }))
           continue
         }

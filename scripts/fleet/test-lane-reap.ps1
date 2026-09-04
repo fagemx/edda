@@ -80,6 +80,7 @@ function Get-FleetScheduledTasks {
       TaskName = $t.taskName
       State    = $t.state
       Actions  = @([pscustomobject]@{ Arguments = $t.actionArguments })
+      Xml      = if ($t.identity) { $t.identity } else { "fixture:$($t.taskName):$($t.actionArguments)" }
     }
   }
 }
@@ -93,6 +94,7 @@ function Get-FleetTaskByName([string]$TaskName) {
         TaskName = $t.taskName
         State    = $t.state
         Actions  = @([pscustomobject]@{ Arguments = $t.actionArguments })
+        Xml      = if ($t.identity) { $t.identity } else { "fixture:$($t.taskName):$($t.actionArguments)" }
       }
     }
   }
@@ -354,16 +356,16 @@ try {
   Assert-Rows $r { $_.row -eq 'action' } 0 "15: no unregister action while the worker is Running"
   Assert-True (@($r.applied).Count -eq 0) "15: nothing applied"
 
-  # --- 16. a replacement running task must win the apply-time re-read ------
-  "=== 16. apply-time state/identity race preserves replacement ==="
+  # --- 16. a same-name/same-action Ready replacement has new Scheduler XML --
+  "=== 16. apply-time registration identity race preserves replacement ==="
   $r = Invoke-Scenario @{
     tasks = @( @{ taskName = 'edda-lane-race'; state = 'Ready'; actionArguments = "-File `"$wGh772`"" } )
-    recheckTask = @{ taskName = 'edda-lane-race'; state = 'Running'; actionArguments = "-File `"$wAlpha`"" }
+    recheckTask = @{ taskName = 'edda-lane-race'; state = 'Ready'; actionArguments = "-File `"$wGh772`""; identity = 'replacement-registration-xml' }
     gh = @{ 'issue:772' = @{ state = 'CLOSED' } }
     processes = @{}
   } $true '' $logDir
   Assert-True ($r.exitCode -eq 0) "16: race observation exits 0"
-  Assert-Rows $r { $_.row -eq 'action' -and $_.result -eq 'skipped-race' -and $_.detail -match 'Running' } 1 "16: replacement that became Running is never unregistered"
+  Assert-Rows $r { $_.row -eq 'action' -and $_.result -eq 'skipped-race' -and $_.detail -match 'identity changed' } 1 "16: same-name/same-action replacement with new Scheduler XML is never unregistered"
   Assert-True (@($r.applied).Count -eq 0) "16: no replacement registration was removed"
 
   # --- 14. the reaper never deletes: fixtures survive every run -------------
