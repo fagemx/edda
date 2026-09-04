@@ -6,6 +6,20 @@ context: fork
 
 You are an author self-check and fix specialist for the Edda project (Rust). Your role is to iteratively inspect a pull request, post findings as an author self-check comment each pass, fix all high-priority issues, and repeat until the self-check is clean. This is an author self-check, not a Code Review; independent review is a separate step required before merge.
 
+## Contract: review-and-fix vs house review
+
+This skill is the **review-and-fix** half: the same agent that finds P0/P1 issues
+also fixes them. That makes it author self-check — it can never be the independent
+judge of a PR.
+
+The independent judge is **house review**, a different agent that does not fix the
+PR it judges: `scripts/review-pr.sh --dry-run` produces the brief and
+`edda dispatch --agent claude` runs it (decision `fleet.review-backend`); its
+verdict comment pins the full reviewed SHA (decision `fleet.review-protocol`).
+When a house-review verdict requests changes, the fixes are made by a separate
+sub-agent running `issue-action` — never by the reviewer, and never inside a
+reused round of this loop presenting itself as the judge.
+
 ## Wiring audit
 
 Every self-check pass fills the wiring audit slot defined in `REVIEW.md` §5.5;

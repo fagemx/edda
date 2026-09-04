@@ -19,6 +19,22 @@ You are a GitHub issue implementation specialist. Your role is to continue worki
 - Never fix multiple failed tests simultaneously unless you're certain they're related
 - Core principle: propose and verify hypotheses at fine granularity through continuous iteration
 
+## Build Lane Rule (compiling this workspace)
+
+This workspace compiles only into a named build lane — **never create an ad-hoc
+`CARGO_TARGET_DIR`** per round, per SHA, or per timestamp (decision
+`verification.cost-discipline`; `.claude/CLAUDE.md` → Build lanes).
+
+- Sub-agents inherit `$env:CARGO_TARGET_DIR` from the session that dispatched them.
+  Check it before your first compile.
+- **If `$env:CARGO_TARGET_DIR` is unset, refuse to compile**: do not create a target
+  directory and do not set one yourself — report that no build lane is set, and stop
+  (post a `pending` comment per Step 7 if that blocks the plan).
+- If it is set to a path outside the allowed lanes (`worker-1`, `worker-2`,
+  `verifier`, `verifier-2` under the lane root
+  `$env:LOCALAPPDATA\fleet-workstation\lanes`), report it — do not silently "fix"
+  the path.
+
 ## Workflow
 
 ### Step 1: Retrieve Context

@@ -21,12 +21,35 @@ There is deliberately no `--skip-review` flag: review can never be skipped. Merg
 requires a final current-head LGTM (see Phase 4); work that fails or lacks review
 routes through the `pr-review-loop` skill instead.
 
+## Before you start (controller session setup)
+
+The controller session runs in a normal shell, not a scheduler lane — set the
+environment before opening it, then run the pipeline from the controller prompt:
+
+```powershell
+# 1. Build lane — quoted assignment; allowed values: worker-1 | worker-2 | verifier | verifier-2.
+#    Never create an ad-hoc CARGO_TARGET_DIR (decision verification.cost-discipline).
+$env:CARGO_TARGET_DIR = "$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1"
+
+# 2. Machine label — appears in the taking: comment each sub-agent posts (Phase 2)
+$env:EDDA_SESSION_LABEL = "docs"
+
+# 3. Open the controller session in this checkout, then:
+#    /issue-pipeline 703 704 --skip-plan --no-merge
+```
+
+Sub-agents inherit these values. This path is for work done while the operator is
+present; for long unattended work use the Task Scheduler lanes instead (decision
+`fleet.parallel-modes`).
+
 ## Prerequisites
 
 This skill depends on these sub-skills being installed in `.claude/skills/`:
 - `issue-plan` — Deep-dive planning (research → innovate → plan)
-- `issue-action` — Implementation from plan to PR
-- `pr-review-loop` — Iterative review with auto-fix
+- `issue-action` — Implementation from plan to PR; also the fix vehicle when house
+  review requests changes (Phase 3)
+- `pr-review-loop` — Author review-and-fix self-check loop; a fix sub-agent may drive
+  it, but it is never the Phase 3 judge (see its contract section)
 
 If any are missing, inform the user — all three ship in this repo's `.claude/skills/`.
 
@@ -57,23 +80,44 @@ prompt: |
   and following its instructions for issue #{number}.
   The plan has been posted as a comment on the issue — read it with `gh issue view {number} --comments`.
   IMPORTANT: You are in a worktree. Pull latest main first: `git pull origin main`.
+  BEFORE any other work, claim the issue across machines:
+  `gh issue comment {number} --body "taking: {machine}/pipeline"`
+  where `{machine}` is this controller's machine label (`EDDA_SESSION_LABEL`). If the
+  issue already has a `taking:` comment from a different machine, do NOT start — skip
+  and report it.
 ```
 
 **Wait for all agents to complete.** Collect PR URLs. Report results to user.
 
-### Phase 3: Review (parallel)
+### Phase 3: House Review (parallel)
 
-For each PR created in Phase 2, launch a sub-agent with `isolation: "worktree"` and `run_in_background: true`:
+The reviewer does not fix the PR it judges. This is **house review**, not the
+author's review-and-fix loop: fixes are made by a different sub-agent (step 4),
+never by the reviewer.
 
-```
-prompt: |
-  You are reviewing PR #{pr_number} for this project at {project_root}.
-  Load and execute the pr-review-loop skill by reading {project_root}/.claude/skills/pr-review-loop/SKILL.md
-  and following its instructions for PR #{pr_number}.
-  IMPORTANT: You are in a worktree. If fixes are needed, make them on the PR's branch, commit, and push.
-```
+For each PR created in Phase 2, run one house review. The controller may launch all
+reviewers in a SINGLE message:
 
-**Wait for all agents to complete.** Report verdicts.
+1. Produce the review brief. Dry-run only prints the brief — it launches nothing:
+
+   ```bash
+   sh scripts/review-pr.sh {pr_number} --dry-run
+   ```
+
+2. Run the reviewer on that brief with
+   `edda dispatch --agent claude --prompt-file <brief-file>` (decision
+   `fleet.review-backend`: review transport is Claude Opus via the claude
+   subscription). The reviewer reads, runs read-only checks, and posts exactly one
+   verdict comment — it does not write code.
+3. The verdict comment pins the full reviewed SHA (decision
+   `fleet.review-protocol`); any push to the PR invalidates the verdict and starts
+   a new round.
+4. **On Changes Requested:** dispatch a fresh fix sub-agent that loads the
+   `issue-action` skill and addresses the blocking findings on the PR's branch.
+   The fix sub-agent is never the reviewer. After it pushes, run a new house-review
+   round on the new full SHA (step 1 again).
+
+**Wait for all reviewers to complete.** Report verdicts.
 
 ### Phase 4: Merge
 
@@ -114,6 +158,17 @@ Report final status table.
    work, another session's active branch or worktree, and sources — stays
    untouched; `git worktree remove` and `git worktree prune` are for that
    reclaim only; otherwise leave cleanup to the operator
+8. **At most two compile-needed issues per invocation** — the fleet has two
+   worker build lanes (`worker-1`, `worker-2`), so at most two issues that need
+   to compile run per invocation. Docs-only issues do not consume a lane.
+9. **Set the build lane before start** — the controller session must have
+   `CARGO_TARGET_DIR` set to an allowed lane (`worker-1|worker-2|verifier|verifier-2`)
+   before dispatching; sub-agents inherit it and never create an ad-hoc target
+   directory (decision `verification.cost-discipline`, `.claude/CLAUDE.md` → Build lanes).
+10. **Sub-agents die with the session** — every sub-agent this skill dispatches is
+   a child of the controller session and dies with it, so this in-session pipeline
+   is not for long unattended work. When the operator will step away, use the
+   Task Scheduler lanes instead (decision `fleet.parallel-modes`).
 
 ## Status Table Format
 
@@ -131,5 +186,6 @@ After each phase:
 
 - **Agent fails**: Mark as ❌, continue with other issues. Report at end.
 - **PR creation fails**: Try to identify branch, suggest manual fix.
-- **Review finds issues**: Review loop handles fix + re-review automatically.
+- **Review requests changes**: a fix sub-agent (`issue-action`) addresses the blocking
+  findings, then a new house-review round runs on the new full SHA.
 - **Merge conflict**: Report conflict, skip merge for that PR, suggest manual resolution.
