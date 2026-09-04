@@ -550,26 +550,43 @@ function Invoke-SpikePublication {
     $cleanupExit = 0
     $verdict = 'auth-failed'
     $originalVerdict = $null
+    $transportDir = Join-Path ([System.IO.Path]::GetTempPath()) ("gh690-transport-" + [guid]::NewGuid().ToString('N'))
+    $savedGitEnvironment = @{}
 
     try {
+        # Build a disposable bare repository as the sole local configuration source.
+        # It has no remotes, url.* rewrite rules, or http.* headers. Global/system
+        # config and inherited GIT_* config injection are excluded for every call.
+        $head = @(& git -C $WorkspacePath rev-parse HEAD 2>$null)
+        $head = ("$head").Trim()
+        $objects = @(& git -C $WorkspacePath rev-parse --git-path objects 2>$null)
+        $objects = ("$objects").Trim()
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($head) -or [string]::IsNullOrWhiteSpace($objects) -or $RefSpec -notmatch '^HEAD:') {
+            throw 'publication transport isolation could not resolve the workspace HEAD/object store.'
+        }
+        if (-not [System.IO.Path]::IsPathRooted($objects)) { $objects = Join-Path $WorkspacePath $objects }
+        $globalConfig = Join-Path $transportDir 'global.gitconfig'
+        New-Item -ItemType Directory -Path $transportDir -Force | Out-Null
+        New-Item -ItemType File -Path $globalConfig -Force | Out-Null
+        Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' } | ForEach-Object {
+            $savedGitEnvironment[$_.Name] = $_.Value
+            Remove-Item ("Env:" + $_.Name) -ErrorAction Stop
+        }
+        $env:GIT_CONFIG_NOSYSTEM = '1'; $env:GIT_CONFIG_GLOBAL = $globalConfig
+        $env:GIT_ALTERNATE_OBJECT_DIRECTORIES = $objects; $env:GIT_TERMINAL_PROMPT = '0'
+        & git init --bare --quiet $transportDir 2>$null
+        if ($LASTEXITCODE -ne 0) { throw 'publication transport isolation could not create its disposable git directory.' }
+        $isolatedRefSpec = $RefSpec -replace '^HEAD:', ($head + ':')
+
         # Approve failure and an invoker exception both refuse publication.
         $approve = & $GitInvoker -GitArgs @($helperArgs + @('credential', 'approve')) -StdinInput $payload
         if ($approve.ExitCode -ne 0) {
             $notes.Add('credential approve failed; publication refused before any push')
         }
         else {
-            # Push the already validated literal URL, never the remote alias. Reset
-            # helpers/headers and suppress interactive/askpass fallback inputs.
-            $savedAskPass = $env:GIT_ASKPASS; $savedSshAskPass = $env:SSH_ASKPASS; $savedSshCommand = $env:GIT_SSH_COMMAND
-            try {
-                Remove-Item Env:GIT_ASKPASS,Env:SSH_ASKPASS,Env:GIT_SSH_COMMAND -ErrorAction SilentlyContinue
-                $env:GIT_TERMINAL_PROMPT = '0'
-                $push = & $GitInvoker -GitArgs @($helperArgs + @('-c', 'http.extraHeader=', '-c', 'core.askPass=', '-c', 'push.followTags=false', 'push', $DestinationUrl, $RefSpec)) -WorkingDirectory $WorkspacePath
-            }
-            finally {
-                $env:GIT_ASKPASS = $savedAskPass; $env:SSH_ASKPASS = $savedSshAskPass; $env:GIT_SSH_COMMAND = $savedSshCommand
-                Remove-Item Env:GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue
-            }
+            # Push from the isolated repository. The validated URL is now consumed
+            # under the same empty config source that excludes rewrites and headers.
+            $push = & $GitInvoker -GitArgs @($helperArgs + @('-c', 'push.followTags=false', 'push', $DestinationUrl, $isolatedRefSpec)) -WorkingDirectory $transportDir
             $pushExit = $push.ExitCode
             if ($push.ExitCode -ne 0) { $notes.Add('git push exited nonzero'); $verdict = 'push-failed' }
             else { $verdict = 'published' }
@@ -592,6 +609,9 @@ function Invoke-SpikePublication {
         }
         catch { $cleanupExit = 1 }
         $payload = $null
+        Get-ChildItem Env: | Where-Object { $_.Name -like 'GIT_*' } | ForEach-Object { Remove-Item ("Env:" + $_.Name) -ErrorAction SilentlyContinue }
+        foreach ($name in $savedGitEnvironment.Keys) { Set-Item ("Env:" + $name) $savedGitEnvironment[$name] }
+        Remove-Item -LiteralPath $transportDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     $originalVerdict = $verdict
     if ($cleanupExit -ne 0) {

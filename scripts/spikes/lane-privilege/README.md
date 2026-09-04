@@ -73,7 +73,7 @@ setup (§ Operator setup below), executes the GH-690 spike:
 | Item | Status |
 |---|---|
 | Baseline FAIL evidence (lane can read operator credentials + org token) | **READ, not re-measured** — GH-690 issue body, 2026-09-02 22:5x on 4090, basis `a1dd3d8` (threat model §1). Rerunning equals re-touching credentials; the conclusion does not change by rerunning. |
-| Fixture tests of preflight + refusal branches | **RAN** — 62/62 pass (safe synthetic fixtures; see run receipt in the PR). |
+| Fixture tests of preflight + refusal branches | **RAN** — 63/63 pass (safe synthetic fixtures; see run receipt in the PR). |
 | Restricted-account negative tests (AccessDenied observed) | **NOT RUN** — no restricted account exists on this host. |
 | Restricted-account positive test (broker token → build/test/push of the spike branch) | **NOT RUN** — no restricted account, no GitHub App installation-token broker. |
 

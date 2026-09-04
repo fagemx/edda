@@ -36,8 +36,13 @@ function Assert-True {
 
 # Fixture workspace/lane: throwaway temp dirs, no repo, no cargo.
 $fxRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("gh690-fixture-" + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path (Join-Path $fxRoot 'ws') -Force | Out-Null
+$fixtureWorkspace = Join-Path $fxRoot 'ws'
+New-Item -ItemType Directory -Path $fixtureWorkspace -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $fxRoot 'lane') -Force | Out-Null
+# A local-only source commit lets the isolated transport use alternates without
+# network access; this is never the real worktree/config.
+git init -q $fixtureWorkspace 2>$null
+git -C $fixtureWorkspace -c user.name=fixture -c user.email=fixture@example.invalid commit --allow-empty -qm fixture 2>$null
 try {
 
     $baseArgs = @{
@@ -252,6 +257,12 @@ try {
         Assert-True -Name 'T11 protected targets refuse empty/relative/restricted/wrong-profile inputs' -Condition $refused
     }
 
+    # Give the source fixture both demonstrated hostile transport settings. The
+    # publication must execute in a different disposable bare repository.
+    git -C $fixtureWorkspace config 'url.https://github.com/fagemx/.pushInsteadOf' 'fixture://start/' 2>$null
+    git -C $fixtureWorkspace config 'url.https://evil.invalid/fagemx/.pushInsteadOf' 'https://github.com/fagemx/' 2>$null
+    git -C $fixtureWorkspace config 'http.https://github.com/.extraHeader' 'Authorization: Basic synthetic' 2>$null
+
     # --- T12 (Round1 F3): publication path with an INJECTED synthetic git invoker.
     # Records every invocation (args + stdin) and returns scripted results.
     $fakeToken = 'gho_FAKEFIXTURETOKEN0000000'
@@ -259,7 +270,8 @@ try {
     $calls = [System.Collections.Generic.List[object]]::new()
     $synthInvoker = {
         param([string[]]$GitArgs, [string]$StdinInput, [string]$WorkingDirectory)
-        $calls.Add([pscustomobject]@{ Args = $GitArgs; Stdin = $StdinInput })
+        $transportConfig = @(& git -C $WorkingDirectory config --get-regexp '^(url\..*\.pushInsteadOf|http\..*\.extraHeader)$' 2>$null)
+        $calls.Add([pscustomobject]@{ Args = $GitArgs; Stdin = $StdinInput; WorkingDirectory = $WorkingDirectory; TransportConfig = $transportConfig })
         # Scripted behavior by subcommand.
         $joined = $GitArgs -join ' '
         if ($joined -match 'credential approve') { return [pscustomobject]@{ ExitCode = 0; Output = @(); Args = $GitArgs; Stdin = $StdinInput } }
@@ -284,12 +296,14 @@ try {
     $pushCall = @($calls | Where-Object { ($_.Args -join ' ') -match ' push ' })[0]
     Assert-True -Name 'T12a push consumes the validated literal URL, not an origin alias' `
         -Condition (($pushCall.Args -contains 'https://github.com/fagemx/edda.git') -and -not ($pushCall.Args -contains 'origin'))
+    Assert-True -Name 'T12a chained rewrites and URL-specific header source are isolated from push' `
+        -Condition ($pushCall.WorkingDirectory -ne $fixtureWorkspace -and @($pushCall.TransportConfig).Count -eq 0)
     Assert-True -Name 'T12a helper list is isolated (credential.helper= reset before cache)' `
         -Condition (($pushCall.Args -contains 'credential.helper=') -and
                     (@($pushCall.Args | Where-Object { $_ -match '^credential\.helper=cache' }).Count -ge 1))
     Assert-True -Name 'T12a push uses one explicit refspec and disables tag-following' `
         -Condition (($pushCall.Args -join ' ') -match 'push\.followTags=false' -and
-                    ($pushCall.Args -join ' ') -match 'HEAD:refs/heads/spike/lane-privilege-fixture')
+                    ($pushCall.Args -join ' ') -match '[0-9a-f]{40}:refs/heads/spike/lane-privilege-fixture')
     Assert-True -Name 'T12a cleanup runs after push (reject + cache exit recorded)' `
         -Condition ((@($calls | Where-Object { ($_.Args -join ' ') -match 'credential reject' }).Count -eq 1) -and
                     (@($calls | Where-Object { ($_.Args -join ' ') -match 'credential-cache exit' }).Count -eq 1))
