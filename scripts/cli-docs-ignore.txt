@@ -12,7 +12,6 @@ decide --scope
 decide --tags
 dispatch --exclude-tools
 dispatch --list-models
-dispatch --mode
 dispatch --model
 dispatch --session-dir
 dispatch --thinking

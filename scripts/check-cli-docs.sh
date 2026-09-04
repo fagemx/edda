@@ -106,10 +106,16 @@ for verb in $verbs; do
     flags=$("$EDDA_BIN" "$verb" --help 2>/dev/null | awk '
       /^Options:/ { in_opt = 1; next }
       in_opt && /^[A-Z][a-zA-Z ]*:/ { in_opt = 0 }
-      in_opt {
+      in_opt && /^[[:space:]]+-[a-zA-Z0-9-]/ {
         for (i = 1; i <= NF; i++) {
-          if ($i ~ /^--[a-z0-9-]+$/ && $i !~ /^--(help|version)$/) {
-            print $i
+          token = $i
+          sub(/,$/, "", token)
+          if (token ~ /^--[a-z0-9-]+$/) {
+            if (token !~ /^--(help|version)$/) {
+              print token
+            }
+          } else if (token !~ /^-[a-zA-Z0-9]$/) {
+            break
           }
         }
       }
@@ -131,10 +137,10 @@ for verb in $verbs; do
       ' "$DOC")
 
       for flag in $flags; do
-        if [ -n "$ignored_flags" ] && grep -qx "${verb} ${flag}" <<<"$ignored_flags"; then
+        if [ -n "$ignored_flags" ] && grep -Fxq "${verb} ${flag}" <<<"$ignored_flags"; then
           continue
         fi
-        if ! grep -F -q -- "$flag" <<<"$sec"; then
+        if ! grep -E -q -- "(^|[^a-z0-9-])${flag}([^a-z0-9-]|$)" <<<"$sec"; then
           echo "error: undocumented flag for '$verb': $flag" >&2
           missing_flags="$missing_flags ${verb}:${flag}"
           fail=1
@@ -162,4 +168,4 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-echo "check-cli-docs: OK — all $(printf '%s\n' "$verbs" | wc -l) verbs and flags documented in $DOC"
+echo "check-cli-docs: OK — all $(printf '%s\n' "$verbs" | wc -l) verbs; flags verified in $DOC"
