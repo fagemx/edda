@@ -1,18 +1,18 @@
 ---
 name: pr-review-loop
-description: Iteratively review PR, post comment, fix issues, and re-review until LGTM
+description: self-check before requesting independent review; never a merge verdict
 context: fork
 ---
 
-You are a PR review-and-fix specialist for the Edda project (Rust). Your role is to iteratively review a pull request, post findings as a PR comment each round, fix all high-priority issues, and repeat until the review verdict is LGTM.
+You are an author self-check and fix specialist for the Edda project (Rust). Your role is to iteratively inspect a pull request, post findings as an author self-check comment each pass, fix all high-priority issues, and repeat until the self-check is clean. This is an author self-check, not a Code Review; independent review is a separate step required before merge.
 
-## Wiring verdict — REQUIRED for every new surface in the diff
+## Wiring audit — REQUIRED for every new surface in the diff
 
-Every review round below is subject to the mandatory Wiring verdict slot defined in
+Every self-check pass below is subject to the mandatory Wiring audit slot defined in
 `fleet-review/SKILL.md` (「Wiring verdict — REQUIRED for every new surface in the diff」):
 one four-question row per new surface (new `pub` fn/field/variant, CLI flag, config key,
 event payload field, written file or side-file), and a mandatory "no new surfaces" line
-for docs-only PRs. Do not skip the slot; a missing line means the review round is incomplete.
+for docs-only PRs. Do not skip the slot; a missing line means the self-check pass is incomplete.
 
 ## Architecture
 
@@ -34,7 +34,7 @@ Loop control is handled by a **bash driver script**, not by your memory. You MUS
 │           │ ←────────────────────── │         │
 │           │       fix-done          │         │
 │           │                         │         │
-│           │     ACTION: LGTM        │         │  ← post LGTM comment, done
+│           │     ACTION: CLEAN       │         │  ← post self-check clean comment, done
 │           │ ──────────────────────→ │         │
 └──────────┘                          └─────────┘
 ```
@@ -89,7 +89,7 @@ case "$CMD" in
     ITER=$((ITER + 1))
     echo "$ITER" > "$STATE"
     if [ "$P0" -eq 0 ] && [ "$P1" -eq 0 ]; then
-      echo "ACTION: LGTM"
+      echo "ACTION: CLEAN"
     elif [ "$ITER" -ge 5 ]; then
       echo "ACTION: COMMENT_FINAL"
     else
@@ -150,7 +150,7 @@ ACTION=$(/tmp/pr-review-loop-driver.sh "$PR_NUMBER" review-done "$P0_COUNT" "$P1
 
 ### On `ACTION: COMMENT`
 
-Post a PR comment with the current iteration's review findings. Read the current iteration number from the state file.
+Post a PR comment with the current iteration's self-check findings. Read the current iteration number from the state file.
 
 ```bash
 ITER=$(cat /tmp/pr-review-loop-${PR_NUMBER}.state)
@@ -159,7 +159,7 @@ ITER=$(cat /tmp/pr-review-loop-${PR_NUMBER}.state)
 Structure the comment:
 
 ```markdown
-## Code Review: PR #<number> (Round <ITER>)
+## Author self-check: PR #<number> (pass <ITER>)
 
 ### Summary
 <Brief summary based on code-quality analysis>
@@ -180,14 +180,14 @@ Structure the comment:
 #### Convention Compliance
 <List any violations found, with file:line references>
 
-#### Testing Verdict: <Adequate / Insufficient Coverage / Convention Violations>
+#### Testing Assessment: <Adequate / Insufficient Coverage / Convention Violations>
 
-### Verdict: Changes Requested
+### Self-Check Status: Fixes Needed
 
-Fixing P0/P1 issues and will re-review.
+Fixing P0/P1 issues and will re-check.
 
 ---
-*Round <ITER> of automated review-fix loop*
+*Pass <ITER> of automated self-check-fix loop*
 ```
 
 Post the comment:
@@ -240,7 +240,7 @@ cargo test --workspace
 
 ```bash
 git add <fixed-files>
-git commit -m "fix: address PR review findings (round <ITER>)"
+git commit -m "fix: address self-check findings (pass <ITER>)"
 git push
 ```
 
@@ -255,32 +255,32 @@ ACTION=$(/tmp/pr-review-loop-driver.sh "$PR_NUMBER" fix-done)
 
 ---
 
-### On `ACTION: LGTM`
+### On `ACTION: CLEAN`
 
-Post a LGTM comment and go to Phase 3.
+Post a self-check clean comment and go to Phase 3.
 
 ```bash
 ITER=$(cat /tmp/pr-review-loop-${PR_NUMBER}.state)
 ```
 
 ```markdown
-## Code Review: PR #<number> (Round <ITER>) — LGTM :tada:
+## Author self-check: PR #<number> (pass <ITER>)
 
 All P0 and P1 issues have been resolved.
 
 ### Summary
 <Brief summary of the final state>
 
-### Verdict: LGTM :white_check_mark:
+### Self-Check Status: Clean
 
-No critical or high-priority issues remaining. This PR is ready for merge.
+self-check clean — independent review required before merge (`Independent Review` status)
 
 ---
-*Completed after <ITER> round(s) of automated review-fix loop*
+*Completed after <ITER> pass(es) of automated self-check-fix loop*
 ```
 
 ```bash
-gh pr comment "$PR_NUMBER" --body "$LGTM_CONTENT"
+gh pr comment "$PR_NUMBER" --body "$CLEAN_CONTENT"
 ```
 
 Go to Phase 3.
@@ -289,20 +289,20 @@ Go to Phase 3.
 
 ### On `ACTION: COMMENT_FINAL`
 
-Max iterations reached. Post a final comment with remaining issues:
+Max iterations reached. Post a final self-check comment with remaining issues:
 
 ```markdown
-## Code Review: PR #<number> (Round 5) — Max Iterations Reached
+## Author self-check: PR #<number> (pass 5) — Max Iterations Reached
 
 ### Remaining Issues
 <List unresolved P0/P1 issues that need manual intervention>
 
-### Verdict: Changes Requested
+### Self-Check Status: Needs Manual Attention
 
-Automated review-fix loop reached maximum iterations (5). The remaining issues above need manual attention.
+Automated self-check-fix loop reached maximum iterations (5). The remaining issues above need manual attention before requesting independent review.
 
 ---
-*Final round of automated review-fix loop*
+*Final pass of automated self-check-fix loop*
 ```
 
 ```bash
@@ -318,16 +318,16 @@ Go to Phase 3.
 Display a local summary (do NOT post another comment):
 
 ```
-PR Review Loop Complete
+PR Self-Check Loop Complete
 
 PR: #{number} - {title}
-Iterations: {count}
+Passes: {count}
 Issues fixed: {count}
-Verdict: {LGTM / Changes Requested (max iterations)}
+Status: {Clean — ready for independent review / Needs manual attention (max iterations)}
 
 [If max iterations reached]
 Remaining issues need manual intervention:
 - {issue}
 
-All review comments posted to PR.
+All self-check comments posted to PR. Independent review required before merge (`Independent Review` status).
 ```
