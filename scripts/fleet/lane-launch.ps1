@@ -119,6 +119,9 @@ foreach ($scope in $Owns) {
     Fail '-Owns entries must be non-empty one-line repository-relative path scopes'
   }
 }
+if (-not $isReview -and $Owns.Count -eq 0) {
+  Fail 'write-enabled lanes require at least one -Owns repository-relative path scope; refusing an unclaimed scheduled writer'
+}
 $TaskName = "edda-lane-$Name"
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existing -and $existing.State -eq 'Running') {
