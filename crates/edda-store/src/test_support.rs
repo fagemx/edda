@@ -58,15 +58,15 @@ impl Drop for ThreadOverrideGuard {
 /// The directory is deleted when the guard (or the last clone of its shared
 /// handle) drops, after the override has been restored.
 pub struct IsolatedStoreRoot {
-    dir: Arc<tempfile::TempDir>,
     _guard: ThreadOverrideGuard,
+    dir: Arc<tempfile::TempDir>,
 }
 
 impl IsolatedStoreRoot {
     fn new() -> std::io::Result<Self> {
         let dir = Arc::new(tempfile::tempdir()?);
         let guard = ThreadOverrideGuard::install(dir.path());
-        Ok(IsolatedStoreRoot { dir, _guard: guard })
+        Ok(IsolatedStoreRoot { _guard: guard, dir })
     }
 
     /// The isolated store root this test resolves into.
