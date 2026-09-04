@@ -97,7 +97,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - run: rustup toolchain install stable --profile minimal --component rustfmt
+      # rust-toolchain.toml pins the version and its components; `rustup show`
+      # installs it and prints it, so the log records which compiler ran.
+      - run: rustup show
       - run: cargo fmt --check
       - run: sh -n install.sh scripts/lint-markdown-content.sh
       - run: bash -n scripts/lint-file-length.sh
@@ -124,7 +126,7 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
-      - run: rustup toolchain install stable --profile minimal --component clippy
+      - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets
 
@@ -163,7 +165,7 @@ jobs:
               -p edda
     steps:
       - uses: actions/checkout@v6
-      - run: rustup toolchain install stable --profile minimal
+      - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo test ${{ matrix.args }}
       # GH-650: docs/reference/cli.md must not silently fall behind the CLI

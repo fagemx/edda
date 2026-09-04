@@ -29,6 +29,12 @@ members = [
 [workspace.package]
 version = "0.4.0"
 edition = "2021"
+# Bisected 2026-09-04, not copied from the toolchain pin: 1.87 fails on
+# dependency floors (darling, instability, time all require 1.88), and
+# 1.88/1.89/1.90 fail on this workspace's own use of `str::floor_char_boundary`
+# (`round_char_boundary`, rust-lang/rust#93743), which stabilised in 1.91.
+# `cargo check --workspace` passes on 1.91.0.
+rust-version = "1.91"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fagemx/edda"
 homepage = "https://edda.sh"
