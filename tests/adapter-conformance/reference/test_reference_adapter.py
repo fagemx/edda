@@ -9,6 +9,7 @@ the operator's real store, never calls `edda hook`.
 Run:  python -m unittest reference.test_reference_adapter -v
 """
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -16,9 +17,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 ADAPTER = Path(__file__).resolve().parent / "edda_reference_adapter.py"
+SPEC = importlib.util.spec_from_file_location("reference_implementation", ADAPTER)
+implementation = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(implementation)
 EDDA = os.environ.get("EDDA_BIN") or str(REPO / "tools" / "edda.exe")
 SENTINEL = "AKIAIOSFODNN7EXAMPLE"
 
@@ -109,7 +114,7 @@ class AdapterTest(unittest.TestCase):
         tiny_ctx = json.loads(tiny.stdout)["context"]
         self.assertIn("edda decide", tiny_ctx)
         self.assertLess(len(tiny_ctx), len(big_ctx))
-        self.assertLessEqual(len(tiny_ctx), 320)
+        self.assertLessEqual(len(tiny_ctx), 300)
 
     # 5. Identical consecutive prompt injections are deduped.
     def test_prompt_dedup(self):
@@ -137,6 +142,7 @@ class AdapterTest(unittest.TestCase):
         digest_notes = sum(1 for ln in log.splitlines()
                            if "session=%s action=digest.complete" % sid in ln)
         self.assertEqual(digest_notes, 1)
+        self.assertFalse(Path(implementation.state_path(str(self.project), sid)).exists())
 
     # 7. Sentinel secret never reaches the durable public ledger.
     def test_secret_redaction(self):
@@ -163,7 +169,26 @@ class AdapterTest(unittest.TestCase):
                 nudges += 1
         self.assertLessEqual(nudges, 2)
 
-    # 9. tool.pre stays advisory-allow.
+    # 9. Private filenames are injective for distinct host session IDs.
+    def test_session_state_filename_is_injective(self):
+        self.assertNotEqual(implementation.state_path(str(self.project), "A/B"),
+                            implementation.state_path(str(self.project), "A?B"))
+        self.assertNotEqual(implementation.state_path(str(self.project), "x" * 200 + "A"),
+                            implementation.state_path(str(self.project), "x" * 200 + "B"))
+
+    # 10. Failed CLI/state writes do not become successful watermarks.
+    def test_failed_durable_writes_remain_retryable(self):
+        sid = "t-retry"
+        env = (EDDA, str(self.project), str(self.store), sid)
+        with mock.patch.object(implementation, "durable_note", return_value=False):
+            self.assertEqual(implementation.on_session_start(env), {})
+        self.assertFalse(Path(implementation.state_path(str(self.project), sid)).exists())
+        with mock.patch.object(implementation, "durable_note", return_value=True), \
+             mock.patch.object(implementation, "save_state", return_value=False):
+            self.assertEqual(implementation.on_session_start(env), {})
+        self.assertFalse(Path(implementation.state_path(str(self.project), sid)).exists())
+
+    # 11. tool.pre stays advisory-allow.
     def test_tool_pre_allow(self):
         proc = self.run_adapter(json.dumps(self.envelope("tool.pre", "t-pre", {
             "tool_name": "Bash", "tool_input": {"command": "whoami"}})))

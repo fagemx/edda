@@ -21,12 +21,19 @@ unsupported SHOULD as `SKIP` with a reason.
 
 ## Launcher obligations
 
-A launcher reports `model_requested`, `model_observed`, `session_observed`,
-`tools_requested`, `tools_applied`, and `heartbeat_owner` in its receipt.
+A launcher receipt **MUST** report `model_requested`, `model_observed`,
+`session_observed`, `tools_requested`, `tools_applied`, and `heartbeat_owner`.
 Requested values are caller intent; observed values come from the backend
 stream or are `unknown`, never inferred from configuration. Unsupported tool
 or thinking policy is refused rather than silently dropped. The launcher owns
 heartbeats while its process runs; a hook owns the interactive host session.
+
+The portable conformance harness exercises each supported launcher profile
+(Claude, pi, Codex) with `fixtures/fake_launcher.py`. This is deterministic
+receipt-protocol evidence — it never starts a provider, reads global config,
+or claims an arbitrary installed `edda dispatch` binary has the fields. A
+production launcher missing any field is non-conformant and must be tested
+against its own provider-free backend shim before it can be accepted.
 
 `docs/reference/cli.md` documents current public dispatch resume behavior:
 repeat a backend session id for pi/Codex; Claude requires `--resume`. A fork is
@@ -79,7 +86,7 @@ Run a clean-room implementation only from this guide, the fixture, and the
 harness:
 
 ```text
-python tests/adapter-conformance/harness/conformance.py --edda PATH_TO_EDDA --adapter-cmd "YOUR_COMMAND" --skip-launcher --out reference-report.json
+python tests/adapter-conformance/harness/conformance.py --edda PATH_TO_EDDA --adapter-cmd "YOUR_COMMAND" --out reference-report.json
 ```
 
 The existing five-bridge mode remains an integration observation of native

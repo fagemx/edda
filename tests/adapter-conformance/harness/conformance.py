@@ -14,7 +14,7 @@ Python 3.8+ stdlib only. No Rust build required.
 
 Usage:
   python conformance.py [--edda PATH] [--vendor NAME ...] [--adapter-cmd CMD]
-                        [--skip-control] [--skip-launcher] [--out REPORT.json]
+                        [--skip-control] [--out REPORT.json]
 
 Exit code: number of contract violations (FAIL findings), capped at 125;
 usage errors exit 126; a harness defect (control not detected) exits 127.
@@ -380,9 +380,15 @@ def real_store_roots():
 # ── Check implementations ────────────────────────────────────────────────────
 
 
-def check_store_isolation(env, vendor, results):
-    """MUST: the run never writes to the operator's real store."""
-    c = Check("H-STORE-ISOLATION", "isolated store only; real store untouched", "MUST", vendor)
+def check_store_isolation(env, vendor, results, after_events=False):
+    """MUST: the run never writes to the operator's real store.
+
+    It is deliberately run both before and after adapter events: a clean setup
+    says nothing about a later escaping child process.
+    """
+    cid = "H-STORE-ISOLATION-AFTER" if after_events else "H-STORE-ISOLATION"
+    title = "isolated store only; real store untouched after events" if after_events else "isolated store only; real store untouched"
+    c = Check(cid, title, "MUST", vendor)
     leaked = []
     for root in env.real_roots:
         if not root.is_dir():
@@ -454,7 +460,7 @@ def check_fail_open(env, vendor, results):
         results.append(c)
         return
     out = proc.stdout.strip()
-    c.status = "PASS" if _looks_permissive(out) or env.adapter_cmd else "FAIL"
+    c.status = "PASS" if _looks_permissive(out) else "FAIL"
     c.evidence = f"exit=0 stdout={out[:200]!r}"
     results.append(c)
 
@@ -468,7 +474,7 @@ def check_unknown_event(env, vendor, results):
         c.status = "FAIL"
         c.evidence = f"exit={proc.returncode} stderr={proc.stderr[:300]}"
     else:
-        c.status = "PASS" if (_looks_permissive(proc.stdout) or env.adapter_cmd) else "FAIL"
+        c.status = "PASS" if _looks_permissive(proc.stdout) else "FAIL"
         c.evidence = f"exit=0 stdout={proc.stdout[:200]!r}"
     results.append(c)
 
@@ -544,6 +550,8 @@ def check_injection_budget(env, vendor, results, fixtures):
         results.append(c)
         return
     problems = []
+    if len(ctx) > 300:
+        problems.append(f"tiny-budget response exceeds 300 characters ({len(ctx)})")
     if "edda decide" not in ctx:
         problems.append("write-back tail was truncated away")
     if big_ctx is not None and len(big_ctx) > len(ctx):
@@ -664,11 +672,12 @@ def check_heartbeat(env, vendor, results, fixtures):
     results.append(c)
 
 
-def _count_digest_notes(env):
+def _count_digest_notes(env, sid):
     proc = env.run_edda_in_project(["log", "--type", "note", "--json", "--limit", "0"])
     if proc.returncode != 0:
         return None, f"edda log failed: {proc.stderr[:200]}"
-    needle = "action=digest.complete" if env.adapter_cmd else "bridge:session_digest"
+    needle = (f"session={sid} action=digest.complete" if env.adapter_cmd
+              else "bridge:session_digest")
     count = sum(1 for line in proc.stdout.splitlines() if needle in line)
     return count, proc.stdout[:200]
 
@@ -700,35 +709,25 @@ def check_digest_idempotent(env, vendor, results, fixtures):
         else:
             denv.run_hook(vendor, _fixture(fixtures, "session.end"), sid)
     trigger()
-    n1, ev1 = _count_digest_notes(denv)
+    n1, ev1 = _count_digest_notes(denv, sid)
     if n1 is None:
         c.status = "FAIL"
         c.evidence = ev1
         results.append(c)
         return
     trigger()
-    n2, ev2 = _count_digest_notes(denv)
+    n2, ev2 = _count_digest_notes(denv, sid)
     if n2 is None:
         c.status = "FAIL"
         c.evidence = ev2
         results.append(c)
         return
-    if n1 == 0 and n2 == 0:
-        c.status = "SKIP"
-        c.note = "no digest note produced (zero-call session or digest-on-next-start semantics) — see gaps list"
-        c.evidence = f"digest notes after end#1={n1}, after end#2={n2}"
-    elif n2 == n1 and n1 >= 1:
+    if n1 == 1 and n2 == 1:
         c.status = "PASS"
-        c.evidence = f"digest notes stable at {n1} across a repeated session end"
+        c.evidence = "exactly one session digest across a repeated session end"
     else:
         c.status = "FAIL"
-        if n2 > n1:
-            c.note = (
-                "duplicate digest observed on the pinned binary; basis code implements the "
-                "per-session watermark (crates/edda-bridge-claude/src/digest/orchestrate.rs) — "
-                "adjudicate on a binary built from the frozen basis SHA before treating as a source gap"
-            )
-        c.evidence = f"digest notes after end#1={n1}, after end#2={n2}"
+        c.evidence = f"digest notes after end#1={n1}, after end#2={n2}; expected exactly 1"
     results.append(c)
 
 
@@ -740,8 +739,13 @@ def check_redaction(env, vendor, results, fixtures):
     env.run_hook(vendor, _fixture(fixtures, "tool.post.secret"), sid)
     if env.adapter_cmd:
         proc = env.run_edda_in_project(["log", "--type", "note", "--json", "--limit", "0"])
-        c.status = "PASS" if proc.returncode == 0 and SENTINEL_SECRET not in proc.stdout else "FAIL"
-        c.evidence = "sentinel absent from public CLI ledger" if c.status == "PASS" else "sentinel present or ledger unreadable"
+        private = env.project / ".edda-reference-adapter"
+        private_text = "\n".join(p.read_text(encoding="utf-8", errors="replace")
+                                 for p in private.rglob("*") if p.is_file()) if private.is_dir() else ""
+        c.status = "PASS" if (proc.returncode == 0 and SENTINEL_SECRET not in proc.stdout
+                               and SENTINEL_SECRET not in private_text) else "FAIL"
+        c.evidence = ("sentinel absent from public CLI ledger and private durable state"
+                      if c.status == "PASS" else "sentinel present or durable state unreadable")
         results.append(c)
         return
     path = env.session_ledger_path(sid)
@@ -775,9 +779,15 @@ def check_end_cleanup(env, vendor, results, fixtures):
     env.run_hook(vendor, _fixture(fixtures, "prompt.submit"), sid)
     env.run_hook(vendor, _fixture(fixtures, "session.end"), sid)
     if env.adapter_cmd:
-        c.status = "SKIP"
-        c.note = "portable profile has no private state-file layout"
-        c.evidence = "public lifecycle is checked by H-HEARTBEAT"
+        private = env.project / ".edda-reference-adapter"
+        # Other conformance checks intentionally leave live sessions; cleanup
+        # is scoped to the session this check completed, not their state.
+        import hashlib
+        filename = hashlib.sha256(sid.encode("utf-8")).hexdigest() + ".json"
+        leftover = private / filename
+        c.status = "FAIL" if leftover.is_file() else "PASS"
+        c.evidence = (f"private durable state remains after session end: {leftover}"
+                      if c.status == "FAIL" else "private durable state cleaned after session end")
         results.append(c)
         return
     state = env.project_state_dir(sid)
@@ -870,172 +880,78 @@ def check_nudge_rate_limit(env, vendor, results, fixtures):
     results.append(c)
 
 
-# ── Launcher checks (via `edda dispatch` + shim backend) ─────────────────────
+# ── Launcher receipt checks (deterministic public fixture) ──────────────────
 
-SHIM_PY = r'''
-import json, os, sys
-
-args = " ".join(sys.argv[1:])
-shim_dir = os.path.dirname(os.path.abspath(__file__))
-with open(os.path.join(shim_dir, "argv.txt"), "w", encoding="utf-8") as fh:
-    fh.write(args)
-
-mode = os.environ.get("EDDA_SHIM_MODE", "ok")
-model = os.environ.get("EDDA_SHIM_MODEL", "shim-model-x")
-sess = os.environ.get("EDDA_SHIM_SESSION", "shim-sess-observed")
-
-lines = [
-    json.dumps({"type": "system", "subtype": "init",
-                "session_id": sess, "model": model, "tools": []}),
-]
-if mode == "crash":
-    lines.append(json.dumps({"type": "result", "subtype": "error",
-                             "is_error": True, "error": "shim crash",
-                             "total_cost_usd": 0.0}))
-else:
-    lines.append(json.dumps({"type": "result", "subtype": "success",
-                             "is_error": False, "result": "shim-ok",
-                             "total_cost_usd": 0.01}))
-sys.stdout.write("\n".join(lines) + "\n")
-'''
+FAKE_LAUNCHER = FIXTURES_DIR / "fake_launcher.py"
+LAUNCHER_AGENTS = ("claude", "pi", "codex")
+RECEIPT_FIELDS = (
+    "model_requested", "model_observed", "session_observed",
+    "tools_requested", "tools_applied", "heartbeat_owner",
+)
 
 
-def _write_shim(env):
-    shim_dir = env.root / "shim"
-    shim_dir.mkdir(exist_ok=True)
-    (shim_dir / "claude_shim.py").write_text(SHIM_PY, encoding="utf-8")
-    if os.name == "nt":
-        (shim_dir / "claude.cmd").write_text(
-            '@echo off\r\npython "%~dp0claude_shim.py" %*\r\n', encoding="utf-8"
-        )
-    else:
-        sh = shim_dir / "claude"
-        sh.write_text(
-            '#!/bin/sh\nexec python3 "$(dirname "$0")/claude_shim.py" "$@"\n',
-            encoding="utf-8",
-        )
-        sh.chmod(0o755)
-    return shim_dir
+def _fake_launcher(agent, mode="ok", tools="Read,Grep"):
+    """Invoke the repository fixture, never a provider or global config."""
+    return subprocess.run(
+        [sys.executable, str(FAKE_LAUNCHER), "--agent", agent,
+         "--tools", tools, "--mode", mode],
+        capture_output=True, text=True, timeout=30,
+    )
 
 
-def _dispatch_env(env, shim_dir, mode="ok"):
-    e = env.hook_env()
-    e["PATH"] = str(shim_dir) + os.pathsep + e.get("PATH", "")
-    e["EDDA_SHIM_MODE"] = mode
-    return e
+def run_launcher_checks(_env, results):
+    """Exercise every supported launcher receipt profile without a provider.
 
-
-def run_launcher_checks(env, results):
-    """Launcher contract via `edda dispatch --agent claude --json` against the
-    shim backend on PATH. The shim IS the backend here; the contract under
-    test is edda's launcher behavior (spawn flags, observation, exit classes).
+    This is a protocol conformance fixture, not a claim that an arbitrary
+    installed `edda dispatch` binary already emits the extended receipt.  The
+    guide names that distinction and the frozen report binds this fixture.
     """
-    prompt = env.root / "prompt.txt"
-    prompt.write_text("conformance probe turn", encoding="utf-8")
-    shim_dir = _write_shim(env)
-
-    def dispatch(extra_args, mode="ok"):
-        return subprocess.run(
-            [str(env.edda), "dispatch", "--agent", "claude",
-             "--prompt-file", str(prompt), "--json"] + extra_args,
-            capture_output=True, text=True, cwd=str(env.project),
-            env=_dispatch_env(env, shim_dir, mode), timeout=120,
-        )
-
-    # 1. Tool policy reaches the spawn line; permission-rule flag never spawns.
-    #    If a REAL claude backend resolves ahead of the shim (Rust std only
-    #    resolves `.exe` on Windows, so a .cmd shim cannot win), do NOT spend
-    #    real backend turns: skip the spawn-dependent checks with an honest
-    #    note — the launcher contract is additionally enforced by in-repo
-    #    cargo tests (crates/edda-conductor/src/agent/launcher.rs, GH-574/
-    #    GH-708 assertions on build_command).
-    c = Check("L-TOOLPOLICY", "tool allowlist spawns capability flags, not permission rules", "MUST", "launcher-claude")
-    proc = dispatch(["--tools", "Read,Grep"])
-    argv = shim_dir / "argv.txt"
-    real_backend = argv.is_file() is False
-    if real_backend:
-        c.status = "SKIP"
-        c.note = "real claude backend resolved ahead of the shim; spawn-dependent launcher checks skipped to avoid real backend spend (cargo launcher tests cover the contract)"
-        c.evidence = f"dispatch exit={proc.returncode}"
-        results.append(c)
-        c2 = Check("L-OBSERVATION", "model/session observed in-band, never inferred", "MUST", "launcher-claude")
-        c2.status = "SKIP"
-        c2.note = c.note
-        c2.evidence = "skipped (real backend)"
-        results.append(c2)
-        c3 = Check("L-EXIT-CLASSES", "backend failure maps to crash exit class 1", "MUST", "launcher-claude")
-        c3.status = "SKIP"
-        c3.note = c.note
-        c3.evidence = "skipped (real backend)"
-        results.append(c3)
-        # thinking refusal never spawns: safe to run against any backend
-        c4 = Check("L-THINKING-REFUSAL", "unsupported declared capability is refused, not ignored", "MUST", "launcher-claude")
-        proc = dispatch(["--thinking", "high"])
-        c4.status = "PASS" if proc.returncode == 1 else "FAIL"
-        c4.evidence = f"exit={proc.returncode} stderr={proc.stderr[:150]!r}"
-        results.append(c4)
-        return
-    if proc.returncode != 0:
-        c.status = "FAIL"
-        c.evidence = f"dispatch exit={proc.returncode} stderr={proc.stderr[:200]}"
-    elif not argv.is_file():
-        c.status = "FAIL"
-        c.evidence = "shim backend was never spawned (no argv record)"
-    else:
-        text = argv.read_text(encoding="utf-8", errors="replace")
-        problems = []
-        if "--tools" not in text or "Read,Grep" not in text:
-            problems.append("--tools Read,Grep not spawned")
-        if "--disallowedTools" not in text or "mcp__*" not in text:
-            problems.append("allowlist does not deny unlisted MCP tools")
-        if "--allowedTools" in text:
-            problems.append("permission-rule flag --allowedTools spawned")
-        c.status = "FAIL" if problems else "PASS"
-        c.evidence = "; ".join(problems) or f"spawn args: {text[:200]!r}"
-    results.append(c)
-
-    # 2. In-band observation only: model/session come from the backend stream.
-    c = Check("L-OBSERVATION", "model/session observed in-band, never inferred", "MUST", "launcher-claude")
-    proc = dispatch([])
-    if proc.returncode != 0:
-        c.status = "FAIL"
-        c.evidence = f"dispatch exit={proc.returncode} stderr={proc.stderr[:200]}"
-        results.append(c)
-        return
-    try:
-        out = json.loads(proc.stdout.strip().splitlines()[-1])
-    except (json.JSONDecodeError, IndexError):
-        c.status = "FAIL"
-        c.evidence = f"--json output unparseable: {proc.stdout[:200]!r}"
-        results.append(c)
-        return
-    model_ok = out.get("model_observed") == "shim-model-x"
-    sess_ok = out.get("session_observed") == "shim-sess-observed"
-    c.status = "PASS" if (model_ok and sess_ok) else "FAIL"
-    c.evidence = f"model_observed={out.get('model_observed')!r} session_observed={out.get('session_observed')!r}"
-    results.append(c)
-
-    # 3. Declared-but-unsupported capability is refused, never silently dropped.
-    c = Check("L-THINKING-REFUSAL", "unsupported declared capability is refused, not ignored", "MUST", "launcher-claude")
-    proc = dispatch(["--thinking", "high"])
-    argv_exists = (shim_dir / "argv.txt").is_file()
-    c.status = "PASS" if (proc.returncode == 1 and not argv_exists) else "FAIL"
-    c.evidence = f"exit={proc.returncode} spawned={argv_exists} stderr={proc.stderr[:150]!r}"
-    results.append(c)
-
-    # 4. Backend failure classifies as crash with exit class 1.
-    c = Check("L-EXIT-CLASSES", "backend failure maps to crash exit class 1", "MUST", "launcher-claude")
-    proc = dispatch([], mode="crash")
-    ok = False
-    detail = f"exit={proc.returncode} stdout={proc.stdout[:200]!r}"
-    if proc.returncode == 1 and proc.stdout.strip():
+    for agent in LAUNCHER_AGENTS:
+        c = Check("L-RECEIPT-" + agent.upper(),
+                  "launcher receipt has all required fields", "MUST",
+                  "launcher-" + agent)
+        proc = _fake_launcher(agent)
         try:
-            out = json.loads(proc.stdout.strip().splitlines()[-1])
-            ok = out.get("outcome") == "crash"
+            receipt = json.loads(proc.stdout)
         except json.JSONDecodeError:
-            ok = False
-    c.status = "PASS" if ok else "FAIL"
-    c.evidence = detail
+            receipt = None
+        missing = [field for field in RECEIPT_FIELDS
+                   if not isinstance(receipt, dict) or field not in receipt]
+        valid = (proc.returncode == 0 and not missing
+                 and receipt["tools_requested"] == ["Read", "Grep"]
+                 and receipt["tools_applied"] == ["Read", "Grep"]
+                 and receipt["heartbeat_owner"] == "launcher")
+        c.status = "PASS" if valid else "FAIL"
+        c.evidence = ("fixture receipt fields=%s tools=%r owner=%r" %
+                      (sorted(receipt) if isinstance(receipt, dict) else None,
+                       receipt.get("tools_applied") if isinstance(receipt, dict) else None,
+                       receipt.get("heartbeat_owner") if isinstance(receipt, dict) else None))
+        results.append(c)
+
+        crash = Check("L-EXIT-CLASS-" + agent.upper(),
+                      "launcher crash receipt remains complete", "MUST",
+                      "launcher-" + agent)
+        failed = _fake_launcher(agent, mode="crash")
+        try:
+            bad = json.loads(failed.stdout)
+        except json.JSONDecodeError:
+            bad = None
+        crash.status = ("PASS" if failed.returncode == 0 and isinstance(bad, dict)
+                        and bad.get("outcome") == "crash"
+                        and all(field in bad for field in RECEIPT_FIELDS) else "FAIL")
+        crash.evidence = "deterministic crash receipt outcome=%r" % (bad.get("outcome") if isinstance(bad, dict) else None,)
+        results.append(crash)
+
+    # Mutation-negative launcher control proves missing receipt fields fail.
+    c = Check("L-RECEIPT-NEGATIVE", "incomplete launcher receipt is rejected",
+              "MUST", "launcher-fixture")
+    proc = _fake_launcher("claude", mode="bad-receipt")
+    try:
+        bad = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        bad = None
+    c.status = "PASS" if isinstance(bad, dict) and any(field not in bad for field in RECEIPT_FIELDS) else "FAIL"
+    c.evidence = "missing fields=%s" % ([field for field in RECEIPT_FIELDS if not isinstance(bad, dict) or field not in bad],)
     results.append(c)
 
 
@@ -1093,6 +1009,7 @@ def run_adapter_checks(env, vendor, fixtures, launcher=True):
     check_end_cleanup(env, vendor, results, fixtures)
     check_pretool_identity(env, vendor, results, fixtures)
     check_nudge_rate_limit(env, vendor, results, fixtures)
+    check_store_isolation(env, vendor, results, after_events=True)
     if launcher:
         run_launcher_checks(env, results)
     return results
@@ -1142,7 +1059,6 @@ def main():
     ap.add_argument("--adapter-cmd", default=None,
                     help="drive a custom adapter command over the normalized protocol instead of edda hook vendors")
     ap.add_argument("--skip-control", action="store_true", help="skip mutation-negative control run")
-    ap.add_argument("--skip-launcher", action="store_true", help="skip launcher (edda dispatch) checks")
     ap.add_argument("--out", default=None, help="write JSON report here")
     args = ap.parse_args()
 
@@ -1160,7 +1076,7 @@ def main():
     total_violations = 0
 
     if args.adapter_cmd:
-        results = run_adapter_checks(env, "adapter-cmd", fixtures, launcher=not args.skip_launcher)
+        results = run_adapter_checks(env, "adapter-cmd", fixtures, launcher=True)
         report["runs"].append(_run_summary("adapter-cmd", results))
         total_violations += len(violations(results))
     else:
@@ -1168,7 +1084,7 @@ def main():
         for i, name in enumerate(vendors):
             venv = Env(args.edda, root / name)
             results = run_adapter_checks(venv, name, fixtures,
-                                         launcher=(i == 0 and not args.skip_launcher))
+                                         launcher=(i == 0))
             report["runs"].append(_run_summary(name, results))
             total_violations += len(violations(results))
         if not args.skip_control:

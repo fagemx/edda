@@ -32,7 +32,6 @@ Python 3.8+ stdlib only.
 import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
 
@@ -81,28 +80,52 @@ def permissive(obj=None):
 
 
 def state_path(workspace, session_id):
-    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id)[:120]
-    return os.path.join(workspace, STATE_DIRNAME, safe + ".json")
+    """Injectively map arbitrary session bytes to a private filename."""
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return os.path.join(workspace, STATE_DIRNAME, digest + ".json")
 
 
 def load_state(workspace, session_id):
     path = state_path(workspace, session_id)
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            return json.load(fh)
-    except Exception:  # noqa: BLE001
+            state = json.load(fh)
+        return state if isinstance(state, dict) else None
+    except FileNotFoundError:
         return {}
+    except (OSError, json.JSONDecodeError):
+        # A failed state read must not be treated as an empty, successful
+        # state: callers leave the event retryable rather than overwriting it.
+        return None
 
 
 def save_state(workspace, session_id, state):
     path = state_path(workspace, session_id)
+    tmp = path + ".tmp"
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(state, fh)
-    except Exception:  # noqa: BLE001
-        pass  # fail-open: state is an optimization, not a contract
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        return False
 
+
+def remove_state(workspace, session_id):
+    try:
+        os.unlink(state_path(workspace, session_id))
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 def edda_run(edda_bin, args, workspace, store_root, timeout=60):
     env = dict(os.environ)
@@ -119,15 +142,26 @@ def edda_run(edda_bin, args, workspace, store_root, timeout=60):
 
 
 def note(edda_bin, workspace, store_root, session_id, action):
-    """Write the exact public lifecycle note for the reference profile."""
+    """Write one public lifecycle note and report durable success."""
     text = "%s session=%s action=%s" % (CONTRACT_VERSION, session_id, action)
     try:
-        return edda_run(
-            edda_bin, ["note", text, "--role", "system"], workspace, store_root
-        )
-    except Exception:  # noqa: BLE001
-        return None
+        proc = edda_run(edda_bin, ["note", text, "--role", "system"], workspace, store_root)
+        return proc.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
+
+def note_exists(edda_bin, workspace, store_root, session_id, action):
+    try:
+        proc = edda_run(edda_bin, ["log", "--type", "note", "--json", "--limit", "0"], workspace, store_root)
+        return proc.returncode == 0 and ("session=%s action=%s" % (session_id, action)) in proc.stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def durable_note(edda_bin, workspace, store_root, session_id, action):
+    """Retry failed CLI writes; do not advance local state on failure."""
+    return note_exists(edda_bin, workspace, store_root, session_id, action) or note(edda_bin, workspace, store_root, session_id, action)
 
 def context_body(edda_bin, workspace, store_root):
     """Bounded context snapshot from the public CLI data plane."""
@@ -150,7 +184,7 @@ def budget_chars():
             limit = min(limit, int(os.environ.get(var, str(limit))))
         except (TypeError, ValueError):
             pass
-    return max(limit, len(WRITEBACK_TAIL) + 80)  # tail always fits
+    return max(1, limit)
 
 
 def pack_context(edda_bin, workspace, store_root):
@@ -161,7 +195,7 @@ def pack_context(edda_bin, workspace, store_root):
     fixed = len(BOUNDARY_START) + len(BOUNDARY_END) + 4
     body_budget = limit - fixed - len(tail)
     if len(body) > body_budget:
-        body = "[edda: context body elided (budget %d chars)]" % max(body_budget, 0)
+        body = "[edda: context body elided]"[:max(body_budget, 0)]
     pack = "\n".join([BOUNDARY_START, body, tail, BOUNDARY_END])
     return pack
 
@@ -172,16 +206,21 @@ def pack_context(edda_bin, workspace, store_root):
 def on_session_start(env):
     edda, ws, store, sid = env
     state = load_state(ws, sid)
+    if state is None:
+        return {}
     if not state.get("heartbeat_started"):
-        note(edda, ws, store, sid, ACTION_HEARTBEAT_START)
+        if not durable_note(edda, ws, store, sid, ACTION_HEARTBEAT_START):
+            return {}
         state["heartbeat_started"] = True
-        save_state(ws, sid, state)
+        if not save_state(ws, sid, state):
+            return {}  # later delivery verifies CLI and retries state write
     return {"context": pack_context(edda, ws, store)}
-
 
 def on_prompt_submit(env, payload):
     edda, ws, store, sid = env
     state = load_state(ws, sid)
+    if state is None:
+        return {}
     hashes = state.setdefault("injected_hashes", [])
     digest = hashlib.sha256(PROMPT_REMINDER.encode("utf-8")).hexdigest()
     if digest in hashes:
@@ -201,7 +240,8 @@ def on_tool_post(env, payload):
     edda, ws, store, sid = env
     # Durable activity before consumption; payloads are never persisted
     # (redaction happens before any durable write).
-    note(edda, ws, store, sid, ACTION_ACTIVITY_APPEND)
+    if not durable_note(edda, ws, store, sid, ACTION_ACTIVITY_APPEND):
+        return {}
     # Rate-limited decision-signal nudge (SHOULD).
     command = ""
     try:
@@ -210,32 +250,28 @@ def on_tool_post(env, payload):
         command = ""
     if "commit" in command:
         state = load_state(ws, sid)
+        if state is None:
+            return {}
         nudges = state.get("nudges", 0)
         if nudges < 2:
             state["nudges"] = nudges + 1
-            save_state(ws, sid, state)
-            return {"context": NUDGE_TEXT}
+            if save_state(ws, sid, state):
+                return {"context": NUDGE_TEXT}
+            return {}
     return {}
 
 
 def on_session_end(env):
     edda, ws, store, sid = env
-    state = load_state(ws, sid)
-    if not state.get("heartbeat_ended"):
-        note(edda, ws, store, sid, ACTION_HEARTBEAT_END)
-        state["heartbeat_ended"] = True
-    if not state.get("digest_complete"):
-        # Idempotent digest: the watermark survives repeated end delivery.
-        note(edda, ws, store, sid, ACTION_DIGEST_COMPLETE)
-        state["digest_complete"] = True
-    # Release per-session state except the durable watermarks. The portable
-    # profile holds no `edda claim`, so there is nothing to unclaim.
-    save_state(ws, sid, {
-        "digest_complete": state.get("digest_complete", True),
-        "heartbeat_ended": True,
-    })
+    # Public CLI evidence is the durable idempotency source.  Private state is
+    # only a retry cache and is removed after every completed session.
+    if not durable_note(edda, ws, store, sid, ACTION_HEARTBEAT_END):
+        return {}
+    if not durable_note(edda, ws, store, sid, ACTION_DIGEST_COMPLETE):
+        return {}
+    if not remove_state(ws, sid):
+        return {}
     return {}
-
 
 def on_compact_pre(_env, _payload):
     # Vendor schemas forbid injection here; hot-pack rebuild is a no-op.
