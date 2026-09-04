@@ -20,8 +20,8 @@ edda conduct run docs/design/infra-contracts/research.yaml --dry-run
 edda conduct run docs/design/infra-contracts/loop.yaml --dry-run
 ```
 
-Running these same plans without `--dry-run` fails before execution because
-runtime carrier support is intentionally deferred. Existing plans that omit
+These plans fail before execution when run without `--dry-run`, because runtime
+carrier support is intentionally deferred. Existing plans that omit
 the new declarations still run. A successful preview proves schema validity,
 not acceptance of the referenced artifact. Independent review and exact-head
 CI receipts are published on the delivery PR, pinned to its full SHA.
