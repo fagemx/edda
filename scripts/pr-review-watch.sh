@@ -85,6 +85,8 @@ LABEL_PR="$SCRIPT_DIR/review-pr.sh"   # always the real script (verdict-label is
 ONCE=0
 DRY=0
 TAB=$(printf '\t')   # literal tab; "\t" inside quotes is backslash-t in POSIX sh
+WATCHLOG=${PR_REVIEW_WATCH_LOG:-$SCRATCH/watch.log}   # set early: offline
+                     # subcommands log gh failures too, not just the main loop
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >> "$WATCHLOG"; }
 
 # ---- offline helpers (unit-tested by scripts/test-pr-review-watch.sh) --------
@@ -131,6 +133,14 @@ decide() {
 # current head still equals the reviewed SHA (and is known).
 label_verdict() { # $1=reviewed sha  $2=current head
   if [ -n "${2:-}" ] && [ "$2" = "$1" ]; then echo apply; else echo skip; fi
+}
+
+# is_full_sha: true only for exactly 40 lowercase hex characters. Every SHA
+# that reaches a pin regex or a status URL is validated with this first
+# (REVIEW.md R5): a validated sha contains no regex metacharacters, so
+# concatenating it into an ERE matches it literally.
+is_full_sha() {
+  printf '%s\n' "${1:-}" | grep -Eq '^[0-9a-f]{40}$'
 }
 
 # gate-state: the union rule for the "Independent Review" commit status.
@@ -183,6 +193,9 @@ verdict_body_lines() { # $1=reviewed sha; stdin: one body per <<<COMMENT>>>
       n = split(buf, L, "\n")
       pinned = 0; inh = 0; vline = ""
       for (i = 1; i <= n; i++) {
+        # $2 is validated with is_full_sha by every caller before it gets
+        # here, so it is exactly 40 lowercase hex characters — no regex
+        # metacharacters — and this pin match is literal.
         if (L[i] ~ ("^## Code Review: Round [0-9]+ — PR #[0-9]+ @ " sha "$")) {
           pinned = 1; continue
         }
@@ -208,8 +221,19 @@ verdict_body_lines() { # $1=reviewed sha; stdin: one body per <<<COMMENT>>>
 }
 
 collect_verdicts() { # $1=pr $2=reviewed sha — every verdict comment pinned to that sha
-  gh pr view "$1" --repo "$REPO" --json comments \
-    --jq '.comments[] | "<<<COMMENT>>>", .body' 2>/dev/null | verdict_body_lines "$2"
+  # Return codes: 0 = ok (verdict lines on stdout, possibly none); 3 = the
+  # comments fetch failed. An unreadable comment list is NOT "no prior
+  # verdicts" — callers must withhold the status, never let the union rule
+  # run on this round's verdict file alone (see post_review_status).
+  is_full_sha "$2" || { log "pr$1 collect-verdicts: $2 is not a full lowercase 40-hex SHA"; return 3; }
+  comments=$(gh pr view "$1" --repo "$REPO" --json comments \
+    --jq '.comments[] | "<<<COMMENT>>>", .body' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "pr$1 comments fetch failed (gh exit $rc): $comments"
+    return 3
+  fi
+  printf '%s\n' "$comments" | verdict_body_lines "$2"
 }
 # /D8-debt
 
@@ -261,8 +285,12 @@ case "${1:-}" in
   gate-state) gate_state; exit 0 ;;
   collect-verdicts)
     if [ $# -lt 3 ]; then echo "usage: pr-review-watch.sh collect-verdicts <pr> <reviewed-sha>" >&2; exit 1; fi
+    if ! is_full_sha "$3"; then
+      echo "pr-review-watch.sh: collect-verdicts: $3 is not a full lowercase 40-hex SHA" >&2
+      exit 2
+    fi
     collect_verdicts "$2" "$3"
-    exit 0
+    exit $?
     ;;
   ack-try)
     if [ $# -lt 4 ]; then echo "usage: pr-review-watch.sh ack-try <pr> <sha> <attempts>" >&2; exit 1; fi
@@ -460,7 +488,12 @@ mark_post_failed() { # $1=pr $2=sha $3=round $4=verdict file
 # this round's verdict file (the comment carrying it was posted just before;
 # the union rule makes the duplicate harmless). The description names this
 # round's verdict; unreadable counts render as "?" — never a made-up number.
+# Returns non-zero WITHOUT posting anything when the sha is not a validated
+# 40-hex value or the comment list is unreadable: a withheld status is
+# retried on the same bounded path as a failed post, never replaced by a
+# union computed from this round's verdict alone.
 post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
+  is_full_sha "$2" || { log "pr$1 status: $2 is not a full lowercase 40-hex SHA; status withheld"; return 3; }
   cur=$(verdict_body_lines "$2" < "$3" | head -1)
   v=$(printf '%s\n' "$cur" | cut -f1)
   p0=$(printf '%s\n' "$cur" | cut -f2)
@@ -468,7 +501,13 @@ post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
   [ -n "$v" ] || v=unknown
   [ -n "$p0" ] || p0="?"
   [ -n "$p1" ] || p1="?"
-  state=$({ collect_verdicts "$1" "$2" 2>/dev/null; verdict_body_lines "$2" < "$3"; } | gate_state)
+  comments=$(collect_verdicts "$1" "$2")
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "pr$1 comments unreadable (gh exit $rc); status withheld, will retry next poll"
+    return 3
+  fi
+  state=$(printf '%s\n%s\n' "$comments" "$(verdict_body_lines "$2" < "$3")" | gate_state)
   gh api "repos/$REPO/statuses/$2" \
     -f state="$state" -f context="Independent Review" \
     -f description="$v P0=$p0 P1=$p1" >/dev/null

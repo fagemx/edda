@@ -56,6 +56,7 @@ case "$1" in
       view)
         case "$*" in
           *"--json comments"*)
+            [ -n "${GH_FAIL_COMMENTS:-}" ] && exit 1
             [ -n "${GH_COMMENTS_FILE:-}" ] && cat "$GH_COMMENTS_FILE"
             exit 0
             ;;
@@ -116,7 +117,7 @@ reset_stubs() {
     : >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$EDDA_STUB_LOG"; : >"$REVIEW_STUB_LOG"
     unset GH_FAIL_COMMENT_FIRST GH_FAIL_COMMENT_ALWAYS GH_FAIL_EDIT GH_FAIL_HEAD \
           GH_PR_LIST_FILE GH_HEAD GH_HEAD_FILE DISPATCH_FAIL_PROBE \
-          GH_COMMENTS_FILE GH_FAIL_STATUS 2>/dev/null || true
+          GH_COMMENTS_FILE GH_FAIL_STATUS GH_FAIL_COMMENTS 2>/dev/null || true
     rm -f "$EDDA_FLEET_SCRATCH"/review-* 2>/dev/null || true
     : >"$EDDA_FLEET_SCRATCH/review-state.tsv"
     : >"$EDDA_FLEET_SCRATCH/review-acks.tsv"
@@ -426,6 +427,54 @@ f="$tmp/comments-wrong-sha"
 verdict_comment 1 "$csha2" 'Changes Requested, P0=1, P1=0 — x' >"$f"
 expect_collect 'a verdict pinned to another sha contributes nothing' \
     '' "$f" "$csha1"
+
+# T1: a failed comments fetch must be an error, never "no prior verdicts" —
+# otherwise the union rule would run on this round's verdict alone.
+expect_collect_fail() {
+    name=$1
+    csha=$2
+    case_number=$((case_number + 1))
+    out=$(GH_FAIL_COMMENTS=1 timeout 60 \
+        sh "$root/scripts/pr-review-watch.sh" collect-verdicts 42 "$csha" 2>/dev/null) && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf '%s: expected non-zero exit when the comments fetch fails, got 0\n' "$name" >&2
+        return 1
+    fi
+    if [ -n "$out" ]; then
+        printf '%s: expected no stdout when the comments fetch fails, got:\n  %s\n' "$name" "$out" >&2
+        return 1
+    fi
+}
+
+expect_collect_fail 'a failed comments fetch is an error, never "no prior verdicts"' "$csha1"
+
+# T3: the reviewed sha is validated at the subcommand boundary before it can
+# reach the pin regex or the status URL (REVIEW.md R5).
+expect_collect_badsha() {
+    name=$1
+    value=$2
+    case_number=$((case_number + 1))
+    out=$(timeout 60 sh "$root/scripts/pr-review-watch.sh" collect-verdicts 42 "$value" \
+        2>"$tmp/stderr-$case_number") && rc=0 || rc=$?
+    if [ "$rc" != "2" ]; then
+        printf '%s: expected exit 2 for a non-40-hex sha, got %s\n' "$name" "$rc" >&2
+        return 1
+    fi
+    if [ -n "$out" ]; then
+        printf '%s: expected no stdout for a non-40-hex sha, got:\n  %s\n' "$name" "$out" >&2
+        return 1
+    fi
+    if ! grep -q 'not a full lowercase 40-hex SHA' "$tmp/stderr-$case_number"; then
+        printf '%s: expected the validation error on stderr, got:\n  %s\n' \
+            "$name" "$(cat "$tmp/stderr-$case_number")" >&2
+        return 1
+    fi
+}
+
+expect_collect_badsha 'a regex metacharacter is not a sha' '.*'
+expect_collect_badsha 'a 39-hex value is not a sha' '111122223333444455556666777788889999aaa'
+expect_collect_badsha 'an uppercase 40-hex value is not a sha' '111122223333444455556666777788889999AAAA'
+expect_collect_badsha 'an alternation is not a sha' "${csha2}\$|${csha1}"
 
 # --- the two debt blocks are exactly their four marker lines (GH-742) ---------
 # The union rule block and the comment-reading block must each be liftable in
@@ -834,6 +883,51 @@ if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
 fi
 if [ -n "$(pending_get)" ]; then
     printf 'live: after the status recovery the pending entry should be dropped, got:\n%s\n' "$(pending_get)" >&2
+    exit 1
+fi
+
+# T2: an unreadable comment list withholds the status entirely — the union is
+# never computed from this round's verdict file alone — and the failure lands
+# on the same bounded retry path as any other status post failure.
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+printf '<<<COMMENT>>>\n## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nChanges Requested, P0=0, P1=3 — blocking P1\n' \
+    "$sha" >"$tmp/comments-pr42-withheld"
+export GH_HEAD="$sha"
+export GH_COMMENTS_FILE="$tmp/comments-pr42-withheld"
+export GH_FAIL_COMMENTS=1
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: comments unreadable)\n' >&2; exit 1; }
+if [ "$(statuses_calls)" != "0" ]; then
+    printf 'live: an unreadable comment list must not post any status, got %s calls\n' "$(statuses_calls)" >&2
+    exit 1
+fi
+if grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: an unreadable comment list must not apply the verdict label\n' >&2
+    exit 1
+fi
+if [ -z "$(pending_get)" ]; then
+    printf 'live: an unreadable comment list must keep the pending entry, got empty\n' >&2
+    exit 1
+fi
+if [ "$(printf '%s' "$(pending_get)" | cut -f6)" != "1" ]; then
+    printf 'live: an unreadable comment list must bump postfails by one, got:\n%s\n' "$(pending_get)" >&2
+    exit 1
+fi
+if ! grep -qF 'comments unreadable' "$PR_REVIEW_WATCH_LOG"; then
+    printf 'live: an unreadable comment list must be logged\n' >&2
+    exit 1
+fi
+unset GH_FAIL_COMMENTS
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: comments recovered)\n' >&2; exit 1; }
+if ! grep -qF -- '-f state=failure' "$GH_STUB_LOG"; then
+    printf 'live: a healthy fetch must post the union failure, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2
+    exit 1
+fi
+if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: the label should be applied after the comments recover\n' >&2
     exit 1
 fi
 
