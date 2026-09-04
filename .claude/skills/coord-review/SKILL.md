@@ -132,21 +132,8 @@ it as a `FOLLOW-UP ISSUE`, and do not block a product-green PR on it.
 ## Wiring verdict — REQUIRED for every new surface in the diff
 
 「存在」≠「有接線」。diff 裡每一個**新面**都必填一列四問，這是必填槽，不是「考慮」bullet；缺槽等同沒審。
-「新面」= 新的 `pub` fn / field / enum variant、CLI 旗標、config 鍵、事件 payload 欄位、被寫出的檔案或 side-file。docs-only 或無新面的 PR 也要寫一行「no new surfaces」——一行不能省，省了就是槽沒填。
-
-每個新面一列，四問各附 `file:line`（本 PR 內或既有碼）：
-
-| 新面 | Writer & shape | Reader（本 PR 內或既有；或「no consumer」） | Failure signal（吞錯／success-only／best-effort？） | Layer reach（旗標→builder→spawn；欄位→store→read-back） |
-|---|---|---|---|---|
-
-判定規則（寫死，不留給審查者裁量）：
-
-- 「no consumer」且沒有具名的後續 issue → **P1**（dead on arrival）。有後續 issue 編號 → 列入 FOLLOW-UP ISSUE，放行。
-- 在 ledger / coordination / cost 路徑上吞錯（`let _ =`、`.ok();`、`unwrap_or_default()` 於寫端、best-effort、只記成功）→ **P1**。
-- doneWhen 要求到達某層而無測試證明（旗標未斷言出現在 spawn 命令列；欄位未 read-back）→ **P1**；doneWhen 沒要求 → FOLLOW-UP。
-- 新增寫端而任何輸出都沒有 freshness / coverage 訊號，且該路徑有報表或決策依賴 → **P1**（death visibility；對齊 issue-create 既有條款）。
-
-機器輔助（審查者 RAN，不是 CI 閘）：`sh scripts/wiring-scan.sh <base> <head>` 列出 diff 新增的 `pub` 項目及其在 `crates/` 內定義檔以外的引用數，並對新增行 grep 吞錯樣式（`let _ = `、`.ok();`、`unwrap_or_default()`、`best-effort`、`silently`）；輸出附在 RAN 段。誤報需要人判，故不進 CI。
+槽的定義——何謂新面、四問表、P1 判定規則、docs-only 的「no new surfaces」行、機器輔助——以
+`REVIEW.md` §5.5 為唯一真實來源，本 skill 不重述；照 §5.5 填滿每個槽，機器輔助輸出附在 RAN 段。
 
 ### Step 6: Generate Report
 

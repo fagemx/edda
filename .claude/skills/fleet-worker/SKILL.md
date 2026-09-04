@@ -26,12 +26,7 @@ description: Use when running one lane of the Fleet execution loop — pick a si
 3. **隔離**：用 `the using-git-worktrees skill` 開一個 worktree，絕不在主工作樹動工。
 4. **TDD**：用 `the test-driven-development skill`——先把 doneWhen 寫成失敗測試，再實作到綠。
 5. **驗證**：跑單上的 verify 指令，範圍照正典的驗證階梯（迭代時只跑觸及的 crate；全套留給凍結的 SHA）。
-6. **開 PR**：`gh pr create --title "<單標題>" --body "closes #<n>\n\n<測試輸出證據>"`。body 必須含**自報接線表**——每個新面（新 `pub` fn / field / enum variant、CLI 旗標、config 鍵、事件 payload 欄位、被寫出的檔案或 side-file）一列，四問各附 `file:line`：
-
-   | 新面 | Writer & shape | Reader（本 PR 內或既有；或「no consumer」） | Failure signal（吞錯／success-only／best-effort？） | Layer reach（旗標→builder→spawn；欄位→store→read-back） |
-   |---|---|---|---|---|
-
-   docs-only 或無新面也要寫一行「no new surfaces」——一行不能省。宣稱錯誤本身就是一個 finding：審查者會用 `scripts/wiring-scan.sh` 核對自報表，而不是從零挖。回到步驟 1。
+6. **開 PR**：`gh pr create --title "<單標題>" --body "closes #<n>\n\n<測試輸出證據>"`。body 必須含**自報接線表**——這是 `REVIEW.md` §5.5 定義的必填槽（唯一真實來源，本 skill 不重述其表格與判定規則）：每個新面一列四問、各附 `file:line`；docs-only 或無新面也要寫一行「no new surfaces」——一行不能省。宣稱錯誤本身就是一個 finding：審查者會用 `scripts/wiring-scan.sh`（§5.5）核對自報表，而不是從零挖。回到步驟 1。
 
 ## 四禁（違反即停）
 

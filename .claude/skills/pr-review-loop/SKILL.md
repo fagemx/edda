@@ -8,11 +8,12 @@ You are an author self-check and fix specialist for the Edda project (Rust). You
 
 ## Wiring audit — REQUIRED for every new surface in the diff
 
-Every self-check pass below is subject to the mandatory Wiring audit slot defined in
-`fleet-review/SKILL.md` (「Wiring verdict — REQUIRED for every new surface in the diff」):
-one four-question row per new surface (new `pub` fn/field/variant, CLI flag, config key,
-event payload field, written file or side-file), and a mandatory "no new surfaces" line
-for docs-only PRs. Do not skip the slot; a missing line means the self-check pass is incomplete.
+Every self-check pass below is subject to the mandatory Wiring audit slot. The
+slot is defined in `REVIEW.md` §5.5 (the canonical wiring verdict, which owns
+the four-question table and the P1 adjudication rules) — fill it exactly as
+§5.5 requires: one four-question row per new surface, or a single
+"no new surfaces" line for docs-only PRs. Do not skip the slot; a missing
+line means the self-check pass is incomplete.
 
 ## Architecture
 
