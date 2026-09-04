@@ -36,7 +36,7 @@ store version**:
   suggestions queue, v13 the `task_leases` table
   (`crates/edda-ledger/src/sqlite_store/schema.rs:217-226#pub(super) const SCHEMA_V13_SQL: &str = "`).
 - **Event payload version** — `edda_core::SCHEMA_VERSION`
-  (`crates/edda-core/src/types.rs:4#pub const SCHEMA_VERSION: u32 = 1;`, stamped into every event payload at
+  (`crates/edda-core/src/types.rs:5#pub const SCHEMA_VERSION: u32 = 1;`, stamped into every event payload at
   `crates/edda-core/src/event.rs:186#schema_version: SCHEMA_VERSION,` and siblings). This has been `1` for
   the project's entire history and is part of the Layer 1 event format, whose
   stability is governed by the v1 event spec (#608), not by this page.
@@ -201,7 +201,7 @@ it, `edda status` produces the same exit code and the same stderr in every
 state (measured). Success is exit `0` with the object on stdout. Failures do
 not emit JSON — a newer ledger schema exits `2` (§1.2), and every other
 failure (no `.edda/`, unreadable database) takes the CLI's shared error path
-and exits `1` (`crates/edda-cli/src/main.rs:1103-1110#if let Err(err) = run(cli) {`).
+and exits `1` (`crates/edda-cli/src/main.rs:1111-1118#if let Err(err) = run(cli) {`).
 
 That last row differs from `edda verify --json`, which answers `2` to the
 same questions. The split is pre-existing and outside #730, but it is

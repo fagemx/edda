@@ -127,6 +127,7 @@ fn review_scratch(prepared: &prepare::Prepared) -> std::path::PathBuf {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)] // Resume preflight is adjacent to its persisted-history regression.
 mod pi_resume_tests {
     use super::pi_session_continues;
 
@@ -137,10 +138,8 @@ mod pi_resume_tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let session = "00000000-0000-4000-8000-000000000001";
 
-        let header = |id: &str| {
-            serde_json::json!({"type":"session", "id": id, "cwd": cwd})
-                .to_string()
-        };
+        let header =
+            |id: &str| serde_json::json!({"type":"session", "id": id, "cwd": cwd}).to_string();
         assert!(!pi_session_continues(temp.path(), session, &cwd));
         std::fs::write(
             temp.path().join("empty.jsonl"),
@@ -150,7 +149,10 @@ mod pi_resume_tests {
         assert!(!pi_session_continues(temp.path(), session, &cwd));
         std::fs::write(
             temp.path().join("unrelated.jsonl"),
-            format!("{}\n{{\"type\":\"message\"}}\n", header("00000000-0000-4000-8000-000000000002")),
+            format!(
+                "{}\n{{\"type\":\"message\"}}\n",
+                header("00000000-0000-4000-8000-000000000002")
+            ),
         )
         .unwrap();
         assert!(!pi_session_continues(temp.path(), session, &cwd));
@@ -185,6 +187,7 @@ fn validate(args: &ReviewArgs) -> Result<()> {
     )
 }
 
+#[allow(clippy::too_many_lines)] // Orchestrates the single review lifecycle and its fail-closed receipts.
 async fn run_with(
     mut prepared: prepare::Prepared,
     args: &ReviewArgs,

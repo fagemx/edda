@@ -18,5 +18,6 @@ pub mod types;
 pub use types::*;
 
 #[cfg(test)]
-mod review_tests;
 mod event_conformance;
+#[cfg(test)]
+mod review_tests;
