@@ -409,10 +409,7 @@ mod tests {
     /// the wrong reason (e.g. env not isolated).
     #[test]
     fn heartbeat_age_secs_reads_through_the_sanitized_funnel() {
-        // No EDDA_STORE_ROOT redirect: a redirect here races every concurrent
-        // store-writing test in this process that doesn't hold ENV_LOCK (the
-        // exact cross-store hazard this round is closing). Peers tests use
-        // unique pids against the default store instead.
+        let _store = crate::isolated_store();
         let pid = "test_agent_phase_age";
         let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
         let now = now_rfc3339();
@@ -448,6 +445,7 @@ mod tests {
 
     #[test]
     fn detect_current_phase_default_is_triage() {
+        let _store = crate::isolated_store();
         let tmp = std::env::temp_dir().join("edda_phase_test_default");
         let _ = std::fs::create_dir_all(&tmp);
         let no_artifacts = tmp.join("empty_deep_dive");
@@ -459,6 +457,7 @@ mod tests {
 
     #[test]
     fn detect_current_phase_feature_branch() {
+        let _store = crate::isolated_store();
         let tmp = std::env::temp_dir().join("edda_phase_test_feat");
         let _ = std::fs::create_dir_all(&tmp);
         let no_artifacts = tmp.join("empty_deep_dive");
@@ -591,6 +590,7 @@ mod tests {
 
     #[test]
     fn read_write_phase_state_roundtrip() {
+        let _store = crate::isolated_store();
         let pid = "test_phase_rt";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -617,6 +617,7 @@ mod tests {
 
     #[test]
     fn read_phase_state_missing() {
+        let _store = crate::isolated_store();
         assert!(read_phase_state("nonexistent_project", "nonexistent_session").is_none());
     }
 }

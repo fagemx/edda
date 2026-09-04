@@ -166,6 +166,7 @@ mod tests {
     #[test]
     fn redact_preserves_normal_code() {
         let input = r#"fn main() {
+let _store = crate::isolated_store();
     let x = 42;
     println!("Hello, world!");
     let path = "/home/user/project/src/main.rs";
@@ -176,6 +177,7 @@ mod tests {
 
     #[test]
     fn redact_in_nested_json() {
+        let _store = crate::isolated_store();
         let raw = serde_json::json!({
             "tool_input": {
                 "command": "curl -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.x.y' https://api.example.com",

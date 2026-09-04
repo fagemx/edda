@@ -64,6 +64,13 @@ async-trait = "0.1"
 # Test-only: tamper tests must write raw SQL against a real SQLite ledger
 # (the repo does not mock internal crates), and the ledger DB is SQLite.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Test-only: enables the thread-local store-root override used by
+# `test_support::isolated_store()` (GH-757). Ordinary (non-test) builds of
+# this crate and of the `edda` binary never enable it, so production and
+# subprocess store resolution is unchanged.
+edda-store = { path = "../edda-store", version = "0.4.0", features = [
+    "test-support",
+] }
 
 [lints]
 workspace = true
