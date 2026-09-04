@@ -257,6 +257,34 @@ fn launch_windows(
     Ok(())
 }
 
+/// Take the private manifest capability for this detached worker and remove
+/// it from the process environment before any backend can inherit it.
+pub fn take_worker_manifest() -> Option<PathBuf> {
+    let path = std::env::var_os("EDDA_DETACHED_MANIFEST").map(PathBuf::from);
+    std::env::remove_var("EDDA_DETACHED_MANIFEST");
+    path
+}
+
+/// Unix workers own manifest writes; the launcher never races their completion.
+pub fn update_worker_manifest(path: Option<&Path>, code: Option<i32>) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
+    value["worker_pid"] = std::process::id().into();
+    value["state"] = if code.is_some() {
+        "completed"
+    } else {
+        "running"
+    }
+    .into();
+    value["exit_code"] = code.into();
+    let temporary = path.with_extension("new");
+    fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;
+    fs::rename(temporary, path)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,32 +339,4 @@ mod windows_tests {
             .contains(&key.as_str())
         }));
     }
-}
-
-/// Take the private manifest capability for this detached worker and remove
-/// it from the process environment before any backend can inherit it.
-pub fn take_worker_manifest() -> Option<PathBuf> {
-    let path = std::env::var_os("EDDA_DETACHED_MANIFEST").map(PathBuf::from);
-    std::env::remove_var("EDDA_DETACHED_MANIFEST");
-    path
-}
-
-/// Unix workers own manifest writes; the launcher never races their completion.
-pub fn update_worker_manifest(path: Option<&Path>, code: Option<i32>) -> Result<()> {
-    let Some(path) = path else {
-        return Ok(());
-    };
-    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
-    value["worker_pid"] = std::process::id().into();
-    value["state"] = if code.is_some() {
-        "completed"
-    } else {
-        "running"
-    }
-    .into();
-    value["exit_code"] = code.into();
-    let temporary = path.with_extension("new");
-    fs::write(&temporary, serde_json::to_vec_pretty(&value)?)?;
-    fs::rename(temporary, path)?;
-    Ok(())
 }
