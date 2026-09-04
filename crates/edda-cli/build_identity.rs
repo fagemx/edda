@@ -31,8 +31,13 @@ pub fn git_metadata_paths(head_path: &Path, common_dir: &Path) -> Vec<PathBuf> {
         }
 
         if !ref_exists {
-            if let Some(parent) = ref_path.parent().filter(|parent| parent.is_dir()) {
-                paths.push(parent.to_path_buf());
+            let mut ancestor = ref_path.parent();
+            while let Some(candidate) = ancestor {
+                if candidate.is_dir() {
+                    paths.push(candidate.to_path_buf());
+                    break;
+                }
+                ancestor = candidate.parent();
             }
         }
     }
