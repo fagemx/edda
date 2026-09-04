@@ -159,21 +159,20 @@ Golden fixture: `crates/edda-cli/tests/ask_compat_contract.rs` →
 
 ### edda-mcp tool responses
 
-Of the MCP tools, two return JSON payloads, and their shapes are stable:
+Stable JSON MCP responses are a client contract for the following tools:
 
-- `edda_ask` (`crates/edda-mcp/src/lib.rs:336-361#async fn edda_ask(`) — returns the same
-  `AskResult` envelope as `edda ask --json` (same key set, same optionality
-  rules).
-- `edda_tool_tier` (`crates/edda-mcp/src/lib.rs:480-490#async fn edda_tool_tier(`) — one JSON object,
-  the `ToolTierResult` shape (`crates/edda-core/src/tool_tier.rs:103-108#pub struct ToolTierResult {`):
-  `tool` (string), `tier` (string, `T0`–`T4`), `approval` (string,
-  `none`/`lazy`/`required`/`blocked`), `description` (string).
+- `edda_ask` returns the `AskResult` envelope used by `edda ask --json`.
+- `edda_tool_tier` returns `ToolTierResult`: `tool`, `tier` (`T0`–`T4`),
+  `approval` (`none`/`lazy`/`required`/`blocked`), and `description`.
+- `edda_task_new`, `edda_task_start`, `edda_task_done`, `edda_task_fail`,
+  `edda_receipt`, and `edda_verify` return the JSON payloads consumed by the
+  shared task state-machine and ledger verification paths.
+- `edda_claim` returns the persisted claim-board result.
 
-Other MCP tools return human-readable text; their output is not a contract.
-
-Golden fixtures: `crates/edda-mcp/src/lib.rs` →
-`compat_golden_fixture_ask_tool_response_keys_and_types` and
-`compat_golden_fixture_tool_tier_response_keys_and_types`.
+These response shapes are covered by the live cross-language SDK contract
+scenario (`sdk/run-contract-tests.mjs`), which calls the real MCP server and
+requires TypeScript/Python structural equivalence. Other MCP tool text remains
+human-readable and is not a stable response contract.
 
 ### `edda status --json`
 

@@ -7,6 +7,7 @@
 
 import json
 import os
+import http.server
 import shutil
 import socket
 import subprocess
@@ -192,6 +193,54 @@ class RoundTripTests(unittest.TestCase):
         self.assertTrue(transport._proc is None)
 
 
+class HttpTransportLocalTests(unittest.TestCase):
+    def _server(self, delay: float = 0.0):
+        seen: list[str | None] = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                seen.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                if delay:
+                    time.sleep(delay)
+                self.wfile.write(b'{"ok":true}')
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, name="edda-sdk-test-http")
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(lambda: (server.shutdown(), thread.join()))
+        return server, seen
+
+    def test_http_auth_and_pre_cancel(self):
+        server, seen = self._server()
+        port = server.server_address[1]
+        http = HttpTransport(f"http://127.0.0.1:{port}", bearer_token="test-token")
+        self.assertEqual(http.health(), {"ok": True})
+        self.assertEqual(seen, ["Bearer test-token"])
+        cancelled = threading.Event()
+        cancelled.set()
+        with self.assertRaises(CancelledError_):
+            http.health(cancel=cancelled)
+        self.assertEqual(seen, ["Bearer test-token"], "pre-cancel must not open a request")
+
+    def test_http_inflight_cancel_reaps_worker(self):
+        server, _ = self._server(delay=2)
+        http = HttpTransport(f"http://127.0.0.1:{server.server_address[1]}")
+        cancelled = threading.Event()
+        timer = threading.Timer(0.1, cancelled.set)
+        timer.start()
+        with self.assertRaises(CancelledError_):
+            http.health(timeout_s=5, cancel=cancelled)
+        timer.join()
+        self.assertFalse(any(t.name == "edda-sdk-http" and t.is_alive() for t in threading.enumerate()))
+
+
 @unittest.skipIf(not EDDA_BIN, "EDDA_BIN not set")
 class HttpReadOnlyTests(unittest.TestCase):
     def test_http_reads_work_and_writes_are_refused(self):
@@ -224,6 +273,11 @@ class HttpReadOnlyTests(unittest.TestCase):
                 http._request("POST", "/api/note")  # noqa: SLF001 - deliberate write probe
         finally:
             proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
             shutil.rmtree(root, ignore_errors=True)
 
 

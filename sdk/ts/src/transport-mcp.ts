@@ -12,7 +12,7 @@ import {
   RpcError,
   TimeoutError,
   TransportError,
-} from "./errors.ts";
+} from "./errors.js";
 
 export interface McpSpawnSpec {
   /** Absolute or resolvable path to the edda binary. Never a shell string. */
@@ -54,7 +54,12 @@ export class McpTransport {
   private nextId = 1;
   private pending = new Map<
     number,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout | null }
+    {
+      resolve: (v: unknown) => void;
+      reject: (e: Error) => void;
+      timer: NodeJS.Timeout | null;
+      removeAbortListener?: () => void;
+    }
   >();
   private buffer = "";
   private toolsCache: McpToolInfo[] | null = null;
@@ -106,6 +111,7 @@ export class McpTransport {
   private failAll(err: Error): void {
     for (const [, p] of this.pending) {
       if (p.timer) clearTimeout(p.timer);
+      p.removeAbortListener?.();
       p.reject(err);
     }
     this.pending.clear();
@@ -124,6 +130,7 @@ export class McpTransport {
     if (!entry) return;
     this.pending.delete(msg.id as number);
     if (entry.timer) clearTimeout(entry.timer);
+    entry.removeAbortListener?.();
     if (msg.error) {
       entry.reject(new RpcError(msg.error.code, msg.error.message, msg.error.data));
     } else {
@@ -138,28 +145,21 @@ export class McpTransport {
     const id = this.nextId++;
     const req: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
     return new Promise<unknown>((resolve, reject) => {
-      const timer =
-        opts.timeoutMs != null
-          ? setTimeout(() => {
-              this.pending.delete(id);
-              reject(new TimeoutError(`${method} exceeded ${opts.timeoutMs}ms`));
-            }, opts.timeoutMs)
-          : null;
-      this.pending.set(id, { resolve, reject, timer });
-      const onAbort = () => {
-        if (this.pending.has(id)) {
-          this.pending.delete(id);
-          if (timer) clearTimeout(timer);
-          reject(new CancelledError());
-        }
+      const finish = (error?: Error) => {
+        const entry = this.pending.get(id);
+        if (!entry) return;
+        this.pending.delete(id);
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.removeAbortListener?.();
+        if (error) reject(error);
       };
+      const timer = opts.timeoutMs != null ? setTimeout(() => finish(new TimeoutError(`${method} exceeded ${opts.timeoutMs}ms`)), opts.timeoutMs) : null;
+      const onAbort = () => finish(new CancelledError());
+      const removeAbortListener = () => opts.signal?.removeEventListener("abort", onAbort);
+      this.pending.set(id, { resolve, reject, timer, removeAbortListener });
       opts.signal?.addEventListener("abort", onAbort, { once: true });
       child.stdin!.write(JSON.stringify(req) + "\n", (err) => {
-        if (err) {
-          this.pending.delete(id);
-          if (timer) clearTimeout(timer);
-          reject(new TransportError("write to edda mcp stdin failed", err));
-        }
+        if (err) finish(new TransportError("write to edda mcp stdin failed", err));
       });
     });
   }
@@ -241,7 +241,12 @@ export class McpTransport {
       const exited = new Promise<void>((resolve) => child.on("exit", () => resolve()));
       child.stdin!.end();
       child.kill();
-      await Promise.race([exited, new Promise<void>((r) => setTimeout(r, 2000))]);
+      let exitedInTime = false;
+      await Promise.race([exited.then(() => { exitedInTime = true; }), new Promise<void>((r) => setTimeout(r, 2000))]);
+      if (!exitedInTime && child.exitCode === null) {
+        child.kill("SIGKILL");
+        await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+      }
     }
     // fully release owned pipes so no fd outlives close()
     child?.stdin?.destroy();

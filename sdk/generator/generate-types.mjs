@@ -88,7 +88,8 @@ const header = `// GENERATED FILE — do not edit by hand.
 
 let out = header;
 out += "\n// ── Event envelope (stable) ──\n\n";
-out += `export interface Envelope ${tsType(JSON.parse(readFileSync(join(specDir, "envelope.schema.json"), "utf8")))}\n`;
+const envelopeType = tsType(JSON.parse(readFileSync(join(specDir, "envelope.schema.json"), "utf8")));
+out += envelopeType.startsWith("{") ? `export interface Envelope ${envelopeType}\n` : `export type Envelope = ${envelopeType};\n`;
 
 const stable = [];
 const unstable = [];
@@ -99,7 +100,8 @@ for (const entry of registry) {
   const stability = entry.stability ?? "unstable";
   (stability === "stable-v1" ? stable : unstable).push({ entry, name });
   out += `\n/** Event type \`${entry.type}\` — stability: ${stability} (source: ${entry.source ?? "n/a"}). */\n`;
-  out += `export interface ${name} ${tsType(schema)}\n`;
+  const payloadType = tsType(schema);
+  out += payloadType.startsWith("{") ? `export interface ${name} ${payloadType}\n` : `export type ${name} = ${payloadType};\n`;
 }
 
 out += "\n// ── Stability-partitioned unions (contract §3) ──\n\n";

@@ -52,6 +52,7 @@ function parseStringDecoded(s: string, i: number): { value: string; next: number
   let out = "";
   let j = i + 1;
   for (;;) {
+    if (j >= s.length) throw new Error(`unterminated string at ${i}`);
     const c = s[j];
     if (c === '"') return { value: out, next: j + 1 };
     if (c === "\\") {
@@ -116,6 +117,7 @@ function emitString(decoded: string): string {
   return out + '"';
 }
 
+const JSON_NUMBER = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/;
 const INTEGER_LEXEME = /^-?(0|[1-9][0-9]*)$/;
 const I64_MIN = -(2n ** 63n);
 const U64_MAX = 2n ** 64n - 1n;
@@ -126,11 +128,12 @@ function formatF64(f: number): string {
   if (Object.is(f, -0)) return "-0.0";
   if (f === 0) return "0.0";
   // shortest digits + decimal exponent via toExponential (shortest by spec)
-  const [m, e] = f.toExponential().split("e");
-  let digits = m.replace(".", "").replace(/0+$/, "");
+  const [mantissa, e] = f.toExponential().split("e");
+  const sign = mantissa.startsWith("-") ? "-" : "";
+  let digits = mantissa.replace("-", "").replace(".", "").replace(/0+$/, "");
   if (digits === "") digits = "0";
   const decExp = parseInt(e, 10);
-  return zmijFormat(digits, decExp);
+  return sign + zmijFormat(digits, decExp);
 }
 
 /** zmij decimal/exponential layout from shortest digits. */
@@ -155,6 +158,7 @@ function zmijFormat(digits: string, decExp: number): string {
 
 /** Canonical number emission from a raw lexeme (serde_json parse semantics). */
 export function canonicalNumber(lexeme: string): string {
+  if (!JSON_NUMBER.test(lexeme)) throw new Error(`invalid JSON number: ${lexeme}`);
   if (INTEGER_LEXEME.test(lexeme)) {
     const v = BigInt(lexeme);
     if (v >= I64_MIN && v <= U64_MAX) return v.toString();
@@ -250,6 +254,9 @@ export function canonicalizeText(
   excludedTopLevel: ReadonlySet<string> = new Set(),
 ): string {
   const parsed = parseValue(rawJson, 0);
+  if (skipWs(rawJson, parsed.next) !== rawJson.length) {
+    throw new Error(`trailing data at ${parsed.next}`);
+  }
   if (excludedTopLevel.size === 0) return render(parsed.value);
   return render(parsed.value, excludedTopLevel, true);
 }

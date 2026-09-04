@@ -20,6 +20,9 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const EDDA_BIN = process.env.EDDA_BIN;
+const npmCli = process.env.npm_execpath ?? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+const npmCommand = process.platform === "win32" ? process.execPath : "npm";
+const npmPrefix = process.platform === "win32" ? [npmCli] : [];
 
 function fail(msg) {
   console.error(`FAIL: ${msg}`);
@@ -67,10 +70,22 @@ for (const [cmd, args] of [
   if (r.status !== 0) fail(`type generation failed for ${cmd}`);
 }
 
-// 2. golden + vector tests (independent canon in each language)
+// 2. compile/import generated types, then golden + vector tests.
 const goldenEnv = { ...process.env, EDDA_SPEC_DIR: specDir };
-
-const tsGolden = spawnSync("node", ["--test", "--experimental-strip-types", join(here, "ts", "test", "golden.test.ts")], {
+const pyTypes = spawnSync("python", ["-c", [
+  "import sys; sys.path.insert(0, 'sdk/python/src'); import edda_sdk.types_gen as t;",
+  "assert 'event_id' in t.Envelope.__required_keys__;",
+  "assert 'refs' in t.Envelope.__optional_keys__;",
+  "assert not any(member is object for member in t.Layer1Payload.__args__);",
+  "assert not any(member is object for member in t.Layer2Payload.__args__);",
+  "assert any(hasattr(value, '__required_keys__') for value in vars(t).values())",
+].join(" ")], { stdio: "inherit", env: goldenEnv });
+if (pyTypes.status !== 0) fail("generated Python types do not compile/import with required nested TypedDicts");
+const tsBuild = spawnSync(npmCommand, [...npmPrefix, "--prefix", join(here, "ts"), "run", "build"], { stdio: "inherit", env: goldenEnv });
+if (tsBuild.status !== 0) fail("TypeScript package build failed");
+const tsPackSmoke = spawnSync(npmCommand, [...npmPrefix, "--prefix", join(here, "ts"), "run", "pack-smoke"], { stdio: "inherit", env: goldenEnv });
+if (tsPackSmoke.status !== 0) fail("TypeScript packed-install smoke test failed");
+const tsGolden = spawnSync("node", ["--test", join(here, "ts", "dist", "test", "golden.test.js")], {
   stdio: "inherit",
   env: goldenEnv,
 });
@@ -78,7 +93,7 @@ if (tsGolden.status !== 0) fail("TS golden/vector tests failed");
 
 const pyGolden = spawnSync("python", ["-m", "unittest", "discover", "-s", join(here, "python", "tests"), "-p", "test_golden.py"], {
   stdio: "inherit",
-  env: { ...goldenEnv, PYTHONPATH: join(here, "python", "src") },
+  env: { ...goldenEnv, PYTHONPATH: join(here, "python", "src"), PYTHONWARNINGS: "error::ResourceWarning" },
 });
 if (pyGolden.status !== 0) fail("Python golden/vector tests failed");
 
@@ -86,7 +101,7 @@ if (pyGolden.status !== 0) fail("Python golden/vector tests failed");
 const tsOutFile = join(mkdtempSync(join(tmpdir(), "edda-scenario-")), "ts.json");
 const pyOutFile = join(mkdtempSync(join(tmpdir(), "edda-scenario-")), "py.json");
 
-const tsContract = spawnSync("node", ["--test", "--experimental-strip-types", join(here, "ts", "test", "contract.test.ts")], {
+const tsContract = spawnSync("node", ["--test", join(here, "ts", "dist", "test", "contract.test.js")], {
   stdio: "inherit",
   env: { ...goldenEnv, EDDA_SCENARIO_OUT: tsOutFile },
 });
@@ -94,7 +109,7 @@ if (tsContract.status !== 0) fail("TS contract tests failed");
 
 const pyContract = spawnSync("python", ["-m", "unittest", "discover", "-s", join(here, "python", "tests"), "-p", "test_contract.py"], {
   stdio: "inherit",
-  env: { ...goldenEnv, EDDA_SCENARIO_OUT: pyOutFile, PYTHONPATH: join(here, "python", "src") },
+  env: { ...goldenEnv, EDDA_SCENARIO_OUT: pyOutFile, PYTHONPATH: join(here, "python", "src"), PYTHONWARNINGS: "error::ResourceWarning" },
 });
 if (pyContract.status !== 0) fail("Python contract tests failed");
 

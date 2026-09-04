@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { canonicalizeText, computeEventHash } from "../src/canon.ts";
+import { canonicalizeText, computeEventHash } from "../src/canon.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -60,6 +60,14 @@ test("crafted numeric-limit vectors match serde_json/zmij semantics", () => {
   );
   // non-finite refused honestly
   assert.throws(() => canonicalizeText("[1e999]"), /out of range/);
+});
+
+test("negative and malformed JSON match Rust serde_json acceptance boundaries", () => {
+  assert.equal(canonicalizeText("[-1.5,-1e-7,-1e16]"), "[-1.5,-1e-7,-1e+16]");
+  // These are rejected by serde_json, the Rust canonicalizer's parser.
+  for (const raw of ["1 2", "01", "-", "1.", "1e", '\"unterminated', '\"\\u12', "[1,", '{"a":1']) {
+    assert.throws(() => canonicalizeText(raw), raw);
+  }
 });
 
 test("golden fixtures: recomputed event hashes match pinned digests", { skip: specDir() === null && "spec not pinned yet (waiting on controller handoff)" }, async () => {

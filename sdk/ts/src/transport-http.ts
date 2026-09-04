@@ -11,7 +11,7 @@ import {
   ProtocolError,
   TimeoutError,
   TransportError,
-} from "./errors.ts";
+} from "./errors.js";
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
@@ -19,9 +19,12 @@ export class HttpTransport {
   private baseUrl: string;
   private defaultTimeoutMs: number;
 
-  constructor(baseUrl: string, defaultTimeoutMs = 30_000) {
+  private bearerToken?: string;
+
+  constructor(baseUrl: string, defaultTimeoutMs = 30_000, bearerToken?: string) {
     this.baseUrl = baseUrl;
     this.defaultTimeoutMs = defaultTimeoutMs;
+    this.bearerToken = bearerToken;
   }
 
   private async request(
@@ -42,7 +45,10 @@ export class HttpTransport {
       const res = await fetch(`${this.baseUrl.replace(/\/$/, "")}${path}`, {
         method,
         signal: controller.signal,
-        headers: { accept: "application/json" },
+        headers: {
+          accept: "application/json",
+          ...(this.bearerToken === undefined ? {} : { authorization: `Bearer ${this.bearerToken}` }),
+        },
       });
       if (!res.ok) {
         throw new TransportError(`HTTP ${res.status} on ${path}`);

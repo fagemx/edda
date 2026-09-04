@@ -16,9 +16,10 @@ import { dirname } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 import { spawnSync } from "node:child_process";
-import { EddaClient, OPERATIONS } from "../src/client.ts";
-import { HttpTransport } from "../src/transport-http.ts";
-import { CapabilityNotAvailable, HttpWriteRefused, TimeoutError, CancelledError } from "../src/errors.ts";
+import { createServer } from "node:http";
+import { EddaClient, OPERATIONS } from "../src/client.js";
+import { HttpTransport } from "../src/transport-http.js";
+import { CapabilityNotAvailable, HttpWriteRefused, TimeoutError, CancelledError } from "../src/errors.js";
 
 const EDDA_BIN = process.env.EDDA_BIN ?? "";
 
@@ -96,6 +97,25 @@ test("contract: dead child surfaces TransportError and close reaps", async () =>
   await client.close();
 });
 
+test("HTTP transport sends configured bearer auth to local remote middleware", async () => {
+  let authorization: string | undefined;
+  const server = createServer((req, res) => {
+    authorization = req.headers.authorization;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end('{"ok":true}');
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const http = new HttpTransport(`http://127.0.0.1:${address.port}`, 1_000, "test-token");
+    assert.deepEqual(await http.health(), { ok: true });
+    assert.equal(authorization, "Bearer test-token");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("contract: HTTP transport is read-only and reads work", { skip: !EDDA_BIN && "EDDA_BIN not set" }, async () => {
   const { root, storeRoot } = makeEnv();
   const port = 17400 + Math.floor(Math.random() * 500);
@@ -128,14 +148,15 @@ test("contract: HTTP transport is read-only and reads work", { skip: !EDDA_BIN &
     );
   } finally {
     proc.kill();
-    await new Promise<void>((resolve) => {
-      if (proc.exitCode !== null) return resolve();
-      const t = setTimeout(resolve, 2000);
-      proc.once("exit", () => {
-        clearTimeout(t);
-        resolve();
-      });
-    });
+    let exited = false;
+    await Promise.race([
+      new Promise<void>((resolve) => proc.once("exit", () => { exited = true; resolve(); })),
+      new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+    ]);
+    if (!exited && proc.exitCode === null) {
+      proc.kill("SIGKILL");
+      await new Promise<void>((resolve) => proc.once("exit", resolve));
+    }
     rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
   }
 });

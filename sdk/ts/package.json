@@ -1,28 +1,25 @@
 {
   "name": "@edda/sdk",
   "version": "0.1.0",
-  "description": "Thin TypeScript client for the edda client contract (MCP writes, read-only HTTP). Types generated from the v1 event spec (GH-608). Publishing pending namespace authorization — see SDK_HANDOFF.md.",
+  "description": "Thin TypeScript client for the edda client contract (MCP writes, read-only HTTP).",
   "private": true,
-  "publishConfig": {
-    "access": "public"
-  },
   "type": "module",
-  "engines": {
-    "node": ">=18.17"
-  },
+  "engines": { "node": ">=18.17" },
   "exports": {
-    ".": "./src/index.ts",
-    "./canon": "./src/canon.ts"
+    ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" },
+    "./canon": { "types": "./dist/src/canon.d.ts", "import": "./dist/src/canon.js" }
   },
-  "files": [
-    "src",
-    "README.md"
-  ],
+  "files": ["dist", "README.md"],
   "scripts": {
-    "test": "node --test --experimental-strip-types test/",
-    "test:golden": "node --test --experimental-strip-types test/golden.test.ts",
-    "test:contract": "node --test --experimental-strip-types test/contract.test.ts",
-    "generate:types": "node ../generator/generate-types.mjs"
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/",
+    "test:golden": "npm run build && node --test dist/test/golden.test.js",
+    "test:contract": "npm run build && node --test dist/test/contract.test.js",
+    "generate:types": "node ../generator/generate-types.mjs",
+    "pack-smoke": "npm pack --json | node ./test/packed-install-smoke.mjs"
   },
-  "dependencies": {}
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "typescript": "^5.7.0"
+  }
 }

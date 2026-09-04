@@ -142,7 +142,7 @@ export interface CommitPayload {
 }
 
 /** Event type `cycle_telemetry` — stability: unstable (source: crates/edda-core/src/event.rs). */
-export interface CycleTelemetryPayload unknown
+export type CycleTelemetryPayload = unknown;
 
 /** Event type `decide_snapshot` — stability: unstable (source: crates/edda-core/src/event.rs). */
 export interface DecideSnapshotPayload {
@@ -200,10 +200,10 @@ export interface DevicePairPayload {
 }
 
 /** Event type `device_revoke` — stability: unstable (source: crates/edda-cli/src/cmd_pair.rs). */
-export interface DeviceRevokePayload unknown | unknown
+export type DeviceRevokePayload = unknown | unknown;
 
 /** Event type `execution_event` — stability: unstable (source: crates/edda-core/src/event.rs). */
-export interface ExecutionEventPayload unknown
+export type ExecutionEventPayload = unknown;
 
 /** Event type `ingestion` — stability: unstable (source: crates/edda-ingestion/src/writer.rs). */
 export interface IngestionPayload {
@@ -395,7 +395,7 @@ export interface TaskRequeuedPayload {
 }
 
 /** Event type `task.session` — stability: unstable (source: crates/edda-core/src/event.rs). */
-export interface TaskSessionPayload unknown | unknown
+export type TaskSessionPayload = unknown | unknown;
 
 /** Event type `task.started` — stability: unstable (source: crates/edda-core/src/event.rs). */
 export interface TaskStartedPayload {

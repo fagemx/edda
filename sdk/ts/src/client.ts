@@ -1,9 +1,9 @@
 // EddaClient: the contracted operation surface (docs/reference/client-contract.md §2).
 // Thin by design — transport + types only. No state rules.
 
-import { McpTransport, type McpSpawnSpec, type CallOptions } from "./transport-mcp.ts";
-import { HttpTransport } from "./transport-http.ts";
-import { CapabilityNotAvailable } from "./errors.ts";
+import { McpTransport, type McpSpawnSpec, type CallOptions } from "./transport-mcp.js";
+import { HttpTransport } from "./transport-http.js";
+import { CapabilityNotAvailable } from "./errors.js";
 
 // Contracted operations. `capability` names the MCP tool that must exist for
 // the operation to be available; the SDK probes tools/list and fails with a
@@ -110,5 +110,5 @@ export class EddaClient {
 }
 
 export { McpTransport, HttpTransport };
-export * from "./errors.ts";
-export * from "./canon.ts";
+export * from "./errors.js";
+export * from "./canon.js";

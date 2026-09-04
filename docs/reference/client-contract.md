@@ -26,10 +26,10 @@ The contracted operation set:
 | `ask` (decision query) | `edda_ask` | `GET /api/decisions` (list) | `edda ask --json` |
 | `note` | `edda_note` | — | `edda note` |
 | `decide` | `edda_decide` | — | `edda decide` |
-| `task new / start / done` | **gap — not yet exposed** (see §5) | — | `edda task new/start/done` |
-| `claim` (scope claim / check) | **gap — not yet exposed** | — | `edda claim` |
-| `receipt` (task receipt on the ledger) | **gap — not yet exposed** | — | `edda task done` (writes receipt event) |
-| `verify` (ledger/hash verification) | **gap — not yet exposed** | — | `edda verify` |
+| `task new / start / done` | `edda_task_new` / `edda_task_start` / `edda_task_done` | — | `edda task new/start/done` |
+| `claim` (scope claim; `claim check` remains CLI-only) | `edda_claim` | — | `edda claim` |
+| `receipt` (task receipt on the ledger) | `edda_receipt` | — | `edda task done` (writes receipt event) |
+| `verify` (ledger/hash verification) | `edda_verify` | — | `edda verify` |
 | read: status / log / context | `edda_status`, `edda_log`, `edda_context` | `GET /api/status`, `GET /api/log`, `GET /api/context` | `edda status`, `edda log --json` |
 
 ## 3. Version and compatibility policy
@@ -62,7 +62,7 @@ The contracted operation set:
   the same release. The SDK will not pretend the current unauthenticated HTTP
   writes are an authorized surface.
 
-## 5. Capability notes
+## 5. MCP capability notes and remaining gap
 
 The contracted operations are exposed as MCP tools backed by the shared,
 validated service paths (the task state machine lives in
@@ -75,8 +75,8 @@ no state rules are duplicated):
   enforced by the shared state machine, not by the SDK or the tool layer).
 - `edda_claim` — writes a coordination-scope claim on the session board
   (one claim per session; a lost write is never reported as success). The
-  glob-intersection `claim check` remains a CLI surface for now — a known,
-  documented gap, not a hidden one.
+  glob-intersection `claim check` remains a CLI-only surface for now; it is
+  the sole operation-table gap and is not represented as SDK capability.
 - `edda_receipt` — reads the receipt recorded by `task done` (receipts have
   no separate write path: "done without a receipt does not exist").
 - `edda_verify` — read-only hash-chain verification, same payload as

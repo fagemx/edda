@@ -15,12 +15,22 @@ on:
       - "sdk/**"
       - "spec/events/**"
       - "tests/fixtures/events/**"
+      - "crates/edda-mcp/**"
+      - "crates/edda-ledger/src/task_actions.rs"
+      - "crates/edda-bridge-*/**"
+      - "crates/edda-cli/**"
+      - "crates/edda-serve/**"
       - ".github/workflows/contract.yml"
   pull_request:
     paths:
       - "sdk/**"
       - "spec/events/**"
       - "tests/fixtures/events/**"
+      - "crates/edda-mcp/**"
+      - "crates/edda-ledger/src/task_actions.rs"
+      - "crates/edda-bridge-*/**"
+      - "crates/edda-cli/**"
+      - "crates/edda-serve/**"
       - ".github/workflows/contract.yml"
 
 concurrency:
@@ -50,6 +60,9 @@ jobs:
           git checkout "$SPEC_SHA" -- spec tests/fixtures
           test -f spec/events/canonical-v1.json
           test -f spec/events/registry.json
+          # The checked-in fallback is a cache, never an independent source.
+          git diff --no-index --exit-code spec sdk/spec-pin/spec
+          git diff --no-index --exit-code tests/fixtures sdk/spec-pin/tests/fixtures
 
       - name: Install Rust toolchain
         run: rustup toolchain install "$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)" --profile minimal
@@ -73,6 +86,9 @@ jobs:
             echo "::error::committed SDK types are stale against the pinned spec $(node -p "require('./sdk/SPEC_PIN.json').spec_sha") — regenerate and commit"
             exit 1
           }
+
+      - name: Install TypeScript package build dependencies
+        run: npm --prefix sdk/ts ci --ignore-scripts
 
       - name: Cross-language contract tests (TS + Python, real edda, isolated stores)
         env:

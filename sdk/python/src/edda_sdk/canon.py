@@ -38,6 +38,7 @@ WHITESPACE = " \t\n\r"
 
 EVENT_HASH_EXCLUDED_KEYS = frozenset({"hash", "digests", "schema_version"})
 
+JSON_NUMBER = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$")
 INTEGER_LEXEME = re.compile(r"^-?(0|[1-9][0-9]*)$")
 _I64_MIN = -(2**63)
 _U64_MAX = 2**64 - 1
@@ -56,6 +57,8 @@ def _decode_string(s: str, i: int) -> tuple[str, int]:
     out: list[str] = []
     j = i + 1
     while True:
+        if j >= len(s):
+            raise ValueError(f"unterminated string at {i}")
         c = s[j]
         if c == '"':
             return "".join(out), j + 1
@@ -175,6 +178,8 @@ def _format_f64(f: float) -> str:
 
 def _canonical_number(lexeme: str) -> str:
     """Canonical number emission from a raw lexeme (serde_json parse semantics)."""
+    if not JSON_NUMBER.fullmatch(lexeme):
+        raise ValueError(f"invalid JSON number: {lexeme}")
     if INTEGER_LEXEME.fullmatch(lexeme):
         v = int(lexeme)
         if _I64_MIN <= v <= _U64_MAX:
@@ -262,7 +267,8 @@ def canonicalize_text(raw_json: str, excluded_top_level: frozenset[str] = frozen
     spec/events/canonical-v1.json.
     """
     parsed, i = _parse_value(raw_json, 0)
-    _skip_ws(raw_json, i)  # trailing whitespace tolerated
+    if _skip_ws(raw_json, i) != len(raw_json):
+        raise ValueError(f"trailing data at {i}")
     return _render(parsed, excluded_top_level or None, True)
 
 

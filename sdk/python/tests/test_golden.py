@@ -69,6 +69,14 @@ class CanonicalVectorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             canonicalize_text("[1e999]")
 
+    def test_negative_and_malformed_json_match_rust_rejection_boundary(self):
+        # serde_json (the Rust oracle) rejects each malformed JSON grammar
+        # case; valid negative forms have their canonical outputs pinned here.
+        self.assertEqual(canonicalize_text("[-1.5,-1e-7,-1e16]"), "[-1.5,-1e-7,-1e+16]")
+        for raw in ("1 2", "01", "-", "1.", "1e", '"unterminated', '"\\u12', "[1,", "{\"a\":1"):
+            with self.assertRaises((ValueError, IndexError), msg=raw):
+                canonicalize_text(raw)
+
 
 @unittest.skipIf(_SPEC is None, "spec not pinned yet (waiting on controller handoff)")
 class GoldenFixtureTests(unittest.TestCase):
