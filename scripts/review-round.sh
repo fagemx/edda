@@ -66,7 +66,9 @@ floor=$(printf '%s\n' "$comments" | sed -n 's/^## Code Review: Round \([0-9][0-9
 floor=${floor:-0}
 last=0
 [ ! -f "$dir/counter" ] || last=$(cat "$dir/counter")
-printf '%s\n' "$last" "$floor" | grep -qEv '^[0-9]{1,9}$' && die 'invalid round state'
+if printf '%s\n' "$last" "$floor" | grep -qEv '^[0-9]{1,9}$'; then
+  die 'invalid round state'
+fi
 [ "$floor" -le "$last" ] || last=$floor
 next=$((last + 1))
 [ "$requested" -le "$next" ] || next=$requested

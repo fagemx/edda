@@ -14,6 +14,7 @@ cat > "$tmp/bin/gh" <<'EOF'
 case "$*" in
   *'--json comments'*) [ ! -f "$FIXTURE/api-fail" ] || exit 1; cat "$FIXTURE/comments" ;;
   *'--json headRefOid,state'*) printf '%s\tOPEN\n' "$(cat "$FIXTURE/head")" ;;
+  *'api --paginate --slurp repos/fixture/repo/issues/12/comments?per_page=100'*) [ ! -f "$FIXTURE/api-fail" ] || exit 1; cat "$FIXTURE/comments-api" ;;
   *'pr checks'*) [ ! -f "$FIXTURE/checks-fail" ] ;;
   *'pr merge'*) printf '%s\n' "$*" > "$FIXTURE/merge" ;;
   *) echo "unexpected gh: $*" >&2; exit 1 ;;
@@ -22,6 +23,18 @@ EOF
 chmod +x "$tmp/bin/gh"
 printf '## Code Review: Round 4 — PR #12 @ %s\n' "$sha" > "$tmp/comments"
 printf '%s\n' "$sha" > "$tmp/head"
+cat > "$tmp/comments-api" <<EOF
+[
+  [
+    {
+      "id": 10,
+      "author_association": "MEMBER",
+      "updated_at": "2026-09-04T00:00:00Z",
+      "body": "## Code Review: Round 7 — PR #12 @ $sha\n- escalations: none\n### Verdict\nLGTM (P0=0, P1=0)"
+    }
+  ]
+]
+EOF
 round=$(sh "$root/scripts/review-round.sh" reserve 12 "$sha" 1 "$tmp/one")
 [ "$round" = 5 ]
 if sh "$root/scripts/review-round.sh" reserve 12 "$sha" 1 "$tmp/two"; then
@@ -72,12 +85,6 @@ if wait "$b"; then success=$((success + 1)); fi
 if sh "$root/scripts/review-round.sh" reserve 12 "$sha" 1 "$tmp/one"; then
   echo 'FAIL: post-race reserve admitted while the winner owns without a terminal receipt' >&2; exit 1
 fi
-cat > "$tmp/comments" <<EOF
-## Code Review: Round 7 — PR #12 @ $sha
-- escalations: none
-### Verdict
-LGTM (P0=0, P1=0)
-EOF
 sh "$root/scripts/merge-reviewed-pr.sh" 12
 [ ! -e "$tmp/merge" ]
 sh "$root/scripts/merge-reviewed-pr.sh" 12 --merge
@@ -88,19 +95,54 @@ if sh "$root/scripts/merge-reviewed-pr.sh" 12 --merge; then
   echo 'FAIL: stale verdict merged' >&2; exit 1
 fi
 printf '%s\n' "$sha" > "$tmp/head"
-sed 's/escalations: none/escalations: needs escalation/' "$tmp/comments" > "$tmp/new"
-mv "$tmp/new" "$tmp/comments"
+sed 's/escalations: none/escalations: needs escalation/' "$tmp/comments-api" > "$tmp/new"
+mv "$tmp/new" "$tmp/comments-api"
 if sh "$root/scripts/merge-reviewed-pr.sh" 12 --merge; then
   echo 'FAIL: provisional review merged' >&2; exit 1
 fi
-cat > "$tmp/comments" <<EOF
-## Code Review: Round 8 — PR #12 @ $sha
-- escalations: none
-### Verdict
-Changes Requested, P0=0, P1=1
+cat > "$tmp/comments-api" <<EOF
+[
+  [
+    {
+      "id": 10,
+      "author_association": "MEMBER",
+      "updated_at": "2026-09-04T00:00:00Z",
+      "body": "## Code Review: Round 7 — PR #12 @ $sha\n- escalations: none\n### Verdict\nLGTM (P0=0, P1=0)"
+    },
+    {
+      "id": 11,
+      "author_association": "MEMBER",
+      "updated_at": "2026-09-04T01:00:00Z",
+      "body": "## Code Review: Round 8 — PR #12 @ $sha\n- escalations: none\n### Verdict\nChanges Requested, P0=0, P1=1"
+    }
+  ]
+]
 EOF
 if sh "$root/scripts/merge-reviewed-pr.sh" 12 --merge; then
   echo 'FAIL: newer blocking review merged' >&2; exit 1
 fi
 [ ! -e "$tmp/merge" ]
-echo 'PASS: shared rounds, concurrent admission, in-progress receipts, terminal WORKTREE_CHECK gating, API errors, stale/provisional/blocking verdicts, matched merge'
+# An older-created review later edited to blockers is the latest trustworthy
+# verdict by REST `updated_at`, even if a later-created LGTM remains present.
+cat > "$tmp/comments-api" <<EOF
+[
+  [
+    {
+      "id": 10,
+      "author_association": "MEMBER",
+      "updated_at": "2026-09-04T02:00:00Z",
+      "body": "## Code Review: Round 7 — PR #12 @ $sha\n- escalations: none\n### Verdict\nChanges Requested, P0=0, P1=1"
+    },
+    {
+      "id": 11,
+      "author_association": "MEMBER",
+      "updated_at": "2026-09-04T01:00:00Z",
+      "body": "## Code Review: Round 8 — PR #12 @ $sha\n- escalations: none\n### Verdict\nLGTM (P0=0, P1=0)"
+    }
+  ]
+]
+EOF
+if sh "$root/scripts/merge-reviewed-pr.sh" 12 --merge; then
+  echo 'FAIL: an older-created but later-edited blocking review merged' >&2; exit 1
+fi
+echo 'PASS: shared rounds, concurrent admission, terminal receipts, REST latest-edited trusted reviews, API errors, stale/provisional/blocking verdicts, matched merge'

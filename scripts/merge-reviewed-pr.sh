@@ -18,9 +18,24 @@ head=$(printf '%s\n' "$facts" | cut -f1)
 state=$(printf '%s\n' "$facts" | cut -f2)
 printf '%s\n' "$head" | grep -qE '^[0-9a-f]{40}$' || die 'invalid PR head'
 [ "$state" = OPEN ] || die "PR is $state"
-# An unrelated outsider's comment cannot grant a merge verdict. Select the last
-# updated trusted review, including blockers, rather than fishing for any LGTM.
-body=$(gh pr view "$pr" --repo "$repo" --json comments --jq '.comments | map(select((.authorAssociation == "OWNER" or .authorAssociation == "MEMBER" or .authorAssociation == "COLLABORATOR") and (.body | test("(?m)^## Code Review: Round [0-9]+")))) | sort_by(.updatedAt) | last | .body // ""') || die 'cannot read reviews'
+# `gh pr view --json comments` does not expose a comment `updatedAt` field.
+# Read the REST issue-comments shape instead: it carries `updated_at`, and
+# --paginate/--slurp makes the selection global rather than accidentally
+# choosing the newest item of just the final page.  A malformed trusted review
+# fails closed; choosing an older LGTM after an edited blocker is unsafe.
+comments=$(gh api --paginate --slurp "repos/$repo/issues/$pr/comments?per_page=100") || die 'cannot read reviews'
+body=$(printf '%s\n' "$comments" | jq -er '
+  [ .[] | .[] ]
+  | map(select(
+      (.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")
+      and (.body | type == "string" and test("(?m)^## Code Review: Round [0-9]+"))
+    )) as $trusted
+  | if ($trusted | length) == 0 then ""
+    elif ($trusted | map(select((.updated_at | type) != "string" or (.updated_at | length) == 0 or (.id | type) != "number")) | length) != 0
+      then error("trusted review lacks REST updated_at or numeric id")
+    else $trusted | sort_by([.updated_at, .id]) | last | .body
+    end
+') || die 'cannot select latest updated trusted review'
 header=$(printf '%s\n' "$body" | grep -m1 '^## Code Review: Round ' || true)
 printf '%s\n' "$header" | grep -qE "^## Code Review: Round [0-9]+ .*PR #$pr @ $head([^0-9a-f]|$)" || die "latest trusted review is not pinned to current head $head"
 printf '%s\n' "$body" | grep -qE '^- escalations: none[[:space:]]*$' || die 'review has missing or unresolved escalations'

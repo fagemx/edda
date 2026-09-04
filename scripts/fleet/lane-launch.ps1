@@ -22,7 +22,7 @@
 # usage:
 #   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> `
 #        -Cwd <worktree> [-Agent pi|codex|claude] [-BudgetUsd <n>] [-TimeoutSec <s>] `
-#        [-SessionId <id>] [-LogDir <dir>] [-BuildLane <lane>] [-DryRun]
+#        [-SessionId <id>] [-LogDir <dir>] [-BuildLane <lane>] [-Owns <path>...] [-DryRun]
 #
 # -BuildLane is optional and accepts exactly the ratified build lanes
 # worker-1|worker-2|verifier|verifier-2 (verification.cost-discipline); when
@@ -31,6 +31,11 @@
 # set). When omitted, the wrapper sets NO CARGO_TARGET_DIR at all — the
 # launcher never synthesizes a build lane; docs lanes compile nothing and
 # pass none.
+#
+# -Owns is optional. Pass only the smallest repository-relative path scopes the
+# implementation needs to claim (for example `crates/edda-cli/src/cmd.rs`);
+# read-only lanes omit it. The launcher forwards each supplied value to
+# `edda dispatch --owns` and does not invent a global ownership policy.
 #
 # Prints, one line each: the .git/config backup verdict (GH-715), then task
 # name, state, wrapper path, log path, done path.
@@ -65,6 +70,7 @@ param(
   [string]$SessionId = '',
   [string]$LogDir = "$env:TEMP\edda-lanes",
   [string]$BuildLane = '',
+  [string[]]$Owns = @(),
   # Explicit for arbitrary lane names; conventional review/reviewer names
   # imply it so historical review-pr<N> callers cannot omit the restriction.
   [switch]$Review,
@@ -107,6 +113,11 @@ if ($Name -match '(?i)(^|[._-])dryrun($|[._-])') {
 $allowedBuildLanes = @('worker-1', 'worker-2', 'verifier', 'verifier-2')
 if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {
   Fail "-BuildLane '$BuildLane' is not an allowed build lane (verification.cost-discipline allows only: $($allowedBuildLanes -join ', ')); omit the parameter for lanes that compile nothing"
+}
+foreach ($scope in $Owns) {
+  if ([string]::IsNullOrWhiteSpace($scope) -or $scope -match '[\r\n]') {
+    Fail '-Owns entries must be non-empty one-line repository-relative path scopes'
+  }
 }
 $TaskName = "edda-lane-$Name"
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -161,6 +172,7 @@ if (-not $PwshExe) { Fail 'pwsh.exe not found on PATH; cannot register the task'
 # The real `edda dispatch` command line (also printed verbatim by -DryRun).
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
 $argLine += $reviewArgs
+foreach ($scope in $Owns) { $argLine += " --owns $(PsQuote $scope)" }
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 
 # Wrapper the scheduled task actually runs: outside the controller's job
@@ -176,6 +188,9 @@ $env:HOME = $env:USERPROFILE
 $env:GIT_CONFIG_PARAMETERS = "'help.format=man'"
 $env:CARGO_TARGET_DIR = __CARGO__
 Set-Location -LiteralPath __CWD__
+$controller = Get-Process -Id $PID -ErrorAction Stop
+$controllerStarted = $controller.StartTime.ToUniversalTime().ToString('o')
+Add-Content -LiteralPath $PSCommandPath -Value "# lane-reap: controller-pid=$PID controller-started=$controllerStarted" -Encoding utf8
 $code = $null
 try {
   __REVIEW_PREFLIGHT__
@@ -186,9 +201,17 @@ try {
   $code = 1
 } finally {
   __REVIEW_FINISH__
+  $unregisterVerdict = 'unregistered'
+  try {
+    Unregister-ScheduledTask -TaskName __TASK__ -Confirm:$false -ErrorAction Stop
+  } catch {
+    $unregisterVerdict = "FAILED ($($_.Exception.Message))"
+    $_ | Out-File __LOG__ -Append -Encoding utf8
+    if ($null -eq $code -or $code -eq 0) { $code = 1 }
+  }
   # The end record is written no matter how the run ends (GH-672): a log
   # with START but no === EXIT === line means the lane was killed mid-flight.
-  Add-Content -LiteralPath __LOG__ -Value "=== EXIT code=$code ===" -Encoding utf8
+  Add-Content -LiteralPath __LOG__ -Value "=== EXIT code=$code registration=$unregisterVerdict ===" -Encoding utf8
   Set-Content -LiteralPath __DONE__ -Value $code -Encoding ascii
 }
 exit $code
@@ -211,6 +234,7 @@ if ($isReview) {
 }
 $wrapperText = $wrapperText.Replace('__REVIEW_PREFLIGHT__', $reviewPreflight)
 $wrapperText = $wrapperText.Replace('__REVIEW_FINISH__', $reviewFinish)
+$wrapperText = $wrapperText.Replace('__TASK__', (PsQuote $TaskName))
 
 if ($DryRun) {
   # Generate our own temporary brief — no caller-supplied untracked input.
@@ -221,6 +245,7 @@ if ($DryRun) {
   )
   $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
   $argLine += $reviewArgs
+  foreach ($scope in $Owns) { $argLine += " --owns $(PsQuote $scope)" }
   if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
   # Dry-run artifacts carry their own names: teeing into $Name.log or writing
   # $Name.done here would put a foreign === EXIT === record in the real lane's
@@ -247,8 +272,11 @@ if ($DryRun) {
   $action = New-ScheduledTaskAction -Execute $PwshExe `
     -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
     -WorkingDirectory $Cwd
+  # Dispatch enforces TimeoutSec itself. A scheduler execution limit would
+  # kill the wrapper before its finally block can write the terminal receipt
+  # and unregister this task, leaving a stale registration.
   $settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSec) `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
     -MultipleInstances IgnoreNew `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -290,6 +318,7 @@ if (-not (Test-Path -LiteralPath $Brief -PathType Leaf)) {
 $Brief = (Resolve-Path -LiteralPath $Brief).Path
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
 $argLine += $reviewArgs
+foreach ($scope in $Owns) { $argLine += " --owns $(PsQuote $scope)" }
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
 
@@ -306,8 +335,10 @@ Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue  # stale done-file 
 $action = New-ScheduledTaskAction -Execute $PwshExe `
   -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
   -WorkingDirectory $Cwd
+# Keep Task Scheduler from preempting the wrapper; edda dispatch owns the
+# requested timeout and its return reaches the wrapper's teardown.
 $settings = New-ScheduledTaskSettingsSet `
-  -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSec) `
+  -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
   -MultipleInstances IgnoreNew `
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
