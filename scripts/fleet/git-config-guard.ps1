@@ -367,7 +367,12 @@ function Restore-BrokenRefs([string]$Repo, [string]$CommonDir, $BrokenRefs) {
 if ($VerifyRefs) {
   $refsHealth = Get-RefsHealth $RepoPath $commonDir
   if (-not $refsHealth.Healthy) {
-    Fail "refs UNHEALTHY: $($refsHealth.Reason)" 2
+    $repairHint = if ($refsHealth.CanRepair) {
+      "repair available from reflog: run scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs"
+    } else {
+      "automatic reflog repair unavailable; inspect repo manually"
+    }
+    Fail "refs UNHEALTHY: $($refsHealth.Reason) ($repairHint)" 2
   }
   "refs=healthy ($($refsHealth.Reason))"
   exit 0
@@ -382,12 +387,15 @@ if ($RestoreRefs) {
     exit 0
   }
   [Console]::Error.WriteLine("git-config-guard: refs UNHEALTHY: $($refsHealth.Reason)")
-  $restoreResult = Restore-BrokenRefs $RepoPath $commonDir $refsHealth.BrokenRefs
-  if (-not $restoreResult.Success) {
-    Fail "RESTORE FAILED: $($restoreResult.Reason)" 2
+  if (-not $refsHealth.CanRepair) {
+    Fail "cannot repair refs automatically: $($refsHealth.Reason)" 2
   }
+  $restoreResult = Restore-BrokenRefs $RepoPath $commonDir $refsHealth.BrokenRefs
   foreach ($r in $restoreResult.Restored) {
     "$r"
+  }
+  if (-not $restoreResult.Success) {
+    Fail "RESTORE FAILED: $($restoreResult.Reason)" 2
   }
   exit 0
 }
@@ -405,7 +413,12 @@ if ($Verify) {
   }
   $refsHealth = Get-RefsHealth $RepoPath $commonDir
   if (-not $refsHealth.Healthy) {
-    Fail "refs UNHEALTHY: $($refsHealth.Reason)" 2
+    $repairHint = if ($refsHealth.CanRepair) {
+      "repair available from reflog: run scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs"
+    } else {
+      "automatic reflog repair unavailable; inspect repo manually"
+    }
+    Fail "refs UNHEALTHY: $($refsHealth.Reason) ($repairHint)" 2
   }
   "config=$ConfigPath healthy ($($configHealth.Reason))"
   "refs=healthy ($($refsHealth.Reason))"
@@ -423,7 +436,12 @@ if ($Backup) {
   }
   $refsHealth = Get-RefsHealth $RepoPath $commonDir
   if (-not $refsHealth.Healthy) {
-    Fail "ref(s) unhealthy ($($refsHealth.Reason)); cannot guarantee repo consistency — repair with scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs" 2
+    $repairHint = if ($refsHealth.CanRepair) {
+      "repair with scripts/fleet/git-config-guard.ps1 -RepoPath '$RepoPath' -RestoreRefs"
+    } else {
+      "automatic repair from reflog unavailable; manual inspection of .git required"
+    }
+    Fail "ref(s) unhealthy ($($refsHealth.Reason)); cannot guarantee repo consistency — $repairHint" 2
   }
   try {
     if ((Get-ConfigHealth $BackupPath).Healthy) { Copy-Atomic $BackupPath $PrevBackupPath }
@@ -474,12 +492,15 @@ if (-not $configHealth.Healthy) {
 $refsHealth = Get-RefsHealth $RepoPath $commonDir
 if (-not $refsHealth.Healthy) {
   [Console]::Error.WriteLine("git-config-guard: refs UNHEALTHY: $($refsHealth.Reason)")
-  $restoreResult = Restore-BrokenRefs $RepoPath $commonDir $refsHealth.BrokenRefs
-  if (-not $restoreResult.Success) {
-    Fail "RESTORE FAILED: $($restoreResult.Reason)" 2
+  if (-not $refsHealth.CanRepair) {
+    Fail "cannot repair refs automatically: $($refsHealth.Reason)" 2
   }
+  $restoreResult = Restore-BrokenRefs $RepoPath $commonDir $refsHealth.BrokenRefs
   foreach ($r in $restoreResult.Restored) {
     "$r"
+  }
+  if (-not $restoreResult.Success) {
+    Fail "RESTORE FAILED: $($restoreResult.Reason)" 2
   }
 } else {
   "refs healthy ($($refsHealth.Reason)); nothing restored"

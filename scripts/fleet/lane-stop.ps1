@@ -318,21 +318,48 @@ if ($laneCwd -and (Test-Path -LiteralPath $laneCwd)) {
   try {
     $guardOut = & (Join-Path $PSScriptRoot 'git-config-guard.ps1') -RepoPath $laneCwd -VerifyOrRestore 2>&1
     $guardExit = $LASTEXITCODE
-    if ($guardExit -eq 0) {
-      $restoredConfigLine = @($guardOut | Where-Object { "$_" -match 'RESTORED config=' })
-      $gitConfigVerdict = if ($restoredConfigLine.Count -gt 0) { "$($restoredConfigLine[0])" } else { 'healthy' }
+    $restoredConfigLine = @($guardOut | Where-Object { "$_" -match 'RESTORED config=' })
+    $healthyConfigLine = @($guardOut | Where-Object { "$_" -match 'config=.*healthy' })
+    $restoredRefLine = @($guardOut | Where-Object { "$_" -match 'RESTORED ref=' })
+    $healthyRefLine = @($guardOut | Where-Object { "$_" -match '^refs healthy' -or "$_" -match '^refs=healthy' })
 
-      $restoredRefLine = @($guardOut | Where-Object { "$_" -match 'RESTORED ref=' })
+    if ($guardExit -eq 0) {
+      $gitConfigVerdict = if ($restoredConfigLine.Count -gt 0) { "$($restoredConfigLine[0])" } else { 'healthy' }
       $gitRefsVerdict = if ($restoredRefLine.Count -gt 0) { "$($restoredRefLine[0])" } else { 'healthy' }
     } else {
-      $gitConfigBroken = $true
-      $gitRefsBroken = $true
-      $gitConfigVerdict = if ($guardExit -eq 4) {
-        'UNVERIFIED (git-config-guard could not read the config; nothing was changed)'
+      # Guard exited non-zero. Accurately report what was actually measured (GH-797, P1-1).
+      if ($restoredConfigLine.Count -gt 0) {
+        $gitConfigVerdict = "$($restoredConfigLine[0])"
+        $gitConfigBroken = $false
+      } elseif ($healthyConfigLine.Count -gt 0) {
+        $gitConfigVerdict = 'healthy'
+        $gitConfigBroken = $false
       } else {
-        "UNREPAIRABLE (git-config-guard exit $guardExit)"
+        $gitConfigBroken = $true
+        $gitConfigVerdict = if ($guardExit -eq 4) {
+          'UNVERIFIED (git-config-guard could not read the config; nothing was changed)'
+        } else {
+          "UNREPAIRABLE (git-config-guard exit $guardExit)"
+        }
       }
-      $gitRefsVerdict = "UNREPAIRABLE (git-config-guard exit $guardExit)"
+
+      if ($gitConfigBroken) {
+        # Config failed or was unreadable, so refs verification was not reached.
+        $gitRefsBroken = $true
+        $gitRefsVerdict = if ($guardExit -eq 4) {
+          'UNVERIFIED (config unreadable; refs not checked)'
+        } else {
+          'UNVERIFIED (config failed; refs not checked)'
+        }
+      } else {
+        # Config is confirmed healthy/restored; the failure was specifically in refs!
+        $gitRefsBroken = $true
+        $gitRefsVerdict = if ($restoredRefLine.Count -gt 0) {
+          "$($restoredRefLine[0]); UNREPAIRABLE (git-config-guard exit $guardExit)"
+        } else {
+          "UNREPAIRABLE (git-config-guard exit $guardExit)"
+        }
+      }
     }
     $guardOut | ForEach-Object { [Console]::Error.WriteLine("lane-stop: git-config-guard: $_") }
   } catch {

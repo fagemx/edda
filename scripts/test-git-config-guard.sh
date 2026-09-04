@@ -277,7 +277,7 @@ rm -rf "$repo_ref2/.git/logs"
 if guard -RepoPath "$repo_ref2" -RestoreRefs >"$tmp/out14" 2>&1; then
   fail "-RestoreRefs exited 0 when no reflog was available"
 fi
-grep -q 'RESTORE FAILED' "$tmp/out14" ||
+grep -q -E 'cannot repair refs automatically|RESTORE FAILED' "$tmp/out14" ||
   fail "-RestoreRefs did not report failure when reflog was missing: $(cat "$tmp/out14")"
 ok "-RestoreRefs fails loudly when no reflog is available"
 
@@ -391,6 +391,8 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
     fail "lane-stop terminated nothing, so the kill path was never exercised: $(cat "$tmp/out9")"
   grep -q 'gitconfig=RESTORED' "$tmp/out9" ||
     fail "lane-stop did not report a restore: $(cat "$tmp/out9")"
+  grep -q 'gitrefs=healthy' "$tmp/out9" ||
+    fail "lane-stop did not report healthy refs when only config was corrupt: $(cat "$tmp/out9")"
   git -C "$repo6" status >/dev/null 2>&1 ||
     fail "git still broken after lane-stop: $(cat "$tmp/out9")"
   cmp -s "$tmp/e2e-good" "$repo6/.git/config" || fail "lane-stop restored the wrong bytes"
@@ -417,6 +419,8 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
     fail "lane-stop terminated nothing in case 12: $(cat "$tmp/out10")"
   grep -q 'gitconfig=UNREPAIRABLE' "$tmp/out10" ||
     fail "lane-stop did not report the config as unrepairable: $(cat "$tmp/out10")"
+  grep -q 'gitrefs=UNVERIFIED' "$tmp/out10" ||
+    fail "lane-stop did not report refs as UNVERIFIED when config failed: $(cat "$tmp/out10")"
   grep -q '=== EXIT' "$logdir/$lane2.log" 2>/dev/null ||
     fail "lane-stop lost the end record on the unrepairable path: $(cat "$tmp/out10")"
   ok "lane-stop exits 1 when the config is corrupt and no backup can repair it"
@@ -439,6 +443,8 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
   [ "$stop_status3" -eq 0 ] || fail "lane-stop exited $stop_status3: $(cat "$tmp/out13")"
   grep -q 'gitconfig=RESTORED' "$tmp/out13" ||
     fail "a review-shaped wrapper skipped the config check: $(cat "$tmp/out13")"
+  grep -q 'gitrefs=healthy' "$tmp/out13" ||
+    fail "a review-shaped wrapper skipped the refs check: $(cat "$tmp/out13")"
   cmp -s "$tmp/e2e-review-good" "$repo10/.git/config" ||
     fail "the review lane's shared config was not repaired"
   ok "lane-stop resolves the cwd of review lanes too, not only lane-launch ones"
@@ -468,6 +474,8 @@ if [ "${GIT_CONFIG_GUARD_E2E:-}" = 1 ]; then
     fail "lane-stop should exit 1 when it cannot verify the config, got: $(cat "$tmp/out14")"
   grep -q '\.git/config UNVERIFIED' "$logdir/$lane4.log" 2>/dev/null ||
     fail "an unreadable config must not be reported as UNREPAIRABLE: $(cat "$logdir/$lane4.log" 2>/dev/null)"
+  grep -q 'refs UNVERIFIED' "$logdir/$lane4.log" 2>/dev/null ||
+    fail "an unreadable config did not report refs as UNVERIFIED: $(cat "$logdir/$lane4.log" 2>/dev/null)"
   grep -q '=== EXIT' "$logdir/$lane4.log" 2>/dev/null ||
     fail "an unreadable config cost the lane its === EXIT === record (GH-672): $(cat "$tmp/out14")"
   [ -f "$logdir/$lane4.done" ] ||
