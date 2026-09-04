@@ -326,6 +326,27 @@ expect_accept "accept: same write line with '// swallow-ok: cleanup only' passes
     git commit -m "feat(test): swallowed hook write justified"
 git reset -q --hard "$prev"
 
+# --- GH-745: swallowed write_phase_state on an added line is rejected --------
+# Adding 'let _ = write_phase_state(pid, &state);' without swallow-ok must be
+# rejected by the ratchet, and accepted with '// swallow-ok: ...'.
+prev=$(git rev-parse HEAD)
+: > "$stub_log"
+printf '\nfn gh745_swallow() {
+    let _ = write_phase_state(pid, &state);
+}
+' >> crates/hooktest/src/main.rs
+git add crates/hooktest/src/main.rs
+expect_reject "reject: added 'let _ = write_phase_state(...);' without swallow-ok (GH-745)" \
+    "let _ = write_phase_state" \
+    env PATH="$stub_dir:$PATH" CARGO_STUB_LOG="$stub_log" \
+    git commit -m "feat(test): swallowed write_phase_state"
+sed -i 's|let _ = write_phase_state(pid, &state);|let _ = write_phase_state(pid, &state); // swallow-ok: test justification|' crates/hooktest/src/main.rs
+git add crates/hooktest/src/main.rs
+expect_accept "accept: same write line with '// swallow-ok: ...' passes (GH-745)" \
+    env PATH="$stub_dir:$PATH" CARGO_STUB_LOG="$stub_log" \
+    git commit -m "feat(test): swallowed write_phase_state justified"
+git reset -q --hard "$prev"
+
 # --- GH-692 round 1: a hunk with deletions must report the true new-file line
 # Deletion ('-') lines do not exist in the new file: they must not advance the
 # line counter (previously each deletion inflated the reported line number).

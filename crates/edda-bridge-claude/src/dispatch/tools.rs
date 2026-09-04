@@ -445,39 +445,62 @@ pub(super) fn try_update_agent_phase(
         crate::agent_phase::detect_transition(&current, previous.as_ref(), &config)
     {
         // Write updated phase state
-        let _ = crate::agent_phase::write_phase_state(project_id, &transition.state);
+        if let Err(e) = crate::agent_phase::write_phase_state(project_id, &transition.state) {
+            crate::state::record_dropped_write(
+                project_id,
+                session_id,
+                "agent phase state",
+                &format!("{e:#}"),
+            );
+        }
 
         // Emit ledger event (best-effort, try-lock)
-        try_write_phase_change_event(raw, &transition);
+        if let Err(e) = try_write_phase_change_event(raw, &transition) {
+            crate::state::record_dropped_write(
+                project_id,
+                session_id,
+                "ledger event (agent-phase-change)",
+                &format!("{e:#}"),
+            );
+        }
     } else {
         // Always persist latest state (updates detected_at for staleness tracking)
-        let _ = crate::agent_phase::write_phase_state(project_id, &current);
+        if let Err(e) = crate::agent_phase::write_phase_state(project_id, &current) {
+            crate::state::record_dropped_write(
+                project_id,
+                session_id,
+                "agent phase state",
+                &format!("{e:#}"),
+            );
+        }
     }
 }
 
-/// Write an agent_phase_change event to the workspace ledger (best-effort).
-fn try_write_phase_change_event(
+/// Write an agent_phase_change event to the workspace ledger (best-effort, try-lock).
+///
+/// GH-745: failed ledger open or append propagates as an error instead of being
+/// silently swallowed — only a missing workspace and a contended lock are
+/// legitimate silent skips.
+pub(super) fn try_write_phase_change_event(
     raw: &serde_json::Value,
     transition: &edda_core::agent_phase::AgentPhaseTransition,
-) {
+) -> anyhow::Result<()> {
     let cwd = get_str(raw, "cwd");
     if cwd.is_empty() {
-        return;
+        return Ok(());
     }
     let Some(root) = edda_ledger::EddaPaths::find_root(Path::new(&cwd)) else {
-        return;
+        return Ok(());
     };
-    let Ok(ledger) = edda_ledger::Ledger::open(&root) else {
-        return;
-    };
+    let ledger = edda_ledger::Ledger::open(&root)?;
     let Ok(_lock) = edda_ledger::WorkspaceLock::acquire(&ledger.paths) else {
-        return; // locked by another process — skip
+        return Ok(()); // locked by another process — skip
     };
     let Ok(branch) = ledger.head_branch() else {
-        return;
+        return Ok(());
     };
     let Ok(parent_hash) = ledger.last_event_hash() else {
-        return;
+        return Ok(());
     };
     let params = edda_core::event::AgentPhaseChangeParams {
         branch: &branch,
@@ -491,7 +514,7 @@ fn try_write_phase_change_event(
         signals: &transition.state.signals,
     };
     if let Ok(event) = edda_core::event::new_agent_phase_change_event(&params) {
-        let _ = ledger.append_event(&event);
+        ledger.append_event(&event)?;
     }
 
     // Push notification (best-effort)
@@ -507,6 +530,7 @@ fn try_write_phase_change_event(
             },
         );
     }
+    Ok(())
 }
 
 /// Read active task names from state file for phase detection heuristics.
