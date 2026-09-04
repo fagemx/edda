@@ -99,6 +99,7 @@ EOF
 cat >"$STUBBIN/review-pr-stub" <<'EOF'
 #!/bin/sh
 echo "REVIEW_LAUNCH $*" >>"$REVIEW_STUB_LOG"
+echo "review_round=${REVIEW_STUB_ROUND:-$2}"
 exit 0
 EOF
 chmod +x "$STUBBIN/gh" "$STUBBIN/pi" "$STUBBIN/edda" "$STUBBIN/claude" "$STUBBIN/review-pr-stub"
@@ -602,6 +603,16 @@ grep -qF 'mode unknown — no SESSION_MODE receipt in .done' "$cfile" || {
     exit 1
 }
 unset GH_HEAD
+
+# The launcher can reserve a higher shared round than this watcher's local state.
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'DISPATCH_EXIT=1\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'backend failed\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
+export REVIEW_STUB_ROUND=8
+run_watch_once >/dev/null 2>&1
+[ "$(pending_get | cut -f2)" = 8 ] || { echo 'retry ignored shared round receipt' >&2; exit 1; }
+unset REVIEW_STUB_ROUND
 
 # --- offline guarantee: the real watcher log was never touched -----------------
 size_after=0

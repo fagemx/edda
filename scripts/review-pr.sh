@@ -210,6 +210,22 @@ SURFACE=$(printf '%s\n' "$FILES" | paste -sd, - | sed 's/,$//')
 # so a PR cannot rewrite the rules it will be judged by. EDDA_REVIEW_SPEC is an
 # explicit file override (offline tests, a spec under development).
 mkdir -p "$SCRATCH"
+# All controller scratch directories share this PR's reservation. Reserve
+# before writing round artifacts or checking out the resumable review worktree.
+REVIEW_RESERVED=0
+REVIEW_MAY_BE_RUNNING=0
+release_unlaunched_review() {
+  if [ "$REVIEW_RESERVED" = 1 ] && [ "$REVIEW_MAY_BE_RUNNING" = 0 ]; then
+    sh "$SELF_DIR/review-round.sh" release "$PR" "$SHA" "$ROUND" ||
+      echo "review-pr.sh: could not release unlaunched reservation" >&2
+  fi
+}
+trap release_unlaunched_review 0
+trap 'exit 1' HUP INT TERM
+if [ "$DRY" = 0 ]; then
+  ROUND=$(sh "$SELF_DIR/review-round.sh" reserve "$PR" "$SHA" "$ROUND" "$SCRATCH") || exit 1
+  REVIEW_RESERVED=1
+fi
 SPEC="$SCRATCH/review-pr$PR-r$ROUND-spec.md"
 if [ -n "$SPEC_OVERRIDE" ]; then
   if [ ! -f "$SPEC_OVERRIDE" ]; then
@@ -710,6 +726,7 @@ for (\$i = 0; \$i -lt 20; \$i++) {
 "task=$TASK state=\$st lastTaskResult=\$(\$info.LastTaskResult)"
 PS
 
+  REVIEW_MAY_BE_RUNNING=1
   out=$(pwsh -NoProfile -ExecutionPolicy Bypass -File "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" 2>&1); rc=$?
   echo "$out"
   [ $rc -eq 0 ] || exit 1
@@ -735,6 +752,7 @@ PS
 fi
 
 if [ "$IS_WIN" = "0" ]; then
+  REVIEW_MAY_BE_RUNNING=1
   nohup "$RUNNER" >/dev/null 2>&1 &
   pid=$!
   sleep 1
@@ -749,3 +767,4 @@ fi
 echo "log=$LOG"
 echo "done=$DONE"
 echo "session=$SID"
+echo "review_round=$ROUND"

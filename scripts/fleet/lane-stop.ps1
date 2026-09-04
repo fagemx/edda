@@ -27,7 +27,18 @@
 #      and the damage is repaired here instead, and
 #   7. writes the end record the killed wrapper can no longer write: the
 #      done-file (sentinel "stopped") and a === EXIT === line in the lane log,
-#      so a lane log with START but no EXIT is never left ambiguous (GH-672).
+#      so a lane log with START but no EXIT is never left ambiguous (GH-672),
+#      and
+#   8. AFTER that verification — never before — unregisters the scheduled
+#      task (GH-772): a stopped lane must not leave a Ready registration
+#      behind that can re-fire stale work. The unregister runs only once the
+#      task is confirmed not Running and no lane process survived, so it can
+#      never terminate a working lane; it removes the registration only and
+#      never touches wrapper, logs, done-files, worktrees or sources. A
+#      registration that vanished between check and unregister (a concurrent
+#      stop) is reported as already-absent, not an error; any other failure
+#      is visible in the output, the end record and a nonzero exit (the
+#      reaper, scripts/fleet/lane-reap.ps1, can still collect it).
 #
 # usage:
 #   pwsh -NoProfile -File scripts/fleet/lane-stop.ps1 -Name <lane> [-LogDir <dir>]
@@ -35,11 +46,11 @@
 # Prints what was terminated, one line each, plus the .git/config verdict.
 # Exit codes (style of lane-status.ps1): 0 = stopped (N processes terminated,
 # or the lane was not running); 1 = error: no matching task, wrapper missing,
-# processes survived the kill, or the lane's .git/config was not confirmed
-# healthy — either corrupt and unrepairable, or impossible to judge (the
-# gitconfig= line says which). The end record (step 7) is written before any
-# of those .git/config failures is reported, so a stop never costs the log its
-# EXIT line (GH-672).
+# processes survived the kill, the task could not be unregistered, or the
+# lane's .git/config was not confirmed healthy — either corrupt and
+# unrepairable, or impossible to judge (the gitconfig= line says which). The
+# end record (step 7) is written before any of those failures is reported, so
+# a stop never costs the log its EXIT line (GH-672).
 # Matches tasks registered across the fleet (edda-lane-*, edda-review-pr*-r*, GH-712).
 param(
   [Parameter(Mandatory = $true)][string]$Name,
@@ -297,6 +308,29 @@ if ($residual.Count -gt 0) {
 $task = Get-ScheduledTask -TaskName $TaskName
 if ($task.State -eq 'Running') { Fail "task $TaskName still reports State = Running after the stop" }
 
+# --- 5b. unregister the registration now that stopping is verified (GH-772) --
+# Reached only when the task is not Running and no lane process survived, so
+# the unregister can never terminate working code. Registration only: wrapper,
+# logs, done-files, worktrees and sources are untouched. An unregister error
+# must be visible but must not cost the lane its end record, so it is carried
+# as a verdict and reported (and failed) after step 7.
+$unregisterVerdict = 'skipped'
+$unregisterFailed = $false
+try {
+  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+  $unregisterVerdict = 'unregistered'
+} catch {
+  # A concurrent stop may have removed the registration between the state
+  # check above and this call; that is success, not a failure.
+  if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+    $unregisterVerdict = 'already-absent (unregistered concurrently)'
+  } else {
+    $unregisterVerdict = "FAILED ($($_.Exception.Message))"
+    $unregisterFailed = $true
+    [Console]::Error.WriteLine("lane-stop: could not unregister $TaskName (GH-772): $($_.Exception.Message)")
+  }
+}
+
 # --- 6. the shared .git/config and refs must still be healthy after the kill (GH-715, GH-797) -----
 # The lane's worktree shares one .git/config and refs with the main checkout and every
 # other worktree; a kill landing on git's write to it NULs the files and takes
@@ -373,7 +407,7 @@ if ($laneCwd -and (Test-Path -LiteralPath $laneCwd)) {
 # --- 7. write the end record the killed wrapper cannot write ----------------
 
 if ($terminated.Count -gt 0 -or ((Test-Path -LiteralPath $Log) -and -not (Test-Path -LiteralPath $Done))) {
-  Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1; terminated $($terminated.Count) process(es); .git/config $gitConfigVerdict; refs $gitRefsVerdict) ===" -Encoding utf8
+  Add-Content -LiteralPath $Log -Value "=== EXIT (stopped by lane-stop.ps1; terminated $($terminated.Count) process(es); registration $unregisterVerdict; .git/config $gitConfigVerdict; refs $gitRefsVerdict) ===" -Encoding utf8
   if (-not (Test-Path -LiteralPath $Done)) {
     Set-Content -LiteralPath $Done -Value 'stopped' -Encoding ascii
   }
@@ -390,7 +424,11 @@ if ($terminated.Count -gt 0) {
 "residual=$($residual.Count) (CommandLine match + process tree verification)"
 "gitconfig=$gitConfigVerdict"
 "gitrefs=$gitRefsVerdict"
+"unregister=$unregisterVerdict"
 if ($gitConfigBroken -or $gitRefsBroken) {
   Fail "the shared git metadata for '$laneCwd' was not confirmed healthy after the kill (config: $gitConfigVerdict; refs: $gitRefsVerdict); every worktree sharing it depends on those files, so check it before starting anything else (GH-715, GH-797)"
+}
+if ($unregisterFailed) {
+  Fail "the scheduled task $TaskName could not be unregistered after the verified stop ($unregisterVerdict); a Ready registration that can re-fire stale work is exactly the GH-772 hazard — disable it by hand or let scripts/fleet/lane-reap.ps1 collect it, and check the Task Scheduler service state"
 }
 exit 0

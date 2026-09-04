@@ -513,11 +513,18 @@ settle_pending() {
               continue
             fi
             log "pr$pr r$round provider probe OK — retrying once via edda dispatch (same model, fleet.review-provider-overload)"
-            if "$REVIEW_PR" "$pr" "$round" "$sha" --sha "$sha" >> "$WATCHLOG" 2>&1; then
-              log "pr$pr r$round dispatch retry launched"
-              pending_update "$pr" "$round" "$sha" 1 "$(date +%s)" "$postfails"
+            retry_out=$("$REVIEW_PR" "$pr" "$round" "$sha" --sha "$sha" 2>&1); retry_rc=$?
+            printf '%s\n' "$retry_out" >> "$WATCHLOG"
+            if [ "$retry_rc" = 0 ]; then
+              actual_round=$(printf '%s\n' "$retry_out" | sed -n 's/^review_round=\([1-9][0-9]*\)$/\1/p' | tail -1)
+              if [ -z "$actual_round" ]; then
+                log "pr$pr retry returned no shared round receipt; keeping pending ownership"
+                continue
+              fi
+              log "pr$pr r$actual_round dispatch retry launched"
+              pending_update "$pr" "$actual_round" "$sha" 1 "$(date +%s)" "$postfails"
             else
-              rc=$?
+              rc=$retry_rc
               if [ "$rc" = "3" ]; then
                 log "pr$pr head moved before dispatch retry; dropping pending entry (rescan will re-review)"
               else
@@ -576,6 +583,12 @@ scan_open_prs() {
     out=$("$REVIEW_PR" "$pr" "$newround" "$prev" --sha "$sha" 2>&1); rc=$?
     [ -n "$out" ] && printf '%s\n' "$out" >> "$WATCHLOG"
     if [ "$rc" -eq 0 ]; then
+      actual_round=$(printf '%s\n' "$out" | sed -n 's/^review_round=\([1-9][0-9]*\)$/\1/p' | tail -1)
+      if [ -z "$actual_round" ]; then
+        log "pr$pr launcher returned no shared round receipt; refusing to guess artifact paths"
+        continue
+      fi
+      newround=$actual_round
       fail_clear "$pr"
       log "pr$pr r$newround launched and confirmed running (task edda-review-pr$pr-r$newround)"
       pending_update "$pr" "$newround" "$sha" 0 "$(date +%s)" 0
