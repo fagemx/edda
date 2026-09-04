@@ -30,10 +30,11 @@ This workspace compiles only into a named build lane — **never create an ad-ho
 - **If `$env:CARGO_TARGET_DIR` is unset, refuse to compile**: do not create a target
   directory and do not set one yourself — report that no build lane is set, and stop
   (post a `pending` comment per Step 7 if that blocks the plan).
+- The lane root is `$env:FLEET_LANE_ROOT` if that environment variable is set,
+  otherwise `$env:LOCALAPPDATA\fleet-workstation\lanes`.
 - If it is set to a path outside the allowed lanes (`worker-1`, `worker-2`,
-  `verifier`, `verifier-2` under the lane root
-  `$env:LOCALAPPDATA\fleet-workstation\lanes`), report it — do not silently "fix"
-  the path.
+  `verifier`, `verifier-2` under that lane root), report it — do not silently "fix"
+  the path. A valid assigned lane under `$env:FLEET_LANE_ROOT` must not be refused.
 
 ## Workflow
 
