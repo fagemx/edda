@@ -23,7 +23,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.3`
+- Spec version: `review-spec-v1.4`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -337,7 +337,17 @@ A docs-only head legitimately shows `Clippy`/`Test` as `skipping` while
 `CI Gate` passes (`ci.path-filter`). That is a correct run, not a broken one.
 
 
-Before claiming `RAN on this workstation`, confirm `edda --version` in the reviewed worktree prints the exact checked-out build identity (commit + date), or `unknown` when git metadata is unavailable.
+Before any CLI probe, record both the installed runtime (`edda --version`) and
+the workspace version at the reviewed base SHA:
+
+```sh
+edda --version
+git show "$BASE:Cargo.toml" | sed -n '/^\[workspace.package\]/,/^\[/p' | grep '^version'
+```
+
+They identify the subject of a later measurement: the first is an installed
+runtime claim and the second is a source claim. A mismatch is not a P0 by
+itself; route each claim through D1, including its required source fallback.
 
 **U7 — the round is complete before it is posted. P1.** Finish the whole scoped
 audit and batch every blocking P0/P1 before `Changes Requested`. A blocker
@@ -348,10 +358,22 @@ non-product cycles without useful progress and route the finding instead
 
 ### 5.1 docs
 
-**D1 — every command named must exist. P1.** Zero discretion (`brief-v1` §1):
-for every backticked CLI invocation the diff adds, probe it and report the exit
-code. You may not conclude anything about a command you did not probe, and "the
-document says it does X" is not a measurement.
+**D1 — claims name their measured subject. P1.** Zero discretion (`brief-v1`
+§1): classify every added factual command claim before measuring it.
+
+| Claim shape | Required subject and check |
+|---|---|
+| A user running a backticked command gets a result | The installed runtime. Probe the command and report its exit code. |
+| The repository or source at SHA `S` has a stated shape, with a repo-relative `path:line` citation | The source at `S`. Read it with `git show "$S:$path"` and report the cited lines. If the claim names no SHA, `S` is the reviewed head SHA. |
+
+A source claim may name a command as data; do not turn that citation into an
+installed-binary claim. Conversely, a runtime claim may not pass because a
+source file has a similar flag. The installed/runtime version mismatch recorded
+before the probes is never a P0 alone. It requires the source check for every
+source claim, and only that check can establish whether the citation is false.
+You may not conclude anything about a runtime command you did not probe or a
+source citation you did not read; "the document says it does X" is not a
+measurement.
 
 **Probe `git` with `-h`, never with `--help`.** On Windows `git <verb> --help`
 does not print to the terminal: it renders the HTML manual and opens it in the
@@ -370,6 +392,10 @@ names the command either names the issue that will implement it, or already
 states that non-zero exit itself** — a documented future verb and a cited
 failure are both allowed; an undocumented one is the `c3-nonexistent-flag`
 failure.
+
+For a source claim, use the cited line range after `git show`; a missing path,
+missing line, or absent stated shape is the P1. Do not use a failed installed
+probe as that finding. This is mechanical routing, not reviewer discretion.
 
 ```sh
 git diff "origin/$BASE..$SHA" | grep '^+' \
@@ -447,8 +473,8 @@ git diff "origin/$BASE..$SHA" -- '*SKILL.md' '.claude/**' 'skills/**' | grep '^+
   | grep -nEi 'merge|--delete-branch|self-review|skip (the )?review'
 ```
 
-**S2 — the skill's factual claims resolve.** Same measurement as D1 and D3,
-applied to every command and every `file:line` reference the skill asserts. P1
+**S2 — the skill's factual claims resolve.** Apply D1's claim routing and D3
+to every command and every `file:line` reference the skill asserts. P1
 per hit.
 
 **S3 — one source of truth. P1.** A skill that restates a rule owned by this
@@ -706,7 +732,7 @@ mechanical.
 | U5 | RAN | exit 0 on this worktree |
 | U6 | RAN | `gh pr checks 664` — `CI Gate pass`, clippy/test `skipping` |
 | U7 | canonical | `loop` items 1–2 and 6; procedural, no command |
-| D1 | RAN | `edda wave --help` → exit 2 (the #616 P1); `edda ask --help` → exit 0; run against this spec's own diff it caught `edda review --help` → exit 2, which is why the rule carries the documented-future-verb clause. The `git` arm was re-probed after #691: `git diff -h`, `git branch -h`, `git log -h` → exit 129 each, usage printed to the terminal, no browser window |
+| D1 | RAN | Runtime probes: `edda wave --help` → exit 2 (the #616 P1); `edda ask --help` → exit 0; this spec's own diff caught `edda review --help` → exit 2, so documented future verbs remain allowed. Source fallback: GH-693's preserved official 0.3 artifact cannot run `dispatch`, while `git show f9496030:crates/edda-cli/src/cmd_dispatch.rs` shows the cited flags; see `docs/evidence/gh693/`. The `git` arm was re-probed after #691: `git diff -h`, `git branch -h`, `git log -h` → exit 129 each, usage printed to the terminal, no browser window |
 | D2 | RAN | `edda ask fleet.review-engine`; and the scoping clause was measured — every decision this file cites resolves from the checkout, while the same `edda ask review.brief-source` from outside it prints `No results found.` |
 | D3 | RAN | 7 paths on a real docs range, 0 false positives after the trailing-argument strip |
 | D4 | RAN | 2 candidates on a real docs range, both carrying the authority caveat |
@@ -750,6 +776,9 @@ mechanical.
   `edda dispatch` ran. The fallback arm is pinned to the recorded
   `fleet.review-engine-model` read-only shape (§0 above) and the verdict
   header prints the `TRANSPORT=` receipt of the arm that actually ran.
+- `review-spec-v1.4` (2026-09-04, issue #693): D1 separates runtime claims
+  from SHA-pinned source claims. An installed-binary mismatch triggers the
+  source check; it cannot alone turn a correct source citation into a P0.
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
