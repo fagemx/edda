@@ -19,8 +19,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn execute(repo_root: &Path, out_dir: &Path, include_notes: bool) -> Result<()> {
+pub fn execute(
+    repo_root: &Path,
+    out_dir: &Path,
+    include_notes: bool,
+    machine: Option<&str>,
+) -> Result<()> {
     let ledger = Ledger::open(repo_root)?;
+    let ratifications = ledger.ratified_decisions_map()?;
 
     fs::create_dir_all(out_dir).with_context(|| format!("create out_dir {out_dir:?}"))?;
     let decisions_dir = out_dir.join("decisions");
@@ -33,7 +39,7 @@ pub fn execute(repo_root: &Path, out_dir: &Path, include_notes: bool) -> Result<
     for (domain, mut rows) in by_domain {
         rows.sort_by(|a, b| a.key.cmp(&b.key));
         let path = decisions_dir.join(format!("{domain}.md"));
-        let body = render_domain(&domain, &rows);
+        let body = render_domain(&domain, &rows, &ratifications);
         write_if_changed(&path, &body)?;
         domain_stats.push((domain, rows.len(), path));
     }
@@ -48,13 +54,23 @@ pub fn execute(repo_root: &Path, out_dir: &Path, include_notes: bool) -> Result<
         None
     };
 
-    let index_body = render_index(&domain_stats, notes_line.as_ref(), out_dir);
+    let total_decisions: usize = domain_stats.iter().map(|(_, n, _)| n).sum();
+    let export_ts = now_rfc3339();
+    let resolved_machine = resolve_machine(machine);
+    let index_body = render_index(
+        &domain_stats,
+        notes_line.as_ref(),
+        out_dir,
+        &export_ts,
+        &resolved_machine,
+        total_decisions,
+    );
     write_if_changed(&out_dir.join("INDEX.md"), &index_body)?;
 
     println!(
         "wrote {} decision files ({} total) + INDEX.md{} at {}",
         domain_stats.len(),
-        domain_stats.iter().map(|(_, n, _)| n).sum::<usize>(),
+        total_decisions,
         if notes_line.is_some() {
             " + notes.md"
         } else {
@@ -83,7 +99,11 @@ fn group_by_domain(
 const HEADER: &str =
     "<!-- edda-ledger-export v1 — GENERATED FILE, DO NOT EDIT — SQLite ledger is authoritative -->";
 
-fn render_domain(domain: &str, rows: &[edda_ledger::DecisionView]) -> String {
+fn render_domain(
+    domain: &str,
+    rows: &[edda_ledger::DecisionView],
+    ratifications: &std::collections::BTreeMap<String, edda_ledger::RatificationInfo>,
+) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str(HEADER);
     out.push('\n');
@@ -103,6 +123,22 @@ fn render_domain(domain: &str, rows: &[edda_ledger::DecisionView]) -> String {
         out.push_str(&format!("- **Value**: `{}`\n", safe_value));
         out.push_str(&format!("- **Reason**: {}\n", safe_reason));
         out.push_str(&format!("- **Branch/ts**: `{}` · {}\n", row.branch, ts));
+        if let Some(info) = ratifications.get(&row.event_id) {
+            out.push_str(&format!(
+                "- **Governance**: ratified by {} at {}\n",
+                info.ratified_by, info.ts
+            ));
+        } else {
+            let auth = if row.authority.is_empty() {
+                "agent"
+            } else {
+                row.authority.as_str()
+            };
+            out.push_str(&format!(
+                "- **Governance**: unratified ({})\n",
+                auth.to_lowercase()
+            ));
+        }
         if !row.affected_paths.is_empty() {
             out.push_str(&format!(
                 "- **Affected paths**: {}\n",
@@ -156,11 +192,17 @@ fn render_index(
     domain_stats: &[(String, usize, PathBuf)],
     notes: Option<&(usize, PathBuf)>,
     out_root: &Path,
+    export_ts: &str,
+    machine: &str,
+    total_decisions: usize,
 ) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str(HEADER);
     out.push('\n');
     out.push_str("# Ledger export index\n\n");
+    out.push_str(&format!("- **Exported at**: {}\n", export_ts));
+    out.push_str(&format!("- **Exporting machine**: {}\n", machine));
+    out.push_str(&format!("- **Total decisions**: {}\n\n", total_decisions));
     out.push_str("SQLite ledger is the single source of truth. These files exist so ");
     out.push_str("humans can `git diff` a snapshot of decisions and notes.\n\n");
     out.push_str("## Decisions by domain\n\n");
@@ -187,6 +229,40 @@ fn render_index(
         ));
     }
     out
+}
+
+fn resolve_machine(explicit: Option<&str>) -> String {
+    if let Some(m) = explicit {
+        let trimmed = m.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(m) = std::env::var("EDDA_MACHINE") {
+        let trimmed = m.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(m) = std::env::var("COMPUTERNAME") {
+        let trimmed = m.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Ok(m) = std::env::var("HOSTNAME") {
+        let trimmed = m.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
 }
 
 /// Write only when content differs — keeps mtime / git status quiet on no-op re-exports.
@@ -242,20 +318,21 @@ mod tests {
     #[test]
     fn render_domain_names_all_columns_including_affected_paths() {
         let rows = vec![dec("db.engine", "sqlite", "db", vec!["src/db.rs"])];
-        let md = render_domain("db", &rows);
+        let md = render_domain("db", &rows, &std::collections::BTreeMap::new());
         assert!(md.contains("GENERATED FILE"));
         assert!(md.contains("# Domain: `db`"));
         assert!(md.contains("`db.engine`"));
         assert!(md.contains("`sqlite`"));
         assert!(md.contains("`src/db.rs`"));
         assert!(md.contains("`evt_db_engine`"));
+        assert!(md.contains("- **Governance**: unratified (human)"));
     }
 
     #[test]
     fn render_domain_scrubs_secrets_in_reason() {
         let mut row = dec("test.key", "val", "test", vec![]);
         row.reason = "temp token sk-abcdefghijklmnopqrstuvwxyz012345".into();
-        let md = render_domain("test", &[row]);
+        let md = render_domain("test", &[row], &std::collections::BTreeMap::new());
         assert!(
             md.contains("[REDACTED:openai_api_key]"),
             "export must not leak old secrets: {md}"
@@ -269,24 +346,48 @@ mod tests {
             ("a".to_string(), 2, PathBuf::from("/root/decisions/a.md")),
             ("b".to_string(), 5, PathBuf::from("/root/decisions/b.md")),
         ];
-        let md = render_index(&stats, None, Path::new("/root"));
+        let md = render_index(
+            &stats,
+            None,
+            Path::new("/root"),
+            "2026-09-04T00:00:00Z",
+            "test-host",
+            7,
+        );
         assert!(md.contains("`a`"));
         assert!(md.contains("2 decision"));
         assert!(md.contains("`b`"));
         assert!(md.contains("5 decision"));
+        assert!(md.contains("- **Exported at**: 2026-09-04T00:00:00Z"));
+        assert!(md.contains("- **Exporting machine**: test-host"));
+        assert!(md.contains("- **Total decisions**: 7"));
     }
 
     #[test]
     fn render_index_notes_line_when_present() {
         let notes = Some((7usize, PathBuf::from("/root/notes.md")));
-        let md = render_index(&[], notes.as_ref(), Path::new("/root"));
+        let md = render_index(
+            &[],
+            notes.as_ref(),
+            Path::new("/root"),
+            "2026-09-04T00:00:00Z",
+            "test-host",
+            0,
+        );
         assert!(md.contains("7 note event"));
         assert!(md.contains("notes.md"));
     }
 
     #[test]
     fn render_index_no_notes_line_when_absent() {
-        let md = render_index(&[], None, Path::new("/root"));
+        let md = render_index(
+            &[],
+            None,
+            Path::new("/root"),
+            "2026-09-04T00:00:00Z",
+            "test-host",
+            0,
+        );
         assert!(!md.contains("notes.md"));
     }
 
@@ -323,6 +424,93 @@ mod tests {
         a.sort_by(|x, y| x.key.cmp(&y.key));
         let mut b = rows;
         b.sort_by(|x, y| x.key.cmp(&y.key));
-        assert_eq!(render_domain("mix", &a), render_domain("mix", &b));
+        assert_eq!(
+            render_domain("mix", &a, &std::collections::BTreeMap::new()),
+            render_domain("mix", &b, &std::collections::BTreeMap::new())
+        );
+    }
+
+    #[test]
+    fn export_distinguishes_ratified_from_unratified_and_stamps_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_root = dir.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        let ledger = Ledger::open_or_init(&repo_root).unwrap();
+
+        // 1. Unratified decision
+        let dp_unrat = edda_core::types::DecisionPayload {
+            key: "auth.session_ttl".to_string(),
+            value: "3600".to_string(),
+            reason: Some("working proposal".to_string()),
+            scope: None,
+            authority: Some("agent".to_string()),
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: None,
+        };
+        let p1 = ledger.last_event_hash().unwrap();
+        let ev1 = edda_core::event::new_decision_event("main", p1.as_deref(), "system", &dp_unrat)
+            .unwrap();
+        ledger.append_event(&ev1).unwrap();
+
+        // 2. Ratified decision
+        let dp_rat = edda_core::types::DecisionPayload {
+            key: "auth.method".to_string(),
+            value: "oauth".to_string(),
+            reason: Some("Proposal - operator ratifies.".to_string()),
+            scope: None,
+            authority: Some("agent".to_string()),
+            affected_paths: None,
+            tags: None,
+            review_after: None,
+            reversibility: None,
+            village_id: None,
+        };
+        let p2 = ledger.last_event_hash().unwrap();
+        let ev2 =
+            edda_core::event::new_decision_event("main", p2.as_deref(), "system", &dp_rat).unwrap();
+        ledger.append_event(&ev2).unwrap();
+
+        // Ratify auth.method
+        let p3 = ledger.last_event_hash().unwrap();
+        let ev3 = edda_core::event::new_decision_ratify_event(
+            "main",
+            p3.as_deref(),
+            "auth.method",
+            "Tim",
+            None,
+        )
+        .unwrap();
+        ledger.append_event(&ev3).unwrap();
+        drop(ledger);
+
+        let out_dir = dir.path().join("export");
+        execute(&repo_root, &out_dir, false, Some("host-alpha")).unwrap();
+
+        let auth_md = fs::read_to_string(out_dir.join("decisions/auth.md")).unwrap();
+        assert!(
+            auth_md.contains("- **Governance**: ratified by Tim"),
+            "ratified decision must state ratifier in governance field: {auth_md}"
+        );
+        assert!(
+            auth_md.contains("- **Governance**: unratified"),
+            "unratified decision must state unratified in governance field: {auth_md}"
+        );
+
+        let index_md = fs::read_to_string(out_dir.join("INDEX.md")).unwrap();
+        assert!(
+            index_md.contains("- **Exported at**:"),
+            "INDEX.md must have export timestamp: {index_md}"
+        );
+        assert!(
+            index_md.contains("- **Exporting machine**: host-alpha"),
+            "INDEX.md must have exporting machine: {index_md}"
+        );
+        assert!(
+            index_md.contains("- **Total decisions**: 2"),
+            "INDEX.md must have total decision count: {index_md}"
+        );
     }
 }

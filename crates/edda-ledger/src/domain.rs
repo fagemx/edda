@@ -6,6 +6,13 @@
 //! Storage-internal types (e.g. `DecisionRow`) remain in `sqlite_store/types.rs`
 //! and are not exposed outside edda-ledger.
 
+/// Decision ratification information (GH-806).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RatificationInfo {
+    pub ratified_by: String,
+    pub ts: String,
+}
+
 /// The type of recurring pattern detected.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
