@@ -1,6 +1,7 @@
 use anyhow::Context;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::process::Command;
 
 use super::manifest::{
