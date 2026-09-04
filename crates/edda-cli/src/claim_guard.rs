@@ -1,369 +1,231 @@
-//! Cross-machine claim guard (GH-656).
+//! GitHub claim guard shared by dispatch and the fleet convention (GH-782).
 //!
-//! Two machines each have their own `.edda/`, so an `edda claim` on one is
-//! invisible to the other; GitHub is the only shared truth. The
-//! `fleet.cross-machine-claim` convention (leave a `taking: <machine>`
-//! comment and a `lane:<machine>` label on the issue before dispatching)
-//! was pure discipline — nothing checked it. This module turns that check
-//! mechanical: given an issue number and the caller's machine label, read
-//! the issue's labels and comments through `gh` and decide whether the
-//! issue is free, already claimed by this machine, or claimed by another
-//! machine (refusal).
-//!
-//! Machine labels are compared verbatim — never guessed from the hostname.
-//! The write side of the same convention lives in
-//! `scripts/fleet-claim-issue.sh`; this module is the read-only guard used
-//! by `edda dispatch --issue <N>`.
+//! Only `taking: <machine>/<role>` comments carry ownership. Queue labels
+//! are written, never interpreted as claims. Open or delivered PRs also
+//! block dispatch, even if queue labels and comments are stale.
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// The claim state of one issue for one machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimState {
-    /// No `lane:*` label and no `taking:` comment naming any machine.
     Unclaimed,
-    /// This machine already claimed it (idempotent re-dispatch is fine).
     ClaimedBySelf,
-    /// Another machine claimed it — dispatch must refuse.
     ClaimedByOther {
         machine: String,
-        /// Comment timestamp, when the claim was made by comment.
         when: Option<String>,
-        /// Which surface carried the claim (`label lane:<m>` or
-        /// `comment "taking: <m>"`), for the refusal message.
         source: String,
+    },
+    InFlight {
+        pr: u64,
+        state: PrState,
     },
 }
 
-/// The slice of `gh issue view --json labels,comments` the guard reads.
-#[derive(Debug, Deserialize)]
-struct GhIssue {
-    #[serde(default)]
-    labels: Vec<GhLabel>,
-    #[serde(default)]
-    comments: Vec<GhComment>,
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum PrState {
+    Open,
+    Merged,
+    Closed,
+}
+
+impl PrState {
+    pub fn refusal(self, issue: u64, pr: u64) -> String {
+        match self {
+            Self::Merged => format!("issue {issue} delivered by #{pr} (merged) — drop fleet:ready"),
+            _ => format!("issue {issue} has open PR #{pr}; dispatch refused"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
-struct GhLabel {
-    name: String,
+struct GhIssue {
+    comments: Vec<GhComment>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GhComment {
-    #[serde(default)]
     body: String,
     #[serde(default)]
     created_at: Option<String>,
 }
 
-/// Validate the caller-supplied machine label: it becomes part of a GitHub
-/// label (`lane:<machine>`) and of a comment (`taking: <machine>`), so it
-/// must be a single token without surrounding whitespace.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhPr {
+    number: u64,
+    state: PrState,
+    title: String,
+    head_ref_name: String,
+}
+
+/// Identity is an explicit machine/role pair, with no whitespace or extra slash.
+/// Bare historical claim markers remain foreign; new callers cannot use them.
 pub fn validate_machine(machine: &str) -> Result<()> {
-    if machine.is_empty() || machine != machine.trim() || machine.split_whitespace().count() != 1 {
-        bail!(
-            "machine label must be one token without whitespace, got {machine:?} \
-             (it becomes the lane:<machine> label and taking: <machine> marker)"
-        );
+    let parts: Vec<_> = machine.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| part.is_empty())
+        || machine.chars().any(char::is_whitespace)
+    {
+        bail!("machine identity must be <machine>/<role> without whitespace, got {machine:?}");
     }
     Ok(())
 }
 
-/// Read the claim state of `issue` for machine `ours` through `gh`.
-///
-/// The gh binary is `EDDA_GH_BIN` when set (the same override pattern as
-/// `EDDA_CODEX_BIN` — also how the tests inject a stub), else `gh` on
-/// PATH. One read-only call: `gh issue view <N> --json labels,comments`.
-pub fn fetch_claim_state(issue: u64, ours: &str) -> Result<ClaimState> {
-    validate_machine(ours)?;
+/// Run gh bound to `repo_cwd`, the selected dispatch repository directory
+/// (GH-782 round 2, F2): gh resolves the repository from the working
+/// directory it is spawned in, so reads and writes without it would target
+/// whatever repo the edda process happened to start in instead of the
+/// `--cwd` the agent will run in.
+fn run_gh(args: &[&str], repo_cwd: &Path) -> Result<Vec<u8>> {
     let gh = std::env::var_os("EDDA_GH_BIN")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("gh"));
     let output = std::process::Command::new(&gh)
-        .args([
-            "issue",
-            "view",
-            &issue.to_string(),
-            "--json",
-            "labels,comments",
-        ])
+        .args(args)
+        .current_dir(repo_cwd)
         .output()
-        .with_context(|| {
-            format!(
-                "claim guard: could not run {} for issue {issue}",
-                gh.display()
-            )
-        })?;
+        .with_context(|| format!("claim guard: could not run {}", gh.display()))?;
     if !output.status.success() {
         bail!(
-            "claim guard: gh issue view {issue} failed: {}",
+            "claim guard: gh {} failed: {}",
+            args.join(" "),
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let parsed: GhIssue = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("claim guard: could not parse gh output for issue {issue}"))?;
-    Ok(claim_state(ours, &parsed))
+    Ok(output.stdout)
 }
 
-/// Decide the claim state from already-fetched labels and comments.
-///
-/// Any signal naming another machine refuses — a label on one side and a
-/// comment on the other is treated as claimed, never as free (fail closed:
-/// a stale `lane:X` label with a fresh `taking: docs` comment must not
-/// wave a dispatch through). Labels are examined first because they are
-/// the more durable surface.
+/// Read comments and the PR history. gh's default 30-row page must not hide
+/// older deliveries, so request its full practical result limit explicitly.
+pub fn fetch_claim_state(issue: u64, ours: &str, repo_cwd: &Path) -> Result<ClaimState> {
+    validate_machine(ours)?;
+    let output = run_gh(
+        &["issue", "view", &issue.to_string(), "--json", "comments"],
+        repo_cwd,
+    )?;
+    let parsed: GhIssue = serde_json::from_slice(&output)
+        .with_context(|| format!("claim guard: could not parse gh issue {issue}"))?;
+    let output = run_gh(
+        &[
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            "1000000",
+            "--json",
+            "number,state,title,headRefName",
+        ],
+        repo_cwd,
+    )?;
+    let prs: Vec<GhPr> =
+        serde_json::from_slice(&output).context("claim guard: could not parse gh PR history")?;
+    Ok(pr_state(issue, &prs).unwrap_or_else(|| claim_state(ours, &parsed)))
+}
+
+/// Complete the claim before starting an agent. Re-dispatch repairs a partial
+/// label/assignee write without adding another taking comment. GitHub provides
+/// no compare-and-swap across these calls; this is not a distributed lock.
+pub fn write_claim(issue: u64, ours: &str, already_claimed: bool, repo_cwd: &Path) -> Result<()> {
+    validate_machine(ours)?;
+    let issue = issue.to_string();
+    if !already_claimed {
+        let now = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)?;
+        run_gh(
+            &[
+                "issue",
+                "comment",
+                &issue,
+                "--body",
+                &format!("taking: {ours} at {now}"),
+            ],
+            repo_cwd,
+        )?;
+    }
+    run_gh(
+        &[
+            "issue",
+            "edit",
+            &issue,
+            "--add-label",
+            "fleet:claimed",
+            "--remove-label",
+            "fleet:ready",
+            "--add-assignee",
+            "@me",
+        ],
+        repo_cwd,
+    )?;
+    Ok(())
+}
+
+fn pr_state(issue: u64, prs: &[GhPr]) -> Option<ClaimState> {
+    // Prefer a delivery over an open duplicate, independent of API order.
+    for state in [PrState::Merged, PrState::Open] {
+        if let Some(pr) = prs.iter().find(|pr| {
+            pr.state == state
+                && (references_issue(&pr.title, &format!("gh-{issue}"))
+                    || references_issue(&pr.head_ref_name, &format!("gh{issue}")))
+        }) {
+            return Some(ClaimState::InFlight {
+                pr: pr.number,
+                state,
+            });
+        }
+    }
+    None
+}
+
+fn references_issue(text: &str, marker: &str) -> bool {
+    // GH-65 must not match GH-656. Prefixes and punctuation around the
+    // full issue marker remain valid in both titles and branch names.
+    text.to_ascii_lowercase()
+        .match_indices(marker)
+        .any(|(start, _)| {
+            !text
+                .as_bytes()
+                .get(start + marker.len())
+                .is_some_and(u8::is_ascii_digit)
+        })
+}
+
 fn claim_state(ours: &str, issue: &GhIssue) -> ClaimState {
-    let mut other_label: Option<(String, String)> = None;
-    for label in &issue.labels {
-        if let Some(machine) = label.name.strip_prefix("lane:") {
-            if machine != ours {
-                other_label = Some((machine.to_owned(), format!("label {}", label.name)));
-                break;
-            }
-        }
-    }
+    let mut claimed_by_self = false;
     for comment in &issue.comments {
-        if let Some(machine) = parse_taking(&comment.body) {
+        for machine in taking_tokens(&comment.body) {
             if machine != ours {
-                let source = if let Some((ref l_machine, ref l_source)) = other_label {
-                    if l_machine == &machine {
-                        l_source.clone()
-                    } else {
-                        "comment \"taking:\"".to_owned()
-                    }
-                } else {
-                    "comment \"taking:\"".to_owned()
-                };
                 return ClaimState::ClaimedByOther {
-                    machine,
+                    machine: machine.to_owned(),
                     when: comment.created_at.clone(),
-                    source,
+                    source: "comment \"taking:\"".to_owned(),
                 };
             }
+            claimed_by_self = true;
         }
     }
-    if let Some((machine, source)) = other_label {
-        return ClaimState::ClaimedByOther {
-            machine,
-            when: None,
-            source,
-        };
-    }
-    let self_label = issue
-        .labels
-        .iter()
-        .any(|label| label.name == format!("lane:{ours}"));
-    let self_comment = issue
-        .comments
-        .iter()
-        .any(|comment| parse_taking(&comment.body).as_deref() == Some(ours));
-    if self_label || self_comment {
+    if claimed_by_self {
         ClaimState::ClaimedBySelf
     } else {
         ClaimState::Unclaimed
     }
 }
 
-/// The machine a `taking: <machine>` comment names, if any. Recognized
-/// only at the start of a line (`taking:` followed by the machine token);
-/// a mention mid-sentence is not a claim.
-fn parse_taking(body: &str) -> Option<String> {
-    for line in body.lines() {
-        let rest = line.trim_start();
-        if let Some(rest) = rest.strip_prefix("taking:") {
-            let machine = rest.split_whitespace().next().unwrap_or("");
-            if !machine.is_empty() {
-                return Some(machine.to_owned());
-            }
-        }
-    }
-    None
+/// Every line-start marker is checked, including multiple markers in one
+/// comment. A prose mention mid-sentence is not ownership.
+fn taking_tokens(body: &str) -> impl Iterator<Item = &str> {
+    body.lines().filter_map(|line| {
+        line.trim_start()
+            .strip_prefix("taking:")
+            .and_then(|rest| rest.split_whitespace().next())
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn issue(labels: &[&str], comments: &[(&str, &str)]) -> GhIssue {
-        GhIssue {
-            labels: labels
-                .iter()
-                .map(|name| GhLabel {
-                    name: (*name).to_owned(),
-                })
-                .collect(),
-            comments: comments
-                .iter()
-                .map(|(created_at, body)| GhComment {
-                    body: (*body).to_owned(),
-                    created_at: Some((*created_at).to_owned()),
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn unclaimed_when_no_signal_names_any_machine() {
-        let state = claim_state("docs", &issue(&["fleet:ready"], &[]));
-        assert_eq!(state, ClaimState::Unclaimed);
-        let state = claim_state(
-            "docs",
-            &issue(
-                &[],
-                &[("2026-09-02T07:06:00Z", "claimed by session a at 07:06")],
-            ),
-        );
-        assert_eq!(state, ClaimState::Unclaimed);
-    }
-
-    #[test]
-    fn a_lane_label_for_another_machine_refuses() {
-        let state = claim_state("docs", &issue(&["lane:4090"], &[]));
-        assert_eq!(
-            state,
-            ClaimState::ClaimedByOther {
-                machine: "4090".into(),
-                when: None,
-                source: "label lane:4090".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn a_taking_comment_for_another_machine_refuses_with_its_timestamp() {
-        let state = claim_state(
-            "docs",
-            &issue(
-                &[],
-                &[(
-                    "2026-09-02T06:30:00Z",
-                    "taking: 4090 at 2026-09-02T06:30:00Z",
-                )],
-            ),
-        );
-        assert_eq!(
-            state,
-            ClaimState::ClaimedByOther {
-                machine: "4090".into(),
-                when: Some("2026-09-02T06:30:00Z".into()),
-                source: "comment \"taking:\"".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn self_signals_are_idempotent_not_refusals() {
-        let state = claim_state(
-            "docs",
-            &issue(&["lane:docs"], &[("2026-09-02T07:06:00Z", "taking: docs")]),
-        );
-        assert_eq!(state, ClaimState::ClaimedBySelf);
-        let state = claim_state("docs", &issue(&["lane:docs"], &[]));
-        assert_eq!(state, ClaimState::ClaimedBySelf);
-        let state = claim_state("docs", &issue(&[], &[("t", "taking: docs")]));
-        assert_eq!(state, ClaimState::ClaimedBySelf);
-    }
-
-    #[test]
-    fn any_other_machine_signal_refuses_even_when_we_also_appear() {
-        // Fail closed: our label plus their comment is still their claim.
-        let state = claim_state(
-            "docs",
-            &issue(&["lane:docs"], &[("2026-09-02T08:00:00Z", "taking: 4090")]),
-        );
-        assert!(matches!(state, ClaimState::ClaimedByOther { .. }));
-    }
-
-    #[test]
-    fn taking_is_only_a_claim_at_line_start() {
-        assert_eq!(parse_taking("taking: 4090").as_deref(), Some("4090"));
-        assert_eq!(parse_taking("  taking: docs").as_deref(), Some("docs"));
-        // A mention mid-sentence is prose, not a claim.
-        assert_eq!(parse_taking("remember: taking: docs first"), None);
-        assert_eq!(parse_taking("taking:"), None);
-        assert_eq!(parse_taking("taking:   "), None);
-    }
-
-    #[test]
-    fn machine_label_must_be_one_explicit_token() {
-        assert!(validate_machine("docs").is_ok());
-        assert!(validate_machine("4090").is_ok());
-        assert!(validate_machine("").is_err());
-        assert!(validate_machine("docs lane").is_err());
-        assert!(validate_machine(" docs ").is_err());
-    }
-
-    static GH_BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct GhBinEnvGuard {
-        previous: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl Drop for GhBinEnvGuard {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(value) => std::env::set_var("EDDA_GH_BIN", value),
-                None => std::env::remove_var("EDDA_GH_BIN"),
-            }
-        }
-    }
-
-    fn gh_bin_env_guard(value: &str) -> GhBinEnvGuard {
-        let lock = GH_BIN_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let previous = std::env::var_os("EDDA_GH_BIN");
-        std::env::set_var("EDDA_GH_BIN", value);
-        GhBinEnvGuard {
-            previous,
-            _lock: lock,
-        }
-    }
-
-    #[test]
-    fn fetch_fails_loudly_when_gh_is_missing() {
-        // EDDA_GH_BIN pointing nowhere is an error, never a silent pass.
-        // Protected by GhBinEnvGuard to avoid racing parallel tests in the binary.
-        let _guard = gh_bin_env_guard("definitely-no-such-gh-9f3a");
-        let result = fetch_claim_state(656, "docs");
-        assert!(result.is_err(), "a broken gh must fail the guard loudly");
-    }
-
-    #[test]
-    fn gh_comment_deserializes_camel_case_created_at() {
-        let json = r#"{
-            "labels": [{"name": "lane:docs"}],
-            "comments": [
-                {
-                    "body": "taking: 4090 at 2026-09-02T13:00:00Z",
-                    "createdAt": "2026-09-02T13:00:00Z"
-                }
-            ]
-        }"#;
-        let issue: GhIssue = serde_json::from_str(json).expect("valid JSON");
-        assert_eq!(issue.comments.len(), 1);
-        assert_eq!(
-            issue.comments[0].created_at.as_deref(),
-            Some("2026-09-02T13:00:00Z")
-        );
-        let state = claim_state("docs", &issue);
-        match state {
-            ClaimState::ClaimedByOther {
-                machine,
-                when,
-                source,
-            } => {
-                assert_eq!(machine, "4090");
-                assert_eq!(when.as_deref(), Some("2026-09-02T13:00:00Z"));
-                assert_eq!(source, "comment \"taking:\"");
-            }
-            other => panic!("expected ClaimedByOther, got {other:?}"),
-        }
-    }
-}
+#[path = "claim_guard_tests.rs"]
+mod tests;
