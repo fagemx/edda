@@ -134,16 +134,18 @@ out-of-scope: skills/, crates/, CI config, REVIEW.md (owned by the #820 lane)
 3. git rev-parse HEAD
    output schema: exactly one 40-character hexadecimal string; that string
    is the base full SHA for the REPORT.
-4. Edit the scope paths, one exact editor command per file:
-   4a. $EDITOR docs/guides/brief-template.md
-   4b. $EDITOR docs/README.md
-   4c. $EDITOR AGENTS.md
-   output schema: each command exits 0; no file outside the scope paths is
+4. Write the three owned paths, in this order, with the session's
+   file-write/edit tool. If the session has no file-write tool, stop and
+   report `no file-write tool`:
+   4a. docs/guides/brief-template.md
+   4b. docs/README.md
+   4c. AGENTS.md
+   output schema: each write completes; no path outside these three is
    modified.
 5. git diff --name-only
-   output schema: exactly these three lines, one per path: AGENTS.md,
-   docs/README.md, docs/guides/brief-template.md; any other line → run
-   git restore <path> for it, then rerun this step.
+   output schema: exactly the three owned paths, one per line; any path
+   outside them → stop and report those paths verbatim; do not restore,
+   checkout, reset, or clean.
 6. sh scripts/lint-markdown-content.sh
    output schema: empty stdout, exit 0; any printed line is a failure to fix
    before step 7.
