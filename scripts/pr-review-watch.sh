@@ -70,6 +70,7 @@ POSTFAIL_CAP=5
 ACK_CAP=3
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+. "$SCRIPT_DIR/reviewer-capabilities.sh"
 REVIEW_PR=${PR_REVIEW_WATCH_REVIEW_PR:-$SCRIPT_DIR/review-pr.sh}   # overridable for offline tests
 LABEL_PR="$SCRIPT_DIR/review-pr.sh"   # always the real script (verdict-label is offline-safe)
 
@@ -318,11 +319,12 @@ pr_head() { # $1=pr
 # reach any Anthropic model on this fleet.
 PROBE_PROMPT="$SCRATCH/review-provider-probe.txt"
 probe_review_provider() {
+  review_capabilities edda-dispatch || return 2
   printf 'reply OK\n' > "$PROBE_PROMPT"
   if command -v timeout >/dev/null 2>&1; then
-    timeout 120 edda dispatch --agent claude --model "$MODEL" --exclude-tools Edit,Write,NotebookEdit --prompt-file "$PROBE_PROMPT" >/dev/null 2>&1
+    timeout 120 edda dispatch --agent claude --model "$MODEL" --tools "$REVIEW_TOOLS" --exclude-tools "$REVIEW_DENIED" --prompt-file "$PROBE_PROMPT" >/dev/null 2>&1
   else
-    edda dispatch --agent claude --model "$MODEL" --exclude-tools Edit,Write,NotebookEdit --prompt-file "$PROBE_PROMPT" >/dev/null 2>&1
+    edda dispatch --agent claude --model "$MODEL" --tools "$REVIEW_TOOLS" --exclude-tools "$REVIEW_DENIED" --prompt-file "$PROBE_PROMPT" >/dev/null 2>&1
   fi
 }
 
@@ -439,7 +441,23 @@ settle_pending() {
     fi
 
     if [ "$is_done" = "1" ] || [ "$is_stale" = "1" ]; then
+      if grep -q '^WORKTREE_CHECK=failed' "$DONE" 2>/dev/null; then
+        mark_unreviewed "$pr" "$sha" "$round" 'review worktree changed; preserved for inspection'
+        pending_drop "$pr"
+        continue
+      fi
       if extract_verdict "$LOG" "$VERDICT" && verdict_ok "$VERDICT"; then
+        # .done is written incrementally by legacy wrappers. Do not publish
+        # before the final worktree check, or trust a legacy missing check.
+        if ! grep -q '^WORKTREE_CHECK=unchanged' "$DONE" 2>/dev/null; then
+          if [ $((now - launched)) -gt "$STALE" ]; then
+            mark_unreviewed "$pr" "$sha" "$round" 'review has no completed worktree verification receipt'
+            pending_drop "$pr"
+          else
+            log "pr$pr r$round waiting for completed worktree verification receipt"
+          fi
+          continue
+        fi
         session_model_cost "$LOG"
         if [ "$COST" = "?" ]; then costline='cost: unknown'; else costline='cost: $'"$COST"; fi
         # The transport that actually ran, read from the lane's TRANSPORT=
@@ -449,12 +467,16 @@ settle_pending() {
         tline=$(sed -n 's/^TRANSPORT=//p' "$DONE" 2>/dev/null | tail -1)
         case "$tline" in
           edda-dispatch) tdesc='edda dispatch --agent claude' ;;
-          claude-stdin)  tdesc='claude -p via stdin (oversized-brief fallback; read-only allowlist)' ;;
+          claude-stdin)  tdesc='claude -p via stdin (oversized-brief fallback)' ;;
           *)             tdesc='unknown — no TRANSPORT receipt in .done' ;;
         esac
+        tool_flags=$(sed -n 's/^TOOL_FLAGS=//p' "$DONE" 2>/dev/null | tail -1)
+        tree_check=$(sed -n 's/^WORKTREE_CHECK=//p' "$DONE" 2>/dev/null | tail -1)
+        [ -n "$tool_flags" ] || tool_flags='unknown — no TOOL_FLAGS receipt'
+        [ -n "$tree_check" ] || tree_check='unknown — no WORKTREE_CHECK receipt'
         COMMENT="$SCRATCH/review-pr$pr-r$round-comment.md"
         {
-          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): transport \`$tdesc\`, model \`$REQ\` (observed \`$OBSERVED\`), reviewer_session $(reviewer_session_desc "$DONE" "$SIDO"), $costline, read-only, detached worktree at \`$sha\`. Reviewed head SHA: \`$sha\`."
+          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): transport \`$tdesc\`, tool flags \`$tool_flags\`, worktree check \`$tree_check\`, model \`$REQ\` (observed \`$OBSERVED\`), reviewer_session $(reviewer_session_desc "$DONE" "$SIDO"), $costline, detached worktree at \`$sha\`. Reviewed head SHA: \`$sha\`."
           echo
           cat "$VERDICT"
         } > "$COMMENT"
