@@ -694,13 +694,25 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | `--budget-usd N` | Per-turn budget in USD (codex cannot enforce budgets) |
 | `--timeout-sec S` | Turn timeout in seconds (default: 1800, like a conduct phase) |
 | `--permission-mode MODE` | Permission mode carried on the synthetic phase verbatim (default `bypassPermissions`); only the claude backend consumes it today, pi and codex ignore it |
-| `--issue N` | GitHub issue number for the cross-machine claim guard; refuses dispatch if claimed by another machine |
-| `--machine LABEL` | Machine label for the cross-machine claim guard (also via `EDDA_MACHINE`; requires `--issue`) |
+| `--issue N` | Check and claim the GitHub issue before launch; refuses another owner, an open PR, or a merged delivery |
+| `--machine MACHINE/ROLE` | Full claim identity, e.g. `4090/worker-1` (also via `EDDA_MACHINE`; requires `--issue`). Bare machine names are invalid |
 | `--json` | Print exactly one JSON object to stdout instead of text lines |
 
 With `--json` the object has the shape
 `{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded\|claim_refused", "result_text":string\|null, "cost_usd":number\|null, "session_id":string, "error":string\|null, "model_requested":string, "model_observed":string, "session_observed":string}`.
-When refused by the cross-machine claim guard (`outcome` is `"claim_refused"`), a reduced shape is emitted:
+With `--issue`, dispatch reads `taking: <machine>/<role>` comments and PR
+history before starting the agent. Ownership compares the full token; routing
+labels (`lane:*`) are ignored. A matching open or merged PR blocks dispatch
+(title `GH-N` or branch `ghN`, case-insensitive). Closed, unmerged PRs do not
+block a retry. GitHub failures fail closed.
+
+For an unclaimed issue, dispatch writes `taking: <machine>/<role> at <time>`,
+adds `fleet:claimed`, removes `fleet:ready`, and assigns `@me` before launch.
+Self-claims add no duplicate comment and repair the queue labels/assignee after
+a partial write. The check and writes are sequential GitHub calls, not a
+cross-session lock. Release/reassignment is handled separately.
+
+When refused by the GitHub claim guard (`outcome` is `"claim_refused"`), a reduced shape is emitted:
 `{"outcome":"claim_refused", "error":string, "issue":number, "machine":string}`.
 `session_id` is the id edda asked for; `session_observed` is the one the
 backend reported in-band, or `"unknown"`. They differ when a `--resume` forked
@@ -712,7 +724,7 @@ Exit codes:
 |------|---------|
 | `0` | agent done |
 | `1` | agent crash or any other failure (including pre-dispatch errors) |
-| `2` | timeout or cross-machine claim refusal (distinguished by outcome) |
+| `2` | timeout or GitHub claim refusal/read/write failure (distinguished by outcome) |
 | `3` | budget exceeded |
 | `4` | max turns |
 

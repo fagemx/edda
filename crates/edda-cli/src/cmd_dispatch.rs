@@ -102,18 +102,13 @@ pub struct DispatchArgs {
     /// conflict error, because --json promises exactly one JSON object.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub list_models: Option<String>,
-    /// GH-656 cross-machine claim guard: check this issue on GitHub before
-    /// dispatching. Both machines read the same truth through `gh`; if
-    /// another machine has claimed it (a `lane:<machine>` label or a
-    /// `taking: <machine>` comment), the agent is not started and the
-    /// process exits 2. Requires --machine (or env EDDA_MACHINE). Without
-    /// --issue, dispatch behaves exactly as before.
+    /// Check and claim this GitHub issue before dispatch. Other owners,
+    /// open PRs and merged PRs refuse with exit 2. Requires --machine or
+    /// EDDA_MACHINE; no claim check runs without --issue.
     #[arg(long)]
     pub issue: Option<u64>,
-    /// Machine label for the claim guard (e.g. `4090`, `docs`) — the token
-    /// in `lane:<machine>` labels and `taking: <machine>` comments. Only an
-    /// explicit value counts: passed here or via EDDA_MACHINE; the hostname
-    /// is never guessed. Requires --issue.
+    /// Explicit <machine>/<role> identity (e.g. 4090/worker-1), also via
+    /// EDDA_MACHINE. The hostname is never guessed. Requires --issue.
     #[arg(long)]
     pub machine: Option<String>,
     /// Print one JSON object to stdout instead of text lines
@@ -451,11 +446,7 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         return Ok(0);
     }
 
-    // GH-656: cross-machine claim guard. GitHub is the only shared truth
-    // between machines, so with an explicit --issue and machine label,
-    // check the issue before starting any agent; a claim by another
-    // machine refuses with exit 2 and no spawn. Without --issue nothing
-    // here runs at all.
+    // Check GitHub ownership and write the claim before starting any agent.
     if let Some((issue, machine, reason)) = claim_guard_refusal(&args)? {
         if args.json {
             println!(
@@ -612,22 +603,32 @@ fn claim_guard_refusal(args: &DispatchArgs) -> Result<Option<(u64, String, Strin
         return Ok(None);
     };
     let machine = match args.machine.as_deref() {
-        Some(machine) => machine.trim().to_owned(),
-        None => std::env::var("EDDA_MACHINE")
-            .unwrap_or_default()
-            .trim()
-            .to_owned(),
+        Some(machine) => machine.to_owned(),
+        None => std::env::var("EDDA_MACHINE").unwrap_or_default(),
     };
     if machine.is_empty() {
         bail!(
-            "--issue {issue} requires an explicit machine label: pass --machine <label> \
+            "--issue {issue} requires an explicit machine identity: pass --machine <machine>/<role> \
              or set EDDA_MACHINE (the hostname is never guessed)"
         );
     }
     crate::claim_guard::validate_machine(&machine)?;
-    match crate::claim_guard::fetch_claim_state(issue, &machine)? {
+    let state = match crate::claim_guard::fetch_claim_state(issue, &machine) {
+        Ok(state) => state,
+        Err(error) => return Ok(Some((issue, machine, error.to_string()))),
+    };
+    match state {
         crate::claim_guard::ClaimState::Unclaimed
-        | crate::claim_guard::ClaimState::ClaimedBySelf => Ok(None),
+        | crate::claim_guard::ClaimState::ClaimedBySelf => {
+            let already_claimed = state == crate::claim_guard::ClaimState::ClaimedBySelf;
+            match crate::claim_guard::write_claim(issue, &machine, already_claimed) {
+                Ok(()) => Ok(None),
+                Err(error) => Ok(Some((issue, machine, error.to_string()))),
+            }
+        }
+        crate::claim_guard::ClaimState::InFlight { pr, state } => {
+            Ok(Some((issue, machine, state.refusal(issue, pr))))
+        }
         crate::claim_guard::ClaimState::ClaimedByOther {
             machine: other,
             when,
@@ -638,8 +639,8 @@ fn claim_guard_refusal(args: &DispatchArgs) -> Result<Option<(u64, String, Strin
                 issue,
                 machine,
                 format!(
-                    "issue {issue} is already claimed by machine '{other}' ({source}{when}); \
-                     dispatch refused — leave the claim to that machine \
+                    "issue {issue} is already claimed by '{other}' ({source}{when}); \
+                     dispatch refused — leave the claim to that owner \
                      (fleet.cross-machine-claim)"
                 ),
             )))
@@ -1235,8 +1236,7 @@ mod tests {
         assert!(claim_guard_refusal(&args).unwrap().is_none());
     }
 
-    /// A machine label with whitespace can never become a clean
-    /// `lane:<machine>` label, so the guard refuses it before any gh call.
+    /// Whitespace in an identity is refused before any gh call.
     #[test]
     fn guard_refuses_an_ill_formed_machine_label_before_gh() {
         let args = parse(&[
@@ -1251,7 +1251,7 @@ mod tests {
             "docs lane",
         ]);
         let error = claim_guard_refusal(&args).expect_err("whitespace machine label");
-        assert!(error.to_string().contains("one token"), "{error}");
+        assert!(error.to_string().contains("without whitespace"), "{error}");
     }
 
     // ── Outcome → exit-code mapping (all five PhaseResult variants) ──
