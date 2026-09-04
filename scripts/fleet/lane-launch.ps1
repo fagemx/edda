@@ -52,7 +52,9 @@
 # then unregisters. No agent spend. Every dry-run artifact is named
 # `$Name.dryrun*` inside -LogDir (log, done-file, wrapper, brief) — the real
 # lane's `$Name.log` and `$Name.done` are never touched, so a real launch
-# after a dry run starts with a clean log and no stale done-file.
+# after a dry run starts with a clean log and no stale done-file. That
+# namespace is why any -Name containing the dryrun segment is rejected by
+# the guard rails below.
 param(
   [Parameter(Mandatory = $true)][string]$Name,
   [string]$Brief = '',
@@ -83,6 +85,13 @@ function PsQuote([string]$s) {
 
 if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
   Fail "-Name '$Name' may contain only letters, digits, dot, underscore, hyphen"
+}
+# Dry-run artifacts are always $Name.dryrun* inside -LogDir, so a real lane
+# named '<X>.dryrun' would resolve its $Name.log / $Name.done onto the
+# dry-run artifacts of '<X>' and re-create exactly the GH-822 collision —
+# the segment is reserved (GH-822 P1-1).
+if ($Name -match '(?i)(^|[._-])dryrun($|[._-])') {
+  Fail "-Name '$Name' may not contain 'dryrun'; reserved for dry-run artifacts"
 }
 $allowedBuildLanes = @('worker-1', 'worker-2', 'verifier', 'verifier-2')
 if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {

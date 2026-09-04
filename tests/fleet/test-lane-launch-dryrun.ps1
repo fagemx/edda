@@ -10,27 +10,38 @@
 #
 # What this test proves (issue #822 doneWhen):
 #   1. No foreign EXIT in the real log (AC1): dry-run first, then a real
-#      launch (its dispatch is stopped after a few seconds by
-#      lane-stop.ps1 — either the wrapper finished or lane-stop writes the
-#      end record, never both), and $Name.log contains EXACTLY ONE
-#      "=== EXIT" line, written by the real pipeline. Pre-fix this fails:
-#      the dry-run's own EXIT line is already in $Name.log, so the count is 2.
+#      launch whose wrapper is left to finish NATURALLY — no lane-stop — so
+#      the end record proven is the real pipeline's own: $Name.log contains
+#      EXACTLY ONE "=== EXIT" line, it matches "=== EXIT code=<n> ==="
+#      (numeric — never lane-stop's "stopped" sentinel), and the done-file
+#      holds exactly that numeric code. Pre-fix this fails: the dry-run's
+#      own EXIT line is already in $Name.log, so the count is 2.
 #   2. Clean LogDir after dry-run (AC2): a dry-run on a clean -LogDir leaves
 #      no $Name.log / $Name.done; every file it creates matches $Name.dryrun*.
 #   3. Printed summary transparency (AC3): the dry-run summary prints
 #      "dry-run log=<path>" and that path differs from the real log path.
 #   4. The dry-run wrapper embeds the dryrun log/done paths (mechanism check).
 #   5. lane-status.ps1 does not surface dry-run artifacts as lane status
-#      (AC5): after the task is unregistered, `lane-status -Name X` exits
-#      nonzero even though X.log / X.done / X.dryrun* files all exist in
-#      -LogDir — status is derived from scheduled tasks only, never from
-#      artifact files, so a leftover dry-run cannot look like a lane.
+#      (AC5): sampled while the real lane is live (the row is reported
+#      exactly because the task exists) and again after the task is
+#      unregistered — `lane-status -Name X` exits nonzero even though
+#      X.log / X.done / X.dryrun* files all exist in -LogDir; status is
+#      derived from scheduled tasks only, never from artifact files, so a
+#      leftover dry-run cannot look like a lane.
+#   6. Guard rail (P1-1): a -Name containing the dryrun segment (e.g.
+#      'X.dryrun') is rejected, so a real lane can never resolve its
+#      $Name.log / $Name.done onto another lane's dry-run artifacts.
 #
-# The real-launch leg runs one trivial `edda dispatch` for a few seconds
-# before lane-stop.ps1 kills it (bounded by -TimeoutSec 90); if `edda` or the
-# agent is unavailable the dispatch fails fast and the wrapper still writes
-# its EXIT record, so the assertion does not depend on agent spend. Pass
-# -SkipRealLaunch to run only the dry-run legs.
+# The real-launch leg runs one trivial `edda dispatch` and polls up to 45s
+# for the wrapper to finish on its own (bounded by -TimeoutSec 90); if
+# `edda` or the agent is unavailable the dispatch fails fast and the wrapper
+# still writes its EXIT record, so the assertion does not depend on agent
+# spend. Pass -SkipRealLaunch to run only the dry-run legs.
+#
+# Cleanup never uses raw Stop-/Unregister-ScheduledTask (P1-2): they kill
+# only the wrapper and can orphan the agent process tree, so cleanup runs
+# lane-stop.ps1 — the sanctioned full-tree kill, in a child pwsh because its
+# Fail calls exit — before unregistering and removing the temp directories.
 #
 # usage:
 #   pwsh -NoProfile -File tests/fleet/test-lane-launch-dryrun.ps1 [-SkipRealLaunch]
@@ -83,12 +94,20 @@ New-Item -ItemType Directory -Force -Path $logDir, $cwd | Out-Null
 & git -C $cwd init -q 2>$null
 if ($LASTEXITCODE -ne 0) { throw "git init failed in $cwd" }
 
+# Cleanup goes through lane-stop.ps1 (P1-2): Stop-ScheduledTask /
+# Unregister-ScheduledTask terminate only the wrapper and can orphan the
+# agent's child process tree, while lane-stop.ps1 kills the whole tree. It
+# runs in a child pwsh (Invoke-ChildScript) because its Fail calls exit,
+# which must not take this test process down.
 $cleanup = {
-  Get-ScheduledTask -TaskName "edda-lane-$name" -ErrorAction SilentlyContinue |
-    ForEach-Object {
-      Stop-ScheduledTask -TaskName $_.TaskName -ErrorAction SilentlyContinue
-      Unregister-ScheduledTask -TaskName $_.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+  if (Get-ScheduledTask -TaskName "edda-lane-$name" -ErrorAction SilentlyContinue) {
+    $stopped = Invoke-ChildScript $stop @("-Name", $name, "-LogDir", "`"$logDir`"")
+    if ($stopped.ExitCode -ne 0) {
+      "--- cleanup lane-stop stdout ---"; $stopped.StdOut
+      "--- cleanup lane-stop stderr ---"; $stopped.StdErr
     }
+    Unregister-ScheduledTask -TaskName "edda-lane-$name" -Confirm:$false -ErrorAction SilentlyContinue
+  }
 }
 & $cleanup
 try {
@@ -134,32 +153,53 @@ try {
       throw "lane-launch (real) exited $($real.ExitCode)"
     }
 
-    # lane-status during the live lane: the row exists exactly because the
+    # Sampled while the lane is live: the row exists exactly because the
     # task exists, and the only name it can print is the real lane's task.
     $st = Invoke-ChildScript $status @("-Name", $name, "-LogDir", "`"$logDir`"")
     Assert-True ($st.ExitCode -eq 0) "AC5: lane-status reports the live real-launch lane"
     Assert-True ($st.StdOut -match "^edda-lane-$name ") "AC5: the reported row is the real lane's task, not a dry-run artifact"
 
-    # Give the dispatch a few seconds to start, then stop the lane the only
-    # sanctioned way. Whether the wrapper finished on its own (it wrote the
-    # EXIT record + done-file) or was killed mid-flight (lane-stop writes the
-    # end record, GH-672), $name.log ends up with EXACTLY ONE === EXIT line.
-    Start-Sleep -Seconds 5
-    $stopOut = Invoke-ChildScript $stop @("-Name", $name, "-LogDir", "`"$logDir`"")
-    if ($stopOut.ExitCode -ne 0) {
-      "--- lane-stop stdout ---"; $stopOut.StdOut; "--- lane-stop stderr ---"; $stopOut.StdErr
+    # P0-1: let the real wrapper finish NATURALLY — no lane-stop — so the
+    # end record proven below is the real pipeline's own, never lane-stop's
+    # "stopped" sentinel. The wrapper writes the done-file in its finally
+    # block together with "=== EXIT code=<n> ===", so the done-file's
+    # appearance marks natural completion.
+    $deadline = (Get-Date).AddSeconds(45)
+    $doneValue = $null
+    while ((Get-Date) -lt $deadline) {
+      Start-Sleep -Seconds 2
+      if (Test-Path -LiteralPath $realDone) {
+        $doneValue = (Get-Content -LiteralPath $realDone -Raw).Trim()
+        break
+      }
     }
-    Assert-True ($stopOut.ExitCode -eq 0) "lane-stop.ps1 stops the real lane cleanly"
+    Assert-True ($null -ne $doneValue) "AC1: real wrapper finished naturally within 45s and wrote $name.done"
 
     Assert-True (Test-Path -LiteralPath $realLog) "AC1: real launch creates $name.log"
-    Assert-True (Test-Path -LiteralPath $realDone) "AC1: real launch (or its stop) creates $name.done"
     $exitLines = @(Select-String -LiteralPath $realLog -Pattern '=== EXIT')
     Assert-True ($exitLines.Count -eq 1) "AC1: $name.log contains exactly one '=== EXIT' line after dry-run + real launch (found: $($exitLines.Count))"
+    $exitMatch = if ($exitLines.Count -gt 0) { [regex]::Match($exitLines[0].Line, '^=== EXIT code=(\d+) ===$') } else { $null }
+    Assert-True ($null -ne $exitMatch -and $exitMatch.Success) "AC1: the EXIT line is the real wrapper's own record '=== EXIT code=<n> ===' (got: '$($exitLines[0].Line)')"
+    Assert-True ($null -ne $exitMatch -and $exitMatch.Success -and $exitMatch.Groups[1].Value -eq $doneValue) "AC1: done-file holds the EXIT line's exact numeric code (exit line: '$($exitMatch.Groups[1].Value)'; done file: '$doneValue')"
+
+    if ($null -ne $doneValue) {
+      # The wrapper finished on its own — unregister the completed task. If
+      # it did not, leave the task for $cleanup (lane-stop) to take down
+      # with its whole process tree.
+      Unregister-ScheduledTask -TaskName "edda-lane-$name" -Confirm:$false -ErrorAction SilentlyContinue
+    }
   }
 
-  # --- leg 3: lane-status after unregister (AC5) ------------------------------
+  # --- leg 3: the guard rail reserves the dryrun namespace (P1-1) -------------
 
-  "=== leg 3: lane-status after the task is unregistered ==="
+  "=== leg 3: -Name containing 'dryrun' is rejected ==="
+  $collision = Invoke-ChildScript $launch @("-Name", "$name.dryrun", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"")
+  Assert-True ($collision.ExitCode -ne 0) "guard rail: lane-launch rejects -Name '$name.dryrun' (GH-822 P1-1)"
+  Assert-True ($collision.StdErr -match "may not contain 'dryrun'") "guard rail: the rejection names the dryrun reservation (stderr: $($collision.StdErr.Trim()))"
+
+  # --- leg 4: lane-status after unregister (AC5) ------------------------------
+
+  "=== leg 4: lane-status after the task is unregistered ==="
   & $cleanup
   $st2 = Invoke-ChildScript $status @("-Name", $name, "-LogDir", "`"$logDir`"")
   Assert-True ($st2.ExitCode -ne 0) "AC5: lane-status reports no lane once the task is gone (dry-run artifacts alone are not status)"
