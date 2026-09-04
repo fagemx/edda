@@ -18,9 +18,9 @@ const PLAN_EXCERPT_MAX_LINES: usize = 30;
 /// tracking (cross-referencing plan steps against tasks/commits). Falls back
 /// to simple truncation if the plan has no recognizable step structure.
 pub(crate) fn render_active_plan(project_id: Option<&str>) -> Option<String> {
-    let plans_dir = match std::env::var("EDDA_PLANS_DIR") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => edda_core::paths::home_dir()?.join(".claude").join("plans"),
+    let plans_dir = match crate::env_var("EDDA_PLANS_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => edda_core::paths::home_dir()?.join(".claude").join("plans"),
     };
     render_active_plan_from_dir(&plans_dir, project_id)
 }
@@ -137,9 +137,9 @@ pub(super) fn run_auto_digest(
     cwd: &str,
 ) -> Option<String> {
     // Check if auto_digest is enabled (default: true)
-    let enabled = match std::env::var("EDDA_BRIDGE_AUTO_DIGEST") {
-        Ok(val) => val != "0",
-        Err(_) => read_workspace_config_bool(cwd, "bridge.auto_digest").unwrap_or(true),
+    let enabled = match crate::env_var("EDDA_BRIDGE_AUTO_DIGEST") {
+        Some(val) => val != "0",
+        None => read_workspace_config_bool(cwd, "bridge.auto_digest").unwrap_or(true),
     };
     if !enabled {
         return None;

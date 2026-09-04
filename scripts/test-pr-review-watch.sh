@@ -55,6 +55,11 @@ case "$1" in
         ;;
       view)
         case "$*" in
+          *"--json comments"*)
+            [ -n "${GH_FAIL_COMMENTS:-}" ] && exit 1
+            [ -n "${GH_COMMENTS_FILE:-}" ] && cat "$GH_COMMENTS_FILE"
+            exit 0
+            ;;
           *headRefOid*)
             [ -n "${GH_FAIL_HEAD:-}" ] && exit 1
             if [ -n "${GH_HEAD_FILE:-}" ]; then cat "$GH_HEAD_FILE"; else echo "${GH_HEAD:-}"; fi
@@ -68,6 +73,10 @@ case "$1" in
         exit 0
         ;;
     esac
+    exit 0
+    ;;
+  api)
+    [ -n "${GH_FAIL_STATUS:-}" ] && exit 1
     exit 0
     ;;
   label) exit 0 ;;
@@ -113,7 +122,8 @@ export PATH="$STUBBIN:$PATH"
 reset_stubs() {
     : >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$EDDA_STUB_LOG"; : >"$REVIEW_STUB_LOG"
     unset GH_FAIL_COMMENT_FIRST GH_FAIL_COMMENT_ALWAYS GH_FAIL_EDIT GH_FAIL_HEAD \
-          GH_PR_LIST_FILE GH_HEAD GH_HEAD_FILE DISPATCH_FAIL_PROBE 2>/dev/null || true
+          GH_PR_LIST_FILE GH_HEAD GH_HEAD_FILE DISPATCH_FAIL_PROBE \
+          GH_COMMENTS_FILE GH_FAIL_STATUS GH_FAIL_COMMENTS 2>/dev/null || true
     rm -f "$EDDA_FLEET_SCRATCH"/review-* 2>/dev/null || true
     : >"$EDDA_FLEET_SCRATCH/review-state.tsv"
     : >"$EDDA_FLEET_SCRATCH/review-acks.tsv"
@@ -325,6 +335,169 @@ expect_label_verdict \
     'skip' \
     'aaa111' \
     ''
+
+# --- gate-state: union rule for the Independent Review commit status ----------
+# Input: one verdict per line, `verdict<TAB>p0<TAB>p1` (blank lines ignored).
+# Output, exactly one word: success only when at least one verdict is
+# LGTM P0=0 P1=0 and no other verdict on the input is anything else; failure
+# when any verdict is present and does not qualify (missing or non-numeric
+# counts count as non-zero); error when there are no verdict lines at all.
+
+expect_gate_state() {
+    name=$1
+    expected=$2
+    input=$3
+    case_number=$((case_number + 1))
+    if ! actual=$(printf '%b' "$input" | \
+        timeout 60 sh "$root/scripts/pr-review-watch.sh" gate-state); then
+        printf '%s: gate-state exited non-zero\n' "$name" >&2
+        return 1
+    fi
+    if [ "$actual" != "$expected" ]; then
+        printf '%s: expected %s, got %s\n' "$name" "$expected" "$actual" >&2
+        return 1
+    fi
+}
+
+expect_gate_state 'no verdict lines at all' 'error' ''
+expect_gate_state 'blank lines only are still no verdicts' 'error' '\n\n'
+expect_gate_state 'one LGTM 0 0' 'success' 'LGTM\t0\t0\n'
+expect_gate_state 'one Changes Requested' 'failure' 'Changes Requested\t0\t3\n'
+expect_gate_state 'a later LGTM does not override an earlier Changes Requested (union rule)' \
+    'failure' \
+    'Changes Requested\t0\t3\nLGTM\t0\t0\n'
+expect_gate_state 'an earlier LGTM does not pre-clear a later Changes Requested' \
+    'failure' \
+    'LGTM\t0\t0\nChanges Requested\t0\t3\n'
+expect_gate_state 'LGTM with P0=1 does not qualify' 'failure' 'LGTM\t1\t0\n'
+expect_gate_state 'LGTM with P1=1 does not qualify' 'failure' 'LGTM\t0\t1\n'
+expect_gate_state 'blank lines mixed in are ignored' 'success' '\nLGTM\t0\t0\n\n\n'
+expect_gate_state 'two qualifying LGTMs are success' 'success' 'LGTM\t0\t0\nLGTM\t0\t0\n'
+expect_gate_state 'a missing count is non-zero, never success' 'failure' 'LGTM\t0\n'
+expect_gate_state 'a non-numeric count is non-zero, never success' 'failure' 'LGTM\tx\ty\n'
+expect_gate_state 'an unknown verdict word is failure' 'failure' 'Needs Discussion\t0\t0\n'
+
+# --- collect-verdicts: read the §7 verdict comments pinned to one SHA ---------
+# The fixture holds the OUTPUT of the gh --jq pipeline (sentinel + raw
+# bodies), the same shape the real gh prints — consistent with
+# GH_PR_LIST_FILE, which also stores jq output rather than raw JSON.
+
+verdict_comment() { # $1=round $2=sha $3=verdict line — the shape the watcher posts
+    printf '<<<COMMENT>>>\n> **Round %s review** — automatic watcher, reviewed head SHA: `%s`.\n\n## Code Review: Round %s — PR #42 @ %s\n\n### Verdict\n%s\n' \
+        "$1" "$2" "$1" "$2" "$3"
+}
+
+expect_collect() {
+    name=$1
+    expected=$2
+    file=$3
+    csha=$4
+    case_number=$((case_number + 1))
+    if ! actual=$(GH_COMMENTS_FILE="$file" timeout 60 \
+        sh "$root/scripts/pr-review-watch.sh" collect-verdicts 42 "$csha"); then
+        printf '%s: collect-verdicts exited non-zero\n' "$name" >&2
+        return 1
+    fi
+    if [ "$actual" != "$expected" ]; then
+        printf '%s: expected\n  %s\ngot\n  %s\n' "$name" "$expected" "$actual" >&2
+        return 1
+    fi
+}
+
+csha1=111122223333444455556666777788889999aaaa
+csha2=9999888877776666555544443333222211110000
+
+f="$tmp/comments-two-shas"
+{
+    verdict_comment 1 "$csha1" 'Changes Requested, P0=0, P1=3 — blocking P1: input Y crashes'
+    verdict_comment 2 "$csha2" 'LGTM (P0=0, P1=0)'
+    printf '<<<COMMENT>>>\nquestion about the diff, no verdict here\n'
+} >"$f"
+expect_collect 'only verdict comments pinned to the reviewed sha are collected' \
+    "$(printf 'Changes Requested\t0\t3')" "$f" "$csha1"
+expect_collect 'the other sha collects its own verdict' \
+    "$(printf 'LGTM\t0\t0')" "$f" "$csha2"
+
+f="$tmp/comments-malformed"
+verdict_comment 1 "$csha1" 'LGTM' >"$f"
+expect_collect 'a verdict line without counts yields empty count fields (never success)' \
+    "$(printf 'LGTM\t\t')" "$f" "$csha1"
+
+f="$tmp/comments-prose"
+printf '<<<COMMENT>>>\n## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\n\n修掉這一項就可以 LGTM。\n' \
+    "$csha1" >"$f"
+expect_collect 'prose that merely says LGTM is not a verdict line' \
+    "$(printf 'LGTM\t\t')" "$f" "$csha1"
+
+f="$tmp/comments-wrong-sha"
+verdict_comment 1 "$csha2" 'Changes Requested, P0=1, P1=0 — x' >"$f"
+expect_collect 'a verdict pinned to another sha contributes nothing' \
+    '' "$f" "$csha1"
+
+# T1: a failed comments fetch must be an error, never "no prior verdicts" —
+# otherwise the union rule would run on this round's verdict alone.
+expect_collect_fail() {
+    name=$1
+    csha=$2
+    case_number=$((case_number + 1))
+    out=$(GH_FAIL_COMMENTS=1 timeout 60 \
+        sh "$root/scripts/pr-review-watch.sh" collect-verdicts 42 "$csha" 2>/dev/null) && rc=0 || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        printf '%s: expected non-zero exit when the comments fetch fails, got 0\n' "$name" >&2
+        return 1
+    fi
+    if [ -n "$out" ]; then
+        printf '%s: expected no stdout when the comments fetch fails, got:\n  %s\n' "$name" "$out" >&2
+        return 1
+    fi
+}
+
+expect_collect_fail 'a failed comments fetch is an error, never "no prior verdicts"' "$csha1"
+
+# T3: the reviewed sha is validated at the subcommand boundary before it can
+# reach the pin regex or the status URL (REVIEW.md R5).
+expect_collect_badsha() {
+    name=$1
+    value=$2
+    case_number=$((case_number + 1))
+    out=$(timeout 60 sh "$root/scripts/pr-review-watch.sh" collect-verdicts 42 "$value" \
+        2>"$tmp/stderr-$case_number") && rc=0 || rc=$?
+    if [ "$rc" != "2" ]; then
+        printf '%s: expected exit 2 for a non-40-hex sha, got %s\n' "$name" "$rc" >&2
+        return 1
+    fi
+    if [ -n "$out" ]; then
+        printf '%s: expected no stdout for a non-40-hex sha, got:\n  %s\n' "$name" "$out" >&2
+        return 1
+    fi
+    if ! grep -q 'not a full lowercase 40-hex SHA' "$tmp/stderr-$case_number"; then
+        printf '%s: expected the validation error on stderr, got:\n  %s\n' \
+            "$name" "$(cat "$tmp/stderr-$case_number")" >&2
+        return 1
+    fi
+}
+
+expect_collect_badsha 'a regex metacharacter is not a sha' '.*'
+expect_collect_badsha 'a 39-hex value is not a sha' '111122223333444455556666777788889999aaa'
+expect_collect_badsha 'an uppercase 40-hex value is not a sha' '111122223333444455556666777788889999AAAA'
+expect_collect_badsha 'an alternation is not a sha' "${csha2}\$|${csha1}"
+
+# --- the two debt blocks are exactly their four marker lines (GH-742) ---------
+# The union rule block and the comment-reading block must each be liftable in
+# one piece: two opening markers and two closing markers, nothing else.
+
+wscript="$root/scripts/pr-review-watch.sh"
+if [ "$(grep -c 'D8-debt' "$wscript")" != "4" ]; then
+    printf 'D8 markers: expected exactly 4 lines (2 open + 2 close), got %s\n' \
+        "$(grep -c 'D8-debt' "$wscript")" >&2
+    exit 1
+fi
+if [ "$(grep -c '^# D8-debt(#769)' "$wscript")" != "1" ] || \
+   [ "$(grep -c '^# D8-debt(#671)' "$wscript")" != "1" ] || \
+   [ "$(grep -c '^# /D8-debt' "$wscript")" != "2" ]; then
+    printf 'D8 markers: expected one #769 opener, one #671 opener, two closers\n' >&2
+    exit 1
+fi
 
 # --- ack retry ----------------------------------------------------------------
 
@@ -622,6 +795,168 @@ grep -qF 'mode unknown — no SESSION_MODE receipt in .done' "$cfile" || {
     exit 1
 }
 unset GH_HEAD
+
+# --- live loop: the Independent Review commit status (GH-742) ------------------
+# Posted to the REVIEWED sha (never the current head), state = the union rule
+# over the §7 verdict comments on that sha plus this round's verdict, retried
+# on the same bounded path as the comment (review:post-failed at the cap).
+
+statuses_calls() { grep -c 'statuses/' "$GH_STUB_LOG" 2>/dev/null || true; }
+
+# the head moved before the verdict settled: no status for anything
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+export GH_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: head moved)\n' >&2; exit 1; }
+if [ "$(statuses_calls)" != "0" ]; then
+    printf 'live: a moved head must not get a commit status, got %s calls\n' "$(statuses_calls)" >&2
+    exit 1
+fi
+
+# LGTM with no other verdict on the sha: status success, then the label
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+export GH_HEAD="$sha"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: lgtm)\n' >&2; exit 1; }
+if ! grep -qF "repos/fagemx/edda/statuses/$sha" "$GH_STUB_LOG"; then
+    printf 'live: the status must be posted to the reviewed sha, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2
+    exit 1
+fi
+if ! grep -qF -- '-f state=success' "$GH_STUB_LOG"; then
+    printf 'live: LGTM P0=0 P1=0 alone must post state=success, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2
+    exit 1
+fi
+if ! grep -qF -- '-f context=Independent Review' "$GH_STUB_LOG"; then
+    printf 'live: the status context must be Independent Review\n' >&2
+    exit 1
+fi
+if ! grep -qF -- '-f description=LGTM P0=0 P1=0' "$GH_STUB_LOG"; then
+    printf 'live: the description must name the verdict, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2
+    exit 1
+fi
+if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: the verdict label should still be applied\n' >&2
+    exit 1
+fi
+if [ "$(state_get)" != "$(printf '42\t%s\t1' "$sha")" ]; then
+    printf 'live: a successful status + label should record reviewed, got:\n%s\n' "$(state_get)" >&2
+    exit 1
+fi
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: second cycle)\n' >&2; exit 1; }
+if [ "$(statuses_calls)" != "1" ]; then
+    printf 'live: the status must be posted once per verdict, got %s calls\n' "$(statuses_calls)" >&2
+    exit 1
+fi
+
+# an earlier Changes Requested on the same sha keeps the union at failure even
+# though this round's verdict is LGTM — the case the whole issue exists for
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+printf '<<<COMMENT>>>\n## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nChanges Requested, P0=0, P1=3 — blocking P1\n' \
+    "$sha" >"$tmp/comments-pr42-earlier-cr"
+export GH_HEAD="$sha"
+export GH_COMMENTS_FILE="$tmp/comments-pr42-earlier-cr"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: union)\n' >&2; exit 1; }
+if ! grep -qF -- '-f state=failure' "$GH_STUB_LOG"; then
+    printf 'live: a standing Changes Requested must hold the union at failure, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2
+    exit 1
+fi
+if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: the label still reflects the current LGTM verdict\n' >&2
+    exit 1
+fi
+
+# posting the status is not best-effort: the comment path\'s bounded retry,
+# and no label until the status is out
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+export GH_HEAD="$sha"
+export GH_FAIL_STATUS=1
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: post fails)\n' >&2; exit 1; }
+if [ -z "$(pending_get)" ]; then
+    printf 'live: a failed status post must keep the pending entry for retry, got empty\n' >&2
+    exit 1
+fi
+if grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: a failed status post must not apply the verdict label yet\n' >&2
+    exit 1
+fi
+if ! grep -qF 'status post failed (attempt 1)' "$PR_REVIEW_WATCH_LOG"; then
+    printf 'live: a failed status post must be logged\n' >&2
+    exit 1
+fi
+unset GH_FAIL_STATUS
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: recovery)\n' >&2; exit 1; }
+if ! grep -qF -- '-f state=success' "$GH_STUB_LOG"; then
+    printf 'live: the status should succeed on the retry, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2
+    exit 1
+fi
+if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: the label should be applied after the status recovery\n' >&2
+    exit 1
+fi
+if [ -n "$(pending_get)" ]; then
+    printf 'live: after the status recovery the pending entry should be dropped, got:\n%s\n' "$(pending_get)" >&2
+    exit 1
+fi
+
+# T2: an unreadable comment list withholds the status entirely — the union is
+# never computed from this round's verdict file alone — and the failure lands
+# on the same bounded retry path as any other status post failure.
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+printf '<<<COMMENT>>>\n## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nChanges Requested, P0=0, P1=3 — blocking P1\n' \
+    "$sha" >"$tmp/comments-pr42-withheld"
+export GH_HEAD="$sha"
+export GH_COMMENTS_FILE="$tmp/comments-pr42-withheld"
+export GH_FAIL_COMMENTS=1
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: comments unreadable)\n' >&2; exit 1; }
+if [ "$(statuses_calls)" != "0" ]; then
+    printf 'live: an unreadable comment list must not post any status, got %s calls\n' "$(statuses_calls)" >&2
+    exit 1
+fi
+if grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: an unreadable comment list must not apply the verdict label\n' >&2
+    exit 1
+fi
+if [ -z "$(pending_get)" ]; then
+    printf 'live: an unreadable comment list must keep the pending entry, got empty\n' >&2
+    exit 1
+fi
+if [ "$(printf '%s' "$(pending_get)" | cut -f6)" != "1" ]; then
+    printf 'live: an unreadable comment list must bump postfails by one, got:\n%s\n' "$(pending_get)" >&2
+    exit 1
+fi
+if ! grep -qF 'comments unreadable' "$PR_REVIEW_WATCH_LOG"; then
+    printf 'live: an unreadable comment list must be logged\n' >&2
+    exit 1
+fi
+unset GH_FAIL_COMMENTS
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: comments recovered)\n' >&2; exit 1; }
+if ! grep -qF -- '-f state=failure' "$GH_STUB_LOG"; then
+    printf 'live: a healthy fetch must post the union failure, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2
+    exit 1
+fi
+if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: the label should be applied after the comments recover\n' >&2
+    exit 1
+fi
 
 # --- offline guarantee: the real watcher log was never touched -----------------
 size_after=0

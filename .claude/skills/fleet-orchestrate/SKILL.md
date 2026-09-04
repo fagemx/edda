@@ -42,16 +42,15 @@ when changing or validating review policy.
    two concurrent workers onward, reserve a verifier seat.
 7. Record tasks, claims, rulings, and acceptance criteria in the durable truth
    layer before ringing host messaging as a doorbell.
-8. Gate every cross-machine dispatch mechanically (GH-656): before a lane
-   starts an issue, its claim is written by exactly one command —
+8. Gate every cross-machine dispatch mechanically (GH-782): before a lane
+   starts an issue, use one claim command —
    `scripts/fleet-claim-issue.sh <issue> <machine>/<role>` (e.g.
-   `4090/worker-1`, `docs/reviewer`), which leaves the `taking:` comment
-   and `lane:*` label. `edda dispatch --issue <N> --machine
-   <machine>/<role>` is only a pre-spawn check: it refuses with exit 2 if
-   another machine already holds the issue, but until #782 lands it
-   writes no claim and does not substitute for the script. The token is
-   an explicit `<machine>/<role>` value from the brief, never a hostname
-   guess.
+   `4090/worker-1`, `docs/reviewer`) or `edda dispatch --issue <N> --machine
+   <machine>/<role>`. Each checks PRs and full `taking:` identities, then
+   writes the `taking:` comment, adds `fleet:claimed`, removes `fleet:ready`,
+   and assigns `@me` before the lane starts. `lane:*` labels are routing only,
+   never ownership. The token is an explicit `<machine>/<role>` value from the
+   brief, never a hostname guess.
 9. Give self-contained briefs (including assigned build lane, verification
    budget, and cleanup authority), monitor compressed state, adjudicate
    conflicts, and close only against immutable full SHAs with proportional
@@ -62,8 +61,8 @@ when changing or validating review policy.
 `fleet:ready` is the operator's signature: promoting an issue to ready already
 authorized it. When the operator says "run ready work today"（「今天開始跑」）, the
 controller runs this procedure and produces the batch itself — it never stops
-to ask for issue numbers. This step **selects**; the actual claim write is the
-single command in sequence step 8 (`scripts/fleet-claim-issue.sh`, #783) —
+to ask for issue numbers. This step **selects**; the actual claim write uses
+one command from sequence step 8 (the claim script or issue-aware dispatch) —
 selection does not claim.
 
 Run it verbatim:
@@ -82,10 +81,10 @@ Run it verbatim:
    ```
 
 2. **Exclude**, recording each issue's reason for the output table:
-   - (a) another machine already holds it: a `taking:` comment or a `lane:*`
-     label naming a different workstation (`fleet.cross-machine-claim`). The
-     same workstation (`docs` vs `docs/pipeline`) is **not** "another
-     machine".
+   - (a) another lane already holds it: a `taking:` comment with a different
+     full `<machine>/<role>` identity. `lane:*` labels are routing only and do
+     not exclude an issue; a different role on the same machine is still a
+     different claimant.
    - (b) already in flight: an open PR — list open `headRefName`s
      (`gh pr list --state open --json headRefName`) and treat any branch
      name containing `gh<n>` as in flight (the repo's convention is

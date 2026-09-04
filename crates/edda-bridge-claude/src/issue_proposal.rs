@@ -344,6 +344,7 @@ mod tests {
 
     #[test]
     fn proposal_status_transitions() {
+        let _store = crate::isolated_store();
         let pid = "test_proposal_status";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -407,6 +408,7 @@ mod tests {
 
     #[test]
     fn storage_save_load_list_roundtrip() {
+        let _store = crate::isolated_store();
         let pid = "test_proposal_storage";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -473,6 +475,7 @@ mod tests {
 
     #[test]
     fn record_issue_created_updates_proposal() {
+        let _store = crate::isolated_store();
         let pid = "test_proposal_issue_created";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -515,6 +518,7 @@ mod tests {
 
     #[test]
     fn record_issue_created_rejects_non_approved() {
+        let _store = crate::isolated_store();
         let pid = "test_proposal_reject_non_approved";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -555,6 +559,7 @@ mod tests {
 
     #[test]
     fn audit_log_records_actions() {
+        let _store = crate::isolated_store();
         let pid = "test_proposal_audit";
         let _ = edda_store::ensure_dirs(pid);
 
@@ -590,6 +595,7 @@ mod tests {
 
     #[test]
     fn new_proposal_id_format() {
+        let _store = crate::isolated_store();
         let id = new_proposal_id();
         assert!(id.starts_with("prop_"));
         assert_eq!(id.len(), 17); // "prop_" (5) + 12 chars
@@ -597,6 +603,7 @@ mod tests {
 
     #[test]
     fn load_nonexistent_proposal_returns_error() {
+        let _store = crate::isolated_store();
         let pid = "test_proposal_missing";
         let _ = edda_store::ensure_dirs(pid);
 
