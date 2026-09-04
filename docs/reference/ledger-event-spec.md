@@ -215,9 +215,9 @@ lossless forwarding of an extended envelope must preserve the raw object and
 negotiate that version instead of claiming typed v1 forwarding is lossless.
 
 V1 remains unsigned. Proposed `actor_id`, `sig`, and `key_id` fields belong
-to the explicit **v1.1 proposal** in
-[`docs/architecture/actor-signing.md`](../architecture/actor-signing.md)
-(#609), not the v1 hash projection or current schemas. No production signing
+to the explicit **v1.1 proposal** tracked in
+[issue #609](https://github.com/fagemx/edda/issues/609), not the v1 hash
+projection or current schemas. No production signing
 or authentication behavior is enabled by this specification.
 
 ## Conformance and proof status
