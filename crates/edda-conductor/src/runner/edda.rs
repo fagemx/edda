@@ -186,6 +186,18 @@ pub fn record_phase_done_with_plan(
     summary: Option<&str>,
     cost_usd: Option<f64>,
 ) {
+    record_phase_done_timed(cwd, plan_id, phase_id, summary, cost_usd, None);
+}
+
+/// Phase receipt with optional measured elapsed time, exposed by `edda log --json`.
+pub fn record_phase_done_timed(
+    cwd: &Path,
+    plan_id: Option<&str>,
+    phase_id: &str,
+    summary: Option<&str>,
+    cost_usd: Option<f64>,
+    elapsed_ms: Option<u64>,
+) {
     let cost_str = cost_usd.map(|c| format!(" [${c:.3}]")).unwrap_or_default();
     let summary_str = summary
         .map(|s| {
@@ -200,12 +212,20 @@ pub fn record_phase_done_with_plan(
         })
         .unwrap_or_default();
     let text = format!("Phase \"{phase_id}\" passed{cost_str}{summary_str}");
+    let text = format!(
+        "{text} [elapsed: {}]",
+        elapsed_ms
+            .map(|ms| format!("{ms} ms"))
+            .unwrap_or_else(|| "—".into())
+    );
     let tags = vec!["conductor".to_string(), format!("phase:{phase_id}")];
     let payload = serde_json::json!({
         "plan_id": plan_id,
         "phase_id": phase_id,
         "status": "passed",
         "cost_usd": cost_usd,
+        "elapsed_ms": elapsed_ms,
+        "elapsed_measured": elapsed_ms.is_some(),
     });
     append_ledger_note_best_effort(
         &format!("phase \"{phase_id}\" passed"),
@@ -237,6 +257,18 @@ pub fn record_phase_failed_with_plan(
     cost_usd: Option<f64>,
     error: &str,
 ) {
+    record_phase_failed_timed(cwd, plan_id, phase_id, cost_usd, error, None);
+}
+
+/// Failed phase receipt; missing timing remains unmeasured, including pre-run failures.
+pub fn record_phase_failed_timed(
+    cwd: &Path,
+    plan_id: Option<&str>,
+    phase_id: &str,
+    cost_usd: Option<f64>,
+    error: &str,
+    elapsed_ms: Option<u64>,
+) {
     let error_str = if error.len() > 200 {
         format!("{}...", truncate_str(error, 200))
     } else {
@@ -244,6 +276,12 @@ pub fn record_phase_failed_with_plan(
     };
     let cost_str = cost_usd.map(|c| format!(" [${c:.3}]")).unwrap_or_default();
     let text = format!("Phase \"{phase_id}\" failed{cost_str}: {error_str}");
+    let text = format!(
+        "{text} [elapsed: {}]",
+        elapsed_ms
+            .map(|ms| format!("{ms} ms"))
+            .unwrap_or_else(|| "—".into())
+    );
     let mut tags = vec!["conductor".to_string(), format!("phase:{phase_id}")];
     tags.push("failure".to_string());
     let payload = serde_json::json!({
@@ -251,6 +289,8 @@ pub fn record_phase_failed_with_plan(
         "phase_id": phase_id,
         "status": "failed",
         "cost_usd": cost_usd,
+        "elapsed_ms": elapsed_ms,
+        "elapsed_measured": elapsed_ms.is_some(),
     });
     append_ledger_note_best_effort(
         &format!("phase \"{phase_id}\" failed"),
@@ -286,6 +326,8 @@ pub fn record_phase_gate_timed_out(
         "phase_id": phase_id,
         "status": "gate_timed_out",
         "cost_usd": cost_usd,
+        "elapsed_ms": null,
+        "elapsed_measured": false,
     });
     append_ledger_note_best_effort(
         &format!("phase \"{phase_id}\" gate timed out"),
@@ -728,5 +770,34 @@ mod tests {
         assert_eq!(payload["status"], "aborted");
         assert_eq!(payload["phases_passed"], 2);
         assert_eq!(payload["phases_pending"], 3);
+    }
+    #[test]
+    fn ledger_phase_receipts_keep_elapsed_beside_cost_and_mark_unknown() {
+        for failed in [false, true] {
+            for elapsed in [None, Some(5000), Some(0)] {
+                let dir = tempfile::tempdir().unwrap();
+                init_test_ledger(dir.path());
+                if failed {
+                    record_phase_failed_timed(
+                        dir.path(),
+                        Some("p"),
+                        "a",
+                        Some(1.25),
+                        "fixture",
+                        elapsed,
+                    );
+                } else {
+                    record_phase_done_timed(dir.path(), Some("p"), "a", None, Some(1.25), elapsed);
+                }
+                let event = conductor_phase_event(dir.path()).unwrap();
+                let payload = &event.payload["conductor_phase"];
+                assert_eq!(payload["elapsed_ms"].as_u64(), elapsed);
+                assert_eq!(payload["elapsed_measured"], elapsed.is_some());
+                assert_eq!(payload["cost_usd"], 1.25);
+                if elapsed.is_none() {
+                    assert!(event.payload["text"].as_str().unwrap().contains("—"));
+                }
+            }
+        }
     }
 }

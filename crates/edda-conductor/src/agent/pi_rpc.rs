@@ -1,3 +1,4 @@
+use super::timing::ProcessTiming;
 use crate::agent::launcher::{AgentLauncher, PhaseResult};
 use crate::plan::schema::Phase;
 use anyhow::{anyhow, Context, Result};
@@ -6,7 +7,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
@@ -68,6 +69,7 @@ pub struct PiRpcLauncher {
     observed_model: std::sync::Mutex<Option<String>>,
     /// In-band session id from the same `get_state` response.
     observed_session: std::sync::Mutex<Option<String>>,
+    timing: ProcessTiming,
 }
 
 impl Default for PiRpcLauncher {
@@ -85,6 +87,7 @@ impl PiRpcLauncher {
             session_dir: None,
             observed_model: std::sync::Mutex::new(None),
             observed_session: std::sync::Mutex::new(None),
+            timing: ProcessTiming::default(),
         }
     }
 
@@ -96,6 +99,7 @@ impl PiRpcLauncher {
             session_dir: None,
             observed_model: std::sync::Mutex::new(None),
             observed_session: std::sync::Mutex::new(None),
+            timing: ProcessTiming::default(),
         }
     }
 
@@ -227,6 +231,7 @@ impl AgentLauncher for PiRpcLauncher {
         cwd: &Path,
         cancel: CancellationToken,
     ) -> Result<PhaseResult> {
+        self.timing.reset();
         self.validate_phase(phase)?;
         let command = self.build_command(phase, session_id, cwd);
         let timeout_sec = phase.timeout_sec.unwrap_or(1800);
@@ -238,6 +243,7 @@ impl AgentLauncher for PiRpcLauncher {
             self.verbose,
             Duration::from_secs(timeout_sec),
             cancel,
+            &self.timing,
         )
         .await?;
         // In-band model observation: whatever pi itself reported via RPC
@@ -245,6 +251,10 @@ impl AgentLauncher for PiRpcLauncher {
         self.record_observed_model(observed_model);
         self.record_observed_session(observed_session);
         Ok(result)
+    }
+
+    fn last_elapsed_ms(&self) -> Option<u64> {
+        self.timing.elapsed_ms()
     }
 
     fn last_observed_model(&self) -> Option<String> {
@@ -265,6 +275,7 @@ impl AgentLauncher for PiRpcLauncher {
 /// Run one phase against a pre-built command (injectable for tests).
 /// Returns the phase result plus the model pi reported in-band via RPC
 /// `get_state`, if the turn settled and pi exposed one (GH-574).
+#[allow(clippy::too_many_arguments)] // Timing observer is independent of the RPC payload.
 async fn run_command(
     command: Command,
     phase: &Phase,
@@ -273,6 +284,7 @@ async fn run_command(
     verbose: bool,
     timeout: Duration,
     cancel: CancellationToken,
+    timing: &ProcessTiming,
 ) -> Result<(PhaseResult, Option<String>, Option<String>)> {
     let mut session = PiRpcSession::spawn_command(command).await?;
     // pi has no system-prompt flag in RPC mode; carry plan context inline.
@@ -293,6 +305,9 @@ async fn run_command(
         (None, None)
     };
     session.terminate().await;
+    if session.child.try_wait()?.is_some() {
+        timing.record(session.started);
+    }
     let result = result?;
     Ok((result, observed_model, observed_session))
 }
@@ -325,6 +340,7 @@ pub fn list_models(pi_bin: Option<PathBuf>, search: Option<&str>) -> Result<Stri
 
 /// One live `pi --mode rpc` process speaking JSONL.
 struct PiRpcSession {
+    started: Instant,
     child: Child,
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
@@ -343,6 +359,7 @@ impl PiRpcSession {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        let started = Instant::now();
         let mut child = command.spawn().context("failed to spawn pi RPC process")?;
         let stdin = child.stdin.take().context("pi RPC stdin was not piped")?;
         let stdout = child.stdout.take().context("pi RPC stdout was not piped")?;
@@ -362,6 +379,7 @@ impl PiRpcSession {
         });
 
         Ok(Self {
+            started,
             child,
             stdin,
             stdout: BufReader::new(stdout).lines(),
@@ -978,6 +996,7 @@ sleep 60"
                 false,
                 Duration::from_secs(phase.timeout_sec.unwrap_or(1800)),
                 CancellationToken::new(),
+                &ProcessTiming::default(),
             ),
         )
         .await
@@ -1127,6 +1146,7 @@ sleep 60"
                 false,
                 Duration::from_secs(1800),
                 cancel,
+                &ProcessTiming::default(),
             ),
         )
         .await
@@ -1483,38 +1503,7 @@ sleep 60"
         assert!(error.to_string().contains("list-models"), "{error}");
     }
 
-    #[test]
-    fn pi_bin_falls_back_to_the_platform_install() {
-        // npm ships pi as a .cmd shim on Windows with no .exe, and
-        // CreateProcess does not apply PATHEXT — the bare name never resolves.
-        let expected = if cfg!(windows) { "pi.cmd" } else { "pi" };
-        assert_eq!(resolve_pi_bin(None), PathBuf::from(expected));
-    }
-
-    #[test]
-    fn edda_pi_bin_overrides_the_platform_default() {
-        let custom = "/opt/pi/bin/pi-custom";
-        assert_eq!(
-            resolve_pi_bin(Some(OsString::from(custom))),
-            PathBuf::from(custom)
-        );
-    }
-
-    #[test]
-    fn empty_edda_pi_bin_is_treated_as_unset() {
-        let expected = if cfg!(windows) { "pi.cmd" } else { "pi" };
-        assert_eq!(
-            resolve_pi_bin(Some(OsString::new())),
-            PathBuf::from(expected),
-            "an empty override must not produce an unspawnable empty path"
-        );
-    }
-
-    #[test]
-    fn with_bin_overrides_the_default() {
-        let custom = PathBuf::from("/opt/pi/bin/pi");
-        assert_eq!(PiRpcLauncher::with_bin(custom.clone()).pi_bin, custom);
-    }
+    include!("pi_rpc_config_tests.rs");
 
     #[test]
     fn stderr_tail_is_empty_for_no_output() {

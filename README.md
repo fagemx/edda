@@ -19,6 +19,7 @@
   <a href="#why-edda">Why Edda?</a> ·
   <a href="#layer-1--memory-that-survives-sessions">Memory</a> ·
   <a href="#layer-2--coordination-that-survives-agents">Fleet</a> ·
+  <a href="#layer-3--control-that-decides-what-runs-next">Control</a> ·
   <a href="#install">Install</a> ·
   <a href="#quick-start">Quick Start</a> ·
   <a href="#how-it-works">How It Works</a> ·
@@ -55,14 +56,15 @@ Agent work disappears in two ways.
 
 **The agent dies, and the work state dies with it.** You run two or three agents in parallel and one session crashes mid-task. What was it doing? What did it finish? Was anything half-done? If the answer lives in a process that no longer exists, you get to reconstruct it by hand — or worse, redo work that was already done.
 
-Edda fixes both with the same primitive: **local, append-only state in `.edda/`, on your machine, that outlives any session, any agent, and any tool.** One workspace, two layers of application:
+Edda fixes both with the same primitive: **local, append-only state in `.edda/`, on your machine, that outlives any session, any agent, and any tool.** One workspace, three layers of application:
 
 | Layer | Question it answers | Primitives |
 |---|---|---|
 | **Memory** | *What was decided, and why?* | decisions, notes, session digests, automatic injection |
 | **Fleet** | *Who is doing what, and what actually happened?* | claims, tasks + receipts, plans, gates, verdicts |
+| **Control** | *What should run, is it worth it, is it alive?* | signals (heartbeat, freshness, cost, verdict, queue depth, surface intersection); verbs watch / report / promote / intake — in flight, [#560](https://github.com/fagemx/edda/issues/560) |
 
-Use layer 1 alone from day one. Layer 2 is simply there — same workspace, same CLI — when you start running more than one agent.
+Use layer 1 alone from day one. Layer 2 is simply there — same workspace, same CLI — when you start running more than one agent. Layer 3 — the control layer — is taking shape on the same foundation.
 
 **Separate persistence planes, deliberately.** Decisions, notes, session digests, tasks, and verdicts are events in the hash-chained SQLite ledger — tamper-evident and replayable. Live coordination state sits outside that chain, in the per-user store: claims append to a coordination log, while each session's heartbeat is a small snapshot file, rewritten as the session works and removed when it exits cleanly — a session that dies without that exit leaves its snapshot behind, which `edda peers` reports as stale and `edda gc` can later reclaim. Each `edda conduct` plan keeps its own state file and event log again separately. All of it is local and inspectable; the hash chain covers the ledger.
 
@@ -157,7 +159,15 @@ edda dispatch --agent codex --prompt-file task.md
 
 **Two-tier authority — recorded is not binding.** Agents record decisions freely, but a recorded decision stays *unratified* until an operator confers authority with `edda ratify` — a separate append-only event, never a mutation of the decision, so the authority trail is auditable. The split lives in the data model and in what agents are taught (`decide` only, never `ratify`); today it is a workflow convention rather than an access-control boundary, since identity is not yet cryptographically enforced. Combined with the hash chain over the ledger, this is the property the whole layer is built for: **agents run on your machine, and you can always check what they did — in order, with the authority trail attached.**
 
-> **Maturity note:** layer 1 is stable daily-driver territory. Layer 2 ships today (claims, tasks, conduct, dispatch, verdict gates, ratify) and is where edda is growing fastest — in-flight work on liveness heartbeats, unified fleet status, and event-driven notifications is tracked in [#560](https://github.com/fagemx/edda/issues/560). It is developed by being used: edda's own multi-agent fleet builds edda with it.
+> **Maturity note:** layer 1 is stable daily-driver territory. Layer 2 ships today (claims, tasks, conduct, dispatch, verdict gates, ratify) and is where edda is growing fastest. Layer 3 — the control layer — is in flight: [epic #560](https://github.com/fagemx/edda/issues/560) tracks the work that turns its signals and verbs (liveness heartbeats, freshness, cost, a unified status plane, watch / report / promote / intake) into product. It is developed by being used: edda's own multi-agent fleet builds edda with it.
+
+## Layer 3 — Control that decides what runs next
+
+Memory holds the record and Fleet holds the workers. Once several lanes are in flight, the hard question moves up a level: *what should run next, is it worth running, and is anything actually alive?* Answering it takes its own objects and verbs: **signals** measured from the ledger and the fleet — heartbeat, freshness, cost, verdicts, queue depth, surface intersections — and the verbs that act on them: **watch**, **report**, **promote**, **intake**.
+
+The boundary that keeps this layer honest: the **mechanical half** becomes product — surface-intersection checks, heartbeat and freshness detection, cost aggregation — so a controller reads the fleet's state from edda instead of reconstructing it by hand. The **judgment half** stays with the operator: direction, promoting pending work to ready, ratification. The operator is not inside the three layers — the operator sits above all of them.
+
+Layer 3 is named and scoped, not shipped: these verbs are design concepts, not subcommands (today's `edda watch` TUI and `edda intake github` cover narrower ground), and productizing them — a unified status plane, liveness heartbeats, cost reporting — is the Layer 3 epic, tracked in [#560](https://github.com/fagemx/edda/issues/560).
 
 ## Install
 

@@ -19,3 +19,4 @@ pub use types::*;
 
 #[cfg(test)]
 mod review_tests;
+mod event_conformance;

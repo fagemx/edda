@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Edda v1 event envelope",
+  "description": "Read shape; absent refs/schema_version default to {}/0; parent_hash defaults to null. Current producers emit version 1 and canonical digests.",
+  "type": "object",
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "ts": {
+      "type": "string"
+    },
+    "type": {
+      "type": "string"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "parent_hash": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "payload": {},
+    "refs": {
+      "type": "object",
+      "properties": {
+        "blobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "provenance": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "target": {
+                "type": "string"
+              },
+              "rel": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "target",
+              "rel"
+            ],
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "digests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "alg": {
+            "type": "string"
+          },
+          "canon": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "alg",
+          "canon",
+          "value"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "event_family": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "event_level": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "event_id",
+    "ts",
+    "type",
+    "branch",
+    "hash",
+    "payload"
+  ],
+  "additionalProperties": true
+}

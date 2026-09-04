@@ -21,6 +21,12 @@ invariant, API/schema order). Plan YAMLs live outside the repo (scratchpad or
 
 ## Layer 1 — static judgment (before dispatch)
 
+Layer 1's input **is** the select-this-batch table from fleet-orchestrate's
+ready-batch selection procedure — a batch never appears from nowhere. That
+table already applied the exclusion checklist (cross-machine claims, in-flight
+PRs/remote branches, `needs-operator`); this layer starts from its selected
+rows and does not repeat those checks.
+
 Ready-queue intake is a machine check, not memory (GH-665): source candidate
 issues from `scripts/fleet/ready-queue-lint.sh`, never a raw
 `gh issue list --label fleet:ready` — the script excludes open issues whose
@@ -49,12 +55,15 @@ against the crate map. Pairwise intersect:
   gates assume an attached controller — wave1 timed out 2 of 3). This also makes
   the GH-543 worktree-ledger trap inapplicable.
 - Record `edda claim --paths` per lane.
-- Cross-machine claim before dispatch (GH-656): for each bundle run
-  `scripts/fleet-claim-issue.sh <issue> <machine>` — machine label from the
-  lane brief, never a hostname guess. Exit 1 (another machine's `taking:`
-  comment or `lane:*` label) means that lane does not dispatch;
-  `edda dispatch --issue <N> --machine <machine>` enforces the same check at
-  dispatch time and refuses with exit 2.
+- Cross-machine claim before dispatch (GH-656): each bundle's claim is
+  written by one command — `scripts/fleet-claim-issue.sh
+  <issue> <machine>/<role>` with the explicit `<machine>/<role>` token
+  from the lane brief (e.g. `4090/worker-1`, `docs/reviewer`), never a
+  hostname guess. Exit 1: another lane's `taking:` comment or `lane:*`
+  label — that lane does not dispatch. `edda dispatch --issue <N>
+  --machine <machine>/<role>` is only a pre-spawn check that refuses with
+  exit 2 if another machine already holds the issue; until #782 lands it
+  writes no claim and does not substitute for the script.
 
 ## Layer 3 — post-hoc net (before merge)
 
