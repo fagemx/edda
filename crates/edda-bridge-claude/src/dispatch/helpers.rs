@@ -1,7 +1,76 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use edda_ledger::tasks::TaskStatus;
+
 use super::read_workspace_config_bool;
+
+// ── Rail Task Briefs (GH-793) ──
+
+/// Render the task-rail brief blocks for tasks this session holds.
+///
+/// A session holds a task when the task is `running` or `ready` and its
+/// assignee matches the session's label. Label resolution mirrors the Stop
+/// nudge (`task_nudge::dispatch_stop`): an active board claim wins, the
+/// heartbeat label is the fallback — interactive sessions get their label
+/// through `edda claim`, not the heartbeat.
+///
+/// Every failure (no heartbeat, no ledger, unreadable views) degrades to
+/// `None` — SessionStart injection must never break a session.
+pub(super) fn render_assigned_task_briefs(
+    project_id: &str,
+    session_id: &str,
+    cwd: &str,
+) -> Option<String> {
+    if session_id.is_empty() || cwd.is_empty() {
+        return None;
+    }
+    let hb = crate::peers::read_heartbeat(project_id, session_id)?;
+    let root = edda_ledger::EddaPaths::find_root(Path::new(cwd))?;
+    let ledger = edda_ledger::Ledger::open(&root).ok()?;
+    let views = ledger.task_views().ok()?;
+    let board = crate::peers::compute_board_state(project_id);
+    let label = board
+        .claims
+        .iter()
+        .find(|c| c.session_id == session_id)
+        .map(|c| c.label.as_str())
+        .unwrap_or(&hb.label);
+    if label.is_empty() {
+        return None;
+    }
+    let blocks: Vec<String> = views
+        .iter()
+        .filter(|v| {
+            matches!(v.status, TaskStatus::Running | TaskStatus::Ready)
+                && v.assignee.as_deref() == Some(label)
+        })
+        .map(|v| edda_ledger::tasks::render_task_brief_block(v, Some(&root)))
+        .collect();
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(blocks.join("\n\n"))
+    }
+}
+
+/// [`render_assigned_task_briefs`] appended onto the SessionStart content
+/// (GH-793). Keeping the append here keeps the injection one line at the
+/// call site — session.rs sits against the GH-779 file-length ceiling.
+pub(super) fn append_task_briefs(
+    content: Option<String>,
+    project_id: &str,
+    session_id: &str,
+    cwd: &str,
+) -> Option<String> {
+    match render_assigned_task_briefs(project_id, session_id, cwd) {
+        Some(briefs) => Some(match content {
+            Some(c) => format!("{c}\n\n{briefs}"),
+            None => briefs,
+        }),
+        None => content,
+    }
+}
 
 // ── Active Plan ──
 
