@@ -286,9 +286,15 @@ git log --format=%B "origin/$BASE..$SHA" \
   | grep -Ein '(^|[^a-z])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+'
 ```
 
-**U3 — the `Issue: #N` line exists. P1.** `scripts/review-pr.sh` parses exactly
-this line to load the `doneWhen` into the brief; without it the next round
-silently loses its acceptance ceiling. Empty output is the failure.
+**U3 — the `Issue: #N` line exists. P1.** This is a convention miss, not a data
+dependency: `scripts/review-pr.sh` collects issue numbers from **three**
+sources (see its issue-number collection block) — `Issue:`/`Issues:` lines,
+closing keywords anywhere in the body, and GitHub's
+closingIssuesReferences — so a body carrying only `Closes #N` still supplies
+the brief with the issue's `doneWhen`, and an empty ceiling is never a
+consequence of the missing line. Missing `Issue: #N` is still P1 because the
+repo wants the issue named in this exact conventional form. Empty output is
+the failure.
 
 ```sh
 gh pr view "$N" --json body --jq .body | awk 'tolower($0) ~ /^issues?[[:space:]]*:/'
