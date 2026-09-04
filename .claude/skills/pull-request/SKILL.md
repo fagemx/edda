@@ -260,7 +260,42 @@ another session's active branch or worktree, and sources — stays untouched (se
 - Keeps main branch history clean and linear
 - Combines all commits into single commit
 
-### Step 4: Switch to Main and Pull Latest
+### Step 4: Clear Delivery Labels from the Delivered Issue
+
+`Closes #N` closes the issue but does **not** touch its labels: after the
+merge, the delivered issue still carries `fleet:ready` and stays pickable
+(GH-665). Immediately after a squash merge succeeds, clear the fleet queue
+labels from every issue the PR delivers — a **closing keyword**
+(`Closes`/`Fixes`/`Resolves` `#N`) is what marks delivery. `Issue: #N` is the
+partial-delivery / non-closing reference (REVIEW.md U2/U3) and must never
+clear labels on its own:
+
+```bash
+# Issues delivered by this PR: closing-keyword references in the PR body
+# ('Closes #N', 'Fixes #N', 'Resolves #N' with inflections). 'Issue: #N',
+# 'tracked in #N', 'see #N' are mentions, not delivery — never match them.
+# The second grep extracts only the number after '#': the first match's
+# leading boundary group is part of the -o output and may itself be a digit
+# ('v2Closes #20' matches '2Closes #20'), so extracting every digit run
+# would turn that digit into a second label target.
+for issue in $(gh pr view --json body -q .body \
+    | grep -ioE '(^|[^A-Za-z])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+' \
+    | grep -oE '#[0-9]+' | tr -d '#' | sort -u); do
+    for label in fleet:ready fleet:claimed; do
+        if gh issue view "$issue" --json labels -q '.labels[].name' \
+            | grep -qx "$label"; then
+            gh issue edit "$issue" --remove-label "$label"
+        fi
+    done
+done
+```
+
+Only a squash-merged PR counts as delivery. If the merge was blocked or the PR
+closed unmerged, skip this step. Do not invent a `fleet:delivered` label —
+removing `fleet:ready` at the merge end plus the machine check in
+`scripts/fleet/ready-queue-lint.sh` at the pick end are the whole mechanism.
+
+### Step 5: Switch to Main and Pull Latest
 
 ```bash
 git checkout main
@@ -340,8 +375,9 @@ Actions Completed:
    1. Merge preconditions verified (final current-head LGTM, P0=0, P1=0, required checks green)
    2. CI checks validated
    3. PR squash merged
-   4. Switched to main
-   5. Pulled latest changes
+   4. fleet:ready / fleet:claimed cleared from delivered issue(s)
+   5. Switched to main
+   6. Pulled latest changes
 
 Latest commit: <hash> <message>
 ```
@@ -416,8 +452,9 @@ gh pr comment "$PR_NUMBER" --body "$COMMENT_CONTENT"
 2. **Run pre-commit checks** - Never skip quality checks
 3. **Never merge with failing checks** - Code quality is non-negotiable
 4. **Use squash merge** - Keeps main history clean
-5. **Confirm merge completion** - Verify PR state is MERGED
-6. **Keep user informed** - Clear status at each step
+5. **Clear fleet delivery labels after merge** - `Closes #N` closes the issue but not its labels; a delivered issue without the label clear stays pickable forever. Only closing keywords (`Closes`/`Fixes`/`Resolves` #N) count — `Issue: #N` alone never clears labels
+6. **Confirm merge completion** - Verify PR state is MERGED
+7. **Keep user informed** - Clear status at each step
 
 ## Related Skills
 
