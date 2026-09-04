@@ -23,7 +23,6 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 time.workspace = true
-dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

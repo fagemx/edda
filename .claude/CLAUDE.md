@@ -52,6 +52,18 @@ Rust development principles and conventions for the edda project.
 - CI runs: `cargo clippy --workspace --all-targets`
 - `RUSTFLAGS: -Dwarnings` in CI — warnings are errors
 
+Workspace method bans:
+
+- Method bans are configured in `clippy.toml` under `disallowed-methods`, each
+  entry carrying the concrete failure reason it prevents (e.g. `dirs::home_dir`
+  vs `std::env::home_dir` disagreeing on Windows).
+- Bans are DefId-matched: aliases, re-exports, and fully-qualified paths are
+  all caught.
+- Limitation: a `disallowed-methods` entry for a crate absent from a given
+  crate's dependency graph is silently inert for that crate — clippy cannot
+  resolve the DefId, so the ban does not fire there. A ban on `dirs` therefore
+  only protects crates that (transitively) depend on `dirs`.
+
 ### 3.2 No unsafe
 
 ```rust
