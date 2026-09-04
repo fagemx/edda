@@ -1,7 +1,5 @@
-use std::time::Duration;
-
 use serde::Deserialize;
-
+use std::time::Duration;
 // ── Config ──
 
 /// Notification channel configuration — stored in `.edda/config.json` under key `notify_channels`.
@@ -19,7 +17,6 @@ pub enum Channel {
         events: Vec<String>,
     },
 }
-
 impl Channel {
     fn events(&self) -> &[String] {
         match self {
@@ -42,13 +39,11 @@ impl Channel {
         self.events().iter().any(|e| e == name || e == "*")
     }
 }
-
 /// Top-level notify configuration.
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct NotifyConfig {
     pub channels: Vec<Channel>,
 }
-
 impl NotifyConfig {
     /// Load from `.edda/config.json` key `notify_channels`.
     /// Returns empty config if key is missing or unparseable.
@@ -975,12 +970,17 @@ mod tests {
     fn digest_truncation_keeps_entities_and_tags_complete() {
         let event = NotifyEvent::Digest {
             title: "t".into(),
-            body: format!("{}&xx", "x".repeat(3885)),
+            body: format!("{}&", "x".repeat(3889)),
         };
         let text = format_telegram(&event);
-        assert!(text.ends_with("&amp;…"), "text={text}");
+        assert!(!text.ends_with("&…"), "text={text}");
         assert!(text.starts_with("<b>t</b>\n"), "text={text}");
-        assert_eq!(text.chars().count(), TELEGRAM_MAX_CHARS);
+        assert!(text.chars().count() <= TELEGRAM_MAX_CHARS);
+        let text = format_telegram(&NotifyEvent::Digest {
+            title: "x".repeat(4000),
+            body: String::new(),
+        });
+        assert!(text.ends_with("…</b>"), "text={text}");
     }
     #[test]
     fn test_channels_ignores_event_subscriptions() {

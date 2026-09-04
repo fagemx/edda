@@ -211,7 +211,7 @@ pub fn render(input: &DigestInput) -> String {
         }
         for t in blocked {
             out.push_str(&format!(
-                "- local task #{} {} — {}\n",
+                "- local task `#{}` {} — {}\n",
                 t.id, t.title, t.status
             ));
         }
@@ -241,7 +241,7 @@ pub fn render(input: &DigestInput) -> String {
         for t in ready {
             let assignee = t.assignee.as_deref().unwrap_or("unassigned");
             out.push_str(&format!(
-                "- local task #{} {}（{}）\n",
+                "- local task `#{}` {}（{}）\n",
                 t.id, t.title, assignee
             ));
         }
@@ -343,15 +343,15 @@ mod tests {
         let out = render(&input);
         let idx = |needle: &str| out.find(needle).unwrap_or(usize::MAX);
         assert!(idx("`db.engine`") < idx("`deploy.target`"), "out={out}");
-        assert!(idx("local task #4") < idx("local task #9"), "out={out}");
+        assert!(idx("local task `#4`") < idx("local task `#9`"), "out={out}");
         assert!(
-            idx("`deploy.target`") < idx("local task #4"),
+            idx("`deploy.target`") < idx("local task `#4`"),
             "decisions before tasks, out={out}"
         );
         assert!(out.contains(
             "- decision `db.engine` — unratified (human), recorded 2026-09-03T01:00:00Z"
         ));
-        assert!(out.contains("- local task #9 later — failed"));
+        assert!(out.contains("- local task `#9` later — failed"));
     }
 
     #[test]
@@ -383,13 +383,13 @@ mod tests {
         let section = out.split("## 明天會做的").nth(1).unwrap_or("");
         let ready_lines = section
             .lines()
-            .filter(|l| l.starts_with("- local task #"))
+            .filter(|l| l.starts_with("- local task `#"))
             .count();
         assert_eq!(ready_lines, 3, "out={out}");
-        assert!(out.contains("- local task #1 t1（w1）"));
-        assert!(out.contains("- local task #3 t3（w3）"));
-        assert!(!out.contains("local task #4"));
-        assert!(!out.contains("local task #5"));
+        assert!(out.contains("- local task `#1` t1（w1）"));
+        assert!(out.contains("- local task `#3` t3（w3）"));
+        assert!(!out.contains("local task `#4`"));
+        assert!(!out.contains("local task `#5`"));
     }
 
     #[test]

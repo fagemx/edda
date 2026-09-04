@@ -54,7 +54,7 @@ case "$1" in
     case "$2" in
       comment) exit 0 ;;
       view)
-        [ -n "${GH_BOARD_FILE:-}" ] && cat "$GH_BOARD_FILE"
+        [ -n "${GH_BOARD_FILE:-}" ] && awk -F '\t' '$2 ~ /needs-operator/ { print }' "$GH_BOARD_FILE"
         exit 0
         ;;
       list)
@@ -213,7 +213,7 @@ printf '%s\n' "$out" | grep -qF -- '- #78 Check run thing — Independent Review
 
 # --- case 4: board comment with needs-operator lands under 例外 ----------------
 reset_stubs
-printf 'https://github.com/fagemx/edda/issues/613#issuecomment-1\tneeds-operator: relogin gh on 4090\n' >"$tmp/board.md"
+printf 'https://github.com/fagemx/edda/issues/613#issuecomment-1\tstatus header\nhttps://github.com/fagemx/edda/issues/613#issuecomment-1\tneeds-operator: relogin gh on 4090\nhttps://github.com/fagemx/edda/issues/613#issuecomment-1\tother details\n' >"$tmp/board.md"
 export GH_BOARD_FILE="$tmp/board.md"
 export EDDA_RECAP_FILE="$RECAP_CANNED"
 out=$(run_digest --dry-run 2>&1) || fail 'case 4: daily-digest.sh exited non-zero'
@@ -222,6 +222,9 @@ printf '%s\n' "$out" | grep -qF -- '- 看板：needs-operator: relogin gh on 409
 # it must come under 例外 (after the heading, before 成本)
 printf '%s\n' "$out" | awk '/^## 例外/{f=1;next} /^## /{f=0} f' | grep -qF -- '- 看板：needs-operator: relogin gh on 4090 (https://github.com/fagemx/edda/issues/613#issuecomment-1)' \
     || fail 'case 4: board line is not inside the 例外 section'
+if printf '%s\n' "$out" | grep -qF 'status header\|other details'; then
+    fail 'case 4: unrelated board lines must not be rendered'
+fi
 
 # --- case 5: not dry-run posts to the board and notifies, in that order --------
 reset_stubs

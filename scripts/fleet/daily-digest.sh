@@ -181,7 +181,7 @@ EOF
 board_lines="$tmp/board-lines.md"
 : >"$board_lines"
 board_comments=$(gh issue view "$EDDA_BOARD_ISSUE" --repo "$EDDA_REPO" --json comments \
-    --jq '.comments[] | select(.createdAt >= "'"$SINCE_ISO"'") | [.url, .body] | @tsv' \
+    --jq '.comments[] | select(.createdAt >= "'"$SINCE_ISO"'") | . as $comment | ($comment.body | split("\n")[] | select(test("needs-operator")) | [$comment.url, .] | @tsv)' \
 ) || { printf '%s: gh issue view (board comments) failed\n' "$prog" >&2; exit 1; }
 printf '%s\n' "$board_comments" | while IFS="$(printf '\t')" read -r url body; do
     [ -n "$url" ] || continue
