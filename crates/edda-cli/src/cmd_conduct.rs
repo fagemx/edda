@@ -120,7 +120,14 @@ pub fn run(
     tmux: bool,
     agent: AgentKind,
 ) -> Result<()> {
-    let plan = load_plan(plan_file)?;
+    let plan = if dry_run {
+        eprintln!(
+            "Schema preview only: draft carriers/checks are validated, not executed or accepted."
+        );
+        edda_conductor::plan::preview::load_preview(plan_file)?
+    } else {
+        load_plan(plan_file)?
+    };
     let cwd = cwd_override
         .map(|p| p.to_path_buf())
         .or_else(|| {
@@ -638,7 +645,14 @@ fn print_status(state: &PlanState) {
             }
             _ => String::new(),
         };
-        println!("  {icon} {:<24} {:?} {detail}", ps.id, ps.status);
+        let elapsed = ps
+            .duration_ms
+            .map(|ms| format!("{ms} ms"))
+            .unwrap_or_else(|| "—".into());
+        println!(
+            "  {icon} {:<24} {:?} {detail} elapsed={elapsed}",
+            ps.id, ps.status
+        );
     }
     println!();
 }

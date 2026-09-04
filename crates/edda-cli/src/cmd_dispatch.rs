@@ -162,6 +162,7 @@ pub struct DispatchOutput {
     pub outcome: Outcome,
     pub result_text: Option<String>,
     pub cost_usd: Option<f64>,
+    pub elapsed_ms: Option<u64>,
     pub session_id: String,
     pub error: Option<String>,
     /// The model edda actually passed to the backend, or the literal
@@ -194,6 +195,7 @@ impl DispatchOutput {
                 cost_usd,
                 result_text,
             } => Self {
+                elapsed_ms: None,
                 outcome: Outcome::Done,
                 result_text,
                 cost_usd,
@@ -204,6 +206,7 @@ impl DispatchOutput {
                 session_observed,
             },
             PhaseResult::AgentCrash { error } => Self {
+                elapsed_ms: None,
                 outcome: Outcome::Crash,
                 result_text: None,
                 cost_usd: None,
@@ -214,6 +217,7 @@ impl DispatchOutput {
                 session_observed,
             },
             PhaseResult::Timeout => Self {
+                elapsed_ms: None,
                 outcome: Outcome::Timeout,
                 result_text: None,
                 cost_usd: None,
@@ -224,6 +228,7 @@ impl DispatchOutput {
                 session_observed,
             },
             PhaseResult::MaxTurns { cost_usd } => Self {
+                elapsed_ms: None,
                 outcome: Outcome::MaxTurns,
                 result_text: None,
                 cost_usd,
@@ -234,6 +239,7 @@ impl DispatchOutput {
                 session_observed,
             },
             PhaseResult::BudgetExceeded { cost_usd } => Self {
+                elapsed_ms: None,
                 outcome: Outcome::BudgetExceeded,
                 result_text: None,
                 cost_usd,
@@ -282,6 +288,12 @@ impl DispatchOutput {
             }
         }
         out.push_str(&format!("Cost: {}\n", self.cost_text()));
+        out.push_str(&format!(
+            "Elapsed: {}\n",
+            self.elapsed_ms
+                .map(|ms| format!("{ms} ms"))
+                .unwrap_or_else(|| "—".into())
+        ));
         out.push_str(&format!("Model requested: {}\n", self.model_requested));
         out.push_str(&format!("Model observed: {}\n", self.model_observed));
         out.push_str(&format!("Session: {}\n", self.session_id));
@@ -295,6 +307,8 @@ impl DispatchOutput {
             "outcome": self.outcome.as_str(),
             "result_text": self.result_text,
             "cost_usd": self.cost_usd,
+            "elapsed_ms": self.elapsed_ms,
+            "elapsed_measured": self.elapsed_ms.is_some(),
             "session_id": self.session_id,
             "error": self.error,
             "model_requested": self.model_requested,
@@ -701,8 +715,12 @@ pub async fn run_with_launcher(
             &cancel,
             &hb,
         )
-        .await?
+        .await
     };
+    launcher.finish_dispatch().await;
+    let result = result.unwrap_or_else(|error| PhaseResult::AgentCrash {
+        error: format!("{error:#}"),
+    });
     // GH-574: requested comes from the phase edda built (what was actually
     // passed to the backend); observed is whatever the backend reported
     // in-band, "unknown" when it reported nothing.
@@ -716,14 +734,20 @@ pub async fn run_with_launcher(
     let session_observed = launcher
         .last_observed_session()
         .unwrap_or_else(|| "unknown".to_owned());
-    Ok(DispatchOutput::from_result(
+    let mut output = DispatchOutput::from_result(
         result,
         session_id.to_owned(),
         model_requested,
         model_observed,
         session_observed,
-    ))
+    );
+    output.elapsed_ms = launcher.last_elapsed_ms();
+    Ok(output)
 }
+
+#[cfg(test)]
+#[path = "cmd_dispatch_elapsed_tests.rs"]
+mod elapsed_tests;
 
 #[cfg(test)]
 mod tests {
@@ -816,6 +840,8 @@ mod tests {
             keys,
             vec![
                 "cost_usd",
+                "elapsed_measured",
+                "elapsed_ms",
                 "error",
                 "model_observed",
                 "model_requested",
@@ -1365,66 +1391,7 @@ mod tests {
 
     // ── JSON serialization shape ──
 
-    #[test]
-    fn json_shape_pins_field_names_for_each_outcome() {
-        let cases = vec![
-            (
-                PhaseResult::AgentDone {
-                    cost_usd: Some(1.25),
-                    result_text: Some("did it".into()),
-                },
-                "done",
-            ),
-            (
-                PhaseResult::AgentCrash {
-                    error: "boom".into(),
-                },
-                "crash",
-            ),
-            (PhaseResult::Timeout, "timeout"),
-            (PhaseResult::MaxTurns { cost_usd: None }, "max_turns"),
-            (
-                PhaseResult::BudgetExceeded { cost_usd: None },
-                "budget_exceeded",
-            ),
-        ];
-        for (result, expected_outcome) in cases {
-            let out = DispatchOutput::from_result(
-                result,
-                "sess-1".into(),
-                "inherited".into(),
-                "unknown".into(),
-                "unknown".into(),
-            );
-            let value: serde_json::Value =
-                serde_json::from_str(&out.to_json()).expect("json parses");
-            assert_eq!(value["outcome"].as_str(), Some(expected_outcome));
-            assert!(value["result_text"].is_null() || value["result_text"].is_string());
-            assert!(value["cost_usd"].is_null() || value["cost_usd"].is_number());
-            assert_eq!(value["session_id"].as_str(), Some("sess-1"));
-            assert!(value["error"].is_null() || value["error"].is_string());
-            let mut keys: Vec<&str> = value
-                .as_object()
-                .expect("json object")
-                .keys()
-                .map(|k| k.as_str())
-                .collect();
-            keys.sort_unstable();
-            assert_eq!(
-                keys,
-                vec![
-                    "cost_usd",
-                    "error",
-                    "model_observed",
-                    "model_requested",
-                    "outcome",
-                    "result_text",
-                    "session_id",
-                    "session_observed"
-                ]
-            );
-        }
-    }
+    include!("cmd_dispatch_json_tests.rs");
 
     #[test]
     fn json_carries_crash_error_and_done_fields() {

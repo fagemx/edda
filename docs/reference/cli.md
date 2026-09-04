@@ -698,6 +698,14 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | `--machine MACHINE/ROLE` | Full claim identity, e.g. `4090/worker-1` (also via `EDDA_MACHINE`; requires `--issue`). Bare machine names are invalid |
 | `--json` | Print exactly one JSON object to stdout instead of text lines |
 
+A `codex` agent that must reach the network — posting a PR comment with
+`gh`, pushing a branch — should be launched through
+`edda dispatch --agent codex` (GH-565): the backend sets no sandbox or
+approval flags, so the user's global Codex configuration is inherited
+unchanged. The Claude Code codex plugin is not a substitute for that role;
+it defaults to a `read-only` sandbox that overrides `~/.codex/config.toml`,
+and a read-only sandbox has no network access.
+
 With `--json` the object has the shape
 `{"outcome":"done\|crash\|timeout\|max_turns\|budget_exceeded\|claim_refused", "result_text":string\|null, "cost_usd":number\|null, "session_id":string, "error":string\|null, "model_requested":string, "model_observed":string, "session_observed":string}`.
 With `--issue`, dispatch reads `taking: <machine>/<role>` comments and PR

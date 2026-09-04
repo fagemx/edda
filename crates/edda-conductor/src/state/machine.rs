@@ -126,6 +126,9 @@ pub struct PhaseState {
     /// gate rejection after a resume must still find the cost.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// Duration of the latest completed attempt, hydrated from events.jsonl.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -368,6 +371,7 @@ impl PlanState {
                 verdict_comment: None,
                 env_retries: 0,
                 cost_usd: None,
+                duration_ms: None,
             })
             .collect();
 

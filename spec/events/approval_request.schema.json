@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "approval_request payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "draft_id": {
+      "type": "string"
+    },
+    "draft_sha256": {
+      "type": "string"
+    },
+    "route_rule_id": {
+      "type": "string"
+    },
+    "stage_id": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    },
+    "assignees": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "draft_id",
+    "draft_sha256",
+    "route_rule_id",
+    "stage_id",
+    "role",
+    "assignees",
+    "reason"
+  ],
+  "additionalProperties": true
+}

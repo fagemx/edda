@@ -14,6 +14,7 @@ ran_allowlist:
   - "gh "
   - "git "
   - "sh scripts/"
+  - "node scripts/pi-session-elapsed.mjs "
 independence: session
 classes:
   code-risk: ["crates/**", "scripts/**", "*.sh", "*.ps1", ".github/**", "install.sh", "Cargo.toml", "Cargo.lock", "*.rs"]
@@ -286,9 +287,15 @@ git log --format=%B "origin/$BASE..$SHA" \
   | grep -Ein '(^|[^a-z])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+'
 ```
 
-**U3 — the `Issue: #N` line exists. P1.** `scripts/review-pr.sh` parses exactly
-this line to load the `doneWhen` into the brief; without it the next round
-silently loses its acceptance ceiling. Empty output is the failure.
+**U3 — the `Issue: #N` line exists. P1.** This is a convention miss, not a data
+dependency: `scripts/review-pr.sh` collects issue numbers from **three**
+sources (see its issue-number collection block) — `Issue:`/`Issues:` lines,
+closing keywords anywhere in the body, and GitHub's
+closingIssuesReferences — so a body carrying only `Closes #N` still supplies
+the brief with the issue's `doneWhen`, and an empty ceiling is never a
+consequence of the missing line. Missing `Issue: #N` is still P1 because the
+repo wants the issue named in this exact conventional form. Empty output is
+the failure.
 
 ```sh
 gh pr view "$N" --json body --jq .body | awk 'tolower($0) ~ /^issues?[[:space:]]*:/'
@@ -608,6 +615,7 @@ One comment per round, pinned to the reviewed full SHA
 ```text
 ## Code Review: Round <N> — PR #<n> @ <full 40-hex SHA>
 
+- elapsed: <pi session first-to-last message elapsed_ms; unmeasured if unavailable>
 - model_requested: <the model dispatch asked for>
 - model_observed: <read from the system, or "unverified">
 - reviewer_session: <per-PR UUID the lane was launched with>
@@ -738,3 +746,20 @@ mechanical.
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
 were measured under.
+
+### Review elapsed source (GH-644)
+
+Read elapsed from the **same pi session JSONL file** used for `model_observed`:
+
+```sh
+node scripts/pi-session-elapsed.mjs "$PI_SESSION_FILE"
+```
+
+Set `PI_SESSION_FILE` to the session file already located for this review.
+Copy `elapsed_ms` into the verdict header as `elapsed: <N> ms (pi session)`
+only when `elapsed_measured` is true; otherwise write `elapsed: unmeasured`.
+The helper measures the first through last **message** timestamps, excluding
+session headers. Missing, malformed, single-message, or a last timestamp before
+the first timestamp
+remain unmeasured. This session interval and dispatch's process lifetime are
+different observations; always identify the source in the header.
