@@ -126,3 +126,19 @@ fn digest_rejects_bad_since_with_exit_2() {
         "error should name the flag, got: {combined:?}"
     );
 }
+
+#[test]
+fn digest_rejects_out_of_range_since_with_exit_2() {
+    let env = TestEnv::new();
+    for since in ["9223372036854775807h", "9223372036854775807d"] {
+        let (code, stdout, stderr) = env.run_edda(&["recap", "--digest", "--since", since]);
+        assert_eq!(
+            code, 2,
+            "since={since}, stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            format!("{stdout}{stderr}").contains("out of range"),
+            "since={since}, stdout={stdout:?} stderr={stderr:?}"
+        );
+    }
+}

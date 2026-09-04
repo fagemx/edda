@@ -148,11 +148,17 @@ while IFS="$(printf '\t')" read -r num title state sha; do
         printf -- '- #%s %s — conflicts with main (window)\n' "$num" "$title" >>"$blocked_body"
         continue
     fi
+    check_runs=$(gh api "repos/$EDDA_REPO/commits/$sha/check-runs" \
+        --jq '.check_runs[] | "\(.name)=\(.conclusion // .status)"') || {
+        printf '%s: gh api (check runs for #%s) failed\n' "$prog" "$num" >&2
+        exit 1
+    }
     statuses=$(gh api "repos/$EDDA_REPO/commits/$sha/status" \
         --jq '.statuses[] | "\(.context)=\(.state)"') || {
         printf '%s: gh api (commit status for #%s) failed\n' "$prog" "$num" >&2
         exit 1
     }
+    statuses=$(printf '%s\n%s\n' "$check_runs" "$statuses")
     reasons=""
     for ctx in 'CI Gate' 'Independent Review'; do
         ctx_state=$(printf '%s\n' "$statuses" | sed -n "s/^$ctx=//p" | head -1)
@@ -174,10 +180,15 @@ EOF
 # --- 5. board needs-operator lines ----------------------------------------------
 board_lines="$tmp/board-lines.md"
 : >"$board_lines"
-board_bodies=$(gh issue view "$EDDA_BOARD_ISSUE" --repo "$EDDA_REPO" --json comments \
-    --jq '.comments[] | select(.createdAt >= "'"$SINCE_ISO"'") | .body' \
+board_comments=$(gh issue view "$EDDA_BOARD_ISSUE" --repo "$EDDA_REPO" --json comments \
+    --jq '.comments[] | select(.createdAt >= "'"$SINCE_ISO"'") | [.url, .body] | @tsv' \
 ) || { printf '%s: gh issue view (board comments) failed\n' "$prog" >&2; exit 1; }
-printf '%s\n' "$board_bodies" | grep 'needs-operator' | sed 's/^/- 看板：/' >"$board_lines" || true
+printf '%s\n' "$board_comments" | while IFS="$(printf '\t')" read -r url body; do
+    [ -n "$url" ] || continue
+    if printf '%s\n' "$body" | grep -q 'needs-operator'; then
+        printf -- '- 看板：%s (%s)\n' "$body" "$url" >>"$board_lines"
+    fi
+done || true
 
 # --- 6. ready queue from GitHub --------------------------------------------------
 ready_lines="$tmp/ready-lines.md"

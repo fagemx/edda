@@ -7,7 +7,7 @@
 # message on failure, final line "daily-digest fixtures passed".
 #
 # Everything is offline: `gh` and `edda` are stubs fed from env
-# (GH_MERGED_JSON, GH_OPEN_JSON, GH_STATUS_JSON, GH_COMMENTS_FILE,
+# (GH_MERGED_JSON, GH_OPEN_JSON, GH_STATUS_JSON, GH_CHECK_RUNS_JSON, GH_COMMENTS_FILE,
 # GH_BOARD_FILE, GH_READY_JSON, EDDA_RECAP_FILE); nothing here touches the
 # real repository, the real board issue, or any notification channel.
 set -eu
@@ -65,7 +65,10 @@ case "$1" in
     exit 0
     ;;
   api)
-    [ -n "${GH_STATUS_JSON:-}" ] && cat "$GH_STATUS_JSON"
+    case "$*" in
+      *check-runs*) [ -n "${GH_CHECK_RUNS_JSON:-}" ] && cat "$GH_CHECK_RUNS_JSON" ;;
+      *) [ -n "${GH_STATUS_JSON:-}" ] && cat "$GH_STATUS_JSON" ;;
+    esac
     exit 0
     ;;
 esac
@@ -96,7 +99,7 @@ export PATH="$STUBBIN:$PATH"
 
 reset_stubs() {
     : >"$GH_STUB_LOG"; : >"$EDDA_STUB_LOG"; : >"$ORDER_LOG"
-    unset GH_MERGED_JSON GH_OPEN_JSON GH_STATUS_JSON GH_COMMENTS_FILE \
+    unset GH_MERGED_JSON GH_OPEN_JSON GH_STATUS_JSON GH_CHECK_RUNS_JSON GH_COMMENTS_FILE \
           GH_BOARD_FILE GH_READY_JSON EDDA_RECAP_FILE 2>/dev/null || true
 }
 
@@ -195,16 +198,29 @@ if printf '%s\n' "$out" | grep -F '#77' | grep -qF 'CI Gate'; then
     fail 'case 3: successful CI Gate must not be reported'
 fi
 
+# --- case 3b: CI Gate is a CheckRun, not a legacy commit status --------------
+reset_stubs
+printf '78\tCheck run thing\tBLOCKED\tdef456\n' >"$tmp/open-check.tsv"
+printf 'CI Gate=success\n' >"$tmp/check-runs.txt"
+printf 'Independent Review=failure\n' >"$tmp/status-check.txt"
+export GH_OPEN_JSON="$tmp/open-check.tsv"
+export GH_CHECK_RUNS_JSON="$tmp/check-runs.txt"
+export GH_STATUS_JSON="$tmp/status-check.txt"
+export EDDA_RECAP_FILE="$RECAP_CANNED"
+out=$(run_digest --dry-run 2>&1) || fail 'case 3b: daily-digest.sh exited non-zero'
+printf '%s\n' "$out" | grep -qF -- '- #78 Check run thing — Independent Review=failure' \
+    || fail "case 3b: check-run CI Gate should be accepted, got: $(printf '%s' "$out" | grep '#78' || true)"
+
 # --- case 4: board comment with needs-operator lands under 例外 ----------------
 reset_stubs
-printf 'needs-operator: relogin gh on 4090\n' >"$tmp/board.md"
+printf 'https://github.com/fagemx/edda/issues/613#issuecomment-1\tneeds-operator: relogin gh on 4090\n' >"$tmp/board.md"
 export GH_BOARD_FILE="$tmp/board.md"
 export EDDA_RECAP_FILE="$RECAP_CANNED"
 out=$(run_digest --dry-run 2>&1) || fail 'case 4: daily-digest.sh exited non-zero'
-printf '%s\n' "$out" | grep -qF -- '- 看板：needs-operator: relogin gh on 4090' \
+printf '%s\n' "$out" | grep -qF -- '- 看板：needs-operator: relogin gh on 4090 (https://github.com/fagemx/edda/issues/613#issuecomment-1)' \
     || fail 'case 4: needs-operator board line not prefixed with - 看板：'
 # it must come under 例外 (after the heading, before 成本)
-printf '%s\n' "$out" | awk '/^## 例外/{f=1;next} /^## /{f=0} f' | grep -qF -- '- 看板：needs-operator: relogin gh on 4090' \
+printf '%s\n' "$out" | awk '/^## 例外/{f=1;next} /^## /{f=0} f' | grep -qF -- '- 看板：needs-operator: relogin gh on 4090 (https://github.com/fagemx/edda/issues/613#issuecomment-1)' \
     || fail 'case 4: board line is not inside the 例外 section'
 
 # --- case 5: not dry-run posts to the board and notifies, in that order --------

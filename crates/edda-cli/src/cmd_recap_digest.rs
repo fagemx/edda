@@ -64,18 +64,24 @@ pub fn execute(repo_root: &Path, since: Option<&str>) -> Result<()> {
 /// an RFC3339 timestamp.
 pub fn parse_since(s: Option<&str>, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
     let Some(v) = s else {
-        return Ok(now - Duration::hours(24));
+        return relative_start(now, Duration::try_hours(24));
     };
     if let Some(hours) = v.strip_suffix('h').and_then(|n| n.parse::<i64>().ok()) {
-        return Ok(now - Duration::hours(hours));
+        return relative_start(now, Duration::try_hours(hours));
     }
     if let Some(days) = v.strip_suffix('d').and_then(|n| n.parse::<i64>().ok()) {
-        return Ok(now - Duration::days(days));
+        return relative_start(now, Duration::try_days(days));
     }
     if let Ok(dt) = DateTime::parse_from_rfc3339(v) {
         return Ok(dt.with_timezone(&Utc));
     }
     bail!("invalid --since '{v}' (expected RFC3339, <N>h or <N>d)")
+}
+
+fn relative_start(now: DateTime<Utc>, duration: Option<Duration>) -> Result<DateTime<Utc>> {
+    duration
+        .and_then(|duration| now.checked_sub_signed(duration))
+        .ok_or_else(|| anyhow::anyhow!("invalid --since duration is out of range"))
 }
 
 fn collect(repo_root: &Path, since: DateTime<Utc>, now: DateTime<Utc>) -> Result<DigestInput> {
@@ -204,7 +210,10 @@ pub fn render(input: &DigestInput) -> String {
             ));
         }
         for t in blocked {
-            out.push_str(&format!("- task #{} {} — {}\n", t.id, t.title, t.status));
+            out.push_str(&format!(
+                "- local task #{} {} — {}\n",
+                t.id, t.title, t.status
+            ));
         }
     }
 
@@ -231,7 +240,10 @@ pub fn render(input: &DigestInput) -> String {
     } else {
         for t in ready {
             let assignee = t.assignee.as_deref().unwrap_or("unassigned");
-            out.push_str(&format!("- task #{} {}（{}）\n", t.id, t.title, assignee));
+            out.push_str(&format!(
+                "- local task #{} {}（{}）\n",
+                t.id, t.title, assignee
+            ));
         }
     }
 
@@ -331,15 +343,15 @@ mod tests {
         let out = render(&input);
         let idx = |needle: &str| out.find(needle).unwrap_or(usize::MAX);
         assert!(idx("`db.engine`") < idx("`deploy.target`"), "out={out}");
-        assert!(idx("task #4") < idx("task #9"), "out={out}");
+        assert!(idx("local task #4") < idx("local task #9"), "out={out}");
         assert!(
-            idx("`deploy.target`") < idx("task #4"),
+            idx("`deploy.target`") < idx("local task #4"),
             "decisions before tasks, out={out}"
         );
         assert!(out.contains(
             "- decision `db.engine` — unratified (human), recorded 2026-09-03T01:00:00Z"
         ));
-        assert!(out.contains("- task #9 later — failed"));
+        assert!(out.contains("- local task #9 later — failed"));
     }
 
     #[test]
@@ -371,13 +383,13 @@ mod tests {
         let section = out.split("## 明天會做的").nth(1).unwrap_or("");
         let ready_lines = section
             .lines()
-            .filter(|l| l.starts_with("- task #"))
+            .filter(|l| l.starts_with("- local task #"))
             .count();
         assert_eq!(ready_lines, 3, "out={out}");
-        assert!(out.contains("- task #1 t1（w1）"));
-        assert!(out.contains("- task #3 t3（w3）"));
-        assert!(!out.contains("task #4"));
-        assert!(!out.contains("task #5"));
+        assert!(out.contains("- local task #1 t1（w1）"));
+        assert!(out.contains("- local task #3 t3（w3）"));
+        assert!(!out.contains("local task #4"));
+        assert!(!out.contains("local task #5"));
     }
 
     #[test]
@@ -405,5 +417,10 @@ mod tests {
         let err = parse_since(Some("soon"), now).unwrap_err().to_string();
         assert!(err.contains("invalid --since"), "err={err}");
         assert!(err.contains("soon"), "err={err}");
+
+        for since in ["9223372036854775807h", "9223372036854775807d"] {
+            let err = parse_since(Some(since), now).unwrap_err().to_string();
+            assert!(err.contains("out of range"), "since={since}, err={err}");
+        }
     }
 }

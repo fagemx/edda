@@ -283,9 +283,18 @@ pub fn test_channels(config: &NotifyConfig) -> Vec<(String, Result<(), String>)>
         duration_minutes: 0,
         summary: "edda notify test — if you see this, notifications are working!".to_string(),
     };
-    send_to_all(config, &test_event)
+    let agent = make_agent();
+    config
+        .channels
+        .iter()
+        .map(|ch| {
+            (
+                ch.display_name(),
+                send(&agent, ch, &test_event).map_err(|e| e.to_string()),
+            )
+        })
+        .collect()
 }
-
 /// Send a free-text message (event name "digest") to every channel whose
 /// `events` list contains "digest" or "*". Same shape as [`test_channels`]:
 /// per-channel results for CLI display; channels that do not subscribe get
@@ -585,26 +594,42 @@ fn format_telegram(event: &NotifyEvent) -> String {
             let w = escape_html(wait_label);
             format!("<b>Verdict needed: {s}</b>\nsha <code>{g}</code> — {w}")
         }
-        NotifyEvent::Digest { title, body } => {
-            let text = format!("<b>{}</b>\n{}", escape_html(title), escape_html(body));
-            truncate_telegram(text)
-        }
+        NotifyEvent::Digest { title, body } => truncate_telegram_digest(title, body),
     }
 }
-
 /// Telegram rejects messages over 4096 characters; keep a margin for the
 /// HTML entities and the title. A longer text is truncated with a trailing
 /// ellipsis rather than failing delivery.
 const TELEGRAM_MAX_CHARS: usize = 3900;
 
-fn truncate_telegram(text: String) -> String {
-    if text.chars().count() <= TELEGRAM_MAX_CHARS {
-        return text;
+fn truncate_telegram_digest(title: &str, body: &str) -> String {
+    let escaped_len = |s: &str| escape_html(s).chars().count();
+    let overhead = "<b></b>\n".chars().count();
+    if overhead + escaped_len(title) + escaped_len(body) <= TELEGRAM_MAX_CHARS {
+        return format!("<b>{}</b>\n{}", escape_html(title), escape_html(body));
     }
-    let truncated: String = text.chars().take(TELEGRAM_MAX_CHARS - 1).collect();
-    format!("{truncated}\u{2026}")
+    let title_budget = TELEGRAM_MAX_CHARS - overhead - 1;
+    if escaped_len(title) > title_budget {
+        return format!("<b>{}…</b>", escape_prefix(title, title_budget));
+    }
+    let body_budget = TELEGRAM_MAX_CHARS - overhead - escaped_len(title) - 1;
+    format!(
+        "<b>{}</b>\n{}…",
+        escape_html(title),
+        escape_prefix(body, body_budget)
+    )
 }
-
+fn escape_prefix(text: &str, budget: usize) -> String {
+    let mut prefix = String::new();
+    for ch in text.chars() {
+        let escaped = escape_html(&ch.to_string());
+        if prefix.chars().count() + escaped.chars().count() > budget {
+            break;
+        }
+        prefix.push_str(&escaped);
+    }
+    prefix
+}
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -944,5 +969,32 @@ mod tests {
         };
         let text = format_telegram(&short);
         assert!(!text.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn digest_truncation_keeps_entities_and_tags_complete() {
+        let event = NotifyEvent::Digest {
+            title: "t".into(),
+            body: format!("{}&xx", "x".repeat(3885)),
+        };
+        let text = format_telegram(&event);
+        assert!(text.ends_with("&amp;…"), "text={text}");
+        assert!(text.starts_with("<b>t</b>\n"), "text={text}");
+        assert_eq!(text.chars().count(), TELEGRAM_MAX_CHARS);
+    }
+    #[test]
+    fn test_channels_ignores_event_subscriptions() {
+        let config = NotifyConfig {
+            channels: vec![Channel::Webhook {
+                url: "http://127.0.0.1:9".into(),
+                events: vec!["approval_pending".into()],
+            }],
+        };
+        let results = test_channels(&config);
+        assert!(!results[0]
+            .1
+            .as_ref()
+            .unwrap_err()
+            .contains("does not subscribe"));
     }
 }
