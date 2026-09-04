@@ -49,7 +49,12 @@
 # lane would get (printed verbatim), schedules the wrapper with a trivial
 # real process (Start-Sleep 20) in place of the agent, proves the task
 # process's parent is the Task Scheduler service (svchost.exe, doneWhen 3),
-# then unregisters. No agent spend.
+# then unregisters. No agent spend. Every dry-run artifact is named
+# `$Name.dryrun*` inside -LogDir (log, done-file, wrapper, brief) — the real
+# lane's `$Name.log` and `$Name.done` are never touched, so a real launch
+# after a dry run starts with a clean log and no stale done-file. That
+# namespace is why any -Name containing the dryrun segment is rejected by
+# the guard rails below.
 param(
   [Parameter(Mandatory = $true)][string]$Name,
   [string]$Brief = '',
@@ -80,6 +85,13 @@ function PsQuote([string]$s) {
 
 if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
   Fail "-Name '$Name' may contain only letters, digits, dot, underscore, hyphen"
+}
+# Dry-run artifacts are always $Name.dryrun* inside -LogDir, so a real lane
+# named '<X>.dryrun' would resolve its $Name.log / $Name.done onto the
+# dry-run artifacts of '<X>' and re-create exactly the GH-822 collision —
+# the segment is reserved (GH-822 P1-1).
+if ($Name -match '(?i)(^|[._-])dryrun($|[._-])') {
+  Fail "-Name '$Name' may not contain 'dryrun'; reserved for dry-run artifacts"
 }
 $allowedBuildLanes = @('worker-1', 'worker-2', 'verifier', 'verifier-2')
 if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {
@@ -177,6 +189,12 @@ if ($DryRun) {
   )
   $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
   if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
+  # Dry-run artifacts carry their own names: teeing into $Name.log or writing
+  # $Name.done here would put a foreign === EXIT === record in the real lane's
+  # log and leave a stale done-file, so a following real launch would look
+  # already-exited and a killed lane would look cleanly finished (GH-672).
+  $Log = Join-Path $LogDir "$Name.dryrun.log"
+  $Done = Join-Path $LogDir "$Name.dryrun.done"
   $runDry = "& pwsh -NoProfile -NonInteractive -Command 'Start-Sleep -Seconds 20' 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
   $Wrapper = Join-Path $LogDir "$Name.dryrun-wrapper.ps1"
 
@@ -190,6 +208,8 @@ if ($DryRun) {
   $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log)).Replace('__RUN__', $runDry).Replace('__DONE__', (PsQuote $Done)) |
     Set-Content -LiteralPath $Wrapper -Encoding utf8
   "dry-run wrapper=$Wrapper (identical to the real wrapper except __RUN__ runs the trivial process)"
+  "dry-run log=$Log"
+  "dry-run done=$Done"
 
   $action = New-ScheduledTaskAction -Execute $PwshExe `
     -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
