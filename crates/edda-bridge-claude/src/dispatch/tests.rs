@@ -26,6 +26,7 @@ use super::session::{
 };
 use super::tools::{
     check_offlimits, check_pending_requests, dispatch_post_tool_use, dispatch_pre_tool_use,
+    try_update_agent_phase, try_write_phase_change_event,
 };
 // Imports from crate
 use crate::parse::resolve_project_id;
@@ -1901,6 +1902,145 @@ fn try_write_task_completed_note_event_reports_readonly_ledger() {
     );
 
     set_ledger_readonly(&paths, false);
+}
+
+#[test]
+fn try_write_phase_change_event_reports_readonly_ledger() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().to_path_buf();
+    let paths = edda_ledger::EddaPaths::discover(&workspace);
+    edda_ledger::ledger::init_workspace(&paths).unwrap();
+    edda_ledger::ledger::init_head(&paths, "main").unwrap();
+    edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
+
+    set_ledger_readonly(&paths, true);
+
+    let raw = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": { "command": "cargo test" },
+        "cwd": workspace.to_str().unwrap()
+    });
+
+    let transition = edda_core::agent_phase::AgentPhaseTransition {
+        from: edda_core::agent_phase::AgentPhase::Implement,
+        to: edda_core::agent_phase::AgentPhase::Review,
+        state: edda_core::agent_phase::AgentPhaseState {
+            phase: edda_core::agent_phase::AgentPhase::Review,
+            session_id: "test-sess-ro".to_string(),
+            label: Some("test-label".to_string()),
+            issue: Some(745),
+            pr: None,
+            branch: Some("main".to_string()),
+            confidence: 0.9,
+            detected_at: "2026-09-04T00:00:00Z".to_string(),
+            signals: vec!["cargo test".to_string()],
+        },
+    };
+
+    // GH-745: a failed ledger append/open must NOT look like success.
+    let result = try_write_phase_change_event(&raw, &transition);
+    assert!(
+        result.is_err(),
+        "read-only ledger must surface the failed phase change event write"
+    );
+
+    set_ledger_readonly(&paths, false);
+}
+
+#[test]
+fn try_update_agent_phase_records_dropped_write_on_state_failure() {
+    let _env = env_guard();
+    let pid = "test_phase_dropped_state";
+    let sid = "sess-phase-dropped-state";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Make the phase file path a directory so write_phase_state fails
+    let phase_path = edda_store::project_dir(pid)
+        .join("state")
+        .join(format!("phase.{sid}.json"));
+    fs::create_dir_all(&phase_path).unwrap();
+
+    let raw = serde_json::json!({
+        "session_id": sid,
+        "cwd": "."
+    });
+
+    assert_eq!(crate::state::read_dropped_writes(pid, sid), 0);
+
+    // GH-745: Calling try_update_agent_phase when write_phase_state fails must record a dropped write
+    try_update_agent_phase(&raw, pid, sid, ".");
+
+    assert!(
+        crate::state::read_dropped_writes(pid, sid) >= 1,
+        "failed write_phase_state must record a dropped write"
+    );
+
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+}
+
+#[test]
+fn try_update_agent_phase_records_dropped_write_on_ledger_failure() {
+    let _env = env_guard();
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().to_path_buf();
+    let paths = edda_ledger::EddaPaths::discover(&workspace);
+    edda_ledger::ledger::init_workspace(&paths).unwrap();
+    edda_ledger::ledger::init_head(&paths, "main").unwrap();
+    edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
+
+    let pid = "test_phase_dropped_ledger";
+    let sid = "sess-phase-dropped-ledger";
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    let _ = edda_store::ensure_dirs(pid);
+
+    // Set initial phase as Triage
+    let initial_state = edda_core::agent_phase::AgentPhaseState {
+        phase: edda_core::agent_phase::AgentPhase::Triage,
+        session_id: sid.to_string(),
+        label: None,
+        issue: None,
+        pr: None,
+        branch: None,
+        confidence: 0.8,
+        detected_at: "2020-01-01T00:00:00Z".to_string(),
+        signals: vec![],
+    };
+    crate::agent_phase::write_phase_state(pid, &initial_state).unwrap();
+
+    // Create an active task that indicates Review phase with confidence >= 0.8
+    let tasks_json = serde_json::json!({
+        "tasks": [
+            { "status": "in_progress", "subject": "review PR #745" }
+        ]
+    });
+    let tasks_path = edda_store::project_dir(pid)
+        .join("state")
+        .join("active_tasks.json");
+    fs::write(&tasks_path, serde_json::to_string(&tasks_json).unwrap()).unwrap();
+
+    // Make ledger readonly so appending the phase change event fails
+    set_ledger_readonly(&paths, true);
+
+    let raw = serde_json::json!({
+        "session_id": sid,
+        "cwd": workspace.to_str().unwrap(),
+        "tool_name": "Bash",
+        "tool_input": { "command": "git commit -m \"feat: implement stuff\"" }
+    });
+
+    assert_eq!(crate::state::read_dropped_writes(pid, sid), 0);
+
+    // GH-745: Calling try_update_agent_phase when ledger append fails must record a dropped write
+    try_update_agent_phase(&raw, pid, sid, workspace.to_str().unwrap());
+
+    assert!(
+        crate::state::read_dropped_writes(pid, sid) >= 1,
+        "failed phase change ledger write must record a dropped write"
+    );
+
+    set_ledger_readonly(&paths, false);
+    let _ = fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
 // ── Auto-claim in PostToolUse (#56) ──
