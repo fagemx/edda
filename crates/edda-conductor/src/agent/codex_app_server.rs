@@ -22,6 +22,13 @@ pub struct CodexTurnOutcome {
 impl CodexAppServer {
     pub async fn spawn(bin: &Path) -> Result<Self> {
         let mut command = Command::new(bin);
+        // No sandbox or approval flags are set here on purpose (GH-565): the
+        // app-server inherits the user's global Codex configuration
+        // (~/.codex/config.toml) unchanged, which is what lets networked
+        // roles — a reviewer posting a PR comment with `gh`, an implementer
+        // pushing a branch — work. Do not add a read-only default: the
+        // Claude Code codex plugin's hardcoded `sandbox: "read-only"` is
+        // exactly the failure this deliberate inheritance avoids.
         command.arg("app-server");
         Self::spawn_with_command(command).await
     }
