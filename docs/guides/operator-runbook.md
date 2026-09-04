@@ -109,15 +109,19 @@
    `edda claim check`（#576，2026-09-02 已合進 main）把這步變成機器判——**但要用從 main 重建的二進位**：
    PATH 上的 `edda.exe` 可能比 #576 舊，`edda claim --help` 沒列出 `check` 就是舊的（它會把 `check` 當成 claim 的 label）。
    重建：`cargo install --path crates/edda-cli --force`，再 `edda claim --help` 確認。
-3. **每張一個 plan、一個 worktree、一條 lane**：
+3. **每張一個 plan、每條 lane 一個固定 worktree**：
    ```bash
-   git worktree add C:/ai_agent/edda-wt-ghNNN -b <branch> origin/main
+    # 首次準備或切到下一張 issue：固定路徑，不建 per-issue worktree
+    pwsh -NoProfile -File scripts/fleet/lane-prepare.ps1 -BuildLane <worker-1|worker-2|verifier|verifier-2> -Branch <branch> -Repo C:/ai_agent/edda
    edda claim "ghNNN" --paths "crates/<crate>/src/*"
-   edda conduct run <plan.yaml> --agent pi --cwd C:/ai_agent/edda-wt-ghNNN      # 多 phase
-   edda dispatch --agent pi --prompt-file brief.md --cwd C:/ai_agent/edda-wt-ghNNN --budget-usd 5   # 單輪
+   edda conduct run <plan.yaml> --agent pi --cwd C:/ai_agent/edda-wt-<lane>      # 多 phase
+   edda dispatch --agent pi --prompt-file brief.md --cwd C:/ai_agent/edda-wt-<lane> --budget-usd 5   # 單輪
    ```
-   plan YAML 放 scratchpad 或 `.tmp/plans/`，不進 repo。Rust lane 設 `CARGO_TARGET_DIR` 為
-   `$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1|worker-2`（verifier 用 `verifier|verifier-2`）。
+    plan YAML 放 scratchpad 或 `.tmp/plans/`，不進 repo。lane worktree 固定為
+    `C:\ai_agent\edda-wt-<worker-1|worker-2|verifier|verifier-2>`；prepare 只在閒置、乾淨
+    worktree 且舊分支的 local tip 等於 `origin/<branch>` 時切換，絕不 force checkout、刪 branch 或刪 source。
+    Rust lane 設 `CARGO_TARGET_DIR` 為
+    `$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1|worker-2|verifier|verifier-2`。
    lane 的**啟動方式**用 `scripts/fleet/lane-launch.ps1`（見 START HERE；Task Scheduler，不是 nohup，規則見 §六）。
 4. **PR 一開就派審（自動，不用人手）**：本機 watcher（`scripts/pr-review-watch.sh`，由
    `scripts/pr-review-launch.ps1` 註冊成隱藏排程任務 `edda-pr-review-watcher`）每 60 秒掃 open PR：
@@ -157,8 +161,10 @@ conventional commit 格式；`SKIP_CLIPPY=1` 跳過 clippy 並自動在訊息尾
 CI 只在 PR 與 push 到 main 時跑，feature branch 靠 PR 的 CI Gate。
 
 1. 在指定 worktree 與分支上做 brief 說的那一件事——不 checkout main、不 pull、不開別的分支。
-2. L0 閘（`cargo fmt --all --check`；`cargo clippy -p <crate> --all-targets -- -D warnings`；`cargo test -p <crate>`），
-   凍結 SHA 前跑一次 L1（`CARGO_INCREMENTAL=0`，workspace 全套），記 gate receipt（SHA、閘、toolchain、lane、結果）。
+2. L0 閘（`cargo fmt --all --check`；`cargo clippy -p <crate> --all-targets -- -D warnings`；`cargo test -p <crate>`）。
+   凍結 SHA 的 L1 是 exact-head CI；Windows CI 未覆蓋的 touched crate 由 verifier lane 以
+   `CARGO_INCREMENTAL=0` 跑一次 `cargo test -p <crate>`（C5 selector），並記 gate receipt
+   （SHA、CI run、toolchain、lane、結果）。不要以本機 workspace 全套代替 L1。
 3. `git push -u origin <branch>`、開 PR、**停**。不合併、不刪分支、不刪 worktree。
 
 Brief 必含：assigned build lane、verification budget（L0 while iterating；L1 once per frozen SHA）、cleanup authority（build cache 可清；worktree／branch／source 不刪）。
