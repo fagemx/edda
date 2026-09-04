@@ -12,7 +12,7 @@ phrasing that delegates choices back to it. It implements the rulings
 recorded on [Issue #792](https://github.com/fagemx/edda/issues/792) — the
 issuer welds context into the brief at dispatch, and flash-tier briefs are
 exhaustive, enumerated, and fixed-schema — plus the 2026-09-03 operator
-comment on that issue (skill-bearing strong-model sessions get principles
+ruling in that issue's body (skill-bearing strong-model sessions get principles
 with reasons, not procedures).
 
 ## The two axes
@@ -79,6 +79,12 @@ schema the step must produce. Phrasing that delegates a choice back to the
 lane is banned — the template's acceptance grep over this file must return
 zero hits in the procedure block and the examples.
 
+Bind the launcher, shell, and native editing tools in the brief. A native tool
+call must name the tool and its argument schema; an editor variable or a bare
+instruction to edit a path is not an executable step. File contents are the
+worker's implementation output, supplied as strings to that bound tool. The
+issuer fixes paths, command order, output checks, and failure handling.
+
 The finish step is mandatory and carries three one-sentence statements; the
 lane will not infer them:
 
@@ -103,7 +109,7 @@ them is the runtime axis.
 ### Example A — Claude Code worker (runtime 1, skill-bearing)
 
 ```text
-role: worker · lane: worker-1 · task id: 12 · issue: #792 ·
+role: worker · lane: none · task id: 12 · issue: #792 ·
 base full SHA: fb6ab1b503c3abb8502b3964678977aa23d316c4 ·
 scope paths: docs/guides/brief-template.md, docs/README.md, AGENTS.md ·
 entry: $coord-sync · gate owner: not you; review queue ·
@@ -117,51 +123,117 @@ out-of-scope: skills/, crates/, CI config, REVIEW.md (owned by the #820 lane)
 
 ### Example B — pi flash-tier lane (runtime 2, skill-less)
 
+Launcher contract for this example: the controller prepares an exclusively
+owned, clean worktree on `codex/gh792-brief-template` at the facts-block SHA,
+with task 12 assigned and no existing PR for that branch. It launches pi
+0.84.4 with `--tools bash,write,edit`, Git Bash as the shell, and authenticated
+`git`, `gh`, and `edda` on PATH. No local Cargo build is assigned. Both examples
+have these same task, branch, scope, and gate assignments.
+
+The pi 0.84.4 built-in tool schemas are `bash({"command": string})`,
+`write({"path": string, "content": string})`, and
+`edit({"path": string, "edits": [{"oldText": string, "newText": string}]})`.
+The launcher must expose these schemas; a mismatch stops dispatch. In the
+procedure, shell commands go in `bash.command`, and `write` / `edit` lines
+are native tool calls, not shell programs. `GUIDE_TEXT` below denotes the
+worker-authored Markdown string implementing #792, JSON-encoded as `content`;
+it is the only authored payload slot, not a command or an environment variable.
+
 ```text
-role: worker · lane: lane-655 · task id: 12 · issue: #792 ·
+role: worker · lane: none · task id: 12 · issue: #792 ·
 base full SHA: fb6ab1b503c3abb8502b3964678977aa23d316c4 ·
 scope paths: docs/guides/brief-template.md, docs/README.md, AGENTS.md ·
 entry: none: procedure below · gate owner: not you; review queue ·
 out-of-scope: skills/, crates/, CI config, REVIEW.md (owned by the #820 lane)
 
-1. git status --porcelain --branch
-   output schema: one line `## docs/gh792-brief-template` and nothing else;
-   any other line → stop and report that line verbatim.
-2. gh issue view 792 --json body --jq .body
-   output schema: the issue body on stdout, exit 0. Acceptance is the
-   doneWhen items of #792, read from that body; any command error → stop
-   and report it verbatim.
+Failure rule for every numbered step: a nonzero command exit, tool error,
+or output-schema mismatch stops execution. Report exactly
+STOP step=<number> output=<verbatim unexpected output>. Preserve all files;
+do not restore, checkout, reset, clean, retry, review, or merge. The controller
+issues the next brief. Success advances to the next numbered step.
+
+1. gh issue view 792 --repo fagemx/edda --json state --jq .state
+   output: `OPEN`.
+2. git status --porcelain=v1 --untracked-files=all --branch
+   output: exactly ## codex/gh792-brief-template, no other lines.
 3. git rev-parse HEAD
-   output schema: exactly one 40-character hexadecimal string; that string
-   is the base full SHA for the REPORT.
-4. Write the three owned paths, in this order, with the session's
-   file-write/edit tool. If the session has no file-write tool, stop and
-   report `no file-write tool`:
-   4a. docs/guides/brief-template.md
-   4b. docs/README.md
-   4c. AGENTS.md
-   output schema: each write completes; no path outside these three is
-   modified.
-5. git diff --name-only
-   output schema: exactly the three owned paths, one per line; any path
-   outside them → stop and report those paths verbatim; do not restore,
-   checkout, reset, or clean.
-6. sh scripts/lint-markdown-content.sh
-   output schema: empty stdout, exit 0; any printed line is a failure to fix
-   before step 7.
-7. git add docs/guides/brief-template.md docs/README.md AGENTS.md &&
-   git commit -m "docs(fleet): brief template for role × runtime composition" \
-     -m "Issue: #792"
-   output schema: one `files changed` summary line; the commit message
-   carries `Issue: #792` as its own line.
-8. git push -u origin docs/gh792-brief-template
-   output schema: one `To <url>` line plus one `branch ... set up to track`
-   line; paste both into the REPORT.
-9. Finish step — the REPORT carries these three sentences as its output
-   schema (REPORT fields, one sentence each; they are not git commands):
-   (a) the commit message carries `Issue: #792` as its own line;
-   (b) the PR body carries `Issue: #792` as its own line;
-   (c) pr.closing-keyword: `Closes #792` is allowed only because every
-   doneWhen item of #792 is delivered; with any item undelivered the body
-   links the issue without a closing keyword.
+   output: fb6ab1b503c3abb8502b3964678977aa23d316c4 (the base full SHA).
+4. edda context
+   output: context text, exit 0; an off-limits overlap with a scope path
+   is a STOP under the failure rule.
+5. edda task list
+   output: task-list text, exit 0, including assigned task 12.
+6. edda task show 12
+   output: task 12 and this brief, exit 0. This is the #793 interim command.
+7. edda claim gh792-worker --paths docs/guides/brief-template.md --paths docs/README.md --paths AGENTS.md
+   output: successful claim for gh792-worker and those three paths, exit 0.
+8. cat .claude/CLAUDE.md AGENTS.md docs/README.md
+   output: the three complete source documents, exit 0.
+9. gh issue view 792 --repo fagemx/edda --json body --jq .body
+   output: issue body, exit 0; read acceptance there, do not copy doneWhen
+   into the guide. Author GUIDE_TEXT as the complete new guide.
+10. write({"path":"docs/guides/brief-template.md","content":GUIDE_TEXT})
+    output: `Successfully wrote <integer> bytes to docs/guides/brief-template.md`.
+11. edit({"path":"docs/README.md","edits":[{"oldText":"## For contributors and the curious","newText":"For lane issuers: [Lane Brief Template](./guides/brief-template.md).\n\n## For contributors and the curious"}]})
+    output: Successfully replaced 1 block(s) in docs/README.md.
+12. edit({"path":"AGENTS.md","edits":[{"oldText":"## Multi-session work","newText":"## Session start without edda hooks (pi, or any session edda did not launch)\n\nClaude Code and Codex sessions get the edda pack injected by a hook. If you are\nnot one of those, run these three before touching any file, and treat their\noutput as the pack:\n\n1. `edda context` — decisions, peers, off-limits paths.\n2. `edda task list` — the task rail; pick the task assigned to you.\n3. `edda task show <id>` — reads your brief. Follow it: it names your scope,\n   who owns the gate, and what is out of scope.\n\nUntil #793 lands, step 3 uses `show`; then it becomes `edda task start <id>`.\n\n## Multi-session work"}]})
+    output: Successfully replaced 1 block(s) in AGENTS.md.
+13. git status --porcelain=v1 --untracked-files=all
+    output: exactly these three lines (strip the four-space presentation
+    indent; the two M lines each retain one leading space):
+     M AGENTS.md
+     M docs/README.md
+    ?? docs/guides/brief-template.md
+14. git add -- docs/guides/brief-template.md docs/README.md AGENTS.md
+    output: empty stdout, exit 0.
+15. git diff --cached --name-only
+    output: exactly AGENTS.md, docs/README.md, docs/guides/brief-template.md,
+    in that order, one path per line. Staging makes the new guide visible.
+16. git diff --exit-code
+    output: empty stdout, exit 0 (nothing changed after staging).
+17. git diff --cached --check
+    output: empty stdout, exit 0.
+18. sh scripts/lint-markdown-content.sh
+    output: empty stdout, exit 0. Cargo budget: zero; exact-head CI is the gate.
+19. git -c core.quotePath=false diff --cached --stat
+    output: three path-stat lines and one summary for exactly 3 files.
+20. git commit -m "docs(fleet): brief template for role and runtime composition" -m "Issue: #792"
+    output: git commit summary, exit 0. Do not infer a PR-body link from it.
+21. git log -1 --format=%B | grep -Fx 'Issue: #792'
+    output: Issue: #792.
+22. git status --porcelain=v1 --untracked-files=all
+    output: empty stdout, exit 0.
+23. git rev-parse HEAD
+    output: one 40-character hexadecimal SHA; retain as delivery_sha.
+24. git push --porcelain -u origin codex/gh792-brief-template
+    output: Git porcelain push status, exit 0, no rejected ref. This is a
+    normal push; no force option is authorized.
+25. cat >"$(git rev-parse --git-path gh792-pr-body.md)" <<'PR_BODY'
+## Problem and change
+Lane briefs lacked a shared contract for role and runtime. This adds the
+guide, docs-map link, and hook-less AGENTS.md entry commands for Issue #792.
+Until #793 lands, the third entry command is edda task show <id>.
+
+Issue: #792
+
+## Validation
+RAN: sh scripts/lint-markdown-content.sh, exit 0; git diff --cached --check,
+exit 0 before commit. No Cargo gate; build lane none.
+Pending: exact-head CI and independent review owned by the review queue.
+Acceptance and any closing keyword await the gate owner's confirmation.
+PR_BODY
+    output: empty stdout, exit 0. This file is Git metadata scratch, not a
+    source path or an additional staged file.
+26. git rev-parse HEAD >>"$(git rev-parse --git-path gh792-pr-body.md)"
+    output: empty stdout, exit 0; appends the delivery full SHA to the body.
+27. gh pr create --repo fagemx/edda --base main --head codex/gh792-brief-template --draft --title "docs(fleet): brief template for role and runtime composition" --body-file "$(git rev-parse --git-path gh792-pr-body.md)"
+    output: one https://github.com/fagemx/edda/pull/<integer> URL, exit 0.
+28. gh pr view codex/gh792-brief-template --repo fagemx/edda --json body --jq .body
+    output: the body from steps 25–26, including its own Issue: #792 line
+    and delivery_sha; no closing keyword. Missing/different content is STOP.
+29. edda note 'GH792 worker committed and opened draft PR; docs lint passed; exact-head CI and independent acceptance pending with review queue; no Cargo build.' --tag session
+    output: Wrote NOTE <event-id>, exit 0.
+30. printf '%s\n' 'The commit message carries Issue: #792 as its own line.' 'The PR body carries Issue: #792 as its own line.' 'pr.closing-keyword: none in this draft; the gate owner must confirm every doneWhen item before adding one.'
+    output: exactly those three sentences, one per line. Return these lines
+    with delivery_sha and the PR URL from steps 23 and 27 to the controller.
 ```
