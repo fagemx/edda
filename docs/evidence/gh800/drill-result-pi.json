@@ -1,0 +1,17 @@
+{
+  "target": "pi",
+  "verifier": false,
+  "supported": false,
+  "failingMethod": "Exception calling \"WriteLine\" with \"1\" argument(s)",
+  "error": "Exception calling \"WriteLine\" with \"1\" argument(s): \"管道正關閉中。\"",
+  "steps": [
+    {
+      "stopReason": null,
+      "step": "1",
+      "failingMethod": "Exception calling \"WriteLine\" with \"1\" argument(s)",
+      "sessionId": null,
+      "ok": false,
+      "error": "Exception calling \"WriteLine\" with \"1\" argument(s): \"管道正關閉中。\""
+    }
+  ]
+}

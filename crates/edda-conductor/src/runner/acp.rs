@@ -374,7 +374,7 @@ impl AcpRunner {
                 Ok(AcpTurnResult {
                     session_id,
                     stop_reason: response.stop_reason,
-                    usage: response.usage.map(Into::into),
+                    usage: effective_usage(&response),
                 })
             })
             .await;
@@ -431,6 +431,23 @@ impl acp::Client for AcpClient {
             .map_err(|_| acp::Error::internal_error())?;
         Ok(())
     }
+}
+
+/// Measured usage from a prompt result. The typed `usage` field wins; when
+/// the agent reports nothing there, `_meta.usage` (Grok Build's carrier,
+/// camelCase keys) is parsed. Both paths are measurements reported by the
+/// agent itself: if neither is present the turn is honestly `measured:
+/// false` — never a zero-cost guess.
+fn effective_usage(response: &acp::PromptResponse) -> Option<AcpUsage> {
+    if let Some(usage) = response.usage {
+        return Some(usage.into());
+    }
+    let usage = response.meta.as_ref()?.get("usage")?;
+    Some(AcpUsage {
+        total_tokens: usage.get("totalTokens")?.as_u64()?,
+        input_tokens: usage.get("inputTokens")?.as_u64()?,
+        output_tokens: usage.get("outputTokens")?.as_u64()?,
+    })
 }
 
 fn spawn_agent(endpoint: &AcpEndpoint, cwd: &Path) -> Result<Child> {
@@ -635,6 +652,40 @@ mod tests {
             ],
         );
         assert_eq!(policy.select_option(&request).as_deref(), Some("deny"));
+    }
+
+    #[test]
+    fn meta_usage_is_parsed_when_typed_field_is_absent() {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "usage".to_string(),
+            serde_json::json!({"totalTokens": 30u64, "inputTokens": 20u64, "outputTokens": 10u64}),
+        );
+        let mut response = acp::PromptResponse::new(acp::StopReason::EndTurn);
+        response.meta = Some(meta);
+        assert_eq!(
+            effective_usage(&response),
+            Some(AcpUsage {
+                total_tokens: 30,
+                input_tokens: 20,
+                output_tokens: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn absent_usage_is_none_not_zero() {
+        let response = acp::PromptResponse::new(acp::StopReason::EndTurn);
+        assert_eq!(effective_usage(&response), None);
+        // A malformed meta block must not invent a measurement either.
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "usage".to_string(),
+            serde_json::json!({"totalTokens": "many"}),
+        );
+        let mut response = acp::PromptResponse::new(acp::StopReason::EndTurn);
+        response.meta = Some(meta);
+        assert_eq!(effective_usage(&response), None);
     }
 
     #[tokio::test(flavor = "current_thread")]

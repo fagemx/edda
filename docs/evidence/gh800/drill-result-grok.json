@@ -1,0 +1,17 @@
+{
+  "target": "grok",
+  "verifier": false,
+  "supported": false,
+  "failingMethod": "session/new",
+  "error": "session/new: no response within timeout",
+  "steps": [
+    {
+      "failingMethod": "session/new",
+      "stopReason": null,
+      "step": "1",
+      "error": "session/new: no response within timeout",
+      "ok": false,
+      "sessionId": null
+    }
+  ]
+}
