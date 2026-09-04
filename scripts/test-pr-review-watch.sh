@@ -92,6 +92,7 @@ cat >"$STUBBIN/edda" <<'EOF'
 #!/bin/sh
 echo "edda $*" >>"$EDDA_STUB_LOG"
 case "$*" in
+  'dispatch --help') echo '--tools <TOOLS> --exclude-tools <EXCLUDE_TOOLS>'; exit 0 ;;
   *--agent*claude*)
     [ -n "${DISPATCH_FAIL_PROBE:-}" ] && exit 1
     exit 0
@@ -99,12 +100,17 @@ case "$*" in
 esac
 exit 0
 EOF
+cat >"$STUBBIN/claude" <<'EOF'
+#!/bin/sh
+test "$*" = '--help' || exit 99
+echo '--tools <tools> --disallowedTools <tools>'
+EOF
 cat >"$STUBBIN/review-pr-stub" <<'EOF'
 #!/bin/sh
 echo "REVIEW_LAUNCH $*" >>"$REVIEW_STUB_LOG"
 exit 0
 EOF
-chmod +x "$STUBBIN/gh" "$STUBBIN/pi" "$STUBBIN/edda" "$STUBBIN/review-pr-stub"
+chmod +x "$STUBBIN/gh" "$STUBBIN/pi" "$STUBBIN/edda" "$STUBBIN/claude" "$STUBBIN/review-pr-stub"
 
 export GH_STUB_LOG="$tmp/gh-stub.log"
 export PI_STUB_LOG="$tmp/pi-stub.log"
@@ -648,6 +654,7 @@ header_comment_path() {
 }
 
 verdict_log_fixture() {
+    echo 'WORKTREE_CHECK=unchanged' >> "$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
     {
         printf '<<<VERDICT\n'
         printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha"
@@ -683,7 +690,7 @@ printf 'TRANSPORT=claude-stdin\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-
 verdict_log_fixture
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: fallback arm)\n' >&2; exit 1; }
 cfile=$(header_comment_path)
-grep -qF 'transport `claude -p via stdin (oversized-brief fallback; read-only allowlist)`' "$cfile" || {
+grep -qF 'transport `claude -p via stdin (oversized-brief fallback)`' "$cfile" || {
     printf 'live: header must name the claude-stdin fallback receipt, got header:\n%s\n' "$(head -1 "$cfile")" >&2
     exit 1
 }

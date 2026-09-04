@@ -70,6 +70,9 @@ param(
   [string]$SessionId = '',
   [string]$LogDir = "$env:TEMP\edda-lanes",
   [string]$BuildLane = '',
+  # Explicit for arbitrary lane names; conventional review/reviewer names
+  # imply it so historical review-pr<N> callers cannot omit the restriction.
+  [switch]$Review,
   [switch]$DryRun
 )
 
@@ -84,6 +87,14 @@ function Fail([string]$Msg) {
 # paths containing apostrophes survive the substitution into the wrapper.
 function PsQuote([string]$s) {
   return "'" + ($s -replace "'", "''") + "'"
+}
+. (Join-Path $PSScriptRoot 'reviewer-capabilities.ps1')
+$isReview = $Review -or $Name -match '(?i)(^|[._-])review(er)?([._-]|$)'
+$reviewArgs = ''
+if ($isReview) {
+  if ($Agent -ne 'claude') { Fail 'review lanes require -Agent claude (Opus); refusing an unsupported reviewer backend' }
+  try { Assert-ReviewCapabilities } catch { Fail $_.Exception.Message }
+  $reviewArgs = " --model claude-opus-5 --permission-mode $(PsQuote $ReviewPermissionMode) --tools $(PsQuote $ReviewTools) --exclude-tools $(PsQuote $ReviewDenied)"
 }
 
 # --- guard rails ------------------------------------------------------------
@@ -167,6 +178,7 @@ if (-not $PwshExe) { Fail 'pwsh.exe not found on PATH; cannot register the task'
 
 # The real `edda dispatch` command line (also printed verbatim by -DryRun).
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
+$argLine += $reviewArgs
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 
 # Wrapper the scheduled task actually runs: outside the controller's job
@@ -184,11 +196,14 @@ __LANEENV__
 Set-Location -LiteralPath __CWD__
 $code = $null
 try {
+  __REVIEW_PREFLIGHT__
   __RUN__
   $code = $LASTEXITCODE
 } catch {
+  $_ | Out-File __LOG__ -Append -Encoding utf8
   $code = 1
 } finally {
+  __REVIEW_FINISH__
   # The end record is written no matter how the run ends (GH-672): a log
   # with START but no === EXIT === line means the lane was killed mid-flight.
   Add-Content -LiteralPath __LOG__ -Value "=== EXIT code=$code ===" -Encoding utf8
@@ -197,6 +212,59 @@ try {
 exit $code
 '@
 $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
+$reviewPreflight = ''
+$reviewFinish = ''
+if ($isReview) {
+  $reviewPreflight = @'
+. __CAPABILITIES__
+Assert-ReviewCapabilities
+Add-Content -LiteralPath __LOG__ -Value __TOOL_FLAGS__
+function Get-ReviewWorktreeSnapshot {
+  $entries = [System.Collections.Generic.List[string]]::new()
+  foreach ($scope in @(
+    @{ Name = 'tracked'; Args = @('--cached') },
+    @{ Name = 'untracked'; Args = @('--others', '--exclude-standard') },
+    @{ Name = 'ignored'; Args = @('--others', '--ignored', '--exclude-standard') }
+  )) {
+    $paths = & git ls-files @($scope.Args)
+    if ($LASTEXITCODE -ne 0) { throw "git ls-files failed for $($scope.Name) scope" }
+    foreach ($path in $paths) {
+      if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $hash = (& git hash-object -- $path)
+        if ($LASTEXITCODE -ne 0) { throw "git hash-object failed for $($scope.Name) path $path" }
+        [void]$entries.Add("$($scope.Name)`t$hash`t$path")
+      } elseif (Test-Path -LiteralPath $path -PathType Container) {
+        [void]$entries.Add("$($scope.Name)`tdirectory`t$path")
+      } else {
+        [void]$entries.Add("$($scope.Name)`tmissing-or-special`t$path")
+      }
+    }
+  }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes(($entries -join "`n"))
+  return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+}
+$reviewHead = & git rev-parse HEAD
+if ($LASTEXITCODE -ne 0) { throw 'review HEAD unavailable' }
+$reviewStatus = (& git status --porcelain=v1 --untracked-files=all) -join "`n"
+if ($LASTEXITCODE -ne 0) { throw 'review status unavailable' }
+$reviewSnapshot = Get-ReviewWorktreeSnapshot
+'@
+  $reviewPreflight = $reviewPreflight.Replace('__CAPABILITIES__', (PsQuote (Join-Path $PSScriptRoot 'reviewer-capabilities.ps1')))
+  $reviewPreflight = $reviewPreflight.Replace('__TOOL_FLAGS__', (PsQuote ('TOOL_FLAGS=' + $reviewArgs)))
+  $reviewFinish = @'
+  $afterHead = & git rev-parse HEAD
+  $headOk = $LASTEXITCODE -eq 0
+  $afterStatus = (& git status --porcelain=v1 --untracked-files=all) -join "`n"
+  $statusOk = $LASTEXITCODE -eq 0
+  try { $afterSnapshot = Get-ReviewWorktreeSnapshot; $snapshotOk = $true } catch { $_ | Out-File __LOG__ -Append -Encoding utf8; $snapshotOk = $false }
+  $treeOk = $statusOk -and $headOk -and $snapshotOk -and $reviewHead -and $afterHead -eq $reviewHead -and $afterStatus -eq $reviewStatus -and $afterSnapshot -eq $reviewSnapshot
+  & git status --short | Out-File __LOG__ -Append -Encoding utf8
+  & git log -1 --format=%H | Out-File __LOG__ -Append -Encoding utf8
+  if ($treeOk) { Add-Content __LOG__ 'WORKTREE_CHECK=unchanged' } else { Add-Content __LOG__ 'WORKTREE_CHECK=failed; preserved for inspection'; $code = 2 }
+'@
+}
+$wrapperText = $wrapperText.Replace('__REVIEW_PREFLIGHT__', $reviewPreflight)
+$wrapperText = $wrapperText.Replace('__REVIEW_FINISH__', $reviewFinish)
 
 if ($DryRun) {
   # Generate our own temporary brief — no caller-supplied untracked input.
@@ -206,6 +274,7 @@ if ($DryRun) {
     "Generated by lane-launch.ps1 -DryRun at $(Get-Date -Format o); proves the launcher, starts no agent."
   )
   $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
+  $argLine += $reviewArgs
   if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
   # Dry-run artifacts carry their own names: teeing into $Name.log or writing
   # $Name.done here would put a foreign === EXIT === record in the real lane's
@@ -274,6 +343,7 @@ if (-not (Test-Path -LiteralPath $Brief -PathType Leaf)) {
 }
 $Brief = (Resolve-Path -LiteralPath $Brief).Path
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
+$argLine += $reviewArgs
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
 
