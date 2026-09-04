@@ -1,0 +1,14 @@
+name: coding-carrier-preview
+strategy_run_id: code-review-587
+phases:
+  - id: verify
+    prompt: Verify the frozen coding artifact against its issue acceptance.
+    isolation: worktree
+    deliverable:
+      kind: pr
+      repository: fagemx/edda
+      number: 587
+      head_sha: d2f3bb16a9155455cf6a0636346b389474000469
+    check:
+      - type: git_clean
+    gate: verdict

@@ -120,7 +120,14 @@ pub fn run(
     tmux: bool,
     agent: AgentKind,
 ) -> Result<()> {
-    let plan = load_plan(plan_file)?;
+    let plan = if dry_run {
+        eprintln!(
+            "Schema preview only: draft carriers/checks are validated, not executed or accepted."
+        );
+        edda_conductor::plan::preview::load_preview(plan_file)?
+    } else {
+        load_plan(plan_file)?
+    };
     let cwd = cwd_override
         .map(|p| p.to_path_buf())
         .or_else(|| {
