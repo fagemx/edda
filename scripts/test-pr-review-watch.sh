@@ -83,7 +83,7 @@ cat >"$STUBBIN/edda" <<'EOF'
 #!/bin/sh
 echo "edda $*" >>"$EDDA_STUB_LOG"
 case "$*" in
-  'dispatch --help') echo '--tools <TOOLS> --exclude-tools <EXCLUDE_TOOLS>'; exit 0 ;;
+  'dispatch --help') echo '--tools <TOOLS> --exclude-tools <EXCLUDE_TOOLS> --permission-mode <MODE>'; exit 0 ;;
   *--agent*claude*)
     [ -n "${DISPATCH_FAIL_PROBE:-}" ] && exit 1
     exit 0
@@ -94,7 +94,7 @@ EOF
 cat >"$STUBBIN/claude" <<'EOF'
 #!/bin/sh
 test "$*" = '--help' || exit 99
-echo '--tools <tools> --disallowedTools <tools>'
+echo '--tools <tools> --disallowedTools <tools> --permission-mode <mode>'
 EOF
 cat >"$STUBBIN/review-pr-stub" <<'EOF'
 #!/bin/sh
