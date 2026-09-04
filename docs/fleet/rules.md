@@ -8,7 +8,7 @@
 
 ## 操作者規則
 
-- **R1 認領**：起手前（R21）在 issue 留 `taking: <machine>/<role> at <ISO8601>` 留言**並**貼 `fleet:claimed` 標籤——留言加標籤合起來才是認領憑證；`lane:*` 標籤（`lane:feature`、`lane:4090`、`lane:docs`）只是路由／分類，永遠不是認領。先寫先贏；讀到別台的 taking 就不開工。來源：#784——本條的憑證形式 supersede `fleet.cross-machine-claim`（該決策只記 `taking: <machine> <lane>` 留言＋`lane:` 前綴機器標籤，是舊 carrier，不再是憑證）；跨機器「先查後開」的紀律本身仍出自 `fleet.cross-machine-claim`。
+- **R1 認領**：起手前（R21）在 issue 留 `taking: <machine>/<role> at <ISO8601>` 留言**並**貼 `fleet:claimed` 標籤——留言加標籤合起來才是認領憑證；`lane:*` 標籤（`lane:feature`、`lane:4090`、`lane:docs`）只是路由／分類，永遠不是認領。先寫先贏；讀到別台的 taking 就不開工。完整、可查的跨機器 carrier 與交還規則是帳本 `fleet.cross-machine-claim`；本條只保留操作者使用的憑證形式。來源：#784、#682。
 - **R2 重複產物**：同一 issue 有兩份產物，留 doneWhen 覆蓋較完整的那份；另一份關閉，可用部分搬過去。不因流程錯誤丟掉真工作。來源：#613 裁定、PR #670。
 - **R3 停止的定義**：三證齊備才算停 —— 排程任務非 `Running`、**沒有 `edda.exe` 仍持有該 lane 的 briefs 路徑**、lane log 有 `=== EXIT ===`。`Ready` 單獨不代表停（#650 被宣告交還時 lane 仍在寫）。只殺 wrapper 不算停。來源：#672、`fleet.lane-stop-4090`。
 - **R4 lane 類型**：diff 需要 cargo（Rust 原始碼、測試、fixture、`Cargo.*`，或 CI 會跑 cargo）就走 4090 build lane，否則走文書機。不看 issue 標題前綴。來源：#651。
@@ -20,7 +20,7 @@
 - **R10 訊息**：真相先寫在 issue 或 PR，host 訊息只做門鈴；永不向人提問。
 - **R11 認證失效**：該運輸的 lane 停派，在 board 記一筆 `needs-operator: relogin <tool> on <machine>`，只記一次；不重試、不換帳號。來源：#593、#669。
 - **R12 核准的計畫步驟**：操作者已核准的設計稿步驟直接以 `fleet:ready` 開單。
-- **R13 交還**：交還必須附 R3 三證與 `git ls-remote` 結果；交還後 15 分鐘再查一次。來源：#650。
+- **R13 交還**：交還必須附 R3 三證與 `git ls-remote` 結果；交還後 15 分鐘再查一次。若是**未交付即釋放**，必須將原 `taking:` 留言劃線並在同一則留言加 `RELEASED — this claim is withdrawn`，再移除與釋放事實矛盾的 `fleet:claimed`／機器 `lane:*` 標籤；已交付的 claim 是正確歷史，進行中的 claim 不得因時間推測為過期。完整規則見帳本 `fleet.cross-machine-claim`。來源：#650、#682。
 - **R14 每日預算**：管理者自身每日 5 美元；lane 照 brief。
 - **R15 認證失敗的機器判準**：一輪 agent 回合若 `Cost: $0.00`，一律當失敗處理，不論 exit code。理由：認證失敗的回合成本必為零，而 `edda dispatch` 目前回 exit 0（#669）。#669 落地後改以 exit code 為準，本條保留為交叉檢查。
 - **R16 存活面的已知污染**：`edda peers` 在 `cargo test -p edda-bridge-claude` 執行期間會出現非 UUID 形狀的假 session（測試 fixture 寫進真實 store，#646）。判存活時忽略 session id 不是 UUID 形狀的條目。心跳判活的視窗是 120 秒（`stale_secs()`），所以兩次查詢相隔超過該視窗可能得到不同答案 —— 這是時序，不是 store 分裂。
