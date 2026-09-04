@@ -62,7 +62,7 @@ use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 
 #[derive(Parser)]
-#[command(name = "edda", version, about = "Decision memory for coding agents")]
+#[command(name = "edda", version = env!("EDDA_LONG_VERSION"), about = "Decision memory for coding agents")]
 struct Cli {
     #[command(subcommand)]
     cmd: Command,

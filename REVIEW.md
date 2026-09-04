@@ -322,6 +322,9 @@ gh pr checks "$N"
 A docs-only head legitimately shows `Clippy`/`Test` as `skipping` while
 `CI Gate` passes (`ci.path-filter`). That is a correct run, not a broken one.
 
+
+Before claiming `RAN on this workstation`, confirm `edda --version` in the reviewed worktree prints the exact checked-out build identity (commit + date), or `unknown` when git metadata is unavailable.
+
 **U7 — the round is complete before it is posted. P1.** Finish the whole scoped
 audit and batch every blocking P0/P1 before `Changes Requested`. A blocker
 raised in a later round must be fix-caused or previously unobservable;
