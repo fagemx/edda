@@ -197,4 +197,22 @@ if grep -E 'scope paths:.*REVIEW\.md|scope paths:.*Cargo\.lock' "$work/out/negat
 fi
 echo "ok 6 negated mentions excluded from scope paths"
 
+# 7. shell-metacharacter stripping from the title: backtick and dollar must not
+# survive into the commit step, where the lane's shell would expand them.
+cat >"$work/issue-metachar.json" <<'JSON'
+{"title":"fix: broke `x` and $(rm -rf /) handling","labels":[],"body":"## Predicted surface\n\n`scripts/review-pr.sh`.\n\n## doneWhen\n- item\n"}
+JSON
+rc=0
+TEST_UNAME=Linux GH_ISSUE_JSON="$work/issue-metachar.json" \
+    PATH="$work/bin:$PATH" \
+    sh "$script" 880 --lane-name n --worktree /tmp/wt --branch b \
+    >"$work/out/metachar.txt" || rc=$?
+[ "$rc" -eq 0 ] || fail "metachar render exit $rc"
+if grep -E '\$\(rm|`x`' "$work/out/metachar.txt"; then
+    fail "shell metacharacter survived into the brief"
+fi
+grep -q 'git commit -m "fix: broke x and (rm -rf /) handling"' "$work/out/metachar.txt" \
+    || fail "stripped title not in commit step: $(grep 'git commit -m' "$work/out/metachar.txt")"
+echo "ok 7 title metacharacters stripped"
+
 echo "PASS: scripts/fleet/test-brief-from-issue.sh"

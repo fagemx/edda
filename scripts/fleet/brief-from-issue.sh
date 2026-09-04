@@ -80,7 +80,11 @@ body=$(printf '%s' "$json" | jq -r .body)
 [ -n "$title" ] && [ "$title" != "null" ] || die "issue $issue has no title"
 [ -n "$body" ] && [ "$body" != "null" ] || die "issue $issue has an empty body"
 
-title_safe=$(printf '%s' "$title" | tr -d '"')
+# The title is interpolated verbatim into quoted shell strings inside the
+# brief (steps 15 and 21), so double quotes, backticks, and dollar signs are
+# stripped: a backtick or $(...) surviving into step 15 would be expanded by
+# the lane's shell when it runs that step.
+title_safe=$(printf '%s' "$title" | tr -d '"`$')
 
 section=$(printf '%s\n' "$body" | tr -d '\r' | awk '
     /^##[ \t]+Predicted surface[ \t]*$/ { p=1; next }
