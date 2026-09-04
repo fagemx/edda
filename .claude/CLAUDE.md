@@ -148,6 +148,7 @@ checks only.
 | Clippy | `cargo clippy --workspace --all-targets` on Linux, macOS **and** Windows |
 | Test (Linux, macOS) | `cargo test --workspace` — all 23 crates |
 | Test (Windows) | **only 7 crates** — `edda-store`, `edda-ledger`, `edda-search-fts`, `edda-transcript`, `edda-bridge-claude`, `edda-conductor`, `edda` (Windows build/link is ~5x slower; the subset is derived from process-spawn, file-lock, and mmap criteria — GH-433) |
+| MSRV (1.91.0) | `cargo +1.91.0 check --workspace --all-targets --locked` on Linux (MSRV compile check only — no tests run on 1.91) |
 
 So on Windows every crate is **type-checked and linted** (Clippy is
 workspace-wide on all three OSes), and every crate's *library* is also linked,
@@ -165,7 +166,7 @@ focused Windows-gap run is load-bearing rather than redundant.
 | Level | When | Run |
 |---|---|---|
 | L0 iterate | while editing | `cargo fmt --all --check`; `cargo clippy -p <crate> --all-targets -- -D warnings`; `cargo test -p <crate>` for each touched crate; `scripts/lint-file-length.sh --tree` |
-| L1 freeze | once per frozen full SHA, clean tree | **exact-head CI** — Format; Clippy ×3 OS; Test on Linux + macOS full workspace; Test on the Windows 7-crate subset — **plus one focused local run by the verifier**, once per frozen SHA, of `cargo test -p <crate>` on Windows for each touched crate outside the subset (the C5 selector — every touched crate minus the 7-subset; the loop is quoted in the Pre-commit Checklist L1 block and the two are kept identical). The implementer / fix lane runs L0 on touched crates, pushes, posts the `Review Response`, and does not run the workspace gate. Record the CI run id together with the full SHA (gate receipt: `CI run <id> @ <sha>`) |
+| L1 freeze | once per frozen full SHA, clean tree | **exact-head CI** — Format; Clippy ×3 OS; Test on Linux + macOS full workspace; Test on the Windows 7-crate subset; MSRV (1.91.0) check on Linux — **plus one focused local run by the verifier**, once per frozen SHA, of `cargo test -p <crate>` on Windows for each touched crate outside the subset (the C5 selector — every touched crate minus the 7-subset; the loop is quoted in the Pre-commit Checklist L1 block and the two are kept identical). The implementer / fix lane runs L0 on touched crates, pushes, posts the `Review Response`, and does not run the workspace gate. Record the CI run id together with the full SHA (gate receipt: `CI run <id> @ <sha>`) |
 | L2 review | verifier, once per frozen full SHA | READ the L1 receipt (exact-head CI, `CI run <id> @ <sha>`) and its job results; RAN only focused or adversarial checks they do not cover — **including Windows behavior in any crate outside the CI Windows subset above**, which L1 itself assigns to the verifier as the C5 selector run. A full local rerun needs a stated reason: red or absent exact-head CI, or grounds to distrust it. A coverage gap earns a **focused** check for that gap, not a full rerun — running the workspace to reach one uncovered crate is the cost this ladder exists to remove. Deterministically red CI already blocks the SHA — audit and request changes instead of spending a full run; if the red is environmental, re-run only the failed job |
 | L3 pre-merge | merge authority | READ exact-head CI and the final current-head LGTM; RAN only a merge check against the current base. A draft/ready, label, or status flip is not a push — nothing reruns |
 
@@ -257,8 +258,9 @@ cargo test -p <touched crate>
 
 # L1 (once per frozen full SHA, clean tree) = exact-head CI (Format; Clippy
 # ×3 OS; Test on Linux + macOS full workspace; Test on the Windows 7-crate
-# subset) + one focused local run by the verifier: `cargo test -p <crate>` on
-# Windows for each touched crate outside the subset — the C5 selector loop.
+# subset; MSRV (1.91.0) check on Linux) + one focused local run by the
+# verifier: `cargo test -p <crate>` on Windows for each touched crate outside
+# the subset — the C5 selector loop.
 # The implementer / fix lane runs L0 on touched crates, pushes, posts the
 # `Review Response`, and does not run the workspace gate.
 for crate in $(git diff --name-only "origin/$BASE...$SHA" \
