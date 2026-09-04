@@ -145,12 +145,13 @@ when non-empty / Some** — they are serialized with `skip_serializing_if`
 means "none", not "removed".
 
 A `DecisionHit` (element of `decisions`/`timeline`;
-`crates/edda-ask/src/lib.rs:90-110`) always carries: `event_id`, `key`,
-`value`, `reason`, `domain`, `branch`, `ts` (strings), `is_active` (bool);
-`tags` (array), `village_id` (string), and `staleness` (object) appear only
-when non-empty / Some.
+`crates/edda-ask/src/lib.rs`) always carries: `event_id`, `key`,
+`value`, `reason`, `domain`, `branch`, `ts` (strings), `is_active` (bool),
+and `governance` (object with `status`, optional `ratified_by`, `ratified_at`;
+GH-806); `tags` (array), `village_id` (string), and `staleness` (object) appear
+only when non-empty / Some.
 
-Golden fixture: `crates/edda-cli/src/cmd_ask.rs` →
+Golden fixture: `crates/edda-cli/tests/ask_compat_contract.rs` →
 `compat_golden_fixture_ask_json_keys_and_types` (crate `edda`).
 
 ### edda-mcp tool responses

@@ -1,3 +1,4 @@
+use crate::domain::RatificationInfo;
 use crate::paths::EddaPaths;
 use crate::sqlite_store::{BundleRow, SqliteStore};
 use crate::verdict::{self, VerdictRecord};
@@ -311,35 +312,49 @@ impl Ledger {
     /// `(branch, key)` whose event predates the ratify. A decision re-made
     /// after the ratify (higher rowid) is therefore unratified until ratified
     /// again.
-    pub fn ratified_decision_events(&self) -> anyhow::Result<std::collections::BTreeSet<String>> {
-        use std::collections::{BTreeMap, BTreeSet};
+    /// Decision ratification metadata (GH-806).
+    pub fn ratified_decisions_map(
+        &self,
+    ) -> anyhow::Result<std::collections::BTreeMap<String, RatificationInfo>> {
+        use std::collections::BTreeMap;
 
-        // Latest ratify rowid per (branch, key). Ratify events are few.
+        // Latest ratify event per (branch, key). Ratify events are few.
         let ratifies = self
             .iter_events_by_type("decision_ratify")
-            .context("Ledger::ratified_decision_events: ratifies")?;
-        let mut ratify_rowid: BTreeMap<(String, String), i64> = BTreeMap::new();
+            .context("Ledger::ratified_decisions_map: ratifies")?;
+        let mut latest_ratify: BTreeMap<(String, String), (i64, RatificationInfo)> =
+            BTreeMap::new();
         for e in &ratifies {
             let Some(key) = e.payload.get("key").and_then(|v| v.as_str()) else {
                 continue;
             };
             let rowid = self.rowid_for_event_id(&e.event_id)?.unwrap_or(0);
-            let entry = ratify_rowid
+            let ratified_by = e
+                .payload
+                .get("ratified_by")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let info = RatificationInfo {
+                ratified_by,
+                ts: e.ts.clone(),
+            };
+            let entry = latest_ratify
                 .entry((e.branch.clone(), key.to_string()))
-                .or_insert(0);
-            if rowid > *entry {
-                *entry = rowid;
+                .or_insert_with(|| (0, info.clone()));
+            if rowid > entry.0 {
+                *entry = (rowid, info);
             }
         }
-        if ratify_rowid.is_empty() {
-            return Ok(BTreeSet::new());
+        if latest_ratify.is_empty() {
+            return Ok(BTreeMap::new());
         }
 
         // Group active decisions (with rowids) by (branch, key).
         let mut by_key: BTreeMap<(String, String), Vec<(i64, String)>> = BTreeMap::new();
         for v in self.active_decisions(None, None, None, None)? {
             let k = (v.branch.clone(), v.key.clone());
-            if ratify_rowid.contains_key(&k) {
+            if latest_ratify.contains_key(&k) {
                 // Missing rowid (shouldn't happen) → MAX, so no ratify precedes
                 // it and it stays unratified (conservative).
                 let rowid = self.rowid_for_event_id(&v.event_id)?.unwrap_or(i64::MAX);
@@ -352,14 +367,23 @@ impl Ledger {
 
         // For each (branch, key), the ratified decision is the latest active
         // one whose event predates the ratify.
-        let mut out: BTreeSet<String> = BTreeSet::new();
+        let mut out: BTreeMap<String, RatificationInfo> = BTreeMap::new();
         for (k, decs) in by_key {
-            let rr = ratify_rowid[&k];
+            let (rr, ref info) = latest_ratify[&k];
             if let Some((_, eid)) = decs.iter().filter(|(r, _)| *r < rr).max_by_key(|(r, _)| *r) {
-                out.insert(eid.clone());
+                out.insert(eid.clone(), info.clone());
             }
         }
         Ok(out)
+    }
+
+    /// Event IDs of active decisions ratified by an operator (GH-401). Which
+    /// decision was current at ratify time: the latest decision for that
+    /// `(branch, key)` whose event predates the ratify. A decision re-made
+    /// after the ratify (higher rowid) is therefore unratified until ratified
+    /// again.
+    pub fn ratified_decision_events(&self) -> anyhow::Result<std::collections::BTreeSet<String>> {
+        Ok(self.ratified_decisions_map()?.into_keys().collect())
     }
 
     /// All `task.*` events in insertion order — the task rail's fold input.
