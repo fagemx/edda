@@ -8,11 +8,12 @@ Every brief a controller hands to a worker, verifier, or lane is composed from
 this template — by hand until the rail renders it (#793). It exists because the
 failure classes repeat: facts rediscovered under pressure, procedure that
 balloons a strong model does not need, and a flash lane improvising around
-phrasing that delegates choices back to it. Rulings it implements:
-`fleet.retrieval-ownership1` (the issuer welds context into the brief at
-dispatch), `fleet.flash-tier-brief-contract` (exhaustive, enumerated,
-fixed-schema), and the operator ruling of 2026-09-03 (skill-bearing
-strong-model sessions get principles with reasons, not procedures).
+phrasing that delegates choices back to it. It implements the rulings
+recorded on [Issue #792](https://github.com/fagemx/edda/issues/792) — the
+issuer welds context into the brief at dispatch, and flash-tier briefs are
+exhaustive, enumerated, and fixed-schema — plus the 2026-09-03 operator
+comment on that issue (skill-bearing strong-model sessions get principles
+with reasons, not procedures).
 
 ## The two axes
 
@@ -126,24 +127,36 @@ out-of-scope: skills/, crates/, CI config, REVIEW.md (owned by the #820 lane)
 1. git status --porcelain --branch
    output schema: one line `## docs/gh792-brief-template` and nothing else;
    any other line → stop and report that line verbatim.
-2. git log --oneline -1
-   output schema: `<sha> <subject>`; copy `<sha>` into the REPORT as the
-   base full SHA.
-3. Edit exactly the scope paths, in the order listed by the issue's
-   suspected-surface section.
-   output schema: one line per file changed, each ending in the line count.
-4. sh scripts/lint-markdown-content.sh
+2. gh issue view 792 --json body --jq .body
+   output schema: the issue body on stdout, exit 0. Acceptance is the
+   doneWhen items of #792, read from that body; any command error → stop
+   and report it verbatim.
+3. git rev-parse HEAD
+   output schema: exactly one 40-character hexadecimal string; that string
+   is the base full SHA for the REPORT.
+4. Edit the scope paths, one exact editor command per file:
+   4a. $EDITOR docs/guides/brief-template.md
+   4b. $EDITOR docs/README.md
+   4c. $EDITOR AGENTS.md
+   output schema: each command exits 0; no file outside the scope paths is
+   modified.
+5. git diff --name-only
+   output schema: exactly these three lines, one per path: AGENTS.md,
+   docs/README.md, docs/guides/brief-template.md; any other line → run
+   git restore <path> for it, then rerun this step.
+6. sh scripts/lint-markdown-content.sh
    output schema: empty stdout, exit 0; any printed line is a failure to fix
-   before step 5.
-5. git add docs/guides/brief-template.md docs/README.md AGENTS.md &&
+   before step 7.
+7. git add docs/guides/brief-template.md docs/README.md AGENTS.md &&
    git commit -m "docs(fleet): brief template for role × runtime composition" \
      -m "Issue: #792"
    output schema: one `files changed` summary line; the commit message
    carries `Issue: #792` as its own line.
-6. git push -u origin docs/gh792-brief-template
+8. git push -u origin docs/gh792-brief-template
    output schema: one `To <url>` line plus one `branch ... set up to track`
    line; paste both into the REPORT.
-7. Finish step — write these three sentences in the REPORT, one sentence each:
+9. Finish step — the REPORT carries these three sentences as its output
+   schema (REPORT fields, one sentence each; they are not git commands):
    (a) the commit message carries `Issue: #792` as its own line;
    (b) the PR body carries `Issue: #792` as its own line;
    (c) pr.closing-keyword: `Closes #792` is allowed only because every
