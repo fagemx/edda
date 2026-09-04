@@ -26,6 +26,18 @@ use tokio_util::sync::CancellationToken;
 /// Arguments for `edda dispatch`.
 #[derive(Args, Debug)]
 pub struct DispatchArgs {
+    /// Owned write paths: refuse overlap with live peers before starting the agent.
+    #[arg(long, value_delimiter = ',')]
+    pub owns: Vec<String>,
+    /// Start outside the caller's process group/job and return a durable handle.
+    #[arg(long, conflicts_with = "list_models")]
+    pub detach: bool,
+    /// Named Cargo build lane for a detached worker; omit for work without builds.
+    #[arg(long, requires = "detach")]
+    pub build_lane: Option<String>,
+    /// Directory for detached logs and manifests (default: system temp/edda-dispatch).
+    #[arg(long, requires = "detach")]
+    pub detach_log_dir: Option<String>,
     /// Agent backend that runs the turn
     #[arg(long, value_enum)]
     pub agent: AgentKind,
@@ -406,7 +418,17 @@ pub fn generate_session_id() -> String {
 /// skips destructors, and a future launcher holding a live child across a
 /// non-zero outcome must not be orphaned.
 pub fn run(args: DispatchArgs) -> Result<()> {
-    let code = run_inner(args)?;
+    // Consume the detached-worker control value before the backend is built:
+    // nested ordinary dispatches inherit this process environment otherwise and
+    // could overwrite their parent's manifest.
+    let worker_manifest = crate::detached_dispatch::take_worker_manifest();
+    crate::detached_dispatch::update_worker_manifest(worker_manifest.as_deref(), None)?;
+    let outcome = run_inner(args);
+    crate::detached_dispatch::update_worker_manifest(
+        worker_manifest.as_deref(),
+        Some(outcome.as_ref().copied().unwrap_or(1)),
+    )?;
+    let code = outcome?;
     if code != 0 {
         std::process::exit(code);
     }
@@ -511,6 +533,21 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
 
     let session_id = args.session_id.clone().unwrap_or_else(generate_session_id);
 
+    if args.detach {
+        let detached = crate::detached_dispatch::launch(&args, &cwd, &session_id)?;
+        if args.json {
+            println!("{}", serde_json::to_string(&detached)?);
+        } else {
+            println!(
+                "handle={}\nlog={}\nmanifest={}",
+                detached.handle,
+                detached.log.display(),
+                detached.manifest.display()
+            );
+        }
+        return Ok(0);
+    }
+    let claim = crate::dispatch_claim::acquire(&cwd, &session_id, &args.owns)?;
     if let Some(warning) = budget_warning_for_agent(args.agent, args.budget_usd.is_some()) {
         eprintln!("{warning}");
     }
@@ -558,15 +595,6 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         cancel,
     ))?;
 
-    if args.json {
-        println!("{}", output.to_json());
-    } else {
-        print!("{}", output.render_text());
-        if let Some(error) = &output.error {
-            eprintln!("Error: {error}");
-        }
-    }
-
     // GH-577: Ingest Pi session transcripts after the turn completes.
     // Observation surface cannot kill work surface (GH-566/GH-577): errors degrade to warnings.
     if args.agent == AgentKind::Pi {
@@ -580,6 +608,19 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
     }
 
     let code = output.exit_code();
+    if let Some(claim) = claim {
+        // A coordination release is load-bearing: never print a successful
+        // machine result while its writer claim remains active.
+        claim.release()?;
+    }
+    if args.json {
+        println!("{}", output.to_json());
+    } else {
+        print!("{}", output.render_text());
+        if let Some(error) = &output.error {
+            eprintln!("Error: {error}");
+        }
+    }
     Ok(code)
 }
 

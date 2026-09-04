@@ -303,7 +303,7 @@ fn coordination_board_path(project_id: &str) -> PathBuf {
 /// read failure, or a damaged claim line must never read as "no claims".
 /// Here a missing file legitimately means an empty board; every other I/O or
 /// parse failure is an error the caller surfaces as exit 2.
-fn read_active_claims(project_id: &str) -> anyhow::Result<Vec<ClaimEntry>> {
+pub(crate) fn read_active_claims(project_id: &str) -> anyhow::Result<Vec<ClaimEntry>> {
     let path = coordination_board_path(project_id);
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
