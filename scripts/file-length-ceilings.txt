@@ -14,7 +14,7 @@ crates/edda-bridge-claude/src/peers/tests.rs 3588
 crates/edda-bridge-claude/src/signals.rs 2252
 crates/edda-cli/src/cmd_bridge/tests.rs 1208
 crates/edda-cli/src/cmd_claim.rs 1685
-crates/edda-cli/src/cmd_dispatch.rs 1996
+crates/edda-cli/src/cmd_dispatch.rs 2047
 crates/edda-cli/src/cmd_draft.rs 1705
 crates/edda-cli/src/cmd_gc.rs 1117
 crates/edda-cli/src/cmd_plan.rs 1022
