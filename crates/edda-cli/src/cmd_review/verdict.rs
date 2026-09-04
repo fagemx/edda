@@ -138,6 +138,10 @@ pub(crate) fn qualify(payload: &mut ReviewVerdictPayload) {
             "model-unknown",
         ),
         (payload.parse != "ok", "parse-failed"),
+        (
+            payload.subject.worktree_check.as_deref() != Some("unchanged"),
+            "worktree-check-not-unchanged",
+        ),
         (payload.subject.coverage != "full", "coverage-partial"),
         (payload.reviewer.tool_policy != "hard", "tool-policy-none"),
         (!payload.escalations.is_empty(), "escalation-pending"),
@@ -323,6 +327,18 @@ mod tests {
         assert!(payload
             .disqualifiers
             .contains(&"blocking-findings-open".into()));
+        assert_ne!(exit_code(&payload), 0);
+    }
+
+    #[test]
+    fn missing_final_worktree_proof_never_qualifies_lgtm() {
+        let mut payload = qualified_payload_with_findings(vec![]);
+        payload.subject.worktree_check = None;
+        qualify(&mut payload);
+        assert!(!payload.qualified);
+        assert!(payload
+            .disqualifiers
+            .contains(&"worktree-check-not-unchanged".into()));
         assert_ne!(exit_code(&payload), 0);
     }
 }

@@ -150,15 +150,48 @@ impl WorktreeGuard {
 }
 
 fn content_hash(root: &Path) -> Result<String> {
-    let listed = git(root, &["ls-files", "-z"])?;
+    // `ls-files -s` supplies the Git entry's mode and object id.  The index
+    // alone is not enough for ordinary files (a reviewer can change the
+    // working copy without staging it), so regular files and symlinks also
+    // contribute their on-disk representation.  Gitlinks deliberately do
+    // not: an uninitialized submodule is a valid checkout and recursing into
+    // one would make its unrelated working state part of this review.
+    let listed = git(root, &["ls-files", "-s", "-z"])?;
     let mut hasher = Sha256::new();
-    for path in listed.split('\0') {
-        if path.is_empty() {
+    for entry in listed.split('\0') {
+        if entry.is_empty() {
             continue;
         }
+        let (metadata, path) = entry
+            .split_once('\t')
+            .context("malformed git index entry")?;
+        let mut fields = metadata.split_whitespace();
+        let mode = fields.next().context("git index entry missing mode")?;
+        let oid = fields.next().context("git index entry missing object id")?;
+        let stage = fields.next().context("git index entry missing stage")?;
+        if fields.next().is_some() {
+            bail!("malformed git index entry");
+        }
+        hasher.update(mode.as_bytes());
+        hasher.update([0]);
+        hasher.update(oid.as_bytes());
+        hasher.update([0]);
+        hasher.update(stage.as_bytes());
+        hasher.update([0]);
         hasher.update(path.as_bytes());
         hasher.update([0]);
-        hasher.update(std::fs::read(root.join(path))?);
+        match mode {
+            // A symlink's Git payload is its link target. `read` follows the
+            // link and fails for a valid dangling link, so use `read_link`.
+            "120000" => hasher.update(
+                std::fs::read_link(root.join(path))?
+                    .as_os_str()
+                    .as_encoded_bytes(),
+            ),
+            // The index records the submodule commit. Do not traverse it.
+            "160000" => {}
+            _ => hasher.update(std::fs::read(root.join(path))?),
+        }
         hasher.update([0]);
     }
     hasher.update(SUBJECT_MARKER.as_bytes());
@@ -213,5 +246,36 @@ mod tests {
         let before = content_hash(&root).unwrap();
         std::fs::write(root.join("a.txt"), "tampered\n").unwrap();
         assert_ne!(before, content_hash(&root).unwrap());
+    }
+
+    #[test]
+    fn content_proof_accepts_uninitialized_gitlink_without_traversing_it() {
+        let (_temp, root) = testrepo::init();
+        let head = testrepo::run(&root, &["rev-parse", "HEAD"]);
+        testrepo::run(
+            &root,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{head},nested"),
+            ],
+        );
+        testrepo::run(&root, &["commit", "-q", "-m", "gitlink"]);
+        std::fs::write(root.join(SUBJECT_MARKER), "subject").unwrap();
+        assert!(content_hash(&root).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn content_proof_accepts_dangling_symlink_by_its_link_target() {
+        use std::os::unix::fs::symlink;
+
+        let (_temp, root) = testrepo::init();
+        symlink("missing-target", root.join("dangling")).unwrap();
+        testrepo::run(&root, &["add", "--", "dangling"]);
+        testrepo::run(&root, &["commit", "-q", "-m", "dangling link"]);
+        std::fs::write(root.join(SUBJECT_MARKER), "subject").unwrap();
+        assert!(content_hash(&root).is_ok());
     }
 }

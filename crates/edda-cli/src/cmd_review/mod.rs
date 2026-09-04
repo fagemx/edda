@@ -90,7 +90,7 @@ fn pi_session_continues(dir: &std::path::Path, session: &str, cwd: &std::path::P
         let Ok(text) = std::fs::read_to_string(path) else {
             return false;
         };
-        let mut lines = text.lines();
+        let mut lines = text.lines().filter(|line| !line.trim().is_empty());
         let Some(header) = lines.next() else {
             return false;
         };
@@ -102,8 +102,29 @@ fn pi_session_continues(dir: &std::path::Path, session: &str, cwd: &std::path::P
             && header["cwd"]
                 .as_str()
                 .is_some_and(|stored| std::path::Path::new(stored) == cwd)
-            && lines.any(|line| !line.trim().is_empty())
+            // Pi resumes context from `message` entries carrying a message
+            // payload, or from a compaction summary. Metadata such as model
+            // changes changes runtime settings but produces no context.
+            && lines
+                .map(serde_json::from_str::<serde_json::Value>)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .is_ok_and(|entries| entries.iter().any(pi_entry_has_context))
     })
+}
+
+fn pi_entry_has_context(entry: &serde_json::Value) -> bool {
+    match entry["type"].as_str() {
+        Some("message") => entry["message"].as_object().is_some_and(|message| {
+            message
+                .get("role")
+                .is_some_and(serde_json::Value::is_string)
+                && message.contains_key("content")
+        }),
+        Some("compaction") | Some("branch_summary") => entry["summary"]
+            .as_str()
+            .is_some_and(|summary| !summary.is_empty()),
+        _ => false,
+    }
 }
 
 fn review_session_dir(prepared: &prepare::Prepared) -> std::path::PathBuf {
@@ -132,7 +153,7 @@ mod pi_resume_tests {
     use super::pi_session_continues;
 
     #[test]
-    fn persisted_pi_history_must_match_session_cwd_and_have_a_turn() {
+    fn persisted_pi_history_must_match_session_cwd_and_have_resumable_context() {
         let temp = tempfile::tempdir().unwrap();
         let cwd = temp.path().join("scratch");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -158,10 +179,46 @@ mod pi_resume_tests {
         assert!(!pi_session_continues(temp.path(), session, &cwd));
         std::fs::write(
             temp.path().join("empty.jsonl"),
+            format!(
+                "{}\n{{\"type\":\"model_change\",\"provider\":\"x\"}}\n",
+                header(session)
+            ),
+        )
+        .unwrap();
+        assert!(!pi_session_continues(temp.path(), session, &cwd));
+        std::fs::write(
+            temp.path().join("empty.jsonl"),
             format!("{}\n{{\"type\":\"message\"}}\n", header(session)),
         )
         .unwrap();
+        assert!(!pi_session_continues(temp.path(), session, &cwd));
+        std::fs::write(
+            temp.path().join("empty.jsonl"),
+            format!(
+                "{}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"review\"}}]}}}}\n",
+                header(session)
+            ),
+        )
+        .unwrap();
         assert!(pi_session_continues(temp.path(), session, &cwd));
+        std::fs::write(
+            temp.path().join("empty.jsonl"),
+            format!(
+                "{}\n{{\"type\":\"compaction\",\"summary\":\"prior review\"}}\n",
+                header(session)
+            ),
+        )
+        .unwrap();
+        assert!(pi_session_continues(temp.path(), session, &cwd));
+        std::fs::write(
+            temp.path().join("empty.jsonl"),
+            format!(
+                "{}\n{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[]}}}}\nnot-json\n",
+                header(session)
+            ),
+        )
+        .unwrap();
+        assert!(!pi_session_continues(temp.path(), session, &cwd));
     }
 }
 
@@ -203,11 +260,37 @@ async fn run_with(
     )?;
     let (gates, probes, evidence_text) =
         prepare::collect_evidence(&mut prepared, args, &worktree.path)?;
-    if !worktree.verify_unchanged(&prepared.subject.head_sha)? {
-        anyhow::bail!("review evidence changed the detached subject worktree");
-    }
     let checklist_measures = evidence::checklist_measures(&gates.ran, &probes);
     let (assembled, classes) = prepare::assemble(&prepared, &evidence_text)?;
+    match worktree.verify_unchanged(&prepared.subject.head_sha) {
+        Ok(true) => {}
+        Ok(false) => {
+            return persist_prelaunch_worktree_failure(
+                &mut prepared,
+                args,
+                &mut worktree,
+                gates,
+                probes,
+                assembled.coverage,
+                classes,
+                "worktree-changed",
+                "review evidence changed the detached subject worktree",
+            );
+        }
+        Err(error) => {
+            return persist_prelaunch_worktree_failure(
+                &mut prepared,
+                args,
+                &mut worktree,
+                gates,
+                probes,
+                assembled.coverage,
+                classes,
+                "worktree-check-failed",
+                &format!("worktree verification failed before launch: {error}"),
+            );
+        }
+    }
     if !assembled.dropped_files.is_empty() {
         prepared.notes.push(format!(
             "Diff omitted for budget: {}",
@@ -388,9 +471,6 @@ async fn run_with(
             .escalations
             .push("REVIEW.md changed in this diff".into());
     }
-    if payload.verdict == "unreviewed" {
-        payload.refs.round = None;
-    }
     match worktree.verify_unchanged(&prepared.subject.head_sha) {
         Ok(true) => payload.subject.worktree_check = Some("unchanged".into()),
         Ok(false) => {
@@ -399,9 +479,20 @@ async fn run_with(
             payload.outcome = "worktree-changed".into();
             payload.parse = "failed".into();
         }
-        Err(error) => prepared
-            .notes
-            .push(format!("worktree verification failed: {error}")),
+        Err(error) => {
+            payload.subject.worktree_check = Some("failed".into());
+            payload.verdict = "unreviewed".into();
+            payload.outcome = "worktree-check-failed".into();
+            payload.parse = "failed".into();
+            prepared
+                .notes
+                .push(format!("worktree verification failed: {error}"));
+        }
+    }
+    // A worktree failure is discovered after the engine result. Clear the
+    // previously allocated historical round only after the final proof.
+    if payload.verdict == "unreviewed" {
+        payload.refs.round = None;
     }
     if let Err(error) = worktree.remove() {
         prepared
@@ -431,6 +522,97 @@ fn union_findings(prior: &[ReviewFinding], current: &[ReviewFinding]) -> Vec<Rev
         finding.id = format!("f{}", index + 1);
     }
     merged
+}
+
+#[allow(clippy::too_many_arguments)] // Constructs the durable no-launch receipt for one proof boundary.
+fn persist_prelaunch_worktree_failure(
+    prepared: &mut prepare::Prepared,
+    args: &ReviewArgs,
+    worktree: &mut git::WorktreeGuard,
+    gates: edda_core::ReviewGates,
+    probes: Vec<edda_core::ReviewProbe>,
+    coverage: String,
+    classes: Vec<String>,
+    outcome: &str,
+    note: &str,
+) -> Result<(ReviewVerdictPayload, String)> {
+    prepared.notes.push(note.into());
+    let policy = if args.require_model_diversity {
+        "model"
+    } else {
+        prepared.fm.independence.as_deref().unwrap_or("session")
+    };
+    let mut payload = ReviewVerdictPayload {
+        schema: "review_verdict/0".into(),
+        subject: ReviewSubject {
+            base_sha: prepared.subject.base_sha.clone(),
+            head_sha: prepared.subject.head_sha.clone(),
+            files: prepared.subject.files.len(),
+            lines: prepared.subject.lines,
+            coverage,
+            subject_seen: None,
+            worktree_check: Some("failed".into()),
+        },
+        refs: edda_core::ReviewRefs {
+            round: None,
+            ..prepared.refs.clone()
+        },
+        spec: prepared.spec.clone(),
+        brief: ReviewBrief {
+            core: brief::CORE_BRIEF_VERSION.into(),
+            review_md_sha: prepared
+                .has_review_md
+                .then(|| prepared.subject.base_sha.clone()),
+            classes,
+        },
+        reviewer: ReviewReviewer {
+            agent: args.agent.as_str().into(),
+            transport: if args.agent == AgentKind::Claude {
+                "claude-code"
+            } else {
+                args.agent.as_str()
+            }
+            .into(),
+            model_requested: args.model.clone().unwrap_or_else(|| "inherited".into()),
+            model_observed: "unknown".into(),
+            observed_via: "none".into(),
+            model_self_report: None,
+            session_id: prepared.session.clone(),
+            session_label: format!("review-{}-r1", &prepared.subject.head_sha[..12]),
+            tool_policy: if tools(args.agent).is_some() {
+                "hard"
+            } else {
+                "none"
+            }
+            .into(),
+        },
+        independence: identity::independence(&prepared.authors, &prepared.session, None)?.into(),
+        independence_policy: policy.into(),
+        gates,
+        probes,
+        verdict: "unreviewed".into(),
+        outcome: outcome.into(),
+        qualified: false,
+        disqualifiers: vec![],
+        findings: vec![],
+        checklist: vec![],
+        escalations: vec![],
+        cost: ReviewCost {
+            usd: None,
+            measured: false,
+            duration_ms: 0,
+        },
+        parse: "failed".into(),
+        notes: None,
+    };
+    if let Err(error) = worktree.remove() {
+        prepared
+            .notes
+            .push(format!("worktree removal failed: {error}"));
+    }
+    payload.notes = Some(prepared.notes.join("\n"));
+    verdict::qualify(&mut payload);
+    persist(&prepared.ledger, &payload, "")
 }
 
 fn outcome(result: Result<PhaseResult>) -> (String, String, Option<f64>) {

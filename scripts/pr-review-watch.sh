@@ -125,6 +125,15 @@ label_verdict() { # $1=reviewed sha  $2=current head
   if [ -n "${2:-}" ] && [ "$2" = "$1" ]; then echo apply; else echo skip; fi
 }
 
+# Product `edda review` exit 3 means an otherwise-LGTM answer was not
+# qualified. The adapter carries the product facts in its terminal receipt;
+# require all of them before a watcher can apply review:lgtm.
+product_lgtm_qualified() { # $1=.done file
+  [ "$(sed -n 's/^DISPATCH_EXIT=//p' "$1" 2>/dev/null | tail -1)" = "0" ] || return 1
+  [ "$(sed -n 's/^QUALIFIED=//p' "$1" 2>/dev/null | tail -1)" = "true" ] || return 1
+  [ -z "$(sed -n 's/^DISQUALIFIERS=//p' "$1" 2>/dev/null | tail -1)" ]
+}
+
 # ---- acknowledgement (retried, bounded; never best-effort) -------------------
 
 ack_register() { # $1=pr $2=sha $3=attempts $4=status(""=pending, "post-failed"=terminal)
@@ -399,6 +408,11 @@ settle_pending() {
         return 0
       fi
       vl=$(sh "$LABEL_PR" verdict-label < "$1")
+      if [ "$vl" = "review:lgtm" ] && [ "$(sed -n 's/^TRANSPORT=//p' "$DONE" 2>/dev/null | tail -1)" = "edda-review" ] && ! product_lgtm_qualified "$DONE"; then
+        mark_unreviewed "$pr" "$sha" "$round" 'product LGTM was unqualified or exited non-zero'
+        pending_drop "$pr"
+        return 0
+      fi
       if [ -n "$vl" ] && gh pr edit "$pr" --repo "$REPO" --add-label "$vl" >/dev/null 2>&1; then
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed"  >/dev/null 2>&1 || true
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:post-failed" >/dev/null 2>&1 || true

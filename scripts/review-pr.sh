@@ -216,6 +216,8 @@ product_review_supported() {
 }
 
 launch_product_review() {
+  # This branch owns its per-round artifacts, including on its first use.
+  mkdir -p "$SCRATCH" || { echo "review-pr.sh: cannot create scratch directory $SCRATCH" >&2; exit 1; }
   LOG="$SCRATCH/review-pr$PR-r$ROUND.log"
   DONE="$SCRATCH/review-pr$PR-r$ROUND.done"
   LANE="$SCRATCH/review-pr$PR-r$ROUND-lane.ps1"
@@ -255,8 +257,17 @@ if (-not \$proof) {
 } else {
   \$p0 = @(\$payload.findings | Where-Object severity -eq 'P0').Count
   \$p1 = @(\$payload.findings | Where-Object severity -eq 'P1').Count
-  \$label = if (\$payload.verdict -eq 'lgtm') { 'LGTM' } elseif (\$payload.verdict -eq 'changes-requested') { 'Changes Requested' } else { '' }
-  if (\$label) { "<<<VERDICT`n### Verdict`n\$label, P0=\$p0, P1=\$p1`nVERDICT>>>" | Out-File '$LOGW' -Encoding utf8 }
+  \$qualified = \$payload.qualified -eq \$true -and @(\$payload.disqualifiers).Count -eq 0
+  \$label = if (\$payload.verdict -eq 'lgtm' -and \$qualified) { 'LGTM' } elseif (\$payload.verdict -eq 'changes-requested') { 'Changes Requested' } else { '' }
+  if (\$label) {
+    "<<<VERDICT\`n### Verdict\`n\$label, P0=\$p0, P1=\$p1\`nEvent identity: \$(\$payload.event_id ?? 'unknown')\`nQualification: \$qualified\`nDisqualifiers: \$((@(\$payload.disqualifiers) -join ', ') ?? 'none')\`n### Findings" | Out-File '$LOGW' -Encoding utf8
+    foreach (\$finding in @(\$payload.findings)) { Add-Content '$LOGW' ("finding: " + (\$finding | ConvertTo-Json -Compress)) -Encoding utf8 }
+    Add-Content '$LOGW' '### Checklist' -Encoding utf8
+    foreach (\$item in @(\$payload.checklist)) { Add-Content '$LOGW' ("checklist: " + (\$item | ConvertTo-Json -Compress)) -Encoding utf8 }
+    Add-Content '$LOGW' '### Escalations' -Encoding utf8
+    foreach (\$escalation in @(\$payload.escalations)) { Add-Content '$LOGW' ("escalation: " + (\$escalation | ConvertTo-Json -Compress)) -Encoding utf8 }
+    Add-Content '$LOGW' 'VERDICT>>>' -Encoding utf8
+  }
   Add-Content '$LOGW' "Model requested: \$(\$payload.reviewer.model_requested)" -Encoding utf8
   Add-Content '$LOGW' "Model observed: \$(\$payload.reviewer.model_observed)" -Encoding utf8
   if (\$null -ne \$payload.cost.usd) { Add-Content '$LOGW' ("Cost: \$" + [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, '{0:0.####}', \$payload.cost.usd)) -Encoding utf8 }
@@ -264,6 +275,7 @@ if (-not \$proof) {
   \$tree = 'unchanged'
   \$policy = 'product-json:hard'
   \$session = \$payload.reviewer.session_id
+  \$disqualifiers = @(\$payload.disqualifiers) -join ','
 }
 "TRANSPORT=edda-review" | Out-File '$DONEW' -Encoding utf8
 "POLICY_RECEIPT=\$policy" | Add-Content '$DONEW' -Encoding utf8
@@ -271,8 +283,11 @@ if (-not \$proof) {
 "SESSION_MODE=$( [ -n "$PRODUCT_RESUME" ] && echo resume || echo new )" | Add-Content '$DONEW' -Encoding utf8
 "DISPATCH_EXIT=\$code" | Add-Content '$DONEW' -Encoding utf8
 "WORKTREE_CHECK=\$tree" | Add-Content '$DONEW' -Encoding utf8
+"QUALIFIED=\$qualified" | Add-Content '$DONEW' -Encoding utf8
+"DISQUALIFIERS=\$disqualifiers" | Add-Content '$DONEW' -Encoding utf8
 exit \$code
 PS
+    [ -s "$LANE" ] || { echo "review-pr.sh: Windows product lane generation produced no artifact" >&2; exit 1; }
     echo "lane_file_arg=$LANEW"
   else
     cat > "$RUNNER" <<RUN
@@ -294,16 +309,32 @@ else
   verdict=\$(jq -r '.verdict' "\$json")
   p0=\$(jq '[.findings[] | select(.severity == "P0")] | length' "\$json")
   p1=\$(jq '[.findings[] | select(.severity == "P1")] | length' "\$json")
+  qualified=\$(jq -r '.qualified == true and ((.disqualifiers // []) | length == 0)' "\$json")
+  disqualifiers=\$(jq -r '(.disqualifiers // []) | join(",")' "\$json")
   case "\$verdict" in lgtm) label=LGTM;; changes-requested) label='Changes Requested';; *) label='';; esac
+  [ "\$label" != LGTM ] || [ "\$qualified" = true ] || label=''
   : > '$LOG'
-  [ -z "\$label" ] || printf '<<<VERDICT\n### Verdict\n%s, P0=%s, P1=%s\nVERDICT>>>\n' "\$label" "\$p0" "\$p1" >> '$LOG'
+  if [ -n "\$label" ]; then
+    printf '<<<VERDICT\n### Verdict\n%s, P0=%s, P1=%s\n' "\$label" "\$p0" "\$p1" >> '$LOG'
+    jq -r '
+      "Event identity: " + (.event_id // "unknown"),
+      "Qualification: " + ((.qualified == true and ((.disqualifiers // []) | length == 0)) | tostring),
+      "Disqualifiers: " + ((.disqualifiers // []) | if length == 0 then "none" else join(", ") end),
+      "### Findings",
+      (.findings[]? | "finding: " + tojson),
+      "### Checklist",
+      (.checklist[]? | "checklist: " + tojson),
+      "### Escalations",
+      (.escalations[]? | "escalation: " + tojson),
+      "VERDICT>>>"
+    ' "\$json" >> '$LOG'
+  fi
   jq -r '"Model requested: " + .reviewer.model_requested, "Model observed: " + .reviewer.model_observed, (if .cost.usd == null then empty else "Cost: $" + (.cost.usd|tostring) end), "Session: " + .reviewer.session_id' "\$json" >> '$LOG'
   tree=unchanged
   policy=product-json:hard
   session=\$(jq -r '.reviewer.session_id' "\$json")
 fi
-rm -f "\$json"
-printf 'TRANSPORT=edda-review\nPOLICY_RECEIPT=%s\nSESSION=%s\nSESSION_MODE=$( [ -n "$PRODUCT_RESUME" ] && echo resume || echo new )\nDISPATCH_EXIT=%s\nWORKTREE_CHECK=%s\n' "\$policy" "\$session" "\$code" "\$tree" > '$DONE'
+printf 'TRANSPORT=edda-review\nPOLICY_RECEIPT=%s\nSESSION=%s\nSESSION_MODE=$( [ -n "$PRODUCT_RESUME" ] && echo resume || echo new )\nDISPATCH_EXIT=%s\nWORKTREE_CHECK=%s\nQUALIFIED=%s\nDISQUALIFIERS=%s\n' "\$policy" "\$session" "\$code" "\$tree" "\${qualified:-false}" "\${disqualifiers:-}" > '$DONE'
 exit "\$code"
 RUN
     sh -n "$RUNNER" || exit 1

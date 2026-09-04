@@ -31,6 +31,14 @@ impl AgentLauncher for Reviewer {
         let head = std::fs::read_to_string(cwd.join(git::SUBJECT_MARKER))?;
         assert_eq!(git::commit(cwd, "HEAD")?, head);
         *self.session.lock().unwrap() = Some(session.into());
+        match self.answer {
+            "mutate-content" => std::fs::write(cwd.join("b.txt"), "tampered\n")?,
+            "mutate-head" => {
+                testrepo::commit_file(cwd, "engine.txt", "tampered\n", "engine mutation");
+            }
+            "mutate-remove" => std::fs::remove_file(cwd.join("b.txt"))?,
+            _ => {}
+        }
         if self.answer == "crash" {
             return Ok(PhaseResult::AgentCrash {
                 error: "provider unavailable".into(),
@@ -42,12 +50,17 @@ impl AgentLauncher for Reviewer {
                 result_text: Some("LGTM".into()),
             });
         }
-        let findings = if self.answer == "changes-requested" {
+        let verdict = if self.answer.starts_with("mutate-") {
+            "lgtm"
+        } else {
+            self.answer
+        };
+        let findings = if verdict == "changes-requested" {
             serde_json::json!([{"severity":"P1","file":"b.txt","line":1,"claim":"fixture finding","evidence":"b.txt:1","rule":"core"}])
         } else {
             serde_json::json!([])
         };
-        let value = serde_json::json!({"subject_seen":head, "verdict":self.answer,"findings":findings,"checklist":[{"item":"changed file","result":"na","measure":"read b.txt; no execution claimed"}],"escalations":[],"model_self_report":"untrusted-name","notes":""});
+        let value = serde_json::json!({"subject_seen":head, "verdict":verdict,"findings":findings,"checklist":[{"item":"changed file","result":"na","measure":"read b.txt; no execution claimed"}],"escalations":[],"model_self_report":"untrusted-name","notes":""});
         Ok(PhaseResult::AgentDone {
             cost_usd: self.cost,
             result_text: Some(format!("```edda-review-verdict/v1\n{value}\n```")),
@@ -239,4 +252,55 @@ async fn default_review_never_executes_declared_gate() {
         .unwrap();
     assert!(!sentinel.exists());
     assert!(payload.gates.ran.is_empty());
+}
+
+#[tokio::test]
+async fn proof_failures_are_unreviewed_unqualified_and_do_not_consume_rounds() {
+    for (answer, expected_outcome) in [
+        ("mutate-content", "worktree-changed"),
+        ("mutate-head", "worktree-changed"),
+        ("mutate-remove", "worktree-check-failed"),
+    ] {
+        let (_temp, root, args) = fixture(true);
+        let reviewer = Reviewer {
+            answer,
+            session: Mutex::new(None),
+            cost: Some(0.01),
+        };
+        let (payload, _) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
+            .await
+            .unwrap();
+        assert_eq!(payload.subject.worktree_check.as_deref(), Some("failed"));
+        assert_eq!(payload.verdict, "unreviewed");
+        assert_eq!(payload.outcome, expected_outcome);
+        assert_eq!(payload.refs.round, None);
+        assert!(!payload.qualified);
+        assert!(payload
+            .disqualifiers
+            .iter()
+            .any(|reason| reason == "worktree-check-not-unchanged"));
+    }
+}
+
+#[tokio::test]
+async fn mutating_ran_gate_persists_unreviewed_proof_failure_before_engine_launch() {
+    let (_temp, root, mut args) = fixture(true);
+    args.run_gates = true;
+    args.gates = vec!["printf tampered > b.txt".into()];
+    let reviewer = Reviewer {
+        answer: "lgtm",
+        session: Mutex::new(None),
+        cost: Some(0.01),
+    };
+    let (payload, _) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
+        .await
+        .unwrap();
+    assert_eq!(payload.subject.worktree_check.as_deref(), Some("failed"));
+    assert_eq!(payload.verdict, "unreviewed");
+    assert_eq!(payload.refs.round, None);
+    assert!(!payload.qualified);
+    assert!(payload
+        .notes
+        .as_deref()
+        .is_some_and(|notes| notes.contains("review evidence changed")));
 }
