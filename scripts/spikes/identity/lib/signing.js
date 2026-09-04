@@ -87,8 +87,10 @@ function rawPublicBytes(publicKey) {
  */
 function signEvent(event, identity) {
   const { actorId, role, keypair } = identity;
+  const [eventFamily, eventLevel] = classifyEventType(event.type);
   const staged = {
     ...event,
+    ...(eventFamily === undefined ? {} : { event_family: eventFamily, event_level: eventLevel }),
     actor_id: actorId,
     key_id: keyIdFor(keypair.pubkeyHex),
     // Advisory discovery metadata; NEVER used by verify (invariant 3).
@@ -117,11 +119,13 @@ function signEvent(event, identity) {
  * @returns {{ ok: boolean, reason?: string, tier: 'signed'|'legacy' }}
  */
 function verifyEvent(event, keyring) {
-  if (!event.sig || !event.actor_id || !event.key_id) {
-    // Legacy tier: unsigned events verify by hash chain only (caller runs
-    // verifyChain); they are recorded but unattributable (invariant 5).
+  const identity = classifyIdentityFields(event);
+  if (identity.tier === 'legacy') {
+    // Legacy is reserved for an entirely absent identity group. A stripped or
+    // malformed signed tuple must never downgrade to this path.
     return { ok: true, tier: 'legacy' };
   }
+  if (identity.error) return { ok: false, reason: identity.error, tier: 'signed' };
   if (event.sig.alg !== 'ed25519') {
     return { ok: false, reason: `unsupported sig alg ${event.sig.alg}`, tier: 'signed' };
   }
@@ -141,7 +145,7 @@ function verifyEvent(event, keyring) {
     null,
     signingInput(event),
     trusted.publicKey,
-    Buffer.from(String(event.sig.value), 'hex'),
+    Buffer.from(event.sig.value, 'hex'),
   );
   if (!sigOk) {
     return { ok: false, reason: 'signature does not verify under trusted key', tier: 'signed' };
@@ -220,8 +224,14 @@ function authorizeRatify(ratifyEvent, keyring) {
 function verifyChain(events) {
   let parent = null;
   for (const ev of events) {
-    if (computeEventHash(ev) !== ev.hash) {
-      return { ok: false, reason: `hash mismatch at ${ev.event_id}` };
+    const expectedHash = computeEventHash(ev);
+    const [family, level] = classifyEventType(ev.type);
+    const expectedDigests = [{ alg: 'sha256', canon: 'edda-canon-v1', value: expectedHash }];
+    if (ev.event_family !== family || ev.event_level !== level) {
+      return { ok: false, reason: `taxonomy mismatch at ${ev.event_id}` };
+    }
+    if (ev.hash !== expectedHash || !sameJson(ev.digests, expectedDigests)) {
+      return { ok: false, reason: `hash or digest mismatch at ${ev.event_id}` };
     }
     if ((ev.parent_hash ?? null) !== parent) {
       return { ok: false, reason: `parent_hash mismatch at ${ev.event_id}` };
@@ -230,6 +240,40 @@ function verifyChain(events) {
   }
   return { ok: true };
 }
+
+/** Legacy is legal only when every signature-related envelope field is absent. */
+function classifyIdentityFields(event) {
+  const fields = ['actor_id', 'key_id', 'sig', 'actor_pubkey'];
+  const present = fields.filter((field) => Object.hasOwn(event, field));
+  if (present.length === 0) return { tier: 'legacy' };
+  const required = ['actor_id', 'key_id', 'sig'];
+  const missing = required.filter((field) => !Object.hasOwn(event, field));
+  if (missing.length) return { tier: 'signed', error: `partial identity tuple: missing ${missing.join(', ')}` };
+  if (typeof event.actor_id !== 'string' || event.actor_id.length === 0) return { tier: 'signed', error: 'malformed actor_id' };
+  if (typeof event.key_id !== 'string' || !/^ek_[0-9a-f]{16}$/.test(event.key_id)) return { tier: 'signed', error: 'malformed key_id' };
+  if (!isRecord(event.sig) || typeof event.sig.alg !== 'string' || typeof event.sig.value !== 'string' || !/^[0-9a-f]{128}$/.test(event.sig.value)) return { tier: 'signed', error: 'malformed signature' };
+  if (Object.hasOwn(event, 'actor_pubkey') && (typeof event.actor_pubkey !== 'string' || !/^[0-9a-f]{64}$/.test(event.actor_pubkey))) return { tier: 'signed', error: 'malformed actor_pubkey' };
+  return { tier: 'signed' };
+}
+
+function classifyEventType(type) {
+  switch (type) {
+    case 'note': case 'checkpoint': return ['signal', 'info'];
+    case 'cmd': return ['signal', 'trace'];
+    case 'commit': case 'merge': return ['milestone', 'milestone'];
+    case 'rebuild': return ['admin', 'trace'];
+    case 'branch_create': case 'branch_switch': case 'device_pair': case 'device_revoke': case 'task.requeued': return ['admin', 'info'];
+    case 'approval': case 'approval_request': case 'approval_policy_match': case 'decision_import': case 'decision_ratify': case 'verdict.recorded': return ['governance', 'governance'];
+    case 'task_intake': case 'agent_phase_change': case 'cycle_telemetry': case 'task.created': case 'task.started': case 'task.failed': return ['signal', 'info'];
+    case 'review_bundle': case 'decide_snapshot': return ['governance', 'milestone'];
+    case 'pr': case 'task.done': return ['milestone', 'milestone'];
+    case 'task.session': return ['signal', 'trace'];
+    default: return [undefined, undefined];
+  }
+}
+
+function isRecord(value) { return value !== null && typeof value === 'object' && !Array.isArray(value); }
+function sameJson(left, right) { return JSON.stringify(left) === JSON.stringify(right); }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -249,6 +293,7 @@ module.exports = {
   HASH_REMOVAL_SET,
   TrustedKeyring,
   authorizeRatify,
+  classifyIdentityFields,
   computeEventHash,
   generateKeyPair,
   keyIdFor,

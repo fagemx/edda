@@ -82,8 +82,10 @@ const agent = generateKeyPair();
 keyring.register('operator-main', operator.pubkeyHex, 'operator');
 keyring.register('agent-fixture', agent.pubkeyHex, 'agent');
 
+const unsignedNote = { ...note };
+delete unsignedNote.schema_version; // Node spike rejects JSON Number values.
 const { event: signed } = signEvent(
-  { ...note, payload: { ...note.payload, role: 'user' } },
+  { ...unsignedNote, payload: { ...note.payload, role: 'user' } },
   { actorId: 'operator-main', role: 'operator', keypair: operator },
 );
 const sv = verifyEvent(signed, keyring);

@@ -23,11 +23,11 @@ spike 內 ephemeral 生成，沒有任何真實操作者金鑰或憑證被使用
 | 元件 | 現況 | 失效訊號 |
 |---|---|---|
 | 事件封套（`crates/edda-core/src/types.rs:358-377`） | 無 `actor`／`signature` 欄位；作者身分是 payload 裡的字串（`event.rs:569` `actor`、`:791` `author`） | 無——任何程序都能寫任何 author 字串 |
-| ratify（`event.rs:255 new_decision_ratify_event`、`cmd_bridge.rs` ratify） | 獨立 append-only 事件（不改原決策——這點是對的） | 無——**不檢查誰按的** |
+| ratify（`event.rs:255 new_decision_ratify_event`、`crates/edda-cli/src/cmd_bridge/decide.rs:225` `ratify`） | 獨立 append-only 事件（不改原決策——這點是對的） | 無——**不檢查誰按的** |
 | `ActorDef`（`policy.rs:100-113`） | roles / kind / email / display_name / runtime | **沒有 key** |
-| `verify_chain`（`ledger.rs:156`） | hash chain | 保證**順序與完整**，不保證**作者** |
+| `verify_chain`（`crates/edda-ledger/src/ledger.rs:205`） | hash chain | 保證**順序與完整**，不保證**作者** |
 
-spike 以 13 個重跑測試（`scripts/spikes/identity/test.js`）把這個缺口
+spike 以 14 個重跑測試（`scripts/spikes/identity/test.js`）把這個缺口
 變成可重現的事實：一段偽造 `role: "operator"` 的 payload，攻擊者重算
 hash 後在**未簽章基線下完全自洽**——鏈驗證通過、事件驗證通過
 （spike.js 階段 C）。這就是本單要補的洞。
@@ -58,10 +58,14 @@ hash 後在**未簽章基線下完全自洽**——鏈驗證通過、事件驗�
   （timestamping / transparency log 為 v2 候選）。
 - **後量子**：Ed25519 不是後量子演算法。
 - **canonicalization 發散**：簽章綁 `edda-canon-v1` 位元組。跨語言
-  實作（serde_json vs 任何其他 JSON 序列化器）在 unicode 轉義等
-  細節可能發散——這正是 golden fixtures 存在的原因（spike.js 階段 B 用
-  **實際 Rust 演算法**產出的 hash 釘死 Node 鏡像），生產實作必須
-  同樣以 fixture 為守門，不以文字描述為守門。
+  實作（serde_json vs 任何其他 JSON 序列化器）在 Unicode scalar 排序、
+  escape 與 number 細節可能發散——這正是 golden fixtures 存在的原因。
+  spike 的 `canonical-v1.json` 是 #608 `canonical-v1.json` 的實際 Rust
+  byte vectors（Unicode、escape、f64/-0、i64/u64 boundary）；Node 實作
+  修正 scalar 排序，但**刻意拒絕所有 JSON Number**，因 parsed JS Number
+  不能忠實表示該 Rust domain。它只對 number-free 子集宣稱 mirror；生產
+  實作必須完整通過 fixture 才可聲稱 parity，不以文字描述或 JSON.stringify
+  當守門。
 
 ### 2.3 與既有機制的分層（GH-690 互補）
 
@@ -128,8 +132,11 @@ sig  = Ed25519.sign( privkey, canon_v1(event − {sig}) )   // 含 hash
 
 ```
 verify(event, keyring):
-  若 event 無 actor_id / key_id / sig 任一欄位:
-      return LEGACY   # 未簽章＝legacy tier，只受 hash chain 約束
+  若 actor_id / key_id / sig / actor_pubkey **全部缺席**:
+      return LEGACY   # 唯一的 legacy 條件；未簽章只受 hash chain 約束
+  若 actor_id / key_id / sig 有任一缺席、空字串、型別錯誤，或 sig 格式錯誤:
+      REJECT           # 不得藉由刪除一欄降級
+  若 actor_pubkey 存在但不是合法 32-byte lowercase hex: REJECT
   若 sig.alg ≠ "ed25519": REJECT
   trusted = keyring.lookup(actor_id, key_id)
   若 trusted 無此配對: REJECT   # 內嵌 actor_pubkey 永不作為信任來源
@@ -146,19 +153,33 @@ verify(event, keyring):
 
 | 點 | 行為 |
 |---|---|
-| `verify_chain`（`ledger.rs`） | 擴充：hash 驗證照舊；宣稱身分的事件加驗簽章 |
-| `sync` / serve ingest | fail-closed：事件宣稱的 (actor_id, key_id) 在 keyring 有配對 → 驗簽不過即拒收；完全未簽章 → 收為 legacy tier（§5.1） |
-| ratify（`cmd_bridge.rs`） | authorized = verifyEvent VERIFIED **且** actor_role == operator（§5.6） |
+| `verify_chain`（`crates/edda-ledger/src/ledger.rs:205` → `crates/edda-ledger/src/sqlite_store/events.rs:715`） | 擴充：先依現行 `validate_event_hash` 比對 hash、**完整 digest array**、taxonomy；再對宣稱身分的事件驗簽 |
+| `sync` / serve ingest | fail-closed：事件宣稱的 (actor_id, key_id) 在 keyring 有配對 → 驗簽不過即拒收；只有完整缺席的 identity group 才收為 legacy tier（§5.1） |
+| ratify（`crates/edda-cli/src/cmd_bridge/decide.rs:225`） | authorized = verifyEvent VERIFIED **且** actor_role == operator（§5.6） |
 | pack / ask | binding 決策只認驗簽通過且 operator-role 的 ratify |
 
-### 3.6 schema_version 與相容性
+### 3.6 SQLite migration、activation 與相容性（未實作）
 
-不動 `schema_version`（維持 1）：新欄位全部 `skip_serializing_if`
-可選，舊版 serde 反序列化忽略未知欄位——**舊 binary 可讀簽章事件**，
-只是不能驗簽（讀得到、驗不了）。這符合帳本決策
-`compat.schema-version-policy = read-older-refuse-newer-minor-bump-announced`：
-結構性 bump（拒讀舊帳本的變更）不需要；若操作者裁決要 bump，
-走該決策的 minor-bump-announced 流程。
+事件 `schema_version` 是否仍為 1 是封套問題；它**不取代** SQLite
+`schema_meta.version`。未來生產 migration 必須在同一 SQLite transaction：
+
+1. `events` 新增 nullable `actor_id`、`key_id`、`sig_alg`、`sig_value`、
+   `actor_pubkey` columns，舊列全為 NULL；不改寫任何歷史 hash 或列。
+2. 把 `schema_meta.version` 升到新的 signing-aware store version，並寫入
+   `schema_meta['signing_capability'] = 'present-not-active'`。migration 的
+   version guard 必須令舊 binary（不知道該 store version／capability）拒絕
+   開啟此 store，而不是 typed round-trip 後丟棄未知 envelope 欄位。
+3. 僅在所有 reader/writer 都是 signing-aware 且 keyring 已配置後，由操作者
+   將 capability 原子切為 `signed-authority-active`。active store 的 writer
+   必須簽所有新 authority event；reader、pack、ask 和 ratify 必須先檢查
+   capability，並只承認已驗簽的 operator ratify。不能驗簽或 capability
+   不認識即 fail closed，不能顯示為「unverified 但照舊 honor」。
+
+因此本提案**不聲稱舊 binary 可讀、保留或標記 signed event，也不聲稱它能
+在 activation 後安全地寫入或 honor unsigned ratify**。現況 `Event` serde
+會丟棄未知 envelope 欄位，而現況 pack/ask 直接從 `decision_ratify` 推導；
+它們正是 version-capability cutover 必須隔離的舊 authority reader。完整缺席
+identity group 的既有歷史仍是 legacy、可驗 chain、不可取得新 authority。
 
 ## 4. 七個設計問題的回答（issue「需要決定的」逐條）
 
@@ -202,8 +223,9 @@ verify(event, keyring):
 2. 歷史不動。需要為某段 legacy 歷史背書時，操作者可發佈
    **attestation 事件**（簽章事件，`refs.provenance` 指向一段
    legacy hash 範圍）——v2 候選，本單不設計細節。
-3. 舊 binary 在升級窗口內可讀新事件（§3.6）；不驗簽的讀者在
-   顯示層標記「未驗證簽章」而非靜默。
+3. 先完成 §3.6 的 store-version migration 和 capability cutover；在
+   `signed-authority-active` 後，舊 binary 必須因 store version 拒絕開啟，
+   不能以忽略欄位的 typed reader 寫入或 honor unsigned ratify。
 
 ### 5.3 為何不在合併點切斷 chain
 
@@ -241,7 +263,8 @@ scripts/spikes/identity/
 ├── lib/signing.js      # hash／簽章／keyring-first 驗證／授權／chain
 ├── lib/rfc8032.js      # RFC 8032 §7.1 測試向量（primary source 釘死密碼學原語）
 ├── fixtures/golden-events.json  # 實際 Rust 演算法產出的 golden 事件
-├── test.js             # 13 個測試（node:test，exit code 即結果）
+├── fixtures/canonical-v1.json   # #608 Rust canonical byte vectors（含拒絕域）
+├── test.js             # 14 個測試（node:test，exit code 即結果）
 ├── spike.js            # 敘事 demo（同檢查，A–E 五幕）
 └── README.md
 ```
@@ -286,7 +309,7 @@ binary** 在隔離 store（`EDDA_STORE_ROOT` tempdir，`edda init` +
 
 | doneWhen 項目 | 證據 |
 |---|---|
-| golden fixtures 簽章＋驗證通過 | 階段 B（Rust hash 重現）＋ D（genuine signed event VERIFIED） |
+| golden fixtures 簽章＋驗證通過 | 階段 B（Rust hash 重現）＋ canonical-v1 vectors（Unicode scalar/escape；float/-0/i64/u64 明確拒絕）＋ D（genuine signed event VERIFIED） |
 | 偽造 author 的 fixture 驗證失敗（fail-first：先證基線接受，再實作防禦） | 階段 C（unsigned baseline **ACCEPTED**——缺口實證）→ 階段 D（同一偽造 **REJECTED**） |
 | actor/key binding | test `actor/key binding`：換綁 actor_id 或 key_id 皆失敗；hash 綁 actor_id/key_id，keyring 配對 fail-closed |
 | 簽章排除自身 | test `sig is outside its own signing input`：sig 在自身簽章輸入與 hash 移除集合之外；Ed25519 確定性重簽同值 |

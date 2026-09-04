@@ -9,7 +9,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { canonicalJsonString } = require('./lib/canon');
+const { canonicalJsonString, compareUnicodeScalars } = require('./lib/canon');
 const {
   HASH_REMOVAL_SET,
   TrustedKeyring,
@@ -24,6 +24,7 @@ const {
 } = require('./lib/signing');
 const { TEST_1, TEST_3, checkVector } = require('./lib/rfc8032');
 const golden = require('./fixtures/golden-events.json');
+const canonicalVectors = require('./fixtures/canonical-v1.json');
 
 const [GOLDEN_HEAD, GOLDEN_NOTE] = golden.events;
 
@@ -57,19 +58,30 @@ test('golden event hashes produced by Rust (edda 0.4.0) reproduce in Node', () =
   }
 });
 
-test('golden chain: parent_hash links head to note event', () => {
+test('golden chain mirrors Rust: hash, complete digest, taxonomy, and linkage all verify', () => {
   assert.equal(GOLDEN_NOTE.parent_hash, GOLDEN_HEAD.hash);
   assert.deepEqual(verifyChain(golden.events), { ok: true });
+  for (const [field, value, reason] of [
+    ['digests', [{ alg: 'sha256', canon: 'edda-canon-v1', value: '0'.repeat(64) }], /digest/],
+    ['event_family', 'governance', /taxonomy/],
+    ['event_level', 'trace', /taxonomy/],
+  ]) {
+    const tampered = { ...GOLDEN_NOTE, [field]: value };
+    assert.match(verifyChain([GOLDEN_HEAD, tampered]).reason, reason, `tampered ${field} must reject`);
+  }
 });
 
-test('canon matches the documented edda-canon-v1 rules', () => {
-  // sorted keys, recursive, compact — mirrors crates/edda-core/src/canon.rs tests
-  assert.equal(canonicalJsonString({ z: 1, a: 2, m: 3 }), '{"a":2,"m":3,"z":1}');
-  assert.equal(
-    canonicalJsonString({ b: { z: 1, a: 2 }, a: 1 }),
-    '{"a":1,"b":{"a":2,"z":1}}',
-  );
-  assert.equal(canonicalJsonString({ a: [3, 1, 2] }), '{"a":[3,1,2]}');
+test('canonical vectors prove scalar ordering and escaping; Number vectors are explicitly rejected', () => {
+  // Copied byte-for-byte from #608's Rust-produced canonical-v1.json.
+  const [nested, unicode, floats, integers, escapes] = canonicalVectors;
+  assert.equal(unicode.canonical, '{"é":4,"é":3,"":2,"𐀀":1}');
+  assert.equal(canonicalJsonString({ '𐀀': 'a', '': 'b', é: 'c', 'é': 'd' }),
+    '{"é":"d","é":"c","":"b","𐀀":"a"}');
+  assert.ok(compareUnicodeScalars('', '𐀀') < 0, 'Unicode scalar order differs from JS UTF-16 order');
+  assert.equal(canonicalJsonString(['\u0000\b\t\n\f\r\u001f/"\\中']), escapes.canonical);
+  for (const vector of [nested, floats, integers]) {
+    assert.throws(() => canonicalJsonString(JSON.parse(vector.input)), /rejects JSON Number/);
+  }
 });
 
 // ── Phase 2: fail-first — forged author ACCEPTED by the unsigned baseline ──
@@ -110,7 +122,9 @@ test('SIGNED: forged-author event is rejected by signature verification', () => 
   keyring.register('agent-fixture', agent.pubkeyHex, 'agent');
 
   const { event: signed } = signEvent(
-    { ...GOLDEN_NOTE, payload: { ...GOLDEN_NOTE.payload, role: 'user' } },
+    // The Node spike deliberately rejects JSON Numbers, so omit the numeric
+    // schema_version before constructing its new signed fixture.
+    { ...withoutSchemaVersion(GOLDEN_NOTE), payload: { ...GOLDEN_NOTE.payload, role: 'user' } },
     { actorId: 'operator-main', role: 'operator', keypair: operator },
   );
   assert.deepEqual(verifyEvent(signed, keyring), {
@@ -187,6 +201,12 @@ test('sig is outside its own signing input and outside the hash', () => {
 });
 
 /** @returns {string} signature hex from signing the same input twice */
+function withoutSchemaVersion(event) {
+  const copy = { ...event };
+  delete copy.schema_version;
+  return copy;
+}
+
 function cryptoSignTwice(event, kp) {
   const crypto = require('node:crypto');
   const sig = crypto.sign(null, signingInput(event), kp.privateKey).toString('hex');
@@ -259,6 +279,27 @@ test('agent-signed ratify verifies cryptographically but is NOT authorized', () 
     { actorId: 'operator-main', role: 'operator', keypair: op },
   );
   assert.deepEqual(authorizeRatify(opRatify, keyring), { authorized: true });
+});
+
+test('partial, empty, and malformed identity groups cannot downgrade to legacy', () => {
+  const keyring = new TrustedKeyring();
+  const { event: signed } = signEvent({ type: 'note', branch: 'main', payload: { text: 'x' } }, {
+    actorId: 'operator-main', role: 'operator', keypair: generateKeyPair(),
+  });
+  for (const field of ['actor_id', 'key_id', 'sig']) {
+    const stripped = { ...signed };
+    delete stripped[field];
+    const verdict = verifyEvent(stripped, keyring);
+    assert.equal(verdict.ok, false, `missing ${field} must reject`);
+    assert.equal(verdict.tier, 'signed');
+    assert.match(verdict.reason, /partial identity tuple/);
+  }
+  for (const [field, value] of [['actor_id', ''], ['key_id', ''], ['sig', {}], ['actor_pubkey', '']]) {
+    const verdict = verifyEvent({ ...signed, [field]: value }, keyring);
+    assert.equal(verdict.ok, false, `empty/malformed ${field} must reject`);
+    assert.equal(verdict.tier, 'signed');
+  }
+  assert.deepEqual(verifyEvent(GOLDEN_NOTE, keyring), { ok: true, tier: 'legacy' });
 });
 
 test('unsigned ratify is legacy-tier: no authority without a signature', () => {

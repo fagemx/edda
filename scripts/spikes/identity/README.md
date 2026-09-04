@@ -8,7 +8,7 @@ model, the envelope extension spec (for #608), and the migration plan.
 ## Run
 
 ```bash
-node scripts/spikes/identity/test.js    # 13 tests; exit 0 = all invariants hold
+node scripts/spikes/identity/test.js    # 14 tests; exit 0 = all invariants hold
 node scripts/spikes/identity/spike.js   # narrative demo (stages A–E)
 ```
 
@@ -29,8 +29,9 @@ nothing to install, nothing added to any Cargo crate.
 | Part | Proves |
 |---|---|
 | `lib/rfc8032.js` | Node's Ed25519 reproduces RFC 8032 §7.1 vectors byte-for-byte (primary-source check, fetched from rfc-editor.org 2026-09-04) |
-| `lib/canon.js` | Node mirror of `edda-canon-v1` (`crates/edda-core/src/canon.rs`) |
+| `lib/canon.js` | Node's deliberately number-free `edda-canon-v1` subset; it uses Unicode scalar ordering and rejects every JSON Number rather than falsely mirror Rust f64/i64/u64 serialization |
 | `fixtures/golden-events.json` | Events whose `hash` came from the **actual Rust algorithm** (edda 0.4.0 binary, isolated `EDDA_STORE_ROOT`) |
+| `fixtures/canonical-v1.json` | Exact #608 Rust canonical byte vectors: Unicode scalar ordering, escapes, f64/-0 and signed/unsigned 64-bit boundaries; the latter two Number domains are asserted as rejected by this Node spike |
 | `test.js` stage B / `spike.js` stage B | Node reproduces the Rust hashes exactly — the cross-language canonicalization guard |
 | `test.js` stage C | **FAIL-FIRST**: a forged author string is self-consistent and ACCEPTED under the unsigned baseline (today's envelope) |
 | `test.js` stage D | The same forgery is REJECTED with signed verification |
@@ -43,10 +44,11 @@ nothing to install, nothing added to any Cargo crate.
 ## Layout
 
 ```
-lib/canon.js        edda-canon-v1 canonical JSON (Node mirror of canon.rs)
+lib/canon.js        number-free edda-canon-v1 subset (Unicode scalar sort)
 lib/signing.js      event hash, sign, keyring-first verify, ratify authority, chain
 lib/rfc8032.js      RFC 8032 §7.1 test vectors + conformance check
 fixtures/golden-events.json   Rust-produced golden events + provenance
+fixtures/canonical-v1.json     #608 Rust canonical byte vectors
 test.js             assertion runner (node:test)
 spike.js            narrative demo
 ```
