@@ -1,0 +1,14 @@
+# Generated SDK types are committed (they are generated from the pinned spec
+# in SPEC_PIN.json; CI regenerates and fails on stale types). Do not hand-edit.
+# sdk/ts/src/types.gen.ts
+# sdk/python/src/edda_sdk/types_gen.py
+
+# Pinned spec checkout (fetched by pin-spec.sh from the SPEC_PIN.json sha;
+# the bytes are reproducible from the sha, so the checkout is not committed).
+sdk/spec-pin/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/

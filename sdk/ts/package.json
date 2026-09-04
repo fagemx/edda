@@ -1,0 +1,28 @@
+{
+  "name": "@edda/sdk",
+  "version": "0.1.0",
+  "description": "Thin TypeScript client for the edda client contract (MCP writes, read-only HTTP). Types generated from the v1 event spec (GH-608). Publishing pending namespace authorization — see SDK_HANDOFF.md.",
+  "private": true,
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./canon": "./src/canon.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/",
+    "test:golden": "node --test --experimental-strip-types test/golden.test.ts",
+    "test:contract": "node --test --experimental-strip-types test/contract.test.ts",
+    "generate:types": "node ../generator/generate-types.mjs"
+  },
+  "dependencies": {}
+}

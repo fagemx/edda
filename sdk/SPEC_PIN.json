@@ -1,0 +1,9 @@
+{
+  "spec_sha": "9e3f6ddb8660e730be2cee631aa1eff7dd208a18",
+  "spec_ref": "PR857 candidate (codex/infra-spec-608), frozen per d-017",
+  "layout": {
+    "schemas": "spec/events/*.schema.json + registry.json + canonical-v1.json",
+    "fixtures": "tests/fixtures/events/*.jsonl"
+  },
+  "note": "Single source of truth for SDK type generation and contract tests. Move only with controller approval; every move requires regenerating sdk/ts/src/types.gen.ts and sdk/python/src/edda_sdk/types_gen.py and committing both (CI fails on stale types). Release/publication waits independent acceptance."
+}

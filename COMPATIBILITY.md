@@ -161,10 +161,10 @@ Golden fixture: `crates/edda-cli/tests/ask_compat_contract.rs` →
 
 Of the MCP tools, two return JSON payloads, and their shapes are stable:
 
-- `edda_ask` (`crates/edda-mcp/src/lib.rs:263-287#async fn edda_ask(`) — returns the same
+- `edda_ask` (`crates/edda-mcp/src/lib.rs:336-361#async fn edda_ask(`) — returns the same
   `AskResult` envelope as `edda ask --json` (same key set, same optionality
   rules).
-- `edda_tool_tier` (`crates/edda-mcp/src/lib.rs:407-417#async fn edda_tool_tier(`) — one JSON object,
+- `edda_tool_tier` (`crates/edda-mcp/src/lib.rs:480-490#async fn edda_tool_tier(`) — one JSON object,
   the `ToolTierResult` shape (`crates/edda-core/src/tool_tier.rs:103-108#pub struct ToolTierResult {`):
   `tool` (string), `tier` (string, `T0`–`T4`), `approval` (string,
   `none`/`lazy`/`required`/`blocked`), `description` (string).
