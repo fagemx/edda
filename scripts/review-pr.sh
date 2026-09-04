@@ -218,9 +218,11 @@ if [ -n "$SPEC_OVERRIDE" ]; then
   SPEC=$SPEC_OVERRIDE
   SPEC_SOURCE="$SPEC_OVERRIDE (EDDA_REVIEW_SPEC override)"
 else
-  # The base commit must be in this object database before it can be read.
+  # The base and head commits must be in this object database before they can be read.
   git -C "$SELF_REPO" cat-file -e "$BASE_SHA^{commit}" 2>/dev/null ||
     git -C "$SELF_REPO" fetch -q origin "$BASE_REF" 2>/dev/null || true
+  git -C "$SELF_REPO" cat-file -e "$SHA^{commit}" 2>/dev/null ||
+    git -C "$SELF_REPO" fetch -q origin "$BR" 2>/dev/null || true
   if git -C "$SELF_REPO" show "$BASE_SHA:REVIEW.md" > "$SPEC" 2>/dev/null; then
     SPEC_SOURCE="REVIEW.md@$BASE_SHA (base of $BASE_REF)"
   elif [ -f "$SELF_REPO/REVIEW.md" ]; then
@@ -371,7 +373,17 @@ BRIEF="$SCRATCH/review-pr$PR-r$ROUND-brief.md"
   echo "### Wiring and write-end swallow scan (scripts/wiring-scan.sh)"
   echo "Reviewer aid: scan for swallow patterns on added lines (\`let _ =\`, \`.ok();\`, \`unwrap_or_default()\`, \`best-effort\`, \`silently\`):"
   echo '```'
-  sh "$SELF_REPO/scripts/wiring-scan.sh" "$BASE_SHA" "$SHA" 2>/dev/null | awk '/^== Swallow patterns/,0' || echo "(wiring scan unavailable)"
+  swallow_scan=$(sh "$SELF_REPO/scripts/wiring-scan.sh" "$BASE_SHA" "$SHA" 2>/dev/null)
+  scan_rc=$?
+  swallow_lens=""
+  if [ "$scan_rc" -eq 0 ] && [ -n "$swallow_scan" ]; then
+    swallow_lens=$(printf '%s\n' "$swallow_scan" | awk '/^== Swallow patterns/,0')
+  fi
+  if [ -n "$swallow_lens" ]; then
+    printf '%s\n' "$swallow_lens"
+  else
+    echo "(wiring scan unavailable)"
+  fi
   echo '```'
   echo "A write-end swallow on a path where coordination, ledger, heartbeat, session-ledger, L3-store, or digest state is written is **P1** (REVIEW.md §5.5, GH-692, GH-733)."
   echo

@@ -492,6 +492,8 @@ grep -q 'Wiring and write-end swallow scan' "$brief" \
     || fail 'D10: the brief does not embed the Wiring and write-end swallow scan section (GH-733)'
 grep -q 'write-end swallow.*is \*\*P1\*\*' "$brief" \
     || fail 'D10: the brief does not state that a write-end swallow on coordination/ledger/heartbeat/session-ledger/L3-store/digest paths is **P1** (GH-733)'
+grep -q '(wiring scan unavailable)' "$brief" \
+    || fail 'D10: the brief does not surface (wiring scan unavailable) when revisions cannot be resolved (GH-733)'
 
 # --- offline guarantee: the real fleet scratch carries none of our output -----
 # Only our own fixture PR is asserted, not the whole listing: a live watcher or
