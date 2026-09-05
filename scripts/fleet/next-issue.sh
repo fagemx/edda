@@ -68,6 +68,11 @@ if [ "$has_claimed" = "true" ]; then
 fi
 has_ready=$(printf '%s' "$json" | jq '[.labels[].name] | index("fleet:ready") != null')
 [ "$has_ready" = "true" ] || die "issue $issue does not carry fleet:ready"
+if [ "$dry" = 0 ]; then
+    echo "== issue freshness"
+    sh "$self_dir/issue-freshness.sh" "$issue" ||
+        die "issue $issue failed the freshness gate (labelled fleet:stale) — not dispatching"
+fi
 title=$(printf '%s' "$json" | jq -r .title)
 [ -n "$title" ] && [ "$title" != "null" ] || die "issue $issue has no title"
 # interpolated into the double-quoted task-new line below; the backslash is
