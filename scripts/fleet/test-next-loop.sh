@@ -262,6 +262,33 @@ printf '%s\n' "$posted" | grep -q 'dispatch --json' || fail "shadow cost line no
 printf '%s\n' "$posted" | grep -q 'placeholder line' && fail "shadow cost line uncorrected"
 [ -f "$wt_fix/.pre-registered" ] || fail "pre-registered worktree not reused — the loop recreated it (checkout --detach branch unexercised)"
 [ "$(git -C "$wt_fix" rev-parse HEAD)" = "$HEAD1" ] || fail "review worktree not detached at the pinned head: $(git -C "$wt_fix" rev-parse HEAD)"
+# Path-drift guard (GH-903): the two checks above inspect only $wt_fix. If the
+# fixture registration ever moves away from $EDDA_FLEET_SCRATCH/wt-review-pr886,
+# the loop registers its own scratch worktree beside it and both checks still
+# pass on the abandoned fixture — the drift is silent. So demand exactly one
+# registration under the test root and that it is the fixture itself. git
+# reports worktree paths in machine-canonical form while $work may be a
+# shell-style path (e.g. MSYS /tmp/...), so canonicalize the root through a
+# throwaway repo under $work instead of deriving it from the fixture path.
+git init -q "$work/canon-probe"
+wt_root=$(git -C "$work/canon-probe" rev-parse --show-toplevel)
+wt_root=${wt_root%/canon-probe}
+[ -n "$wt_root" ] || fail "cannot canonicalize the test root from $work"
+wt_canon=$(git -C "$wt_fix" rev-parse --show-toplevel) || \
+    fail "cannot resolve the fixture worktree registration: $wt_fix"
+wt_reg=0
+wt_drift=
+while IFS= read -r wt_path; do
+    case $wt_path in
+        "$wt_root"/*)
+            wt_reg=$((wt_reg + 1))
+            [ "$wt_path" = "$wt_canon" ] || wt_drift=$wt_path ;;
+    esac
+done <<EOF
+$(git worktree list --porcelain | sed -n 's/^worktree //p')
+EOF
+[ "$wt_reg" -eq 1 ] && [ -z "$wt_drift" ] || \
+    fail "worktree path drift: want exactly one registration under $wt_root and it must be $wt_canon, found $wt_reg${wt_drift:+ with stray $wt_drift}"
 echo "ok 5 moved-head refusal"
 echo "ok 6 shadow post shape"
 
