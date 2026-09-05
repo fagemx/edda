@@ -276,8 +276,6 @@ r8_pass() {
         r8_ctx=$(tail -n 3 "$RULES")
         r8_line=$(printf -- '- %s %s（依 R8 由 %s 追加；案例：看板 #%s 留言「manager: no rule for %s」；理由：現行規則未涵蓋）' \
             "$TODAY" "$desc" "$IDENT" "$EDDA_BOARD_ISSUE" "$desc")
-        printf '%s\n' "$r8_line" >>"$RULES"
-        printf '%s: R8 rule appended to %s: %s\n' "$prog" "$RULES" "$desc" >&2
         {
             printf 'manager: R8 rule appended by %s\n\n' "$IDENT"
             printf 'Case: board #%s comment 「manager: no rule for %s」; applies to docs/fleet/rules.md, section 管理者自訂 (append-only, end of file).\n\n' \
@@ -289,8 +287,20 @@ r8_pass() {
             printf '+%s\n' "$r8_line"
             printf '```\n'
         } >"$STATE/r8-patch.md"
-        gh issue comment "$EDDA_BOARD_ISSUE" --repo "$EDDA_REPO" \
-            --body-file "$STATE/r8-patch.md" >/dev/null 2>&1 || :
+        # Post before appending. The comment is the carrier that survives a
+        # worktree reset; the append is local convenience. If the post fails
+        # and we appended first, the grep -qF dedupe above blocks every
+        # retry, so one lost write loses the duty permanently. Posting first
+        # means a failed write leaves nothing appended and the next wake
+        # tries again — and note_failed makes this wake exit non-zero rather
+        # than reporting a clean tick that silently did nothing.
+        if ! gh issue comment "$EDDA_BOARD_ISSUE" --repo "$EDDA_REPO" \
+                --body-file "$STATE/r8-patch.md" >/dev/null 2>&1; then
+            note_failed "R8 patch comment failed for: $desc (rule not appended; will retry next wake)"
+            continue
+        fi
+        printf '%s\n' "$r8_line" >>"$RULES"
+        printf '%s: R8 rule appended to %s: %s\n' "$prog" "$RULES" "$desc" >&2
     done <<EOF
 $(grep '^manager: no rule for ' "$BOARD_BODY" 2>/dev/null | sed 's/^manager: no rule for //' || :)
 EOF

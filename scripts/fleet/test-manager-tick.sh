@@ -29,7 +29,7 @@ fail() {
 # Both log their argv to $ORDER_LOG. `gh` answers per subcommand from env files
 # (GH_READY_TSV, GH_OPEN_PRS_TSV, $BOARD/<n>.body, $DIFFS/<n>.files) and fails
 # everything when GH_RC is non-zero (`gh pr diff` additionally fails when
-# GH_PRC is non-zero). `edda` answers only `dispatch`.
+# GH_PRC is non-zero; `gh issue comment` when GH_CRC is). `edda` answers only `dispatch`.
 STUBBIN="$tmp/bin"
 mkdir -p "$STUBBIN"
 cat >"$STUBBIN/gh" <<'EOF'
@@ -50,6 +50,7 @@ case "$1 $2" in
     exit ${GH_RC:-0}
     ;;
   "issue comment")
+    if [ -n "${GH_CRC:-}" ] && [ "$GH_CRC" != 0 ]; then exit "$GH_CRC"; fi
     num=$3
     bodyfile=""
     while [ $# -gt 0 ]; do
@@ -105,10 +106,11 @@ new_env() {
     : >"$ORDER_LOG"
     GH_RC=0
     GH_PRC=0
+    GH_CRC=0
     EDDA_DISPATCH_EXIT=0
     # a realistic successful dispatch: done, cost unmeasured (null -> n/a)
     EDDA_DISPATCH_OUT='{"outcome":"done","result_text":"lane started","cost_usd":null}'
-    export GH_PRC EDDA_DISPATCH_EXIT EDDA_DISPATCH_OUT
+    export GH_PRC GH_CRC EDDA_DISPATCH_EXIT EDDA_DISPATCH_OUT
     export EDDA_MANAGER_STATE="$STATE" EDDA_LANES_DIR="$LANES" EDDA_LANE_ROOT="$LROOT"
     export EDDA_RULES_FILE="$RULES"
 }
@@ -258,6 +260,7 @@ run_tick --no-board
 # --- case 8: manager: no rule for X -> append one line under 管理者自訂 (R8) ------
 new_env 8
 printf -- 'manager: no rule for nightly lane-warm scheduling\n' >"$BOARD/613.body"
+cp "$RULES" "$tmp/rules8-pristine.md"
 
 run_tick --no-board
 [ "$tick_rc" = 0 ] || fail "case 8: tick exited $tick_rc: $(cat "$tmp/tick.err")"
@@ -276,10 +279,57 @@ grep -q '^+.*nightly lane-warm scheduling' "$BOARD/613.body"     || fail 'case 8
 grep -q -- '--- a/docs/fleet/rules.md' "$BOARD/613.body"     || fail 'case 8: R8 patch comment is not a unified diff (no --- header)'
 grep -q '^@@ -[0-9]*,3 +[0-9]*,4 @@' "$BOARD/613.body"     || fail 'case 8: R8 patch hunk header is missing or has no context lines'
 
+# The header shape above is necessary but not sufficient: a patch can carry a
+# correct '@@ -n,3 +n,4 @@' and still be corrupt when the context lines are
+# missing, and a reviewer demonstrated exactly that mutant passing the suite.
+# The only assertion a well-formed-looking stub cannot satisfy is running the
+# patch, so extract it from the board comment and apply it to a pristine copy.
+mkdir -p "$tmp/apply8/docs/fleet"
+cp "$tmp/rules8-pristine.md" "$tmp/apply8/docs/fleet/rules.md"
+git -C "$tmp/apply8" init -q
+awk '/^```diff$/ { f=1; next } /^```$/ { f=0 } f' "$BOARD/613.body" >"$tmp/r8.patch"
+[ -s "$tmp/r8.patch" ] || fail "case 8: no diff fence found in the R8 patch comment"
+git -C "$tmp/apply8" apply --check "$tmp/r8.patch" 2>"$tmp/r8.applyerr" \
+    || fail "case 8: the emitted R8 patch does not apply: $(cat "$tmp/r8.applyerr")"
+git -C "$tmp/apply8" apply "$tmp/r8.patch" \
+    || fail "case 8: the emitted R8 patch failed to apply after --check passed"
+# --strip-trailing-cr: `git apply` in a scratch repo obeys that repo's
+# core.autocrlf, so a byte comparison here would measure Windows line-ending
+# normalisation rather than whether the patch reproduces the append (#920).
+diff --strip-trailing-cr -q "$tmp/apply8/docs/fleet/rules.md" "$RULES" >/dev/null \
+    || fail "case 8: applying the patch does not reproduce the tick own append"
+
 run_tick --no-board
 [ "$tick_rc" = 0 ] || fail "case 8: tick 2 exited $tick_rc: $(cat "$tmp/tick.err")"
 [ "$(count_in 'nightly lane-warm scheduling' "$RULES")" = "1" ] \
     || fail 'case 8: duplicate R8 append on the second tick'
+
+# --- case 8b: the R8 patch comment fails to post -------------------------------
+# The comment is the carrier that survives the lane worktree, and the append's
+# grep -qF dedupe blocks every retry once the rule is in the file. So a lost
+# write must not leave the rule appended, and must not report a clean wake.
+new_env 8b
+printf -- 'manager: no rule for seeded post-failure probe
+' >"$BOARD/613.body"
+GH_CRC=1
+export GH_CRC
+
+run_tick --no-board
+[ "$tick_rc" != 0 ] || fail 'case 8b: a failed R8 patch comment must make the tick exit non-zero'
+grep -q 'seeded post-failure probe' "$RULES" \
+    && fail 'case 8b: the rule was appended even though its patch comment never posted'
+grep -q 'manager-tick: FAILED R8 patch comment failed' "$tmp/tick.err" \
+    || fail "case 8b: no FAILED line for the lost patch comment: $(cat "$tmp/tick.err")"
+
+# recovery wake: the write works again, so the duty completes on the retry the
+# dedupe would have blocked had the first wake appended.
+GH_CRC=0
+run_tick --no-board
+[ "$tick_rc" = 0 ] || fail "case 8b: recovery tick exited $tick_rc: $(cat "$tmp/tick.err")"
+grep -q 'seeded post-failure probe' "$RULES" \
+    || fail 'case 8b: the recovery wake did not append the rule'
+grep -q 'manager: R8 rule appended by' "$BOARD/613.body" \
+    || fail 'case 8b: the recovery wake did not post the patch comment'
 
 # --- case 9: dispatch exits non-zero -> FAILED log, no tracking -------------------
 new_env 9
