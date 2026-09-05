@@ -2,7 +2,7 @@
 # Offline self-test for scripts/fleet/next-issue.sh and next-review.sh (GH-886).
 # Stubs gh and edda (and pwsh, defensively); jq, git and sh stay real.
 # Writes only under its temp dir; the one git side effect — worktree
-# registration for the review worktree the loop creates — is pruned on exit.
+# registration for the pre-registered review worktree — is pruned on exit.
 set -eu
 
 cd "$(git rev-parse --show-toplevel)"
@@ -30,7 +30,7 @@ cleanup() {
 trap cleanup 0 HUP INT TERM
 export TMPDIR="$work"
 
-mkdir -p "$work/bin" "$work/fixtures" "$work/scratch" "$work/lanes" "$work/wt" "$work/out"
+mkdir -p "$work/bin" "$work/fixtures" "$work/scratch" "$work/lanes" "$work/out"
 export EDDA_FLEET_SCRATCH="$work/scratch"
 export TEMP="$work/lanes"
 export TMPDIR="$work"
@@ -236,7 +236,12 @@ echo "ok 4 round-cap refusal"
 
 # ── 5+6. shadow run: real worktree, moved head refuses; intact posts ─
 
-git worktree add --detach "$work/wt/review-pr886" "$HEAD1" >/dev/null 2>&1
+# Pre-register the review worktree where next-review.sh reads it
+# ($EDDA_FLEET_SCRATCH/wt-review-pr886) so the checkout --detach branch runs
+# instead of the loop's own worktree add. The marker proves reuse below.
+wt_fix="$work/scratch/wt-review-pr886"
+git worktree add --detach "$wt_fix" "$HEAD1" >/dev/null 2>&1
+: >"$wt_fix/.pre-registered"
 
 printf '%s' "$HEAD1" >"$work/gh-head"
 EDDA_STUB_MOVE_HEAD="$HEAD2" \
@@ -255,6 +260,35 @@ printf '%s\n' "$posted" | head -1 | grep -q '(SHADOW)$' || fail "shadow heading 
 printf '%s\n' "$posted" | sed -n '2,3p' | grep -qx 'shadow: true' || fail "shadow body line missing: $(printf '%s\n' "$posted" | head -3)"
 printf '%s\n' "$posted" | grep -q 'dispatch --json' || fail "shadow cost line not corrected: $(printf '%s\n' "$posted" | grep '^\\- cost' || true)"
 printf '%s\n' "$posted" | grep -q 'placeholder line' && fail "shadow cost line uncorrected"
+[ -f "$wt_fix/.pre-registered" ] || fail "pre-registered worktree not reused — the loop recreated it (checkout --detach branch unexercised)"
+[ "$(git -C "$wt_fix" rev-parse HEAD)" = "$HEAD1" ] || fail "review worktree not detached at the pinned head: $(git -C "$wt_fix" rev-parse HEAD)"
+# Path-drift guard (GH-903): the two checks above inspect only $wt_fix. If the
+# fixture registration ever moves away from $EDDA_FLEET_SCRATCH/wt-review-pr886,
+# the loop registers its own scratch worktree beside it and both checks still
+# pass on the abandoned fixture — the drift is silent. So demand exactly one
+# registration under the test root and that it is the fixture itself. git
+# reports worktree paths in machine-canonical form while $work may be a
+# shell-style path (e.g. MSYS /tmp/...), so canonicalize the root through a
+# throwaway repo under $work instead of deriving it from the fixture path.
+git init -q "$work/canon-probe"
+wt_root=$(git -C "$work/canon-probe" rev-parse --show-toplevel)
+wt_root=${wt_root%/canon-probe}
+[ -n "$wt_root" ] || fail "cannot canonicalize the test root from $work"
+wt_canon=$(git -C "$wt_fix" rev-parse --show-toplevel) || \
+    fail "cannot resolve the fixture worktree registration: $wt_fix"
+wt_reg=0
+wt_drift=
+while IFS= read -r wt_path; do
+    case $wt_path in
+        "$wt_root"/*)
+            wt_reg=$((wt_reg + 1))
+            [ "$wt_path" = "$wt_canon" ] || wt_drift=$wt_path ;;
+    esac
+done <<EOF
+$(git worktree list --porcelain | sed -n 's/^worktree //p')
+EOF
+[ "$wt_reg" -eq 1 ] && [ -z "$wt_drift" ] || \
+    fail "worktree path drift: want exactly one registration under $wt_root and it must be $wt_canon, found $wt_reg${wt_drift:+ with stray $wt_drift}"
 echo "ok 5 moved-head refusal"
 echo "ok 6 shadow post shape"
 
