@@ -1,3 +1,4 @@
+pub use crate::review::*;
 use serde::{Deserialize, Serialize};
 
 /// Current schema version for new events.
@@ -105,7 +106,7 @@ pub fn classify_event_type(event_type: &str) -> (Option<&'static str>, Option<&'
             Some(event_family::GOVERNANCE),
             Some(event_level::GOVERNANCE),
         ),
-        "task_intake" => (Some(event_family::SIGNAL), Some(event_level::INFO)),
+        "task_intake" | "review_verdict" => (Some(event_family::SIGNAL), Some(event_level::INFO)),
         "agent_phase_change" => (Some(event_family::SIGNAL), Some(event_level::INFO)),
         "review_bundle" => (Some(event_family::GOVERNANCE), Some(event_level::MILESTONE)),
         "approval_policy_match" => (

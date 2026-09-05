@@ -7,6 +7,19 @@ use std::process::Command as ProcessCommand;
 
 // ── CLI entry points ────────────────────────────────────────────────
 
+pub(crate) fn execute(repo_root: &Path, command: crate::BundleCmd) -> Result<()> {
+    eprintln!("edda bundle is deprecated; use edda review for independent SHA-pinned reviews.");
+    match command {
+        crate::BundleCmd::Create {
+            diff,
+            test_cmd,
+            skip_tests,
+        } => execute_create(repo_root, diff.as_deref(), test_cmd.as_deref(), skip_tests),
+        crate::BundleCmd::Show { bundle_id } => execute_show(repo_root, &bundle_id),
+        crate::BundleCmd::List { status } => execute_list(repo_root, status.as_deref()),
+    }
+}
+
 /// Execute `edda bundle create`.
 pub fn execute_create(
     repo_root: &Path,
