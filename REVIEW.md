@@ -23,7 +23,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.4`
+- Spec version: `review-spec-v1.5`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -756,6 +756,11 @@ mechanical.
 | §7/§8 shadow | canonical | `review.gh880-shadow` + GH-887: the header field, the heading suffix and the exclusion rule are new in this revision; the compare script's provenance is the same ruling |
 
 ## 10. Version
+
+- `review-spec-v1.5` (2026-09-05, issue #887): the SHADOW round shape — the
+  `- shadow: true` header field, the ` (SHADOW)` heading suffix, the §8
+  exclusion rule, and the §9 provenance row. Nothing else in the rule set
+  changed; v1.4 verdicts remain valid for their SHAs.
 
 - `review-spec-v1` (2026-09-02, issue #633): first collection. Merges the
   review-fix loop (`.claude/CLAUDE.md`), the wiring verdict (#629) and brief

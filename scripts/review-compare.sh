@@ -35,13 +35,12 @@ comments=$(gh pr view "$pr" --repo "$repo" --json comments \
     die "gh pr view $pr comments failed"
 
 tmp=$(mktemp "${TMPDIR:-/tmp}/review-compare.XXXXXX")
-trap 'rm -f "$tmp" "$tmp".shadow.findings "$tmp".auth.findings "$tmp".shadow.meta "$tmp".auth.meta' 0 HUP INT TERM
 
 # Extract, per comment pinned to the sha, the verdict line, model_observed,
 # and the Findings rows into:
 #   $tmp.shadow.findings / $tmp.auth.findings   — "- [Pn] ..." lines
 #   $tmp.shadow.meta   / $tmp.auth.meta         — verdict<TAB>model_observed
-awk -v sha="$sha" -v tmp="$tmp" '
+printf '%s' "$comments" | awk -v sha="$sha" -v tmp="$tmp" '
     function flush(   i, n, pinned, isshadow, inh, section, m) {
       if (!inb) return
       inb = 0
@@ -86,18 +85,16 @@ awk -v sha="$sha" -v tmp="$tmp" '
     { if (!inb) { inb = 1; buf = "" }
       buf = buf $0 "\n" }
     END { flush() }
-' <<<"$comments"
+'
 
 [ -f "$tmp.shadow.findings" ] || die "no SHADOW round pinned to $sha on PR #$pr — nothing to compare"
-: >"$tmp.matched"
-: >"$tmp.drift"
 
 # Matching key per finding: every file:line and bare-file token in the line;
 # a finding with no file token falls back to its first 60 characters. Two
 # findings sharing any key are the same finding (#883 will make rule ids the
 # primary key; the fallback keeps this usable before that lands).
 findings_tmp2=$(mktemp "${TMPDIR:-/tmp}/review-compare.XXXXXX")
-trap 'rm -f "$tmp" "$findings_tmp2"' 0 HUP INT TERM
+trap 'rm -f "$tmp" "$tmp".shadow.findings "$tmp".auth.findings "$tmp".shadow.meta "$tmp".auth.meta' 0 HUP INT TERM
 mv "$tmp.shadow.findings" "$findings_tmp2.shadow" 2>/dev/null || printf '' >"$findings_tmp2.shadow"
 [ -f "$tmp.auth.findings" ] && mv "$tmp.auth.findings" "$findings_tmp2.auth" || printf '' >"$findings_tmp2.auth"
 
@@ -145,7 +142,7 @@ awk -v sf="$findings_tmp2.shadow" '
     }
 ' "$findings_tmp2.auth" >"$tmp.rows"
 
-shadow_verdict=$(sed -n 's/^[^\t]*\t//p' "$tmp.shadow.meta" | head -1)
+shadow_model=$(sed -n 's/^[^\t]*\t//p' "$tmp.shadow.meta" | head -1)
 auth_verdict=$(head -1 "$tmp.auth.meta" 2>/dev/null | cut -f1)
 auth_model=$(head -1 "$tmp.auth.meta" 2>/dev/null | cut -f2)
 
@@ -157,7 +154,7 @@ if [ ! -s "$tmp.auth.meta" ]; then
     echo
     cat "$findings_tmp2.shadow"
     echo
-    echo "for-ledger: shadow=$shadow_verdict authoritative=pending missed_P0=0 missed_P1=0 unconfirmed=$(grep -c '^unconfirmed' "$tmp.rows" 2>/dev/null || echo 0) matched=0 drift=0"
+    echo "for-ledger: shadow=$shadow_model authoritative=pending missed_P0=0 missed_P1=0 unconfirmed=$(grep -c '^unconfirmed' "$tmp.rows" 2>/dev/null || true) matched=0 drift=0"
     exit 0
 fi
 echo "- authoritative verdict/model: $auth_verdict / ${auth_model:-unknown}"

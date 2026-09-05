@@ -554,8 +554,10 @@ settle_pending() {
       # label, no Independent Review status, ever. The drop is the success
       # path for a shadow round — the authoritative round comes later.
       if grep -Eq -- '-? ?shadow: true$' "$1"; then
-        log "pr$pr r$round shadow round posted — no label, no status (review.gh880-shadow)"
-        state_set "$pr" "$sha" "$round"
+        log "pr$pr r$round shadow round posted — no label, no status, sha left unreviewed for the make-up round (review.gh880-shadow)"
+        # No state_set: recording the SHA as reviewed would make decide() skip
+        # this PR forever and the authoritative make-up round could never launch.
+        # Only the pending entry drops; the rescan sees the PR unreviewed.
         pending_drop "$pr"
         return 0
       fi

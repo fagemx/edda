@@ -18,7 +18,7 @@ sh -n "$0" || {
 work=$(mktemp -d "${TMPDIR:-/tmp}/test-review-compare.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 export TMPDIR="$work"
-mkdir -p "$work/bin" "$work/fixtures" "$work/out" "$work/out"
+mkdir -p "$work/bin" "$work/fixtures" "$work/out"
 
 SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
@@ -31,12 +31,14 @@ STUB
 chmod +x "$work/bin/gh"
 
 # 1 missed P0 (scripts/d.sh:40), 1 missed P1 (scripts/e.sh:50),
-# 1 unconfirmed (scripts/c.sh:30), 2 matched (scripts/a.sh:10),
+# 1 unconfirmed (scripts/c.sh:30), 2 matched (scripts/a.sh:10, scripts/f.sh:60),
 # 1 severity drift (scripts/b.sh:20 — P1 authoritative vs P2 shadow).
 cat >"$work/fixtures/both.json" <<EOF
 {"comments":[
- {"body":"<<<CS>>>\n## Code Review: Round 1 — PR #899 @ $SHA (SHADOW)\n\nshadow: true\n\n- model_observed: openrouter/z-ai/glm-5.3-flash\n- spec: review-spec-v1.4\n\n### Findings\n- [P1] matched defect — evidence: scripts/a.sh:10\n- [P2] drifted severity — evidence: scripts/b.sh:20\n- [P2] shadow-only suspicion — evidence: scripts/c.sh:30\n\n### Verdict\nChanges Requested, P0=0, P1=1\n<<<CE>>>"},
- {"body":"## Code Review: Round 2 — PR #899 @ $SHA\n\n- model_observed: claude-opus-5\n- spec: review-spec-v1.4\n\n### Findings\n- [P1] matched defect — evidence: scripts/a.sh:10\n- [P1] drifted severity — evidence: scripts/b.sh:20\n- [P0] catastrophic miss — evidence: scripts/d.sh:40\n- [P1] real blocker the shadow missed — evidence: scripts/e.sh:50\n\n### Verdict\nLGTM (P0=0, P1=0)\n<<<CE>>>"}]}
+ {"body":"<<<CS>>>\n## Code Review: Round 1 — PR #899 @ $SHA (SHADOW)\n\nshadow: true\n\n- model_observed: openrouter/z-ai/glm-5.3-flash\n- spec: review-spec-v1.4\n\n### Findings\n- [P1] matched defect — evidence: scripts/a.sh:10\n- [P2] drifted severity — evidence: scripts/b.sh:20\n- [P2] shadow-only suspicion — evidence: scripts/c.sh:30
+- [P2] second matched pair — evidence: scripts/f.sh:60\n\n### Verdict\nChanges Requested, P0=0, P1=1\n<<<CE>>>"},
+ {"body":"## Code Review: Round 2 — PR #899 @ $SHA\n\n- model_observed: claude-opus-5\n- spec: review-spec-v1.4\n\n### Findings\n- [P1] matched defect — evidence: scripts/a.sh:10\n- [P1] drifted severity — evidence: scripts/b.sh:20\n- [P0] catastrophic miss — evidence: scripts/d.sh:40\n- [P2] second matched pair — evidence: scripts/f.sh:60
+- [P1] real blocker the shadow missed — evidence: scripts/e.sh:50\n\n### Verdict\nLGTM (P0=0, P1=0)\n<<<CE>>>"}]}
 EOF
 # Normalise the markers the stub emits (the fixture embeds its own comment
 # framing because gh --jq prints one body per <<<COMMENT>>> line).
@@ -80,7 +82,7 @@ line=$(grep '^for-ledger:' "$work/out/both.txt")
 printf '%s\n' "$line" | grep -q 'missed_P0=1' || echo "FAIL: for-ledger missed_P0=1 missing: $line" >&2
 printf '%s\n' "$line" | grep -q 'missed_P1=1' || echo "FAIL: for-ledger missed_P1=1 missing: $line" >&2
 printf '%s\n' "$line" | grep -q 'unconfirmed=1' || echo "FAIL: for-ledger unconfirmed=1 missing: $line" >&2
-printf '%s\n' "$line" | grep -q 'matched=1' || echo "FAIL: for-ledger matched=1 missing: $line" >&2
+printf '%s\n' "$line" | grep -q 'matched=2' || echo "FAIL: for-ledger matched=2 missing: $line" >&2
 printf '%s\n' "$line" | grep -q 'drift=1' || echo "FAIL: for-ledger drift=1 missing: $line" >&2
 printf '%s\n' "$line" | grep -q 'shadow=openrouter/z-ai/glm-5.3-flash' || echo "FAIL: shadow model missing: $line" >&2
 printf '%s\n' "$line" | grep -q 'authoritative=claude-opus-5' || echo "FAIL: authoritative model missing: $line" >&2
