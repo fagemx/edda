@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "branch_create payload",
+  "description": "Layer 1 v1 payload.",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "purpose": {
+      "type": "string"
+    },
+    "from_branch": {
+      "type": "string"
+    },
+    "from_event_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "purpose",
+    "from_branch",
+    "from_event_id"
+  ],
+  "additionalProperties": true
+}

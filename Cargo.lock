@@ -1022,9 +1022,12 @@ version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-ask",
+ "edda-bridge-claude",
  "edda-core",
  "edda-derive",
  "edda-ledger",
+ "edda-notify",
+ "edda-store",
  "rmcp",
  "schemars",
  "serde",
