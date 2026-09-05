@@ -66,7 +66,8 @@ case "$1" in
             exit 0
             ;;
           *state*)
-            echo "OPEN"
+            [ -n "${GH_FAIL_STATE:-}" ] && exit 1
+            if [ -n "${GH_STATE:-}" ]; then echo "$GH_STATE"; else echo "OPEN"; fi
             exit 0
             ;;
         esac
@@ -76,7 +77,59 @@ case "$1" in
     exit 0
     ;;
   api)
-    [ -n "${GH_FAIL_STATUS:-}" ] && exit 1
+    case "$*" in
+      *"/statuses/"*)
+        [ -n "${GH_FAIL_STATUS:-}" ] && exit 1
+        exit 0
+        ;;
+      *"comments"*)
+        # collect_verdicts reads REST issues comments (numeric ids). The
+        # GH_COMMENTS_FILE fixture stores the jq-output shape (sentinel + raw
+        # bodies); re-encode it as the REST array so the real --jq filter in
+        # collect_verdicts runs against the stub, ids included.
+        [ -n "${GH_FAIL_COMMENTS:-}" ] && exit 1
+        [ -z "${GH_COMMENTS_FILE:-}" ] && exit 0
+        # resolve the caller's --jq operand (this stub header has no global loop)
+        jq_expr=
+        prev=
+        for a in "$@"; do
+            [ "$prev" = "--jq" ] && jq_expr=$a
+            prev=$a
+        done
+        json=$(awk '
+          /^<<<COMMENT>>>$/ { n++; id[n] = 1; next }
+          /^<<<COMMENT [0-9]+>>>$/ {
+            n++
+            id[n] = $0
+            sub(/^<<<COMMENT /, "", id[n])
+            sub(/>>>$/, "", id[n])
+            next
+          }
+          {
+            if (n == 0) next
+            esc = $0
+            gsub(/\\/, "\\\\", esc)
+            gsub(/"/, "\\\"", esc)
+            body[n] = body[n] (body[n] == "" ? "" : "\\n") esc
+          }
+          END {
+            printf "["
+            for (i = 1; i <= n; i++) {
+              printf "%s{\"id\":%s,\"body\":\"%s\"}", (i > 1 ? "," : ""), id[i], body[i]
+            }
+            printf "]\n"
+          }
+        ' "$GH_COMMENTS_FILE")
+        # the stub IS gh: apply the caller's --jq itself, exactly like the
+        # real endpoint's --jq would run against this array
+        if [ -n "$jq_expr" ]; then
+            printf '%s' "$json" | jq -r "$jq_expr"
+        else
+            printf '%s\n' "$json"
+        fi
+        exit 0
+        ;;
+    esac
     exit 0
     ;;
   label) exit 0 ;;
@@ -384,8 +437,10 @@ expect_gate_state 'an unknown verdict word is failure' 'failure' 'Needs Discussi
 # GH_PR_LIST_FILE, which also stores jq output rather than raw JSON.
 
 verdict_comment() { # $1=round $2=sha $3=verdict line — the shape the watcher posts
-    printf '<<<COMMENT>>>\n> **Round %s review** — automatic watcher, reviewed head SHA: `%s`.\n\n## Code Review: Round %s — PR #42 @ %s\n\n### Verdict\n%s\n' \
-        "$1" "$2" "$1" "$2" "$3"
+    # R23 (#917): the posted comment IS the report — the §7 heading is the
+    # first line, no watcher banner before it.
+    printf '<<<COMMENT>>>\n## Code Review: Round %s — PR #42 @ %s\n\n### Verdict\n%s\n' \
+        "$1" "$2" "$3"
 }
 
 expect_collect() {
@@ -664,14 +719,24 @@ if [ "$(printf '%s' "$(pending_get)" | cut -f4)" != "1" ]; then
     exit 1
 fi
 
-# --- live loop: the verdict header names the transport that actually ran (P1) --
+# --- live loop: the receipts the verdict header used to carry (GH-708, R23) ----
 # Round 2 P1-1: the header used to hardcode `edda dispatch --agent claude` even
-# when the oversized-brief claude-stdin fallback was the arm that ran. The
-# header must print the TRANSPORT= receipt from .done, verbatim, or say
-# "unknown" when the receipt is missing — never the transport we wish had run.
+# when the oversized-brief claude-stdin fallback was the arm that ran. R23
+# (#917) moves the receipts out of the PR comment entirely: the comment IS the
+# §7 report, heading first, and the transport receipt lands in the watcher log
+# — verbatim, or "unknown" when the receipt is missing, never the transport we
+# wish had run.
 
 header_comment_path() {
     sed -n 's/.*--body-file //p' "$GH_STUB_LOG" | tail -1
+}
+
+comment_head_is_heading() { # $1=comment file — R23: the heading is line 1
+    head -1 "$1" | grep -q '^## Code Review: Round [0-9]* — PR #42 @ '
+}
+
+last_receipt_line() { # the receipts of the MOST RECENT posted verdict comment
+    grep 'posted verdict comment' "$PR_REVIEW_WATCH_LOG" | tail -1
 }
 
 verdict_log_fixture() {
@@ -704,8 +769,12 @@ verdict_log_fixture
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: dispatch arm)\n' >&2; exit 1; }
 cfile=$(header_comment_path)
 [ -n "$cfile" ] || { printf 'live: a settled verdict should post a comment\n' >&2; exit 1; }
-grep -qF 'transport `edda dispatch --agent claude`' "$cfile" || {
-    printf 'live: header must name the edda-dispatch receipt, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+comment_head_is_heading "$cfile" || {
+    printf 'live: R23 — the posted comment must begin with the §7 heading, got:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+last_receipt_line | grep -qF 'transport edda dispatch --agent claude,' || {
+    printf 'live: the log must name the edda-dispatch receipt, got:\n%s\n' "$(tail -3 "$PR_REVIEW_WATCH_LOG")" >&2
     exit 1
 }
 
@@ -715,12 +784,16 @@ printf 'TRANSPORT=claude-stdin\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-
 verdict_log_fixture
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: fallback arm)\n' >&2; exit 1; }
 cfile=$(header_comment_path)
-grep -qF 'transport `claude -p via stdin (oversized-brief fallback)`' "$cfile" || {
-    printf 'live: header must name the claude-stdin fallback receipt, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+comment_head_is_heading "$cfile" || {
+    printf 'live: R23 — the posted comment must begin with the §7 heading, got:\n%s\n' "$(head -1 "$cfile")" >&2
     exit 1
 }
-if grep -qF 'edda dispatch --agent claude' "$cfile"; then
-    printf 'live: header must not claim edda dispatch when the claude-stdin fallback ran, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+last_receipt_line | grep -qF 'transport claude -p via stdin (oversized-brief fallback),' || {
+    printf 'live: the log must name the claude-stdin fallback receipt, got:\n%s\n' "$(tail -3 "$PR_REVIEW_WATCH_LOG")" >&2
+    exit 1
+}
+if last_receipt_line | grep -qF 'transport edda dispatch --agent claude,'; then
+    printf 'live: the log must not claim edda dispatch when the claude-stdin fallback ran\n' >&2
     exit 1
 fi
 
@@ -730,18 +803,22 @@ printf 'DISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 verdict_log_fixture
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: missing receipt)\n' >&2; exit 1; }
 cfile=$(header_comment_path)
-grep -qF 'transport `unknown — no TRANSPORT receipt in .done`' "$cfile" || {
-    printf 'live: a missing TRANSPORT receipt must render as unknown, not a guessed transport, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+comment_head_is_heading "$cfile" || {
+    printf 'live: R23 — the posted comment must begin with the §7 heading, got:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+last_receipt_line | grep -qF 'transport unknown — no TRANSPORT receipt in .done,' || {
+    printf 'live: a missing TRANSPORT receipt must log as unknown, not a guessed transport, got:\n%s\n' "$(tail -3 "$PR_REVIEW_WATCH_LOG")" >&2
     exit 1
 }
 export GH_HEAD="$sha"
 
-# --- live loop: the header names the reviewer conversation (GH-708) ------------
+# --- live loop: the log names the reviewer conversation (GH-708, R23) ----------
 # The per-PR reviewer session is what makes round 2+ a delta review, so the
-# verdict header carries it. Two independent facts are compared, never merged:
+# watcher log carries it. Two independent facts are compared, never merged:
 # SESSION=/SESSION_MODE= are what review-pr.sh LAUNCHED with, and the log's
 # `Session:` line is what the backend REPORTED. A disagreement means the resume
-# forked into a fresh conversation, and the header must say so.
+# forked into a fresh conversation, and the log must say so.
 
 reset_stubs
 pending_set 42 1 "$sha" 0 0
@@ -750,8 +827,12 @@ printf 'TRANSPORT=edda-dispatch\nSESSION=11111111-2222-4333-8444-555555555555\nS
 verdict_log_fixture
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: session)\n' >&2; exit 1; }
 cfile=$(header_comment_path)
-grep -qF 'reviewer_session `11111111-2222-4333-8444-555555555555` (resumed)' "$cfile" || {
-    printf 'live: header must name the resumed reviewer conversation, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+comment_head_is_heading "$cfile" || {
+    printf 'live: R23 — the posted comment must begin with the §7 heading, got:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+last_receipt_line | grep -qF 'reviewer_session `11111111-2222-4333-8444-555555555555` (resumed)' || {
+    printf 'live: the log must name the resumed reviewer conversation, got:\n%s\n' "$(last_receipt_line)" >&2
     exit 1
 }
 
@@ -764,8 +845,12 @@ verdict_log_fixture
 FIXTURE_SESSION_OBSERVED=
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: session mismatch)\n' >&2; exit 1; }
 cfile=$(header_comment_path)
-grep -qF 'BACKEND REPORTED `99999999-8888-4777-8666-555555555555`' "$cfile" || {
-    printf 'live: a resume that ran in a different conversation must be reported, not hidden, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+comment_head_is_heading "$cfile" || {
+    printf 'live: R23 — the posted comment must begin with the §7 heading, got:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+last_receipt_line | grep -qF 'BACKEND REPORTED `99999999-8888-4777-8666-555555555555`' || {
+    printf 'live: a resume that ran in a different conversation must be reported, not hidden, got:\n%s\n' "$(tail -3 "$PR_REVIEW_WATCH_LOG")" >&2
     exit 1
 }
 
@@ -780,12 +865,16 @@ verdict_log_fixture
 FIXTURE_NO_SESSION_OBSERVED=0
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: no observation)\n' >&2; exit 1; }
 cfile=$(header_comment_path)
-grep -qF 'reviewer_session `11111111-2222-4333-8444-555555555555` (resumed)' "$cfile" || {
-    printf 'live: a reviewer that observed no session must render the launched id plainly, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+comment_head_is_heading "$cfile" || {
+    printf 'live: R23 — the posted comment must begin with the §7 heading, got:\n%s\n' "$(head -1 "$cfile")" >&2
     exit 1
 }
-if grep -qF 'BACKEND REPORTED' "$cfile"; then
-    printf 'live: no observation is not a mismatch — the header must not claim one, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+grep -qF 'reviewer_session `11111111-2222-4333-8444-555555555555` (resumed)' "$PR_REVIEW_WATCH_LOG" || {
+    printf 'live: a reviewer that observed no session must render the launched id plainly, got:\n%s\n' "$(tail -3 "$PR_REVIEW_WATCH_LOG")" >&2
+    exit 1
+}
+if last_receipt_line | grep -qF 'BACKEND REPORTED'; then
+    printf 'live: no observation is not a mismatch — the log must not claim one\n' >&2
     exit 1
 fi
 
@@ -795,8 +884,12 @@ printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review
 verdict_log_fixture
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (header: no session receipt)\n' >&2; exit 1; }
 cfile=$(header_comment_path)
-grep -qF 'mode unknown — no SESSION_MODE receipt in .done' "$cfile" || {
-    printf 'live: a missing SESSION_MODE receipt must render as unknown, got header:\n%s\n' "$(head -1 "$cfile")" >&2
+comment_head_is_heading "$cfile" || {
+    printf 'live: R23 — the posted comment must begin with the §7 heading, got:\n%s\n' "$(head -1 "$cfile")" >&2
+    exit 1
+}
+last_receipt_line | grep -qF 'mode unknown — no SESSION_MODE receipt in .done' || {
+    printf 'live: a missing SESSION_MODE receipt must log as unknown, got:\n%s\n' "$(tail -3 "$PR_REVIEW_WATCH_LOG")" >&2
     exit 1
 }
 unset GH_HEAD
@@ -972,6 +1065,132 @@ if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
     printf 'live: the label should be applied after the comments recover\n' >&2
     exit 1
 fi
+
+# --- R23 (#917): verdict shape and non-open PRs --------------------------------
+# 1. the happy path is unchanged: a §7 carrier (heading first) posts the
+#    comment, writes the status, and applies the label
+# 2. #867's transcript dump (heading mid-body) is no verdict: no status, no
+#    label, exactly one malformed notice, and the round does not settle this
+#    poll (the per-PR failure signal)
+# 3. the same dump on the next poll: no second notice; the union runs on this
+#    round's LGTM alone and the round settles
+# 4. a non-open PR is never launched and never acked (MERGED, CLOSED, and an
+#    unreadable state all count as not open)
+
+r23_dump_fixture() { # $1=comment id $2=sha — #867's shape: narration, ---, heading mid-body
+    {
+        printf '<<<COMMENT %s>>>\n' "$1"
+        for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'reviewer narration line %s\n' "$i"; done
+        printf -- '---\n'
+        printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$2"
+    } >"$tmp/comments-pr42-r23-dump"
+}
+
+r23_done_receipt() {
+    printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' \
+        >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+}
+
+# case 1 — heading-first LGTM: the unchanged happy path
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+r23_done_receipt
+verdict_log_fixture
+export GH_HEAD="$sha"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r23 case 1)\n' >&2; exit 1; }
+grep -qF -- '-f state=success' "$GH_STUB_LOG" || {
+    printf 'live: r23 case 1 — a heading-first LGTM must write the status\n' >&2; exit 1
+}
+grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG" || {
+    printf 'live: r23 case 1 — a heading-first LGTM must apply the label\n' >&2; exit 1
+}
+unset GH_HEAD
+
+# case 2 — the transcript dump contributes nothing and draws exactly one notice
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+r23_done_receipt
+verdict_log_fixture
+r23_dump_fixture 7777001 "$sha"
+export GH_HEAD="$sha"
+export GH_COMMENTS_FILE="$tmp/comments-pr42-r23-dump"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r23 case 2)\n' >&2; exit 1; }
+[ "$(statuses_calls)" = "0" ] || {
+    printf 'live: r23 case 2 — a transcript dump must not let a status post, got %s calls\n' \
+        "$(statuses_calls)" >&2; exit 1
+}
+if grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: r23 case 2 — a transcript dump must not let the label apply\n' >&2; exit 1
+fi
+[ "$(grep -cF 'review: malformed verdict comment 7777001' "$GH_STUB_LOG")" = "1" ] || {
+    printf 'live: r23 case 2 — exactly one malformed notice expected, got:\n%s\n' \
+        "$(grep -F 'malformed verdict comment' "$GH_STUB_LOG")" >&2; exit 1
+}
+[ "$(printf '%s' "$(pending_get)" | cut -f6)" = "1" ] || {
+    printf 'live: r23 case 2 — the round must not settle this poll (postfail bump), got:\n%s\n' \
+        "$(pending_get)" >&2; exit 1
+}
+
+# case 3 — the next poll: notice not repeated, the union proceeds, the round settles
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r23 case 3)\n' >&2; exit 1; }
+[ "$(grep -cF 'review: malformed verdict comment 7777001' "$GH_STUB_LOG")" = "1" ] || {
+    printf 'live: r23 case 3 — the malformed notice must not repeat\n' >&2; exit 1
+}
+grep -qF -- '-f state=success' "$GH_STUB_LOG" || {
+    printf 'live: r23 case 3 — the union (this LGTM alone) must succeed on the retry\n' >&2; exit 1
+}
+[ -z "$(pending_get)" ] || {
+    printf 'live: r23 case 3 — the round should settle once the status lands, got:\n%s\n' \
+        "$(pending_get)" >&2; exit 1
+}
+unset GH_HEAD GH_COMMENTS_FILE
+
+# case 4 — a non-open PR: no launch, no ack, no status
+for r23_state in MERGED CLOSED; do
+    reset_stubs
+    printf '42\t%s\t\t2026-09-02T00:00:00Z\n' "$sha" >"$tmp/pr-list-r23"
+    GH_PR_LIST_FILE="$tmp/pr-list-r23" GH_STATE="$r23_state" \
+        run_watch_once >/dev/null 2>&1 || {
+        printf 'live: watcher cycle failed (r23 case 4: %s)\n' "$r23_state" >&2; exit 1
+    }
+    [ -s "$REVIEW_STUB_LOG" ] && {
+        printf 'live: r23 case 4 — a %s PR must not be launched, got:\n%s\n' \
+            "$r23_state" "$(cat "$REVIEW_STUB_LOG")" >&2; exit 1
+    }
+    grep -qF 'review: started on' "$GH_STUB_LOG" && {
+        printf 'live: r23 case 4 — a %s PR must not be acked\n' "$r23_state" >&2; exit 1
+    }
+    grep -qF "pr42 skipped: state is '$r23_state', not OPEN" "$PR_REVIEW_WATCH_LOG" || {
+        printf 'live: r23 case 4 — the skip must be logged with the state, got:\n%s\n' \
+            "$(tail -3 "$PR_REVIEW_WATCH_LOG")" >&2; exit 1
+    }
+done
+reset_stubs
+# an unreadable state counts as not open — no launch either
+printf '42\t%s\t\t2026-09-02T00:00:00Z\n' "$sha" >"$tmp/pr-list-r23"
+GH_PR_LIST_FILE="$tmp/pr-list-r23" GH_FAIL_STATE=1 \
+    run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r23 case 4: unreadable state)\n' >&2; exit 1; }
+[ -s "$REVIEW_STUB_LOG" ] && {
+    printf 'live: r23 case 4 — an unreadable state must not launch, got:\n%s\n' \
+        "$(cat "$REVIEW_STUB_LOG")" >&2; exit 1
+}
+grep -qF "pr42 skipped: state is 'unreadable', not OPEN" "$PR_REVIEW_WATCH_LOG" || {
+    printf 'live: r23 case 4 — an unreadable state must be logged as a skip, got:\n%s\n' \
+        "$(tail -3 "$PR_REVIEW_WATCH_LOG")" >&2; exit 1
+}
+# the ack retry path: a non-open PR is never acked and its entry is dropped
+for r23_state in MERGED CLOSED; do
+    reset_stubs
+    printf '42\t%s\t0\t\n' "$sha" >"$EDDA_FLEET_SCRATCH/review-acks.tsv"
+    GH_STATE="$r23_state" expect_ack "ack skipped on a $r23_state PR" 0 42 "$sha" 0
+    [ -z "$(ack_state)" ] || {
+        printf 'live: r23 case 4 — the ack entry must be dropped for a %s PR, got:\n%s\n' \
+            "$r23_state" "$(ack_state)" >&2; exit 1
+    }
+    grep -qF 'review: started on' "$GH_STUB_LOG" && {
+        printf 'live: r23 case 4 — a %s PR must not be acked\n' "$r23_state" >&2; exit 1
+    }
+done
 
 # --- offline guarantee: the real watcher log was never touched -----------------
 size_after=0

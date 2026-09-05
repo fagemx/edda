@@ -3,6 +3,10 @@
 # has not been reviewed yet, launch the read-only reviewer (scripts/review-pr.sh),
 # post `review: started on <sha>` as an acknowledgement (retried, bounded), then
 # post the SHA-pinned verdict when the reviewer finishes and set review:* labels.
+# R23 (#917): a verdict comment is the report only, §7 heading first — the
+# watcher never launches or acks on a non-open PR, treats a comment carrying
+# the heading anywhere but line 1 as a malformed transcript dump (one notice,
+# no status, no label), and posts its own receipts to the log, not the comment.
 #
 # usage: pr-review-watch.sh [--once] [--dry-run]
 #        pr-review-watch.sh decide                 (offline helper; TSV on stdin)
@@ -191,27 +195,50 @@ gate_state() {
 # `### Verdict` heading carries the verdict and its P0/P1 counts (the same
 # line scripts/review-pr.sh verdict-label reads). Missing counts are passed
 # through as empty fields — the union rule treats them as non-zero.
-verdict_body_lines() { # $1=reviewed sha; stdin: one body per <<<COMMENT>>>
-                       # block (a single raw body also works); stdout: verdict<TAB>p0<TAB>p1
+verdict_body_lines() { # $1=reviewed sha; stdin: one body per <<<COMMENT>>> block
+                       # (a single raw body also works); stdout: verdict<TAB>p0<TAB>p1,
+                       # plus one `<<<MALFORMED <comment id>>>` record per malformed comment
   awk -v sha="$1" '
-    function flush(   i, n, vline, v, p0, p1, inh, pinned) {
+    BEGIN {
+      # The R23 heading shape (rules.md R23), with the SHADOW suffix accepted
+      # in both recorded positions (REVIEW.md §7/§8: after Round <N>; #917
+      # trim contract: line end). Built from 40 single-char classes so the
+      # match never depends on awk interval-expression support.
+      h = ""
+      for (i = 0; i < 40; i++) h = h "[0-9a-f]"
+      heading = "^## Code Review: Round [0-9]+( \\(SHADOW\\))? — PR #[0-9]+ @ " h "( \\(SHADOW\\))?$"
+    }
+    function flush(   i, n, vline, v, p0, p1, inh, first) {
       if (!inb) return
       inb = 0
       n = split(buf, L, "\n")
-      pinned = 0; inh = 0; vline = ""
-      for (i = 1; i <= n; i++) {
-        # $2 is validated with is_full_sha by every caller before it gets
-        # here, so it is exactly 40 lowercase hex characters — no regex
-        # metacharacters — and this pin match is literal.
-        if (L[i] ~ ("^## Code Review: Round [0-9]+ — PR #[0-9]+ @ " sha "$")) {
-          pinned = 1; continue
+      # R23 (#917): a verdict comment BEGINS with the §7 heading. A comment
+      # carrying the heading anywhere else is a transcript dump (#867): it is
+      # no verdict at all — no status, no label, no round. The caller posts
+      # the one-shot malformed notice from the <<<MALFORMED>>> record.
+      first = L[1]
+      if (first !~ heading) {
+        for (i = 1; i <= n; i++) {
+          if (L[i] ~ heading) {
+            if (cid != "") print "<<<MALFORMED " cid ">>>"
+            return
+          }
         }
+        return
+      }
+      # $2 is validated with is_full_sha by every caller before it gets
+      # here, so it is exactly 40 lowercase hex characters — no regex
+      # metacharacters — and this pin match is literal. No ` (SHADOW)`
+      # allowance here: a SHADOW verdict never enters the union (REVIEW.md §8).
+      if (first !~ ("^## Code Review: Round [0-9]+ — PR #[0-9]+ @ " sha "$")) return
+      inh = 0; vline = ""
+      for (i = 2; i <= n; i++) {
         if (L[i] ~ /^#{1,}[[:space:]]*Verdict/) { inh = 1; continue }
-        if (pinned && inh && vline == "" && L[i] ~ /LGTM|Changes Requested/) {
+        if (inh && vline == "" && L[i] ~ /LGTM|Changes Requested/) {
           vline = L[i]
         }
       }
-      if (!pinned || vline == "") return
+      if (vline == "") return
       v = "LGTM"
       if (vline ~ /Changes Requested/) v = "Changes Requested"
       p0 = ""; p1 = ""
@@ -220,27 +247,45 @@ verdict_body_lines() { # $1=reviewed sha; stdin: one body per <<<COMMENT>>>
       print v "\t" p0 "\t" p1
     }
     { sub(/\r$/, "") }
-    /^<<<COMMENT>>>$/ { flush(); inb = 1; buf = ""; next }
-    { if (!inb) { inb = 1; buf = "" }
+    /^<<<COMMENT>>>$/ { flush(); inb = 1; buf = ""; cid = ""; next }
+    /^<<<COMMENT [0-9]+>>>$/ {
+      flush(); inb = 1; buf = ""
+      cid = $0; sub(/^<<<COMMENT /, "", cid); sub(/>>>$/, "", cid)
+      next
+    }
+    { if (!inb) { inb = 1; buf = ""; cid = "" }
       buf = buf $0 "\n" }
     END { flush() }
   '
 }
 
 collect_verdicts() { # $1=pr $2=reviewed sha — every verdict comment pinned to that sha
-  # Return codes: 0 = ok (verdict lines on stdout, possibly none); 3 = the
-  # comments fetch failed. An unreadable comment list is NOT "no prior
-  # verdicts" — callers must withhold the status, never let the union rule
-  # run on this round's verdict file alone (see post_review_status).
+  # Return codes: 0 = ok (verdict lines on stdout, possibly none); 4 = ok,
+  # but at least one malformed verdict comment was seen (its `<<<MALFORMED
+  # <comment id>>>` records are on stdout; the caller posts the one-shot
+  # notice and withholds the status for that poll); 3 = the comments fetch
+  # failed. An unreadable comment list is NOT "no prior verdicts" — callers
+  # must withhold the status, never let the union rule run on this round's
+  # verdict file alone (see post_review_status).
   is_full_sha "$2" || { log "pr$1 collect-verdicts: $2 is not a full lowercase 40-hex SHA"; return 3; }
-  comments=$(gh pr view "$1" --repo "$REPO" --json comments \
-    --jq '.comments[] | "<<<COMMENT>>>", .body' 2>&1)
+  # REST issues comments, not `gh pr view --json comments`: the GraphQL shape
+  # carries only node ids (base64), while the malformed-notice contract needs
+  # the numeric comment id humans can resolve. --paginate keeps the full
+  # comment list (a 30-comment default page would hide older verdicts from
+  # the union); jq runs per page and pages split between comments.
+  comments=$(gh api --paginate "repos/$REPO/issues/$1/comments" \
+    --jq '.[] | "<<<COMMENT \(.id)>>>" , .body' 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
     log "pr$1 comments fetch failed (gh exit $rc): $comments"
     return 3
   fi
-  printf '%s\n' "$comments" | verdict_body_lines "$2"
+  out=$(printf '%s\n' "$comments" | verdict_body_lines "$2")
+  printf '%s\n' "$out"
+  case "$out" in
+    *"<<<MALFORMED"*) return 4 ;;
+    *) return 0 ;;
+  esac
 }
 # /D8-debt
 
@@ -258,11 +303,21 @@ ack_drop() { # $1=pr
 }
 
 ack_try() { # $1=pr $2=sha $3=attempts — one attempt.
-  # exit 0 = posted (pending entry cleared); 1 = failed, retries remain;
-  # 2 = failed after the bound. The entry is a durable record: after the bound
-  # it is only marked "post-failed" once review:post-failed is APPLIED; if the
-  # label call fails too, the entry stays for the next poll (no silent
-  # terminal state).
+  # exit 0 = posted (or the PR is no longer open — entry dropped, nothing to
+  # ack); 1 = failed, retries remain; 2 = failed after the bound. The entry
+  # is a durable record: after the bound it is only marked "post-failed" once
+  # review:post-failed is APPLIED; if the label call fails too, the entry
+  # stays for the next poll (no silent terminal state).
+  # R23 follow-on (#917): `review: started` never lands on a merged or
+  # closed PR (#867 posted it twice on an already-merged PR). A state read
+  # that fails counts as NOT open — a watcher that cannot read the state
+  # never acks.
+  st=$(gh pr view "$1" --repo "$REPO" --json state --jq .state 2>/dev/null)
+  if [ "$st" != "OPEN" ]; then
+    log "pr$1 ack skipped: state is '${st:-unreadable}', not OPEN — posting nothing, ack entry dropped"
+    ack_drop "$1"
+    return 0
+  fi
   if printf 'review: started on %s\n' "$2" \
       | gh pr comment "$1" --repo "$REPO" --body-file - >/dev/null 2>&1; then
     ack_drop "$1"
@@ -515,11 +570,36 @@ post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
   [ -n "$p1" ] || p1="?"
   comments=$(collect_verdicts "$1" "$2")
   rc=$?
-  if [ "$rc" -ne 0 ]; then
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; then
     log "pr$1 comments unreadable (gh exit $rc); status withheld, will retry next poll"
     return 3
   fi
-  state=$(printf '%s\n%s\n' "$comments" "$(verdict_body_lines "$2" < "$3")" | gate_state)
+  # R23 (#917): a transcript-dump verdict (heading anywhere but line 1) is no
+  # verdict — it contributes nothing to the union. The watcher posts one
+  # notice per comment id (marker file in $SCRATCH, the same one-shot
+  # mechanism as $STATUSOK) and withholds the status for any poll in which a
+  # NEW notice goes out — the per-PR failure signal; the next poll proceeds
+  # with the malformed comment permanently excluded.
+  new_notice=0
+  seen=
+  for cid in $(printf '%s\n' "$comments" | sed -n 's/^<<<MALFORMED \([0-9]\{1,\}\)>>>/\1/p'); do
+    seen="$seen $cid"
+    marker="$SCRATCH/review-pr$1-malformed-$cid.noticed"
+    if [ -f "$marker" ]; then continue; fi
+    if gh pr comment "$1" --repo "$REPO" --body "review: malformed verdict comment $cid" >/dev/null 2>&1; then
+      : > "$marker"
+      log "pr$1 malformed verdict comment $cid: notice posted; it contributes no verdict"
+    else
+      log "pr$1 malformed notice for comment $cid failed to post; will retry next poll"
+    fi
+    new_notice=1
+  done
+  if [ "$new_notice" = "1" ]; then
+    log "pr$1 status withheld this poll: new malformed verdict notice(s):$seen"
+    return 3
+  fi
+  prior=$(printf '%s\n' "$comments" | awk -F'\t' '$1 == "LGTM" || $1 == "Changes Requested"')
+  state=$(printf '%s\n%s\n' "$prior" "$(verdict_body_lines "$2" < "$3")" | gate_state)
   gh api "repos/$REPO/statuses/$2" \
     -f state="$state" -f context="Independent Review" \
     -f description="$v P0=$p0 P1=$p1" >/dev/null
@@ -690,17 +770,18 @@ settle_pending() {
         [ -n "$tool_flags" ] || tool_flags='unknown — no TOOL_FLAGS receipt'
         [ -n "$tree_check" ] || tree_check='unknown — no WORKTREE_CHECK receipt'
         COMMENT="$SCRATCH/review-pr$pr-r$round-comment.md"
-        {
-          echo "> **Round $round review** — automatic watcher (\`scripts/pr-review-watch.sh\`): transport \`$tdesc\`, tool flags \`$tool_flags\`, worktree check \`$tree_check\`, model \`$REQ\` (observed \`$OBSERVED\`), reviewer_session $(reviewer_session_desc "$DONE" "$SIDO"), $costline, detached worktree at \`$sha\`. Reviewed head SHA: \`$sha\`."
-          echo
-          cat "$VERDICT"
-        } > "$COMMENT"
+        # R23 (#917): the posted comment IS the report — the §7 carrier
+        # verbatim, heading first, no watcher narration before it. The
+        # transport/tool/worktree/session receipts this header used to carry
+        # move to the log line below; the round guard above already proved
+        # the carrier begins with the SHA-pinned heading.
+        cp "$VERDICT" "$COMMENT"
         if [ "$DRY" = "1" ]; then
           echo "dry-run: would post $COMMENT to PR #$pr and set a review:* label"
           continue
         fi
         if gh pr comment "$pr" --repo "$REPO" --body-file "$COMMENT" >/dev/null 2>&1; then
-          log "pr$pr r$round posted verdict comment"
+          log "pr$pr r$round posted verdict comment (transport $tdesc, tool flags $tool_flags, worktree check $tree_check, model $REQ observed $OBSERVED, reviewer_session $(reviewer_session_desc "$DONE" "$SIDO"), $costline, detached worktree at $sha)"
           mv "$VERDICT" "$POSTED"
           pending_update "$pr" "$round" "$sha" "$attempts" "$launched" 0
           finish_verdict "$POSTED"
@@ -774,6 +855,16 @@ scan_open_prs() {
     [ "${verb:-}" = "REVIEW" ] || continue
     [ -n "${pr:-}" ] || continue
     pending_has "$pr" && continue
+
+    # R23 follow-on (#917): never start a round on a PR that is not open
+    # (#867 launched a review on an already-merged PR and acked it twice).
+    # A state read that fails counts as NOT open — a watcher that cannot
+    # read the state never launches.
+    st=$(gh pr view "$pr" --repo "$REPO" --json state --jq .state 2>/dev/null)
+    if [ "$st" != "OPEN" ]; then
+      log "pr$pr skipped: state is '${st:-unreadable}', not OPEN — no launch, no review: started, no status"
+      continue
+    fi
 
     prev=$(state_field "$pr" 2)
     round=$(state_field "$pr" 3)
