@@ -36,7 +36,7 @@ store version**:
   suggestions queue, v13 the `task_leases` table
   (`crates/edda-ledger/src/sqlite_store/schema.rs:217-226#pub(super) const SCHEMA_V13_SQL: &str = "`).
 - **Event payload version** — `edda_core::SCHEMA_VERSION`
-  (`crates/edda-core/src/types.rs:4#pub const SCHEMA_VERSION: u32 = 1;`, stamped into every event payload at
+  (`crates/edda-core/src/types.rs:5#pub const SCHEMA_VERSION: u32 = 1;`, stamped into every event payload at
   `crates/edda-core/src/event.rs:186#schema_version: SCHEMA_VERSION,` and siblings). This has been `1` for
   the project's entire history and is part of the Layer 1 event format, whose
   stability is governed by the v1 event spec (#608), not by this page.
@@ -220,8 +220,8 @@ above: on a missing workspace both forms exit alike and neither prints JSON.
 ## 3. Layer 2/3 events are unstable
 
 All Layer 2/3 objects — task, claim, receipt, verdict, plan, and phase
-events, plus the `edda review` review-verdict events (the verb itself is a
-designed future verb, tracked as #652) — are **unstable** until
+events, plus `edda review` events (`review_verdict/0`) and its JSON output
+(delivered in #652) — are **unstable** until
 the v1 event spec (#608) lands and declares otherwise.
 
 That is not re-declared here: it is the recorded decision

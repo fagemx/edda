@@ -136,6 +136,12 @@ label_verdict() { # $1=reviewed sha  $2=current head
   if [ -n "${2:-}" ] && [ "$2" = "$1" ]; then echo apply; else echo skip; fi
 }
 
+product_lgtm_qualified() { # $1=.done file
+  [ "$(sed -n 's/^DISPATCH_EXIT=//p' "$1" 2>/dev/null | tail -1)" = "0" ] || return 1
+  [ "$(sed -n 's/^QUALIFIED=//p' "$1" 2>/dev/null | tail -1)" = "true" ] || return 1
+  [ -z "$(sed -n 's/^DISQUALIFIERS=//p' "$1" 2>/dev/null | tail -1)" ]
+}
+
 # is_full_sha: true only for exactly 40 lowercase hex characters. Every SHA
 # that reaches a pin regex or a status URL is validated with this first
 # (REVIEW.md R5): a validated sha contains no regex metacharacters, so
@@ -497,6 +503,10 @@ mark_post_failed() { # $1=pr $2=sha $3=round $4=verdict file
 post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
   is_full_sha "$2" || { log "pr$1 status: $2 is not a full lowercase 40-hex SHA; status withheld"; return 3; }
   cur=$(verdict_body_lines "$2" < "$3" | head -1)
+  if [ -z "$cur" ]; then
+    log "pr$1 status: verdict carrier is missing a SHA-pinned REVIEW.md §7 heading; status withheld"
+    return 3
+  fi
   v=$(printf '%s\n' "$cur" | cut -f1)
   p0=$(printf '%s\n' "$cur" | cut -f2)
   p1=$(printf '%s\n' "$cur" | cut -f3)
@@ -552,6 +562,17 @@ settle_pending() {
         pending_drop "$pr"
         return 0
       fi
+      vl=$(sh "$LABEL_PR" verdict-label < "$1")
+      if ! verdict_body_lines "$sha" < "$1" | grep -q .; then
+        mark_unreviewed "$pr" "$sha" "$round" 'verdict carrier lacked the SHA-pinned REVIEW.md §7 heading'
+        pending_drop "$pr"
+        return 0
+      fi
+      if [ "$vl" = "review:lgtm" ] && [ "$(sed -n 's/^TRANSPORT=//p' "$DONE" 2>/dev/null | tail -1)" = "edda-review" ] && ! product_lgtm_qualified "$DONE"; then
+        mark_unreviewed "$pr" "$sha" "$round" 'product LGTM was unqualified or exited non-zero'
+        pending_drop "$pr"
+        return 0
+      fi
       # The Independent Review status goes to the REVIEWED sha, on the same
       # bounded retry path as the comment (never best-effort): a failed post
       # increments postfails and keeps the pending entry; at the cap the PR
@@ -574,7 +595,6 @@ settle_pending() {
           return 0
         fi
       fi
-      vl=$(sh "$LABEL_PR" verdict-label < "$1")
       if [ -n "$vl" ] && gh pr edit "$pr" --repo "$REPO" --add-label "$vl" >/dev/null 2>&1; then
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed"  >/dev/null 2>&1 || true
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:post-failed" >/dev/null 2>&1 || true
@@ -623,6 +643,11 @@ settle_pending() {
         continue
       fi
       if extract_verdict "$LOG" "$VERDICT" && verdict_ok "$VERDICT"; then
+        if ! verdict_body_lines "$sha" < "$VERDICT" | grep -q .; then
+          mark_unreviewed "$pr" "$sha" "$round" 'verdict carrier lacked the SHA-pinned REVIEW.md §7 heading'
+          pending_drop "$pr"
+          continue
+        fi
         # A terminal receipt is one atomically published object, never an
         # incremental DISPATCH_EXIT line. Legacy receipts without FINAL_EXIT
         # and partial receipts fail
@@ -652,9 +677,15 @@ settle_pending() {
         case "$tline" in
           edda-dispatch) tdesc='edda dispatch --agent claude' ;;
           claude-stdin)  tdesc='claude -p via stdin (oversized-brief fallback)' ;;
+          edda-review)   tdesc='edda review --json (product-owned review)' ;;
           *)             tdesc='unknown — no TRANSPORT receipt in .done' ;;
         esac
-        tool_flags=$(sed -n 's/^TOOL_FLAGS=//p' "$DONE" 2>/dev/null | tail -1)
+        if [ "$tline" = "edda-review" ]; then
+          tool_flags=$(sed -n 's/^POLICY_RECEIPT=//p' "$DONE" 2>/dev/null | tail -1)
+          [ -n "$tool_flags" ] || tool_flags='unknown — no product policy receipt'
+        else
+          tool_flags=$(sed -n 's/^TOOL_FLAGS=//p' "$DONE" 2>/dev/null | tail -1)
+        fi
         tree_check=$(sed -n 's/^WORKTREE_CHECK=//p' "$DONE" 2>/dev/null | tail -1)
         [ -n "$tool_flags" ] || tool_flags='unknown — no TOOL_FLAGS receipt'
         [ -n "$tree_check" ] || tree_check='unknown — no WORKTREE_CHECK receipt'
