@@ -55,7 +55,7 @@
 #   N.A.    the rule needs reviewer input (D2's decision key), needs a PR
 #           number, or has no command block in the spec (U7, S2, S3, C1,
 #           R4, R5).
-#   需升級   the [判斷] rules (D5, R2) — escalated per REVIEW.md §6, never
+#   需升級   the [判斷] rule (D5) — escalated per REVIEW.md §6, never
 #           adjudicated here.
 #
 # exit: 0 every row PASS / N.A. / 需升級 · 1 any FAIL ·
@@ -202,7 +202,7 @@ C3|code-plain|P1
 C4|code-plain|P1
 C5|code-plain|P1
 R1|code-risk|P0
-R2|code-risk|judgement
+R2|code-risk|P0/P1
 R3|code-risk|P0
 R4|code-risk|P1
 R5|code-risk|P1

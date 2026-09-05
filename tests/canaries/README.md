@@ -61,8 +61,9 @@ git commit -m "calibration: canary set v0"
 git diff HEAD~1..HEAD > /tmp/canary-v0.diff
 ```
 
-然後對每個引擎，用審查 brief 模板 v1
-（`docs/superpowers/specs/2026-09-02-reviewer-brief-template-v1.md`）跑
+然後對每個引擎，用審查 brief 模板 **v2**
+（`docs/superpowers/specs/2026-09-02-reviewer-brief-template-v2.md`——現行派工來源；
+v1 保留為歷史，v0 校準是在 v1 之下量的，兩者的抓取率不可直接相比）跑
 **一次唯讀審查**，引擎的 cwd 是上述 clone：
 
 - pi 系（sol／gemini／glm）：
@@ -75,6 +76,12 @@ git diff HEAD~1..HEAD > /tmp/canary-v0.diff
 對每顆金絲雀、每個引擎記一格：**caught / missed / false positive**
 （評分基準在各 canary 的 `expected.md`）。抓取率進帳本，構成引擎 × 類別表；
 合格門檻與重校節奏見設計文件 §1.3。
+
+每一格另記 `severity_match`（該格給的嚴重度是否等於 `expected.md` 的
+severity——學習 2：低估連錨都有）與 `model_observed`（由系統取得：pi 讀 session
+檔的 `modelId`，claude 讀 `--output-format json` 的 `modelUsage`；引擎自述與
+`PI_MODEL` 環境變數都不算數）。已跑過的校準：v0（brief v1）＝設計文件 §3；
+**v1（brief v2，glm ×5 ＋ Opus ×1）＝設計文件 §3.1**。
 
 ## 線只升不降
 
