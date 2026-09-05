@@ -30,13 +30,14 @@ case "$sha" in
 esac
 printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$' || die "sha must be a full 40-hex SHA, got '${sha}'"
 
+gherr=$(mktemp "${TMPDIR:-/tmp}/review-compare.XXXXXX")
 comments=$(gh pr view "$pr" --repo "$repo" --json comments \
-    --jq '.comments[] | "<<<COMMENT>>>", .body' 2>&1) ||
-    die "gh pr view $pr comments failed"
+    --jq '.comments[] | "<<<COMMENT>>>", .body' 2>"$gherr") ||
+    die "gh pr view $pr comments failed: $(tail -1 "$gherr")"
 
 tmp=$(mktemp "${TMPDIR:-/tmp}/review-compare.XXXXXX")
 findings_tmp2=$(mktemp "${TMPDIR:-/tmp}/review-compare.XXXXXX")
-trap 'rm -f "$tmp" "$tmp".* "$findings_tmp2" "$findings_tmp2".*' 0 HUP INT TERM
+trap 'rm -f "$tmp" "$tmp".* "$findings_tmp2" "$findings_tmp2".* "$gherr"' 0 HUP INT TERM
 
 # Extract, per comment pinned to the sha, the verdict line, model_observed,
 # and the Findings rows into:
@@ -89,13 +90,17 @@ printf '%s' "$comments" | awk -v sha="$sha" -v tmp="$tmp" '
     END { flush() }
 '
 
-[ -f "$tmp.shadow.findings" ] || die "no SHADOW round pinned to $sha on PR #$pr — nothing to compare"
+[ -f "$tmp.shadow.meta" ] || die "no SHADOW round pinned to $sha on PR #$pr — nothing to compare"
 
 # Matching key per finding: every file:line and bare-file token in the line;
 # a finding with no file token falls back to its first 60 characters. Two
 # findings sharing any key are the same finding (#883 will make rule ids the
 # primary key; the fallback keeps this usable before that lands).
-mv "$tmp.shadow.findings" "$findings_tmp2.shadow"
+if [ -f "$tmp.shadow.findings" ]; then
+    mv "$tmp.shadow.findings" "$findings_tmp2.shadow"
+else
+    printf '' >"$findings_tmp2.shadow"
+fi
 if [ -f "$tmp.auth.findings" ]; then
     mv "$tmp.auth.findings" "$findings_tmp2.auth"
 else
