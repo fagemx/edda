@@ -303,4 +303,20 @@ grep -q 'no pi arm yet' "$work/out/delegate.err" || fail "non-shadow refusal mus
 [ -s "$work/gh-posted" ] && fail "non-shadow refusal must post nothing"
 echo "ok 7 non-shadow delegation refusal"
 
+# ── 8. machine identity shape: a crafted identity never reaches sh -c ─
+
+printf '%s' "$HEAD1" >"$work/gh-head"
+for crafted in 'docs/worker-1" --evil "x' 'docs/'; do
+    : >"$work/edda-calls"
+    : >"$work/gh-edits"
+    run_loop sh "$next_issue" 886 "$crafted" >"$work/out/identity.txt" 2>"$work/out/identity.err" && \
+        fail "crafted identity '$crafted' must exit 2" || rc=$?
+    [ "${rc:-0}" -eq 2 ] || fail "identity refusal exit ${rc:-0}, want 2 for '$crafted'"
+    grep -q 'machine identity' "$work/out/identity.err" || \
+        fail "crafted identity '$crafted' must die at validation: $(cat "$work/out/identity.err")"
+    [ -s "$work/edda-calls" ] && fail "crafted identity '$crafted' reached task new: $(cat "$work/edda-calls")"
+    [ -s "$work/gh-edits" ] && fail "crafted identity '$crafted' touched labels: $(cat "$work/gh-edits")"
+done
+echo "ok 8 machine identity shape refusal"
+
 echo "PASS: scripts/fleet/test-next-loop.sh"
