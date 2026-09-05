@@ -188,24 +188,28 @@ gate_state() {
 verdict_body_lines() { # $1=reviewed sha; stdin: one body per <<<COMMENT>>>
                        # block (a single raw body also works); stdout: verdict<TAB>p0<TAB>p1
   awk -v sha="$1" '
-    function flush(   i, n, vline, v, p0, p1, inh, pinned) {
+    function flush(   i, n, vline, v, p0, p1, inh, pinned, isshadow) {
       if (!inb) return
       inb = 0
       n = split(buf, L, "\n")
-      pinned = 0; inh = 0; vline = ""
+      pinned = 0; inh = 0; vline = ""; isshadow = 0
       for (i = 1; i <= n; i++) {
         # $2 is validated with is_full_sha by every caller before it gets
         # here, so it is exactly 40 lowercase hex characters — no regex
-        # metacharacters — and this pin match is literal.
-        if (L[i] ~ ("^## Code Review: Round [0-9]+ — PR #[0-9]+ @ " sha "$")) {
+        # metacharacters — and this pin match is literal. The optional
+        # " (SHADOW)" suffix marks a shadow round (review.gh880-shadow).
+        if (L[i] ~ ("^## Code Review: Round [0-9]+ — PR #[0-9]+ @ " sha "( \(SHADOW\))?$")) {
           pinned = 1; continue
         }
+        # A shadow round is never a verdict: the body field is the machine
+        # signal, and the round is excluded from the union entirely.
+        if (pinned && L[i] == "- shadow: true") { isshadow = 1 }
         if (L[i] ~ /^#{1,}[[:space:]]*Verdict/) { inh = 1; continue }
         if (pinned && inh && vline == "" && L[i] ~ /LGTM|Changes Requested/) {
           vline = L[i]
         }
       }
-      if (!pinned || vline == "") return
+      if (!pinned || vline == "" || isshadow) return
       v = "LGTM"
       if (vline ~ /Changes Requested/) v = "Changes Requested"
       p0 = ""; p1 = ""
@@ -544,6 +548,15 @@ settle_pending() {
         # A failed/empty head query is NOT evidence the head moved: keep the
         # verdict pending and retry on the next poll.
         log "pr$pr head unknown, retry — head query failed after posting the verdict; pending entry kept"
+        return 0
+      fi
+      # A SHADOW round (review.gh880-shadow) is not a verdict: no review:*
+      # label, no Independent Review status, ever. The drop is the success
+      # path for a shadow round — the authoritative round comes later.
+      if grep -Eq -- '-? ?shadow: true$' "$1"; then
+        log "pr$pr r$round shadow round posted — no label, no status (review.gh880-shadow)"
+        state_set "$pr" "$sha" "$round"
+        pending_drop "$pr"
         return 0
       fi
       if [ "$(label_verdict "$sha" "$cur")" != "apply" ]; then

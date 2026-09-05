@@ -584,6 +584,32 @@ if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
     exit 1
 fi
 
+# --- live loop: a SHADOW round posts no label and no status (GH-887) ----------
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf '## Code Review: Round 1 — PR #42 @ %s (SHADOW)\n\nshadow: true\n\n- model_observed: openrouter/z-ai/glm-5.3-flash\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" \
+    >"$EDDA_FLEET_SCRATCH/review-pr42-r1-verdict.md.posted"
+export GH_HEAD="$sha"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (shadow round)\n' >&2; exit 1; }
+if [ -n "$(pending_get)" ]; then
+    printf 'live: a shadow round must drop the pending entry, got:\n%s\n' "$(pending_get)" >&2
+    exit 1
+fi
+if grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: a shadow round must not apply the verdict label\n' >&2
+    exit 1
+fi
+if grep -q 'statuses/' "$GH_STUB_LOG"; then
+    printf 'live: a shadow round must not post the Independent Review status: %s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2
+    exit 1
+fi
+if ! grep -q 'shadow round posted' "$PR_REVIEW_WATCH_LOG"; then
+    printf 'live: the shadow drop must be logged\n' >&2
+    exit 1
+fi
+
 # --- live loop: provider probe before the single dispatch retry (P1) ---------
 
 reset_stubs

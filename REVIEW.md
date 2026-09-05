@@ -649,6 +649,7 @@ One comment per round, pinned to the reviewed full SHA
 - spec: review-spec-v1.3
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
+- shadow: true — only on a SHADOW round (heading suffix ` (SHADOW)`); omit the field entirely on an authoritative round
 - cost: <elapsed / tokens / tool calls, as available>
 
 ### IN SCOPE
@@ -691,6 +692,8 @@ launched with; the watcher records a mismatch with the backend-reported id
 rather than overwriting it.
 
 ## 8. Step 8 — the verdict
+
+A round whose header carries `- shadow: true` and the ` (SHADOW)` heading suffix is **never a verdict** — it sets no `review:*` label, no `Independent Review` status, and the union over a SHA ignores it entirely; it is compare data for the make-up round (`scripts/review-compare.sh`), not a merge input (`review.gh880-shadow`).
 
 - **P0 = 0 and P1 = 0 → LGTM.** Add `fleet:reviewed`. Stop. Merge is the
   operator's action, never the reviewer's (`loop`; GATE-01).
@@ -750,6 +753,7 @@ mechanical.
 | R3 | RAN | `sh -n` on 3 changed scripts, all exit 0 |
 | R4–R5 | canonical | `brief-v1` §6.1 items 3–4; stated as properties, not commands |
 | §5.5 | RAN | `sh scripts/wiring-scan.sh 6340d94~1 6340d94` |
+| §7/§8 shadow | canonical | `review.gh880-shadow` + GH-887: the header field, the heading suffix and the exclusion rule are new in this revision; the compare script's provenance is the same ruling |
 
 ## 10. Version
 

@@ -105,7 +105,13 @@ SHA_GIVEN=""
 # failed` rather than guessing). `Changes Requested` is tested first so a line
 # naming both resolves to the blocking side.
 if [ "${1:-}" = "verdict-label" ]; then
-  vline=$(sed -n '/^#\{1,\}[[:space:]]*Verdict/,$p' | sed '1d' \
+  # A SHADOW round (review.gh880-shadow) is not a verdict: it is never
+  # review:lgtm or review:changes-requested, sets no label and no status.
+  # The body line is the machine signal; the heading suffix alone is not.
+  # The body is slurped once — a grep on stdin would consume it.
+  body=$(cat)
+  if printf '%s\n' "$body" | grep -Eq -- '-? ?shadow: true$'; then echo "shadow"; exit 0; fi
+  vline=$(printf '%s\n' "$body" | sed -n '/^#\{1,\}[[:space:]]*Verdict/,$p' | sed '1d' \
           | grep -m1 -E 'LGTM|Changes Requested') || vline=""
   case "$vline" in
     *"Changes Requested"*) echo "review:changes-requested" ;;
@@ -389,9 +395,19 @@ BRIEF="$SCRATCH/review-pr$PR-r$ROUND-brief.md"
   echo "A write-end swallow on a path where coordination, ledger, heartbeat, session-ledger, L3-store, or digest state is written is **P1** (REVIEW.md §5.5, GH-692, GH-733)."
   echo
   echo "## Output"
+  SHADOW_SUFFIX=""
+  SHADOW_FIELD=""
+  if [ "${EDDA_REVIEW_SHADOW:-0}" = "1" ]; then
+    # SHADOW round (review.gh880-shadow): the heading suffix and the body
+    # field mark the round so verdict-label, the watcher and the compare
+    # script can tell it apart from a verdict.
+    SHADOW_SUFFIX=" (SHADOW)"
+    SHADOW_FIELD="- shadow: true"
+  fi
   echo "Print the REVIEW.md §7 verdict — every field, the Rules table with one row per routed rule, the Wiring table — between the markers below, with this header line filled in:"
   echo "<<<VERDICT"
-  echo "## Code Review: Round $ROUND — PR #$PR @ $SHA"
+  echo "## Code Review: Round $ROUND — PR #$PR @ $SHA$SHADOW_SUFFIX"
+  if [ -n "$SHADOW_FIELD" ]; then echo "$SHADOW_FIELD"; fi
   echo "…the rest exactly as REVIEW.md §7 specifies (model_requested: $MODEL, spec: $SPEC_VERSION, class: $CANON_CLASS)…"
   echo "VERDICT>>>"
   echo
