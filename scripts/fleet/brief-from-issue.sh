@@ -205,7 +205,7 @@ scope paths: ${paths_csv} ·
 entry: none: procedure below · gate owner: not you; review queue ·
 out-of-scope: every path and concern not listed in scope paths
 
-Launcher contract: you are pi 0.84.4 in an exclusively owned, clean worktree at ${worktree} on branch ${branch} at the base full SHA, with task ${task} assigned, issue #${issue} claimed, lane name ${lane_name}, and no existing PR for that branch. Your tools are bash({"command": string}) running Git Bash, write({"path": string, "content": string}) and edit({"path": string, "edits": [{"oldText": string, "newText": string}]}). Shell commands go in bash.command; file changes are write/edit tool calls, never shell programs that rewrite files (no sed -i, no cat > file). git, gh and edda are authenticated on PATH. Build lane: ${lane}.
+Launcher contract: you are pi 0.84.4 in an exclusively owned, clean worktree at ${worktree} on branch ${branch} at the base full SHA, with task ${task} assigned, issue #${issue} claimed, lane name ${lane_name}, and no existing PR for that branch. The one sanctioned prep command that produced this worktree is git worktree add -b ${branch} ${worktree} origin/main — a prep from any other start point cannot satisfy step 2. Your tools are bash({"command": string}) running Git Bash, write({"path": string, "content": string}) and edit({"path": string, "edits": [{"oldText": string, "newText": string}]}). Shell commands go in bash.command; file changes are write/edit tool calls, never shell programs that rewrite files (no sed -i, no cat > file). git, gh and edda are authenticated on PATH. Build lane: ${lane}.
 
 ${host_fact}
 

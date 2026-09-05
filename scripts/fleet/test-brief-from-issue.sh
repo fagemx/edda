@@ -287,4 +287,21 @@ grep -q '24. edda task done 128' "$work/out/withtask.txt" \
     || fail "rail step 24 missing with --task-id"
 echo "ok 9 omitted --task-id renders rail-free steps (both modes)"
 
+# 10. the rendered contract pins the one sanctioned prep command (GH-897):
+#     step 2 keeps the tracking-suffix expectation and the launcher contract
+#     names the refname form that produces it.
+rc=0
+TEST_UNAME=Linux GH_ISSUE_JSON="$work/issue-880.json" \
+    PATH="$work/bin:$PATH" \
+    sh "$script" 880 --lane-name edda-lane-gh880 \
+        --worktree C:/ai_agent/edda-wt-gh880 \
+        --branch fix/gh880-pi-review-arm \
+    >"$work/out/prep.txt" || rc=$?
+[ "$rc" -eq 0 ] || fail "prep render exit $rc"
+grep -qF 'exactly ## fix/gh880-pi-review-arm...origin/main, no other lines.' "$work/out/prep.txt" \
+    || fail "step 2 does not pin the tracking-suffix form"
+grep -qF "git worktree add -b fix/gh880-pi-review-arm C:/ai_agent/edda-wt-gh880 origin/main" "$work/out/prep.txt" \
+    || fail "launcher contract does not name the sanctioned prep command"
+echo "ok 10 sanctioned prep command pinned in the rendered brief"
+
 echo "PASS: scripts/fleet/test-brief-from-issue.sh"

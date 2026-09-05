@@ -188,6 +188,19 @@ git -C "$repo" worktree list --porcelain | grep -F "$(cygpath -m "$lane")" >/dev
   || fail "prepare: worktree not registered with the repo"
 ok "prepare creates fixed worktree $lanewin on a new branch from origin/main"
 
+# GH-897: the new branch must carry the auto-upstream line so the rendered
+# brief's step 2 (## <branch>...origin/main) matches what the prep produces.
+up=$(git -C "$lane" rev-parse --abbrev-ref --symbolic-full-name "@{upstream}" 2>/dev/null || true)
+[ "$up" = "origin/main" ] || fail "prepare: branch codex/gh100-a tracks '$up', want origin/main — the rendered brief's step 2 would STOP"
+ok "prepare sets the tracking line the rendered brief step 2 expects"
+
+# GH-897: a raw-SHA start point cannot set the tracking line — refuse it.
+sha=$(git -C "$repo" rev-parse origin/main)
+expect_fail "prepare raw-SHA start ref" "remote-tracking" \
+  prepare -BuildLane worker-2 -Branch codex/gh109-sha -Repo "$repo" -StartRef "$sha"
+[ ! -e "$(wt_posix "$repo" worker-2)" ] || fail "refused raw-SHA prepare created a worktree"
+ok "prepare refuses a non-tracking start ref instead of an untracked branch"
+
 expect_ok "prepare idempotent same branch" prepare -BuildLane worker-1 -Branch codex/gh100-a -Repo "$repo"
 [ "$(git -C "$lane" symbolic-ref --quiet HEAD)" = "refs/heads/codex/gh100-a" ] \
   || fail "idempotent prepare moved the worktree"

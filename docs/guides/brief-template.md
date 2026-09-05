@@ -161,7 +161,7 @@ issues the next brief. Success advances to the next numbered step.
 1. gh issue view 792 --repo fagemx/edda --json state --jq .state
    output: `OPEN`.
 2. git status --porcelain=v1 --untracked-files=all --branch
-   output: exactly ## codex/gh792-brief-template, no other lines.
+   output: exactly ## codex/gh792-brief-template...origin/main, no other lines.
 3. git rev-parse HEAD
    output: fb6ab1b503c3abb8502b3964678977aa23d316c4 (the base full SHA).
 4. edda context
