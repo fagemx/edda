@@ -605,6 +605,64 @@ post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
     -f description="$v P0=$p0 P1=$p1" >/dev/null
 }
 
+# ---- rules.md R22 executor: engine x surface decides status/label -----------
+
+# Path table — SOURCE OF TRUTH: docs/fleet/rules.md R22 (anti-drift test:
+# scripts/test-pr-review-watch.sh asserts this table equals R22's path tokens).
+# shipping: `crates/**`, `Cargo.toml`, `Cargo.lock`, `install.sh`, `rust-toolchain*`, `clippy.toml`
+# gate: `.github/**`, `lefthook.yml`, `scripts/lint-*.sh`, `scripts/fleet/lane-launch.ps1`, `scripts/fleet-claim-issue.sh`
+# judging: `REVIEW.md`, `docs/fleet/rules.md`, `tests/canaries/**`, `scripts/review-pr.sh`, `scripts/pr-review-watch.sh`, `scripts/review-l0.sh`, `scripts/reviewer-capabilities.sh`, `scripts/fleet/reviewer-capabilities.ps1`, `scripts/fleet/daily-digest.sh`
+# internal-tools: `scripts/fleet/**`, `scripts/test-*.sh`, `docs/**`, `.claude/**` — plus the fallback: everything not matched above
+classify_surface() { # stdin: one changed path per line; stdout: shipping|gate|judging|internal-tools
+  # Most restricted surface any one path falls on; in shell case, * matches
+  # across / so the R22 tokens work verbatim as patterns.
+  rank=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    case "$p" in
+      crates/**|Cargo.toml|Cargo.lock|install.sh|rust-toolchain*|clippy.toml) r=3 ;;
+      .github/**|lefthook.yml|scripts/lint-*.sh|scripts/fleet/lane-launch.ps1|scripts/fleet-claim-issue.sh) r=2 ;;
+      REVIEW.md|docs/fleet/rules.md|tests/canaries/**|scripts/review-pr.sh|scripts/pr-review-watch.sh|scripts/review-l0.sh|scripts/reviewer-capabilities.sh|scripts/fleet/reviewer-capabilities.ps1|scripts/fleet/daily-digest.sh) r=1 ;;
+      scripts/fleet/**|scripts/test-*.sh|docs/**|.claude/**) r=0 ;;
+      *) r=0 ;;
+    esac
+    [ "$r" -gt "$rank" ] && rank=$r
+  done
+  case "$rank" in
+    3) echo shipping ;;
+    2) echo gate ;;
+    1) echo judging ;;
+    *) echo internal-tools ;;
+  esac
+}
+
+verdict_engine() { # stdin: verdict carrier; stdout: opus|sol|glm|unknown
+  line=$(awk '/^## Code Review: Round/{seen=1} seen && /^- model_observed:/{print; exit}')
+  case "$line" in
+    *opus*) echo opus ;;
+    *sol*) echo sol ;;
+    *glm*) echo glm ;;
+    *) echo unknown ;;
+  esac
+}
+
+verdict_is_shadow() { # stdin: verdict carrier; exit 0 when the round declares itself SHADOW
+  { head -1 | grep -q ' (SHADOW)$'; } && return 0
+  { grep -qE '^shadow: true'; } && return 0
+  return 1
+}
+
+verdict_surface_ok() { # $1=engine $2=surface; exit 0 only when authoritative per rules.md R22
+  case "$1/$2" in
+    opus/*|sol/*|glm/internal-tools) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+pr_changed_files() { # $1=pr; stdout: one changed path per line (empty on gh failure)
+  gh pr view "$1" --repo "$REPO" --json files 2>/dev/null | jq -r '.files[].path' 2>/dev/null
+}
+
 # ---- in-flight handling ------------------------------------------------------
 settle_pending() {
   [ -s "$PENDING" ] || return 0
@@ -644,7 +702,48 @@ settle_pending() {
       fi
       vl=$(sh "$LABEL_PR" verdict-label < "$1")
       if ! verdict_body_lines "$sha" < "$1" | grep -q .; then
+        # The strict pin rejects SHADOW headings on purpose (a SHADOW verdict
+        # never enters the union), so a well-formed SHADOW-declared carrier
+        # lands here: settle it as SHADOW instead of unreviewed. A carrier
+        # with neither shape is truly malformed (R23).
+        if verdict_is_shadow < "$1"; then
+          log "pr$pr r$round SHADOW-declared verdict on $sha — no status, no label; round settled"
+          state_set "$pr" "$sha" "$round"
+          pending_drop "$pr"
+          return 0
+        fi
         mark_unreviewed "$pr" "$sha" "$round" 'verdict carrier lacked the SHA-pinned REVIEW.md §7 heading'
+        pending_drop "$pr"
+        return 0
+      fi
+      # rules.md R22 (GH-919): engine x surface decides whether this round may
+      # write status or a review:* label. A SHADOW-declared round, a
+      # non-authoritative engine, or an unknown engine is handled as SHADOW:
+      # no status, no label, one notice per (sha, verdict comment id) when the
+      # round is not self-declared, and the round still settles.
+      if verdict_is_shadow < "$1"; then
+        log "pr$pr r$round verdict is marked SHADOW on $sha — no status, no label; round settled"
+        state_set "$pr" "$sha" "$round"
+        pending_drop "$pr"
+        return 0
+      fi
+      engine=$(verdict_engine < "$1")
+      files_changed=$(pr_changed_files "$pr")
+      surface=$(printf '%s
+' "$files_changed" | classify_surface)
+      if ! verdict_surface_ok "$engine" "$surface"; then
+        cid=$(cat "$SCRATCH/review-pr$pr-r$round-comment.id" 2>/dev/null || echo unknown)
+        marker="$SCRATCH/review-pr$pr-shadow-$sha-$cid.noticed"
+        if [ ! -f "$marker" ]; then
+          if gh pr comment "$pr" --repo "$REPO" --body "review: verdict by $engine on $surface surface is SHADOW per rules.md R22 — awaiting an authoritative engine" >/dev/null 2>&1; then
+            : > "$marker"
+            log "pr$pr r$round R22 SHADOW notice posted: $engine on $surface ($sha, comment $cid)"
+          else
+            log "pr$pr r$round R22 SHADOW notice failed to post; will retry next poll"
+          fi
+        fi
+        log "pr$pr r$round verdict by $engine on $surface surface is not authoritative (R22) — no status, no label; round settled"
+        state_set "$pr" "$sha" "$round"
         pending_drop "$pr"
         return 0
       fi
@@ -724,6 +823,12 @@ settle_pending() {
       fi
       if extract_verdict "$LOG" "$VERDICT" && verdict_ok "$VERDICT"; then
         if ! verdict_body_lines "$sha" < "$VERDICT" | grep -q .; then
+          if verdict_is_shadow < "$VERDICT"; then
+            log "pr$pr r$round SHADOW-declared verdict on $sha — no status, no label; round settled"
+            state_set "$pr" "$sha" "$round"
+            pending_drop "$pr"
+            continue
+          fi
           mark_unreviewed "$pr" "$sha" "$round" 'verdict carrier lacked the SHA-pinned REVIEW.md §7 heading'
           pending_drop "$pr"
           continue
@@ -780,7 +885,8 @@ settle_pending() {
           echo "dry-run: would post $COMMENT to PR #$pr and set a review:* label"
           continue
         fi
-        if gh pr comment "$pr" --repo "$REPO" --body-file "$COMMENT" >/dev/null 2>&1; then
+        if comment_url=$(gh pr comment "$pr" --repo "$REPO" --body-file "$COMMENT" 2>/dev/null); then
+          printf '%s\n' "${comment_url##*-}" > "$SCRATCH/review-pr$pr-r$round-comment.id" 2>/dev/null || :
           log "pr$pr r$round posted verdict comment (transport $tdesc, tool flags $tool_flags, worktree check $tree_check, model $REQ observed $OBSERVED, reviewer_session $(reviewer_session_desc "$DONE" "$SIDO"), $costline, detached worktree at $sha)"
           mv "$VERDICT" "$POSTED"
           pending_update "$pr" "$round" "$sha" "$attempts" "$launched" 0
