@@ -1,7 +1,7 @@
 #!/bin/sh
 # review-compare.sh — diff the SHADOW review round against the authoritative
 # review round on the same SHA (issue #887; operator ruling recorded as
-# decision `review.gh880-shadow`).
+# decision `review.gh880-shadow` = `glm-shadow-round-opus-makeup-when-quota`).
 #
 # usage: review-compare.sh <pr> <sha>
 #   <pr>   PR number

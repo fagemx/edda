@@ -758,7 +758,7 @@ mechanical.
 | R3 | RAN | `sh -n` on 3 changed scripts, all exit 0 |
 | R4–R5 | canonical | `brief-v1` §6.1 items 3–4; stated as properties, not commands |
 | §5.5 | RAN | `sh scripts/wiring-scan.sh 6340d94~1 6340d94` |
-| §8 shadow rule | canonical | operator ruling 2026-09-05 (`review.gh880-shadow`, issue #887): a ` (SHADOW)` round is never a verdict, sets no label and no `Independent Review` status; `sh scripts/review-compare.sh <pr> <sha>` diffs it against the authoritative round on the same SHA |
+| §8 shadow rule | canonical | operator ruling 2026-09-05 (`review.gh880-shadow` = `glm-shadow-round-opus-makeup-when-quota`, issue #887): a ` (SHADOW)` round is never a verdict, sets no label and no `Independent Review` status; `sh scripts/review-compare.sh <pr> <sha>` diffs it against the authoritative round on the same SHA |
 
 ## 10. Version
 
