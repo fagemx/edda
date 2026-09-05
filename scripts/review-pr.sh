@@ -574,7 +574,7 @@ try { Assert-ReviewCapabilities 'pi-dispatch' } catch { \$_ | Out-File '$LOGW'; 
 & edda dispatch --agent pi --model '$MODEL' --tools "\$PiReviewTools" --session-id '$SID' --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
 \$code = \$LASTEXITCODE
 "TRANSPORT=pi-dispatch" | Out-File "$DONEW" -Encoding utf8
-"TOOL_FLAGS=--tools 'read,grep,find,ls'" | Out-File "$DONEW" -Append -Encoding utf8
+"TOOL_FLAGS=--tools '$PI_REVIEW_TOOLS'" | Out-File "$DONEW" -Append -Encoding utf8
 "SESSION=$SID" | Out-File "$DONEW" -Append -Encoding utf8
 "SESSION_MODE=$SESSION_MODE" | Out-File "$DONEW" -Append -Encoding utf8
 "DISPATCH_EXIT=\$code" | Out-File "$DONEW" -Append -Encoding utf8
@@ -703,7 +703,7 @@ review_capabilities pi-dispatch > '$LOG' 2>&1 || { echo 'DISPATCH_EXIT=2' > '$DO
 edda dispatch --agent pi --model '$MODEL' --tools "\$PI_REVIEW_TOOLS" --session-id '$SID' --prompt-file '$BRIEF' > '$LOG' 2>&1
 code=\$?
 echo "TRANSPORT=pi-dispatch" > '$DONE'
-echo "TOOL_FLAGS=--tools 'read,grep,find,ls'" >> '$DONE'
+echo "TOOL_FLAGS=--tools '$PI_REVIEW_TOOLS'" >> '$DONE'
 echo "SESSION=$SID" >> '$DONE'
 echo "SESSION_MODE=$SESSION_MODE" >> '$DONE'
 echo "DISPATCH_EXIT=\$code" >> '$DONE'

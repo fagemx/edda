@@ -43,6 +43,9 @@ if [ "$*" = 'dispatch --help' ]; then
  exit 0
 fi
 echo launch >> "$CALLS"
+# Record the full argument list so a test can compare what the stubbed edda
+# actually received against the TOOL_FLAGS= receipt the lane writes.
+echo "DISPATCH $*" >> "$CALLS"
 case "$*" in
  *"--agent pi"*)
    case "$*" in
@@ -213,6 +216,14 @@ for BACKEND in pi-modern pi-old pi-old-edda; do
    fi
    grep -q '^TRANSPORT=pi-dispatch' "$tmp/scratch/review-pr9998-r1.done" || { echo 'FAIL pi-modern: no TRANSPORT=pi-dispatch receipt'; failures=$((failures + 1)); }
    grep -qF "TOOL_FLAGS=--tools 'read,grep,find,ls'" "$tmp/scratch/review-pr9998-r1.done" || { echo 'FAIL pi-modern: TOOL_FLAGS receipt missing the allowlist'; failures=$((failures + 1)); }
+   # The receipt must name the same allowlist the stubbed edda actually
+   # received (GH-880 round 1): a frozen literal would let the .done claim a
+   # boundary the launch did not have.
+   received=$(sed -n 's/.*DISPATCH \(.*--tools [^ ]*\).*/\1/p' "$CALLS" | head -1 | sed 's/.*--tools //')
+   receipted=$(sed -n "s/^TOOL_FLAGS=--tools '\([^']*\)'.*/\1/p" "$tmp/scratch/review-pr9998-r1.done" | head -1)
+   if [ -z "$received" ] || [ "$received" != "$receipted" ]; then
+     echo "FAIL pi-modern: TOOL_FLAGS receipt '$receipted' != allowlist the launch carried '$received'"; failures=$((failures + 1))
+   fi
    ;;
  *)
    if [ "$rc" -eq 0 ] || [ -s "$CALLS" ]; then
