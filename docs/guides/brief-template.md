@@ -197,18 +197,26 @@ issues the next brief. Success advances to the next numbered step.
     output: empty stdout, exit 0. Cargo budget: zero; exact-head CI is the gate.
 19. git -c core.quotePath=false diff --cached --stat
     output: three path-stat lines and one summary for exactly 3 files.
-20. git commit -m "docs(fleet): brief template for role and runtime composition" -m "Issue: #792"
+20. sh scripts/review-l0.sh origin/main HEAD
+    output: the classifier line (classes=..., canonical_class=...) plus one
+    | Rule | Class | Severity | Result | Evidence | row per routed rule —
+    every row PASS; a FAIL row is a STOP under the failure rule. N.A. rows
+    carry their reason and 需升級 rows escalate to the reviewer (REVIEW.md
+    §6–§7); neither is a FAIL. This is the L0 self-check: the row commands
+    are extracted from REVIEW.md at run time, so the lane is judged by the
+    rules its own tree states.
+21. git commit -m "docs(fleet): brief template for role and runtime composition" -m "Issue: #792"
     output: git commit summary, exit 0. Do not infer a PR-body link from it.
-21. git log -1 --format=%B | grep -Fx 'Issue: #792'
+22. git log -1 --format=%B | grep -Fx 'Issue: #792'
     output: Issue: #792.
-22. git status --porcelain=v1 --untracked-files=all
+23. git status --porcelain=v1 --untracked-files=all
     output: empty stdout, exit 0.
-23. git rev-parse HEAD
+24. git rev-parse HEAD
     output: one 40-character hexadecimal SHA; retain as delivery_sha.
-24. git push --porcelain -u origin codex/gh792-brief-template
+25. git push --porcelain -u origin codex/gh792-brief-template
     output: Git porcelain push status, exit 0, no rejected ref. This is a
     normal push; no force option is authorized.
-25. cat >"$(git rev-parse --git-path gh792-pr-body.md)" <<'PR_BODY'
+26. cat >"$(git rev-parse --git-path gh792-pr-body.md)" <<'PR_BODY'
 ## Problem and change
 Lane briefs lacked a shared contract for role and runtime. This adds the
 guide, docs-map link, and hook-less AGENTS.md entry commands for Issue #792.
@@ -224,16 +232,16 @@ Acceptance and any closing keyword await the gate owner's confirmation.
 PR_BODY
     output: empty stdout, exit 0. This file is Git metadata scratch, not a
     source path or an additional staged file.
-26. git rev-parse HEAD >>"$(git rev-parse --git-path gh792-pr-body.md)"
+27. git rev-parse HEAD >>"$(git rev-parse --git-path gh792-pr-body.md)"
     output: empty stdout, exit 0; appends the delivery full SHA to the body.
-27. gh pr create --repo fagemx/edda --base main --head codex/gh792-brief-template --draft --title "docs(fleet): brief template for role and runtime composition" --body-file "$(git rev-parse --git-path gh792-pr-body.md)"
+28. gh pr create --repo fagemx/edda --base main --head codex/gh792-brief-template --draft --title "docs(fleet): brief template for role and runtime composition" --body-file "$(git rev-parse --git-path gh792-pr-body.md)"
     output: one https://github.com/fagemx/edda/pull/<integer> URL, exit 0.
-28. gh pr view codex/gh792-brief-template --repo fagemx/edda --json body --jq .body
-    output: the body from steps 25–26, including its own Issue: #792 line
+29. gh pr view codex/gh792-brief-template --repo fagemx/edda --json body --jq .body
+    output: the body from steps 26–27, including its own Issue: #792 line
     and delivery_sha; no closing keyword. Missing/different content is STOP.
-29. edda note 'GH792 worker committed and opened draft PR; docs lint passed; exact-head CI and independent acceptance pending with review queue; no Cargo build.' --tag session
+30. edda note 'GH792 worker committed and opened draft PR; docs lint passed; exact-head CI and independent acceptance pending with review queue; no Cargo build.' --tag session
     output: Wrote NOTE <event-id>, exit 0.
-30. printf '%s\n' 'The commit message carries Issue: #792 as its own line.' 'The PR body carries Issue: #792 as its own line.' 'pr.closing-keyword: none in this draft; the gate owner must confirm every doneWhen item before adding one.'
+31. printf '%s\n' 'The commit message carries Issue: #792 as its own line.' 'The PR body carries Issue: #792 as its own line.' 'pr.closing-keyword: none in this draft; the gate owner must confirm every doneWhen item before adding one.'
     output: exactly those three sentences, one per line. Return these lines
-    with delivery_sha and the PR URL from steps 23 and 27 to the controller.
+    with delivery_sha and the PR URL from steps 24 and 28 to the controller.
 ```
