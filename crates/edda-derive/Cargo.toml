@@ -11,8 +11,8 @@ categories.workspace = true
 keywords.workspace = true
 
 [dependencies]
-edda-core = { path = "../edda-core", version = "0.4.0" }
-edda-ledger = { path = "../edda-ledger", version = "0.4.0" }
+edda-core = { path = "../edda-core", version = "0.5.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.5.0" }
 anyhow.workspace = true
 time.workspace = true
 serde.workspace = true

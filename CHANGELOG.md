@@ -7,9 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-04
+
+### Added
+
+- **Release automation publishes the workspace before the GitHub Release** — pushing a `v*` tag makes CI derive the dependency-first publish order, upload every publishable crate, verify immutable registry provenance against the tag SHA, and only then create and populate the GitHub Release behind a crates.io parity gate (GH-648)
+- **Operator daily digest** — `edda recap --digest` prints the deterministic operator digest for the last window, `edda notify send` pushes free text as a digest event, and `scripts/fleet/daily-digest.sh` assembles the fleet-wide daily report (GH-765)
+- **`edda verify`** — top-level verb wiring `Ledger::verify_chain` so users can audit their own hash chain (GH-647); `edda status --json` with a golden fixture (GH-730); build identity included in `edda --version` (GH-746)
+- **Cross-machine claim guard** — `scripts/fleet-claim-issue.sh` plus `edda dispatch --issue/--machine` coordinate fleet claim handoff across machines (GH-656), with role-aware issue claims before dispatch (GH-782)
+- **Merge-precondition gate** — merges are gated on recorded preconditions (GH-580)
+- **Ledger event v1 specification** — the ledger's event surface is specified and fixture-backed (GH-608)
+- **Conductor phase gates matured** — gate-wait progress signals with a visible deadline (GH-551), honest gate-timeout state with waiver semantics and an `on_gate_timeout` policy (GH-552), phase elapsed time accounting (GH-644), infrastructure contract plans (#856), and phase terminal-state notifications through edda-notify (GH-564)
+- **Review system** — REVIEW.md as the one executable review spec (#633), a wiring verdict slot with `scripts/wiring-scan.sh` (#629), the PR review watcher that launches the read-only reviewer and posts SHA-pinned verdicts plus the `Independent Review` status (#641), and one resumable reviewer conversation per PR (GH-708)
+- **Dispatch capabilities** — `edda dispatch` passes through launcher capabilities: model, thinking, tool policy, session dir, and model listing (GH-574); pi session transcripts are ingested post-dispatch (GH-577)
+- **Fleet lanes** — a tracked lane launcher `scripts/fleet/lane-launch.ps1` / `lane-status.ps1` (GH-606) plus persistent lane helpers (#868); process object claims and merge gate protection (GH-581)
+- **CI hardening** — path-aware CI that skips clippy/test for docs-only changes behind an aggregate `CI Gate` job (#643), merge_group support (#635), and an MSRV 1.91.0 check (GH-824)
+- **Machine-detectable CLI docs coverage** — `scripts/check-cli-docs.sh` verifies every verb and long flag in `docs/reference/cli.md` against the built binary (GH-650, GH-795)
+
+### Changed
+
+- The toolchain is pinned to 1.98.1 and `rust-version` is declared 1.91 — CI no longer floats ahead of workstations (GH-814)
+- `[profile.dev]` uses line-tables-only debuginfo and rust-lld, halving the debug build footprint and cutting Windows link time 12–21% (GH-810)
+- `dirs::home_dir` is banned workspace-wide; home resolution goes through `edda_core::paths` (GH-812)
+- Opening a ledger refuses newer `schema_version` files instead of guessing (GH-729), and COMPATIBILITY.md documents the upgrade policy plus the enumerated stable `--json` contracts (GH-651)
+- The review transport moved from pi to `edda dispatch`-launched Claude with Opus pinned and UUID sessions (GH-708), and the verification ladder's L1 is exact-head CI plus the verifier's focused Windows-gap run (#753)
+- Large modules were split for maintainability — `cmd_bridge/`, `cmd_reconcile/`, runner `gate.rs`/`outcome.rs` — and process-spawning tests moved to integration tests (GH-777, GH-778, GH-776, GH-799)
+- Pre-commit and commit-msg hooks are git-native via `core.hooksPath`, enforcing the L0 gates locally, with a file/function-length ratchet (GH-634, GH-779)
+
 ### Fixed
 
-- Release automation now blocks GitHub release creation until every publishable workspace crate exists at the tag version on crates.io and is not yanked
+- Verdict gates fail closed: bad freshness bounds, unparsable `gate_entered_at`, and unreadable ledgers surface errors instead of proceeding (GH-541, GH-744)
+- Conductor reconciles in-memory state with disk before phase selection (GH-750), clears stale waivers on retry (GH-747), anchors gate-progress budgets to entry (GH-751), and survives concurrent runner saves and manual skips (GH-556)
+- Fleet lane lifecycle: lane-stop kills the whole process tree (GH-672), process snapshot and child PID ordering fixed (GH-706), review lanes supported in lane-stop/lane-status (GH-712), git-config-guard detects and recovers corrupt refs (GH-797), and `.git/config` backups are validated and restored post-kill (GH-715)
+- Bridges surface swallowed hook-path write errors (GH-745, GH-692), fix per-turn peer dedup defeated by wall-clock age (GH-678), and stop writing empty session digests with absurd durations (GH-578)
+- Claims report standing bare-CLI claims and share one liveness criterion through session inference (GH-705, GH-617)
+- `edda ask` and export projections report the governance tier (GH-806) and disambiguate empty vs unregistered stores (GH-701)
+- Postmortem command_failure keying, segment command-word matching, and a separate show counter (GH-813)
+- Background sharing of the current Haiku model selection (#875); cost estimates return Option and refresh the pricing table (GH-585)
+- Release automation enforces distribution channel parity before publishing (GH-655)
 
 ## [0.4.0] - 2026-09-02
 

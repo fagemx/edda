@@ -92,7 +92,7 @@ cat >"$STUBBIN/edda" <<'EOF'
 #!/bin/sh
 echo "edda $*" >>"$EDDA_STUB_LOG"
 case "$*" in
-  'dispatch --help') echo '--tools <TOOLS> --exclude-tools <EXCLUDE_TOOLS>'; exit 0 ;;
+  'dispatch --help') echo '--tools <TOOLS> --exclude-tools <EXCLUDE_TOOLS> --permission-mode <MODE>'; exit 0 ;;
   *--agent*claude*)
     [ -n "${DISPATCH_FAIL_PROBE:-}" ] && exit 1
     exit 0
@@ -103,11 +103,12 @@ EOF
 cat >"$STUBBIN/claude" <<'EOF'
 #!/bin/sh
 test "$*" = '--help' || exit 99
-echo '--tools <tools> --disallowedTools <tools>'
+echo '--tools <tools> --disallowedTools <tools> --permission-mode <mode>'
 EOF
 cat >"$STUBBIN/review-pr-stub" <<'EOF'
 #!/bin/sh
 echo "REVIEW_LAUNCH $*" >>"$REVIEW_STUB_LOG"
+echo "review_round=${REVIEW_STUB_ROUND:-$2}"
 exit 0
 EOF
 chmod +x "$STUBBIN/gh" "$STUBBIN/pi" "$STUBBIN/edda" "$STUBBIN/claude" "$STUBBIN/review-pr-stub"
@@ -674,7 +675,11 @@ header_comment_path() {
 }
 
 verdict_log_fixture() {
-    echo 'WORKTREE_CHECK=unchanged' >> "$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+    # A completed review receipt is published as one final object. These lines
+    # deliberately model the complete contract, not the old incremental
+    # DISPATCH_EXIT/WORKTREE_CHECK shape that the watcher must fail closed.
+    printf 'FINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' \
+        >> "$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
     {
         printf '<<<VERDICT\n'
         printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha"
@@ -796,6 +801,16 @@ grep -qF 'mode unknown — no SESSION_MODE receipt in .done' "$cfile" || {
 }
 unset GH_HEAD
 
+# The launcher can reserve a higher shared round than this watcher's local state.
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'DISPATCH_EXIT=1\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'backend failed\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
+export REVIEW_STUB_ROUND=8
+run_watch_once >/dev/null 2>&1
+[ "$(pending_get | cut -f2)" = 8 ] || { echo 'retry ignored shared round receipt' >&2; exit 1; }
+unset REVIEW_STUB_ROUND
+
 # --- live loop: the Independent Review commit status (GH-742) ------------------
 # Posted to the REVIEWED sha (never the current head), state = the union rule
 # over the §7 verdict comments on that sha plus this round's verdict, retried
@@ -806,7 +821,7 @@ statuses_calls() { grep -c 'statuses/' "$GH_STUB_LOG" 2>/dev/null || true; }
 # the head moved before the verdict settled: no status for anything
 reset_stubs
 pending_set 42 1 "$sha" 0 0
-printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 verdict_log_fixture
 export GH_HEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: head moved)\n' >&2; exit 1; }
@@ -818,7 +833,7 @@ fi
 # LGTM with no other verdict on the sha: status success, then the label
 reset_stubs
 pending_set 42 1 "$sha" 0 0
-printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 verdict_log_fixture
 export GH_HEAD="$sha"
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (status: lgtm)\n' >&2; exit 1; }
@@ -859,7 +874,7 @@ fi
 # though this round's verdict is LGTM — the case the whole issue exists for
 reset_stubs
 pending_set 42 1 "$sha" 0 0
-printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 verdict_log_fixture
 printf '<<<COMMENT>>>\n## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nChanges Requested, P0=0, P1=3 — blocking P1\n' \
     "$sha" >"$tmp/comments-pr42-earlier-cr"
@@ -880,7 +895,7 @@ fi
 # and no label until the status is out
 reset_stubs
 pending_set 42 1 "$sha" 0 0
-printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 verdict_log_fixture
 export GH_HEAD="$sha"
 export GH_FAIL_STATUS=1
@@ -918,7 +933,7 @@ fi
 # on the same bounded retry path as any other status post failure.
 reset_stubs
 pending_set 42 1 "$sha" 0 0
-printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 verdict_log_fixture
 printf '<<<COMMENT>>>\n## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nChanges Requested, P0=0, P1=3 — blocking P1\n' \
     "$sha" >"$tmp/comments-pr42-withheld"

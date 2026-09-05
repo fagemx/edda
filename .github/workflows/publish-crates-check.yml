@@ -8,7 +8,10 @@ on:
       - 'scripts/publish-crates*'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'crates/**/Cargo.toml'
+      # Whole crate tree, not just manifests: include_str! resources, build
+      # scripts, and packaged tests/READMEs also fail `cargo publish` at the
+      # tag, and a src-only change never ran this gate (GH-892, #891).
+      - 'crates/**'
       - 'rust-toolchain.toml'
 
 permissions:

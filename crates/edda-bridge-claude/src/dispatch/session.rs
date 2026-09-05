@@ -5,8 +5,8 @@ use std::path::Path;
 use crate::signals::{extract_session_signals, save_session_signals, TaskSnapshot};
 
 use super::helpers::{
-    extract_prior_session_last_message, inject_karvi_brief, read_project_state, render_active_plan,
-    render_skill_guide_directive, run_auto_digest,
+    append_task_briefs, extract_prior_session_last_message, inject_karvi_brief, read_project_state,
+    render_active_plan, render_skill_guide_directive, run_auto_digest,
 };
 use super::{
     apply_context_budget, context_budget, is_same_as_last_inject, read_counter, read_hot_pack,
@@ -837,6 +837,9 @@ pub(super) fn dispatch_session_start(
             None => project_state,
         });
     }
+
+    // Inject rail task briefs this session holds (GH-793); helper stays silent on failure.
+    content = append_task_briefs(content, project_id, session_id, cwd);
 
     // Inject active decisions as context (Track F — Decision Deepening)
     {

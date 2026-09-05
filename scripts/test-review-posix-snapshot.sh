@@ -32,7 +32,7 @@ echo Linux
 EOF
 cat > "$tmp/bin/claude" <<'EOF'
 #!/bin/sh
-if [ "$*" = --help ]; then echo '--tools <tools> --disallowedTools <tools> --permission-mode <mode>'; fi
+if [ "$*" = --help ]; then echo '--tools <tools> --disallowedTools, --disallowed-tools <tools> --permission-mode <mode>'; fi
 EOF
 cat > "$tmp/bin/edda" <<'EOF'
 #!/bin/sh

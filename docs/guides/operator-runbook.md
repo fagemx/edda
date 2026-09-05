@@ -31,12 +31,16 @@
    實作入口、`--check` 的 exit code 與身分格式見 `docs/fleet/rules.md` R21（#782）。
 3. **派 lane**（開 worktree 後）：
    ```bash
-   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> -Cwd <worktree>
+   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> -Cwd <worktree> -Owns <repo-path> [<repo-path>...]
    ```
    脚本不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`
    （決策 `verification.cost-discipline`），給了就在 wrapper 設
    `CARGO_TARGET_DIR = <lane root>\<BuildLane>`（lane root =
    `$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）；
+   寫入 lane 也要傳它實際會改的最小 `-Owns` repo path；可在最後一個 `-Owns`
+   後列多個 scope，例如 `-Owns crates/edda-cli/src/cmd_dispatch.rs docs/guides/operator-runbook.md`。
+   scope 必須是 canonical repository-relative path：不可用 absolute、drive/UNC、`..` 或 `./`
+   alias；review lane 是唯讀可省略。
    Rust lane 要明確傳，如 `-BuildLane worker-1`；docs lane 只寫文件不編譯，
    不傳 build lane，wrapper 就不設 `CARGO_TARGET_DIR`（見 §六）。
 4. **盯進度**（不用再翻檔案時間戳）：
@@ -145,7 +149,9 @@
    （v1 無 codex 後備——它做不到唯讀，且在新決策下 codex 也到不了 Opus；§六 `fleet.review-provider-overload` 的決策全文仍可 `edda ask` 查）。
    啟停、狀態檔與疑難排解見 `docs/guides/pr-review-watcher.md`。watcher **不合併**——合併仍在第 6 步、要授權。
 5. **收斂**：`/fleet-pr-loop` 的 bash driver 吐 `ACTION: REVIEW | FIX | DONE | BLOCKED`，照做到 LGTM；driver 不合併。
-6. **合併**（有授權時）：`git diff <LGTM 的 SHA>..origin/<branch>` 必須為空（判決還在），`gh pr checks` 7 綠，才合。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
+6. **合併**（有操作者授權時）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過。取得合併授權後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
+
+   手動啟動與 watcher 共用 `scripts/review-round.sh` 的每個 repository／PR 認領與輪次，儲存在 `$HOME/.edda/review-coordination/`，不跟隨個別 scratch 目錄。已發表的 PR 審查輪次是下限；有尚未寫入終止 receipt 的審查時，第二個啟動者會被拒絕。中斷且沒有 receipt 的認領保持拒絕狀態，操作者應先確認舊 lane 已停止再恢復，不能只依 PID 或經過時間認定它已退出。
 7. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
 8. **收工**：`edda note "completed X; decided Y; next: Z" --tag session`；回報你：合了什麼、開了什麼、等你什麼。
 
