@@ -246,4 +246,45 @@ grep -q 'rm -rf' "$work/out/crafted.txt" \
     && fail "crafted token leaked into the rendered brief"
 echo "ok 8 crafted scope token rejected"
 
+# 9. omitted --task-id renders without the task-rail steps (GH-898): the
+#    fixed steps 6 and 24 must never name task none, and both invocation
+#    modes are proven.
+rc=0
+TEST_UNAME=Linux GH_ISSUE_JSON="$work/issue-880.json" \
+    PATH="$work/bin:$PATH" \
+    sh "$script" 880 --lane-name edda-lane-gh880 \
+        --worktree C:/ai_agent/edda-wt-gh880 \
+        --branch fix/gh880-pi-review-arm \
+    >"$work/out/notask.txt" || rc=$?
+[ "$rc" -eq 0 ] || fail "no-task-id render exit $rc"
+if grep -q 'edda task show none' "$work/out/notask.txt"; then
+    fail "step 6 renders edda task show none — the lane stops there (GH-898)"
+fi
+if grep -q 'task done none' "$work/out/notask.txt"; then
+    fail "step 24 renders edda task done none — the receipt cannot succeed (GH-898)"
+fi
+if grep -q 'including task none' "$work/out/notask.txt"; then
+    fail "step 5 expects task none on the rail (GH-898)"
+fi
+grep -q '6. git rev-parse --is-inside-work-tree' "$work/out/notask.txt" \
+    || fail "rail-free step 6 missing"
+grep -q '24. edda note ' "$work/out/notask.txt" \
+    || fail "rail-free step 24 missing"
+grep -q 'DONE issue=#880 task=none' "$work/out/notask.txt" \
+    || fail "task=none report line missing"
+rc=0
+TEST_UNAME=Linux GH_ISSUE_JSON="$work/issue-880.json" \
+    PATH="$work/bin:$PATH" \
+    sh "$script" 880 --lane-name edda-lane-gh880 \
+        --worktree C:/ai_agent/edda-wt-gh880 \
+        --branch fix/gh880-pi-review-arm \
+        --task-id 128 \
+    >"$work/out/withtask.txt" || rc=$?
+[ "$rc" -eq 0 ] || fail "with-task-id render exit $rc"
+grep -q '6. edda task show 128' "$work/out/withtask.txt" \
+    || fail "rail step 6 missing with --task-id"
+grep -q '24. edda task done 128' "$work/out/withtask.txt" \
+    || fail "rail step 24 missing with --task-id"
+echo "ok 9 omitted --task-id renders rail-free steps (both modes)"
+
 echo "PASS: scripts/fleet/test-brief-from-issue.sh"
