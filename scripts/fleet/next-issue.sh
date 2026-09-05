@@ -140,6 +140,11 @@ if [ "$dry" = 0 ] && grep -q '^<<AUTHORED STEPS>>$' "$brief_path"; then
     die "brief still contains <<AUTHORED STEPS>> — fill the authored middle in $brief_path, then rerun"
 fi
 
+if [ "$dry" = 0 ]; then
+    echo "== brief validate"
+    sh "$self_dir/brief-validate.sh" "$brief_path" ||
+        die "brief-validate INVALID — fix the failing step in the brief, then rerun"
+fi
 echo "== task"
 echo "cmd: $task_cmd"
 
