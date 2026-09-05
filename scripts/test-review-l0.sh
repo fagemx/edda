@@ -131,6 +131,16 @@ fi
 grep -Fq 'classes=' "$TMP/clean.out" || fail "clean fixture: no classifier line"
 grep -Fq '| R3 | code-risk | P0 | PASS' "$TMP/clean.out" \
   || fail "clean fixture: R3 row not PASS"
+# Table completeness. The suite asserted individual rows and never a total,
+# which is how the dropped-last-id defect shipped (GH-882 review round 1): a
+# missing row sets no FAIL, so only an explicit per-id check catches it. The
+# fixture's changed files route the `any`, code-plain and code-risk arms.
+for r in U1 U2 U3 U4 U5 U6 U7 C1 C2 C3 C4 C5 R1 R2 R3 R4 R5 WIRING; do
+  grep -Fq "| $r |" "$TMP/clean.out" \
+    || fail "clean fixture: no row for routed rule $r"
+done
+echo "clean fixture: every routed rule printed a row — OK"
+
 echo "clean fixture: all rows PASS/N.A./需升級, runner exit 0 — OK"
 
 # ---- 3. unmarked block: `UNMARKED <first line>`, exit 3 ---------------------

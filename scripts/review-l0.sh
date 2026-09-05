@@ -174,6 +174,11 @@ esac
 case "$CLASSES" in
   *code-risk*) ROUTED="$ROUTED R1 R2 R3 R4 R5" ;;
 esac
+# The membership test below is `*" $rid "*`, so the finished string needs a
+# delimiter on both ends. Without the trailing one the last id never matched
+# and its rule was dropped from the table with no FAIL and no message
+# (GH-882 review round 1: R5 for code-risk, C5 for code-plain).
+ROUTED="$ROUTED "
 
 # rule table: <id>|<routing class>|<severity> — severities per §5 headings
 RULE_TABLE='U1|any|P0
@@ -234,6 +239,19 @@ run_block() { # <rule> <class> <severity> <blocks-file line>
       fi
       ;;
   esac
+
+  # U2's P1 is the MISMATCH between a closing keyword and an undelivered
+  # doneWhen (REVIEW.md §5.0). The block prints the keyword lines, which are
+  # candidates the reviewer adjudicates against the issue - and this runner
+  # never reads the issue. Reporting them as FAIL marks every correctly formed
+  # PR failed (GH-882 review round 1), so U2 joins D2 as reviewer input.
+  if [ "$1" = "U2" ]; then
+    rc=0
+    OUT=$(sh "$TMP/block.sh" 2>&1) || rc=$?
+    if [ -n "$OUT" ]; then ev=$(printf '%s\n' "$OUT" | oneline); else ev='(no closing keyword)'; fi
+    print_row "$rule" "$2" "$3" 'N.A.(needs reviewer input)' "$ev"
+    return
+  fi
 
   rc=0
   OUT=$(sh "$TMP/block.sh" 2>&1) || rc=$?
