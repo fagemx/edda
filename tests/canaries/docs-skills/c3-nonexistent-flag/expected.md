@@ -1,3 +1,11 @@
+---
+id: c3-nonexistent-flag
+class: docs-skills
+severity: P1
+file: canaries-fixture/c3-nonexistent-flag/runbook.md
+match: '(prune-orphans|prune orphans).*(不存在|nonexistent|non-existent|no such|not exist|not listed|not found|not available|not supported|undefined|沒有|無此|不在)|(不存在|nonexistent|non-existent|no such|not exist|not listed|not found|not available|not supported|undefined|沒有|無此|不在).*(prune-orphans|prune orphans)'
+---
+
 # c3-nonexistent-flag
 
 - class: `docs-skills`（docs）

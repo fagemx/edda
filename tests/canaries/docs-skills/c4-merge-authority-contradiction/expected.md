@@ -1,3 +1,11 @@
+---
+id: c4-merge-authority-contradiction
+class: docs-skills
+severity: P0
+file: canaries-fixture/c4-merge-authority/review-closer-skill.md
+match: '(skip.{0,3}review|跳過審查|免審|bypass.{0,3}review|先合併|merge.{0,3}before.{0,3}review|合併後補|補審|merge.authority|合併權限|--delete-branch|LGTM.{0,40}(trigger|觸發|gate|閘))'
+---
+
 # c4-merge-authority-contradiction
 
 - class: `docs-skills`（skills）
