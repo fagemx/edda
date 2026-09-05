@@ -97,7 +97,7 @@ is what "additive" means for them).
 
 One JSON object with exactly these keys (emitted at
 `crates/edda-cli/src/cmd_dispatch.rs#pub fn to_json(&self) -> String {`; mirrored in the long help,
-`crates/edda-cli/src/main.rs:480-485#With --json, exactly one object is printed to stdout:`):
+`crates/edda-cli/src/main.rs:486-491#With --json, exactly one object is printed to stdout:`):
 
 | Key | Type | Notes |
 |---|---|---|
@@ -179,7 +179,7 @@ Golden fixtures: `crates/edda-mcp/src/lib.rs` →
 
 One JSON object with exactly these keys (emitted at
 `crates/edda-cli/src/cmd_status.rs:18-29#let payload = serde_json::json!({`; flag declared at
-`crates/edda-cli/src/main.rs:278-283#Status {`, dispatched at `crates/edda-cli/src/main.rs#Command::Status { json } =>`):
+`crates/edda-cli/src/main.rs:284-289#Status {`, dispatched at `crates/edda-cli/src/main.rs#Command::Status { json } =>`):
 
 | Key | Type | Notes |
 |---|---|---|

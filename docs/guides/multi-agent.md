@@ -223,6 +223,73 @@ The coordination layer runs entirely on local files:
 
 No central server, no network communication. Two Claude Code sessions on the same repo coordinate automatically.
 
+## Cross-machine decision mirror (GH-671)
+
+Everything above coordinates sessions on one machine. Decisions recorded in a
+ledger are machine-local by design (`#613` §2: `.edda/` is gitignored), so
+`edda ask` on machine B cannot see a ruling made on machine A. The binding
+ruling is:
+
+`ledger.cross-machine-projection=committed-mirror-stamped-at-wave-close-quote-never-paraphrase`
+
+The cross-machine projection of decisions is a **git-committed mirror**, not a
+network protocol:
+
+- **Write (source machine).** `scripts/fleet/ledger-sync.sh` runs
+  `edda export md --out docs/ledger` and commits only that directory
+  (path-limited commit — unrelated WIP is never swept). Trigger choice:
+  `fleet.ledger-sync-trigger=scheduled-on-4090` — Windows Task Scheduler runs
+  the script periodically on the 4090; it is behavior-tested with a stubbed
+  `edda` against throwaway repos (`scripts/fleet/test-ledger-sync.sh`), never
+  against the production ledger, and the script itself never registers a
+  production Scheduled Task.
+- **Read (target machine).** After pulling, `edda sync --from-mirror
+  docs/ledger` imports the mirror into the local ledger. Same rule as sqlite
+  sync (#394): same key with a different value imports **inactive** — merge,
+  never overwrite. A decision whose original event already exists locally is
+  skipped, so a machine importing its own mirror is a no-op. Ratified
+  decisions arrive ratified: the mirror's ratification is replayed as an
+  append-only `decision_ratify` event.
+- **Values are quoted, never paraphrased.** The mirror carries the verbatim
+  value and reason of every decision; the import must never mint a value from
+  an INDEX gloss (INDEX.md carries counts and freshness only). The
+  `fleet.lane-profile` acceptance is the worked example: the verbatim value
+  `agent-actor-is-the-profile` with its six-point reason must survive the
+  round trip — the design-doc gloss `actor-is-profile` must not win.
+- **Freshness (death visibility).** `INDEX.md` is stamped on every export
+  with `- **Exported at**:` (RFC 3339) and `- **Exporting machine**:`. If the
+  stamp is older than **24 hours** (default,
+  `edda-ledger::sync::DEFAULT_MIRROR_STALE_HOURS`) — or unreadable — `edda
+  sync --from-mirror` prints a visible `⚠ STALE MIRROR` line naming the
+  threshold, stamp and machine before importing. Unknown freshness is treated
+  as stale, never silently fresh.
+- **Doorbell boundary.** The mirror is truth-layer replication: it rides git
+  and delivers whenever the clone pulls, with no resident process. There is
+  deliberately **no cross-platform doorbell** in this issue — live push over
+  Tailscale (`edda node` / `edda inbox`) is #685, as is session identity
+  (`label@machine`, collision warning). The mirror carries the *decisions*;
+  it does not implement them.
+
+### Auditing a doneWhen that says 「決策 X 已在帳本」(`audit.ledger-donewhen`)
+
+This is the named home of the audit rule. When an issue's doneWhen claims a
+decision of the form 「決策 X 已在帳本」("decision X is in the ledger"), audit it
+by **citing the decision key and the machine**:
+
+1. Name the exact key (e.g. `fleet.merge-authority`) and the machine whose
+   ledger is claimed to hold it (e.g. `4090`).
+2. Check the committed mirror of that machine: look up the key under
+   `docs/ledger/decisions/<domain>.md` in a checkout that carries machine's
+   mirror push, or run `edda ask <key>` on the machine itself. The INDEX
+   stamp tells you how fresh the evidence is (see the 24h threshold above).
+3. **not-found is ledger locality, not an absent ruling.** If the key is not
+   in *your* ledger or mirror, that means the ruling lives on another
+   machine's ledger, or your mirror checkout is stale — re-export or
+   `edda sync --from-mirror docs/ledger` before concluding anything. It does
+   **not** mean the decision was never made. Only after the machine named in
+   the claim provably lacks the key (fresh mirror, key absent) is the claim
+   refuted.
+
 ## Typical workflow
 
 ```bash
@@ -245,3 +312,6 @@ Each agent will:
 - **Same machine only** — peer discovery uses local filesystem
 - **Bash bypass** — scope claims apply to Edit/Write tools; `sed` and `mv` in Bash are not checked
 - **Stale heartbeats** — heartbeats older than 120 seconds are considered inactive
+- **Decision mirrors** — the committed mirror under `docs/ledger/` is generated
+  by `edda export md` (see the section above); hand-edits to it are lost on the
+  next export, and the SQLite ledger stays the single source of truth

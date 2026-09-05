@@ -10,6 +10,12 @@
 //! - Freshness metadata: `INDEX.md` intentionally carries the run-time export
 //!   timestamp (`- **Exported at**: ...`) and exporting machine identity
 //!   (GH-806) for cross-machine provenance, and is updated on each export run.
+//! - Round trip (GH-671): each decision additionally carries Scope, Authority,
+//!   Reversibility and — when set — Review after and Village, because the
+//!   committed-mirror import in `edda-ledger::sync` needs those fields to
+//!   restore the row faithfully (original actor included). Values and reasons
+//!   are escaped (`\` and newline) so multi-line reasons survive the
+//!   single-line markdown encoding losslessly.
 //! - Layout:
 //!   <out>/INDEX.md             — table of contents with freshness metadata
 //!   <out>/decisions/<domain>.md — one file per domain (active decisions)
@@ -123,8 +129,8 @@ fn render_domain(
         let (safe_value, _) = redact(&row.value);
         let ts = row.ts.as_deref().unwrap_or("?");
         out.push_str(&format!("## `{}`\n\n", row.key));
-        out.push_str(&format!("- **Value**: `{}`\n", safe_value));
-        out.push_str(&format!("- **Reason**: {}\n", safe_reason));
+        out.push_str(&format!("- **Value**: `{}`\n", escape_field(&safe_value)));
+        out.push_str(&format!("- **Reason**: {}\n", escape_field(&safe_reason)));
         out.push_str(&format!("- **Branch/ts**: `{}` · {}\n", row.branch, ts));
         if let Some(info) = ratifications.get(&row.event_id) {
             out.push_str(&format!(
@@ -141,6 +147,16 @@ fn render_domain(
                 "- **Governance**: unratified ({})\n",
                 auth.to_lowercase()
             ));
+        }
+        // GH-671 round-trip fields: the mirror import restores these 1:1.
+        out.push_str(&format!("- **Scope**: {}\n", row.propagation));
+        out.push_str(&format!("- **Authority**: {}\n", row.authority));
+        out.push_str(&format!("- **Reversibility**: {}\n", row.reversibility));
+        if let Some(review) = &row.review_after {
+            out.push_str(&format!("- **Review after**: {review}\n"));
+        }
+        if let Some(village) = &row.village_id {
+            out.push_str(&format!("- **Village**: {village}\n"));
         }
         if !row.affected_paths.is_empty() {
             out.push_str(&format!(
@@ -232,6 +248,12 @@ fn render_index(
         ));
     }
     out
+}
+
+/// Escape a field for single-line markdown (GH-671 round trip): backslash
+/// first, then newline. Inverse lives in `edda-ledger::sync::unescape_field`.
+fn escape_field(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\n', "\\n")
 }
 
 fn resolve_machine(explicit: Option<&str>) -> String {
@@ -329,6 +351,50 @@ mod tests {
         assert!(md.contains("`src/db.rs`"));
         assert!(md.contains("`evt_db_engine`"));
         assert!(md.contains("- **Governance**: unratified (human)"));
+    }
+
+    /// GH-671: the mirror import restores Scope/Authority/Reversibility (and
+    /// Review after / Village when set) — so export must emit them.
+    #[test]
+    fn render_domain_emits_round_trip_fields_for_mirror_import() {
+        let mut row = dec(
+            "fleet.lane-profile",
+            "agent-actor-is-the-profile",
+            "fleet",
+            vec![],
+        );
+        row.propagation = "local".into();
+        row.authority = "agent".into();
+        row.reversibility = "hard".into();
+        row.review_after = Some("2027-01-01".into());
+        row.village_id = Some("village-alpha".into());
+        let md = render_domain("fleet", &[row], &std::collections::BTreeMap::new());
+        assert!(md.contains("- **Scope**: local"), "{md}");
+        assert!(md.contains("- **Authority**: agent"), "{md}");
+        assert!(md.contains("- **Reversibility**: hard"), "{md}");
+        assert!(md.contains("- **Review after**: 2027-01-01"), "{md}");
+        assert!(md.contains("- **Village**: village-alpha"), "{md}");
+    }
+
+    /// Multi-line reasons and backslashes must survive the single-line
+    /// markdown encoding losslessly (quote-never-paraphrase).
+    #[test]
+    fn render_domain_escapes_newlines_and_backslashes_in_value_and_reason() {
+        let mut row = dec("esc.k", "a\\b\nc", "esc", vec![]);
+        row.reason = "r1\nr2 \\ path".into();
+        let md = render_domain("esc", &[row], &std::collections::BTreeMap::new());
+        assert!(
+            md.contains("- **Value**: `a\\\\b\\nc`"),
+            "escaped value: {md}"
+        );
+        assert!(
+            md.contains("- **Reason**: r1\\nr2 \\\\ path"),
+            "escaped reason: {md}"
+        );
+        assert!(
+            !md.contains("a\nb"),
+            "raw newline must not leak into the file"
+        );
     }
 
     #[test]

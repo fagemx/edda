@@ -152,6 +152,12 @@ enum Command {
         /// Pull from a specific project name only
         #[arg(long)]
         from: Option<String>,
+        /// Import from a committed markdown mirror directory (GH-671), e.g.
+        /// `edda sync --from-mirror docs/ledger` after another machine ran
+        /// scripts/fleet/ledger-sync.sh. Relative paths resolve against the
+        /// workspace root.
+        #[arg(long = "from-mirror")]
+        from_mirror: Option<String>,
         /// Preview without writing
         #[arg(long)]
         dry_run: bool,
@@ -1153,7 +1159,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             session.as_deref(),
         ),
         Command::Group { cmd } => cmd_group::execute(cmd, &repo_root),
-        Command::Sync { from, dry_run } => cmd_sync::execute(&repo_root, from.as_deref(), dry_run),
+        Command::Sync {
+            from,
+            from_mirror,
+            dry_run,
+        } => cmd_sync::execute(&repo_root, from.as_deref(), from_mirror.as_deref(), dry_run),
         Command::Task { cmd } => cmd_task::execute(cmd, &repo_root),
         Command::Verdict { cmd } => cmd_verdict::run(cmd, &repo_root),
         Command::Reconcile { args } => cmd_reconcile::run(&repo_root, args),
