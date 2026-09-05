@@ -94,7 +94,7 @@ if [ "$dry" = 1 ]; then
     if [ "$shadow" = 1 ]; then
         echo "cmd: gh pr comment $pr --repo $repo --body-file <verdict>  # heading suffix ' (SHADOW)', body line 'shadow: true', no labels, no status"
     else
-        echo "cmd: EDDA_REVIEW_AGENT=pi sh scripts/review-pr.sh $pr $round  # full verdict flow"
+        echo "cmd: (after checking review-pr.sh has the pi arm) EDDA_REVIEW_AGENT=pi sh scripts/review-pr.sh $pr $round  # full verdict flow"
     fi
     echo "== dry-run: nothing launched or posted"
     exit 0
@@ -105,8 +105,20 @@ brief_path=$(printf '%s\n' "$brief_out" | sed -n 's/^brief=//p')
 [ -n "$brief_path" ] || die "could not read the brief path from review-pr.sh output"
 echo "brief: $brief_path"
 [ -f "$brief_path" ] || die "brief file missing: $brief_path"
+# review-pr.sh prints "spec=REVIEW.md@<sha> …" on the normal path; on a
+# pre-spec base it falls back to the checkout copy and prints no SHA — do the
+# same instead of dying.
 base_sha=$(printf '%s\n' "$brief_out" | sed -n 's/^spec=REVIEW.md@\([0-9a-f]*\).*/\1/p' | head -1)
-[ -n "$base_sha" ] || die "could not read the spec SHA from review-pr.sh output"
+
+# doneWhen item 7: neither script ever calls a Claude backend. The non-shadow
+# delegation is only legal once review-pr.sh grows the pi arm (GH-880, PR
+# #890); until that lands the arm is absent and the delegation would dispatch
+# the claude backend by construction.
+if [ "$shadow" != 1 ]; then
+    if ! grep -q 'EDDA_REVIEW_AGENT' "$self_dir/../review-pr.sh"; then
+        die "review-pr.sh has no pi arm yet (GH-880 unmerged) — its delegation would call the claude backend; use --shadow"
+    fi
+fi
 
 echo "== review worktree"
 if [ -d "$wt" ]; then
@@ -114,7 +126,23 @@ if [ -d "$wt" ]; then
 else
     git -C "$root" worktree add --detach "$wt" "$head_sha" >/dev/null
 fi
-git -C "$wt" show "$base_sha:REVIEW.md" >"$wt/.edda-review-spec.md"
+if [ -n "$base_sha" ]; then
+    git -C "$wt" show "$base_sha:REVIEW.md" >"$wt/.edda-review-spec.md"
+else
+    echo "spec SHA unavailable from review-pr.sh output — falling back to the checkout copy"
+    cp "$root/REVIEW.md" "$wt/.edda-review-spec.md"
+fi
+
+if [ "$shadow" != 1 ]; then
+    echo "== post (delegated verdict flow)"
+    head_now=$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)
+    if [ "$head_now" != "$head_sha" ]; then
+        die "head moved between brief and post ($head_sha -> $head_now) — posting nothing"
+    fi
+    echo "delegating the verdict flow to review-pr.sh (pi arm, labels and status included)"
+    EDDA_REVIEW_AGENT=pi sh "$self_dir/../review-pr.sh" "$pr" "$round"
+    exit 0
+fi
 
 echo "== engine (read-only glm, thinking max)"
 engine_cmd="edda dispatch --agent pi --model $model --tools read,grep,find,ls --thinking max --budget-usd 1 --timeout-sec 1500 --json --prompt-file $brief_path"
@@ -126,7 +154,6 @@ echo "$engine_out" >"$wt/next-review-engine.json"
 outcome=$(printf '%s' "$engine_out" | jq -r .outcome)
 [ "$outcome" = "done" ] || die "engine outcome is $outcome (see $wt/next-review-engine.json)"
 verdict=$(printf '%s' "$engine_out" | jq -r .result_text)
-model_observed=$(printf '%s' "$engine_out" | jq -r .model_observed)
 cost=$(printf '%s' "$engine_out" | jq -r '.cost_usd // "unmeasured"')
 elapsed_ms=$(printf '%s' "$engine_out" | jq -r '.elapsed_ms // empty')
 [ -n "$verdict" ] && [ "$verdict" != "null" ] || die "engine returned no verdict text"
@@ -138,18 +165,13 @@ if [ "$head_now" != "$head_sha" ]; then
 fi
 verdict_file="$wt/next-review-r$round-verdict.md"
 printf '%s\n' "$verdict" >"$verdict_file"
-if [ "$shadow" = 1 ]; then
-    # SHADOW shape (review.gh880-shadow): heading suffix, shadow: true, no
-    # labels, no Independent Review status, not a merge authority.
-    sed -i "1s/\$/ (SHADOW)/" "$verdict_file"
-    sed -i "1a shadow: true" "$verdict_file"
-    cost_line="$cost"
-    [ -n "$elapsed_ms" ] && cost_line="$cost / ${elapsed_ms}ms"
-    sed -i "s|^- cost: .*|- cost: $cost_line (dispatch --json)|" "$verdict_file"
-    gh pr comment "$pr" --repo "$repo" --body-file "$verdict_file" >/dev/null ||
-        die "gh pr comment failed"
-    echo "posted SHADOW round $round: $verdict_file"
-else
-    echo "delegating the verdict flow to review-pr.sh (labels and status included)"
-    EDDA_REVIEW_AGENT=pi sh "$self_dir/../review-pr.sh" "$pr" "$round"
-fi
+# SHADOW shape (review.gh880-shadow): heading suffix, shadow: true, no
+# labels, no Independent Review status, not a merge authority.
+sed -i "1s/\$/ (SHADOW)/" "$verdict_file"
+sed -i "1a shadow: true" "$verdict_file"
+cost_line="$cost"
+[ -n "$elapsed_ms" ] && cost_line="$cost / ${elapsed_ms}ms"
+sed -i "s|^- cost: .*|- cost: $cost_line (dispatch --json)|" "$verdict_file"
+gh pr comment "$pr" --repo "$repo" --body-file "$verdict_file" >/dev/null ||
+    die "gh pr comment failed"
+echo "posted SHADOW round $round: $verdict_file"

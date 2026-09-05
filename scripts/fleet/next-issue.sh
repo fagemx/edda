@@ -70,8 +70,9 @@ has_ready=$(printf '%s' "$json" | jq '[.labels[].name] | index("fleet:ready") !=
 [ "$has_ready" = "true" ] || die "issue $issue does not carry fleet:ready"
 title=$(printf '%s' "$json" | jq -r .title)
 [ -n "$title" ] && [ "$title" != "null" ] || die "issue $issue has no title"
-# interpolated into the double-quoted task-new line below
-title_safe=$(printf '%s' "$title" | tr -d '"`$')
+# interpolated into the double-quoted task-new line below; the backslash is
+# stripped too — a trailing \\ would escape the closing quote inside sh -c
+title_safe=$(printf '%s' "$title" | tr -d '"`$\\')
 
 echo "== branch and worktree"
 type=$(printf '%s' "$title" | sed -n 's/^\([a-z][a-z0-9]*\)([^)]*)[:].*/\1/p')
@@ -103,7 +104,7 @@ fi
 brief_path="${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}/brief-gh$issue.md"
 render_cmd="sh scripts/fleet/brief-from-issue.sh $issue --lane-name $lane --worktree $wt --branch $branch"
 
-echo "== brief"
+# (brief is rendered here; its output block is printed after the task line, in doneWhen order)
 brief_note=
 if [ -f "$brief_path" ] && ! grep -q '^<<AUTHORED STEPS>>$' "$brief_path"; then
     brief_note="keeping authored brief: $brief_path"
@@ -121,17 +122,19 @@ else
     fi
 fi
 [ -n "$scope_csv" ] || die "rendered brief has no scope paths line"
+# The facts line reads "scope paths: a, b, c ·" — strip the trailing dot, then
+# split on ", " into repeatable --path flags (every path, not just the first).
+scope_csv=${scope_csv% ·}
 task_paths=
-path_entry=$scope_csv
-while [ -n "$path_entry" ]; do
-    p=${path_entry%%, *}
-    case "$p" in
-        *,*) path_entry=${path_entry#*, } ;;
-        *) path_entry= ;;
+while [ -n "$scope_csv" ]; do
+    p=${scope_csv%%, *}
+    case "$scope_csv" in
+        *,\ *) scope_csv=${scope_csv#*, } ;;
+        *) scope_csv= ;;
     esac
-    task_paths="$task_paths --path $p"
+    task_paths="$task_paths --path \"$p\""
 done
-task_cmd="edda task new \"$title_safe\" --assignee ${machine#*/}$task_paths --brief $brief_path --key gh$issue"
+task_cmd="edda task new \"$title_safe\" --assignee \"${machine#*/}\"$task_paths --brief \"$brief_path\" --key gh$issue"
 
 if [ "$dry" = 0 ] && grep -q '^<<AUTHORED STEPS>>$' "$brief_path"; then
     die "brief still contains <<AUTHORED STEPS>> — fill the authored middle in $brief_path, then rerun"

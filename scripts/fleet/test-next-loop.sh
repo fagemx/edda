@@ -186,6 +186,10 @@ grep -q '^brief path: ' "$work/out/dry.txt" || fail "dry-run output misses the b
 grep -q 'fleet-claim-issue.sh 886 docs/worker-1' "$work/out/dry.txt" || fail "dry-run output misses the claim command"
 grep -q 'lane-launch.ps1 -Name edda-lane-gh886 ' "$work/out/dry.txt" || fail "dry-run output misses the launch command"
 grep -q 'nothing created, claimed, or launched' "$work/out/dry.txt" || fail "dry-run output misses the closing line"
+grep -qF -- '--path "scripts/fleet/next-issue.sh"' "$work/out/dry.txt" || fail "task-new line misses the first scope path"
+grep -qF -- '--path "docs/guides/pi-controller-runbook.md"' "$work/out/dry.txt" || fail "task-new line misses the second scope path"
+if grep -q 'task new .*·' "$work/out/dry.txt"; then fail "task-new line carries a stray middle-dot"
+fi
 # order: lint < branch < task new < brief < claim < launch
 lint_n=$(grep -n '^== ready-queue lint' "$work/out/dry.txt" | cut -d: -f1)
 branch_n=$(grep -n '^branch: ' "$work/out/dry.txt" | cut -d: -f1)
@@ -253,5 +257,16 @@ printf '%s\n' "$posted" | grep -q 'dispatch --json' || fail "shadow cost line no
 printf '%s\n' "$posted" | grep -q 'placeholder line' && fail "shadow cost line uncorrected"
 echo "ok 5 moved-head refusal"
 echo "ok 6 shadow post shape"
+
+# ── 7. non-shadow delegation refuses while review-pr.sh has no pi arm ─
+
+: >"$work/gh-posted"
+printf '%s' "$HEAD1" >"$work/gh-head"
+run_loop sh "$next_review" 886 >"$work/out/delegate.txt" 2>"$work/out/delegate.err" && \
+    fail "non-shadow delegation must exit 2 while the pi arm is absent" || rc=$?
+[ "${rc:-0}" -eq 2 ] || fail "non-shadow refusal exit ${rc:-0}, want 2: $(cat "$work/out/delegate.err")"
+grep -q 'no pi arm yet' "$work/out/delegate.err" || fail "non-shadow refusal must name the missing arm: $(cat "$work/out/delegate.err")"
+[ -s "$work/gh-posted" ] && fail "non-shadow refusal must post nothing"
+echo "ok 7 non-shadow delegation refusal"
 
 echo "PASS: scripts/fleet/test-next-loop.sh"

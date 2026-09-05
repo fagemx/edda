@@ -47,8 +47,8 @@ First run renders `~/.edda/fleet/brief-gh<issue>.md` and exits 2 with
 `brief still contains <<AUTHORED STEPS>> — fill the authored middle in
 <path>, then rerun`. Fill the marker with the issue's implementation steps
 (from the issue body's authored surface; never copy its doneWhen into the
-brief), then run the same command again: it keeps the authored brief, runs
-`edda task new`, `fleet-claim-issue.sh`, creates the worktree, and launches
+brief), then run the same command again: it keeps the authored brief, creates
+the worktree, runs `edda task new` and `fleet-claim-issue.sh`, and launches
 `edda-lane-gh<issue>` through `scripts/fleet/lane-launch.ps1`
 (`-TimeoutSec 5400 -BudgetUsd 3`). Expected at the end:
 `lane launched: edda-lane-gh<issue>`.
@@ -82,6 +82,10 @@ sh scripts/fleet/next-review.sh <pr> --shadow --dry-run
 
 Expected: the head SHA, the round count, the brief command, the engine
 command, the post command, `== dry-run: nothing launched or posted`, exit 0.
+
+Without `--shadow` the script refuses to delegate until `review-pr.sh`
+carries the pi arm (GH-880, PR #890): its delegation would otherwise call the
+Claude backend, which doneWhen item 7 forbids for both scripts.
 
 ```sh
 sh scripts/fleet/next-review.sh <pr> --shadow
