@@ -687,6 +687,7 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--agent AGENT` | Backend that runs the turn: `claude` (default), `pi`, or `codex` |
+| `--task-id ID` | Task-rail id whose brief the ACP prompt is derived from: an ACP dispatch takes prompt, scope, and resume id from the task instead of a prompt file. Only valid with an ACP agent (`acp:*`); paired with a non-ACP agent it is an error (`--task-id is only valid with an ACP agent`), not a silent no-op. Requires the task to be running |
 | `--prompt-file FILE` | Path to the file containing the prompt, read verbatim (required) |
 | `--session-id ID` | Session id passed to the backend verbatim; generated and printed when omitted so the caller can reuse it on the next call. pi and codex resume a prior conversation by repeating the id; claude refuses an id that already exists (`Session ID <id> is already in use`) and needs `--resume` |
 | `--resume` | Continue the conversation `--session-id` names instead of starting a new one (`claude --resume <id>`). claude only — pi and codex resume by repeating `--session-id` alone and refuse this flag. Requires `--session-id` |
