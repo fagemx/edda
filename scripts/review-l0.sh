@@ -27,10 +27,12 @@
 #            classifier's file list is the working tree against <base>
 #            (staged and unstaged work included) while the blocks diff the
 #            committed range — the pre-push shape of Example B step 20.
-#   [PR-number]  blocks referencing "$N" (U1, U2's first probe, U3, U6, C5,
-#            R3) run only when a PR number is passed; without one they report
-#            N.A.(needs PR number) instead of failing. Offline callers can
-#            fake the PR surface by putting a stub gh earlier in PATH —
+#   [PR-number]  blocks referencing "$N" (U2, U3, U6) run only when a PR
+#            number is passed; without one they report N.A.(needs PR number)
+#            instead of failing. U1, C5 and R3 enumerate the changed files
+#            from REVIEW_FILES (GH-922 d-004 option A), so the pre-push pass
+#            — no PR number — runs them too. Offline callers can still fake
+#            the PR surface by putting a stub gh earlier in PATH —
 #            scripts/test-review-l0.sh does exactly that.
 #   REVIEW_L0_SPEC  spec file to extract from (default REVIEW.md in the cwd —
 #            the checkout's own copy, so a lane self-checks the rules exactly
@@ -151,6 +153,13 @@ if [ "$ARG_SHA" = "HEAD" ]; then
 else
   git diff --name-only "${ARG_BASE}...${ARG_SHA}" > "$TMP/files" 2>/dev/null || exit 2
 fi
+# GH-922 (d-004 option A): the U1/C5/R3 blocks in REVIEW.md read their file
+# list from REVIEW_FILES when it is set and fall back to `gh pr diff "$N"
+# --name-only` otherwise. The runner always has the list it just computed, so
+# the pre-push pass (no PR number) can run those three rules; the gh command
+# stays once per rule, in REVIEW.md (review.spec-router-single-source).
+REVIEW_FILES="$TMP/files"
+export REVIEW_FILES
 
 CLASSES=$(sh "$TMP/classify.sh" < "$TMP/files") || {
   echo "review-l0.sh: the REVIEW.md classifier block failed" >&2
@@ -216,7 +225,13 @@ print_row() { # <rule> <class> <severity> <result> <evidence>
 }
 
 oneline() { # first line of stdin, pipes escaped for the table cell, capped
-  head -n 1 | sed 's/|/\\|/g' | cut -c1-160
+  # GH-922: `cut -c` is byte-based on this build; a long CJK evidence line
+  # would end in a partial UTF-8 sequence. The cap is a byte cap (LC_ALL=C)
+  # plus a back-off that strips a trailing partial multi-byte sequence, so
+  # the cell always decodes as valid UTF-8.
+  head -n 1 | sed 's/|/\\|/g' \
+    | LC_ALL=C cut -c1-160 \
+    | LC_ALL=C sed -E 's/[\xC0-\xFF][\x80-\xBF]*$//'
 }
 
 run_block() { # <rule> <class> <severity> <blocks-file line>
@@ -230,12 +245,18 @@ run_block() { # <rule> <class> <severity> <blocks-file line>
     return
   fi
   # Blocks referencing "$N" are PR-surface probes; without a number they
-  # cannot run and must say so rather than fail.
+  # cannot run and must say so rather than fail — unless the block reads its
+  # file list from REVIEW_FILES (GH-922 d-004 option A): there the "$N" lives
+  # only in the fallback branch, which REVIEW_FILES being set keeps unreached.
   case "$(cat "$TMP/block.sh")" in
     *'$N'*)
       if [ -z "$N" ]; then
-        print_row "$rule" "$2" "$3" 'N.A.(needs PR number)' '-'
-        return
+        if [ -n "${REVIEW_FILES:-}" ] && grep -q 'REVIEW_FILES' "$TMP/block.sh"; then
+          :
+        else
+          print_row "$rule" "$2" "$3" 'N.A.(needs PR number)' '-'
+          return
+        fi
       fi
       ;;
   esac

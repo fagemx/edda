@@ -277,7 +277,7 @@ lane brief allows. A file outside it is a lane-boundary violation.
 
 # review-spec:check U1
 ```sh
-gh pr diff "$N" --name-only
+if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi
 ```
 # review-spec:check-end
 
@@ -566,7 +566,8 @@ uncovered crate; never the whole workspace to reach one.
 
 # review-spec:check C5
 ```sh
-gh pr diff "$N" --name-only | grep '^crates/' | cut -d/ -f2 | sort -u \
+{ if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi; } \
+  | grep '^crates/' | cut -d/ -f2 | sort -u \
   | grep -Ev '^(edda-store|edda-ledger|edda-search-fts|edda-transcript|edda-bridge-claude|edda-conductor|edda-cli)$'
 ```
 # review-spec:check-end
@@ -610,7 +611,7 @@ git diff "origin/$BASE..$SHA" --unified=0 -- '*.sh' '*.bash' '*.ps1' '.github' \
 
 # review-spec:check R3
 ```sh
-for f in $(gh pr diff "$N" --name-only | grep -E '\.(sh|bash)$'); do
+for f in $(if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi | grep -E '\.(sh|bash)$'); do
   [ -f "$f" ] && { sh -n "$f"; echo "$f -> sh -n exit=$?"; }
 done
 ```
