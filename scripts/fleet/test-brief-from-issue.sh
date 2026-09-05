@@ -16,7 +16,7 @@ sh -n "$0" || {
 }
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/test-brief-from-issue.XXXXXX")
-trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work"' 0 HUP INT TERM
 export TMPDIR="$work"
 
 mkdir -p "$work/bin" "$work/out"
@@ -126,6 +126,12 @@ assert_skeleton() {
         || fail "missing pr-body path resolution step"
     grep -q 'write({"path":"<pr_body_path>"' "$out" \
         || fail "write step must target the retained git-dir path"
+    grep -qF -- '--paths "scripts/review-pr.sh"' "$out" \
+        || fail "claim step paths must be quoted"
+    grep -qF 'git ls-files -- "scripts/review-pr.sh"' "$out" \
+        || fail "ls-files step paths must be quoted"
+    grep -qF 'git add -- "scripts/review-pr.sh"' "$out" \
+        || fail "git add step paths must be quoted"
     if grep -qF '.git/gh880-pr-body.md' "$out"; then
         fail "hardcoded .git/ pr-body path still present (linked worktree .git is a file)"
     fi
@@ -223,5 +229,21 @@ fi
 grep -q 'git commit -m "fix: broke x and (rm -rf /) handling"' "$work/out/metachar.txt" \
     || fail "stripped title not in commit step: $(grep 'git commit -m' "$work/out/metachar.txt")"
 echo "ok 7 title metacharacters stripped"
+
+# 8. a crafted Predicted-surface token is rejected, not rendered (R5)
+cat >"$work/issue-crafted.json" <<'JSON'
+{"title":"crafted","labels":[],"body":"## Predicted surface\n\n`scripts/review-pr.sh`, `docs/a; rm -rf ~`.\n\n## doneWhen\n- item\n"}
+JSON
+rc=0
+TEST_UNAME=Linux GH_ISSUE_JSON="$work/issue-crafted.json" \
+    PATH="$work/bin:$PATH" \
+    sh "$script" 1 --lane-name n --worktree /tmp/wt --branch b \
+    >"$work/out/crafted.txt" 2>"$work/out/crafted.err" || rc=$?
+[ "$rc" -eq 2 ] || fail "crafted token exit $rc, want 2"
+grep -q 'rm -rf' "$work/out/crafted.err" \
+    || fail "crafted-token stderr must name the rejected token: $(cat "$work/out/crafted.err")"
+grep -q 'rm -rf' "$work/out/crafted.txt" \
+    && fail "crafted token leaked into the rendered brief"
+echo "ok 8 crafted scope token rejected"
 
 echo "PASS: scripts/fleet/test-brief-from-issue.sh"

@@ -123,6 +123,13 @@ printf '%s' "$section" | awk -v RS='`' '
 while IFS= read -r tok; do
     [ -n "$tok" ] || continue
     is_repo_path "$tok" || continue
+    # R5: these tokens reach the lane's shell inside rendered command lines
+    # (steps 7, 9 and 12), so only the plain repo-relative path shape is
+    # accepted — no metacharacters, no leading dash, never a bare slash.
+    case "$tok" in
+        *[!A-Za-z0-9._/-]*|-*|/|.|..|*/..*|../*)
+            die "Predicted-surface token '$tok' is not a plain repo-relative path" ;;
+    esac
     if grep -Fxq -- "$tok" "$tmp" 2>/dev/null; then
         continue
     fi
@@ -134,6 +141,7 @@ done <"$raw"
 paths_csv=
 paths_claim=
 paths_space=
+paths_quoted=
 npath=0
 while IFS= read -r p; do
     [ -n "$p" ] || continue
@@ -141,11 +149,13 @@ while IFS= read -r p; do
     if [ -z "$paths_csv" ]; then
         paths_csv=$p
         paths_space=$p
+        paths_quoted="\"$p\""
     else
         paths_csv="$paths_csv, $p"
         paths_space="$paths_space $p"
+        paths_quoted="$paths_quoted \"$p\""
     fi
-    paths_claim="$paths_claim --paths $p"
+    paths_claim="$paths_claim --paths \"$p\""
 done <"$tmp"
 
 sha=$(git -C "$root" rev-parse origin/main) || die "git rev-parse origin/main failed"
@@ -166,6 +176,7 @@ esac
 
 # Porcelain expected lines: one path per line, listed for the git-status finish step.
 status_lines=$(printf '%s\n' "$paths_space" | tr ' ' '\n' | sed '/^$/d')
+first_path=$(printf '%s' "$status_lines" | head -1)
 
 cat <<EOF
 role: worker · lane: ${lane} · task id: ${task} · issue: #${issue} ·
@@ -200,17 +211,17 @@ issues the next brief. Success advances to the next numbered step.
    output: successful claim for gh${issue}-worker and the scope paths, exit 0.
 8. gh issue view ${issue} --repo ${repo} --json body --jq .body
    output: the issue body, exit 0. Read doneWhen there; do not copy doneWhen into this brief.
-9. git ls-files -- ${paths_space}
+9. git ls-files -- ${paths_quoted}
    output: the tracked subset of the scope paths, one per line, exit 0. cat each printed path. Untracked scope paths are created in the authored steps; that is not a STOP.
 
 <<AUTHORED STEPS>>
 
 10. git status --porcelain=v1 --untracked-files=all
-    output: exactly the scope paths and no others, one porcelain line per path:
+    output: exactly one porcelain line per scope path and no other paths, each line being the two-character status, a space, then the path (for example \`?? ${first_path}\` for a new file or \` M ${first_path}\` for a modified one):
 ${status_lines}
 11. git diff --check
     output: empty stdout, exit 0.
-12. git add -- ${paths_space}
+12. git add -- ${paths_quoted}
     output: empty stdout, exit 0.
 13. git diff --cached --name-only
     output: exactly the scope paths, one path per line, and no others.
