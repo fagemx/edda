@@ -262,8 +262,13 @@ jobs:
           native_dir="edda-${tag}-x86_64-unknown-linux-gnu"
           tar -xzf "${native_dir}.tar.gz"
           actual_version="$(env -u GH_TOKEN -u GITHUB_TOKEN "./${native_dir}/edda" --version)"
-          if [ "$actual_version" != "edda ${tag#v}" ]; then
-            echo "::error::Native asset reports '$actual_version', expected 'edda ${tag#v}'"
+          # edda --version may carry a build identity suffix (GH-746), e.g.
+          # "edda 0.5.0 (e36a9ed55916 2026-09-04)"; tarball builds report
+          # "(unknown)". Compare the version core only.
+          core="${actual_version#edda }"
+          core="${core%% (*}"
+          if [ "$core" != "${tag#v}" ]; then
+            echo "::error::Native asset reports '$actual_version', expected 'edda ${tag#v}' (optionally with a build identity suffix)"
             exit 1
           fi
       - name: Publish release
