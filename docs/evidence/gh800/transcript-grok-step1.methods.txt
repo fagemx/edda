@@ -1,0 +1,11 @@
+2026-09-04T10:17:47.3468867Z out initialize
+2026-09-04T10:17:49.8668864Z in <- response id=1
+2026-09-04T10:17:49.9128614Z out session/new
+2026-09-04T10:17:49.9183410Z in _x.ai/mcp/servers_updated
+2026-09-04T10:17:50.2841039Z in _x.ai/models/update
+2026-09-04T10:17:50.3176645Z in _x.ai/models/update
+2026-09-04T10:17:50.3293270Z in _x.ai/settings/update
+2026-09-04T10:17:50.3346413Z in _x.ai/announcements/update
+2026-09-04T10:17:50.3390350Z in _x.ai/settings/update
+2026-09-04T10:17:50.3437384Z in _x.ai/announcements/update
+2026-09-04T10:17:51.8724697Z in _x.ai/announcements/update

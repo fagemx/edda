@@ -1,0 +1,3 @@
+# GH800 clippy -D warnings (worker-2 lane)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.23s
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.30s

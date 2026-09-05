@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod edda;
 pub mod event_log;
 pub mod gate;

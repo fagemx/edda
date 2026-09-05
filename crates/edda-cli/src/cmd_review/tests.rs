@@ -237,6 +237,27 @@ fn empty_diff_and_author_session_refuse_before_launch_or_event() {
         .is_empty());
 }
 
+#[test]
+fn review_refuses_acp_agents_without_an_enforced_tool_allowlist() {
+    for agent in [
+        AgentKind::AcpGrok,
+        AgentKind::AcpKilo,
+        AgentKind::AcpPi,
+        AgentKind::AcpClaude,
+    ] {
+        let args = ReviewArgs {
+            agent,
+            ..Default::default()
+        };
+        let error = validate(&args)
+            .err()
+            .unwrap_or_else(|| panic!("{agent:?} review must be refused"));
+        let text = error.to_string();
+        assert!(text.contains(agent.as_str()), "{text}");
+        assert!(text.contains("unrestricted reviewer"), "{text}");
+    }
+}
+
 #[tokio::test]
 async fn default_review_never_executes_declared_gate() {
     let (_temp, root, mut args) = fixture(false);

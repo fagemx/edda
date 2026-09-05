@@ -16,7 +16,7 @@ use crate::agent_kind::{
     build_launcher, validate_dispatch_options, AgentKind, DispatchOptions, LauncherOptions,
 };
 use crate::cmd_dispatch::{build_phase, CapabilityOptions};
-use anyhow::Result;
+use anyhow::{bail, Result};
 pub use args::ReviewArgs;
 use edda_conductor::agent::launcher::{AgentLauncher, PhaseResult};
 use edda_core::{
@@ -227,10 +227,20 @@ fn tools(agent: AgentKind) -> Option<Vec<String>> {
         AgentKind::Pi => Some(["read", "grep", "find", "ls"].map(str::to_owned).into()),
         AgentKind::Claude => Some(["Read", "Grep", "Glob"].map(str::to_owned).into()),
         AgentKind::Codex => None,
+        AgentKind::AcpGrok | AgentKind::AcpKilo | AgentKind::AcpPi | AgentKind::AcpClaude => {
+            unreachable!("ACP agents are refused by validate() before tool selection")
+        }
     }
 }
 
 fn validate(args: &ReviewArgs) -> Result<()> {
+    if args.agent.is_acp() {
+        bail!(
+            "agent \"{}\" does not support review dispatch: no enforced tool allowlist \
+             exists over ACP and edda review never dispatches an unrestricted reviewer",
+            args.agent.as_str()
+        );
+    }
     let allow = tools(args.agent);
     validate_dispatch_options(
         args.agent,
