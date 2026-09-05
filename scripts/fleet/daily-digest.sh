@@ -139,9 +139,14 @@ review_total=$(sed -n 's/.*review cost \$\([0-9.]*\)$/\1/p' "$merged_body" \
 # --- 4. 擋住什麼 -----------------------------------------------------------------
 blocked_body="$tmp/blocked-body.md"
 : >"$blocked_body"
+# The loop walks EVERY open PR: readiness is the verdict-drift state (GH-914),
+# not mergeStateStatus — a stacked PR whose base is a feature branch reports
+# CLEAN with zero verdicts and must still appear. BLOCKED/DIRTY PRs keep the
+# status-reasons treatment below; every other state is reachable only through
+# its drift reason.
 open_rows=$(gh pr list --repo "$EDDA_REPO" --state open --limit 100 \
     --json number,title,mergeStateStatus,headRefOid \
-    --jq '.[] | select(.mergeStateStatus == "BLOCKED" or .mergeStateStatus == "DIRTY") | [.number, .title, .mergeStateStatus, .headRefOid] | @tsv' \
+    --jq '.[] | [.number, .title, .mergeStateStatus, .headRefOid] | @tsv' \
 ) || { printf '%s: gh pr list (open) failed\n' "$prog" >&2; exit 1; }
 
 # Readiness is the verdict-drift state (GH-914), not mergeStateStatus: the
