@@ -1,25 +1,79 @@
 # GH800 ACP module handoff
 
-Basis: `467e8be02eb98fb47d0eca82e9dd400d91d67e6a`. Candidate commit: `d94f8ad`
-+ this working tree (target table, drill driver, usage meta path). No CLI
-wiring — see Remaining gates.
+Basis: `2a098d8` (reworded history of the `d94f8ad`/`688b2ef` candidates). This
+turn (infra-acp-glm, Task #69) completed the CLI integration on top of the
+bounded runner and added offline deterministic fake-ACP evidence. Real
+provider drills remain open and are listed honestly at the end.
 
 ## Implemented (runner crate, no CLI dependency)
 
 - `runner::acp::AcpRunner` performs the typed ACP V1 initialize, new/load,
   prompt, streamed-update, permission, cancellation, and bounded drain flow.
+  The per-turn protocol flow lives in `AcpRunner::drive`, split from the
+  child-spawning `run` so offline tests exercise the identical flow.
 - `runner::acp::AcpPermissionPolicy` permits only `allow_once` inside
   canonical task roots; it rejects traversal, symlink escapes, peer-owned
   paths, unlocated calls, persistent grants, and all verifier requests. ACP
   client filesystem and terminal capabilities remain structurally disabled.
 - `LedgerAcpAudit` appends `task.session` immediately after `session/new` and
-  durable, scrubbed lifecycle/permission audit notes.
+  durable, scrubbed lifecycle/permission audit notes plus a numeric usage
+  receipt (`measured: true|false`, never a zero-cost guess).
 - `runner::acp::effective_usage` — measured usage: typed `usage` field first,
   then `_meta.usage` (Grok Build's camelCase carrier); malformed meta never
-  invents a measurement. Absent on the wire ⇒ `None` ⇒ `measured: false`.
+  invents a measurement.
 - `agent::acp_targets::AcpTarget` — per-target spawn table (grok/kilo/pi/
   claude) with verifier read-only flags where the target documents them
   (grok `--sandbox read-only` only; no invented flags elsewhere).
+- F7 nested-session guard (TASK_RAIL_V1 §4.3): `spawn_agent` strips
+  `CLAUDECODE`, `CLAUDE_CODE`, `CLAUDE_CODE_ENTRYPOINT`, and
+  `CLAUDE_CODE_SSE_PORT` from the child environment.
+
+## CLI integration (Task #69, this working tree)
+
+`edda dispatch --agent acp:<grok|kilo|pi|claude> --task-id N` routes to
+`cmd_dispatch_acp` after the normal dispatch F1 cwd/prompt preflight and
+GitHub claim guard. ACP rejects command-line prompt/session and unsupported
+legacy capability options; it derives the bounded #793-style brief/task-facts
+prompt, concrete permission roots, `edda mcp serve` stdio endpoint, target,
+and prior `task.session` id from the task view. It reuses GH-605's writer
+claim and releases that claim before emitting the result; `--detach` is
+explicitly refused rather than bypassing its detached-supervisor protocol.
+
+- Task-rail routing: `task.created` `agent_kind` (`acp:<target>`) must match
+  the selected target or dispatch refuses; `edda task new --agent-kind
+  acp:<target>` creates such tasks.
+- First prompt: task title, bounded brief content, scope paths, upstream
+  dependency receipts, worktree path, and the `edda task done` completion
+  instruction — the ledger is the communication (TASK_RAIL_V1 §5).
+- Continuity: turn 1 persists `task.session` before any prompt side effect;
+  every later controller turn loads the same session via `session/load`
+  (`resume_session_id` from the projected task view) — never a silent new
+  session.
+- Read-only policy: in-band `AcpPermissionPolicy` for every turn, plus
+  documented spawn-level read-only flags for verifier lanes where a target
+  ships them.
+- Usage: the JSON result carries `measured` and the numeric usage, and the
+  ledger receives the same metadata-only receipt.
+- Failure cleanup: the runner always drains (and kills) the child before an
+  error reaches the caller; the writer claim is released on success and
+  failure alike; a failed `session/new` persists no session and no usage.
+
+## Offline deterministic fake-ACP evidence (Task #69, this workstation)
+
+All evidence is offline: an in-process fake agent speaks the same typed ACP
+protocol over duplex streams, driven through `AcpRunner::drive` — no
+provider binary, no network, no account. Logs:
+`docs/evidence/gh800/glm-fake-acp-tests.log` and
+`docs/evidence/gh800/glm-cli-acp-tests.log`.
+
+| Evidence | Test |
+|---|---|
+| Two-step: initialize → session/new → prompt, agent-reported `_meta.usage` | `fake_agent_two_step_uses_measured_usage_and_resumes_one_session` |
+| Same-session follow-up: `session/load` resumes the persisted id, usage absent ⇒ `measured: false` | same test |
+| Wire-level denial + allowance: server→client permission requests answered through the real request path (in-scope ⇒ `allow_once`, peer-owned ⇒ deny) | `fake_agent_permission_requests_follow_the_policy_on_the_wire` |
+| Kill mid-turn: prompt entered, cancelled, error `session/prompt cancelled` audited; restart loads the same session | `fake_agent_cancelled_turn_restarts_into_the_same_session` |
+| Failure cleanup: failed `session/new` persists no session event and no usage | `fake_agent_setup_failure_persists_no_session_and_no_usage` |
+| F7 strip measured on a real spawned child (`cmd /C set` / `/usr/bin/env` dump) | `spawned_child_env_strips_nested_session_markers` |
 
 ## Windows probe/drill evidence (2026-09-04, this workstation)
 
@@ -44,60 +98,45 @@ configuration in `_x.ai/mcp/servers_updated`. A prior raw local transcript was
 scrubbed. The driver now persists no arbitrary JSON or message text at all;
 synthetic canaries cover nested unknown fields, headers/userinfo, arrays, and
 malformed lines. The **runner** persists only audit kind strings, never
-notification payloads — integration must keep that property. Runtime-profile
-isolation is an integration concern, but no concrete authorized implementation
-brief exists, so this candidate does not broaden into it.
+notification payloads. Runtime-profile isolation is an integration concern,
+but no concrete authorized implementation brief exists, so this candidate does
+not broaden into it.
 
-Runner integration consequence: `session/new` on grok can exceed 3 minutes;
-per-method budgets must exceed the driver's 180 s first-attempt cap, and
-session setup must not share the prompt-timeout constant (`REQUEST_TIMEOUT`
-30 s in the candidate covers prompt only; initialize/new/load are currently
-unbounded — add bounded large budgets before CLI wiring).
+## Gates (Task #69, worker-2 lane, this working tree)
 
-## Gates (Terra, at `d94f8ad`)
+- RAN `cargo fmt --all --check`: clean.
+- RAN `cargo clippy -p edda-conductor --all-targets -- -D warnings`: clean.
+- RAN `cargo clippy -p edda --all-targets -- -D warnings`: clean.
+- RAN `cargo test -p edda-conductor acp`: 17 passed (5 new offline evidence
+  tests + policy/usage/timeout/connection tests).
+- RAN `cargo test -p edda acp` / `agent_kind` / `cmd_dispatch::tests`:
+  7 + 6 + 47 passed.
+- RAN `scripts/lint-file-length.sh --tree`: clean (ceilings ratcheted for
+  `runner/acp.rs` 1503, `cmd_dispatch.rs` 2106, `main.rs` 1463).
+- RAN `git diff --check`: clean.
+- Prior Terra gates at `d94f8ad` (focused `acp::tests`, conductor clippy,
+  `scripts/test-drill-acp-800.ps1` canaries) are recorded in
+  `docs/evidence/gh800/terra-l0-logs/`.
 
-- RAN `cargo test -p edda-conductor acp::tests --lib`: 4 passed (fake typed
-  ACP agent covers initialize/new/prompt/load).
-- RAN `cargo clippy -p edda-conductor --all-targets -- -D warnings`: passed.
-- RAN `cargo test -p edda-conductor`: 379 tests exercised; host stream
-  truncated before the final line, no failing test shown.
-- RAN `cargo fmt --all --check`, `scripts/lint-file-length.sh --tree`,
-  `git diff --check`: passed.
+## Remaining gaps (honest, blocking `Closes #800`)
 
-## Remaining gates for this working tree (lane release needed)
-
-- Terra L0 is recorded in `docs/evidence/gh800/terra-l0-logs/` using the
-  released verifier lane with `CARGO_INCREMENTAL=0`. Initial focused ACP test
-  and Clippy logs record the real `effective_usage` borrow failure; after the
-  focused fix, all final logs exit 0: `cargo test -p edda-conductor acp`,
-  `cargo test -p edda-conductor acp_targets`, conductor Clippy
-  warnings-denied, fmt, and file-length. No full conductor/workspace suite was
-  rerun.
-- `scripts/test-drill-acp-800.ps1` safe-trace canaries and `git diff --check`
-  also exit 0; no live target probe was rerun.
-- Real 2-step drills (needs safe temp worktree + known provider auth):
-  grok with ≥400 s session/new budget; kilo/pi/claude only after a real
-  entry point exists (package-local attempt is an installation trial — out of
-  bounds this turn). Unsupported claims must carry the exact failing method.
-- F7 nested-session env strip drill; kill-mid-turn → restart → `session/load`
-  resume drill.
-
-## Controller integration (not authorized yet)
-
-CLI cmd_dispatch/agent_kind wiring waits on the #782/#605 owner's frozen-SHA
-grant. Integration must construct `AcpTaskRequest` from the task view (task
-id, worktree, rendered #793 brief/facts prompt, live peer roots, `edda-mcp`
-stdio endpoint, `resume_session_id` from `task.session`), select targets via
-`agent::acp_targets::AcpTarget`, and map `AcpTurnResult::usage` into receipt
-cost fields with explicit `measured: true|false`. Old dispatch backends are
-untouched. No `Closes #800` until drill acceptance.
+- No real provider two-step drill has passed. grok `session/new` exceeded the
+  400 s budget; kilo and pi have no entry point on PATH; claude's npx adapter
+  produced no output in prior probes. None may be claimed as supported.
+- F7 stripping is measured on a spawned child, not yet inside a real nested
+  Claude Code session on a live provider turn.
+- The kill→restart→`session/load` drill ran against the deterministic fake;
+  the same sequence has not been observed on a real agent.
+- `edda dispatch --agent acp:<target>` against a live provider, the detached
+  supervisor protocol for ACP, and reconciler auto-respawn remain unwired.
 
 ## Coordination
 
-- Scope: `runner/acp.rs`, `agent/acp_targets.rs`, `agent/mod.rs`,
-  `scripts/drill-acp-800.ps1`, `docs/evidence/gh800/*`, `ACP_HANDOFF.md`.
-  Off-limits peers respected: cmd_dispatch.rs, claim_guard.rs, lane scripts
-  (CLI/lifecycle), sdk/* (SDK), adapter-conformance surfaces.
-- Orphan cleanup receipt 10:37Z: stopped PID 33756 (own stdin-script probe
-  python, hung on broken pipe) and PID 42360 (its `grok agent stdio` child).
-  No generic node/grok processes touched.
+- Task #69 grant: `runner/acp.rs`, `agent/acp_targets.rs`, `agent/mod.rs`,
+  `agent_kind.rs`, `cmd_dispatch.rs`, `cmd_dispatch_acp.rs`, `main.rs`,
+  `ACP_HANDOFF.md`, `scripts/drill-acp-800.ps1`, `docs/evidence/gh800/*` plus
+  the file-length ratchet data file. GH-605 shared lifecycle files
+  (`dispatch_claim.rs`, lane scripts) were consumed, not modified.
+- Orphan cleanup receipt 10:37Z (prior session): stopped PID 33756 and PID
+  42360 (own stdin-script probe + its grok child). No generic node/grok
+  processes touched.

@@ -15,6 +15,7 @@ mod cmd_config;
 mod cmd_context;
 mod cmd_controls;
 mod cmd_dispatch;
+mod cmd_dispatch_acp;
 mod cmd_draft;
 mod cmd_export;
 mod cmd_gc;

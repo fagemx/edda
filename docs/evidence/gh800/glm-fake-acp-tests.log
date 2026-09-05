@@ -1,0 +1,27 @@
+# GH800 offline fake-ACP focused tests (worker-2 lane, 2026-09-05T04:15:54Z)
+runner: pi openrouter/z-ai/glm-5.3-flash
+
+   Compiling edda-conductor v0.4.0 (C:\ai_agent\edda-wt-infra-acp\crates\edda-conductor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.65s
+     Running unittests src\lib.rs (C:/Users/fagem/AppData/Local/fleet-workstation/lanes/worker-2\debug\deps\edda_conductor-3f21d6ad58300ab9.exe)
+
+running 17 tests
+test agent::acp_targets::tests::parses_agent_kind_suffixes_and_prefixes ... ok
+test agent::acp_targets::tests::grok_worker_endpoint_is_bare_subcommand ... ok
+test agent::acp_targets::tests::grok_verifier_endpoint_prepends_read_only_sandbox ... ok
+test runner::acp::tests::absent_usage_is_none_not_zero ... ok
+test agent::acp_targets::tests::keys_round_trip ... ok
+test runner::acp::tests::meta_usage_is_parsed_when_typed_field_is_absent ... ok
+test agent::acp_targets::tests::targets_without_documented_readonly_flags_get_none ... ok
+test runner::acp::tests::unlocated_request_fails_closed ... ok
+test runner::acp::tests::setup_timeout_and_cancellation_are_bounded_and_audited ... ok
+test runner::acp::tests::task_scope_allows_once_but_never_always ... ok
+test runner::acp::tests::policy_denies_traversal_peer_scope_and_verifier ... ok
+test runner::acp::tests::fake_agent_setup_failure_persists_no_session_and_no_usage ... ok
+test runner::acp::tests::fake_agent_exercises_initialize_new_prompt_and_load ... ok
+test runner::acp::tests::fake_agent_cancelled_turn_restarts_into_the_same_session ... ok
+test runner::acp::tests::fake_agent_two_step_uses_measured_usage_and_resumes_one_session ... ok
+test runner::acp::tests::fake_agent_permission_requests_follow_the_policy_on_the_wire ... ok
+test runner::acp::tests::spawned_child_env_strips_nested_session_markers ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 384 filtered out; finished in 1.14s
