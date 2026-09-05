@@ -266,7 +266,7 @@ DRY_TARGET_STAT=$(printf '%s' "$DRY_TARGET_STAT" | git apply --stat - 2>/dev/nul
 # Dry run: describe everything, launch nothing (not even a review run).
 # ---------------------------------------------------------------------------
 if [ "$DRY_RUN" -eq 1 ]; then
-  echo "clone: ${TMPDIR:-/tmp}/edda-calib.XXXXXX/repo  (branch calib-canary-v0, from origin/main)"
+  echo 'clone: ${TMPDIR:-/tmp}/edda-calib.XXXXXX/repo  (branch calib-canary-v0, from origin/main)'
   echo
   echo "commit 1: \"$FIXTURE_COMMIT_MSG\""
   for cdir in $CANARIES; do

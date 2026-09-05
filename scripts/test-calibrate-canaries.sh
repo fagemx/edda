@@ -151,7 +151,15 @@ case $out in
     good 'dry-run prints the exact pi launch line per run' ;;
   *) bad 'dry-run does not print the exact pi launch line per run' ;;
 esac
-if [ -z "$(find "$TEST_TMPDIR" -maxdepth 1 -name 'edda-calib-*' -print -quit)" ]; then
+# The pattern here is deliberately BROADER than the positive assertion at
+# the dry-run clone-path check above, and the asymmetry is the point: a
+# positive assertion should be as tight as possible so a wrong value fails
+# it, while a negative assertion should be as broad as possible so a
+# leftover in ANY shape is still found. A negative assertion whose pattern
+# has gone stale does not go red — it goes green, silently, which is what
+# happened when the clone path moved from edda-calib-$$ to edda-calib.XXXXXX
+# and these two checks stopped matching anything at all.
+if [ -z "$(find "$TEST_TMPDIR" -maxdepth 1 -name 'edda-calib*' -print -quit)" ]; then
   good 'dry-run creates no clone'
 else
   bad 'dry-run created a clone'
@@ -207,7 +215,8 @@ scenario() { # <name> <transcript-file> <expected-substring> <want-rc>
 $(printf '%s\n' "$out" | grep '^| c')"
     ;;
   esac
-  if [ -z "$(find "$TEST_TMPDIR" -maxdepth 1 -name 'edda-calib-*' -print -quit)" ]; then
+  # Broad by design — see the note on the dry-run clone check above.
+  if [ -z "$(find "$TEST_TMPDIR" -maxdepth 1 -name 'edda-calib*' -print -quit)" ]; then
     good "$name clone removed"
   else
     bad "$name left a clone behind"

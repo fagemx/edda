@@ -75,7 +75,8 @@ finding 是什麼（`expected.md`）。引擎定期對金絲雀集跑審查 → 
 
 ```sh
 WT=<this worktree>
-CLONE="$TMPDIR/edda-calib-$$"
+CALIB_TMP=$(mktemp -d "${TMPDIR:-/tmp}/edda-calib.XXXXXX")
+CLONE="$CALIB_TMP/repo"
 git clone "$WT" "$CLONE" && cd "$CLONE"
 git checkout -b calib-canary-v0 origin/main
 
