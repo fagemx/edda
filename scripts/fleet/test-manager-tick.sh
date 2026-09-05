@@ -267,6 +267,15 @@ tail -1 "$RULES" | grep -q 'nightly lane-warm scheduling' \
 [ -z "$(git -C "$root" status --porcelain docs/fleet/rules.md)" ] \
     || fail 'case 8: the repository rules.md must not be touched by a fixture run'
 
+# doneWhen 無規則 is two halves — 「追加一條並以留言附 patch」. The append is
+# asserted above; this asserts the patch comment, which is the half that
+# survives the lane worktree. It is posted even under --no-board, like the
+# other alarms: --no-board silences the status line, not the carriers.
+grep -q 'manager: R8 rule appended by' "$BOARD/613.body"     || fail "case 8: R8 patch comment missing from the board: $(cat "$BOARD/613.body")"
+grep -q '^+.*nightly lane-warm scheduling' "$BOARD/613.body"     || fail 'case 8: R8 patch comment carries no + line for the appended rule'
+grep -q -- '--- a/docs/fleet/rules.md' "$BOARD/613.body"     || fail 'case 8: R8 patch comment is not a unified diff (no --- header)'
+grep -q '^@@ -[0-9]*,3 +[0-9]*,4 @@' "$BOARD/613.body"     || fail 'case 8: R8 patch hunk header is missing or has no context lines'
+
 run_tick --no-board
 [ "$tick_rc" = 0 ] || fail "case 8: tick 2 exited $tick_rc: $(cat "$tmp/tick.err")"
 [ "$(count_in 'nightly lane-warm scheduling' "$RULES")" = "1" ] \

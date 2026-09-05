@@ -267,9 +267,30 @@ r8_pass() {
         fi
         # Append-only: the 管理者自訂 section is the last section of rules.md,
         # so an end-of-file append lands inside it.
-        printf -- '- %s %s（依 R8 由 %s 追加；案例：看板 #%s 留言「manager: no rule for %s」；理由：現行規則未涵蓋）\n' \
-            "$TODAY" "$desc" "$IDENT" "$EDDA_BOARD_ISSUE" "$desc" >>"$RULES"
+        # doneWhen 無規則 is two halves: 「追加一條並以留言附 patch」. The
+        # append alone lives in this lane's working tree — uncommitted,
+        # invisible to the other machine, discarded by any worktree reset.
+        # The comment below is the half that survives, and it is the form
+        # the operator applies.
+        r8_ctx_n=$(wc -l <"$RULES" | tr -d " ")
+        r8_ctx=$(tail -n 3 "$RULES")
+        r8_line=$(printf -- '- %s %s（依 R8 由 %s 追加；案例：看板 #%s 留言「manager: no rule for %s」；理由：現行規則未涵蓋）' \
+            "$TODAY" "$desc" "$IDENT" "$EDDA_BOARD_ISSUE" "$desc")
+        printf '%s\n' "$r8_line" >>"$RULES"
         printf '%s: R8 rule appended to %s: %s\n' "$prog" "$RULES" "$desc" >&2
+        {
+            printf 'manager: R8 rule appended by %s\n\n' "$IDENT"
+            printf 'Case: board #%s comment 「manager: no rule for %s」; applies to docs/fleet/rules.md, section 管理者自訂 (append-only, end of file).\n\n' \
+                "$EDDA_BOARD_ISSUE" "$desc"
+            printf '```diff\n'
+            printf -- '--- a/docs/fleet/rules.md\n+++ b/docs/fleet/rules.md\n'
+            printf -- '@@ -%s,3 +%s,4 @@\n' "$((r8_ctx_n - 2))" "$((r8_ctx_n - 2))"
+            printf '%s\n' "$r8_ctx" | sed "s/^/ /"
+            printf '+%s\n' "$r8_line"
+            printf '```\n'
+        } >"$STATE/r8-patch.md"
+        gh issue comment "$EDDA_BOARD_ISSUE" --repo "$EDDA_REPO" \
+            --body-file "$STATE/r8-patch.md" >/dev/null 2>&1 || :
     done <<EOF
 $(grep '^manager: no rule for ' "$BOARD_BODY" 2>/dev/null | sed 's/^manager: no rule for //' || :)
 EOF
