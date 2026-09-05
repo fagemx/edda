@@ -7,8 +7,11 @@
 REVIEW_TOOLS='Read,Grep,Glob,Bash'
 REVIEW_DENIED='Edit,Write,NotebookEdit,mcp__*'
 REVIEW_PERMISSION_MODE='plan'
+# pi gets an allowlist, not an exclude list: pi on Windows exposes a separate
+# powershell tool an exclude list would miss (review.execution-policy).
+PI_REVIEW_TOOLS='read,grep,find,ls'
 
-review_capabilities() { # edda-dispatch | claude-stdin; never starts a turn
+review_capabilities() { # edda-dispatch | claude-stdin | pi-dispatch; never starts a turn
   case "$1" in
     edda-dispatch)
       review_help=$(edda dispatch --help 2>&1) || review_help=''
@@ -16,6 +19,10 @@ review_capabilities() { # edda-dispatch | claude-stdin; never starts a turn
       ;;
     claude-stdin)
       review_required=''
+      ;;
+    pi-dispatch)
+      review_help=$(edda dispatch --help 2>&1) || review_help=''
+      review_required='--model --tools'
       ;;
     *) echo 'review capability check: unknown transport' >&2; return 2 ;;
   esac
@@ -28,6 +35,18 @@ review_capabilities() { # edda-dispatch | claude-stdin; never starts a turn
       return 2
     fi
   done
+  if [ "$1" = pi-dispatch ]; then
+    # pi arm: verify the pi binary itself can take the launch shape
+    # (--tools allowlist, per-PR --session-id, pinned --model).
+    review_help=$(pi --help 2>&1) || review_help=''
+    for review_flag in --tools --session-id --model; do
+      if ! printf '%s\n' "$review_help" | grep -qE -- "(^|[[:space:],])$review_flag([[:space:],=]|$)"; then
+        echo "review capability check: pi lacks $review_flag; refusing reviewer launch (upgrade pi)" >&2
+        return 2
+      fi
+    done
+    return 0
+  fi
   # Dispatch delegates to this same backend, so verify BOTH binaries.
   review_help=$(claude --help 2>&1) || review_help=''
   for review_flag in --tools --disallowedTools --permission-mode; do

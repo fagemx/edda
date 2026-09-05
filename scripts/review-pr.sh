@@ -41,6 +41,11 @@
 #   EDDA_FLEET_SCRATCH     state/log dir           (default $HOME/.edda/fleet)
 #   EDDA_REVIEW_MODEL      review model            (default claude-opus-5; passed
 #                                                  to `edda dispatch --model`)
+#   EDDA_REVIEW_AGENT      review backend          (default claude; pi = edda
+#                                                  dispatch --agent pi with the
+#                                                  read-only allowlist
+#                                                  read,grep,find,ls; Anthropic
+#                                                  models refused on pi)
 #   EDDA_REVIEW_SPEC       explicit REVIEW.md path (override; default: read
 #                                                  REVIEW.md at the PR base SHA)
 #
@@ -71,6 +76,27 @@ usage() {
 REPO=${EDDA_REPO:-fagemx/edda}
 MODEL=${EDDA_REVIEW_MODEL:-claude-opus-5}
 MODEL_SHORT=${MODEL##*/}
+# Review backend (GH-880): claude (default) or pi. Decision
+# fleet.claude-subscription-transport: an Anthropic model may only run through
+# Claude Code — pi routes through openrouter, so an Anthropic model id on the
+# pi arm is refused fail-closed here, before any directory is created or file
+# written (so --dry-run refuses too).
+AGENT=${EDDA_REVIEW_AGENT:-claude}
+case "$AGENT" in
+  claude) : ;;
+  pi)
+    case "$MODEL" in
+      anthropic/*|claude-*|*/claude-*)
+        echo "fleet.claude-subscription-transport: refusing EDDA_REVIEW_AGENT=pi with model $MODEL — an Anthropic model may only run through Claude Code" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    echo "review-pr.sh: unknown EDDA_REVIEW_AGENT value '$AGENT' (expected claude or pi)" >&2
+    exit 2
+    ;;
+esac
 SCRATCH=${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}
 
 # The spec is read out of git, not off the working tree. Resolve the checkout
@@ -587,6 +613,9 @@ echo "spec=$SPEC_SOURCE ($SPEC_VERSION)"
 echo "base=$BASE_SHA"
 echo "session=$SID"
 echo "session_mode=$SESSION_MODE"
+if [ "$AGENT" = pi ]; then
+  echo "launch: edda dispatch --agent pi --model $MODEL --tools $PI_REVIEW_TOOLS --session-id $SID (session_mode=$SESSION_MODE)"
+fi
 
 # ---- what would be launched: lane script + exact -File argument -------------
 # Both launchers are GENERATED BEFORE the dry-run exit so the whole transport
@@ -721,11 +750,23 @@ function Remove-ReviewWorktree {
 # edda dispatch hands the prompt to 'claude -p' as a command-line argument,
 # and Windows caps a command line at 32767 chars. The fallback keeps the same
 # restricted read-only capability shape; both arms join the single final receipt
-# below instead of independently appending half a .done file.
+# below instead of independently appending half a .done file. The pi arm
+# (GH-880) needs no size fallback: its prompt travels by --prompt-file, so the
+# command-line cap never applies to it.
+\$agent = '$AGENT'
 try {
   if (-not \$sourceReady) { throw 'source check did not establish a baseline' }
   \$briefChars = (Get-Content -Raw "$BRIEFW").Length
-  if (\$briefChars -lt 30000) {
+  if (\$agent -eq 'pi') {
+    Assert-ReviewCapabilities 'pi-dispatch'
+    \$transport = 'pi-dispatch'
+    # Receipt and launch interpolate the same allowlist variable, so a .done
+    # can never claim a boundary the dispatch did not carry (GH-880 round 1).
+    \$toolFlags = "--tools '\$PiReviewTools'"
+    & edda dispatch --agent pi --model '$MODEL' --tools "\$PiReviewTools" --session-id '$SID' --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
+    \$rawDispatchExit = \$LASTEXITCODE
+    \$dispatchCode = \$rawDispatchExit
+  } elseif (\$briefChars -lt 30000) {
     Assert-ReviewCapabilities 'edda-dispatch'
     \$transport = 'edda-dispatch'
     & edda dispatch --agent claude --model '$MODEL' --permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
@@ -847,10 +888,22 @@ remove_review_worktree() {
   [ ! -e '$WT' ]
 }
 # Same size guard as the Windows lane: dispatch while the brief fits, otherwise
-# the read-only-allowlisted stdin fallback. Both converge on one final receipt.
+# the read-only-allowlisted stdin fallback. The pi arm (GH-880) skips the guard
+# — its prompt travels by --prompt-file. All three converge on one final receipt.
+agent='$AGENT'
 if [ "\$source_ready" = 1 ]; then
   chars=\$(wc -m < '$BRIEF')
-  if [ "\$chars" -lt 30000 ]; then
+  if [ "\$agent" = pi ]; then
+    if review_capabilities pi-dispatch > '$LOG' 2>&1; then
+      transport=pi-dispatch
+      # Receipt and launch read the same sourced allowlist, so a .done can
+      # never claim a boundary the dispatch did not carry (GH-880 round 1).
+      tool_flags="--tools '\$PI_REVIEW_TOOLS'"
+      edda dispatch --agent pi --model '$MODEL' --tools "\$PI_REVIEW_TOOLS" --session-id '$SID' --prompt-file '$BRIEF' > '$LOG' 2>&1
+      raw_dispatch_exit=\$?
+      final_exit=\$raw_dispatch_exit
+    fi
+  elif [ "\$chars" -lt 30000 ]; then
     if review_capabilities edda-dispatch > '$LOG' 2>&1; then
       transport=edda-dispatch
       edda dispatch --agent claude --model '$MODEL' --permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file '$BRIEF' > '$LOG' 2>&1
@@ -983,7 +1036,9 @@ command -v edda >/dev/null 2>&1 || {
 }
 # Reject before creating the worktree or scheduling a job, then recheck in the
 # generated lane because its PATH (and installed binary) may differ.
-if [ "$(wc -m < "$BRIEF")" -lt 30000 ]; then
+if [ "$AGENT" = pi ]; then
+  review_capabilities pi-dispatch || exit 2
+elif [ "$(wc -m < "$BRIEF")" -lt 30000 ]; then
   review_capabilities edda-dispatch || exit 2
 else
   review_capabilities claude-stdin || exit 2
