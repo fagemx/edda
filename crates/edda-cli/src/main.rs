@@ -15,6 +15,7 @@ mod cmd_config;
 mod cmd_context;
 mod cmd_controls;
 mod cmd_dispatch;
+mod cmd_dispatch_acp;
 mod cmd_draft;
 mod cmd_export;
 mod cmd_gc;
@@ -37,6 +38,7 @@ mod cmd_rebuild;
 mod cmd_recap;
 mod cmd_recap_digest;
 mod cmd_reconcile;
+mod cmd_review;
 mod cmd_rules;
 mod cmd_run;
 mod cmd_scan;
@@ -496,6 +498,12 @@ enum Command {
         #[command(flatten)]
         args: cmd_dispatch::DispatchArgs,
     },
+    /// Independent SHA-pinned review. Exit: 0 qualified LGTM, 1 changes,
+    /// 2 unable to review, 3 unqualified LGTM. JSON is unstable.
+    Review {
+        #[command(flatten)]
+        args: cmd_review::ReviewArgs,
+    },
     /// Task intake — ingest external tasks into the ledger
     Intake {
         #[command(subcommand)]
@@ -519,7 +527,7 @@ enum Command {
         #[command(subcommand)]
         cmd: PipelineCmd,
     },
-    /// Create and manage review bundles for rapid approval
+    #[command(about = "Deprecated: use `edda review` for independent SHA-pinned reviews.")]
     Bundle {
         #[command(subcommand)]
         cmd: BundleCmd,
@@ -1112,7 +1120,7 @@ fn find_unsupported_schema_version_error(
 #[allow(clippy::too_many_lines)] // 304 lines at #779; split tracked in none
 fn run(cli: Cli) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
-    let repo_root = edda_ledger::EddaPaths::find_root(&cwd).unwrap_or(cwd);
+    let repo_root = edda_ledger::EddaPaths::find_root(&cwd).unwrap_or_else(|| cwd.clone());
 
     match cli.cmd {
         Command::Init {
@@ -1321,6 +1329,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Plan { cmd } => cmd_plan::run(cmd, &repo_root),
         Command::Conduct { cmd } => cmd_conduct::run_cmd(cmd, &repo_root),
         Command::Dispatch { args } => cmd_dispatch::run(args),
+        Command::Review { args } => cmd_review::run(args, &cwd),
         Command::Intake { cmd } => match cmd {
             IntakeCmd::Github { issue_id } => cmd_intake::execute_github(&repo_root, issue_id),
         },
@@ -1335,20 +1344,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
             PipelineCmd::Status { issue_id } => cmd_pipeline::execute_status(&repo_root, issue_id),
         },
-        Command::Bundle { cmd } => match cmd {
-            BundleCmd::Create {
-                diff,
-                test_cmd,
-                skip_tests,
-            } => cmd_bundle::execute_create(
-                &repo_root,
-                diff.as_deref(),
-                test_cmd.as_deref(),
-                skip_tests,
-            ),
-            BundleCmd::Show { bundle_id } => cmd_bundle::execute_show(&repo_root, &bundle_id),
-            BundleCmd::List { status } => cmd_bundle::execute_list(&repo_root, status.as_deref()),
-        },
+        Command::Bundle { cmd } => cmd_bundle::execute(&repo_root, cmd),
         Command::Brief {
             task_id,
             list,

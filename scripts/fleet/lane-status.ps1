@@ -6,8 +6,13 @@
 #   pwsh -NoProfile -File scripts/fleet/lane-status.ps1                 # all edda-lane-* and edda-review-* tasks
 #   pwsh -NoProfile -File scripts/fleet/lane-status.ps1 -Name <lane>    # one lane (worker or review)
 #
-# Per lane: task state, LastTaskResult, log size, done-file presence, and the
-# worktree's short HEAD (read from the task's WorkingDirectory).
+# Per lane: task state, LastTaskResult, log size, done-file presence, the
+# worktree's short HEAD (read from the task's WorkingDirectory), and the
+# controller identity recorded by the wrapper (`# lane-reap:` metadata,
+# GH-772): alive means the recorded PID exists and its creation time matches,
+# gone/reused flag a registration whose wrapper can never run its completion
+# unregister — a stale registration the reaper (scripts/fleet/lane-reap.ps1)
+# can collect.
 # Exit codes: 0 = reported (found at least one lane), 1 = no matching task.
 param(
   [string]$Name = '',
@@ -83,7 +88,9 @@ foreach ($t in $tasks) {
 
   # Live process count: traverse wrapper, brief, and their full descendant trees (GH-712 P1-3)
   $liveProcs = 0
+  $controller = '-'
   if ($wrapper) {
+    $wb = $null
     $brief = if (Test-Path -LiteralPath $wrapper) {
       $wb = Get-Content -LiteralPath $wrapper -Raw
       if ($wb -match '--prompt-file\s+[''"]([^''"]+)[''"]') {
@@ -91,6 +98,26 @@ foreach ($t in $tasks) {
         if ($b.Length -gt 4) { $b } else { $null }
       } else { $null }
     } else { $null }
+
+    # GH-772: the wrapper records its own controller identity for the reaper.
+    # Same 2s creation-time tolerance as lane-reap.ps1; a wrapper without the
+    # metadata line (legacy) reports '-' rather than a guess.
+    if ($wb -match '(?m)^\s*#\s*lane-reap:.*controller-pid=(\d+)') {
+      $cpid = [int]$Matches[1]
+      $cstart = $null
+      if ($wb -match 'controller-started=(\S+)') {
+        try {
+          $cstart = [datetime]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind)
+        } catch { $cstart = $null }
+      }
+      $cproc = $allProcs | Where-Object { [int]$_.ProcessId -eq $cpid } | Select-Object -First 1
+      if (-not $cproc) { $controller = "gone(pid=$cpid)" }
+      elseif (-not $cstart) { $controller = "unknown(pid=$cpid)" }
+      elseif ([math]::Abs(([DateTimeOffset]$cproc.CreationDate - [DateTimeOffset]$cstart).TotalSeconds) -le 2) {
+        $controller = "alive(pid=$cpid)"
+      } else { $controller = "reused(pid=$cpid)" }
+    }
 
     $seeds = @($allProcs | Where-Object {
       $_.ProcessId -ne $PID -and $_.CommandLine -and (
@@ -112,7 +139,7 @@ foreach ($t in $tasks) {
     $liveProcs = $liveSet.Count
   }
 
-  "{0} state={1} lastTaskResult={2} logBytes={3} done={4} head={5} cwd={6} liveProcs={7}" -f `
-    $t.TaskName, $t.State, $info.LastTaskResult, $logBytes, $doneExists, $head, $cwd, $liveProcs
+  "{0} state={1} lastTaskResult={2} logBytes={3} done={4} head={5} cwd={6} liveProcs={7} controller={8}" -f `
+    $t.TaskName, $t.State, $info.LastTaskResult, $logBytes, $doneExists, $head, $cwd, $liveProcs, $controller
 }
 exit 0

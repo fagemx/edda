@@ -5,14 +5,75 @@
 //! a receipt does not exist. Status shown anywhere is derived, never stored.
 
 use clap::Subcommand;
-use edda_core::event::{
-    new_task_created_event, new_task_done_event, new_task_failed_event, new_task_started_event,
-    TaskCreatedParams,
+use edda_ledger::task_actions::{
+    done_task, fail_task, find_view, new_task, start_task, DoneOutcome, NewOutcome, NewTaskArgs,
+    StartOutcome,
 };
-use edda_ledger::lock::WorkspaceLock;
 use edda_ledger::tasks::{self, TaskStatus, TaskView};
 use edda_ledger::Ledger;
 use std::path::Path;
+
+#[cfg(test)]
+#[path = "cmd_task_brief_tests.rs"]
+mod brief_tests;
+
+fn parse_status(s: &str) -> anyhow::Result<TaskStatus> {
+    Ok(match s {
+        "blocked" => TaskStatus::Blocked,
+        "ready" => TaskStatus::Ready,
+        "running" => TaskStatus::Running,
+        "done" => TaskStatus::Done,
+        "failed" => TaskStatus::Failed,
+        other => {
+            anyhow::bail!("unknown status '{other}' (expected blocked|ready|running|done|failed)")
+        }
+    })
+}
+
+/// Rebuild derived views after a task write (shared-action injection point).
+fn rebuild(ledger: &Ledger, branch: &str) {
+    let _ = edda_derive::rebuild_branch(ledger, branch);
+}
+
+/// Create a task via the shared task actions, then dispatch assignment
+/// notifications (presentation concern, kept at the CLI edge).
+fn do_new(repo_root: &Path, args: &NewTaskArgs<'_>) -> anyhow::Result<NewOutcome> {
+    let outcome = new_task(repo_root, args, &rebuild)?;
+    if !outcome.deduped {
+        if let Some(assignee) = args.assignee {
+            let ledger = Ledger::open(repo_root)?;
+            let notify_config = edda_notify::NotifyConfig::load(&ledger.paths);
+            if !notify_config.channels.is_empty() {
+                edda_notify::dispatch(
+                    &notify_config,
+                    &edda_notify::NotifyEvent::TaskAssigned {
+                        task_id: outcome.task_id,
+                        title: args.title.to_string(),
+                        assignee: assignee.to_string(),
+                    },
+                );
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+fn do_start(repo_root: &Path, id: u64, lease_ttl_s: u64) -> anyhow::Result<StartOutcome> {
+    start_task(repo_root, id, lease_ttl_s, &rebuild)
+}
+
+fn do_done(
+    repo_root: &Path,
+    id: u64,
+    receipt: &str,
+    evidence_paths: &[String],
+) -> anyhow::Result<DoneOutcome> {
+    done_task(repo_root, id, receipt, evidence_paths, &rebuild)
+}
+
+fn do_fail(repo_root: &Path, id: u64, reason: &str) -> anyhow::Result<()> {
+    fail_task(repo_root, id, reason, &rebuild)
+}
 
 #[derive(Subcommand)]
 pub enum TaskCmd {
@@ -92,222 +153,21 @@ pub enum TaskCmd {
     },
 }
 
-/// Arguments for creating a task (mirrors `task.created` payload).
-pub struct NewTaskArgs<'a> {
-    pub title: &'a str,
-    pub assignee: Option<&'a str>,
-    pub agent_kind: Option<&'a str>,
-    pub after: &'a [u64],
-    pub plan: Option<&'a str>,
-    pub work_unit: Option<&'a str>,
-    pub brief: Option<&'a str>,
-    pub idempotency_key: Option<&'a str>,
-    pub scope_paths: &'a [String],
-}
-
-#[derive(Debug)]
-pub struct NewOutcome {
-    pub task_id: u64,
-    pub status: TaskStatus,
-    /// True when an existing task with the same idempotency key was reused.
-    pub deduped: bool,
-}
-
-#[derive(Debug)]
-pub struct StartOutcome {
-    pub attempt: u32,
-}
-
-#[derive(Debug)]
-pub struct DoneOutcome {
-    /// Successors unlocked by this completion: (task_id, title, assignee).
-    pub unlocked: Vec<(u64, String, Option<String>)>,
-}
-
-fn find_view(views: &[TaskView], id: u64) -> anyhow::Result<&TaskView> {
-    views
-        .iter()
-        .find(|v| v.task_id == id)
-        .ok_or_else(|| anyhow::anyhow!("task #{id} not found — see `edda task list`"))
-}
-
-fn parse_status(s: &str) -> anyhow::Result<TaskStatus> {
-    Ok(match s {
-        "blocked" => TaskStatus::Blocked,
-        "ready" => TaskStatus::Ready,
-        "running" => TaskStatus::Running,
-        "done" => TaskStatus::Done,
-        "failed" => TaskStatus::Failed,
-        other => {
-            anyhow::bail!("unknown status '{other}' (expected blocked|ready|running|done|failed)")
-        }
-    })
-}
-
-fn do_new(repo_root: &Path, args: &NewTaskArgs<'_>) -> anyhow::Result<NewOutcome> {
+/// Everything `task start` prints: the started line, then the GH-793 brief
+/// block from the same `render_task_brief_block` the SessionStart hook uses.
+fn run_start(repo_root: &Path, id: u64, lease_ttl_s: u64) -> anyhow::Result<String> {
+    let outcome = do_start(repo_root, id, lease_ttl_s)?;
+    let mut out = format!(
+        "Started task #{id} (attempt {}, lease {lease_ttl_s}s)",
+        outcome.attempt
+    );
     let ledger = Ledger::open(repo_root)?;
-    let _lock = WorkspaceLock::acquire(&ledger.paths)?;
-
     let views = ledger.task_views()?;
-    if let Some(key) = args.idempotency_key {
-        if let Some(existing) = tasks::find_by_idempotency_key(&views, key) {
-            return Ok(NewOutcome {
-                task_id: existing.task_id,
-                status: existing.status,
-                deduped: true,
-            });
-        }
+    if let Some(v) = views.iter().find(|x| x.task_id == id) {
+        out.push('\n');
+        out.push_str(&tasks::render_task_brief_block(v, Some(repo_root)));
     }
-
-    let task_id = tasks::next_task_id(&views);
-    let branch = ledger.head_branch()?;
-    let parent_hash = ledger.last_event_hash()?;
-    let event = new_task_created_event(&TaskCreatedParams {
-        branch: &branch,
-        parent_hash: parent_hash.as_deref(),
-        task_id,
-        title: args.title,
-        assignee: args.assignee,
-        agent_kind: args.agent_kind,
-        after: args.after,
-        plan_id: args.plan,
-        work_unit_ref: args.work_unit,
-        brief_ref: args.brief,
-        idempotency_key: args.idempotency_key,
-        scope_paths: args.scope_paths,
-    })?;
-    ledger.append_event(&event)?;
-    let _ = edda_derive::rebuild_branch(&ledger, &branch);
-
-    let views = ledger.task_views()?;
-    let status = find_view(&views, task_id)?.status;
-    drop(_lock);
-    if let Some(assignee) = args.assignee {
-        let notify_config = edda_notify::NotifyConfig::load(&ledger.paths);
-        if !notify_config.channels.is_empty() {
-            edda_notify::dispatch(
-                &notify_config,
-                &edda_notify::NotifyEvent::TaskAssigned {
-                    task_id,
-                    title: args.title.to_string(),
-                    assignee: assignee.to_string(),
-                },
-            );
-        }
-    }
-    Ok(NewOutcome {
-        task_id,
-        status,
-        deduped: false,
-    })
-}
-
-fn do_start(repo_root: &Path, id: u64, lease_ttl_s: u64) -> anyhow::Result<StartOutcome> {
-    let ledger = Ledger::open(repo_root)?;
-    let _lock = WorkspaceLock::acquire(&ledger.paths)?;
-
-    let views = ledger.task_views()?;
-    let v = find_view(&views, id)?;
-    match v.status {
-        TaskStatus::Done => anyhow::bail!("task #{id} is already done"),
-        TaskStatus::Running => {
-            anyhow::bail!("task #{id} is already running (attempt {})", v.attempts)
-        }
-        TaskStatus::Blocked => {
-            let unmet: Vec<String> = v
-                .after
-                .iter()
-                .filter(|d| {
-                    views
-                        .iter()
-                        .find(|x| x.task_id == **d)
-                        .is_none_or(|x| x.status != TaskStatus::Done)
-                })
-                .map(|d| format!("#{d}"))
-                .collect();
-            anyhow::bail!("task #{id} is blocked — unmet deps: {}", unmet.join(", "));
-        }
-        // Ready = normal start; Failed = retry.
-        TaskStatus::Ready | TaskStatus::Failed => {}
-    }
-    let attempt = v.attempts + 1;
-
-    let branch = ledger.head_branch()?;
-    let parent_hash = ledger.last_event_hash()?;
-    let event = new_task_started_event(&branch, parent_hash.as_deref(), id, lease_ttl_s, attempt)?;
-    ledger.append_event(&event)?;
-    let _ = edda_derive::rebuild_branch(&ledger, &branch);
-
-    Ok(StartOutcome { attempt })
-}
-
-fn do_done(
-    repo_root: &Path,
-    id: u64,
-    receipt: &str,
-    evidence_paths: &[String],
-) -> anyhow::Result<DoneOutcome> {
-    let ledger = Ledger::open(repo_root)?;
-    let _lock = WorkspaceLock::acquire(&ledger.paths)?;
-
-    let views = ledger.task_views()?;
-    let v = find_view(&views, id)?;
-    let correction = v.status == TaskStatus::Done;
-    match v.status {
-        TaskStatus::Running | TaskStatus::Done => {}
-        TaskStatus::Ready if v.attempts > 0 => {}
-        TaskStatus::Ready | TaskStatus::Blocked => anyhow::bail!(
-            "task #{id} has not been started — run `edda task start {id}` first \
-             (start/done pairs are what make the ledger replayable)"
-        ),
-        TaskStatus::Failed => {
-            anyhow::bail!("task #{id} is failed — run `edda task start {id}` to retry, then done")
-        }
-    }
-    if receipt.trim().is_empty() {
-        anyhow::bail!(
-            "a completion without a receipt does not exist — pass --receipt with real content"
-        );
-    }
-
-    let branch = ledger.head_branch()?;
-    let parent_hash = ledger.last_event_hash()?;
-    let event = new_task_done_event(&branch, parent_hash.as_deref(), id, receipt, evidence_paths)?;
-    ledger.append_event(&event)?;
-    let _ = edda_derive::rebuild_branch(&ledger, &branch);
-
-    let unlocked = if correction {
-        Vec::new()
-    } else {
-        let after_views = ledger.task_views()?;
-        tasks::ready_successors_of(&after_views, id)
-            .into_iter()
-            .map(|s| (s.task_id, s.title.clone(), s.assignee.clone()))
-            .collect()
-    };
-    Ok(DoneOutcome { unlocked })
-}
-
-fn do_fail(repo_root: &Path, id: u64, reason: &str) -> anyhow::Result<()> {
-    let ledger = Ledger::open(repo_root)?;
-    let _lock = WorkspaceLock::acquire(&ledger.paths)?;
-
-    let views = ledger.task_views()?;
-    let v = find_view(&views, id)?;
-    if v.status != TaskStatus::Running {
-        anyhow::bail!(
-            "task #{id} is not running ({}) — only a running task can fail",
-            v.status
-        );
-    }
-
-    let branch = ledger.head_branch()?;
-    let parent_hash = ledger.last_event_hash()?;
-    let event = new_task_failed_event(&branch, parent_hash.as_deref(), id, reason)?;
-    ledger.append_event(&event)?;
-    let _ = edda_derive::rebuild_branch(&ledger, &branch);
-
-    Ok(())
+    Ok(out)
 }
 
 /// One task's row, shared by the local and fleet boards so they cannot drift
@@ -492,11 +352,7 @@ pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
             Ok(())
         }
         TaskCmd::Start { id, lease_ttl_s } => {
-            let outcome = do_start(repo_root, id, lease_ttl_s)?;
-            println!(
-                "Started task #{id} (attempt {}, lease {lease_ttl_s}s)",
-                outcome.attempt
-            );
+            println!("{}", run_start(repo_root, id, lease_ttl_s)?);
             Ok(())
         }
         TaskCmd::Done {
@@ -617,7 +473,12 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             lock_tx
-                .send(WorkspaceLock::acquire(&edda_ledger::EddaPaths::discover(&ws)).is_ok())
+                .send(
+                    edda_ledger::lock::WorkspaceLock::acquire(&edda_ledger::EddaPaths::discover(
+                        &ws,
+                    ))
+                    .is_ok(),
+                )
                 .unwrap();
             stream
                 .set_read_timeout(Some(std::time::Duration::from_millis(100)))
@@ -902,7 +763,7 @@ mod tests {
         do_fail(&ws, 1, "lease expired").unwrap();
         {
             let ledger = Ledger::open(&ws).unwrap();
-            let _lock = WorkspaceLock::acquire(&ledger.paths).unwrap();
+            let _lock = edda_ledger::lock::WorkspaceLock::acquire(&ledger.paths).unwrap();
             let branch = ledger.head_branch().unwrap();
             let parent_hash = ledger.last_event_hash().unwrap();
             let event =

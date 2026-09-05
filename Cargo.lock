@@ -9,6 +9,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "agent-client-protocol"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10eeef5e80864f9c3c148a3f395c3e35a66d37ec7561c7845b2bffae8e841759"
+dependencies = [
+ "agent-client-protocol-schema",
+ "anyhow",
+ "async-broadcast",
+ "async-trait",
+ "derive_more",
+ "futures",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agent-client-protocol-schema"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca68e7e55681ce56546c0cecc6bc8f20493d24b44c6d93ec46174f310730bba2"
+dependencies = [
+ "anyhow",
+ "derive_more",
+ "schemars",
+ "serde",
+ "serde_json",
+ "strum 0.28.0",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -122,6 +153,18 @@ name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
+
+[[package]]
+name = "async-broadcast"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "435a87a52755b8f27fcf321ac4f04b2802e337c8c4872923137471ec39c37532"
+dependencies = [
+ "event-listener",
+ "event-listener-strategy",
+ "futures-core",
+ "pin-project-lite",
+]
 
 [[package]]
 name = "async-stream"
@@ -477,6 +520,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
+name = "convert_case"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -651,6 +703,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "derive_more"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d751e9e49156b02b44f9c1815bcb94b984cdcc4396ecc32521c739452808b134"
+dependencies = [
+ "derive_more-impl",
+]
+
+[[package]]
+name = "derive_more-impl"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
+dependencies = [
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "syn",
+ "unicode-xid",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -718,7 +793,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "edda"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -765,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "edda-aggregate"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -779,7 +854,7 @@ dependencies = [
 
 [[package]]
 name = "edda-ask"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -792,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "edda-bridge-claude"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -822,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "edda-bridge-codex"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-bridge-claude",
@@ -840,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "edda-bridge-cursor"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-bridge-claude",
@@ -856,7 +931,7 @@ dependencies = [
 
 [[package]]
 name = "edda-bridge-hermes"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-bridge-claude",
@@ -875,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "edda-bridge-openclaw"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-bridge-claude",
@@ -891,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "edda-chronicle"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -913,8 +988,9 @@ dependencies = [
 
 [[package]]
 name = "edda-conductor"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
+ "agent-client-protocol",
  "anyhow",
  "async-trait",
  "edda-core",
@@ -937,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "edda-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -958,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "edda-derive"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -971,7 +1047,7 @@ dependencies = [
 
 [[package]]
 name = "edda-index"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-store",
@@ -983,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "edda-ingestion"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -997,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "edda-ledger"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -1018,13 +1094,16 @@ dependencies = [
 
 [[package]]
 name = "edda-mcp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-ask",
+ "edda-bridge-claude",
  "edda-core",
  "edda-derive",
  "edda-ledger",
+ "edda-notify",
+ "edda-store",
  "rmcp",
  "schemars",
  "serde",
@@ -1035,7 +1114,7 @@ dependencies = [
 
 [[package]]
 name = "edda-notify"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-ledger",
@@ -1047,7 +1126,7 @@ dependencies = [
 
 [[package]]
 name = "edda-pack"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -1062,7 +1141,7 @@ dependencies = [
 
 [[package]]
 name = "edda-postmortem"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -1078,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "edda-search-fts"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -1096,7 +1175,7 @@ dependencies = [
 
 [[package]]
 name = "edda-serve"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1130,7 +1209,7 @@ dependencies = [
 
 [[package]]
 name = "edda-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1146,7 +1225,7 @@ dependencies = [
 
 [[package]]
 name = "edda-transcript"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "edda-core",
@@ -1197,6 +1276,26 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "event-listener"
+version = "5.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
+dependencies = [
+ "parking",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "event-listener-strategy"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8be9f3dfaaffdae2972880079a491a1a8bb7cbed0b8dd7a347f668b4150a3b93"
+dependencies = [
+ "event-listener",
+ "pin-project-lite",
 ]
 
 [[package]]
@@ -2354,6 +2453,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "parking"
+version = "2.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2554,7 +2659,7 @@ dependencies = [
  "itertools 0.13.0",
  "lru",
  "paste",
- "strum",
+ "strum 0.26.3",
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.2.0",
@@ -2781,6 +2886,15 @@ name = "rustc-hash"
 version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357703d41365b4b27c590e3ed91eabb1b663f07c4c084095e60cbed4362dff0d"
+
+[[package]]
+name = "rustc_version"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfcb3a22ef46e85b45de6ee7e79d063319ebb6594faafcf1c225ea92ab6e9b92"
+dependencies = [
+ "semver",
+]
 
 [[package]]
 name = "rustix"
@@ -3154,7 +3268,16 @@ version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
 dependencies = [
- "strum_macros",
+ "strum_macros 0.26.4",
+]
+
+[[package]]
+name = "strum"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+dependencies = [
+ "strum_macros 0.28.0",
 ]
 
 [[package]]
@@ -3167,6 +3290,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rustversion",
+ "syn",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
  "syn",
 ]
 
@@ -3522,6 +3657,7 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "tokio",

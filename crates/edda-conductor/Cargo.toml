@@ -11,11 +11,11 @@ categories.workspace = true
 keywords.workspace = true
 
 [dependencies]
-edda-store = { path = "../edda-store", version = "0.4.0" }
-edda-core = { path = "../edda-core", version = "0.4.0" }
-edda-ledger = { path = "../edda-ledger", version = "0.4.0" }
-edda-derive = { path = "../edda-derive", version = "0.4.0" }
-edda-notify = { path = "../edda-notify", version = "0.4.0" }
+edda-store = { path = "../edda-store", version = "0.5.0" }
+edda-core = { path = "../edda-core", version = "0.5.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.5.0" }
+edda-derive = { path = "../edda-derive", version = "0.5.0" }
+edda-notify = { path = "../edda-notify", version = "0.5.0" }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -23,10 +23,11 @@ serde_json.workspace = true
 serde_yml = "0.0.12"
 time.workspace = true
 tokio = { version = "1", features = ["process", "time", "rt-multi-thread", "io-util", "macros"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["compat"] }
 async-trait = "0.1"
 regex.workspace = true
 uuid.workspace = true
+agent-client-protocol.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -6,7 +6,7 @@ title: CLI Reference
 
 Complete reference for all `edda` commands.
 
-> Documented for edda 0.4 — the surface below was re-derived from the 0.4.0
+> Documented for edda 0.5 — the surface below is re-derived from the built binary by
 > binary, not copied from an older release. `scripts/check-cli-docs.sh`
 > enforces that every verb the binary exposes is documented here, either as a
 > full section or as a row in the [Internal / experimental](#internal--experimental-commands)
@@ -687,6 +687,7 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--agent AGENT` | Backend that runs the turn: `claude` (default), `pi`, or `codex` |
+| `--task-id ID` | Task-rail id whose brief the ACP prompt is derived from: an ACP dispatch takes prompt, scope, and resume id from the task instead of a prompt file. Only valid with an ACP agent (`acp:*`); paired with a non-ACP agent it is an error (`--task-id is only valid with an ACP agent`), not a silent no-op. Requires the task to be running |
 | `--prompt-file FILE` | Path to the file containing the prompt, read verbatim (required) |
 | `--session-id ID` | Session id passed to the backend verbatim; generated and printed when omitted so the caller can reuse it on the next call. pi and codex resume a prior conversation by repeating the id; claude refuses an id that already exists (`Session ID <id> is already in use`) and needs `--resume` |
 | `--resume` | Continue the conversation `--session-id` names instead of starting a new one (`claude --resume <id>`). claude only — pi and codex resume by repeating `--session-id` alone and refuse this flag. Requires `--session-id` |
@@ -907,7 +908,7 @@ documented surface cannot silently drift from the binary;
 | `intake` | Task intake — ingest external tasks into the ledger | Experimental ingest surface |
 | `prs` | Scan and record PR events from GitHub | Needs network and a token; normally driven by the scheduler or `edda watch` |
 | `pipeline` | Auto-execution pipeline — skill chain with approval gates | Experimental orchestration layer; prefer `edda plan` / `edda conduct` for reviewed plans |
-| `bundle` | Create and manage review bundles for rapid approval | Experimental review packaging |
+| `bundle` | Create and manage review bundles for rapid approval | Deprecated; use `edda review` |
 | `brief` | View task engineering briefs (materialized from ledger events) | Read-only viewer normally consumed via `edda task` workflows |
 | `policy` | Approval policy management (show, check, init) | Changes gate semantics; edit policy deliberately, not ad hoc |
 | `notify` | Push notification management; notify send --title --file pushes free text as event "digest" | Plumbing for other verbs; needs a configured channel |
@@ -920,3 +921,52 @@ documented surface cannot silently drift from the binary;
 | `propose-patch` | Controls patch workflow — evaluate quality rules and propose Karvi controls adjustments | Niche governance surface, experimental (references the retired Karvi workflow) |
 | `skill` | Manage skill registry (scan, list, show, search) | Experimental registry |
 | `tool-tier` | Tool tier governance — query and manage tool risk classifications | Governance plumbing consumed by other tools |
+
+### edda review
+
+Review a committed branch using an independent read-only agent and record a
+`review_verdict/0` event in the author's ledger. The payload and `--json`
+output are unstable. `edda log --type review_verdict` reads the events.
+
+```bash
+edda review --agent pi --model openai-codex/gpt-5.6-sol --spec acceptance.md --gate 'cargo test -p mycrate'
+edda review --pr 123 --resume --json
+```
+
+The default agent is pi, with its inherited model. The base resolves through
+origin/HEAD, origin/main, origin/master, main, then master; use `--base` to
+override, and `--head` to select a committed subject. Empty diffs fail before
+launch. `--pr` resolves immutable head/base and the first closing issue as the
+spec; an explicit `--spec <path|#issue>` takes precedence.
+
+The reviewer receives the base version of REVIEW.md, scoped decisions,
+evidence, and the diff in a unique detached checkout. pi and Claude use a
+read-only tool allowlist without a shell. Requested and observed model/session
+identities remain distinct. Same-author sessions are refused; model diversity
+is optional with `--require-model-diversity`. `--session-id` sets the reviewer
+UUID explicitly; it must be a UUID and cannot name an author session. When
+resuming, an explicit `--session-id` must match the prior ledger-recorded
+reviewer session. `--resume` requires that prior review and reuses its
+reviewer session; a backend fork disqualifies it. `--thinking` selects pi's
+thinking level; Claude and Codex reject the option rather than silently
+ignoring it.
+
+Gates are READ from clean exact-SHA command receipts and required exact-SHA CI.
+Missing checks remain unverified; any red evidence wins. `--run-gates` opts in
+to execution of trusted declared commands, bounded by `--max-ran-sec` (300 by
+default). Cargo gates require an existing `CARGO_TARGET_DIR` build lane.
+`--trust-spec` authorizes issue verify commands; explicit issue selection by
+itself does not. Local specification paths are operator-trusted.
+
+| Exit | Meaning |
+|---|---|
+| 0 | LGTM with all qualification requirements satisfied |
+| 1 | Changes requested |
+| 2 | Unable to review: refusal, empty diff, provider failure or invalid verdict |
+| 3 | LGTM with unmet qualification requirements |
+
+Output lists findings, SHA, reviewer, round, gate evidence, cost and actionable
+disqualifiers. Unmeasured cost is never represented as zero. No PR comment,
+label change, merge, or conductor gate approval occurs automatically.
+`--timeout-sec` defaults to 900; `--budget-usd` is passed to supported backends.
+`--keep-worktree` preserves the review checkout for inspection.

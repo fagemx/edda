@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "edda-sdk"
+version = "0.1.0"
+description = "Thin Python client for the edda client contract (MCP writes, read-only HTTP). Types generated from the v1 event spec (GH-608). Publishing pending namespace authorization — see SDK_HANDOFF.md."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT OR Apache-2.0" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+edda_sdk = ["py.typed"]

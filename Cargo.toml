@@ -27,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 # Bisected 2026-09-04, not copied from the toolchain pin: 1.87 fails on
 # dependency floors (darling, instability, time all require 1.88), and
@@ -64,6 +64,7 @@ uuid = { version = "1", features = ["v5"] }
 rand = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+agent-client-protocol = { version = "=0.10.4", features = ["unstable_session_usage"] }
 
 [workspace.lints.clippy]
 too_many_lines = "warn"

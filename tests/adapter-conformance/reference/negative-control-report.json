@@ -1,0 +1,148 @@
+{
+  "provenance": {
+    "contract_version": "adapter-contract/0.1",
+    "protocol_version": "adapter-normalized-protocol/0.1",
+    "source_basis_sha": "03d0f6ee7d06442f7d72f899de0e8c2fc0b68d4f",
+    "source_base_sha": "9de7662",
+    "edda_version": "edda 0.4.0 (467e8be02eb9-dirty 2026-09-04)",
+    "edda_sha256": "0ad2b0c5e236e1cd078f2de2c0bd2f3a171567163caa2574dd030bc9f4b55833",
+    "edda_path": "C:\\ai_agent\\edda-cleanroom-610-20260904\\tools\\edda.exe",
+    "provenance_note": "source_basis_sha is supplied build provenance, not binary attestation. The embedded version string and SHA-256 are recorded independently; if its embedded revision differs from source_basis_sha (or is dirty), this report is a pinned-binary observation only and is not evidence about current main or the supplied frozen source."
+  },
+  "runs": [
+    {
+      "target": "adapter-cmd",
+      "results": [
+        {
+          "id": "H-STORE-ISOLATION",
+          "title": "isolated store only; real store untouched",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "no conf1dab522a artifacts in C:\\Users\\fagem\\.edda; C:\\Users\\fagem\\AppData\\Roaming\\edda; C:\\Users\\fagem\\.local\\share\\edda",
+          "note": ""
+        },
+        {
+          "id": "H-FAIL-OPEN",
+          "title": "malformed stdin exits 0, never blocks the host agent",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{\"continue\": true}'",
+          "note": ""
+        },
+        {
+          "id": "H-UNKNOWN-EVENT",
+          "title": "unknown event exits 0 permissively",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{\"continue\": true}'",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-START",
+          "title": "session start injects bounded context with write-back protocol",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "FAIL",
+          "evidence": "no injection key in stdout: '{\"continue\": true}'",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-BUDGET",
+          "title": "pack budget truncates body, preserves write-back tail",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "FAIL",
+          "evidence": "no injection under tiny budget: '{\"continue\": true}'",
+          "note": ""
+        },
+        {
+          "id": "H-PROMPT-DEDUP",
+          "title": "identical consecutive prompt injections are deduped",
+          "severity": "SHOULD",
+          "vendor": "adapter-cmd",
+          "status": "SKIP",
+          "evidence": "no injection on first prompt.submit: '{\"continue\": true}'",
+          "note": "vendor prompt.submit event does not inject (capability note, see gaps list)"
+        },
+        {
+          "id": "H-LEDGER-APPEND",
+          "title": "hook events append to durable evidence",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "FAIL",
+          "evidence": "missing public markers ['session=conf1dab522a-ledger action=heartbeat.start', 'session=conf1dab522a-ledger action=activity.append']; log exit=0",
+          "note": ""
+        },
+        {
+          "id": "H-HEARTBEAT",
+          "title": "heartbeat written on start, removed on end",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "FAIL",
+          "evidence": "missing ['session=conf1dab522a-hb action=heartbeat.start', 'session=conf1dab522a-hb action=heartbeat.end']",
+          "note": ""
+        },
+        {
+          "id": "H-DIGEST-IDEMPOTENT",
+          "title": "repeated digest triggers produce exactly one digest",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "SKIP",
+          "evidence": "digest notes after end#1=0, after end#2=0",
+          "note": "no digest note produced (zero-call session or digest-on-next-start semantics) \u2014 see gaps list"
+        },
+        {
+          "id": "H-REDACT-STORE",
+          "title": "secrets redacted before durable store write",
+          "severity": "SHOULD",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "sentinel absent from public CLI ledger",
+          "note": ""
+        },
+        {
+          "id": "H-END-CLEANUP",
+          "title": "session end removes per-session state",
+          "severity": "SHOULD",
+          "vendor": "adapter-cmd",
+          "status": "SKIP",
+          "evidence": "public lifecycle is checked by H-HEARTBEAT",
+          "note": "portable profile has no private state-file layout"
+        },
+        {
+          "id": "H-PRETOOL-IDENTITY",
+          "title": "PreToolUse stays allow + carries session identity (codex capability)",
+          "severity": "SHOULD",
+          "vendor": "adapter-cmd",
+          "status": "SKIP",
+          "evidence": "decision=None updatedInput=no",
+          "note": "vendor has no session-identity rewrite capability (documented capability difference)"
+        },
+        {
+          "id": "H-NUDGE-RATE",
+          "title": "decision nudges are rate-limited",
+          "severity": "SHOULD",
+          "vendor": "adapter-cmd",
+          "status": "SKIP",
+          "evidence": "0 nudges over 6 signal events",
+          "note": "no nudge observed at probe cadence (threshold not reached) \u2014 not a violation"
+        }
+      ],
+      "violations": 4,
+      "skipped": [
+        "H-PROMPT-DEDUP",
+        "H-DIGEST-IDEMPOTENT",
+        "H-END-CLEANUP",
+        "H-PRETOOL-IDENTITY",
+        "H-NUDGE-RATE"
+      ]
+    }
+  ],
+  "summary": {
+    "contract_violations": 4,
+    "verdict": "VIOLATIONS FOUND"
+  }
+}

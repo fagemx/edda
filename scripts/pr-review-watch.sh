@@ -138,6 +138,12 @@ label_verdict() { # $1=reviewed sha  $2=current head
   if [ -n "${2:-}" ] && [ "$2" = "$1" ]; then echo apply; else echo skip; fi
 }
 
+product_lgtm_qualified() { # $1=.done file
+  [ "$(sed -n 's/^DISPATCH_EXIT=//p' "$1" 2>/dev/null | tail -1)" = "0" ] || return 1
+  [ "$(sed -n 's/^QUALIFIED=//p' "$1" 2>/dev/null | tail -1)" = "true" ] || return 1
+  [ -z "$(sed -n 's/^DISQUALIFIERS=//p' "$1" 2>/dev/null | tail -1)" ]
+}
+
 # is_full_sha: true only for exactly 40 lowercase hex characters. Every SHA
 # that reaches a pin regex or a status URL is validated with this first
 # (REVIEW.md R5): a validated sha contains no regex metacharacters, so
@@ -509,6 +515,10 @@ mark_post_failed() { # $1=pr $2=sha $3=round $4=verdict file
 post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
   is_full_sha "$2" || { log "pr$1 status: $2 is not a full lowercase 40-hex SHA; status withheld"; return 3; }
   cur=$(verdict_body_lines "$2" < "$3" | head -1)
+  if [ -z "$cur" ]; then
+    log "pr$1 status: verdict carrier is missing a SHA-pinned REVIEW.md §7 heading; status withheld"
+    return 3
+  fi
   v=$(printf '%s\n' "$cur" | cut -f1)
   p0=$(printf '%s\n' "$cur" | cut -f2)
   p1=$(printf '%s\n' "$cur" | cut -f3)
@@ -564,6 +574,17 @@ settle_pending() {
         pending_drop "$pr"
         return 0
       fi
+      vl=$(sh "$LABEL_PR" verdict-label < "$1")
+      if ! verdict_body_lines "$sha" < "$1" | grep -q .; then
+        mark_unreviewed "$pr" "$sha" "$round" 'verdict carrier lacked the SHA-pinned REVIEW.md §7 heading'
+        pending_drop "$pr"
+        return 0
+      fi
+      if [ "$vl" = "review:lgtm" ] && [ "$(sed -n 's/^TRANSPORT=//p' "$DONE" 2>/dev/null | tail -1)" = "edda-review" ] && ! product_lgtm_qualified "$DONE"; then
+        mark_unreviewed "$pr" "$sha" "$round" 'product LGTM was unqualified or exited non-zero'
+        pending_drop "$pr"
+        return 0
+      fi
       # The Independent Review status goes to the REVIEWED sha, on the same
       # bounded retry path as the comment (never best-effort): a failed post
       # increments postfails and keeps the pending entry; at the cap the PR
@@ -586,7 +607,6 @@ settle_pending() {
           return 0
         fi
       fi
-      vl=$(sh "$LABEL_PR" verdict-label < "$1")
       if [ -n "$vl" ] && gh pr edit "$pr" --repo "$REPO" --add-label "$vl" >/dev/null 2>&1; then
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed"  >/dev/null 2>&1 || true
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:post-failed" >/dev/null 2>&1 || true
@@ -635,14 +655,27 @@ settle_pending() {
         continue
       fi
       if extract_verdict "$LOG" "$VERDICT" && verdict_ok "$VERDICT"; then
-        # .done is written incrementally by legacy wrappers. Do not publish
-        # before the final worktree check, or trust a legacy missing check.
-        if ! grep -q '^WORKTREE_CHECK=unchanged' "$DONE" 2>/dev/null; then
+        if ! verdict_body_lines "$sha" < "$VERDICT" | grep -q .; then
+          mark_unreviewed "$pr" "$sha" "$round" 'verdict carrier lacked the SHA-pinned REVIEW.md §7 heading'
+          pending_drop "$pr"
+          continue
+        fi
+        # A terminal receipt is one atomically published object, never an
+        # incremental DISPATCH_EXIT line. Legacy receipts without FINAL_EXIT
+        # and partial receipts fail
+        # closed: source verification, worktree removal and task teardown must
+        # all be proven before this watcher publishes a verdict.
+        if ! grep -qx 'DISPATCH_EXIT=0' "$DONE" 2>/dev/null \
+          || ! grep -qx 'FINAL_EXIT=0' "$DONE" 2>/dev/null \
+          || ! grep -qx 'WORKTREE_CHECK=unchanged' "$DONE" 2>/dev/null \
+          || ! grep -qx 'WORKTREE_CLEANUP=removed' "$DONE" 2>/dev/null \
+          || ! grep -Eq '^TASK_CLEANUP=(unregistered|not-applicable)$' "$DONE" 2>/dev/null \
+          || ! grep -qx 'TERMINAL_RECEIPT=complete' "$DONE" 2>/dev/null; then
           if [ $((now - launched)) -gt "$STALE" ]; then
-            mark_unreviewed "$pr" "$sha" "$round" 'review has no completed worktree verification receipt'
+            mark_unreviewed "$pr" "$sha" "$round" 'review has no clean atomic terminal receipt'
             pending_drop "$pr"
           else
-            log "pr$pr r$round waiting for completed worktree verification receipt"
+            log "pr$pr r$round waiting for clean atomic terminal receipt"
           fi
           continue
         fi
@@ -656,9 +689,15 @@ settle_pending() {
         case "$tline" in
           edda-dispatch) tdesc='edda dispatch --agent claude' ;;
           claude-stdin)  tdesc='claude -p via stdin (oversized-brief fallback)' ;;
+          edda-review)   tdesc='edda review --json (product-owned review)' ;;
           *)             tdesc='unknown — no TRANSPORT receipt in .done' ;;
         esac
-        tool_flags=$(sed -n 's/^TOOL_FLAGS=//p' "$DONE" 2>/dev/null | tail -1)
+        if [ "$tline" = "edda-review" ]; then
+          tool_flags=$(sed -n 's/^POLICY_RECEIPT=//p' "$DONE" 2>/dev/null | tail -1)
+          [ -n "$tool_flags" ] || tool_flags='unknown — no product policy receipt'
+        else
+          tool_flags=$(sed -n 's/^TOOL_FLAGS=//p' "$DONE" 2>/dev/null | tail -1)
+        fi
         tree_check=$(sed -n 's/^WORKTREE_CHECK=//p' "$DONE" 2>/dev/null | tail -1)
         [ -n "$tool_flags" ] || tool_flags='unknown — no TOOL_FLAGS receipt'
         [ -n "$tree_check" ] || tree_check='unknown — no WORKTREE_CHECK receipt'
@@ -701,11 +740,18 @@ settle_pending() {
               continue
             fi
             log "pr$pr r$round provider probe OK — retrying once via edda dispatch (same model, fleet.review-provider-overload)"
-            if "$REVIEW_PR" "$pr" "$round" "$sha" --sha "$sha" >> "$WATCHLOG" 2>&1; then
-              log "pr$pr r$round dispatch retry launched"
-              pending_update "$pr" "$round" "$sha" 1 "$(date +%s)" "$postfails"
+            retry_out=$("$REVIEW_PR" "$pr" "$round" "$sha" --sha "$sha" 2>&1); retry_rc=$?
+            printf '%s\n' "$retry_out" >> "$WATCHLOG"
+            if [ "$retry_rc" = 0 ]; then
+              actual_round=$(printf '%s\n' "$retry_out" | sed -n 's/^review_round=\([1-9][0-9]*\)$/\1/p' | tail -1)
+              if [ -z "$actual_round" ]; then
+                log "pr$pr retry returned no shared round receipt; keeping pending ownership"
+                continue
+              fi
+              log "pr$pr r$actual_round dispatch retry launched"
+              pending_update "$pr" "$actual_round" "$sha" 1 "$(date +%s)" "$postfails"
             else
-              rc=$?
+              rc=$retry_rc
               if [ "$rc" = "3" ]; then
                 log "pr$pr head moved before dispatch retry; dropping pending entry (rescan will re-review)"
               else
@@ -764,6 +810,12 @@ scan_open_prs() {
     out=$("$REVIEW_PR" "$pr" "$newround" "$prev" --sha "$sha" 2>&1); rc=$?
     [ -n "$out" ] && printf '%s\n' "$out" >> "$WATCHLOG"
     if [ "$rc" -eq 0 ]; then
+      actual_round=$(printf '%s\n' "$out" | sed -n 's/^review_round=\([1-9][0-9]*\)$/\1/p' | tail -1)
+      if [ -z "$actual_round" ]; then
+        log "pr$pr launcher returned no shared round receipt; refusing to guess artifact paths"
+        continue
+      fi
+      newround=$actual_round
       fail_clear "$pr"
       log "pr$pr r$newround launched and confirmed running (task edda-review-pr$pr-r$newround)"
       pending_update "$pr" "$newround" "$sha" 0 "$(date +%s)" 0

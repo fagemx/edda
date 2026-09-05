@@ -1,0 +1,15 @@
+# command: cargo test -p edda-conductor acp_targets
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.88s
+     Running unittests src\lib.rs (C:/Users/fagem/AppData/Local/fleet-workstation/lanes/verifier\debug\deps\edda_conductor-f9aa58aa2610f7a6.exe)
+
+running 5 tests
+test agent::acp_targets::tests::grok_worker_endpoint_is_bare_subcommand ... ok
+test agent::acp_targets::tests::grok_verifier_endpoint_prepends_read_only_sandbox ... ok
+test agent::acp_targets::tests::keys_round_trip ... ok
+test agent::acp_targets::tests::parses_agent_kind_suffixes_and_prefixes ... ok
+test agent::acp_targets::tests::targets_without_documented_readonly_flags_get_none ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 381 filtered out; finished in 0.00s
+
+
+# exit_code: 0

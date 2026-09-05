@@ -1,0 +1,16 @@
+{
+  "target": "grok",
+  "verifier": false,
+  "supported": false,
+  "failingMethod": "session/new",
+  "failureStatus": "timeout",
+  "steps": [
+    {
+      "failingMethod": "session/new",
+      "stopReason": null,
+      "status": "timeout",
+      "step": "1",
+      "ok": false
+    }
+  ]
+}
