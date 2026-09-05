@@ -22,6 +22,7 @@
 set -eu
 
 prog=$(basename "$0")
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 usage() {
     printf 'usage: %s [--since <RFC3339|Nh|Nd>] [--board <issue-number>] [--dry-run]\n' "$prog" >&2
 }
@@ -138,38 +139,76 @@ review_total=$(sed -n 's/.*review cost \$\([0-9.]*\)$/\1/p' "$merged_body" \
 # --- 4. 擋住什麼 -----------------------------------------------------------------
 blocked_body="$tmp/blocked-body.md"
 : >"$blocked_body"
+# The loop walks EVERY open PR: readiness is the verdict-drift state (GH-914),
+# not mergeStateStatus — a stacked PR whose base is a feature branch reports
+# CLEAN with zero verdicts and must still appear. BLOCKED/DIRTY PRs keep the
+# status-reasons treatment below; every other state is reachable only through
+# its drift reason.
 open_rows=$(gh pr list --repo "$EDDA_REPO" --state open --limit 100 \
     --json number,title,mergeStateStatus,headRefOid \
-    --jq '.[] | select(.mergeStateStatus == "BLOCKED" or .mergeStateStatus == "DIRTY") | [.number, .title, .mergeStateStatus, .headRefOid] | @tsv' \
+    --jq '.[] | [.number, .title, .mergeStateStatus, .headRefOid] | @tsv' \
 ) || { printf '%s: gh pr list (open) failed\n' "$prog" >&2; exit 1; }
+
+# Readiness is the verdict-drift state (GH-914), not mergeStateStatus: the
+# ruleset protects `main` only, so a stacked PR whose base is a feature
+# branch reports CLEAN with zero verdicts. The drift check is invoked, not
+# re-implemented here — its exit 1 is the normal "something is not ready"
+# signal and must not abort the digest; its exit 2 is a failed read and
+# takes the same failure path as a gh failure below. GH_OPEN_JSON is cleared
+# for the subprocess so a test fixture written for this script's own
+# post-jq `gh pr list` output is not re-parsed as raw JSON by the drift check.
+drift_out="$tmp/drift.txt"
+drift_rc=0
+GH_OPEN_JSON= sh "$self_dir/verdict-drift.sh" >"$drift_out" 2>"$tmp/drift.err" || drift_rc=$?
+if [ "$drift_rc" -ge 2 ]; then
+    printf '%s: verdict-drift.sh failed (exit %s)\n' "$prog" "$drift_rc" >&2
+    cat "$tmp/drift.err" >&2
+    exit 1
+fi
+drift_map="$tmp/drift-map.tsv"
+# keep only the not-ready states; a head verdict (LGTM or Changes Requested)
+# means the readiness signal exists and needs no digest row from here
+awk '
+    $4 == "no" || $4 == "stale" || $4 == "SHADOW" {
+        n = substr($1, 2)
+        reason = $4
+        for (i = 5; i <= NF; i++) reason = reason " " $i
+        printf "%s\t%s\n", n, reason
+    }
+' "$drift_out" >"$drift_map"
 while IFS="$(printf '\t')" read -r num title state sha; do
     [ -n "$num" ] || continue
-    if [ "$state" = "DIRTY" ]; then
-        printf -- '- #%s %s — conflicts with main (window)\n' "$num" "$title" >>"$blocked_body"
-        continue
-    fi
-    check_runs=$(gh api "repos/$EDDA_REPO/commits/$sha/check-runs" \
-        --jq '.check_runs[] | "\(.name)=\(.conclusion // .status)"') || {
-        printf '%s: gh api (check runs for #%s) failed\n' "$prog" "$num" >&2
-        exit 1
-    }
-    statuses=$(gh api "repos/$EDDA_REPO/commits/$sha/status" \
-        --jq '.statuses[] | "\(.context)=\(.state)"') || {
-        printf '%s: gh api (commit status for #%s) failed\n' "$prog" "$num" >&2
-        exit 1
-    }
-    statuses=$(printf '%s\n%s\n' "$check_runs" "$statuses")
     reasons=""
-    for ctx in 'CI Gate' 'Independent Review'; do
-        ctx_state=$(printf '%s\n' "$statuses" | sed -n "s/^$ctx=//p" | head -1)
-        if [ -z "$ctx_state" ]; then
-            ctx_state="absent"
-        fi
-        if [ "$ctx_state" != "success" ]; then
-            [ -n "$reasons" ] && reasons="$reasons, "
-            reasons="$reasons$ctx=$ctx_state"
-        fi
-    done
+    drift_reason=$(awk -F '\t' -v n="$num" '$1 == n { print $2 }' "$drift_map")
+    if [ "$state" = "DIRTY" ]; then
+        reasons="conflicts with main (window)"
+    elif [ "$state" = "BLOCKED" ]; then
+        check_runs=$(gh api "repos/$EDDA_REPO/commits/$sha/check-runs" \
+            --jq '.check_runs[] | "\(.name)=\(.conclusion // .status)"') || {
+            printf '%s: gh api (check runs for #%s) failed\n' "$prog" "$num" >&2
+            exit 1
+        }
+        statuses=$(gh api "repos/$EDDA_REPO/commits/$sha/status" \
+            --jq '.statuses[] | "\(.context)=\(.state)"') || {
+            printf '%s: gh api (commit status for #%s) failed\n' "$prog" "$num" >&2
+            exit 1
+        }
+        statuses=$(printf '%s\n%s\n' "$check_runs" "$statuses")
+        for ctx in 'CI Gate' 'Independent Review'; do
+            ctx_state=$(printf '%s\n' "$statuses" | sed -n "s/^$ctx=//p" | head -1)
+            if [ -z "$ctx_state" ]; then
+                ctx_state="absent"
+            fi
+            if [ "$ctx_state" != "success" ]; then
+                [ -n "$reasons" ] && reasons="$reasons, "
+                reasons="$reasons$ctx=$ctx_state"
+            fi
+        done
+    fi
+    if [ -n "$drift_reason" ]; then
+        [ -n "$reasons" ] && reasons="$reasons, "
+        reasons="$reasons$drift_reason"
+    fi
     if [ -n "$reasons" ]; then
         printf -- '- #%s %s — %s\n' "$num" "$title" "$reasons" >>"$blocked_body"
     fi
