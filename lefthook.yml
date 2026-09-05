@@ -9,5 +9,7 @@ pre-commit:
 
 pre-push:
   commands:
+    guard-push:
+      run: sh scripts/fleet/guard-push.sh
     clippy:
       run: cargo clippy --workspace -- -D warnings
