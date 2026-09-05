@@ -1,0 +1,22 @@
+[
+  {
+    "Path": "C:\\ai_agent\\edda-cleanroom-610-20260904\\docs\\guides\\writing-a-bridge.md",
+    "Hash": "FDFF67F7C7F18E524A1AB6FAC3F695366F31ABA80E3D0C6F94098DC61D20F8B6"
+  },
+  {
+    "Path": "C:\\ai_agent\\edda-cleanroom-610-20260904\\docs\\reference\\cli.md",
+    "Hash": "BE274B0B60DDE10AA3A84BF2624D318185464DB647BDB02995B3AB513F598DC2"
+  },
+  {
+    "Path": "C:\\ai_agent\\edda-cleanroom-610-20260904\\tests\\adapter-conformance\\fixtures\\normalized-events.json",
+    "Hash": "166C1BA25DB29CA4506C8C978352DA846973999F6EBC54F81EDF91EC9D431D7F"
+  },
+  {
+    "Path": "C:\\ai_agent\\edda-cleanroom-610-20260904\\tests\\adapter-conformance\\harness\\conformance.py",
+    "Hash": "F2EF874E3E638699C1A895A0A98C2271579C04BE596F195B868366A3970E4425"
+  },
+  {
+    "Path": "C:\\ai_agent\\edda-cleanroom-610-20260904\\tools\\edda.exe",
+    "Hash": "0AD2B0C5E236E1CD078F2DE2C0BD2F3A171567163CAA2574DD030BC9F4B55833"
+  }
+]
