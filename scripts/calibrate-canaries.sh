@@ -3,7 +3,7 @@
 # recipe as a script (issue #881; design #618 §1.2 and §7 item 7).
 #
 # For each requested engine (<backend>:<catalogue id>, id copied verbatim) it
-# builds a throwaway clone under ${TMPDIR:-/tmp}/edda-calib-$$, commits the
+# builds a throwaway clone under a fresh mktemp -d directory, commits the
 # canary fixture pre-state, then commits the canary set (two commits, exactly
 # the README recipe), produces the target diff HEAD~1..HEAD, launches the
 # engine READ-ONLY once per run with cwd = the clone, collects model_observed
@@ -266,7 +266,7 @@ DRY_TARGET_STAT=$(printf '%s' "$DRY_TARGET_STAT" | git apply --stat - 2>/dev/nul
 # Dry run: describe everything, launch nothing (not even a review run).
 # ---------------------------------------------------------------------------
 if [ "$DRY_RUN" -eq 1 ]; then
-  echo "clone: ${TMPDIR:-/tmp}/edda-calib-$$  (branch calib-canary-v0, from origin/main)"
+  echo "clone: ${TMPDIR:-/tmp}/edda-calib.XXXXXX/repo  (branch calib-canary-v0, from origin/main)"
   echo
   echo "commit 1: \"$FIXTURE_COMMIT_MSG\""
   for cdir in $CANARIES; do
@@ -291,9 +291,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
     run=1
     while [ "$run" -le "$RUNS" ]; do
       if [ "$backend" = pi ]; then
-        pi_launch_line "$id" "$san" "$run" '${TMPDIR:-/tmp}/edda-calib-'"$$"
+        pi_launch_line "$id" "$san" "$run" '${TMPDIR:-/tmp}/edda-calib.XXXXXX/repo'
       else
-        claude_launch_line "$id" "$san" "$run" '${TMPDIR:-/tmp}/edda-calib-'"$$"
+        claude_launch_line "$id" "$san" "$run" '${TMPDIR:-/tmp}/edda-calib.XXXXXX/repo'
       fi
       echo "  ^ run $run/$RUNS for $backend:$id"
       run=$((run + 1))
@@ -305,8 +305,14 @@ fi
 # ---------------------------------------------------------------------------
 # Real run: throwaway clone, two commits, target diff, per-run launches.
 # ---------------------------------------------------------------------------
-CLONE="${TMPDIR:-/tmp}/edda-calib-$$"
-cleanup() { rm -rf -- "$CLONE"; }
+# A fresh mktemp -d, never "$$": PIDs are reused, the traps below fire on
+# every exit path including the failure path, and several lanes run at once on
+# this workstation — a PID collision would have one run delete another run's
+# directory. The clone goes in a subdirectory so the path is both unique and
+# ours, and cleanup removes the whole workspace rather than the clone alone.
+CALIB_TMP=$(mktemp -d "${TMPDIR:-/tmp}/edda-calib.XXXXXX") || die 2 "mktemp -d failed"
+CLONE="$CALIB_TMP/repo"
+cleanup() { rm -rf -- "$CALIB_TMP"; }
 trap cleanup EXIT
 trap 'cleanup; trap - EXIT; exit 130' INT
 trap 'cleanup; trap - EXIT; exit 143' TERM

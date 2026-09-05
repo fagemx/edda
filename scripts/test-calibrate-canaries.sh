@@ -131,8 +131,8 @@ out=$(run_calibrate --runs 2 --dry-run)
 rc=$?
 [ "$rc" -eq 0 ] || bad "dry-run exit $rc"
 case $out in
-  *edda-calib-*) good 'dry-run prints the clone path under TMPDIR' ;;
-  *) bad 'dry-run does not print the clone path' ;;
+  *edda-calib.XXXXXX/repo*) good 'dry-run prints the clone path shape under TMPDIR' ;;
+  *) bad 'dry-run does not print the clone path shape (expected edda-calib.XXXXXX/repo)' ;;
 esac
 case $out in
   *'calibration: canary fixture pre-state'*) good 'dry-run prints fixture commit' ;;
