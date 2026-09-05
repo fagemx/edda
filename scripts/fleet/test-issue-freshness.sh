@@ -70,8 +70,25 @@ cat >"$work/fixtures/issue-nodonewhen.json" <<'JSON'
 {"state":"OPEN","title":"feat(fleet): freshness no donewhen","labels":[{"name":"fleet:ready"}],"comments":[],
  "body":"## Predicted surface\n\nGate file `scripts/fleet/next-issue.sh` exists.\n"}
 JSON
+cat >"$work/fixtures/issue-barename.json" <<'JSON'
+{"state":"OPEN","title":"feat(fleet): freshness bare name","labels":[{"name":"fleet:ready"}],"comments":[],
+ "body":"Prose mentions bare `next-review.sh` here.\n\n## doneWhen\n- item\n"}
+JSON
+cat >"$work/fixtures/issue-concept.json" <<'JSON'
+{"state":"OPEN","title":"feat(fleet): freshness concept token","labels":[{"name":"fleet:ready"}],"comments":[],
+ "body":"## Predicted surface\n\nNew file `scripts/fleet/proposed-996.sh` lands here.\n\n## Details\n\nThe conflict cut `if/else` across hunks and `scripts/fleet/nope-996.sh` is referenced.\n\n## doneWhen\n- item\n"}
+JSON
+cat >"$work/fixtures/issue-mention.json" <<'JSON'
+{"state":"OPEN","title":"feat(fleet): freshness mention","labels":[{"name":"fleet:ready"}],"comments":[],
+ "body":"## doneWhen\n- `scripts/fleet/next-issue.sh`\n"}
+JSON
 cat >"$work/fixtures/pr-list-hit.json" <<'JSON'
-[{"number":746,"state":"MERGED","title":"x","body":"Closes #993"}]
+[{"number":746,"state":"MERGED","title":"x","body":"Closes #993",
+  "closingIssuesReferences":[{"number":993}]}]
+JSON
+cat >"$work/fixtures/pr-list-mention.json" <<'JSON'
+[{"number":555,"state":"MERGED","title":"x","body":"mentions #997",
+  "closingIssuesReferences":[]}]
 JSON
 cat >"$work/fixtures/pr-list-empty.json" <<'JSON'
 []
@@ -101,6 +118,7 @@ case "$1 $2" in
     "pr list")
         case "$*" in
             *993*) resp=$(cat "$GH_FIXTURES/pr-list-hit.json") ;;
+            *997*) resp=$(cat "$GH_FIXTURES/pr-list-mention.json") ;;
             *) resp=$(cat "$GH_FIXTURES/pr-list-empty.json") ;;
         esac ;;
 esac
@@ -111,6 +129,9 @@ case "$1 $2" in
             *\ 992\ *|*\ 992) resp=$(cat "$GH_FIXTURES/issue-badflag.json") ;;
             *\ 993\ *|*\ 993) resp=$(cat "$GH_FIXTURES/issue-stalepr.json") ;;
             *\ 994\ *|*\ 994) resp=$(cat "$GH_FIXTURES/issue-nodonewhen.json") ;;
+            *\ 995\ *|*\ 995) resp=$(cat "$GH_FIXTURES/issue-barename.json") ;;
+            *\ 996\ *|*\ 996) resp=$(cat "$GH_FIXTURES/issue-concept.json") ;;
+            *\ 997\ *|*\ 997) resp=$(cat "$GH_FIXTURES/issue-mention.json") ;;
             *) resp=$(cat "$GH_FIXTURES/issue-ok.json") ;;
         esac ;;
     "issue edit")
@@ -173,10 +194,10 @@ if [ "$run_suite" -eq 1 ]; then
     # a. valid issue: all checks PASS, exit 0
     run_gated sh "$freshness" 991 >"$work/out-a.txt" 2>"$work/err-a.txt" ||
         fail "issue 991 must pass: rc=$? err=$(cat "$work/err-a.txt")"
-    grep -q '^PASS path scripts/fleet/next-issue.sh$' "$work/out-a.txt" ||
-        fail "issue 991 misses the path PASS line: $(cat "$work/out-a.txt")"
-    grep -q '^PASS path scripts/fleet/brief-from-issue.sh$' "$work/out-a.txt" ||
-        fail "issue 991 misses the second path PASS line"
+    # 991's path-shaped tokens all live in its Predicted surface section —
+    # proposals are skipped, so the suite must see no path findings at all
+    grep -q '^PASS path' "$work/out-a.txt" &&
+        fail "issue 991 must skip Predicted-surface proposals: $(cat "$work/out-a.txt")"
     grep -q '^PASS edda ask$' "$work/out-a.txt" ||
         fail "issue 991 misses the edda PASS line"
     grep -q '^PASS doneWhen$' "$work/out-a.txt" ||
@@ -215,6 +236,35 @@ if [ "$run_suite" -eq 1 ]; then
     grep -q '^FAIL doneWhen' "$work/out-d.txt" ||
         fail "issue 994 misses the doneWhen FAIL line: $(cat "$work/out-d.txt")"
     echo "ok d missing doneWhen fails"
+
+    # e. bare filename resolves to exactly one tracked file
+    run_gated sh "$freshness" 995 >"$work/out-e.txt" 2>"$work/err-e.txt" ||
+        fail "issue 995 must pass: rc=$? err=$(cat "$work/err-e.txt")"
+    grep -q '^PASS path next-review.sh (resolved scripts/fleet/next-review.sh)$' "$work/out-e.txt" ||
+        fail "issue 995 misses the resolved bare-name PASS line: $(cat "$work/out-e.txt")"
+    echo "ok e bare name resolves"
+
+    # f. concept slash token WARNs, untracked file-like token FAILs,
+    #    Predicted-surface proposals are skipped entirely
+    run_gated sh "$freshness" 996 >"$work/out-f.txt" 2>"$work/err-f.txt" &&
+        fail "issue 996 must exit 1" || rc=$?
+    [ "${rc:-0}" -eq 1 ] || fail "issue 996 exit ${rc:-0}, want 1"
+    fails=$(grep -c '^FAIL' "$work/out-f.txt") || true
+    [ "$fails" -eq 1 ] || fail "issue 996 must print exactly one FAIL: $(cat "$work/out-f.txt")"
+    grep -q '^FAIL path scripts/fleet/nope-996.sh missing' "$work/out-f.txt" ||
+        fail "issue 996 must FAIL the untracked file-like token: $(cat "$work/out-f.txt")"
+    grep -q '^WARN unparsed if/else$' "$work/out-f.txt" ||
+        fail "issue 996 must WARN the concept token: $(cat "$work/out-f.txt")"
+    grep -q 'proposed-996' "$work/out-f.txt" &&
+        fail "issue 996 must skip Predicted-surface proposals: $(cat "$work/out-f.txt")"
+    echo "ok f concept warn, proposal skipped, untracked fails"
+
+    # g. merged PR that merely mentions the issue does not count as delivery
+    run_gated sh "$freshness" 997 >"$work/out-g.txt" 2>"$work/err-g.txt" ||
+        fail "issue 997 must pass: rc=$? err=$(cat "$work/err-g.txt")"
+    grep -q '^PASS not delivered$' "$work/out-g.txt" ||
+        fail "issue 997 must not treat a mention as delivery: $(cat "$work/out-g.txt")"
+    echo "ok g mention is not delivery"
 
     echo "PASS: scripts/fleet/test-issue-freshness.sh"
     exit 0

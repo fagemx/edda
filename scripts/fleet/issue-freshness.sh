@@ -43,6 +43,15 @@ cd "$(git rev-parse --show-toplevel)"
 sha=$(git rev-parse origin/main)
 body=$(gh issue view "$issue" --repo "$repo" --json body --jq .body | tr -d '\r')
 
+# Predicted-surface tokens are proposals for files that may not exist yet,
+# never references: the freshness scan reads the rest of the body only.
+body=$(printf '%s\n' "$body" | awk '
+    /^##[ \t]*Predicted surface[ \t]*$/ { skip = 1; next }
+    /^##[ \t]/ { skip = 0 }
+    skip { next }
+    { print }
+')
+
 fail=0
 fail_lines=
 
@@ -70,21 +79,46 @@ printf '%s\n' "$body" | awk -v RS='`' '
 while IFS= read -r tok; do
     [ -n "$tok" ] || continue
     case "$tok" in
-        */*) ;;
-        *.sh|*.ps1) ;;
+        */*)
+            # a slash token is only credible when its last segment names a
+            # file (carries a dot); `if/else` and friends WARN instead
+            case ${tok##*/} in
+                *.*)
+                    case "$tok" in
+                        *[!A-Za-z0-9._/-]*|-*|/|.|..|*/..*|../*)
+                            echo "WARN unparsed $tok"
+                            continue ;;
+                    esac
+                    if git cat-file -e "$sha:$tok" 2>/dev/null; then
+                        echo "PASS path $tok"
+                    else
+                        echo "FAIL path $tok missing at $sha"
+                        record_fail "FAIL path $tok missing at $sha"
+                    fi
+                    ;;
+                *)
+                    echo "WARN unparsed $tok"
+                    ;;
+            esac
+            ;;
+        *.*)
+            # bare filename: a repo-relative probe cannot see it, so resolve
+            # it against tracked paths and probe only on an exact single hit
+            case "$tok" in
+                *[!A-Za-z0-9._-]*)
+                    echo "WARN unparsed $tok"
+                    continue ;;
+            esac
+            resolved=$(git ls-files -- "*$tok" | head -n 1)
+            count=$(git ls-files -- "*$tok" | wc -l)
+            if [ "$count" -eq 1 ] && git cat-file -e "$sha:$resolved" 2>/dev/null; then
+                echo "PASS path $tok (resolved $resolved)"
+            else
+                echo "WARN bare name $tok does not resolve to exactly one tracked file"
+            fi
+            ;;
         *) continue ;;
     esac
-    case "$tok" in
-        *[!A-Za-z0-9._/-]*)
-            echo "WARN unparsed $tok"
-            continue ;;
-    esac
-    if git cat-file -e "$sha:$tok" 2>/dev/null; then
-        echo "PASS path $tok"
-    else
-        echo "FAIL path $tok missing at $sha"
-        record_fail "FAIL path $tok missing at $sha"
-    fi
 done <"$tmp"
 
 # 2. edda verbs: every `edda <verb>` mention must survive its own --help.
@@ -112,8 +146,15 @@ else
 fi
 
 # 4. delivered: any merged PR whose title/body/branch matches the issue.
-pr1=$(gh pr list --repo "$repo" --state merged --search "GH-$issue" --json number --jq '.[].number' || :)
-pr2=$(gh pr list --repo "$repo" --state merged --search "#$issue" --json number --jq '.[].number' || :)
+delivering() {
+    # a merged PR delivers this issue only when GitHub resolved a closing
+    # reference to it; mentions in title, body or branch do not count
+    gh pr list --repo "$repo" --state merged --search "$1" \
+        --json number,closingIssuesReferences \
+        --jq ".[] | select(any(.closingIssuesReferences[]?; .number == $issue)) | .number" || :
+}
+pr1=$(delivering "GH-$issue")
+pr2=$(delivering "#$issue")
 merged=$(printf '%s\n%s\n' "$pr1" "$pr2" | tr -d '\r' | sort -u | sed '/^$/d')
 if [ -n "$merged" ]; then
     spaced=$(printf '%s' "$merged" | tr '\n' ' ')
