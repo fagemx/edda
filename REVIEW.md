@@ -649,6 +649,7 @@ One comment per round, pinned to the reviewed full SHA
 - spec: review-spec-v1.3
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
+- shadow: true|false  (true: the heading is `## Code Review: Round <N> (SHADOW) — PR #<n> @ <full 40-hex SHA>`; a SHADOW round is never a verdict — §8)
 - cost: <elapsed / tokens / tool calls, as available>
 
 ### IN SCOPE
@@ -702,6 +703,13 @@ rather than overwriting it.
 - An LGTM with a non-empty `escalations:` field is provisional (§6.4).
 - Every push invalidates this verdict (`loop` item 5). A draft/ready flip, a
   label, or a status change is not a push and reruns nothing (`ladder`, L3).
+- **A round posted as SHADOW is never a verdict.** A §7 comment whose heading
+  carries the ` (SHADOW)` suffix and whose header sets `- shadow: true` sets
+  no `review:*` label and no `Independent Review` status — the union rule
+  below ignores it. It is calibration evidence, not a gate:
+  `scripts/review-compare.sh <pr> <sha>` diffs its findings against the
+  authoritative round (the latest §7 round on that SHA without the suffix)
+  and prints one `for-ledger` line for the calibration ledger (issue #887).
 
 Internal verifier reports, task receipts and CI do not replace this comment
 (`loop`). For a local-only delivery with no PR, record the same fields in the
@@ -750,6 +758,7 @@ mechanical.
 | R3 | RAN | `sh -n` on 3 changed scripts, all exit 0 |
 | R4–R5 | canonical | `brief-v1` §6.1 items 3–4; stated as properties, not commands |
 | §5.5 | RAN | `sh scripts/wiring-scan.sh 6340d94~1 6340d94` |
+| §8 shadow rule | canonical | operator ruling 2026-09-05 (`review.gh880-shadow`, issue #887): a ` (SHADOW)` round is never a verdict, sets no label and no `Independent Review` status; `sh scripts/review-compare.sh <pr> <sha>` diffs it against the authoritative round on the same SHA |
 
 ## 10. Version
 
