@@ -37,10 +37,13 @@ class Generator:
             return " | ".join(self.type_for(part, hint) for part in schema["anyOf"])
         if "oneOf" in schema:
             return " | ".join(self.type_for(part, hint) for part in schema["oneOf"])
+        # Enum schemas carry their own value domain: render them as real
+        # literal unions whether or not a sibling "type" key is present (the
+        # pinned corpus uses bare enums and anyOf-wrapped enums).
+        if "enum" in schema:
+            return "Literal[" + ", ".join(repr(value) for value in schema["enum"]) + "]"
         kind = schema.get("type")
         if kind == "string":
-            if "enum" in schema:
-                return "Literal[" + ", ".join(repr(value) for value in schema["enum"]) + "]"
             return "str"
         if kind == "integer":
             return "int"

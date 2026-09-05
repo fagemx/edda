@@ -168,7 +168,7 @@ export interface DecisionImportPayload {
     "key": string;
     "value": string;
     "reason"?: string | null;
-    "scope"?: unknown | null;
+    "scope"?: "local" | "shared" | "global" | null;
     "authority"?: string | null;
     "affected_paths"?: Array<string> | null;
     "tags"?: Array<string> | null;
@@ -208,9 +208,9 @@ export type ExecutionEventPayload = unknown;
 /** Event type `ingestion` — stability: unstable (source: crates/edda-ingestion/src/writer.rs). */
 export interface IngestionPayload {
   "id": string;
-  "triggerType": unknown;
+  "triggerType": "auto" | "suggested" | "manual";
   "eventType": string;
-  "sourceLayer": unknown;
+  "sourceLayer": "L0" | "L1" | "L2" | "L3" | "L4" | "L5";
   "sourceRefs"?: Array<{
     "layer": string;
     "kind": string;
@@ -243,7 +243,7 @@ export interface NotePayload {
     "key": string;
     "value": string;
     "reason"?: string | null;
-    "scope"?: unknown | null;
+    "scope"?: "local" | "shared" | "global" | null;
     "authority"?: string | null;
     "affected_paths"?: Array<string> | null;
     "tags"?: Array<string> | null;
@@ -343,16 +343,16 @@ export interface ReviewBundlePayload {
     [k: string]: unknown;
   };
   "risk_assessment": {
-    "level": unknown;
+    "level": "low" | "medium" | "high" | "critical";
     "factors": Array<{
       "signal": string;
-      "level": unknown;
+      "level": "low" | "medium" | "high" | "critical";
       "detail": string;
       [k: string]: unknown;
     }>;
     [k: string]: unknown;
   };
-  "suggested_action": unknown;
+  "suggested_action": "approve" | "review" | "request_changes" | "reject";
   "suggested_reason": string;
   [k: string]: unknown;
 }
@@ -421,7 +421,7 @@ export interface TaskIntakePayload {
 /** Event type `verdict.recorded` — stability: unstable (source: crates/edda-core/src/event.rs). */
 export interface VerdictRecordedPayload {
   "subject": string;
-  "decision": unknown;
+  "decision": "approved" | "rejected";
   "sha": string;
   "comment"?: string;
   "actor": string;

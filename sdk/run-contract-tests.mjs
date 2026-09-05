@@ -81,6 +81,14 @@ const pyTypes = spawnSync("python", ["-c", [
   "assert any(hasattr(value, '__required_keys__') for value in vars(t).values())",
 ].join(" ")], { stdio: "inherit", env: goldenEnv });
 if (pyTypes.status !== 0) fail("generated Python types do not compile/import with required nested TypedDicts");
+// Enum probe: representative enum fields (bare and anyOf-wrapped) must be
+// literal unions, not object/unknown, with requiredness preserved — see
+// sdk/python/tests/test_types_gen.py.
+const pyEnumProbe = spawnSync("python", ["-m", "unittest", "discover", "-s", join(here, "python", "tests"), "-p", "test_types_gen.py"], {
+  stdio: "inherit",
+  env: { ...goldenEnv, PYTHONPATH: join(here, "python", "src"), PYTHONWARNINGS: "error::ResourceWarning" },
+});
+if (pyEnumProbe.status !== 0) fail("generated Python enum fields are not literal unions (test_types_gen.py failed)");
 const tsBuild = spawnSync(npmCommand, [...npmPrefix, "--prefix", join(here, "ts"), "run", "build"], { stdio: "inherit", env: goldenEnv });
 if (tsBuild.status !== 0) fail("TypeScript package build failed");
 const tsPackSmoke = spawnSync(npmCommand, [...npmPrefix, "--prefix", join(here, "ts"), "run", "pack-smoke"], { stdio: "inherit", env: goldenEnv });

@@ -46,9 +46,15 @@ function tsType(schema, indent = "", nameHint = "") {
   if (schema.oneOf) {
     return schema.oneOf.map((s) => tsType(s, indent, nameHint)).join(" | ");
   }
+  // Enum schemas carry their own value domain: render them as real string-literal
+  // unions whether or not a sibling "type" key is present (the pinned corpus
+  // uses bare enums and anyOf-wrapped enums).
+  if (schema.enum) {
+    return schema.enum.map((e) => JSON.stringify(e)).join(" | ");
+  }
   switch (schema.type) {
     case "string":
-      return schema.enum ? schema.enum.map((e) => JSON.stringify(e)).join(" | ") : "string";
+      return "string";
     case "integer":
       return "number /* integer */";
     case "number":
