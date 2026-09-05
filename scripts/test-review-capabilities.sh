@@ -88,15 +88,22 @@ BACKEND=unguarded; export BACKEND
 printf ORIGINAL > "$CANARY"
 : > "$CALLS"
 printf brief > "$tmp/scratch/review-pr9998-r1-brief.md"
+failures=0
 sh "$tmp/unguarded-old-run.sh" > "$tmp/old-out" 2>&1 || old_rc=$?
 old_rc=${old_rc:-0}
-if [ "$(cat "$CANARY")" != TAMPERED ] || [ ! -s "$CALLS" ] || [ "$old_rc" -ne 0 ]; then
+# This control asks one thing: does an UNGUARDED dispatch reach the backend?
+# So it reads DISPATCH_EXIT from the receipt, not the runner's process exit.
+# Since GH-867 the process exit also folds in worktree and task teardown, and
+# this fixture's wt-review-pr9998 is a standalone `git init` repo rather than a
+# worktree registered against $ROOT, so `git worktree remove` fails here by
+# construction and FINAL_EXIT is always 2 — which made the control look dead
+# when it was working (GH-928).
+unguarded_dispatch_exit=$(sed -n 's/^DISPATCH_EXIT=//p' "$tmp/scratch/review-pr9998-r1.done" | head -1)
+if [ "$(cat "$CANARY")" != TAMPERED ] || [ ! -s "$CALLS" ] || [ "$unguarded_dispatch_exit" != 0 ]; then
   cat "$tmp/old-out" >&2 || true
-  echo 'FAIL unguarded baseline: old dispatch shape did not write owned canary' >&2
-  exit 1
+  echo "FAIL unguarded baseline: unguarded dispatch did not reach the backend (canary=$(cat "$CANARY") DISPATCH_EXIT=${unguarded_dispatch_exit:-absent} process_exit=$old_rc)" >&2
+  failures=$((failures + 1))
 fi
-
-failures=0
 for BACKEND in old modern old-claude fallback mutate; do
  export BACKEND
  printf ORIGINAL > "$CANARY"
@@ -128,16 +135,24 @@ for BACKEND in old modern old-claude fallback mutate; do
      echo 'FAIL mutate: tracked, untracked, or ignored source change was accepted' >&2; failures=$((failures + 1))
    fi ;;
  *)
-   if [ ! -s "$CALLS" ] || [ "$rc" -ne 0 ]; then
-     echo "FAIL $BACKEND: capable backend never launched"; failures=$((failures + 1))
+   # Same reading as the unguarded control above: "did the dispatch run" is
+   # DISPATCH_EXIT, not the process exit, which since GH-867 also carries
+   # teardown the fixture cannot satisfy (GH-928).
+   dispatch_exit=$(sed -n 's/^DISPATCH_EXIT=//p' "$tmp/scratch/review-pr9998-r1.done" | head -1)
+   if [ ! -s "$CALLS" ] || [ "$dispatch_exit" != 0 ]; then
+     echo "FAIL $BACKEND: capable backend never launched (DISPATCH_EXIT=${dispatch_exit:-absent} process_exit=$rc)"; failures=$((failures + 1))
    fi
    if ! grep -q '^TOOL_FLAGS=.*--permission-mode.*mcp__' "$tmp/scratch/review-pr9998-r1.done"; then
      echo "FAIL $BACKEND: no actual flags receipt"; failures=$((failures + 1))
    fi ;;
  esac
 done
-[ "$failures" -eq 0 ] || exit 1
-echo 'review capability canaries passed (unguarded baseline; old/modern dispatch and fallback; all source scopes)'
+# No early exit: the Windows block below must run even when a POSIX case
+# failed, so the operator sees every failing case in one run (GH-928). The
+# single gate is at the end of the file.
+if [ "$failures" -eq 0 ]; then
+  echo 'review capability canaries passed (unguarded baseline; old/modern dispatch and fallback; all source scopes)'
+fi
 
 # On Windows execute the generated PowerShell lane too. Functions stand in
 # for the two binaries; any non-help call with missing flags writes canary.
@@ -197,17 +212,23 @@ EOF
     pwsh -NoProfile -File "$(cygpath -w "$tmp/driver.ps1")" \
       -Lane "$(cygpath -w "$tmp/scratch/review-pr9998-r1-lane.ps1")" > "$tmp/win-out" 2>&1 || rc=$?
     if [ "$(tr -d '\r\n' < "$CANARY")" != ORIGINAL ]; then
-      echo "FAIL Windows $BACKEND: canary changed"; exit 1
+      echo "FAIL Windows $BACKEND: canary changed"; failures=$((failures + 1))
     fi
     case "$BACKEND" in
       old|old-claude)
-        if [ "$rc" -eq 0 ] || [ -s "$CALLS" ]; then cat "$tmp/win-out"; echo "FAIL Windows $BACKEND: not refused"; exit 1; fi ;;
+        if [ "$rc" -eq 0 ] || [ -s "$CALLS" ]; then cat "$tmp/win-out"; echo "FAIL Windows $BACKEND: not refused"; failures=$((failures + 1)); fi ;;
       mutate)
-        if [ ! -s "$CALLS" ] || [ "$rc" -eq 0 ] || ! grep -q '^WORKTREE_CHECK=failed' "$tmp/scratch/review-pr9998-r1.done"; then cat "$tmp/win-out"; echo 'FAIL Windows mutate: source change was accepted'; exit 1; fi ;;
+        if [ ! -s "$CALLS" ] || [ "$rc" -eq 0 ] || ! grep -q '^WORKTREE_CHECK=failed' "$tmp/scratch/review-pr9998-r1.done"; then cat "$tmp/win-out"; echo 'FAIL Windows mutate: source change was accepted'; failures=$((failures + 1)); fi ;;
       *)
-        if [ ! -s "$CALLS" ] || [ "$rc" -ne 0 ]; then cat "$tmp/win-out"; echo "FAIL Windows $BACKEND: no successful launch"; exit 1; fi
-        grep -q '^TOOL_FLAGS=.*--permission-mode.*mcp__' "$tmp/scratch/review-pr9998-r1.done" || exit 1 ;;
+        win_dispatch_exit=$(sed -n 's/^DISPATCH_EXIT=//p' "$tmp/scratch/review-pr9998-r1.done" | head -1)
+        if [ ! -s "$CALLS" ] || [ "$win_dispatch_exit" != 0 ]; then cat "$tmp/win-out"; echo "FAIL Windows $BACKEND: no successful launch (DISPATCH_EXIT=${win_dispatch_exit:-absent} process_exit=$rc)"; failures=$((failures + 1)); fi
+        grep -q '^TOOL_FLAGS=.*--permission-mode.*mcp__' "$tmp/scratch/review-pr9998-r1.done" || { echo "FAIL Windows $BACKEND: no actual flags receipt"; failures=$((failures + 1)); } ;;
     esac
   done
-  echo 'Windows generated lane canaries passed (old/modern transport and source-snapshot cases)'
+  if [ "$failures" -eq 0 ]; then
+    echo 'Windows generated lane canaries passed (old/modern transport and source-snapshot cases)'
+  fi
 fi
+
+# The one gate, after every case has had its say.
+[ "$failures" -eq 0 ] || exit 1
