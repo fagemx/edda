@@ -51,7 +51,7 @@ EOF
 cat > "$tmp/bin/claude" <<'EOF'
 #!/bin/sh
 if [ "$*" = '--help' ]; then
- [ "$BACKEND" = old-claude ] || echo '--tools <tools> --disallowedTools <tools> --permission-mode <mode>'
+ [ "$BACKEND" = old-claude ] || echo '--tools <tools> --disallowedTools, --disallowed-tools <tools> --permission-mode <mode>'
  exit 0
 fi
 echo launch >> "$CALLS"
@@ -161,7 +161,7 @@ function edda {
 }
 function claude {
   if (($args -join ' ') -eq '--help') {
-    if ($env:BACKEND -ne 'old-claude') { '--tools <tools> --disallowedTools <tools> --permission-mode <mode>' }
+    if ($env:BACKEND -ne 'old-claude') { '--tools <tools> --disallowedTools, --disallowed-tools <tools> --permission-mode <mode>' }
     $global:LASTEXITCODE = 0; return
   }
   Add-Content $env:CALLS launch
