@@ -48,6 +48,14 @@ case "$machine" in
     */*) : ;;
     *) die "machine identity must be <machine>/<role>, got '$machine'" ;;
 esac
+# The identity is interpolated into the double-quoted sh -c task-new line
+# below, so every segment must be [A-Za-z0-9._-]+ — a quote, dollar, backtick,
+# backslash, or whitespace surviving this check would break out of that string.
+for machine_segment in "${machine%%/*}" "${machine#*/}"; do
+    case "$machine_segment" in
+        ''|*[!A-Za-z0-9._-]*) die "machine identity segments must match [A-Za-z0-9._-]+, got '$machine'" ;;
+    esac
+done
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH= cd -- "$self_dir/../.." && pwd)
