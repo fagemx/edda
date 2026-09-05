@@ -23,7 +23,7 @@ classes:
 
 # REVIEW.md — the executable review spec
 
-- Spec version: `review-spec-v1.3`
+- Spec version: `review-spec-v1.4`
 - Audience: anyone — human or engine — reviewing a pull request in this
   repository, and any script that builds a review brief.
 - Status: this file is the **single source of truth** for how a PR is reviewed
@@ -98,12 +98,14 @@ the rule says so and the command is not piped.
 
 ## 1. Step 1 — fetch the PR
 
+# review-spec:check FETCH
 ```sh
 N=<pr-number>
 gh pr view "$N" --json headRefOid,headRefName,title,body,state,isDraft
 SHA=$(gh pr view "$N" --json headRefOid --jq .headRefOid)   # full 40-hex
 gh pr checkout "$N"
 ```
+# review-spec:check-end
 
 The reviewed SHA is the **full** head SHA and it is pinned for the whole round.
 Every push invalidates the previous verdict and requires another round
@@ -118,12 +120,14 @@ partial-delivery or design-only PR references the issue without one.
 `scripts/review-pr.sh` mines the `Issue:` line, closing keywords, and GitHub's
 own linkage:
 
+# review-spec:check ISSUES
 ```sh
 ISSUES=$(gh pr view "$N" --json body --jq .body \
   | awk 'tolower($0) ~ /^issues?[[:space:]]*:/' | grep -Eo '#[0-9]+' | tr -d '#' | sort -u)
 for i in $ISSUES; do gh issue view "$i" --json body --jq .body \
   | awk '/^## doneWhen/{f=1;next} /^## /{f=0} f'; done
 ```
+# review-spec:check-end
 
 The issue's `doneWhen` is the acceptance ceiling (`loop` item 2). Anything the
 PR does beyond it, and anything you want beyond it, is a `FOLLOW-UP ISSUE`, not
@@ -132,12 +136,14 @@ safety boundary.
 
 ## 2. Step 2 — diff it
 
+# review-spec:check DIFF
 ```sh
 BASE=$(gh pr view "$N" --json baseRefName --jq .baseRefName)
 git fetch -q origin "$BASE"
 gh pr diff "$N" --name-only          # the changed-file list — the allowed surface
 gh pr diff "$N"                      # the diff itself
 ```
+# review-spec:check-end
 
 For a delta round (a re-review after a fix push) the target is
 `git diff <previously-reviewed-sha>..<new-sha>` plus a RAN confirmation that
@@ -151,15 +157,18 @@ Classification is **mechanical, from the changed-file list**
 The router is the marked block below: it reads the `--name-only` list on stdin
 and prints the classes the PR belongs to plus the canonical class of §3.2.
 
+# review-spec:check ROUTER
 ```sh
 gh pr diff "$N" --name-only \
   | sh -c "$(awk '/^# review-spec:classifier$/{f=1;next} /^# review-spec:classifier-end$/{exit} f' REVIEW.md)"
 ```
+# review-spec:check-end
 
 `scripts/review-pr.sh` extracts the same block by the same two marker lines and
 runs it on the PR's files, so the router exists **once**. Change it here and
 nowhere else; a copy anywhere else is an `S3` finding against that copy.
 
+# review-spec:check CLASSIFIER
 ```sh
 # review-spec:classifier
 # Reads the changed-file list on stdin; prints "classes=<...>" and
@@ -189,6 +198,7 @@ esac
 printf "classes=%s\ncanonical_class=%s\n" "$classes" "$canon"
 # review-spec:classifier-end
 ```
+# review-spec:check-end
 
 ### 3.1 The risk surface, enumerated
 
@@ -265,9 +275,11 @@ must hold and input shapes to confirm — never as an attack plan (decision
 **U1 — surface. P0.** Every changed file is inside the surface the issue or the
 lane brief allows. A file outside it is a lane-boundary violation.
 
+# review-spec:check U1
 ```sh
 gh pr diff "$N" --name-only
 ```
+# review-spec:check-end
 
 **U2 — closing keyword ⟺ every doneWhen delivered. P1.** A PR body writes
 `closes #N` exactly when the diff delivers every doneWhen item of issue #N, so
@@ -280,12 +292,14 @@ in the brief) against the diff: a closing keyword on a partially delivered or
 design-only issue would auto-close unfinished work — that is the P1. The
 signal is the printed lines, not `$?`.
 
+# review-spec:check U2
 ```sh
 gh pr view "$N" --json body --jq .body \
   | grep -Ein '(^|[^a-z])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+'
 git log --format=%B "origin/$BASE..$SHA" \
   | grep -Ein '(^|[^a-z])(close[sd]?|fix(e[sd])?|resolve[sd]?)[[:space:]]+#[0-9]+'
 ```
+# review-spec:check-end
 
 **U3 — the `Issue: #N` line exists. P1.** This is a convention miss, not a data
 dependency: `scripts/review-pr.sh` collects issue numbers from **three**
@@ -297,25 +311,31 @@ consequence of the missing line. Missing `Issue: #N` is still P1 because the
 repo wants the issue named in this exact conventional form. Empty output is
 the failure.
 
+# review-spec:check U3
 ```sh
 gh pr view "$N" --json body --jq .body | awk 'tolower($0) ~ /^issues?[[:space:]]*:/'
 ```
+# review-spec:check-end
 
 **U4 — conventional commit subjects. P1.** `<type>(<scope>): <description>`
 (`.claude/CLAUDE.md` § "Commit Conventions"). Printed lines are the offenders;
 empty output passes. Merge commits and `wip(…)` checkpoints are exempt
 (`CONTRIBUTING.md`).
 
+# review-spec:check U4
 ```sh
 git log --format=%s "origin/$BASE..$SHA" \
   | grep -Ev '^(feat|fix|docs|refactor|test|chore|perf|build|ci|style|revert)(\([a-z0-9._/-]+\))?!?: .+'
 ```
+# review-spec:check-end
 
 **U5 — markdown content lint. P1.** Exit code is the signal.
 
+# review-spec:check U5
 ```sh
 sh scripts/lint-markdown-content.sh; echo "exit=$?"
 ```
+# review-spec:check-end
 
 **U6 — gates: READ before RAN. P0 when CI is deterministically red.** The L1
 receipt is exact-head CI itself — `CI run <id> @ <sha>` — and the workspace
@@ -329,15 +349,30 @@ absent exact-head CI, or grounds to distrust it). Deterministically red CI
 already blocks the SHA — audit and request changes instead of spending a full
 run; if the red is environmental, rerun only the failed job.
 
+# review-spec:check U6
 ```sh
 gh pr checks "$N"
 ```
+# review-spec:check-end
 
 A docs-only head legitimately shows `Clippy`/`Test` as `skipping` while
 `CI Gate` passes (`ci.path-filter`). That is a correct run, not a broken one.
 
 
-Before claiming `RAN on this workstation`, confirm `edda --version` in the reviewed worktree prints the exact checked-out build identity (commit + date), or `unknown` when git metadata is unavailable.
+Before any CLI probe, record both the installed runtime (`edda --version`) and
+the workspace version at the reviewed base SHA:
+
+# review-spec:check U6
+```sh
+edda --version
+BASE_SHA=$(gh pr view "$N" --json baseRefOid --jq .baseRefOid)
+git show "$BASE_SHA:Cargo.toml" | sed -n '/^\[workspace.package\]/,/^\[/p' | grep '^version'
+```
+# review-spec:check-end
+
+They identify the subject of a later measurement: the first is an installed
+runtime claim and the second is a source claim. A mismatch is not a P0 by
+itself; route each claim through D1, including its required source fallback.
 
 **U7 — the round is complete before it is posted. P1.** Finish the whole scoped
 audit and batch every blocking P0/P1 before `Changes Requested`. A blocker
@@ -348,10 +383,22 @@ non-product cycles without useful progress and route the finding instead
 
 ### 5.1 docs
 
-**D1 — every command named must exist. P1.** Zero discretion (`brief-v1` §1):
-for every backticked CLI invocation the diff adds, probe it and report the exit
-code. You may not conclude anything about a command you did not probe, and "the
-document says it does X" is not a measurement.
+**D1 — claims name their measured subject. P1.** Zero discretion (`brief-v1`
+§1): classify every added factual command claim before measuring it.
+
+| Claim shape | Required subject and check |
+|---|---|
+| A user running a backticked command gets a result | The installed runtime. Probe the command and report its exit code. |
+| The repository or source at SHA `S` has a stated shape, with a repo-relative `path:line` citation | The source at `S`. Read it with `git show "$S:$path"` and report the cited lines. If the claim names no SHA, `S` is the reviewed head SHA. |
+
+A source claim may name a command as data; do not turn that citation into an
+installed-binary claim. Conversely, a runtime claim may not pass because a
+source file has a similar flag. The installed/runtime version mismatch recorded
+before the probes is never a P0 alone. It requires the source check for every
+source claim, and only that check can establish whether the citation is false.
+You may not conclude anything about a runtime command you did not probe or a
+source citation you did not read; "the document says it does X" is not a
+measurement.
 
 **Probe `git` with `-h`, never with `--help`.** On Windows `git <verb> --help`
 does not print to the terminal: it renders the HTML manual and opens it in the
@@ -371,6 +418,11 @@ states that non-zero exit itself** — a documented future verb and a cited
 failure are both allowed; an undocumented one is the `c3-nonexistent-flag`
 failure.
 
+For a source claim, use the cited line range after `git show`; a missing path,
+missing line, or absent stated shape is the P1. Do not use a failed installed
+probe as that finding. This is mechanical routing, not reviewer discretion.
+
+# review-spec:check D1
 ```sh
 git diff "origin/$BASE..$SHA" | grep '^+' \
   | grep -oE '`(edda|gh|git|cargo|pi|claude) [a-z][a-z0-9-]*' | tr -d '`' | sort -u \
@@ -381,14 +433,17 @@ git diff "origin/$BASE..$SHA" | grep '^+' \
       else echo "$c $flag -> exit=$e CANDIDATE"; fi
     done
 ```
+# review-spec:check-end
 
 **D2 — ledger claims match the ledger. P1.** Every stated decision value or
 status (active / ratified / superseded) is checked against the ledger itself. A
 stale claim counts even when it errs safe (canary `c2-stale-ratify-claim`).
 
+# review-spec:check D2
 ```sh
 edda ask <decision-key>
 ```
+# review-spec:check-end
 
 **The ledger is workspace-scoped, and a review worktree is usually outside it.**
 `edda ask` answers from the project owning the current directory, so from a
@@ -409,6 +464,7 @@ the diff adds and open each one. `MISSING` lines are the findings (canary
 `c3-nonexistent-flag` is the same failure one level down: a named flag that
 does not exist).
 
+# review-spec:check D3
 ```sh
 tops=$(git ls-files | cut -d/ -f1 | sort -u | tr '\n' '|' | sed 's/|$//')
 git diff "origin/$BASE..$SHA" | grep '^+' \
@@ -416,6 +472,7 @@ git diff "origin/$BASE..$SHA" | grep '^+' \
   | grep -E "^($tops)(/|$)" | sed 's/[ <*#\\].*$//;s#/$##' | sort -u \
   | while read -r p; do [ -e "$p" ] && echo "OK      $p" || echo "MISSING $p"; done
 ```
+# review-spec:check-end
 
 **D4 — authority boundary. P0.** A document may not instruct its reader to act
 beyond their role: merging, force-pushing, deleting branches, or skipping
@@ -426,10 +483,12 @@ and lane worktree). A candidate with no such caveat is the finding (canary
 `c4-merge-authority-contradiction`; decisions `fleet.merge-authority`,
 `fleet.merged-artifact-cleanup`).
 
+# review-spec:check D4
 ```sh
 git diff "origin/$BASE..$SHA" --unified=0 | grep -nE '^\+' \
   | grep -E 'gh pr merge|--delete-branch|--admin|--no-verify|push --force|force-push'
 ```
+# review-spec:check-end
 
 **D5 — wording and structure. `[判斷]`.** Whether the prose is clear, correctly
 scoped and non-duplicative. Judgement — see §6.
@@ -442,13 +501,15 @@ not instruct self-merge. Check the added text against the prohibitions the
 skill itself declares and against `loop` ("Merge still requires explicit
 operator authority").
 
+# review-spec:check S1
 ```sh
 git diff "origin/$BASE..$SHA" -- '*SKILL.md' '.claude/**' 'skills/**' | grep '^+' \
   | grep -nEi 'merge|--delete-branch|self-review|skip (the )?review'
 ```
+# review-spec:check-end
 
-**S2 — the skill's factual claims resolve.** Same measurement as D1 and D3,
-applied to every command and every `file:line` reference the skill asserts. P1
+**S2 — the skill's factual claims resolve.** Apply D1's claim routing and D3
+to every command and every `file:line` reference the skill asserts. P1
 per hit.
 
 **S3 — one source of truth. P1.** A skill that restates a rule owned by this
@@ -465,29 +526,35 @@ it fails (`loop` item 1).
 test is P0.** The test must fail without the change. Enumerate what the diff
 adds:
 
+# review-spec:check C2
 ```sh
 git log --format=%s "origin/$BASE..$SHA"
 git diff "origin/$BASE..$SHA" -- 'crates/**' | grep -cE '^\+.*(#\[test\]|fn test_)'
 ```
+# review-spec:check-end
 
 **C3 — no `unwrap`/`expect` outside tests. P1.** The grep is the candidate
 list; a candidate is N.A. only when the reported line is inside a
 `#[cfg(test)]` module, which you confirm by opening the file
 (`.claude/CLAUDE.md` §3.3).
 
+# review-spec:check C3
 ```sh
 git diff "origin/$BASE..$SHA" -- 'crates/**' | grep -nE '^\+.*\.(unwrap|expect)\('
 ```
+# review-spec:check-end
 
 **C4 — no `unsafe`, no blanket clippy allow. P1.** Printed lines are the
 findings; empty output passes (`.claude/CLAUDE.md` §3.1–3.2). A targeted
 `#[allow(clippy::<lint>)]` is permitted; `clippy::all` and crate-level
 `#![allow(...)]` are not.
 
+# review-spec:check C4
 ```sh
 git diff "origin/$BASE..$SHA" \
   | grep -nE '^\+.*(unsafe[[:space:]]*\{|#\[allow\(clippy::all\)\]|#!\[allow)'
 ```
+# review-spec:check-end
 
 **C5 — Windows coverage gap. P1 if unrun.** CI runs `cargo test --workspace`
 on Linux and macOS but only 7 crates on Windows — `edda-store`, `edda-ledger`,
@@ -497,10 +564,12 @@ the ladder's own L2 command for that crate — `cargo test -p <crate>` on
 Windows — not a new gate invented here (`ladder`). One focused check per
 uncovered crate; never the whole workspace to reach one.
 
+# review-spec:check C5
 ```sh
 gh pr diff "$N" --name-only | grep '^crates/' | cut -d/ -f2 | sort -u \
   | grep -Ev '^(edda-store|edda-ledger|edda-search-fts|edda-transcript|edda-bridge-claude|edda-conductor|edda-cli)$'
 ```
+# review-spec:check-end
 
 ### 5.4 code-risk — everything in §5.3, plus
 
@@ -508,10 +577,12 @@ gh pr diff "$N" --name-only | grep '^crates/' | cut -d/ -f2 | sort -u \
 trigger condition stated in the review. A hit whose trigger you cannot state is
 itself the finding.
 
+# review-spec:check R1
 ```sh
 git diff "origin/$BASE..$SHA" --unified=0 | grep -nE '^\+' \
   | grep -E 'rm -rf|git clean|reset --hard|git rm|--delete-branch|--force|Remove-Item'
 ```
+# review-spec:check-end
 
 **R2 — shell operator precedence. `[判斷]`.** For every added line mixing `||`
 and `&&`, write the parse tree and the truth table, and say for each branch
@@ -521,11 +592,13 @@ the item the cheap engines escalate rather than adjudicate — see §6.
 
 **R3 — every changed shell script parses. P0.** Exit code is the signal.
 
+# review-spec:check R3
 ```sh
 for f in $(gh pr diff "$N" --name-only | grep -E '\.(sh|bash)$'); do
   [ -f "$f" ] && { sh -n "$f"; echo "$f -> sh -n exit=$?"; }
 done
 ```
+# review-spec:check-end
 
 **R4 — resource release and `set -e` semantics. P1.** Temp directories, files
 and locks have a release path on every exit, including the error path. `set -u`
@@ -567,9 +640,11 @@ Fixed adjudication, no discretion (`wiring`):
 
 Machine aid — reviewer RAN, not a CI gate (false positives are expected):
 
+# review-spec:check WIRING
 ```sh
 sh scripts/wiring-scan.sh "origin/$BASE" "$SHA"
 ```
+# review-spec:check-end
 
 ## 6. `[判斷]` items and escalation
 
@@ -706,7 +781,7 @@ mechanical.
 | U5 | RAN | exit 0 on this worktree |
 | U6 | RAN | `gh pr checks 664` — `CI Gate pass`, clippy/test `skipping` |
 | U7 | canonical | `loop` items 1–2 and 6; procedural, no command |
-| D1 | RAN | `edda wave --help` → exit 2 (the #616 P1); `edda ask --help` → exit 0; run against this spec's own diff it caught `edda review --help` → exit 2, which is why the rule carries the documented-future-verb clause. The `git` arm was re-probed after #691: `git diff -h`, `git branch -h`, `git log -h` → exit 129 each, usage printed to the terminal, no browser window |
+| D1 | RAN | Runtime probes: `edda wave --help` → exit 2 (the #616 P1); `edda ask --help` → exit 0; this spec's own diff caught `edda review --help` → exit 2, so documented future verbs remain allowed. Source fallback: GH-693's preserved official 0.3 artifact cannot run `dispatch`, while `git show f9496030:crates/edda-cli/src/cmd_dispatch.rs` shows the cited flags; see `docs/evidence/gh693/`. The `git` arm was re-probed after #691: `git diff -h`, `git branch -h`, `git log -h` → exit 129 each, usage printed to the terminal, no browser window |
 | D2 | RAN | `edda ask fleet.review-engine`; and the scoping clause was measured — every decision this file cites resolves from the checkout, while the same `edda ask review.brief-source` from outside it prints `No results found.` |
 | D3 | RAN | 7 paths on a real docs range, 0 false positives after the trailing-argument strip |
 | D4 | RAN | 2 candidates on a real docs range, both carrying the authority caveat |
@@ -750,6 +825,9 @@ mechanical.
   `edda dispatch` ran. The fallback arm is pinned to the recorded
   `fleet.review-engine-model` read-only shape (§0 above) and the verdict
   header prints the `TRANSPORT=` receipt of the arm that actually ran.
+- `review-spec-v1.4` (2026-09-04, issue #693): D1 separates runtime claims
+  from SHA-pinned source claims. An installed-binary mismatch triggers the
+  source check; it cannot alone turn a correct source citation into a P0.
 
 Changing a rule here changes the line for every engine. Record the version in
 each verdict's `spec:` field so catch rates stay readable against the spec they
@@ -759,9 +837,11 @@ were measured under.
 
 Read elapsed from the **same pi session JSONL file** used for `model_observed`:
 
+# review-spec:check ELAPSED
 ```sh
 node scripts/pi-session-elapsed.mjs "$PI_SESSION_FILE"
 ```
+# review-spec:check-end
 
 Set `PI_SESSION_FILE` to the session file already located for this review.
 Copy `elapsed_ms` into the verdict header as `elapsed: <N> ms (pi session)`

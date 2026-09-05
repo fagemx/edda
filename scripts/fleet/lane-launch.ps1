@@ -23,7 +23,7 @@
 # usage:
 #   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> `
 #        -Cwd <worktree> [-Agent pi|codex|claude] [-BudgetUsd <n>] [-TimeoutSec <s>] `
-#        [-SessionId <id>] [-LogDir <dir>] [-BuildLane <lane>] [-DryRun]
+#        [-SessionId <id>] [-LogDir <dir>] [-BuildLane <lane>] [-Owns <path>...] [-DryRun]
 #
 # -BuildLane is optional and accepts exactly the ratified build lanes
 # worker-1|worker-2|verifier|verifier-2 (verification.cost-discipline); when
@@ -36,6 +36,11 @@
 # the launcher consumes it instead of duplicating a drifting literal. When
 # omitted, the wrapper sets NO CARGO env at all — the launcher never
 # synthesizes a build lane; docs lanes compile nothing and pass none.
+#
+# Write-enabled lanes require the smallest canonical repository-relative path
+# scopes they need to claim (for example `crates/edda-cli/src/cmd_dispatch.rs`);
+# read-only review lanes omit them. The launcher forwards each supplied value
+# to `edda dispatch --owns` and does not invent a global ownership policy.
 #
 # Prints, one line each: the .git/config backup verdict (GH-715), then task
 # name, state, wrapper path, log path, done path.
@@ -70,6 +75,10 @@ param(
   [string]$SessionId = '',
   [string]$LogDir = "$env:TEMP\edda-lanes",
   [string]$BuildLane = '',
+  # PowerShell -File binds only the first whitespace-separated value to an
+  # array parameter; unbound trailing values remain in automatic $args and
+  # are folded into this public parameter below.
+  [string[]]$Owns = @(),
   # Explicit for arbitrary lane names; conventional review/reviewer names
   # imply it so historical review-pr<N> callers cannot omit the restriction.
   [switch]$Review,
@@ -77,6 +86,18 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# PowerShell's -File binder silently leaves all but the first `-Owns a b`
+# value unbound.  Read the process argv before helper code runs, replacing the
+# binder result with the documented trailing scope list.  -Owns is deliberately
+# documented as the final option, so every remaining token is a scope.
+$remainingOwns = @($args)
+$rawArgv = [Environment]::GetCommandLineArgs()
+$ownsAt = [Array]::LastIndexOf($rawArgv, '-Owns')
+if ($ownsAt -ge 0) {
+  $remainingOwns = @()
+  for ($i = $ownsAt + 1; $i -lt $rawArgv.Length; $i++) { $remainingOwns += $rawArgv[$i] }
+  $Owns = @()
+}
 
 function Fail([string]$Msg) {
   [Console]::Error.WriteLine("lane-launch: $Msg")
@@ -112,6 +133,27 @@ if ($Name -match '(?i)(^|[._-])dryrun($|[._-])') {
 $allowedBuildLanes = @('worker-1', 'worker-2', 'verifier', 'verifier-2')
 if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {
   Fail "-BuildLane '$BuildLane' is not an allowed build lane (verification.cost-discipline allows only: $($allowedBuildLanes -join ', ')); omit the parameter for lanes that compile nothing"
+}
+$allOwns = [System.Collections.Generic.List[string]]::new()
+foreach ($scope in @($Owns)) { if ($null -ne $scope -and $scope -ne '') { $allOwns.Add([string]$scope) } }
+foreach ($scope in $remainingOwns) { if ($null -ne $scope -and $scope -ne '') { $allOwns.Add([string]$scope) } }
+$Owns = @($allOwns)
+foreach ($scope in $Owns) {
+  # Dispatch claims are compared lexically, so allow exactly one portable
+  # spelling: a non-empty slash-separated repository-relative path.  Reject
+  # drive-relative forms too (`C:foo` is not rooted on Windows), and every
+  # dot component in any position — leading, interior, terminal (`a/.`), or
+  # standalone (`.`) — since those alias a canonical directory scope while
+  # the lexical claim consumer treats the spellings as distinct.
+  if ([string]::IsNullOrWhiteSpace($scope) -or $scope -match '[\r\n\\]' -or
+      [IO.Path]::IsPathRooted($scope) -or $scope -match '^[A-Za-z]:' -or
+      $scope -match '(^|/)\.{1,2}(/|$)' -or
+      $scope -match '//' -or $scope.EndsWith('/')) {
+    Fail "-Owns entry '$scope' must be a canonical non-empty slash-separated repository-relative path scope"
+  }
+}
+if (-not $isReview -and $Owns.Count -eq 0) {
+  Fail 'write-enabled lanes require at least one -Owns repository-relative path scope; refusing an unclaimed scheduled writer'
 }
 $TaskName = "edda-lane-$Name"
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -179,6 +221,7 @@ if (-not $PwshExe) { Fail 'pwsh.exe not found on PATH; cannot register the task'
 # The real `edda dispatch` command line (also printed verbatim by -DryRun).
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
 $argLine += $reviewArgs
+foreach ($scope in $Owns) { $argLine += " --owns $(PsQuote $scope)" }
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 
 # Wrapper the scheduled task actually runs: outside the controller's job
@@ -193,9 +236,15 @@ $env:HOME = $env:USERPROFILE
 # keep `git --help` from opening a browser inside the hidden task
 $env:GIT_CONFIG_PARAMETERS = "'help.format=man'"
 __LANEENV__
-Set-Location -LiteralPath __CWD__
 $code = $null
 try {
+  # All setup belongs inside the terminal-receipt try/finally.  A failure
+  # resolving the worktree or controller used to leave a registered task with
+  # no done file for lane-status/reap to reason about (GH-772 P0-1).
+  Set-Location -LiteralPath __CWD__
+  $controller = Get-Process -Id $PID -ErrorAction Stop
+  $controllerStarted = $controller.StartTime.ToUniversalTime().ToString('o')
+  Add-Content -LiteralPath $PSCommandPath -Value "# lane-reap: controller-pid=$PID controller-started=$controllerStarted" -Encoding utf8
   __REVIEW_PREFLIGHT__
   __RUN__
   $code = $LASTEXITCODE
@@ -203,11 +252,32 @@ try {
   $_ | Out-File __LOG__ -Append -Encoding utf8
   $code = 1
 } finally {
-  __REVIEW_FINISH__
-  # The end record is written no matter how the run ends (GH-672): a log
-  # with START but no === EXIT === line means the lane was killed mid-flight.
-  Add-Content -LiteralPath __LOG__ -Value "=== EXIT code=$code ===" -Encoding utf8
-  Set-Content -LiteralPath __DONE__ -Value $code -Encoding ascii
+  # A review source-check failure must survive later cleanup failures: run all
+  # teardown steps, but only replace a successful/null exit code.
+  try { __REVIEW_FINISH__ } catch {
+    $_ | Out-File __LOG__ -Append -Encoding utf8
+    if ($null -eq $code -or $code -eq 0) { $code = 2 }
+  }
+  $unregisterVerdict = 'unregistered'
+  try {
+    Unregister-ScheduledTask -TaskName __TASK__ -Confirm:$false -ErrorAction Stop
+  } catch {
+    $unregisterVerdict = "FAILED ($($_.Exception.Message))"
+    $_ | Out-File __LOG__ -Append -Encoding utf8
+    if ($null -eq $code -or $code -eq 0) { $code = 1 }
+  }
+  # Publish only after source checking and task teardown. A receipt-write
+  # failure is visible in the log and does not skip teardown or turn a source
+  # failure into success.
+  $doneVerdict = 'written'
+  try {
+    Set-Content -LiteralPath __DONE__ -Value $code -Encoding ascii
+  } catch {
+    $doneVerdict = "FAILED ($($_.Exception.Message))"
+    $_ | Out-File __LOG__ -Append -Encoding utf8
+    if ($null -eq $code -or $code -eq 0) { $code = 1 }
+  }
+  Add-Content -LiteralPath __LOG__ -Value "=== EXIT code=$code registration=$unregisterVerdict done=$doneVerdict ===" -Encoding utf8
 }
 exit $code
 '@
@@ -265,6 +335,7 @@ $reviewSnapshot = Get-ReviewWorktreeSnapshot
 }
 $wrapperText = $wrapperText.Replace('__REVIEW_PREFLIGHT__', $reviewPreflight)
 $wrapperText = $wrapperText.Replace('__REVIEW_FINISH__', $reviewFinish)
+$wrapperText = $wrapperText.Replace('__TASK__', (PsQuote $TaskName))
 
 if ($DryRun) {
   # Generate our own temporary brief — no caller-supplied untracked input.
@@ -275,6 +346,7 @@ if ($DryRun) {
   )
   $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
   $argLine += $reviewArgs
+  foreach ($scope in $Owns) { $argLine += " --owns $(PsQuote $scope)" }
   if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
   # Dry-run artifacts carry their own names: teeing into $Name.log or writing
   # $Name.done here would put a foreign === EXIT === record in the real lane's
@@ -301,8 +373,11 @@ if ($DryRun) {
   $action = New-ScheduledTaskAction -Execute $PwshExe `
     -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
     -WorkingDirectory $Cwd
+  # Dispatch enforces TimeoutSec itself. A scheduler execution limit would
+  # kill the wrapper before its finally block can write the terminal receipt
+  # and unregister this task, leaving a stale registration.
   $settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSec) `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
     -MultipleInstances IgnoreNew `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
   Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
@@ -322,11 +397,32 @@ if ($DryRun) {
   if ($parentName -ne 'svchost.exe') { Fail "dry-run task parent is $parentName, expected svchost.exe (Task Scheduler service)" }
 
   $deadline = (Get-Date).AddSeconds(60)
+  $selfUnregistered = $false
   do {
     Start-Sleep -Seconds 2
-    $task = Get-ScheduledTask -TaskName $TaskName
-    $info = Get-ScheduledTaskInfo -TaskName $TaskName
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $task) {
+      # The owned wrapper unregisters itself in its finally block.  That is a
+      # successful dry-run only when its terminal receipt exists and reports
+      # zero; absence without that receipt remains an unknown launch failure.
+      if (-not (Test-Path -LiteralPath $Done -PathType Leaf)) {
+        Fail "dry-run task $TaskName disappeared without its terminal receipt"
+      }
+      $terminalCode = (Get-Content -LiteralPath $Done -Raw -ErrorAction Stop).Trim()
+      if ($terminalCode -ne '0') {
+        Fail "dry-run task $TaskName self-unregistered with terminal receipt '$terminalCode', expected 0"
+      }
+      $selfUnregistered = $true
+      break
+    }
+    $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $info) { Fail "dry-run task $TaskName exists but its scheduler result is unavailable" }
   } while (($task.State -eq 'Running' -or $info.LastTaskResult -eq 267009) -and (Get-Date) -lt $deadline)
+
+  if ($selfUnregistered) {
+    "dry-run task=$TaskName state=unregistered-by-owned-wrapper receipt=0"
+    exit 0
+  }
 
   "dry-run task=$TaskName state=$($task.State)"
   "LastRunTime=$($info.LastRunTime) LastTaskResult=$($info.LastTaskResult)"
@@ -344,6 +440,7 @@ if (-not (Test-Path -LiteralPath $Brief -PathType Leaf)) {
 $Brief = (Resolve-Path -LiteralPath $Brief).Path
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
 $argLine += $reviewArgs
+foreach ($scope in $Owns) { $argLine += " --owns $(PsQuote $scope)" }
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
 
@@ -356,24 +453,62 @@ $wrapperText.Replace('__CWD__', (PsQuote $Cwd)).Replace('__LOG__', (PsQuote $Log
   Set-Content -LiteralPath $Wrapper -Encoding utf8
 
 Remove-Item -LiteralPath $Done -ErrorAction SilentlyContinue  # stale done-file from a previous run must not masquerade as this run
+$registered = $false
+$scheduledActionArguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`""
+$registrationDescription = "edda lane registration $([guid]::NewGuid().ToString('N'))"
+try {
+  $action = New-ScheduledTaskAction -Execute $PwshExe `
+    -Argument $scheduledActionArguments `
+    -WorkingDirectory $Cwd
+  # Keep Task Scheduler from preempting the wrapper; edda dispatch owns the
+  # requested timeout and its return reaches the wrapper's teardown.
+  $settings = New-ScheduledTaskSettingsSet `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
+    -MultipleInstances IgnoreNew `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+  Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+  Register-ScheduledTask -TaskName $TaskName -Action $action -Settings $settings -Description $registrationDescription -RunLevel Limited | Out-Null
+  $registered = $true
+  Start-ScheduledTask -TaskName $TaskName
+  Start-Sleep -Seconds 2
 
-$action = New-ScheduledTaskAction -Execute $PwshExe `
-  -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Wrapper`"" `
-  -WorkingDirectory $Cwd
-$settings = New-ScheduledTaskSettingsSet `
-  -ExecutionTimeLimit (New-TimeSpan -Seconds $TimeoutSec) `
-  -MultipleInstances IgnoreNew `
-  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-Register-ScheduledTask -TaskName $TaskName -Action $action -Settings $settings -RunLevel Limited | Out-Null
-Start-ScheduledTask -TaskName $TaskName
-Start-Sleep -Seconds 2
-
-# A launch that writes its scripts but registers no task must not report
-# success having started nothing (failure mode recorded on #606).
-$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if (-not $task) { Fail "task $TaskName is absent after Start-ScheduledTask; nothing was launched" }
-if ($task.State -ne 'Running') { Fail "task $TaskName did not reach Running after Start-ScheduledTask (state: $($task.State))" }
+  # A launch that writes its scripts but registers no task must not report
+  # success having started nothing (failure mode recorded on #606).
+  $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+  if (-not $task) { throw "task $TaskName is absent after Start-ScheduledTask; nothing was launched" }
+  if ($task.State -ne 'Running') { throw "task $TaskName did not reach Running after Start-ScheduledTask (state: $($task.State))" }
+} catch {
+  $launchError = $_.Exception.Message
+  # The wrapper did not start cleanly, so publish the same terminal shape it
+  # would have written.  Never unregister a task that turned Running while we
+  # observed the failure: it may be a replacement launched concurrently.
+  $registrationVerdict = 'not-registered'
+  if ($registered) {
+    try {
+      $current = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+      $currentArguments = if ($current -and $current.Actions -and $current.Actions.Count -gt 0) { [string]$current.Actions[0].Arguments } else { $null }
+      $currentDescription = if ($current) { [string]$current.Description } else { $null }
+      if ($current -and $current.State -ne 'Running' -and $currentArguments -eq $scheduledActionArguments -and $currentDescription -eq $registrationDescription) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+        $registrationVerdict = 'unregistered-after-launch-failure'
+      } elseif ($current) {
+        $registrationVerdict = 'preserved-replaced-or-running-after-launch-failure'
+      } else {
+        $registrationVerdict = 'already-absent-after-launch-failure'
+      }
+    } catch {
+      $registrationVerdict = "cleanup-failed ($($_.Exception.Message))"
+    }
+  }
+  try {
+    Add-Content -LiteralPath $Log -Value "lane-launch: setup/start failed: $launchError" -Encoding utf8
+    Set-Content -LiteralPath $Done -Value '1' -Encoding ascii
+    Add-Content -LiteralPath $Log -Value "=== EXIT code=1 registration=$registrationVerdict done=written ===" -Encoding utf8
+  } catch {
+    [Console]::Error.WriteLine("lane-launch: could not publish failed-launch receipt: $($_.Exception.Message)")
+  }
+  Fail "setup/start failed for ${TaskName}: $launchError (registration $registrationVerdict)"
+}
 
 "task=$TaskName state=$($task.State)"
 "wrapper=$Wrapper"

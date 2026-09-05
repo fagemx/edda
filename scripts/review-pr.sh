@@ -50,11 +50,11 @@
 #                                  <<<VERDICT and VERDICT>>> markers; the
 #                                  dispatch receipt's `Model requested:` /
 #                                  `Model observed:` / `Cost:` lines follow it)
-#   review-pr<N>-r<R>.done         written when the dispatch exits
-#                                  ("TRANSPORT=<arm>" naming the arm that
-#                                  actually ran, "SESSION=<uuid>",
-#                                  "SESSION_MODE=new|resume", then
-#                                  "DISPATCH_EXIT=<code>")
+#   review-pr<N>-r<R>.done         atomically published only after dispatch,
+#                                  source proof, worktree removal and task
+#                                  teardown ("TRANSPORT=<arm>", "SESSION=<uuid>",
+#                                  raw "DISPATCH_EXIT=<code>", final exit and
+#                                  terminal WORKTREE/TASK cleanup proof)
 #   wt-review-pr<N>/               detached worktree at the PR head, removed by
 #                                  the lane once the round's verdict is in the
 #                                  log and recreated at the same path next
@@ -210,6 +210,22 @@ SURFACE=$(printf '%s\n' "$FILES" | paste -sd, - | sed 's/,$//')
 # so a PR cannot rewrite the rules it will be judged by. EDDA_REVIEW_SPEC is an
 # explicit file override (offline tests, a spec under development).
 mkdir -p "$SCRATCH"
+# All controller scratch directories share this PR's reservation. Reserve
+# before writing round artifacts or checking out the resumable review worktree.
+REVIEW_RESERVED=0
+REVIEW_MAY_BE_RUNNING=0
+release_unlaunched_review() {
+  if [ "$REVIEW_RESERVED" = 1 ] && [ "$REVIEW_MAY_BE_RUNNING" = 0 ]; then
+    sh "$SELF_DIR/review-round.sh" release "$PR" "$SHA" "$ROUND" ||
+      echo "review-pr.sh: could not release unlaunched reservation" >&2
+  fi
+}
+trap release_unlaunched_review 0
+trap 'exit 1' HUP INT TERM
+if [ "$DRY" = 0 ]; then
+  ROUND=$(sh "$SELF_DIR/review-round.sh" reserve "$PR" "$SHA" "$ROUND" "$SCRATCH") || exit 1
+  REVIEW_RESERVED=1
+fi
 SPEC="$SCRATCH/review-pr$PR-r$ROUND-spec.md"
 if [ -n "$SPEC_OVERRIDE" ]; then
   if [ ! -f "$SPEC_OVERRIDE" ]; then
@@ -470,8 +486,21 @@ if [ "$IS_WIN" = "1" ]; then
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 \$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 \$env:HOME = \$env:USERPROFILE
-Set-Location '$WTW'
-. '$CAPSW'
+# The .done file is a terminal receipt, not a progress log. Build it only in
+# finally and rename it once source proof, worktree removal, and this task's
+# self-unregister have all finished. A failed/partial publish intentionally
+# leaves no admission signal for the next review round.
+\$receiptTmp = "$DONEW.pending-\$PID"
+\$dispatchCode = 2
+\$rawDispatchExit = 2
+\$toolFlags = "--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED'"
+\$transport = 'none'
+\$worktreeCheck = 'failed; source check not reached'
+\$worktreeCleanup = 'not-attempted'
+\$taskCleanup = 'not-attempted'
+\$sourceReady = \$false
+\$beforeStatus = \$null
+\$beforeSnapshot = \$null
 function Get-ReviewWorktreeSnapshot {
   \$entries = [System.Collections.Generic.List[string]]::new()
   foreach (\$scope in @(
@@ -496,202 +525,218 @@ function Get-ReviewWorktreeSnapshot {
   \$bytes = [System.Text.Encoding]::UTF8.GetBytes((\$entries -join "\`n"))
   return [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData(\$bytes)).ToLowerInvariant()
 }
-\$beforeStatus = (& git status --porcelain=v1 --untracked-files=all) -join "\n"
-if (\$LASTEXITCODE -ne 0) { 'DISPATCH_EXIT=2' | Out-File '$DONEW'; exit 2 }
-try { \$beforeSnapshot = Get-ReviewWorktreeSnapshot } catch { \$_ | Out-File '$DONEW'; 'DISPATCH_EXIT=2' | Out-File '$DONEW' -Append; exit 2 }
+try {
+  Set-Location '$WTW'
+  . '$CAPSW'
+  \$beforeStatus = (& git status --porcelain=v1 --untracked-files=all) -join "\n"
+  if (\$LASTEXITCODE -eq 0) { \$beforeSnapshot = Get-ReviewWorktreeSnapshot; \$sourceReady = \$true }
+  else { throw 'git status unavailable before dispatch' }
+} catch { \$_ | Out-File '$LOGW' -Append -Encoding utf8 }
 function Test-ReviewWorktree {
   \$afterHead = & git rev-parse HEAD
-  if (\$LASTEXITCODE -ne 0) { 'WORKTREE_CHECK=failed; git HEAD unavailable' | Out-File '$DONEW' -Append; return \$false }
+  if (\$LASTEXITCODE -ne 0) { return 'failed; git HEAD unavailable' }
   \$afterStatus = (& git status --porcelain=v1 --untracked-files=all) -join "\n"
-  if (\$LASTEXITCODE -ne 0) { 'WORKTREE_CHECK=failed; git status unavailable' | Out-File '$DONEW' -Append; return \$false }
-  try { \$afterSnapshot = Get-ReviewWorktreeSnapshot } catch { \$_ | Out-File '$DONEW' -Append; 'WORKTREE_CHECK=failed; source snapshot unavailable' | Out-File '$DONEW' -Append; return \$false }
+  if (\$LASTEXITCODE -ne 0) { return 'failed; git status unavailable' }
+  try { \$afterSnapshot = Get-ReviewWorktreeSnapshot } catch { return 'failed; source snapshot unavailable' }
   & git status --short | Out-File '$LOGW' -Append -Encoding utf8
   & git log -1 --format=%H | Out-File '$LOGW' -Append -Encoding utf8
-  if (\$LASTEXITCODE -ne 0 -or \$afterHead -ne '$SHA' -or \$afterStatus -ne \$beforeStatus -or \$afterSnapshot -ne \$beforeSnapshot) {
-    'WORKTREE_CHECK=failed; preserved for inspection' | Out-File '$DONEW' -Append -Encoding utf8
-    return \$false
+  if (\$afterHead -ne '$SHA' -or \$afterStatus -ne \$beforeStatus -or \$afterSnapshot -ne \$beforeSnapshot) {
+    return 'failed; preserved for inspection'
   }
-  'WORKTREE_CHECK=unchanged' | Out-File '$DONEW' -Append -Encoding utf8
-  return \$true
+  return 'unchanged'
 }
 function Remove-ReviewWorktree {
-  # The verdict is in the log by the time this runs, so the detached worktree
-  # has served its purpose. Left behind, they accumulate: 14 stale
-  # wt-review-pr* trees sat on this workstation when GH-708 was written. The
-  # path stays per-PR and is recreated at the same place next round, which
-  # does not break --resume (verified: resume is cwd-independent and keeps
-  # appending to the same transcript). --force because the launcher copies
-  # the untracked .edda-review-spec.md into the tree. A failure here (a file
-  # still locked, say) must not change the round's exit code.
-  if ('$ROOTW' -eq '') { return }
-  Set-Location '$SCRATCHW'
-  & git -C '$ROOTW' worktree remove --force '$WTW' 2>&1 | Out-Null
+  # Preserve the review worktree on any uncertainty. This is a narrowly named
+  # git worktree removal, not a recursive scratch cleanup.
+  if ('$ROOTW' -eq '') { return \$false }
+  try {
+    Set-Location '$SCRATCHW'
+    & git -C '$ROOTW' worktree remove --force '$WTW' 2>&1 | Out-File '$LOGW' -Append -Encoding utf8
+    if (\$LASTEXITCODE -ne 0) { return \$false }
+    return -not (Test-Path -LiteralPath '$WTW')
+  } catch {
+    \$_ | Out-File '$LOGW' -Append -Encoding utf8
+    return \$false
+  }
 }
 # edda dispatch hands the prompt to 'claude -p' as a command-line argument,
-# and Windows caps a command line at 32767 chars — an oversized prompt dies in
-# the spawn with os error 206 before claude starts. The brief stays far under
-# that budget because the spec is referenced (.edda-review-spec.md in the
-# worktree), not inlined; the guard is the honest safety valve for a brief
-# that grows past it anyway (a giant doneWhen, say). The fallback runs the
-# recorded fleet.review-engine-model shape — the brief piped to claude via
-# stdin with the same restricted --tools capability allowlist —
-# never an unrestricted reviewer (GH-708 round 2, P1-2). Either arm writes a
-# TRANSPORT= receipt into .done, and the verdict header the watcher posts
-# prints that receipt verbatim instead of a hardcoded transport.
-\$briefChars = (Get-Content -Raw "$BRIEFW").Length
-if (\$briefChars -lt 30000) {
-  try { Assert-ReviewCapabilities 'edda-dispatch' } catch { \$_ | Out-File '$LOGW'; 'DISPATCH_EXIT=2' | Out-File '$DONEW'; exit 2 }
-  & edda dispatch --agent claude --model '$MODEL' --permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
-  \$code = \$LASTEXITCODE
-  "TRANSPORT=edda-dispatch" | Out-File "$DONEW" -Encoding utf8
-  "TOOL_FLAGS=--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED'" | Out-File "$DONEW" -Append -Encoding utf8
-  "SESSION=$SID" | Out-File "$DONEW" -Append -Encoding utf8
-  "SESSION_MODE=$SESSION_MODE" | Out-File "$DONEW" -Append -Encoding utf8
-  "DISPATCH_EXIT=\$code" | Out-File "$DONEW" -Append -Encoding utf8
-  if (Test-ReviewWorktree) { Remove-ReviewWorktree } else { exit 2 }
-  exit \$code
-}
-\$raw = Get-Content -Raw "$BRIEFW"
-try { Assert-ReviewCapabilities 'claude-stdin' } catch { \$_ | Out-File '$LOGW'; 'DISPATCH_EXIT=2' | Out-File '$DONEW'; exit 2 }
-\$json = \$raw | & claude -p --model '$MODEL' --output-format json --permission-mode '$REVIEW_PERMISSION_MODE' $CLAUDE_SESSION_ARGS --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED' 2>"$ERRW"
-\$code = \$LASTEXITCODE
-\$r = \$null
-try { \$r = \$json | ConvertFrom-Json } catch { }
-if (\$r -and \$r.result) {
-  \$r.result | Out-File -FilePath "$LOGW" -Encoding utf8
-  \$mu = @(\$r.modelUsage.PSObject.Properties.Name) | Select-Object -First 1
-  if (-not \$mu) { \$mu = 'unknown' }
-  Add-Content -Path "$LOGW" -Value 'Model requested: $MODEL' -Encoding utf8
-  Add-Content -Path "$LOGW" -Value "Model observed: \$mu" -Encoding utf8
-  if (\$null -ne \$r.total_cost_usd) {
-    # InvariantCulture: the default conversion renders a comma-decimal locale's
-    # "0,33", which the watcher's [0-9.]* pattern drops to cost: unknown.
-    Add-Content -Path "$LOGW" -Value ("Cost: \$" + [math]::Round(\$r.total_cost_usd, 2).ToString([System.Globalization.CultureInfo]::InvariantCulture)) -Encoding utf8
+# and Windows caps a command line at 32767 chars. The fallback keeps the same
+# restricted read-only capability shape; both arms join the single final receipt
+# below instead of independently appending half a .done file.
+try {
+  if (-not \$sourceReady) { throw 'source check did not establish a baseline' }
+  \$briefChars = (Get-Content -Raw "$BRIEFW").Length
+  if (\$briefChars -lt 30000) {
+    Assert-ReviewCapabilities 'edda-dispatch'
+    \$transport = 'edda-dispatch'
+    & edda dispatch --agent claude --model '$MODEL' --permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
+    \$rawDispatchExit = \$LASTEXITCODE
+    \$dispatchCode = \$rawDispatchExit
+  } else {
+    Assert-ReviewCapabilities 'claude-stdin'
+    \$transport = 'claude-stdin'
+    \$toolFlags = "--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED'"
+    \$raw = Get-Content -Raw "$BRIEFW"
+    \$json = \$raw | & claude -p --model '$MODEL' --output-format json --permission-mode '$REVIEW_PERMISSION_MODE' $CLAUDE_SESSION_ARGS --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED' 2>"$ERRW"
+    \$rawDispatchExit = \$LASTEXITCODE
+    \$dispatchCode = \$rawDispatchExit
+    \$r = \$null
+    try { \$r = \$json | ConvertFrom-Json } catch { }
+    if (\$r -and \$r.result) {
+      \$r.result | Out-File -FilePath "$LOGW" -Encoding utf8
+      \$mu = @(\$r.modelUsage.PSObject.Properties.Name) | Select-Object -First 1
+      if (-not \$mu) { \$mu = 'unknown' }
+      Add-Content -Path "$LOGW" -Value 'Model requested: $MODEL' -Encoding utf8
+      Add-Content -Path "$LOGW" -Value "Model observed: \$mu" -Encoding utf8
+      if (\$null -ne \$r.total_cost_usd) {
+        Add-Content -Path "$LOGW" -Value ("Cost: \$" + [math]::Round(\$r.total_cost_usd, 2).ToString([System.Globalization.CultureInfo]::InvariantCulture)) -Encoding utf8
+      }
+      Add-Content -Path "$LOGW" -Value "Session: $SID" -Encoding utf8
+      Add-Content -Path "$LOGW" -Value "Session observed: \$(\$r.session_id)" -Encoding utf8
+    } else { \$json | Out-File -FilePath "$LOGW" -Encoding utf8 }
+    if (Test-Path "$ERRW") {
+      Get-Content "$ERRW" | Add-Content -Path "$LOGW" -Encoding utf8
+      Remove-Item "$ERRW" -ErrorAction SilentlyContinue
+    }
   }
-  Add-Content -Path "$LOGW" -Value "Session: $SID" -Encoding utf8
-  Add-Content -Path "$LOGW" -Value "Session observed: \$(\$r.session_id)" -Encoding utf8
-} else {
-  \$json | Out-File -FilePath "$LOGW" -Encoding utf8
+} catch {
+  \$_ | Out-File '$LOGW' -Append -Encoding utf8
+  \$dispatchCode = 2
+} finally {
+  if (\$sourceReady) {
+    \$worktreeCheck = Test-ReviewWorktree
+    if (\$worktreeCheck -eq 'unchanged') {
+      if (Remove-ReviewWorktree) { \$worktreeCleanup = 'removed' }
+      else { \$worktreeCleanup = 'failed; preserved for inspection'; \$dispatchCode = 2 }
+    } else { \$dispatchCode = 2 }
+  }
+  try {
+    Unregister-ScheduledTask -TaskName 'edda-review-pr$PR-r$ROUND' -Confirm:\$false -ErrorAction Stop
+    \$taskCleanup = 'unregistered'
+  } catch {
+    \$taskCleanup = "failed; \$(\$_.Exception.Message)"
+    \$_ | Out-File '$LOGW' -Append -Encoding utf8
+    \$dispatchCode = 2
+  }
+  try {
+    [System.IO.File]::WriteAllLines(\$receiptTmp, [string[]]@(
+      "TRANSPORT=\$transport",
+      "TOOL_FLAGS=\$toolFlags",
+      "SESSION=$SID",
+      "SESSION_MODE=$SESSION_MODE",
+      "DISPATCH_EXIT=\$rawDispatchExit",
+      "FINAL_EXIT=\$dispatchCode",
+      "WORKTREE_CHECK=\$worktreeCheck",
+      "WORKTREE_CLEANUP=\$worktreeCleanup",
+      "TASK_CLEANUP=\$taskCleanup",
+      'TERMINAL_RECEIPT=complete'
+    ), [System.Text.UTF8Encoding]::new(\$false))
+    Move-Item -LiteralPath \$receiptTmp -Destination '$DONEW' -Force
+  } catch {
+    \$_ | Out-File '$LOGW' -Append -Encoding utf8
+    \$dispatchCode = 2
+  }
 }
-if (Test-Path "$ERRW") { Get-Content "$ERRW" | Add-Content -Path "$LOGW" -Encoding utf8; Remove-Item "$ERRW" -ErrorAction SilentlyContinue }
-"TRANSPORT=claude-stdin" | Out-File "$DONEW" -Encoding utf8
-"TOOL_FLAGS=--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED'" | Out-File "$DONEW" -Append -Encoding utf8
-"SESSION=$SID" | Out-File "$DONEW" -Append -Encoding utf8
-"SESSION_MODE=$SESSION_MODE" | Out-File "$DONEW" -Append -Encoding utf8
-"DISPATCH_EXIT=\$code" | Out-File "$DONEW" -Append -Encoding utf8
-if (Test-ReviewWorktree) { Remove-ReviewWorktree } else { exit 2 }
-exit \$code
+exit \$dispatchCode
 PS
 else
-  # Linux: no job-object trap, plain nohup is enough. The source snapshot
-  # consumes Git's NUL-delimited path inventory, so this runner requires Bash
-  # rather than silently parsing it with POSIX `read`.
+  # Linux: NUL-delimited source snapshots require Bash; pipefail preserves a
+  # failed Git inventory rather than treating it as an empty one.
   cat > "$RUNNER" <<RUN
 #!/usr/bin/env bash
 set -o pipefail
 export HOME="\${HOME:-$(getent passwd "\$(id -u)" 2>/dev/null | cut -d: -f6)}"
 cd '$WT' || exit 1
 . '$SELF_DIR/reviewer-capabilities.sh'
+# Publish no .done progress file. The final receipt below is built in a temp
+# file and renamed only after source proof and the narrowly scoped worktree
+# removal have completed.
+raw_dispatch_exit=2
+final_exit=2
+transport=none
+tool_flags="--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED'"
+worktree_check='failed; source check not reached'
+worktree_cleanup=not-attempted
 before_snapshot_file='$DONE.before-snapshot'
 after_snapshot_file='$DONE.after-snapshot'
-cleanup_review_snapshots() {
-  rm -f -- "\$before_snapshot_file" "\$after_snapshot_file"
-}
+cleanup_review_snapshots() { rm -f -- "\$before_snapshot_file" "\$after_snapshot_file"; }
 trap cleanup_review_snapshots EXIT
 trap 'cleanup_review_snapshots; exit 130' HUP INT TERM
 review_hash_scope() {
-  scope=\$1
-  shift
-  # Bash's read -d keeps Git's NUL inventory intact, including newline paths.
-  # pipefail makes a failed git ls-files command fail this snapshot too.
+  scope=\$1; shift
   git ls-files -z "\$@" | while IFS= read -r -d '' path; do
-    if [ -f "\$path" ]; then
-      hash=\$(git hash-object -- "\$path") || exit 1
-      printf '%s\t%s\t%s\0' "\$scope" "\$hash" "\$path"
-    elif [ -L "\$path" ]; then
-      printf '%s\tsymlink\t%s\t%s\0' "\$scope" "\$(readlink "\$path")" "\$path"
-    else
-      printf '%s\tmissing-or-special\t%s\0' "\$scope" "\$path"
-    fi
+    if [ -f "\$path" ]; then hash=\$(git hash-object -- "\$path") || exit 1; printf '%s\t%s\t%s\0' "\$scope" "\$hash" "\$path"
+    elif [ -L "\$path" ]; then printf '%s\tsymlink\t%s\t%s\0' "\$scope" "\$(readlink "\$path")" "\$path"
+    else printf '%s\tmissing-or-special\t%s\0' "\$scope" "\$path"; fi
   done
 }
-review_worktree_snapshot() {
-  snapshot_file=\$1
-  : > "\$snapshot_file" || return 1
-  review_hash_scope tracked --cached > "\$snapshot_file" || return 1
-  review_hash_scope untracked --others --exclude-standard >> "\$snapshot_file" || return 1
-  review_hash_scope ignored --others --ignored --exclude-standard >> "\$snapshot_file" || return 1
-  git hash-object --stdin < "\$snapshot_file"
-}
-before_status=\$(git status --porcelain=v1 --untracked-files=all) || exit 2
-before_snapshot=\$(review_worktree_snapshot "\$before_snapshot_file") || { echo 'DISPATCH_EXIT=2' > '$DONE'; exit 2; }
+review_worktree_snapshot() { snapshot_file=\$1; : > "\$snapshot_file" || return 1; review_hash_scope tracked --cached > "\$snapshot_file" || return 1; review_hash_scope untracked --others --exclude-standard >> "\$snapshot_file" || return 1; review_hash_scope ignored --others --ignored --exclude-standard >> "\$snapshot_file" || return 1; git hash-object --stdin < "\$snapshot_file"; }
+before_status=\$(git status --porcelain=v1 --untracked-files=all)
+before_snapshot=\$(review_worktree_snapshot "\$before_snapshot_file")
+if [ \$? -eq 0 ]; then source_ready=1; else source_ready=0; echo 'review-pr runner: source snapshot unavailable before dispatch' >> '$LOG'; fi
 check_review_worktree() {
-  after_head=\$(git rev-parse HEAD) || { echo 'WORKTREE_CHECK=failed; git HEAD unavailable' >> '$DONE'; return 1; }
-  after_status=\$(git status --porcelain=v1 --untracked-files=all) || { echo 'WORKTREE_CHECK=failed; git status unavailable' >> '$DONE'; return 1; }
-  after_snapshot=\$(review_worktree_snapshot "\$after_snapshot_file") || { echo 'WORKTREE_CHECK=failed; source snapshot unavailable' >> '$DONE'; return 1; }
+  after_head=\$(git rev-parse HEAD) || { echo 'failed; git HEAD unavailable'; return; }
+  after_status=\$(git status --porcelain=v1 --untracked-files=all) || { echo 'failed; git status unavailable'; return; }
+  after_snapshot=\$(review_worktree_snapshot "\$after_snapshot_file") || { echo 'failed; source snapshot unavailable'; return; }
   git status --short >> '$LOG'
   git log -1 --format=%H >> '$LOG'
-  if [ "\$after_head" != '$SHA' ] || [ "\$after_status" != "\$before_status" ] || [ "\$after_snapshot" != "\$before_snapshot" ]; then
-    echo 'WORKTREE_CHECK=failed; preserved for inspection' >> '$DONE'
-    return 1
-  fi
-  echo 'WORKTREE_CHECK=unchanged' >> '$DONE'
+  if [ "\$after_head" != '$SHA' ] || [ "\$after_status" != "\$before_status" ] || [ "\$after_snapshot" != "\$before_snapshot" ]; then echo 'failed; preserved for inspection'; else echo unchanged; fi
 }
-# Same lifecycle as the Windows lane's Remove-ReviewWorktree (see there): the
-# verdict is in the log once the reviewer exits, so the detached worktree is
-# removed rather than left to accumulate. Never changes the round's exit code.
 remove_review_worktree() {
-  [ -n '$ROOT' ] || return 0
-  cd '$SCRATCH' || return 0
-  git -C '$ROOT' worktree remove --force '$WT' >/dev/null 2>&1 || true
+  [ -n '$ROOT' ] || return 1
+  ( cd '$SCRATCH' && git -C '$ROOT' worktree remove --force '$WT' >> '$LOG' 2>&1 ) || return 1
+  [ ! -e '$WT' ]
 }
-# Same size guard as the Windows lane (see there): edda dispatch while the
-# brief fits the Windows-shaped spawn budget, the read-only-allowlisted
-# claude-via-stdin fallback above it. TRANSPORT= names the arm that ran.
-chars=\$(wc -m < '$BRIEF')
-if [ "\$chars" -lt 30000 ]; then
-  review_capabilities edda-dispatch > '$LOG' 2>&1 || { echo 'DISPATCH_EXIT=2' > '$DONE'; exit 2; }
-  edda dispatch --agent claude --model '$MODEL' --permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file '$BRIEF' > '$LOG' 2>&1
-  code=\$?
-  echo "TRANSPORT=edda-dispatch" > '$DONE'
-  echo "TOOL_FLAGS=--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED'" >> '$DONE'
-  echo "SESSION=$SID" >> '$DONE'
-  echo "SESSION_MODE=$SESSION_MODE" >> '$DONE'
-  echo "DISPATCH_EXIT=\$code" >> '$DONE'
-  check_review_worktree && remove_review_worktree || exit 2
-  exit \$code
+# Same size guard as the Windows lane: dispatch while the brief fits, otherwise
+# the read-only-allowlisted stdin fallback. Both converge on one final receipt.
+if [ "\$source_ready" = 1 ]; then
+  chars=\$(wc -m < '$BRIEF')
+  if [ "\$chars" -lt 30000 ]; then
+    if review_capabilities edda-dispatch > '$LOG' 2>&1; then
+      transport=edda-dispatch
+      edda dispatch --agent claude --model '$MODEL' --permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file '$BRIEF' > '$LOG' 2>&1
+      raw_dispatch_exit=\$?
+      final_exit=\$raw_dispatch_exit
+    fi
+  elif review_capabilities claude-stdin > '$LOG' 2>&1; then
+    transport=claude-stdin
+    tool_flags="--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED'"
+    claude -p --model '$MODEL' --output-format json --permission-mode '$REVIEW_PERMISSION_MODE' $CLAUDE_SESSION_ARGS --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED' < '$BRIEF' > '$LOG.json' 2>'$LOG.err'
+    raw_dispatch_exit=\$?
+    final_exit=\$raw_dispatch_exit
+    if command -v jq >/dev/null 2>&1; then
+      jq -r '.result // empty' '$LOG.json' > '$LOG'
+      mu=\$(jq -r '.modelUsage | keys[0] // "unknown"' '$LOG.json')
+      printf 'Model requested: %s\nModel observed: %s\nSession: %s\n' '$MODEL' "\$mu" '$SID' >> '$LOG'
+      jq -r 'if .total_cost_usd != null then "Cost: \$" + ((.total_cost_usd * 100 | round) / 100 | tostring) else empty end' '$LOG.json' >> '$LOG'
+      jq -r '"Session observed: " + (.session_id // "unknown")' '$LOG.json' >> '$LOG'
+    else
+      echo 'review-pr runner: jq not found on PATH — cannot extract the verdict from claude JSON' > '$LOG'
+      cat '$LOG.json' >> '$LOG'
+      final_exit=1
+    fi
+    [ -s '$LOG' ] || cp '$LOG.json' '$LOG'
+    [ -f '$LOG.err' ] && cat '$LOG.err' >> '$LOG'
+    rm -f '$LOG.json' '$LOG.err'
+  fi
 fi
-review_capabilities claude-stdin > '$LOG' 2>&1 || { echo 'DISPATCH_EXIT=2' > '$DONE'; exit 2; }
-claude -p --model '$MODEL' --output-format json --permission-mode '$REVIEW_PERMISSION_MODE' $CLAUDE_SESSION_ARGS --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED' < '$BRIEF' > '$LOG.json' 2>'$LOG.err'
-code=\$?
-if command -v jq >/dev/null 2>&1; then
-  jq -r '.result // empty' '$LOG.json' > '$LOG'
-  mu=\$(jq -r '.modelUsage | keys[0] // "unknown"' '$LOG.json')
-  printf 'Model requested: %s\n' '$MODEL' >> '$LOG'
-  printf 'Model observed: %s\n' "\$mu" >> '$LOG'
-  jq -r 'if .total_cost_usd != null then "Cost: \$" + ((.total_cost_usd * 100 | round) / 100 | tostring) else empty end' '$LOG.json' >> '$LOG'
-  printf 'Session: %s
-' '$SID' >> '$LOG'
-  jq -r '"Session observed: " + (.session_id // "unknown")' '$LOG.json' >> '$LOG'
-else
-  # No jq is not a silent degradation into a dead verdict: name the fault in
-  # the log the watcher reads, keep the raw JSON for diagnosis, and fail the
-  # round explicitly (DISPATCH_EXIT=1) rather than letting extract_verdict
-  # find no markers and label the head review:unreviewed with no reason.
-  echo "review-pr runner: jq not found on PATH — cannot extract the verdict from claude's JSON output; install jq and relaunch" > '$LOG'
-  cat '$LOG.json' >> '$LOG'
-  code=1
+if [ "\$source_ready" = 1 ]; then
+  worktree_check=\$(check_review_worktree)
+  if [ "\$worktree_check" = unchanged ]; then
+    if remove_review_worktree; then worktree_cleanup=removed; else worktree_cleanup='failed; preserved for inspection'; final_exit=2; fi
+  else
+    final_exit=2
+  fi
 fi
-[ -s '$LOG' ] || cp '$LOG.json' '$LOG'
-[ -f '$LOG.err' ] && cat '$LOG.err' >> '$LOG'
-rm -f '$LOG.json' '$LOG.err'
-echo "TRANSPORT=claude-stdin" > '$DONE'
-echo "TOOL_FLAGS=--permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --disallowedTools '$REVIEW_DENIED'" >> '$DONE'
-echo "SESSION=$SID" >> '$DONE'
-echo "SESSION_MODE=$SESSION_MODE" >> '$DONE'
-echo "DISPATCH_EXIT=\$code" >> '$DONE'
-check_review_worktree && remove_review_worktree || exit 2
-exit \$code
+receipt_tmp='$DONE.pending-'"\$\$"
+if {
+  printf 'TRANSPORT=%s\nTOOL_FLAGS=%s\nSESSION=%s\nSESSION_MODE=%s\nDISPATCH_EXIT=%s\nFINAL_EXIT=%s\nWORKTREE_CHECK=%s\nWORKTREE_CLEANUP=%s\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' \
+    "\$transport" "\$tool_flags" '$SID' '$SESSION_MODE' "\$raw_dispatch_exit" "\$final_exit" "\$worktree_check" "\$worktree_cleanup"
+} > "\$receipt_tmp" && mv -f "\$receipt_tmp" '$DONE'; then :; else
+  echo "review-pr runner: terminal receipt publish failed; retained \$receipt_tmp" >> '$LOG'
+  final_exit=2
+fi
+exit \$final_exit
 RUN
   command -v bash >/dev/null 2>&1 || { echo "review-pr.sh: bash is required for the Linux NUL-safe source snapshot" >&2; exit 1; }
   bash -n "$RUNNER" || exit 1
@@ -700,6 +745,67 @@ fi
 
 if [ -z "$ISSUES" ]; then
   echo "review-pr.sh: WARNING: PR #$PR links no issue — the brief carries NO doneWhen, so this review has no acceptance ceiling (issue #683). The brief states this; obtain the issue before trusting the verdict." >&2
+fi
+
+write_windows_launcher() {
+  TASK="edda-review-pr$PR-r$ROUND"
+  cat > "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" <<PS
+foreach (\$f in @("$LOGW", "$DONEW", "$DONEW.err")) { if (Test-Path \$f) { [System.IO.File]::Delete(\$f) } }
+Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue
+\$action = New-ScheduledTaskAction -Execute "$PWSH_EXE" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$LANE_FILE_ARG\`"" -WorkingDirectory '$WTW'
+# The dispatch timeout is handled inside the child lane. Scheduler must not
+# preempt its finally block before it publishes the terminal receipt and
+# unregisters itself.
+\$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+try {
+  Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited -ErrorAction Stop | Out-Null
+  try { Start-ScheduledTask -TaskName '$TASK' -ErrorAction Stop }
+  catch {
+    \$startFailure = \$_.Exception.Message
+    \$taskCleanup = 'failed; task start did not reach cleanup'
+    try {
+      Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction Stop
+      \$taskCleanup = 'unregistered'
+    } catch {
+      \$taskCleanup = "failed; \$(\$_.Exception.Message)"
+      \$_ | Out-File '$LOGW' -Append -Encoding utf8
+    }
+    "review-pr launcher: Start-ScheduledTask failed: \$startFailure" | Out-File '$LOGW' -Append -Encoding utf8
+    \$receiptTmp = "$DONEW.pending-\$PID"
+    try {
+      [System.IO.File]::WriteAllLines(\$receiptTmp, [string[]]@(
+        'TRANSPORT=not-started',
+        'TOOL_FLAGS=not-started',
+        'SESSION=$SID',
+        'SESSION_MODE=$SESSION_MODE',
+        'DISPATCH_EXIT=2',
+        'FINAL_EXIT=2',
+        'WORKTREE_CHECK=not-started',
+        'WORKTREE_CLEANUP=preserved; scheduler start failed',
+        "TASK_CLEANUP=\$taskCleanup",
+        'TERMINAL_RECEIPT=complete'
+      ), [System.Text.UTF8Encoding]::new(\$false))
+      Move-Item -LiteralPath \$receiptTmp -Destination '$DONEW' -Force
+    } catch {
+      \$_ | Out-File '$LOGW' -Append -Encoding utf8
+    }
+    throw
+  }
+} catch { throw }
+\$st = ""
+for (\$i = 0; \$i -lt 20; \$i++) {
+  Start-Sleep -Seconds 1
+  \$st = (Get-ScheduledTask -TaskName '$TASK').State
+  if (\$st -eq 'Running') { break }
+}
+\$info = Get-ScheduledTaskInfo -TaskName '$TASK'
+"task=$TASK state=\$st lastTaskResult=\$(\$info.LastTaskResult)"
+PS
+
+}
+
+if [ "$DRY" = "1" ] && [ "$IS_WIN" = "1" ]; then
+  write_windows_launcher
 fi
 
 if [ "$DRY" = "1" ]; then
@@ -754,25 +860,9 @@ if [ "$IS_WIN" = "1" ]; then
   # empty/CP950 in the scheduled-task environment; the lane script generated
   # above sets them explicitly before dispatching.
   command -v pwsh >/dev/null 2>&1 || { echo "review-pr.sh: pwsh not found" >&2; exit 1; }
-  TASK="edda-review-pr$PR-r$ROUND"
+  write_windows_launcher
 
-  cat > "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" <<PS
-foreach (\$f in @("$LOGW", "$DONEW", "$DONEW.err")) { if (Test-Path \$f) { [System.IO.File]::Delete(\$f) } }
-Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue
-\$action = New-ScheduledTaskAction -Execute "$PWSH_EXE" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$LANE_FILE_ARG\`"" -WorkingDirectory '$WTW'
-\$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited | Out-Null
-Start-ScheduledTask -TaskName '$TASK'
-\$st = ""
-for (\$i = 0; \$i -lt 20; \$i++) {
-  Start-Sleep -Seconds 1
-  \$st = (Get-ScheduledTask -TaskName '$TASK').State
-  if (\$st -eq 'Running') { break }
-}
-\$info = Get-ScheduledTaskInfo -TaskName '$TASK'
-"task=$TASK state=\$st lastTaskResult=\$(\$info.LastTaskResult)"
-PS
-
+  REVIEW_MAY_BE_RUNNING=1
   out=$(pwsh -NoProfile -ExecutionPolicy Bypass -File "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" 2>&1); rc=$?
   echo "$out"
   [ $rc -eq 0 ] || exit 1
@@ -798,6 +888,7 @@ PS
 fi
 
 if [ "$IS_WIN" = "0" ]; then
+  REVIEW_MAY_BE_RUNNING=1
   nohup "$RUNNER" >/dev/null 2>&1 &
   pid=$!
   sleep 1
@@ -812,3 +903,4 @@ fi
 echo "log=$LOG"
 echo "done=$DONE"
 echo "session=$SID"
+echo "review_round=$ROUND"

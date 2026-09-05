@@ -19,8 +19,11 @@ review_capabilities() { # edda-dispatch | claude-stdin; never starts a turn
       ;;
     *) echo 'review capability check: unknown transport' >&2; return 2 ;;
   esac
+  # Trailing class must accept ',' — claude 2.1.259 help prints comma-
+  # separated aliases ("--disallowedTools, --disallowed-tools <tools...>"),
+  # so a space/equals-only tail false-negatives the exact flag (GH-893).
   for review_flag in $review_required; do
-    if ! printf '%s\n' "$review_help" | grep -qE -- "(^|[[:space:],])$review_flag([[:space:]=]|$)"; then
+    if ! printf '%s\n' "$review_help" | grep -qE -- "(^|[[:space:],])$review_flag([[:space:]=,]|$)"; then
       echo "review capability check: edda dispatch lacks $review_flag; refusing reviewer launch (upgrade edda)" >&2
       return 2
     fi
@@ -28,7 +31,7 @@ review_capabilities() { # edda-dispatch | claude-stdin; never starts a turn
   # Dispatch delegates to this same backend, so verify BOTH binaries.
   review_help=$(claude --help 2>&1) || review_help=''
   for review_flag in --tools --disallowedTools --permission-mode; do
-    if ! printf '%s\n' "$review_help" | grep -qE -- "(^|[[:space:],])$review_flag([[:space:]=]|$)"; then
+    if ! printf '%s\n' "$review_help" | grep -qE -- "(^|[[:space:],])$review_flag([[:space:]=,]|$)"; then
       echo "review capability check: claude lacks $review_flag; refusing reviewer launch (upgrade claude)" >&2
       return 2
     fi

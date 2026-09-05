@@ -12,10 +12,9 @@ crates/edda-bridge-claude/src/digest/tests.rs 3260
 crates/edda-bridge-claude/src/dispatch/tests.rs 3238
 crates/edda-bridge-claude/src/peers/tests.rs 3588
 crates/edda-bridge-claude/src/signals.rs 2252
-crates/edda-cli/src/cmd_bridge/tests.rs 1208
-crates/edda-cli/src/cmd_claim.rs 1685
+crates/edda-cli/src/cmd_bridge/tests.rs 1223
+crates/edda-cli/src/cmd_claim.rs 1732
 crates/edda-cli/src/cmd_dispatch.rs 2106
-crates/edda-conductor/src/runner/acp.rs 1503
 crates/edda-cli/src/cmd_draft.rs 1705
 crates/edda-cli/src/cmd_gc.rs 1117
 crates/edda-cli/src/cmd_plan.rs 1022
@@ -24,6 +23,7 @@ crates/edda-cli/src/main.rs 1463
 crates/edda-conductor/src/agent/codex_app_server.rs 1062
 crates/edda-conductor/src/agent/codex_rpc.rs 1378
 crates/edda-conductor/src/agent/pi_rpc.rs 1480
+crates/edda-conductor/src/runner/acp.rs 1503
 crates/edda-conductor/src/runner/gate.rs 1020
 crates/edda-conductor/src/runner/sequential.rs 4593
 crates/edda-core/src/event.rs 2191

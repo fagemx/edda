@@ -7,7 +7,7 @@ pub(super) fn peers_json(project_id: &str) -> serde_json::Value {
         edda_bridge_claude::peers::discover_all_sessions(project_id)
             .into_iter()
             .map(|peer| {
-                let stale = peer.age_secs > stale_threshold;
+                let stale = !peer.is_live;
                 let mut value = serde_json::to_value(&peer).unwrap_or_default();
                 value["stale"] = serde_json::json!(stale);
                 value
@@ -62,9 +62,7 @@ pub fn peers(repo_root: &Path, json: bool) -> anyhow::Result<()> {
 
     // Collapse stale sessions (heartbeat older than threshold) to a count so
     // dead heartbeat files do not read as live contention.
-    let stale_threshold = edda_bridge_claude::peers::stale_secs();
-    let (active, stale): (Vec<_>, Vec<_>) =
-        sessions.iter().partition(|p| p.age_secs <= stale_threshold);
+    let (active, stale): (Vec<_>, Vec<_>) = sessions.iter().partition(|p| p.is_live);
 
     if active.is_empty() {
         println!(

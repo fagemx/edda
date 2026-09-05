@@ -51,7 +51,7 @@ EOF
 cat > "$tmp/bin/claude" <<'EOF'
 #!/bin/sh
 if [ "$*" = '--help' ]; then
- [ "$BACKEND" = old-claude ] || echo '--tools <tools> --disallowedTools <tools> --permission-mode <mode>'
+ [ "$BACKEND" = old-claude ] || echo '--tools <tools> --disallowedTools, --disallowed-tools <tools> --permission-mode <mode>'
  exit 0
 fi
 echo launch >> "$CALLS"
@@ -78,7 +78,7 @@ sed '/git -C .* worktree remove /d' "$runner" > "$tmp/run.sh"
 # surrogate, not a claim that an old Claude binary was available; the separate
 # real-Claude receipt records the installed 2.1.259 before/after experiment.
 sed \
-  -e '/review_capabilities /d' \
+  -e 's/if review_capabilities [a-z-]* > .*; then/if true; then/' \
   -e "s/ --permission-mode 'plan'//" \
   -e "s/ --tools 'Read,Grep,Glob,Bash'//" \
   -e "s/ --exclude-tools 'Edit,Write,NotebookEdit,mcp__\*'//" \
@@ -161,7 +161,7 @@ function edda {
 }
 function claude {
   if (($args -join ' ') -eq '--help') {
-    if ($env:BACKEND -ne 'old-claude') { '--tools <tools> --disallowedTools <tools> --permission-mode <mode>' }
+    if ($env:BACKEND -ne 'old-claude') { '--tools <tools> --disallowedTools, --disallowed-tools <tools> --permission-mode <mode>' }
     $global:LASTEXITCODE = 0; return
   }
   Add-Content $env:CALLS launch

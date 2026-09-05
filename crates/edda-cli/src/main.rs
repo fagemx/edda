@@ -36,6 +36,7 @@ mod cmd_propose;
 mod cmd_prs;
 mod cmd_rebuild;
 mod cmd_recap;
+mod cmd_recap_digest;
 mod cmd_reconcile;
 mod cmd_rules;
 mod cmd_run;
@@ -265,23 +266,8 @@ enum Command {
     },
     /// Chronicle synthesis - cognitive zoom across sessions
     Recap {
-        /// Topic query (e.g. "auth", "postgres")
-        query: Option<String>,
-        /// Project name filter
-        #[arg(long)]
-        project: Option<String>,
-        /// Time filter: last week
-        #[arg(long)]
-        week: bool,
-        /// Time filter: since date (ISO 8601)
-        #[arg(long)]
-        since: Option<String>,
-        /// Cross-repo: all projects
-        #[arg(long)]
-        all: bool,
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
+        #[command(flatten)]
+        args: cmd_recap::RecapArgs,
     },
     /// Run a command and record its output
     Run {
@@ -1246,22 +1232,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             impact,
             fleet,
         ),
-        Command::Recap {
-            query,
-            project,
-            week,
-            since,
-            all,
-            json,
-        } => cmd_recap::execute(
-            &repo_root,
-            query.as_deref(),
-            project.as_deref(),
-            week,
-            since.as_deref(),
-            all,
-            json,
-        ),
+        Command::Recap { args } => cmd_recap::execute(&repo_root, &args),
         Command::Run { argv } => cmd_run::execute(&repo_root, &argv),
         Command::Status { json } => cmd_status::execute(&repo_root, json),
         Command::Commit {

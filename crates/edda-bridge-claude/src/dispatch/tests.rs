@@ -3177,3 +3177,6 @@ fn read_project_state_respects_500_char_budget() {
 
 #[path = "tests_tail_gh757.rs"]
 mod tests_tail_gh757;
+
+#[path = "tests_gh793.rs"]
+mod tests_gh793;
