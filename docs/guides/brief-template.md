@@ -94,6 +94,12 @@ lane will not infer them:
 3. `pr.closing-keyword`: state whether a closing keyword is allowed for that
    PR — allowed only when every doneWhen item of the issue is delivered.
 
+The facts block, the nine preamble steps, and the finish steps of a flash-tier
+brief are rendered by `scripts/fleet/brief-from-issue.sh` from the issue body's
+`## Predicted surface` section. Example B below stays the worked shape. The
+script prints `<<AUTHORED STEPS>>` once; the issuer replaces that marker with
+the issue-specific implementation steps.
+
 ## PR-body evidence standard
 
 The worked example of the evidence a PR body must carry is the description of
