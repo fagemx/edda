@@ -78,7 +78,7 @@ sed '/git -C .* worktree remove /d' "$runner" > "$tmp/run.sh"
 # surrogate, not a claim that an old Claude binary was available; the separate
 # real-Claude receipt records the installed 2.1.259 before/after experiment.
 sed \
-  -e '/review_capabilities /d' \
+  -e 's/if review_capabilities [a-z-]* > .*; then/if true; then/' \
   -e "s/ --permission-mode 'plan'//" \
   -e "s/ --tools 'Read,Grep,Glob,Bash'//" \
   -e "s/ --exclude-tools 'Edit,Write,NotebookEdit,mcp__\*'//" \

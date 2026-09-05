@@ -32,7 +32,14 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' 0 HUP INT TERM
+if [ "${EDDA_REVIEW_PR_KEEP_FIXTURE:-}" = 1 ]; then
+  trap 'printf "retained fixture: %s\n" "$tmp" >&2' 0 HUP INT TERM
+else
+  trap 'rm -rf "$tmp"' 0 HUP INT TERM
+fi
+REAL_CYGPATH=$(command -v cygpath 2>/dev/null || :)
+REAL_PWSH=$(command -v pwsh 2>/dev/null || :)
+REAL_GIT=$(command -v git 2>/dev/null || :)
 
 REAL_SCRATCH="$HOME/.edda/fleet"
 listing_before="$tmp/real-scratch-before"
@@ -87,6 +94,12 @@ case "$1" in
     if [ -f "$GH_ISSUE_DIR/$n" ]; then cat "$GH_ISSUE_DIR/$n"; else exit 1; fi
     exit 0
     ;;
+  api)
+    # The startup fixture has no published review rounds. The real launcher
+    # only needs this trusted-round inventory to be a valid empty JSON array.
+    printf '%s\n' '[]'
+    exit 0
+    ;;
 esac
 exit 0
 EOF
@@ -102,6 +115,9 @@ EOF
 # why the fallback arm still prefixes a drive rather than returning \tmp\...
 cat >"$STUBBIN/cygpath" <<'EOF'
 #!/bin/sh
+if [ "${EDDA_REVIEW_PR_USE_REAL_CYGPATH:-}" = "1" ]; then
+  exec "$EDDA_REVIEW_PR_REAL_CYGPATH" "$@"
+fi
 p=$2
 case "$p" in
   /[a-zA-Z]/*)
@@ -155,6 +171,101 @@ dry_run() { # $1 = body text
     }
     brief="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-brief.md"
 }
+
+# --- GH-772 startup cleanup: execute generated Windows runners ---------------
+# This selector deliberately avoids the historical broad fixture. It asks the
+# shell generator to render the lane/launcher, then runs those rendered files
+# under pwsh with only Task Scheduler cmdlets mocked. The scratch and worktree
+# are fixture-owned, and no real scheduled task is registered.
+startup_proof() {
+    [ -n "$REAL_CYGPATH" ] && [ -n "$REAL_PWSH" ] && [ -n "$REAL_GIT" ] || {
+        echo 'startup proof requires Git Bash cygpath, git, and pwsh' >&2
+        return 2
+    }
+    export EDDA_REVIEW_PR_REAL_CYGPATH="$REAL_CYGPATH"
+    export EDDA_REVIEW_PR_USE_REAL_CYGPATH=1
+    export HOME="$tmp/home"
+    mkdir -p "$HOME"
+    dry_run 'Issue: #650\n'
+
+    marker="$tmp/set-location-unregister.log"
+    hook="$tmp/set-location-failure.ps1"
+    cat >"$hook" <<'PS'
+param([string]$Lane, [string]$Marker)
+function Set-Location { throw 'injected Set-Location failure' }
+function Unregister-ScheduledTask {
+  param([string]$TaskName)
+  Add-Content -LiteralPath $Marker -Value "unregister:$TaskName"
+}
+& $Lane
+exit $LASTEXITCODE
+PS
+    lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-lane.ps1"
+    if "$REAL_PWSH" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$hook" -Lane "$("$REAL_CYGPATH" -w "$lane")" -Marker "$("$REAL_CYGPATH" -w "$marker")"; then
+        fail 'startup-set-location: generated lane succeeded despite injected Set-Location failure'
+    fi
+    done="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.done"
+    grep -q '^unregister:edda-review-pr9999-r1$' "$marker" \
+        || fail 'startup-set-location: generated lane did not attempt task unregister'
+    grep -qx 'DISPATCH_EXIT=2' "$done" \
+        || fail 'startup-set-location: terminal receipt lost dispatch failure'
+    grep -qx 'FINAL_EXIT=2' "$done" \
+        || fail 'startup-set-location: terminal receipt lost final failure'
+    grep -qx 'TASK_CLEANUP=unregistered' "$done" \
+        || fail 'startup-set-location: terminal receipt lost cleanup result'
+    grep -qx 'TERMINAL_RECEIPT=complete' "$done" \
+        || fail 'startup-set-location: generated lane did not publish a complete terminal receipt'
+
+    # `dry_run` above rendered this production launcher. Invoke that file with
+    # injected Scheduler cmdlets; this does not reconstruct or parse a shell
+    # template and never registers a real task.
+    task_marker="$tmp/start-task-operations.log"
+    task_hook="$tmp/start-task-failure.ps1"
+    cat >"$task_hook" <<'PS'
+param([string]$Marker)
+function New-ScheduledTaskAction { [pscustomobject]@{} }
+function New-ScheduledTaskSettingsSet { [pscustomobject]@{} }
+function Register-ScheduledTask {
+  param([string]$TaskName)
+  Add-Content -LiteralPath $Marker -Value "register:$TaskName"
+}
+function Start-ScheduledTask { throw 'injected Start-ScheduledTask failure' }
+function Unregister-ScheduledTask {
+  param([string]$TaskName)
+  Add-Content -LiteralPath $Marker -Value "unregister:$TaskName"
+}
+PS
+    launch="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-launch.ps1"
+    if "$REAL_PWSH" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ". '$("$REAL_CYGPATH" -w "$task_hook")' -Marker '$("$REAL_CYGPATH" -w "$task_marker")'; try { . '$("$REAL_CYGPATH" -w "$launch")'; exit 0 } catch { exit 2 }"; then
+        fail 'startup-start-task: launcher succeeded despite injected Start-ScheduledTask failure'
+    fi
+    done="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.done"
+    grep -q '^register:edda-review-pr9999-r1$' "$task_marker" \
+        || fail 'startup-start-task: generated launcher did not register its task'
+    [ "$(grep -c '^unregister:edda-review-pr9999-r1$' "$task_marker")" -ge 2 ] \
+        || fail 'startup-start-task: generated launcher did not compensate Start-ScheduledTask with unregister'
+    grep -qx 'DISPATCH_EXIT=2' "$done" \
+        || fail 'startup-start-task: terminal receipt lost dispatch failure'
+    grep -qx 'FINAL_EXIT=2' "$done" \
+        || fail 'startup-start-task: terminal receipt lost final failure'
+    grep -qx 'WORKTREE_CHECK=not-started' "$done" \
+        || fail 'startup-start-task: receipt falsely claims a source check'
+    grep -qx 'TASK_CLEANUP=unregistered' "$done" \
+        || fail 'startup-start-task: receipt lost compensation result'
+    grep -qx 'TERMINAL_RECEIPT=complete' "$done" \
+        || fail 'startup-start-task: launcher did not publish a complete terminal receipt'
+    grep -q 'Start-ScheduledTask failed: injected Start-ScheduledTask failure' "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.log" \
+        || fail 'startup-start-task: launcher log omitted the start failure'
+
+    unset EDDA_REVIEW_PR_REAL_CYGPATH EDDA_REVIEW_PR_USE_REAL_CYGPATH
+    if [ "$failures" != 0 ]; then return 1; fi
+    printf 'review-pr startup fixtures passed\n'
+}
+
+if [ "${EDDA_REVIEW_PR_STARTUP_ONLY:-}" = 1 ]; then
+    startup_proof
+    exit $?
+fi
 
 # Same, for a specific round — and optionally under a HOME whose Claude
 # session store decides whether the round opens a session or resumes one.
@@ -389,15 +500,19 @@ if ! grep -q '.edda-review-spec.md' "$brief"; then
     fail 'D8d: the brief does not point the reviewer at the worktree spec copy .edda-review-spec.md'
 fi
 lane="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-lane.ps1"
-grep -Fq -- "--tools 'Read,Grep,Glob,Bash(git *),Bash(gh *),Bash(edda *),Bash(sh *)'" "$lane" \
+grep -Fq -- "--tools 'Read,Grep,Glob,Bash'" "$lane" \
     || fail 'D8e: the fallback arm lacks the measured restricted capability allowlist (GH-702)'
+grep -Fq -- "--permission-mode 'plan'" "$lane" \
+    || fail 'D8e: the fallback arm lacks the plan-mode write barrier (GH-702)'
 if grep -q 'bypassPermissions' "$lane"; then
     fail 'D8f: the fallback arm still grants --permission-mode bypassPermissions — the recorded fleet.review-engine-model shape auto-approves only the read allowlist'
 fi
-grep -q 'TRANSPORT=edda-dispatch' "$lane" \
-    || fail 'D8g: the dispatch arm writes no TRANSPORT=edda-dispatch receipt — the verdict header cannot name the transport that actually ran'
-grep -q 'TRANSPORT=claude-stdin' "$lane" \
-    || fail 'D8h: the fallback arm writes no TRANSPORT=claude-stdin receipt'
+grep -q "\$transport = 'edda-dispatch'" "$lane" \
+    || fail 'D8g: the dispatch arm does not name edda-dispatch for the terminal receipt'
+grep -q "\$transport = 'claude-stdin'" "$lane" \
+    || fail 'D8h: the fallback arm does not name claude-stdin for the terminal receipt'
+grep -q '"TRANSPORT=\$transport"' "$lane" \
+    || fail 'D8h: the atomic terminal receipt carries no TRANSPORT field'
 
 # --- D9 (GH-708 scope addition): one resumable reviewer conversation per PR ---
 # fleet.reviewer-agent=pi-with-per-pr-resumable-session chose pi for one
@@ -470,13 +585,31 @@ if ! grep -q 'carries no prior transcript' "$brief"; then
     fail 'D9h: a delta round with no recorded conversation does not warn that the earlier rounds are missing from context'
 fi
 
-# D9i: the per-PR worktree is removed when the round ends and pruned before the
-# next one — 14 stale wt-review-pr* trees were the reason (GH-708 comment).
+# D9i: the per-PR worktree is removed only after a successful source proof,
+# then the complete receipt is atomically published. A partial/legacy receipt
+# cannot release the next reviewer while this lane is still cleaning up.
 grep -q 'function Remove-ReviewWorktree' "$lane" \
     || fail 'D9i: the lane defines no worktree removal'
-if [ "$(grep -cE '^[[:space:]]*if \(Test-ReviewWorktree\) \{ Remove-ReviewWorktree \} else \{ exit 2 \}$' "$lane")" -lt 2 ]; then
-    fail 'D9i: the lane does not guard worktree removal on both transport arms'
-fi
+grep -q 'if (Remove-ReviewWorktree)' "$lane" \
+    || fail 'D9i: the Windows lane does not attempt removal after source proof'
+grep -q 'WORKTREE_CLEANUP=\$worktreeCleanup' "$lane" \
+    || fail 'D9i: the lane receipt does not carry worktree cleanup status'
+grep -q 'TERMINAL_RECEIPT=complete' "$lane" \
+    || fail 'D9i: the lane writes no terminal receipt proof'
+grep -q 'WriteAllLines(\$receiptTmp' "$lane" \
+    || fail 'D9i: the Windows lane does not buffer its terminal receipt'
+grep -q 'Move-Item -LiteralPath \$receiptTmp' "$lane" \
+    || fail 'D9i: the Windows lane does not atomically publish the terminal receipt'
+# The scheduled child, not merely its launcher, unregisters itself in both
+# normal and exception paths (the surrounding finally is the exception path).
+grep -q 'finally {' "$lane" \
+    || fail 'D9i: the Windows lane has no finally cleanup path'
+grep -q "Unregister-ScheduledTask -TaskName 'edda-review-pr$FIXTURE_PR-r" "$lane" \
+    || fail 'D9i: the Windows scheduled child does not unregister itself'
+grep -q "\$taskCleanup = 'unregistered'" "$lane" \
+    || fail 'D9i: the normal task cleanup receipt is absent'
+grep -q 'TASK_CLEANUP=\$taskCleanup' "$lane" \
+    || fail 'D9i: exception cleanup failures are not visible in the terminal receipt'
 # Anchored at the start of a line so the assertion cannot be satisfied by the
 # comment block above the call (round 1 P2: the loose grep matched prose).
 grep -qE '^[[:space:]]*git -C "\$ROOT" worktree prune' "$root/scripts/review-pr.sh" \
