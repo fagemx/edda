@@ -1,7 +1,76 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use edda_ledger::tasks::TaskStatus;
+
 use super::read_workspace_config_bool;
+
+// ── Rail Task Briefs (GH-793) ──
+
+/// Render the task-rail brief blocks for tasks this session holds.
+///
+/// A session holds a task when the task is `running` or `ready` and its
+/// assignee matches the session's label. Label resolution mirrors the Stop
+/// nudge (`task_nudge::dispatch_stop`): an active board claim wins, the
+/// heartbeat label is the fallback — interactive sessions get their label
+/// through `edda claim`, not the heartbeat.
+///
+/// Every failure (no heartbeat, no ledger, unreadable views) degrades to
+/// `None` — SessionStart injection must never break a session.
+pub(super) fn render_assigned_task_briefs(
+    project_id: &str,
+    session_id: &str,
+    cwd: &str,
+) -> Option<String> {
+    if session_id.is_empty() || cwd.is_empty() {
+        return None;
+    }
+    let hb = crate::peers::read_heartbeat(project_id, session_id)?;
+    let root = edda_ledger::EddaPaths::find_root(Path::new(cwd))?;
+    let ledger = edda_ledger::Ledger::open(&root).ok()?;
+    let views = ledger.task_views().ok()?;
+    let board = crate::peers::compute_board_state(project_id);
+    let label = board
+        .claims
+        .iter()
+        .find(|c| c.session_id == session_id)
+        .map(|c| c.label.as_str())
+        .unwrap_or(&hb.label);
+    if label.is_empty() {
+        return None;
+    }
+    let blocks: Vec<String> = views
+        .iter()
+        .filter(|v| {
+            matches!(v.status, TaskStatus::Running | TaskStatus::Ready)
+                && v.assignee.as_deref() == Some(label)
+        })
+        .map(|v| edda_ledger::tasks::render_task_brief_block(v, Some(&root)))
+        .collect();
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(blocks.join("\n\n"))
+    }
+}
+
+/// [`render_assigned_task_briefs`] appended onto the SessionStart content
+/// (GH-793). Keeping the append here keeps the injection one line at the
+/// call site — session.rs sits against the GH-779 file-length ceiling.
+pub(super) fn append_task_briefs(
+    content: Option<String>,
+    project_id: &str,
+    session_id: &str,
+    cwd: &str,
+) -> Option<String> {
+    match render_assigned_task_briefs(project_id, session_id, cwd) {
+        Some(briefs) => Some(match content {
+            Some(c) => format!("{c}\n\n{briefs}"),
+            None => briefs,
+        }),
+        None => content,
+    }
+}
 
 // ── Active Plan ──
 
@@ -18,9 +87,9 @@ const PLAN_EXCERPT_MAX_LINES: usize = 30;
 /// tracking (cross-referencing plan steps against tasks/commits). Falls back
 /// to simple truncation if the plan has no recognizable step structure.
 pub(crate) fn render_active_plan(project_id: Option<&str>) -> Option<String> {
-    let plans_dir = match std::env::var("EDDA_PLANS_DIR") {
-        Ok(dir) => PathBuf::from(dir),
-        Err(_) => edda_core::paths::home_dir()?.join(".claude").join("plans"),
+    let plans_dir = match crate::env_var("EDDA_PLANS_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => edda_core::paths::home_dir()?.join(".claude").join("plans"),
     };
     render_active_plan_from_dir(&plans_dir, project_id)
 }
@@ -137,9 +206,9 @@ pub(super) fn run_auto_digest(
     cwd: &str,
 ) -> Option<String> {
     // Check if auto_digest is enabled (default: true)
-    let enabled = match std::env::var("EDDA_BRIDGE_AUTO_DIGEST") {
-        Ok(val) => val != "0",
-        Err(_) => read_workspace_config_bool(cwd, "bridge.auto_digest").unwrap_or(true),
+    let enabled = match crate::env_var("EDDA_BRIDGE_AUTO_DIGEST") {
+        Some(val) => val != "0",
+        None => read_workspace_config_bool(cwd, "bridge.auto_digest").unwrap_or(true),
     };
     if !enabled {
         return None;

@@ -132,9 +132,19 @@ fn analyze_failures(
         });
     }
 
-    // Rule proposal: if specific commands keep failing, suggest a pre-check
-    for cmd in &input.failed_commands {
-        let short_cmd = cmd.split_whitespace().next().unwrap_or(cmd);
+    // Rule proposal: if specific commands keep failing, suggest a pre-check.
+    // Filter out compound commands, variable assignments, and shell
+    // builtins/keywords/common utilities: their failures are environmental
+    // noise, not a missing-tool signal, and such rules previously fired on
+    // every Bash call (GH-813).
+    for cmd in input
+        .failed_commands
+        .iter()
+        .filter(|cmd| crate::rules::is_trackable_command(cmd))
+    {
+        let Some(short_cmd) = crate::rules::command_word(cmd) else {
+            continue;
+        };
         rule_proposals.push(RuleProposal {
             trigger: format!("command_failure:{short_cmd}"),
             action: format!("Verify {short_cmd} is available and configured before running"),
@@ -335,6 +345,49 @@ mod tests {
             .iter()
             .any(|l| l.severity == LessonSeverity::High));
         assert!(!result.rule_proposals.is_empty());
+    }
+
+    #[test]
+    fn failed_command_filters_builtins_compound_and_assignments() {
+        let trigger = trigger_with(vec![TriggerReason::SessionFailures]);
+        let mut input = base_input();
+        input.outcome = "error_stuck".to_string();
+        input.tool_failures = 6;
+        input.failed_commands = vec![
+            "cd /tmp && npm test".to_string(),
+            "echo hi; ls -la".to_string(),
+            "git status | head".to_string(),
+            "FOO=bar npm test".to_string(),
+            "cd /tmp".to_string(),
+            "echo missing-file".to_string(),
+            "grep pattern".to_string(),
+            "for f in *; do echo $f; done".to_string(),
+            "   ".to_string(),
+            "".to_string(),
+            "npm test".to_string(),
+        ];
+
+        let result = analyze(&trigger, &input);
+        // Only the trackable real command survives the filter (GH-813:
+        // builtins/keywords/assignments/compound commands produced noise
+        // rules that fired on every Bash call).
+        assert_eq!(result.rule_proposals.len(), 1);
+        assert_eq!(result.rule_proposals[0].trigger, "command_failure:npm");
+    }
+
+    #[test]
+    fn failed_command_normalizes_quoted_command_triggers() {
+        let trigger = trigger_with(vec![TriggerReason::SessionFailures]);
+        let mut input = base_input();
+        input.failed_commands = vec![r#""python" -V"#.to_string()];
+
+        let result = analyze(&trigger, &input);
+        assert_eq!(result.rule_proposals.len(), 1);
+        assert_eq!(result.rule_proposals[0].trigger, "command_failure:python");
+        assert_eq!(
+            result.rule_proposals[0].action,
+            "Verify python is available and configured before running"
+        );
     }
 
     #[test]

@@ -5,8 +5,8 @@ use std::path::Path;
 use crate::signals::{extract_session_signals, save_session_signals, TaskSnapshot};
 
 use super::helpers::{
-    extract_prior_session_last_message, inject_karvi_brief, read_project_state, render_active_plan,
-    render_skill_guide_directive, run_auto_digest,
+    append_task_briefs, extract_prior_session_last_message, inject_karvi_brief, read_project_state,
+    render_active_plan, render_skill_guide_directive, run_auto_digest,
 };
 use super::{
     apply_context_budget, context_budget, is_same_as_last_inject, read_counter, read_hot_pack,
@@ -307,12 +307,19 @@ pub(super) fn dispatch_session_end(
     let (bg_tx, bg_rx) = std::sync::mpsc::channel::<&'static str>();
     let mut bg_count: usize = 0;
 
+    // The store root is resolved per thread; a test-installed thread-local
+    // override would not reach the closures below (no-op in production
+    // builds, where no override can be installed) — GH-757.
+    let bg_store_root = edda_store::captured_store_root_for_spawn();
+
     // 2f. Background decision extraction
     if crate::bg_extract::should_run(project_id, session_id) {
         let tx = bg_tx.clone();
         let pid = project_id.to_string();
         let sid = session_id.to_string();
+        let store_root = bg_store_root.clone();
         std::thread::spawn(move || {
+            let _store_scope = edda_store::install_captured_store_root(store_root.as_deref());
             if let Err(e) = crate::bg_extract::run_extraction(&pid, &sid) {
                 tracing::warn!(error = %e, "decision extraction failed");
             }
@@ -327,7 +334,9 @@ pub(super) fn dispatch_session_end(
         let pid = project_id.to_string();
         let sid = session_id.to_string();
         let cwd_str = cwd.to_string();
+        let store_root = bg_store_root.clone();
         std::thread::spawn(move || {
+            let _store_scope = edda_store::install_captured_store_root(store_root.as_deref());
             if let Err(e) = crate::bg_digest::run_digest(&pid, &sid, &cwd_str) {
                 tracing::warn!(error = %e, "session digest failed");
             }
@@ -343,7 +352,9 @@ pub(super) fn dispatch_session_end(
         let tx = bg_tx.clone();
         let pid = project_id.to_string();
         let cwd_owned = cwd.to_string();
+        let store_root = bg_store_root.clone();
         std::thread::spawn(move || {
+            let _store_scope = edda_store::install_captured_store_root(store_root.as_deref());
             if let Err(e) = crate::bg_scan::run_scan(&pid, &cwd_owned) {
                 tracing::warn!(error = %e, "capability scan failed");
             }
@@ -358,7 +369,9 @@ pub(super) fn dispatch_session_end(
         let tx = bg_tx.clone();
         let pid = project_id.to_string();
         let cwd_owned = cwd.to_string();
+        let store_root = bg_store_root.clone();
         std::thread::spawn(move || {
+            let _store_scope = edda_store::install_captured_store_root(store_root.as_deref());
             if let Err(e) = crate::bg_detect::run_detect(&pid, &cwd_owned) {
                 eprintln!("[edda-bg] pattern detection failed: {e}");
             }
@@ -373,7 +386,9 @@ pub(super) fn dispatch_session_end(
         let tx = bg_tx.clone();
         let pid = project_id.to_string();
         let cwd_owned = cwd.to_string();
+        let store_root = bg_store_root.clone();
         std::thread::spawn(move || {
+            let _store_scope = edda_store::install_captured_store_root(store_root.as_deref());
             if let Err(e) = crate::bg_index::run_index(&pid, &cwd_owned) {
                 tracing::warn!(error = %e, "search reindex failed");
             }
@@ -387,8 +402,7 @@ pub(super) fn dispatch_session_end(
 
     // Join background threads with a configurable timeout.
     let bg_timeout = std::time::Duration::from_secs(
-        std::env::var("EDDA_BG_JOIN_TIMEOUT_SECS")
-            .ok()
+        crate::env_var("EDDA_BG_JOIN_TIMEOUT_SECS")
             .and_then(|v| v.parse().ok())
             .unwrap_or(45),
     );
@@ -487,7 +501,7 @@ pub(super) fn notify_session_end(project_id: &str, cwd: &str, session_id: &str) 
 /// never fail because of post-mortem logic.
 #[allow(clippy::too_many_lines)] // 176 lines at #779; split tracked in none
 pub(super) fn run_postmortem(project_id: &str, session_id: &str, cwd: &str) {
-    if std::env::var("EDDA_POSTMORTEM").unwrap_or_else(|_| "1".into()) == "0" {
+    if crate::env_var("EDDA_POSTMORTEM").unwrap_or_else(|| "1".into()) == "0" {
         return;
     }
 
@@ -824,6 +838,9 @@ pub(super) fn dispatch_session_start(
         });
     }
 
+    // Inject rail task briefs this session holds (GH-793); helper stays silent on failure.
+    content = append_task_briefs(content, project_id, session_id, cwd);
+
     // Inject active decisions as context (Track F — Decision Deepening)
     {
         let decision_pack_md = {
@@ -964,7 +981,7 @@ pub(super) fn dispatch_session_start(
 }
 
 fn persist_session_identity(session_id: &str) -> anyhow::Result<()> {
-    let Some(env_file) = std::env::var_os("CLAUDE_ENV_FILE") else {
+    let Some(env_file) = crate::env_var_os("CLAUDE_ENV_FILE") else {
         return Ok(());
     };
     if session_id.is_empty() || env_file.is_empty() {

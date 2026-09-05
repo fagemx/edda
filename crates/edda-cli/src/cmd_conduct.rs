@@ -645,7 +645,14 @@ fn print_status(state: &PlanState) {
             }
             _ => String::new(),
         };
-        println!("  {icon} {:<24} {:?} {detail}", ps.id, ps.status);
+        let elapsed = ps
+            .duration_ms
+            .map(|ms| format!("{ms} ms"))
+            .unwrap_or_else(|| "—".into());
+        println!(
+            "  {icon} {:<24} {:?} {detail} elapsed={elapsed}",
+            ps.id, ps.status
+        );
     }
     println!();
 }

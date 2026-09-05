@@ -369,6 +369,7 @@ mod tests {
 
     #[test]
     fn parse_step_pattern_a() {
+        let _store = crate::isolated_store();
         let content = "\
 # Plan Title
 
@@ -393,6 +394,7 @@ Final description
 
     #[test]
     fn parse_step_pattern_b() {
+        let _store = crate::isolated_store();
         let content = "\
 # Plan
 
@@ -417,6 +419,7 @@ Details
 
     #[test]
     fn parse_mixed_patterns() {
+        let _store = crate::isolated_store();
         let content = "\
 # Plan
 
@@ -438,6 +441,7 @@ Even more stuff
 
     #[test]
     fn parse_no_steps_returns_empty() {
+        let _store = crate::isolated_store();
         let content = "\
 # Plan
 
@@ -456,6 +460,7 @@ Some implementation
 
     #[test]
     fn parse_single_step_returns_empty() {
+        let _store = crate::isolated_store();
         let content = "\
 # Plan
 
@@ -610,6 +615,7 @@ Description
 
     #[test]
     fn extract_body_between_steps() {
+        let _store = crate::isolated_store();
         let content = "\
 ## Step 1: First
 Body line 1
@@ -627,6 +633,7 @@ Body of second
 
     #[test]
     fn extract_body_last_step() {
+        let _store = crate::isolated_store();
         let content = "\
 ## Step 1: First
 Earlier
@@ -665,6 +672,7 @@ Final body line 2
 
     #[test]
     fn render_fallback_no_steps() {
+        let _store = crate::isolated_store();
         // Non-stepped plan should return None
         let content = "# Plan\n\n## Context\nSome context\n\n## Design\nSome design\n";
         let result =

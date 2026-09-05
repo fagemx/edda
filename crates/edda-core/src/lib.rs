@@ -1,5 +1,6 @@
 pub mod agent_phase;
 pub mod approval;
+pub mod background_model;
 pub mod bundle;
 pub mod canon;
 pub mod decision;
@@ -13,3 +14,6 @@ pub mod tool_tier;
 pub mod types;
 
 pub use types::*;
+
+#[cfg(test)]
+mod event_conformance;

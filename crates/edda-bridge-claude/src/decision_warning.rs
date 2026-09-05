@@ -216,6 +216,7 @@ mod tests {
 
     #[test]
     fn test_no_decisions_returns_none() {
+        let _store = crate::isolated_store();
         invalidate_cache();
         let (_tmp, root) = setup_workspace();
         let result = decision_file_warning(&root, "src/main.rs", "main");
@@ -224,6 +225,7 @@ mod tests {
 
     #[test]
     fn test_no_matching_paths_returns_none() {
+        let _store = crate::isolated_store();
         invalidate_cache();
         let (_tmp, root) = setup_workspace();
         insert_decision_with_paths(
@@ -239,6 +241,7 @@ mod tests {
 
     #[test]
     fn test_matching_glob_returns_warning() {
+        let _store = crate::isolated_store();
         invalidate_cache();
         let (_tmp, root) = setup_workspace();
         insert_decision_with_paths(
@@ -258,6 +261,7 @@ mod tests {
 
     #[test]
     fn test_multiple_matches() {
+        let _store = crate::isolated_store();
         invalidate_cache();
         let (_tmp, root) = setup_workspace();
         insert_decision_with_paths(&root, "db.engine", "sqlite", "embedded", &["crates/**"]);
@@ -304,6 +308,7 @@ mod tests {
 
     #[test]
     fn test_format_warning_empty_reason() {
+        let _store = crate::isolated_store();
         let view = DecisionView {
             event_id: "evt_1".to_string(),
             branch: "main".to_string(),

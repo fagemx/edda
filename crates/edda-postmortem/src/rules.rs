@@ -112,6 +112,15 @@ pub struct Rule {
     pub source_session: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_event: Option<String>,
+    /// Times this rule's enforcement was shown to a user (e.g. PreToolUse
+    /// matches). Unlike `hits`, shows never update `last_hit`, never promote
+    /// Proposed -> Active, and never reactivate Dormant/Settled rules
+    /// (GH-813: hit-on-every-Bash-call kept noise rules alive forever).
+    #[serde(default)]
+    pub shows: u64,
+    /// Why this rule was revoked (only set when revoked via `revoke`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_reason: Option<String>,
     pub category: RuleCategory,
 }
 
@@ -138,6 +147,21 @@ impl Rule {
         if matches!(self.status, RuleStatus::Dormant | RuleStatus::Settled) {
             self.status = RuleStatus::Active;
         }
+    }
+
+    /// Record that this rule's enforcement was shown to the user.
+    ///
+    /// Increments the show counter only: `last_hit` is NOT updated, Proposed
+    /// rules are NOT promoted, and Dormant/Settled rules are NOT reactivated
+    /// (GH-813: shows are pure statistics and must not reset the TTL).
+    pub fn record_shown(&mut self) {
+        self.shows += 1;
+    }
+
+    /// Revoke this rule: mark it Dead with a reason.
+    pub fn revoke(&mut self, reason: String) {
+        self.status = RuleStatus::Dead;
+        self.revoked_reason = Some(reason);
     }
 
     /// Compute days since last hit.
@@ -283,6 +307,8 @@ impl RulesStore {
             status: RuleStatus::Proposed,
             source_session,
             source_event,
+            shows: 0,
+            revoked_reason: None,
             category,
         };
 
@@ -296,6 +322,15 @@ impl RulesStore {
     /// 2. Anchor decay: check if anchored file changed
     /// 3. Enforce active window cap (~15)
     pub fn run_decay_cycle(&mut self) {
+        // 0. Reclaim disallowed command triggers (GH-813): shell
+        // builtins/keywords/common utilities and variable assignments never
+        // make meaningful learned rules — revoke them outright.
+        for rule in &mut self.rules {
+            if rule.is_alive() && is_disallowed_trigger(&rule.trigger) {
+                rule.revoke("disallowed command trigger (builtin/keyword/assignment)".to_string());
+            }
+        }
+
         // 1. Time decay
         for rule in &mut self.rules {
             rule.apply_time_decay();
@@ -340,6 +375,27 @@ impl RulesStore {
         }
 
         self.last_decay_run = Some(now_rfc3339());
+    }
+
+    /// Record shows for matched rules. Unlike `record_matched_hits`, this
+    /// never resets the TTL or reactivates decayed rules (GH-813).
+    pub fn record_matched_shows(&mut self, matched_ids: &[String]) {
+        for id in matched_ids {
+            if let Some(rule) = self.get_mut(id) {
+                rule.record_shown();
+            }
+        }
+    }
+
+    /// Revoke a rule by ID. Returns false when the ID is unknown.
+    pub fn revoke_rule(&mut self, id: &str, reason: String) -> bool {
+        match self.get_mut(id) {
+            Some(rule) => {
+                rule.revoke(reason);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Garbage-collect dead rules (remove from store entirely).
@@ -399,6 +455,251 @@ pub struct StoreStats {
 
 // -- Helpers --
 
+/// Shell builtins, keywords, and ubiquitous utilities whose failures are
+/// environmental noise rather than a missing-tool signal. They must never
+/// become learned-rule command triggers (GH-813: echo 1789 / cd 1618 hits).
+pub const DISALLOWED_TRIGGER_WORDS: &[&str] = &[
+    "alias",
+    "bg",
+    "bind",
+    "break",
+    "builtin",
+    "caller",
+    "case",
+    "cd",
+    "command",
+    "compgen",
+    "complete",
+    "compopt",
+    "continue",
+    "coproc",
+    "declare",
+    "dirs",
+    "disown",
+    "do",
+    "done",
+    "echo",
+    "elif",
+    "else",
+    "enable",
+    "esac",
+    "eval",
+    "exec",
+    "exit",
+    "export",
+    "fc",
+    "fg",
+    "fi",
+    "for",
+    "function",
+    "getopts",
+    "hash",
+    "help",
+    "history",
+    "if",
+    "in",
+    "jobs",
+    "kill",
+    "let",
+    "local",
+    "logout",
+    "mapfile",
+    "popd",
+    "printf",
+    "pushd",
+    "pwd",
+    "read",
+    "readarray",
+    "readonly",
+    "return",
+    "select",
+    "set",
+    "shift",
+    "shopt",
+    "source",
+    "suspend",
+    "test",
+    "then",
+    "time",
+    "times",
+    "trap",
+    "true",
+    "type",
+    "typeset",
+    "ulimit",
+    "umask",
+    "unalias",
+    "unset",
+    "until",
+    "wait",
+    "while",
+    "cat",
+    "sed",
+    "grep",
+    "head",
+    "tail",
+    "wc",
+    "find",
+    "ls",
+    "false",
+];
+
+/// True when a bare token is a variable assignment: `NAME=value` or the
+/// bash append form `NAME+=value`. The name before `=` / `+=` must be a
+/// valid shell identifier (ASCII alpha/underscore, then ASCII alphanum or
+/// underscore).
+pub fn is_var_assignment(token: &str) -> bool {
+    let Some(eq) = token.find('=') else {
+        return false;
+    };
+    let name = &token[..eq];
+    let name = name.strip_suffix('+').unwrap_or(name);
+    !name.is_empty()
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Split a shell command into segments on `;`, `&`, `|`, and newline.
+///
+/// Quote-aware: delimiters inside single quotes, double quotes, or after a
+/// backslash escape do not split. For example
+/// `printf '%s' 'skip; python -V'` is ONE segment whose command word is
+/// `printf`.
+pub fn split_command_segments(cmd: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (i, ch) in cmd.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => escaped = true,
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ';' | '&' | '|' | '\n' if !in_single && !in_double => {
+                segments.push(&cmd[start..i]);
+                start = i + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    segments.push(&cmd[start..]);
+    segments
+}
+
+/// Tokenize a command segment into unquoted words.
+///
+/// Splits on unquoted whitespace; single and double quotes group characters
+/// into one word and are stripped (so `'python'` yields `python`); a
+/// backslash outside single quotes escapes the next character (so
+/// `git\ commit` is one word). Inside double quotes only `\`, `"`, `$`, and
+/// backtick drop the backslash, matching shell quoting rules closely enough
+/// for command-word extraction.
+fn unquoted_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for ch in segment.chars() {
+        if escaped {
+            // Outside quotes any escaped character is literal; inside double
+            // quotes only a few escapes drop the backslash.
+            if !in_double || matches!(ch, '\\' | '"' | '$' | '`') {
+                current.push(ch);
+            } else {
+                current.push('\\');
+                current.push(ch);
+            }
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if !in_single => {
+                escaped = true;
+                in_word = true;
+            }
+            '\'' if !in_double => {
+                in_single = !in_single;
+                in_word = true;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+                in_word = true;
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if in_word {
+                    words.push(std::mem::take(&mut current));
+                    in_word = false;
+                }
+            }
+            c => {
+                current.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(current);
+    }
+    words
+}
+
+/// Quote-aware command word of a command segment.
+///
+/// Tokenizes `segment` into words while respecting quotes and backslash
+/// escapes, skips leading variable assignments (including quoted values
+/// like `FOO='hello world'`), and returns the first non-assignment word,
+/// unquoted (e.g. `python` for `'python'` or `"python"`). Returns None when
+/// the segment is empty or consists only of assignments.
+pub fn command_word(segment: &str) -> Option<String> {
+    let mut words = unquoted_words(segment);
+    while words.first().is_some_and(|w| is_var_assignment(w)) {
+        words.remove(0);
+    }
+    words.into_iter().next()
+}
+
+/// True when a command may become a learned-rule command trigger.
+///
+/// Rejects empty/whitespace commands, compound commands (`;`, `&&`, `||`,
+/// `|`, newline), commands whose leading word is a variable assignment
+/// (`FOO=bar npm test` keeps its assignment prefix out of learned
+/// triggers), and shell builtins/keywords/common utilities (GH-813). The
+/// leading word is taken quote-aware, so `"echo" hi` is also rejected.
+pub fn is_trackable_command(cmd: &str) -> bool {
+    let cmd = cmd.trim();
+    if cmd.is_empty() || cmd.contains([';', '|', '&', '\n']) {
+        return false;
+    }
+    match unquoted_words(cmd).first() {
+        Some(word) if !is_var_assignment(word) => {
+            !DISALLOWED_TRIGGER_WORDS.contains(&word.as_str())
+        }
+        _ => false,
+    }
+}
+
+/// True when a stored rule trigger is disallowed and should be reclaimed by
+/// the decay cycle. ONLY `command_failure:` triggers can be disallowed
+/// command triggers: `file_churn:<path>` (paths may contain `=`),
+/// `multi_agent_start`, and free-text triggers are never revoked by the
+/// decay cycle (GH-813).
+pub fn is_disallowed_trigger(trigger: &str) -> bool {
+    let Some(cmd) = trigger.strip_prefix("command_failure:") else {
+        return false;
+    };
+    cmd.contains('=') || !is_trackable_command(cmd)
+}
+
 fn new_rule_id() -> String {
     format!("rule_{}", ulid::Ulid::new().to_string().to_lowercase())
 }
@@ -420,190 +721,6 @@ fn file_sha256(path: &str) -> Option<String> {
     Some(hex::encode(hash))
 }
 
+#[path = "rules_tests.rs"]
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_rule(trigger: &str, action: &str, status: RuleStatus) -> Rule {
-        Rule {
-            id: new_rule_id(),
-            trigger: trigger.to_string(),
-            action: action.to_string(),
-            anchor_file: None,
-            anchor_hash: None,
-            created: now_rfc3339(),
-            last_hit: now_rfc3339(),
-            hits: 2,
-            ttl_days: DEFAULT_TTL_DAYS,
-            superseded_by: None,
-            status,
-            source_session: "test-session".to_string(),
-            source_event: None,
-            category: RuleCategory::PreCommit,
-        }
-    }
-
-    #[test]
-    fn new_store_is_empty() {
-        let store = RulesStore::default();
-        assert!(store.rules.is_empty());
-        assert!(store.active_rules().is_empty());
-    }
-
-    #[test]
-    fn propose_creates_proposed_rule() {
-        let mut store = RulesStore::default();
-        let id = store.propose_rule(
-            "test failure".into(),
-            "run tests before commit".into(),
-            None,
-            RuleCategory::PreCommit,
-            "s1".into(),
-            None,
-        );
-        assert!(!id.is_empty());
-        let rule = store.get(&id).unwrap();
-        assert_eq!(rule.status, RuleStatus::Proposed);
-        assert_eq!(rule.hits, 1);
-    }
-
-    #[test]
-    fn duplicate_proposal_confirms_existing() {
-        let mut store = RulesStore::default();
-        let id1 = store.propose_rule(
-            "test failure".into(),
-            "run tests before commit".into(),
-            None,
-            RuleCategory::PreCommit,
-            "s1".into(),
-            None,
-        );
-        let id2 = store.propose_rule(
-            "test failure".into(),
-            "run tests before commit".into(),
-            None,
-            RuleCategory::PreCommit,
-            "s2".into(),
-            None,
-        );
-        // Same rule ID returned (confirmation, not new rule)
-        assert_eq!(id1, id2);
-        let rule = store.get(&id1).unwrap();
-        assert_eq!(rule.hits, 2);
-        // 2 hits -> promoted to Active
-        assert_eq!(rule.status, RuleStatus::Active);
-    }
-
-    #[test]
-    fn contradiction_supersedes_old_rule() {
-        let mut store = RulesStore::default();
-        let id1 = store.propose_rule(
-            "test failure".into(),
-            "run tests before commit".into(),
-            None,
-            RuleCategory::PreCommit,
-            "s1".into(),
-            None,
-        );
-        // Same trigger, different action
-        let id2 = store.propose_rule(
-            "test failure".into(),
-            "run linter before commit".into(),
-            None,
-            RuleCategory::PreCommit,
-            "s2".into(),
-            None,
-        );
-        assert_ne!(id1, id2);
-        let old = store.get(&id1).unwrap();
-        assert_eq!(old.status, RuleStatus::Superseded);
-        assert_eq!(old.superseded_by.as_deref(), Some(id2.as_str()));
-    }
-
-    #[test]
-    fn record_hit_resets_ttl() {
-        let mut rule = make_rule("trigger", "action", RuleStatus::Active);
-        let before = rule.last_hit.clone();
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        rule.record_hit();
-        assert_ne!(rule.last_hit, before);
-        assert_eq!(rule.hits, 3);
-    }
-
-    #[test]
-    fn dormant_reactivates_on_hit() {
-        let mut rule = make_rule("trigger", "action", RuleStatus::Dormant);
-        rule.record_hit();
-        assert_eq!(rule.status, RuleStatus::Active);
-    }
-
-    #[test]
-    fn active_window_cap_enforced() {
-        let mut store = RulesStore::default();
-        // Create 20 active rules
-        for i in 0..20 {
-            let mut rule = make_rule(
-                &format!("trigger_{i}"),
-                &format!("action_{i}"),
-                RuleStatus::Active,
-            );
-            rule.hits = 20 - i;
-            store.rules.push(rule);
-        }
-        store.run_decay_cycle();
-        let active_count = store.active_rules().len();
-        assert!(
-            active_count <= MAX_ACTIVE_RULES,
-            "active_count={active_count} exceeds cap={MAX_ACTIVE_RULES}"
-        );
-    }
-
-    #[test]
-    fn gc_removes_dead_rules() {
-        let mut store = RulesStore::default();
-        store.rules.push(make_rule("a", "b", RuleStatus::Active));
-        store.rules.push(make_rule("c", "d", RuleStatus::Dead));
-        store
-            .rules
-            .push(make_rule("e", "f", RuleStatus::Superseded));
-        let removed = store.gc_dead_rules();
-        assert_eq!(removed, 1);
-        assert_eq!(store.rules.len(), 2);
-    }
-
-    #[test]
-    fn store_round_trip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("rules.json");
-
-        let mut store = RulesStore::default();
-        store.propose_rule(
-            "trigger".into(),
-            "action".into(),
-            None,
-            RuleCategory::Workflow,
-            "s1".into(),
-            None,
-        );
-        store.save(&path).unwrap();
-
-        let loaded = RulesStore::load(&path);
-        assert_eq!(loaded.rules.len(), 1);
-        assert_eq!(loaded.rules[0].trigger, "trigger");
-    }
-
-    #[test]
-    fn stats_counts_correctly() {
-        let mut store = RulesStore::default();
-        store.rules.push(make_rule("a", "b", RuleStatus::Active));
-        store.rules.push(make_rule("c", "d", RuleStatus::Proposed));
-        store.rules.push(make_rule("e", "f", RuleStatus::Dormant));
-        store.rules.push(make_rule("g", "h", RuleStatus::Dead));
-        let stats = store.stats();
-        assert_eq!(stats.total, 4);
-        assert_eq!(stats.active, 1);
-        assert_eq!(stats.proposed, 1);
-        assert_eq!(stats.dormant, 1);
-        assert_eq!(stats.dead, 1);
-    }
-}
+mod tests;

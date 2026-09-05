@@ -1,84 +1,74 @@
 #!/bin/sh
-# fleet-claim-issue.sh — cross-machine issue claim for the fleet (GH-656).
-#
-# Two machines each have their own `.edda/`; an `edda claim` on one is
-# invisible to the other. GitHub is the only shared truth, and the
-# `fleet.cross-machine-claim` convention (leave a `taking: <machine>`
-# comment and a `lane:<machine>` label before starting work) was pure
-# discipline. This script makes it mechanical:
-#
-#   fleet-claim-issue.sh <issue> <machine>     claim the issue for <machine>
-#   fleet-claim-issue.sh --check <issue> <machine>   read-only check
-#
-# Outcomes:
-#   0  claimed now (unclaimed before), or already held by <machine>
-#      (idempotent — no duplicate comment), or `--check` with no
-#      other-machine claim (nothing written in check mode, ever)
-#   1  claimed by ANOTHER machine — prints which machine, when, and via
-#      which surface; nothing is written
-#   2  usage error
-#
-# Machine labels are compared verbatim against the tokens in
-# `lane:<machine>` labels and `taking: <machine>` comments. The hostname is
-# never guessed: <machine> must be passed explicitly. Any gh failure aborts
-# the script (fail closed) — a broken gh must never look like "unclaimed".
-#
-# `edda dispatch --issue <N> --machine <label>` runs the same check on the
-# dispatch path (crates/edda-cli/src/claim_guard.rs) and refuses with exit
-# code 2; this script is the write side of the same convention.
+# GitHub issue claim guard/write side (GH-782).
 set -eu
 
 usage() {
-    echo "usage: $0 [--check] <issue-number> <machine-label>" >&2
-    echo "       $0 <issue-number> <machine-label> [--check]" >&2
+    echo "usage: $0 [--check] <issue-number> <machine>/<role>" >&2
+    echo "       $0 <issue-number> <machine>/<role> [--check]" >&2
     exit 2
 }
 
-check=0
-if [ "${1:-}" = "--check" ]; then
-    check=1
-    shift
-elif [ "${3:-}" = "--check" ]; then
-    check=1
-    set -- "$1" "$2"
-fi
+die_gh() { echo "claim guard: gh command failed" >&2; exit 2; }
 
+check=0
+if [ "${1:-}" = "--check" ]; then check=1; shift
+elif [ "${3:-}" = "--check" ]; then check=1; set -- "$1" "$2"
+fi
 [ $# -eq 2 ] || usage
 issue=$1
 machine=$2
-
 case "$machine" in
-    '' | *[[:space:]]*)
-        echo "machine label must be one token without whitespace, got '$machine'" >&2
-        exit 2
-        ;;
+    */*) first=${machine%%/*}; second=${machine#*/} ;;
+    *) echo "machine identity must be <machine>/<role>, got '$machine'" >&2; exit 2 ;;
 esac
-
+case "$first" in
+    '' | *[[:space:]]*) usage ;;
+esac
+case "$second" in
+    '' | */* | *[[:space:]]*) usage ;;
+esac
+case "$issue" in
+    '' | *[!0-9]* | 0) usage ;;
+esac
+# Canonicalize the decimal issue number (review850 round 1 F3): GitHub
+# resolves 0656 to issue 656, so a leading zero would search gh-0656 and
+# miss an existing open/merged delivery PR. Strip leading zeros before any
+# network call; "0" is rejected above, so an all-zero value reduces to the
+# empty string and is rejected here.
+while [ "$issue" != "${issue#0}" ]; do issue=${issue#0}; done
+case "$issue" in
+    '') usage ;;
+esac
 tab=$(printf '\t')
 
-labels=$(gh issue view "$issue" --json labels --jq '.labels[].name')
-comments=$(gh issue view "$issue" --json comments --jq \
-    '.comments[] | .createdAt as $c | .body | gsub("\r"; "") | split("\n")[] | (($c // "") + "\t" + .)')
+# PR state wins over comments. Filtering is local in gh's jq expression.
+pr=$(gh pr list --state all --limit 1000000 --json number,state,title,headRefName --jq \
+    ".[] | select((.state == \"OPEN\" or .state == \"MERGED\") and (((.title | ascii_downcase) | test(\"gh-${issue}([^0-9]|$)\")) or ((.headRefName | ascii_downcase) | test(\"gh${issue}([^0-9]|$)\")))) | [.number, (.state | ascii_downcase)] | @tsv" \
+    ) || die_gh
+pr=$(printf '%s' "$pr" | tr -d '\r')
+# Prefer a merged delivery if more than one matching PR exists.
+merged=$(printf '%s\n' "$pr" | awk -F '\t' '$2 == "merged" { print; exit }')
+[ -z "$merged" ] || pr=$merged
+if [ -n "$pr" ]; then
+    pr=$(printf '%s\n' "$pr" | head -n 1)
+    pr_number=${pr%%"$tab"*}
+    pr_state=${pr#*"$tab"}
+    if [ "$pr_state" = "merged" ]; then
+        echo "issue $issue delivered by #$pr_number (merged) — drop fleet:ready"
+    else
+        echo "issue $issue has open PR #$pr_number; not touching it"
+    fi
+    exit 1
+fi
 
+comments=$(gh issue view "$issue" --json comments --jq \
+    '.comments[] | .createdAt as $c | .body | gsub("\r"; "") | split("\n")[] | (($c // "") + "\t" + .)' \
+    ) || die_gh
+comments=$(printf '%s' "$comments" | tr -d '\r')
 other=''
 other_when=''
-other_source=''
 self=0
-
-for label in $labels; do
-    case "$label" in
-        lane:*)
-            m=${label#lane:}
-            if [ "$m" = "$machine" ]; then
-                self=1
-            elif [ -z "$other" ]; then
-                other=$m
-                other_source="label $label"
-            fi
-            ;;
-    esac
-done
-
+tab=$(printf '\t')
 scratch=$(mktemp)
 trap 'rm -f "$scratch"' EXIT
 printf '%s\n' "$comments" > "$scratch"
@@ -86,50 +76,31 @@ while IFS= read -r line; do
     [ -n "$line" ] || continue
     when=${line%%"$tab"*}
     body=${line#*"$tab"}
-    while :; do
-        case "$body" in
-            [[:space:]]*) body=${body#[[:space:]]} ;;
-            *) break ;;
-        esac
-    done
+    body=$(printf '%s' "$body" | sed 's/^[[:space:]]*//')
     case "$body" in
-        taking:\ *)
-            m=${body#taking: }
-            m=${m%%[[:space:]]*}
-            if [ "$m" = "$machine" ]; then
-                self=1
-            elif [ -z "$other" ]; then
-                other=$m
-                other_when=$when
-                other_source='comment "taking:"'
-            elif [ "$other" = "$m" ] && [ -z "$other_when" ]; then
-                other_when=$when
-            fi
-            ;;
+        taking:*)
+            owner=$(printf '%s' "${body#taking:}" | sed 's/^[[:space:]]*//')
+            owner=${owner%%[[:space:]]*}
+            [ -n "$owner" ] || continue
+            if [ "$owner" = "$machine" ]; then self=1
+            elif [ -z "$other" ]; then other=$owner; other_when=$when
+            fi ;;
     esac
 done < "$scratch"
 
 if [ -n "$other" ]; then
-    msg="issue $issue is claimed by machine '$other'"
-    if [ -n "$other_when" ]; then
-        msg="$msg (taking: $other at $other_when)"
-    fi
-    msg="$msg — $other_source; not touching it"
-    echo "$msg"
+    echo "issue $issue is claimed by '$other' at $other_when — comment \"taking:\"; not touching it"
     exit 1
 fi
-
-if [ "$self" -eq 1 ]; then
-    echo "issue $issue already claimed by '$machine'; nothing to do"
-    exit 0
-fi
-
 if [ "$check" -eq 1 ]; then
-    echo "issue $issue is unclaimed (--check: nothing written)"
+    if [ "$self" -eq 1 ]; then echo "issue $issue already claimed by '$machine'"
+    else echo "issue $issue is unclaimed (--check: nothing written)"; fi
     exit 0
 fi
-
-now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-gh issue comment "$issue" --body "taking: $machine at $now" >/dev/null
-gh issue edit "$issue" --add-label "lane:$machine" >/dev/null
-echo "claimed issue $issue for '$machine' (comment taking: $machine at $now, label lane:$machine)"
+if [ "$self" -ne 1 ]; then
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    gh issue comment "$issue" --body "taking: $machine at $now" >/dev/null || die_gh
+fi
+# Repeat edit on self to repair partial writes; it adds no duplicate comment.
+gh issue edit "$issue" --add-label fleet:claimed --remove-label fleet:ready --add-assignee @me >/dev/null || die_gh
+echo "claimed issue $issue for '$machine'"

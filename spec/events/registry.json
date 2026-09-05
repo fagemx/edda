@@ -1,0 +1,182 @@
+[
+  {
+    "type": "agent_phase_change",
+    "schema": "agent_phase_change.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "approval",
+    "schema": "approval.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "approval_policy_match",
+    "schema": "approval_policy_match.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "approval_request",
+    "schema": "approval_request.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "branch_create",
+    "schema": "branch_create.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "branch_switch",
+    "schema": "branch_switch.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "checkpoint",
+    "schema": "checkpoint.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "cmd",
+    "schema": "cmd.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "commit",
+    "schema": "commit.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "cycle_telemetry",
+    "schema": "cycle_telemetry.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "decide_snapshot",
+    "schema": "decide_snapshot.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "decision_import",
+    "schema": "decision_import.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-ledger/src/sync.rs"
+  },
+  {
+    "type": "decision_ratify",
+    "schema": "decision_ratify.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "device_pair",
+    "schema": "device_pair.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-cli/src/cmd_pair.rs"
+  },
+  {
+    "type": "device_revoke",
+    "schema": "device_revoke.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-cli/src/cmd_pair.rs"
+  },
+  {
+    "type": "execution_event",
+    "schema": "execution_event.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "ingestion",
+    "schema": "ingestion.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-ingestion/src/writer.rs"
+  },
+  {
+    "type": "merge",
+    "schema": "merge.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "note",
+    "schema": "note.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "pr",
+    "schema": "pr.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "rebuild",
+    "schema": "rebuild.schema.json",
+    "stability": "stable-v1",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "review_bundle",
+    "schema": "review_bundle.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "task.created",
+    "schema": "task.created.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "task.done",
+    "schema": "task.done.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "task.failed",
+    "schema": "task.failed.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "task.requeued",
+    "schema": "task.requeued.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "task.session",
+    "schema": "task.session.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "task.started",
+    "schema": "task.started.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "task_intake",
+    "schema": "task_intake.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
+    "type": "verdict.recorded",
+    "schema": "verdict.recorded.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  }
+]

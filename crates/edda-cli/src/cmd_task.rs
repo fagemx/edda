@@ -9,9 +9,13 @@ use edda_ledger::task_actions::{
     done_task, fail_task, find_view, new_task, start_task, DoneOutcome, NewOutcome, NewTaskArgs,
     StartOutcome,
 };
-use edda_ledger::tasks::{TaskStatus, TaskView};
+use edda_ledger::tasks::{self, TaskStatus, TaskView};
 use edda_ledger::Ledger;
 use std::path::Path;
+
+#[cfg(test)]
+#[path = "cmd_task_brief_tests.rs"]
+mod brief_tests;
 
 fn parse_status(s: &str) -> anyhow::Result<TaskStatus> {
     Ok(match s {
@@ -147,6 +151,23 @@ pub enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Everything `task start` prints: the started line, then the GH-793 brief
+/// block from the same `render_task_brief_block` the SessionStart hook uses.
+fn run_start(repo_root: &Path, id: u64, lease_ttl_s: u64) -> anyhow::Result<String> {
+    let outcome = do_start(repo_root, id, lease_ttl_s)?;
+    let mut out = format!(
+        "Started task #{id} (attempt {}, lease {lease_ttl_s}s)",
+        outcome.attempt
+    );
+    let ledger = Ledger::open(repo_root)?;
+    let views = ledger.task_views()?;
+    if let Some(v) = views.iter().find(|x| x.task_id == id) {
+        out.push('\n');
+        out.push_str(&tasks::render_task_brief_block(v, Some(repo_root)));
+    }
+    Ok(out)
 }
 
 /// One task's row, shared by the local and fleet boards so they cannot drift
@@ -331,11 +352,7 @@ pub fn execute(cmd: TaskCmd, repo_root: &Path) -> anyhow::Result<()> {
             Ok(())
         }
         TaskCmd::Start { id, lease_ttl_s } => {
-            let outcome = do_start(repo_root, id, lease_ttl_s)?;
-            println!(
-                "Started task #{id} (attempt {}, lease {lease_ttl_s}s)",
-                outcome.attempt
-            );
+            println!("{}", run_start(repo_root, id, lease_ttl_s)?);
             Ok(())
         }
         TaskCmd::Done {

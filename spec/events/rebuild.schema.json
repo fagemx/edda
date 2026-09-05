@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "rebuild payload",
+  "description": "Layer 1 v1 payload.",
+  "type": "object",
+  "properties": {
+    "scope": {
+      "type": "string"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "scope",
+    "branch",
+    "reason"
+  ],
+  "additionalProperties": true
+}

@@ -25,7 +25,11 @@ pub struct Brief {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_phase: Option<String>,
     pub completed_phases: usize,
-    pub cost: BriefCost,
+    /// GH-571: cost is only published when the backend measured usage. An
+    /// unmeasured plan (cost_measured == false) emits no "cost" key at all,
+    /// mirroring demo/runtime-edda.js which drops unmeasured cost claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<BriefCost>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<String>,
 }
@@ -74,10 +78,13 @@ pub struct BriefPhase {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct BriefCost {
-    pub total_usd: f64,
+    /// GH-571: None means unmeasured (no usage reported), not a genuine $0.00.
+    /// A measured zero round-trips as Some(0.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub by_phase: HashMap<String, f64>,
 }
@@ -109,8 +116,8 @@ impl Brief {
                 } else {
                     None
                 },
-                duration_ms: None, // Not tracked in PlanState
-                cost_usd: None,    // Not tracked in PlanState per-phase
+                duration_ms: ps.duration_ms,
+                cost_usd: ps.cost_usd,
                 started_at: ps.started_at.clone(),
                 completed_at: ps.completed_at.clone(),
                 error: ps.error.as_ref().map(|e| e.message.clone()),
@@ -130,9 +137,15 @@ impl Brief {
             }
         }
 
-        let cost = BriefCost {
-            total_usd: state.total_cost_usd,
-            by_phase: HashMap::new(), // Per-phase cost not tracked in PlanState
+        // GH-571: preserve measured-ness — unmeasured plans publish no cost
+        // claim, while a measured zero stays a genuine Some(0.0).
+        let cost = if state.cost_measured {
+            Some(BriefCost {
+                total_usd: Some(state.total_cost_usd),
+                by_phase: HashMap::new(), // Per-phase cost not tracked in PlanState
+            })
+        } else {
+            None
         };
 
         Brief {
@@ -168,7 +181,9 @@ pub fn brief_path(cwd: &Path, plan_name: &str) -> PathBuf {
 /// `write_runner_status` pattern — a brief-write failure must never abort
 /// the run.
 pub fn write_brief(cwd: &Path, state: &PlanState, meta: Option<BriefMeta>) {
-    let brief = Brief::from_state(state, meta);
+    let mut measured = state.clone();
+    super::derive::hydrate_durations(cwd, &mut measured);
+    let brief = Brief::from_state(&measured, meta);
     let path = brief_path(cwd, &state.plan_name);
     if let Ok(data) = serde_json::to_string_pretty(&brief) {
         if let Err(e) = edda_store::write_atomic(&path, data.as_bytes()) {
@@ -285,13 +300,13 @@ phases:
     #[test]
     fn from_state_cost_aggregation() {
         let mut state = test_plan_state();
-        state.total_cost_usd = 1.23;
+        state.record_cost(1.23);
 
         let brief = Brief::from_state(&state, None);
 
-        assert!((brief.cost.total_usd - 1.23).abs() < f64::EPSILON);
+        assert_eq!(brief.cost.as_ref().unwrap().total_usd, Some(1.23));
         // by_phase is empty because PlanState doesn't track per-phase cost
-        assert!(brief.cost.by_phase.is_empty());
+        assert!(brief.cost.as_ref().unwrap().by_phase.is_empty());
     }
 
     #[test]
@@ -339,6 +354,7 @@ phases:
             None,
         )
         .unwrap();
+        state.record_cost(0.0);
         let brief = Brief::from_state(
             &state,
             Some(BriefMeta {
@@ -393,7 +409,7 @@ phases:
             }),
         )
         .unwrap();
-        state.total_cost_usd = 0.42;
+        state.record_cost(0.42);
 
         let brief = Brief::from_state(
             &state,
@@ -413,12 +429,117 @@ phases:
         assert_eq!(restored.plan.total_phases, brief.plan.total_phases);
         assert_eq!(restored.completed_phases, brief.completed_phases);
         assert_eq!(restored.current_phase, brief.current_phase);
-        assert!((restored.cost.total_usd - brief.cost.total_usd).abs() < f64::EPSILON);
+        assert_eq!(restored.cost, brief.cost);
         assert_eq!(restored.phases.len(), brief.phases.len());
         assert_eq!(
             restored.meta.as_ref().unwrap().board_type,
             brief.meta.as_ref().unwrap().board_type,
         );
+    }
+
+    #[test]
+    fn from_state_unmeasured_cost() {
+        let state = test_plan_state();
+        assert!(!state.cost_measured);
+
+        let brief = Brief::from_state(&state, None);
+
+        assert!(brief.cost.is_none(), "unmeasured plan must publish no cost");
+        let json = serde_json::to_string_pretty(&brief).unwrap();
+        assert!(!json.contains("\"cost\""), "no cost key in JSON: {json}");
+    }
+
+    #[test]
+    fn from_state_measured_zero_cost() {
+        let mut state = test_plan_state();
+        state.record_cost(0.0);
+
+        let brief = Brief::from_state(&state, None);
+
+        let cost = brief.cost.as_ref().unwrap();
+        assert_eq!(cost.total_usd, Some(0.0));
+        let json = serde_json::to_string_pretty(&brief).unwrap();
+        assert!(json.contains("\"totalUsd\": 0.0"), "JSON: {json}");
+    }
+
+    #[test]
+    fn from_state_measured_nonzero_cost() {
+        let mut state = test_plan_state();
+        state.record_cost(1.23);
+
+        let brief = Brief::from_state(&state, None);
+
+        let cost = brief.cost.as_ref().unwrap();
+        assert_eq!(cost.total_usd, Some(1.23));
+        let json = serde_json::to_string_pretty(&brief).unwrap();
+        assert!(json.contains("\"totalUsd\": 1.23"), "JSON: {json}");
+    }
+
+    #[test]
+    fn brief_roundtrip_unmeasured() {
+        let state = test_plan_state();
+        let brief = Brief::from_state(&state, None);
+        assert!(brief.cost.is_none());
+
+        let json = serde_json::to_string_pretty(&brief).unwrap();
+        let restored: Brief = serde_json::from_str(&json).unwrap();
+        assert!(restored.cost.is_none());
+    }
+
+    #[test]
+    fn brief_deserialization_compatibility() {
+        // Missing "cost" → None
+        let restored: Brief = serde_json::from_str(
+            r#"{
+                "plan": {"name": "test", "totalPhases": 0},
+                "phases": {},
+                "completedPhases": 0,
+                "artifacts": []
+            }"#,
+        )
+        .unwrap();
+        assert!(restored.cost.is_none(), "missing cost deserializes as None");
+
+        // "cost": {} → Some(BriefCost { total_usd: None, .. })
+        let restored: Brief = serde_json::from_str(
+            r#"{
+                "plan": {"name": "test", "totalPhases": 0},
+                "phases": {},
+                "completedPhases": 0,
+                "artifacts": [],
+                "cost": {}
+            }"#,
+        )
+        .unwrap();
+        let cost = restored.cost.as_ref().unwrap();
+        assert_eq!(cost.total_usd, None);
+        assert!(cost.by_phase.is_empty());
+
+        // "cost": {"totalUsd": 0.0} → measured zero
+        let restored: Brief = serde_json::from_str(
+            r#"{
+                "plan": {"name": "test", "totalPhases": 0},
+                "phases": {},
+                "completedPhases": 0,
+                "artifacts": [],
+                "cost": {"totalUsd": 0.0}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(restored.cost.as_ref().unwrap().total_usd, Some(0.0));
+
+        // "cost": {"totalUsd": 1.50} → measured nonzero
+        let restored: Brief = serde_json::from_str(
+            r#"{
+                "plan": {"name": "test", "totalPhases": 0},
+                "phases": {},
+                "completedPhases": 0,
+                "artifacts": [],
+                "cost": {"totalUsd": 1.50}
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(restored.cost.as_ref().unwrap().total_usd, Some(1.50));
     }
 
     #[test]
@@ -482,6 +603,62 @@ phases:
         assert_eq!(
             brief.phases["build"].error.as_deref(),
             Some("cargo test exited 1"),
+        );
+    }
+    #[test]
+    fn event_duration_reaches_derived_brief_without_inventing_missing_measurements() {
+        use crate::runner::event_log::{Event, EventLogger};
+        use crate::state::persist::{load_state, save_state};
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_plan_state();
+        // Real semantics: the attempt counter is incremented and persisted
+        // before the matching PhaseStart/terminal events are appended, so
+        // attempt-1 evidence always coexists with a persisted attempts == 1.
+        state.get_phase_mut("build").unwrap().attempts = 1;
+        save_state(dir.path(), &state).unwrap();
+        let mut events = EventLogger::new(dir.path(), &state.plan_name);
+        for failed in [false, true] {
+            events.record(if failed {
+                Event::PhaseFailed {
+                    phase_id: "build".into(),
+                    attempt: 1,
+                    duration_ms: 5000,
+                    error: "fixture".into(),
+                    error_type: None,
+                    env_retries: 0,
+                    attempt_charged: true,
+                }
+            } else {
+                Event::PhasePassed {
+                    phase_id: "build".into(),
+                    attempt: 1,
+                    duration_ms: 5000,
+                    cost_usd: None,
+                }
+            });
+            let restored = load_state(dir.path(), &state.plan_name).unwrap().unwrap();
+            assert_eq!(restored.phases[0].duration_ms, Some(5000));
+            write_brief(dir.path(), &state, None);
+            let brief: Brief = serde_json::from_str(
+                &std::fs::read_to_string(brief_path(dir.path(), &state.plan_name)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(brief.phases["build"].duration_ms, Some(5000));
+            assert_eq!(brief.phases["test"].duration_ms, None);
+        }
+        // Retry boundary: the new attempt number is persisted before its
+        // PhaseStart, and the stale prior-attempt duration was already
+        // cleared by the runner.
+        state.get_phase_mut("build").unwrap().attempts = 2;
+        save_state(dir.path(), &state).unwrap();
+        events.record(Event::PhaseStart {
+            phase_id: "build".into(),
+            attempt: 2,
+        });
+        let restored = load_state(dir.path(), &state.plan_name).unwrap().unwrap();
+        assert_eq!(
+            Brief::from_state(&restored, None).phases["build"].duration_ms,
+            None
         );
     }
 }

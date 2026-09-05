@@ -67,10 +67,9 @@ pub fn request(
 
 /// Labels of every currently active session, for "did you mean" diagnostics.
 fn active_labels(project_id: &str) -> Vec<String> {
-    let stale = edda_bridge_claude::peers::stale_secs();
     let mut labels: Vec<String> = edda_bridge_claude::peers::discover_all_sessions(project_id)
         .into_iter()
-        .filter(|p| p.age_secs <= stale && !p.label.is_empty())
+        .filter(|p| p.is_live && !p.label.is_empty())
         .map(|p| p.label)
         .collect();
     labels.sort();
@@ -146,12 +145,11 @@ pub(super) fn has_live_sessions(project_id: &str) -> bool {
     !fresh_sessions(project_id).is_empty()
 }
 
-/// The sessions currently passing the shared liveness window.
+/// The sessions currently passing the shared liveness criterion.
 fn fresh_sessions(project_id: &str) -> Vec<edda_bridge_claude::peers::PeerSummary> {
-    let stale = edda_bridge_claude::peers::stale_secs();
     edda_bridge_claude::peers::discover_all_sessions(project_id)
         .into_iter()
-        .filter(|session| session.age_secs <= stale)
+        .filter(|session| session.is_live)
         .collect()
 }
 

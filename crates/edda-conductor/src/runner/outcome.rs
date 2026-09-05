@@ -93,12 +93,13 @@ pub(super) async fn fail_checking_phase(
     // the phase's measured cost — checks failing after a measured agent
     // turn must not rewrite that cost as unmeasured null.
     let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
-    edda::record_phase_failed_with_plan(
+    edda::record_phase_failed_timed(
         cwd,
         Some(plan.name.as_str()),
         phase_id,
         measured,
         &err_msg,
+        Some(elapsed.as_millis() as u64),
     );
     let ps = state.get_phase(phase_id)?;
     let (error_type, attempt_charged) = match &error_info {
@@ -345,12 +346,13 @@ pub(super) async fn process_phase_result(
                     // Record to edda ledger — with the plan id (GH-584
                     // round-2 P1-2): the structured payload must attribute
                     // the cost to its plan on the production path.
-                    edda::record_phase_done_with_plan(
+                    edda::record_phase_done_timed(
                         cwd,
                         Some(&plan.name),
                         phase_id,
                         result_text.as_deref(),
                         cost_usd,
+                        Some(elapsed_ms),
                     );
                     event_log.record(Event::PhasePassed {
                         phase_id: phase_id.to_string(),
@@ -412,12 +414,13 @@ pub(super) async fn process_phase_result(
                 let _ = tmux.update_phase_status(phase_id, "Stale");
             }
             let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
-            edda::record_phase_failed_with_plan(
+            edda::record_phase_failed_timed(
                 cwd,
                 Some(&plan.name),
                 phase_id,
                 measured,
                 "timed out",
+                Some(elapsed_ms),
             );
             event_log.record(Event::PhaseFailed {
                 phase_id: phase_id.to_string(),
@@ -460,7 +463,14 @@ pub(super) async fn process_phase_result(
                 let _ = tmux.update_phase_status(phase_id, "Failed");
             }
             let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
-            edda::record_phase_failed_with_plan(cwd, Some(&plan.name), phase_id, measured, &error);
+            edda::record_phase_failed_timed(
+                cwd,
+                Some(&plan.name),
+                phase_id,
+                measured,
+                &error,
+                Some(elapsed_ms),
+            );
             event_log.record(Event::PhaseFailed {
                 phase_id: phase_id.to_string(),
                 attempt,
@@ -531,7 +541,14 @@ pub(super) async fn process_phase_result(
             // terminal states — the workspace ledger must get the failure
             // event, carrying the measured cost when the backend reported one.
             let measured = state.get_phase(phase_id).ok().and_then(|p| p.cost_usd);
-            edda::record_phase_failed_with_plan(cwd, Some(&plan.name), phase_id, measured, &msg);
+            edda::record_phase_failed_timed(
+                cwd,
+                Some(&plan.name),
+                phase_id,
+                measured,
+                &msg,
+                Some(elapsed_ms),
+            );
             notifier
                 .notify_phase_terminal(phase_terminal_event(
                     &plan.name, phase_id, "Failed", attempt, None,

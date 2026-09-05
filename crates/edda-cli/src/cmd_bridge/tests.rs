@@ -473,6 +473,21 @@ fn resolve_session_id_refusal_names_live_sessions() {
     let _ = std::fs::remove_dir_all(edda_store::project_dir(pid));
 }
 
+#[test]
+fn resolve_session_id_refuses_unattributed_parented_subagent() {
+    let _store = crate::test_support::isolated_store();
+    let _env = env_guard();
+    let pid = "test_gh780_parented_identity";
+    let stale = edda_bridge_claude::peers::stale_secs();
+    std::env::remove_var("EDDA_SESSION_ID");
+    std::env::remove_var("EDDA_SESSION_LABEL");
+    crate::test_support::write_aged_heartbeat(pid, "sub-agent-1", stale * 3, Some("parent-1"));
+
+    let err = resolve_session_id(None, pid, "cli").expect_err("live heartbeat is ambiguous");
+    assert!(err.to_string().contains("--session is required"));
+    assert!(err.to_string().contains("sub-agent-1"));
+}
+
 // ── Render & Heartbeat CLI tests (Issue #15) ──
 
 #[test]

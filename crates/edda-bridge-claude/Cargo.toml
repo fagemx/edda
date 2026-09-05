@@ -11,17 +11,17 @@ categories.workspace = true
 keywords.workspace = true
 
 [dependencies]
-edda-aggregate = { path = "../edda-aggregate", version = "0.4.0" }
-edda-core = { path = "../edda-core", version = "0.4.0" }
-edda-store = { path = "../edda-store", version = "0.4.0" }
-edda-transcript = { path = "../edda-transcript", version = "0.4.0" }
-edda-index = { path = "../edda-index", version = "0.4.0" }
-edda-pack = { path = "../edda-pack", version = "0.4.0" }
-edda-ledger = { path = "../edda-ledger", version = "0.4.0" }
-edda-search-fts = { path = "../edda-search-fts", version = "0.4.0" }
-edda-notify = { path = "../edda-notify", version = "0.4.0" }
-edda-postmortem = { path = "../edda-postmortem", version = "0.4.0" }
-edda-derive = { path = "../edda-derive", version = "0.4.0" }
+edda-aggregate = { path = "../edda-aggregate", version = "0.5.0" }
+edda-core = { path = "../edda-core", version = "0.5.0" }
+edda-store = { path = "../edda-store", version = "0.5.0" }
+edda-transcript = { path = "../edda-transcript", version = "0.5.0" }
+edda-index = { path = "../edda-index", version = "0.5.0" }
+edda-pack = { path = "../edda-pack", version = "0.5.0" }
+edda-ledger = { path = "../edda-ledger", version = "0.5.0" }
+edda-search-fts = { path = "../edda-search-fts", version = "0.5.0" }
+edda-notify = { path = "../edda-notify", version = "0.5.0" }
+edda-postmortem = { path = "../edda-postmortem", version = "0.5.0" }
+edda-derive = { path = "../edda-derive", version = "0.5.0" }
 anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
@@ -37,6 +37,11 @@ tracing = { workspace = true }
 [dev-dependencies]
 tempfile.workspace = true
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Test-only: enables the thread-local store-root override used by
+# `isolated_store()` fixtures (GH-757). Not enabled for ordinary builds.
+edda-store = { path = "../edda-store", version = "0.5.0", features = [
+    "test-support",
+] }
 
 [lints]
 workspace = true

@@ -29,29 +29,82 @@ when changing or validating review policy.
    authority, and stop conditions. “Keep going” does not expand scope.
 2. Inspect repository instructions, current revision, dirty state, active
    peers, claims, decisions, issue/PR state, and available durable carriers.
-3. Maintain two logical rails: read-only review/discovery and write-enabled
+3. Select this batch before any dispatch: run the ready-batch selection
+   procedure below and hand its table to `/parallel-wave`. `fleet:ready` is
+   the operator's authorization — the controller picks the batch itself and
+   never stops to ask the operator for issue numbers.
+4. Maintain two logical rails: read-only review/discovery and write-enabled
    delivery. A verified finding may cross rails; a suspicion may not.
-4. Build a dependency and file-overlap graph. Parallelize only independent
+5. Build a dependency and file-overlap graph. Parallelize only independent
    ready bundles; serialize the same code chain. Set worker WIP no higher than
    verifier capacity.
-5. Keep one controller, independent workers, and a read-only verifier. From
+6. Keep one controller, independent workers, and a read-only verifier. From
    two concurrent workers onward, reserve a verifier seat.
-6. Record tasks, claims, rulings, and acceptance criteria in the durable truth
+7. Record tasks, claims, rulings, and acceptance criteria in the durable truth
    layer before ringing host messaging as a doorbell.
-7. Gate every cross-machine dispatch mechanically (GH-656): before a lane
-   starts an issue, its claim is written by exactly one command —
+8. Gate every cross-machine dispatch mechanically (GH-782): before a lane
+   starts an issue, use one claim command —
    `scripts/fleet-claim-issue.sh <issue> <machine>/<role>` (e.g.
-   `4090/worker-1`, `docs/reviewer`), which leaves the `taking:` comment
-   and `lane:*` label. `edda dispatch --issue <N> --machine
-   <machine>/<role>` is only a pre-spawn check: it refuses with exit 2 if
-   another machine already holds the issue, but until #782 lands it
-   writes no claim and does not substitute for the script. The token is
-   an explicit `<machine>/<role>` value from the brief, never a hostname
-   guess.
-8. Give self-contained briefs (including assigned build lane, verification
+   `4090/worker-1`, `docs/reviewer`) or `edda dispatch --issue <N> --machine
+   <machine>/<role>`. Each checks PRs and full `taking:` identities, then
+   writes the `taking:` comment, adds `fleet:claimed`, removes `fleet:ready`,
+   and assigns `@me` before the lane starts. `lane:*` labels are routing only,
+   never ownership. The token is an explicit `<machine>/<role>` value from the
+   brief, never a hostname guess.
+9. Give self-contained briefs (including assigned build lane, verification
    budget, and cleanup authority), monitor compressed state, adjudicate
    conflicts, and close only against immutable full SHAs with proportional
    evidence.
+
+## Ready-batch selection (select this batch)
+
+`fleet:ready` is the operator's signature: promoting an issue to ready already
+authorized it. When the operator says "run ready work today"（「今天開始跑」）, the
+controller runs this procedure and produces the batch itself — it never stops
+to ask for issue numbers. This step **selects**; the actual claim write uses
+one command from sequence step 8 (the claim script or issue-aware dispatch) —
+selection does not claim.
+
+Run it verbatim:
+
+1. **Query candidates** — the machine check is the filter of record (GH-665);
+   never a raw label listing as the only filter. The second query adds
+   routing fields; the third reads each candidate in full — the body and
+   comments carry the predicted write surface, `blocked-by` edges, and other
+   machines' `taking:` claims, so the rules below are applied from fetched
+   data, never from titles alone:
+
+   ```bash
+   sh scripts/fleet/ready-queue-lint.sh    # pickable ready issues, oldest first
+   gh issue list --label fleet:ready --state open --json number,title,createdAt,labels
+   gh issue view <n> --json body,comments,labels,title,createdAt   # per candidate <n>
+   ```
+
+2. **Exclude**, recording each issue's reason for the output table:
+   - (a) another lane already holds it: a `taking:` comment with a different
+     full `<machine>/<role>` identity. `lane:*` labels are routing only and do
+     not exclude an issue; a different role on the same machine is still a
+     different claimant.
+   - (b) already in flight: an open PR — list open `headRefName`s
+     (`gh pr list --state open --json headRefName`) and treat any branch
+     name containing `gh<n>` as in flight (the repo's convention is
+     `<type>/gh<n>-…`; a `head:gh<n>` search misses it) — **or** a remote
+     branch (`git ls-remote --heads origin "*gh<n>*"`) — pushed-but-unopened
+     branches are invisible to `gh pr list`.
+   - (c) labeled `needs-operator`.
+
+3. **Route** by predicted write surface: anything touching `crates/**`,
+   `.github/workflows/**`, `scripts/**`, or `Cargo.*` needs a build lane →
+   the 4090-shaped machine. Pure `docs/**`, `*.md`, or `.claude/skills/**`
+   work stays on this docs machine.
+
+4. **Sort** oldest `createdAt` first, unless an issue is blocked-by another
+   selected issue — blocked items keep their dependency order and stay
+   unassigned until their blocker dispatches.
+
+5. **Output** one table — selected / excluded with reason — and hand it to
+   `/parallel-wave` as its Layer-1 input. Do not restate REVIEW.md tables
+   here; review routing lives in the review charter.
 
 ## Non-negotiable invariants
 

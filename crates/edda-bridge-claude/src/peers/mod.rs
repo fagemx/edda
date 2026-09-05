@@ -170,6 +170,19 @@ pub struct PeerSummary {
     pub session_id: String,
     pub label: String,
     pub age_secs: u64,
+    /// Verdict of the ONE shared criterion
+    /// ([`liveness::liveness_from_heartbeat`]), decided here where the
+    /// heartbeat — and therefore `parent_session_id` — is still in scope.
+    ///
+    /// Consumers must filter on this rather than recomputing
+    /// `age_secs <= stale_secs()`: `age_secs` alone cannot express the 15x
+    /// window the criterion grants a parented sub-agent, so every inline
+    /// comparison silently calls a live sub-agent dead (GH-780). Not
+    /// serialized — `edda peers --json` already publishes this fact as its
+    /// own `stale` key, and a second spelling of one fact is a contract
+    /// consumers would have to reconcile.
+    #[serde(skip)]
+    pub is_live: bool,
     pub last_heartbeat: String,
     pub focus_files: Vec<String>,
     pub task_subjects: Vec<String>,

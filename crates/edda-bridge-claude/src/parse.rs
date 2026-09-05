@@ -102,6 +102,7 @@ mod tests {
 
     #[test]
     fn snake_to_camel_converts_correctly() {
+        let _store = crate::isolated_store();
         assert_eq!(snake_to_camel("hook_event_name"), "hookEventName");
         assert_eq!(snake_to_camel("session_id"), "sessionId");
         assert_eq!(snake_to_camel("transcript_path"), "transcriptPath");
@@ -147,6 +148,7 @@ mod tests {
 
     #[test]
     fn get_str_missing_fields_returns_empty() {
+        let _store = crate::isolated_store();
         let val = serde_json::json!({});
         assert_eq!(get_str(&val, "session_id"), "");
         assert_eq!(get_str(&val, "hook_event_name"), "");
@@ -156,6 +158,7 @@ mod tests {
 
     #[test]
     fn get_str_snake_case_preferred() {
+        let _store = crate::isolated_store();
         // When both snake_case and camelCase exist, snake_case wins
         let val = serde_json::json!({
             "session_id": "snake_wins",
@@ -166,6 +169,7 @@ mod tests {
 
     #[test]
     fn get_str_camel_case_fallback() {
+        let _store = crate::isolated_store();
         // When only camelCase exists, it should be found via fallback
         let val = serde_json::json!({"sessionId": "from_camel"});
         assert_eq!(get_str(&val, "session_id"), "from_camel");
@@ -173,6 +177,7 @@ mod tests {
 
     #[test]
     fn get_str_non_string_value_returns_empty() {
+        let _store = crate::isolated_store();
         // If the field exists but is not a string, return empty
         let val = serde_json::json!({"session_id": 42});
         assert_eq!(get_str(&val, "session_id"), "");

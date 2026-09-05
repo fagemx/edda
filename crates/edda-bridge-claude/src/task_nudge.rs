@@ -173,6 +173,7 @@ mod tests {
 
     #[test]
     fn select_nudges_filters_ready_assigned_unmarked() {
+        let _store = crate::isolated_store();
         let views = vec![
             mk_view(1, TaskStatus::Ready, Some("tester")),
             mk_view(2, TaskStatus::Ready, Some("writer")), // other assignee
@@ -187,6 +188,7 @@ mod tests {
 
     #[test]
     fn select_nudges_skips_watermarked() {
+        let _store = crate::isolated_store();
         let views = vec![
             mk_view(1, TaskStatus::Ready, Some("tester")),
             mk_view(2, TaskStatus::Ready, Some("tester")),
@@ -199,6 +201,7 @@ mod tests {
 
     #[test]
     fn render_nudge_mentions_ids_and_verbs() {
+        let _store = crate::isolated_store();
         let a = mk_view(7, TaskStatus::Ready, Some("tester"));
         let msg = render_nudge(&[&a]);
         assert!(msg.contains("#7"), "message should name the task: {msg}");
@@ -218,6 +221,7 @@ mod tests {
 
     #[test]
     fn stop_hook_nudges_once_then_stays_quiet() {
+        let _store = crate::isolated_store();
         // Real workspace + ledger + heartbeat, driven through the hook entrypoint.
         let ws = std::env::temp_dir().join(format!("edda_stopnudge_{}", std::process::id()));
         let _ = fs::remove_dir_all(&ws);
@@ -282,6 +286,7 @@ mod tests {
 
     #[test]
     fn watermark_write_failure_suppresses_nudge() {
+        let _store = crate::isolated_store();
         // If we cannot record that we nudged, we must not nudge — otherwise
         // the same task re-blocks every Stop forever. Force the failure by
         // planting a FILE where the state dir should be.
@@ -333,6 +338,7 @@ mod tests {
 
     #[test]
     fn watermark_roundtrip() {
+        let _store = crate::isolated_store();
         let project_id = format!("test_task_nudge_{}", std::process::id());
         let session_id = "s-watermark";
         assert!(read_watermark(&project_id, session_id).is_empty());

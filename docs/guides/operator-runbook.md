@@ -24,16 +24,23 @@
    git status                              # 乾淨、on branch main
    git rev-list --count HEAD..origin/main  # 0 = 沒落後
    ```
-2. **接單**：`gh issue edit <N> --add-label fleet:claimed --remove-label fleet:ready --add-assignee @me`，
-   並在 issue 留 lease 留言。
+2. **接單**：手動認領用 `sh scripts/fleet-claim-issue.sh <N> <machine>/<role>`（例如
+   `4090/worker-1`、`docs/reviewer`）；`edda dispatch --issue <N> --machine <machine>/<role>`
+   也會在派發前做同一套認領。認領、釋放與已交付歷史的正典是帳本
+   `fleet.cross-machine-claim`（`edda ask fleet.cross-machine-claim`）；本 runbook 不重述該協定。
+   實作入口、`--check` 的 exit code 與身分格式見 `docs/fleet/rules.md` R21（#782）。
 3. **派 lane**（開 worktree 後）：
    ```bash
-   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> -Cwd <worktree>
+   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> -Cwd <worktree> -Owns <repo-path> [<repo-path>...]
    ```
    脚本不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`
    （決策 `verification.cost-discipline`），給了就在 wrapper 設
    `CARGO_TARGET_DIR = <lane root>\<BuildLane>`（lane root =
    `$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）；
+   寫入 lane 也要傳它實際會改的最小 `-Owns` repo path；可在最後一個 `-Owns`
+   後列多個 scope，例如 `-Owns crates/edda-cli/src/cmd_dispatch.rs docs/guides/operator-runbook.md`。
+   scope 必須是 canonical repository-relative path：不可用 absolute、drive/UNC、`..` 或 `./`
+   alias；review lane 是唯讀可省略。
    Rust lane 要明確傳，如 `-BuildLane worker-1`；docs lane 只寫文件不編譯，
    不傳 build lane，wrapper 就不設 `CARGO_TARGET_DIR`（見 §六）。
 4. **盯進度**（不用再翻檔案時間戳）：
@@ -98,20 +105,27 @@
 1. **開場**：在 `C:\ai_agent\edda` 開 Claude Code。pack 自動列出決策、peers、任務。說：
    「`/fleet-orchestrate` 今天跑 ready 的單」。控制者先做 fleet-orchestrate 的 controller sequence
    第 1–2 步：定目標、排除、證據門檻、開單與合併授權、停止條件；看 revision、dirty state、peers、claims、issue/PR 狀態。
-2. **判併行**：`/parallel-wave`——每張 ready issue 推 predicted write surface，兩兩交集：
+   **Standing 授權（不必逐批請示）**：`fleet:ready` 標籤就是操作者的簽名——控制者接著自己跑
+   fleet-orchestrate 的 ready-batch selection 程序選出這一批、產出選/排表，不回頭問編號；
+   操作者的介入點是 promote 與裁決，不是每批打字給編號（程序正典在 fleet-orchestrate，這裡不重述）。
+2. **判併行**：`/parallel-wave`——輸入就是上一步選單程序的選/排表；每張選中的 ready issue 推 predicted write surface，兩兩交集：
    disjoint → 一起派；同檔不同符號 → 兩邊 brief 寫 FORBIDDEN 符號清單；同符號 → 串成一條；scope 太糊 → 退回佇列。
    `edda claim check`（#576，2026-09-02 已合進 main）把這步變成機器判——**但要用從 main 重建的二進位**：
    PATH 上的 `edda.exe` 可能比 #576 舊，`edda claim --help` 沒列出 `check` 就是舊的（它會把 `check` 當成 claim 的 label）。
    重建：`cargo install --path crates/edda-cli --force`，再 `edda claim --help` 確認。
-3. **每張一個 plan、一個 worktree、一條 lane**：
+3. **每張一個 plan、每條 lane 一個固定 worktree**：
    ```bash
-   git worktree add C:/ai_agent/edda-wt-ghNNN -b <branch> origin/main
+    # 首次準備或切到下一張 issue：固定路徑，不建 per-issue worktree
+    pwsh -NoProfile -File scripts/fleet/lane-prepare.ps1 -BuildLane <worker-1|worker-2|verifier|verifier-2> -Branch <branch> -Repo C:/ai_agent/edda
    edda claim "ghNNN" --paths "crates/<crate>/src/*"
-   edda conduct run <plan.yaml> --agent pi --cwd C:/ai_agent/edda-wt-ghNNN      # 多 phase
-   edda dispatch --agent pi --prompt-file brief.md --cwd C:/ai_agent/edda-wt-ghNNN --budget-usd 5   # 單輪
+   edda conduct run <plan.yaml> --agent pi --cwd C:/ai_agent/edda-wt-<lane>      # 多 phase
+   edda dispatch --agent pi --prompt-file brief.md --cwd C:/ai_agent/edda-wt-<lane> --budget-usd 5   # 單輪
    ```
-   plan YAML 放 scratchpad 或 `.tmp/plans/`，不進 repo。Rust lane 設 `CARGO_TARGET_DIR` 為
-   `$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1|worker-2`（verifier 用 `verifier|verifier-2`）。
+    plan YAML 放 scratchpad 或 `.tmp/plans/`，不進 repo。lane worktree 固定為
+    `C:\ai_agent\edda-wt-<worker-1|worker-2|verifier|verifier-2>`；prepare 只在閒置、乾淨
+    worktree 且舊分支的 local tip 等於 `origin/<branch>` 時切換，絕不 force checkout、刪 branch 或刪 source。
+    Rust lane 設 `CARGO_TARGET_DIR` 為
+    `$env:LOCALAPPDATA\fleet-workstation\lanes\worker-1|worker-2|verifier|verifier-2`。
    lane 的**啟動方式**用 `scripts/fleet/lane-launch.ps1`（見 START HERE；Task Scheduler，不是 nohup，規則見 §六）。
 4. **PR 一開就派審（自動，不用人手）**：本機 watcher（`scripts/pr-review-watch.sh`，由
    `scripts/pr-review-launch.ps1` 註冊成隱藏排程任務 `edda-pr-review-watcher`）每 60 秒掃 open PR：
@@ -135,7 +149,9 @@
    （v1 無 codex 後備——它做不到唯讀，且在新決策下 codex 也到不了 Opus；§六 `fleet.review-provider-overload` 的決策全文仍可 `edda ask` 查）。
    啟停、狀態檔與疑難排解見 `docs/guides/pr-review-watcher.md`。watcher **不合併**——合併仍在第 6 步、要授權。
 5. **收斂**：`/fleet-pr-loop` 的 bash driver 吐 `ACTION: REVIEW | FIX | DONE | BLOCKED`，照做到 LGTM；driver 不合併。
-6. **合併**（有授權時）：`git diff <LGTM 的 SHA>..origin/<branch>` 必須為空（判決還在），`gh pr checks` 7 綠，才合。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
+6. **合併**（有操作者授權時）：先執行 `sh scripts/merge-reviewed-pr.sh <PR>`，核對最新可信審查是目前完整 SHA 的 LGTM、P0=0/P1=0、無待升級項目且必要 CI 檢查通過。取得合併授權後使用 `sh scripts/merge-reviewed-pr.sh <PR> --merge`；它以 `--match-head-commit` 鎖定審查 SHA，避免最後一刻 push 越過判決。合併後對剩下的 PR 做 Layer-3 交集：不相交直接合，相交要 rebase → 判決失效 → 再一輪。
+
+   手動啟動與 watcher 共用 `scripts/review-round.sh` 的每個 repository／PR 認領與輪次，儲存在 `$HOME/.edda/review-coordination/`，不跟隨個別 scratch 目錄。已發表的 PR 審查輪次是下限；有尚未寫入終止 receipt 的審查時，第二個啟動者會被拒絕。中斷且沒有 receipt 的認領保持拒絕狀態，操作者應先確認舊 lane 已停止再恢復，不能只依 PID 或經過時間認定它已退出。
 7. **開單**：審查 exhaust、runtime 的傷、重複兩次的手動步驟，當場 `/issue-intake`／`/issue-create`（含四問接線審計）。不要留在對話裡。
 8. **收工**：`edda note "completed X; decided Y; next: Z" --tag session`；回報你：合了什麼、開了什麼、等你什麼。
 
@@ -151,8 +167,10 @@ conventional commit 格式；`SKIP_CLIPPY=1` 跳過 clippy 並自動在訊息尾
 CI 只在 PR 與 push 到 main 時跑，feature branch 靠 PR 的 CI Gate。
 
 1. 在指定 worktree 與分支上做 brief 說的那一件事——不 checkout main、不 pull、不開別的分支。
-2. L0 閘（`cargo fmt --all --check`；`cargo clippy -p <crate> --all-targets -- -D warnings`；`cargo test -p <crate>`），
-   凍結 SHA 前跑一次 L1（`CARGO_INCREMENTAL=0`，workspace 全套），記 gate receipt（SHA、閘、toolchain、lane、結果）。
+2. L0 閘（`cargo fmt --all --check`；`cargo clippy -p <crate> --all-targets -- -D warnings`；`cargo test -p <crate>`）。
+   凍結 SHA 的 L1 是 exact-head CI；Windows CI 未覆蓋的 touched crate 由 verifier lane 以
+   `CARGO_INCREMENTAL=0` 跑一次 `cargo test -p <crate>`（C5 selector），並記 gate receipt
+   （SHA、CI run、toolchain、lane、結果）。不要以本機 workspace 全套代替 L1。
 3. `git push -u origin <branch>`、開 PR、**停**。不合併、不刪分支、不刪 worktree。
 
 Brief 必含：assigned build lane、verification budget（L0 while iterating；L1 once per frozen SHA）、cleanup authority（build cache 可清；worktree／branch／source 不刪）。
@@ -185,7 +203,7 @@ Brief 必含：assigned build lane、verification budget（L0 while iterating；
 | **lane 啟動走 Task Scheduler，不走 nohup／Start-Process**：Claude Code 的工具 shell 在 Windows Job Object 裡，nohup 的子程序仍隨 session 死。`Register-ScheduledTask` + `Start-ScheduledTask`（父程序是 svchost）；該環境 `HOME` 為空，lane wrapper 必須顯式設；`CARGO_TARGET_DIR` 只在 `-BuildLane` 指名四個允許 build lane 之一時設（不編譯的 session 沒有 build lane——`.claude/CLAUDE.md`、`verification.cost-discipline`；要編譯的必須給四擇一，launcher 拒絕其他名字）。`lane-launch.ps1` 不合成 build lane：`-BuildLane` 只收 `worker-1|worker-2|verifier|verifier-2`，設 `CARGO_TARGET_DIR`＝lane root（`$env:LOCALAPPDATA\fleet-workstation\lanes`，可用 `FLEET_LANE_ROOT` 改）\`<BuildLane>`；docs lane 不傳，wrapper 不設。`Get-ScheduledTaskInfo` 可輪詢，`Unregister-ScheduledTask` 清理。重派前先讀 worktree／branch／PR 狀態，不信任 live handle。**手續已脚本化**：用 `scripts/fleet/lane-launch.ps1` 註冊起 lane、`scripts/fleet/lane-status.ps1` 盯狀態（用法見 START HERE），不要再手寫 wrapper | `fleet.lane-launch`、`fleet.lane-dispatch` |
 | **停 lane 一律走 `scripts/fleet/lane-stop.ps1 -Name <lane>`**：`Stop-ScheduledTask` 與 `Unregister-ScheduledTask` 都只終止任務的 wrapper，**不殺它 spawn 的 process tree**（GH-672：被「停」的 lane 照樣 commit／push／開 PR，任務卻顯示 `State = Ready`）。`lane-stop.ps1` 停任務、殺整棵樹（wrapper 已死時依 `CommandLine` 比對 wrapper／brief 路徑抓孤兒）、驗證無殘留、回報實際終止了什麼，並補寫結束記錄（done-file + lane log 的 `=== EXIT ===` 行）——wrapper 本身也在 `finally` 寫同樣的結束記錄，所以正常結束、出錯、被停三種 endings 都有 EXIT。**殺完要驗共用 `.git/config`**：硬殺撞上 git 寫 config 會把它變成整片 NUL，主 checkout 加全部 worktree 同時失去 git；2026-09-02／03 各發生一次，而當時的 `.bak` 是**損毀後**才複製的，所以也是整片 NUL——備份不驗證等於沒有備份（GH-715）。殺完 `lane-stop.ps1` 驗證 config 仍可解析，壞了就從 `lane-launch.ps1` 開跑前存的**已驗證**備份還原（`scripts/fleet/git-config-guard.ps1`），還不回來就 exit 1；結束記錄一定先寫。沒有優雅關閉窗口：不帶 `/F` 的 `taskkill` 對沒有視窗的隱藏 console 程序無效（實測 exit 128、目標存活），加一段等待只會讓每次停 lane 多付秒數而擋不住任何損毀 | `fleet.lane-stop-4090` |
 | 一 issue ＝ 一單 phase plan ＝ 一 worktree ＝ 一 build lane；並行在 plan 之間；plan 裡不寫沒理由的 `depends_on`；並行 plan 不用 verdict gate | `cleanup.parallel-exec`、`cleanup.review-gate` |
-| 任何 session 開始一張 issue 前的起手守門（`--check`、認領憑證、拒絕條件）：見 `docs/fleet/rules.md` R21，本表不重述 | #784（R21；`fleet.cross-machine-claim` 的舊 carrier 已被取代） |
+| 跨機器認領、釋放與已交付歷史：讀帳本 `fleet.cross-machine-claim`；起手守門的實作入口與拒絕條件見 `docs/fleet/rules.md` R21，本表不重述 | `fleet.cross-machine-claim`、#784（R21） |
 | build lane 只用 `worker-1|worker-2|verifier|verifier-2`；永不建 ad-hoc `CARGO_TARGET_DIR`；L1 與 verifier 設 `CARGO_INCREMENTAL=0` | `verification.cost-discipline` |
 | 操作者在場的小批量併行走 `/issue-pipeline`（in-session 子代理：開工先貼 `taking: <machine>/pipeline`、審查是 house review——審查者不修自己審的 PR、子代理隨 session 死，長時間無人值守改派 Task Scheduler lane）；一次最多兩張要編譯的單 | `fleet.parallel-modes=in-session-pipeline-when-operator-present-lanes-when-unattended` |
 | 審查釘 full SHA；**每次 push 使前一個判決失效**；一個 PR 一個審查者身分 | `fleet.review-protocol` |

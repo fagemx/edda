@@ -1,7 +1,5 @@
-use std::time::Duration;
-
 use serde::Deserialize;
-
+use std::time::Duration;
 // ── Config ──
 
 /// Notification channel configuration — stored in `.edda/config.json` under key `notify_channels`.
@@ -19,7 +17,6 @@ pub enum Channel {
         events: Vec<String>,
     },
 }
-
 impl Channel {
     fn events(&self) -> &[String] {
         match self {
@@ -42,13 +39,11 @@ impl Channel {
         self.events().iter().any(|e| e == name || e == "*")
     }
 }
-
 /// Top-level notify configuration.
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct NotifyConfig {
     pub channels: Vec<Channel>,
 }
-
 impl NotifyConfig {
     /// Load from `.edda/config.json` key `notify_channels`.
     /// Returns empty config if key is missing or unparseable.
@@ -132,6 +127,9 @@ pub enum NotifyEvent {
         gate_sha: String,
         wait_label: String,
     },
+    /// GH-765: free-text delivery for the daily fleet digest (and any other
+    /// operator-facing push). `title` is the first line, `body` the rest.
+    Digest { title: String, body: String },
 }
 
 impl NotifyEvent {
@@ -145,6 +143,7 @@ impl NotifyEvent {
             NotifyEvent::TaskAssigned { .. } => "task_assigned",
             NotifyEvent::PhaseTerminal { .. } => "phase_terminal",
             NotifyEvent::GateProgress { .. } => "gate_progress",
+            NotifyEvent::Digest { .. } => "digest",
         }
     }
 
@@ -236,6 +235,10 @@ impl NotifyEvent {
                 "gate_sha": gate_sha,
                 "wait_label": wait_label,
             }),
+            NotifyEvent::Digest { title, body } => serde_json::json!({
+                "title": title,
+                "body": body,
+            }),
         }
     }
 }
@@ -280,8 +283,45 @@ pub fn test_channels(config: &NotifyConfig) -> Vec<(String, Result<(), String>)>
         .channels
         .iter()
         .map(|ch| {
+            (
+                ch.display_name(),
+                send(&agent, ch, &test_event).map_err(|e| e.to_string()),
+            )
+        })
+        .collect()
+}
+/// Send a free-text message (event name "digest") to every channel whose
+/// `events` list contains "digest" or "*". Same shape as [`test_channels`]:
+/// per-channel results for CLI display; channels that do not subscribe get
+/// a skip error so the operator sees why nothing arrived.
+pub fn send_text(
+    config: &NotifyConfig,
+    title: &str,
+    body: &str,
+) -> Vec<(String, Result<(), String>)> {
+    let event = NotifyEvent::Digest {
+        title: title.to_string(),
+        body: body.to_string(),
+    };
+    send_to_all(config, &event)
+}
+
+fn send_to_all(config: &NotifyConfig, event: &NotifyEvent) -> Vec<(String, Result<(), String>)> {
+    let agent = make_agent();
+    config
+        .channels
+        .iter()
+        .map(|ch| {
             let name = ch.display_name();
-            let result = send(&agent, ch, &test_event).map_err(|e| e.to_string());
+            let result = if ch.matches(event) {
+                send(&agent, ch, event).map_err(|e| e.to_string())
+            } else {
+                Err(format!(
+                    "channel does not subscribe to {:?} (events: {:?})",
+                    event.event_name(),
+                    ch.events()
+                ))
+            };
             (name, result)
         })
         .collect()
@@ -402,6 +442,7 @@ fn format_ntfy(event: &NotifyEvent) -> (String, String, String) {
             format!("Waiting on sha {gate_sha} — {wait_label}"),
             "default".to_string(),
         ),
+        NotifyEvent::Digest { title, body } => (title.clone(), body.clone(), "default".to_string()),
     }
 }
 
@@ -417,6 +458,15 @@ fn send_webhook(agent: &ureq::Agent, url: &str, event: &NotifyEvent) -> anyhow::
 }
 
 fn format_webhook(event: &NotifyEvent) -> serde_json::Value {
+    // GH-765: the digest posts a flat payload (event name + title + body) so
+    // simple receivers do not have to unwrap the generic envelope.
+    if let NotifyEvent::Digest { title, body } = event {
+        return serde_json::json!({
+            "event": "digest",
+            "title": title,
+            "body": body,
+        });
+    }
     serde_json::json!({
         "event_type": event.event_name(),
         "data": event.to_json(),
@@ -539,9 +589,42 @@ fn format_telegram(event: &NotifyEvent) -> String {
             let w = escape_html(wait_label);
             format!("<b>Verdict needed: {s}</b>\nsha <code>{g}</code> — {w}")
         }
+        NotifyEvent::Digest { title, body } => truncate_telegram_digest(title, body),
     }
 }
+/// Telegram rejects messages over 4096 characters; keep a margin for the
+/// HTML entities and the title. A longer text is truncated with a trailing
+/// ellipsis rather than failing delivery.
+const TELEGRAM_MAX_CHARS: usize = 3900;
 
+fn truncate_telegram_digest(title: &str, body: &str) -> String {
+    let escaped_len = |s: &str| escape_html(s).chars().count();
+    let overhead = "<b></b>\n".chars().count();
+    if overhead + escaped_len(title) + escaped_len(body) <= TELEGRAM_MAX_CHARS {
+        return format!("<b>{}</b>\n{}", escape_html(title), escape_html(body));
+    }
+    let title_budget = TELEGRAM_MAX_CHARS - overhead - 1;
+    if escaped_len(title) > title_budget {
+        return format!("<b>{}…</b>", escape_prefix(title, title_budget));
+    }
+    let body_budget = TELEGRAM_MAX_CHARS - overhead - escaped_len(title) - 1;
+    format!(
+        "<b>{}</b>\n{}…",
+        escape_html(title),
+        escape_prefix(body, body_budget)
+    )
+}
+fn escape_prefix(text: &str, budget: usize) -> String {
+    let mut prefix = String::new();
+    for ch in text.chars() {
+        let escaped = escape_html(&ch.to_string());
+        if prefix.chars().count() + escaped.chars().count() > budget {
+            break;
+        }
+        prefix.push_str(&escaped);
+    }
+    prefix
+}
 fn escape_html(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -831,5 +914,87 @@ mod tests {
         };
         let text = format_telegram(&event);
         assert!(text.contains("Fix &lt;script&gt; &amp; stuff"));
+    }
+
+    #[test]
+    fn digest_has_stable_name_and_flat_webhook_payload() {
+        let event = NotifyEvent::Digest {
+            title: "Fleet digest 2026-09-03".into(),
+            body: "## 例外\n（無）\n".into(),
+        };
+        assert_eq!(event.event_name(), "digest");
+        let payload = format_webhook(&event);
+        assert_eq!(payload["event"], "digest");
+        assert_eq!(payload["title"], "Fleet digest 2026-09-03");
+        assert_eq!(payload["body"], "## 例外\n（無）\n");
+
+        let ch: Channel = serde_json::from_value(serde_json::json!({
+            "type": "webhook",
+            "url": "https://example.com/hook",
+            "events": ["digest"]
+        }))
+        .unwrap();
+        assert!(ch.matches(&event));
+    }
+
+    #[test]
+    fn format_telegram_digest_escapes_html() {
+        let event = NotifyEvent::Digest {
+            title: "<&>".into(),
+            body: "a<b>&c".into(),
+        };
+        let text = format_telegram(&event);
+        assert!(text.starts_with("<b>&lt;&amp;&gt;</b>"), "text={text}");
+        assert!(text.contains("a&lt;b&gt;&amp;c"), "text={text}");
+    }
+
+    #[test]
+    fn format_telegram_digest_truncates_to_3900_with_ellipsis() {
+        let event = NotifyEvent::Digest {
+            title: "t".into(),
+            body: "x".repeat(5000),
+        };
+        let text = format_telegram(&event);
+        assert_eq!(text.chars().count(), 3900);
+        assert!(text.ends_with('\u{2026}'));
+
+        let short = NotifyEvent::Digest {
+            title: "t".into(),
+            body: "short".into(),
+        };
+        let text = format_telegram(&short);
+        assert!(!text.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn digest_truncation_keeps_entities_and_tags_complete() {
+        let event = NotifyEvent::Digest {
+            title: "t".into(),
+            body: format!("{}&", "x".repeat(3889)),
+        };
+        let text = format_telegram(&event);
+        assert!(!text.ends_with("&…"), "text={text}");
+        assert!(text.starts_with("<b>t</b>\n"), "text={text}");
+        assert!(text.chars().count() <= TELEGRAM_MAX_CHARS);
+        let text = format_telegram(&NotifyEvent::Digest {
+            title: "x".repeat(4000),
+            body: String::new(),
+        });
+        assert!(text.ends_with("…</b>"), "text={text}");
+    }
+    #[test]
+    fn test_channels_ignores_event_subscriptions() {
+        let config = NotifyConfig {
+            channels: vec![Channel::Webhook {
+                url: "http://127.0.0.1:9".into(),
+                events: vec!["approval_pending".into()],
+            }],
+        };
+        let results = test_channels(&config);
+        assert!(!results[0]
+            .1
+            .as_ref()
+            .unwrap_err()
+            .contains("does not subscribe"));
     }
 }
