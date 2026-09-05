@@ -697,6 +697,7 @@ One comment per round, pinned to the reviewed full SHA
 - spec: review-spec-v1.3
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
+- shadow: true|false  (documentation for a SHADOW round: true requires the heading suffix ` (SHADOW)` — `## Code Review: Round <N> (SHADOW) — PR #<n> @ <full 40-hex SHA>`; the suffix is the only marker, this field never substitutes for it; a SHADOW round is never a verdict — §8)
 - cost: <elapsed / tokens / tool calls, as available>
 
 ### IN SCOPE
@@ -750,6 +751,14 @@ rather than overwriting it.
 - An LGTM with a non-empty `escalations:` field is provisional (§6.4).
 - Every push invalidates this verdict (`loop` item 5). A draft/ready flip, a
   label, or a status change is not a push and reruns nothing (`ladder`, L3).
+- **A round posted as SHADOW is never a verdict.** A §7 comment whose heading
+  carries the ` (SHADOW)` suffix — the only SHADOW marker; the `- shadow:
+  true` header field is documentation that accompanies it, never a
+  substitute — sets no `review:*` label and no `Independent Review` status —
+  the union rule below ignores it. It is calibration evidence, not a gate:
+  `scripts/review-compare.sh <pr> <sha>` diffs its findings against the
+  authoritative round (the latest §7 round on that SHA without the suffix)
+  and prints one `for-ledger` line for the calibration ledger (issue #887).
 
 Internal verifier reports, task receipts and CI do not replace this comment
 (`loop`). For a local-only delivery with no PR, record the same fields in the
@@ -758,7 +767,10 @@ strongest durable local carrier; do not invent a PR.
 The watcher also posts the merge gate's commit status: context
 `Independent Review`, pinned to the reviewed SHA in §7's heading. Its state
 is the union of every §7 verdict comment on that SHA plus the round just
-posted: `success` only when at least one verdict is `LGTM (P0=0, P1=0)` and
+posted — a SHADOW round (heading with the ` (SHADOW)` suffix) is never a
+verdict and never enters this state; that exclusion is part of this rule,
+not a side effect of the watcher's pin regex — `success` only when at least
+one verdict is `LGTM (P0=0, P1=0)` and
 no verdict on that SHA is anything else; any standing non-qualifying verdict
 is `failure`; no verdict at all is `error`. A later LGTM therefore does not
 override an earlier Changes Requested on the same SHA (GH-742).
@@ -798,6 +810,7 @@ mechanical.
 | R3 | RAN | `sh -n` on 3 changed scripts, all exit 0 |
 | R4–R5 | canonical | `brief-v1` §6.1 items 3–4; stated as properties, not commands |
 | §5.5 | RAN | `sh scripts/wiring-scan.sh 6340d94~1 6340d94` |
+| §8 shadow rule | canonical | operator ruling 2026-09-05 (`review.gh880-shadow` = `glm-shadow-round-opus-makeup-when-quota`, issue #887): a ` (SHADOW)` round is never a verdict, sets no label and no `Independent Review` status; `sh scripts/review-compare.sh <pr> <sha>` diffs it against the authoritative round on the same SHA |
 
 ## 10. Version
 
