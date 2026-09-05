@@ -5,3 +5,9 @@ scripts/githooks/* text eol=lf
 scripts/lint-doc-citations.sh text eol=lf
 scripts/lint-doc-citations.awk text eol=lf
 scripts/test-doc-citations.sh text eol=lf
+
+# Prose files are LF everywhere: a CRLF blob makes `git diff --check` report
+# a trailing carriage return on every touched line (GH-920), and any editor
+# writing one convention rewrites untouched lines as a side effect.
+*.md text eol=lf
+
