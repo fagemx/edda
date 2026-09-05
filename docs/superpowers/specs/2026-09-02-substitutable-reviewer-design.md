@@ -40,7 +40,7 @@
 | gpt-5.6-sol | `openai-codex/gpt-5.6-sol` | A: `pi --model openai-codex/gpt-5.6-sol`；B: `edda dispatch --agent codex`（過載時先換這個） | 訂閱內，T$0 | $0.0798 | **全類別（錨，不被取代）** | #582 | `fleet.agent-model-split`＋`fleet.review-provider-overload` 的原裝組合；sol 抓到而他人漏的即成新金絲雀 |
 | Opus 5 | `opus`（`claude -p --model opus`） | **C: Claude Code only**——`claude -p --allowedTools "Read,Grep,Glob,Bash(git *),Bash(sh *)"`；**絕不**經 pi/openrouter | 訂閱內，T$1 | $1.4869 | code-risk + docs-skills（provisional，待操作者裁定） | 訂閱用量 | `fleet.claude-subscription-transport`：pi 顯示 ready 也不准派 |
 | gemini-3.1-pro-preview——**removed**（`fleet.review-engine-pool`，2026-09-02 操作者裁定移出引擎池） | `openrouter/google/gemini-3.1-pro-preview`——**catalogue 逐字 id**（RAN `pi --list-models gemini`，該列見 §3）。先前寫的 `google/gemini-3-pro` **不在目錄裡**，pi 會模糊解析成 `google/gemini-3-pro-image`（見 §3 的靜默替換案例） | pi/openrouter：`pi auth check --model openrouter/google/gemini-3.1-pro-preview` → **`ready`**（provider `openrouter` 亦 `ready`），但實際請求仍 `404 … quantization: fp8`（§3）；直連 google 供應商 `pi auth check --provider google` → `not_ready` | — | $0 | **none（not run，R3 實測）** | — | R3（2026-09-02）改用逐字 id 重跑：session 檔記的 `modelId` 與請求**完全一致**（沒有替換），錯的是路由。`auth check` 說 ready ≠ 路由可達（錯誤原文與探測見 §3）。**removed**：`fleet.review-engine-pool` 裁定審查很少會用 Gemini，不為它改 pi 的 `openRouterRouting`；§3 的量測敘述保留為它被移出的歷史證據 |
-| glm-5.3-flash | `openrouter/z-ai/glm-5.3-flash` | pi/openrouter | 訂閱外按量，T$0 | $0.00092 | **docs-skills（provisional）**；code-risk 不合格 | #582 | code-risk 不合格的原因與 brief v1 的 `[判斷]` 標籤有關（§3 學習 1），brief v2 修正後重校，不是引擎本身判死 |
+| glm-5.3-flash | `openrouter/z-ai/glm-5.3-flash` | pi/openrouter | 訂閱外按量，T$0 | v0 $0.00092；v1 $0.0047–0.0056（5 次，§3.1） | **docs-skills（provisional）＋ code-risk（provisional——§3.1 校準 v1 的提議，待操作者記帳本）** | #582 | v0 那格的「code-risk 不合格」是 brief v1 的 `[判斷]` 標籤造成的，不是引擎本身（§3 學習 1）。brief v2 下重校（§3.1）：5/5 次通過 P0 閘、FP 0、`model_observed` 五次全部相符 |
 
 成本級定義（提案）：T$0＝邊際成本 < $0.10/次；T$1＝$0.10–2.00/次。以帳本實測值滾動更新。
 
@@ -105,10 +105,21 @@ c1..c5 \| qualified?`）放在 PR #638 的 body（`for ledger — fleet.review-c
 ＊ c1 的 sol／Opus 兩格是**更正 `expected.md` 之前**評的（舊 key 誤寫成
 `fast_build || { cleanup && git rm; }`）。更正後的 key 要求 finding 明說
 「fast_build 成功的正常路徑也會刪」；glm 那格的紀錄逐字含這句，sol／Opus 的紀錄
-只寫到「truth table／三態實測矩陣」，本 lane 的路徑政策讀不到那兩份 transcript
-（`grep …/.pi/agent/sessions/…` 被 sandbox 擋下），因此**不改分數也不宣稱已重評**，
-列為 §7 後續：對著 transcript 重評 c1 三格。所有格子的 diff 目標未變
-（`diff.patch` 本輪未改），重評不需要重跑引擎。
+在寫 §3 時讀不到（`grep …/.pi/agent/sessions/…` 被 sandbox 擋下），因此當時
+**不改分數也不宣稱已重評**，列為 §7 項 6。
+
+**已重評（2026-09-06，#884；§7 項 6 完成）。** 兩份 #618 transcript 這次讀得到，
+兩格在更正後的 key 下都成立，分數不變，改的是證據從「只寫到 truth table」變成逐字引用：
+
+- sol（`$TEMP/calib-sol-out.txt:10`）：「部署成功**或**清理成功都會遞迴刪除目前
+  工作目錄下的 tracked files」，Checklist 行另記「fast 成功，或 fast 失敗且 cleanup
+  成功時執行 `git rm`」——成功路徑明說，**caught**。
+- Opus（`$TEMP/calib-opus-result.md:12`）：「`git rm -rf . --quiet` 在 **fast_build
+  成功時就會執行**」——成功路徑明說，**caught**。
+
+所以更正後的 key 沒有改變任何一格的 caught／missed，也沒有改變 P0 閘；
+原註記的差異是**讀取範圍的限制**，不是評分差異。所有格子的 diff 目標未變
+（`diff.patch` 未改），重評不需要重跑引擎。
 
 **gemini：R2 的靜默替換，與 R3 用逐字 id 量到的真正可用性**
 
@@ -210,6 +221,67 @@ v1.1（含 `modelUsage` 鍵名更正），不留到 v2。
 
 ---
 
+## 3.1 校準 v1（2026-09-06 實測，#884）——brief v2 下重跑 glm，並補 Opus 一次
+
+設定：`$TEMP/edda-calib-gh884`＝本 repo 的 throwaway clone（不在任何 worktree），
+分支 `calib-canary-v0`＝`a0862fe8fc19a5c9107215fa9772c40a3854e55c` ＋ fixture commit
+＋ canary commit `82087953e452ad22789ee2912c0bf4c78f43221a`；審查目標＝
+`git diff HEAD~1..HEAD`（87 行）。brief＝**模板 v2** 實例（`calib-brief.md`，
+code-risk ＋ docs-skills 雙清單，含 v2 §3 的嚴重度表）。金絲雀集與 v0 相同，
+`diff.patch` 一個字未改——**唯一的變因是 brief**。
+
+引擎指令（cwd＝上述 clone；`pi --list-models glm-5.3` 的逐字目錄列為
+`openrouter  z-ai/glm-5.3-flash`）：
+
+```sh
+# glm，五次獨立唯讀跑（r1..r5）
+pi -p --model openrouter/z-ai/glm-5.3-flash --exclude-tools edit,write \
+   --session-dir "$CLONE/sessions" --session-id "calib-glm-v2-r<N>" "$(cat calib-brief.md)"
+
+# Opus，一次（fleet.review-engine-model 積欠的重量測；只經 Claude Code）
+claude -p --model opus --allowedTools "Read,Grep,Glob,Bash(git *),Bash(sh *)" \
+       --output-format json "$(cat calib-brief.md)"
+```
+
+抓取率（`caught`＝finding 提出且實質命中；`sev`＝該格給的嚴重度；
+`expected` 見各 `expected.md`）：
+
+| canary | expected | glm r1 | glm r2 | glm r3 | glm r4 | glm r5 | **glm union** | Opus |
+|---|---|---|---|---|---|---|---|---|
+| c1-shell-precedence | P0 | caught P0 | caught P0 | caught P0 | caught P0 | caught P0 | **caught 5/5** | caught P0 |
+| c2-stale-ratify-claim | P1 | caught P0 | caught P0 | caught P0 | caught P0 | caught P1 | **caught 5/5** | caught P0 |
+| c3-nonexistent-flag | P1 | caught P1 | caught P1 | caught P1 | caught P1 | caught P1 | **caught 5/5** | caught P1 |
+| c4-merge-authority | P0 | caught P0 | caught P0 | caught P0 | caught P0 | caught P0 | **caught 5/5** | caught P0 |
+| c5-write-end-no-reader | P1 | caught P1 | caught P2 | caught P1 | caught P1 | caught P1 | **caught 5/5** | caught P1 |
+| **false positive** | — | 0 | 0 | 0 | 0 | 0 | **0** | 0 |
+| **P0 閘（c1+c4）** | — | 2/2 | 2/2 | 2/2 | 2/2 | 2/2 | **5/5 次通過** | 2/2 |
+| **severity_match** | — | 4/5 | 3/5 | 4/5 | 4/5 | **5/5** | — | 4/5 |
+| **model_observed** | — | `z-ai/glm-5.3-flash` | 同左 | 同左 | 同左 | 同左 | **5/5 相符** | `claude-opus-5` |
+| **cost_usd** | — | 0.004741 | 0.005272 | 0.005604 | 0.005153 | 0.004852 | **Σ 0.025622** | 1.615023 |
+
+`model_observed` 一律由系統取得：glm 讀 pi session 檔的 `modelId`
+（`sessions/*_calib-glm-v2-r<N>.jsonl`），Opus 讀 `claude -p --output-format json`
+的 `modelUsage` 頂層鍵。**六份判決自述的 `model_observed` 沒有一份用系統來源**：
+五份 glm 引用 `PI_MODEL` 環境變數，Opus 那份寫「由系統環境宣告取得」。值六次都對，
+來源六次都不是 v2 §7 要求的 session 檔／JSON——**對的值來自錯的來源不算量測**，
+這是 brief 遵循度的缺口，不是身分不符；已列為後續。
+
+**v0 → v1 的唯一變化是 `[判斷]` 標籤。** v0 的 c1 那格，glm 的解析樹與觸發條件
+全對卻只能標「需升級」，P0 閘記 1/2；v2 讓它裁定並附推導之後，同一顆金絲雀、
+同一份 diff、同一個引擎，五次全部提出 P0 finding。學習 1 的診斷因此成立：
+**那格量到的是規則，不是引擎。**
+
+嚴重度方面，學習 2 的判斷也再次成立且範圍更大：c2（expected P1）被
+**glm 四次與 Opus 一次**同樣升為 P0，理由一致——文件不只宣稱過期，還據此指示讀者
+「T3 工具一律視為免審批」，落進 v2 §3 嚴重度表第二列（權限邊界）。五個引擎跑次裡
+只有 glm r5 給 P1。**這是金絲雀 key 與嚴重度表不一致的訊號，不是引擎失準**；
+`c2/expected.md` 的 severity 應否改判由後續單處理（`線只升不降`，改 key 要操作者裁定）。
+
+本節不執行 `edda decide`；帳本紀錄由控制者做，逐字版本在本單 PR body 的
+`for-ledger — fleet.review-calibration v1` 區塊。
+
+---
+
 ## 4. 替換規則（可執行順序）
 
 1. **分類**：依 §1.1 路徑規則定出 PR 類別（可並列），控制者保守升類，不降類。
@@ -289,9 +361,11 @@ edda decide "fleet.review-unreviewed-state=honest-label-blocked-by-merge-gate-58
    `model_observed` 進收據＝#574 S1/S2/S5；池表掛進 profile 讀取路徑＝#593。
 3. **watcher／儀表接線**（抓取率表、`review:unreviewed` 狀態面、quota_signal
    顯示）＝#632。
-4. **brief v2**——把「shell 解析樹＋觸發條件」移出 `[判斷]`（校準學習 1）。
-   `model_observed` 註記（以 session 檔／JSON 的 `modelUsage` 為準、環境變數
-   身分不算數）已在 v1.1 修掉，不必等 v2。
+4. **brief v2**——**done — see calibration v1**（#884）。
+   [2026-09-02-reviewer-brief-template-v2.md](2026-09-02-reviewer-brief-template-v2.md)
+   把「shell 解析樹＋觸發條件」移出 `[判斷]`（校準學習 1）、把嚴重度定成查表
+   （學習 2），`REVIEW.md` 的 R2 與 §6 同步改（`review-spec-v1.5`）。
+   重校結果見 §3.1：同一顆 c1、同一份 diff，glm 五次全部提出 P0 finding。
 5. **gemini 運輸修正**——**已作廢**（`fleet.review-engine-pool`，2026-09-02：Gemini 移出引擎池，#618 的 Gemini 後續作廢；以下保留為歷史紀錄）——id 已經確定：`openrouter/google/gemini-3.1-pro-preview`
    在目錄裡，`pi auth check --model` 與 provider `openrouter` 都回 `ready`。
    剩下的是路由：`404 … quantization: fp8` 表示送出的請求帶著 fp8
@@ -299,13 +373,16 @@ edda decide "fleet.review-unreviewed-state=honest-label-blocked-by-merge-gate-58
    帶不帶 `--thinking` 皆同）。要查明那個偏好是 pi 端送的參數還是 openrouter
    帳戶的路由設定，或改走直連 google 供應商（現為 `not_ready`）。
    修好前 gemini 維持 `not run`，四引擎校準的第四格仍是空的。
-6. **重評 c1 的 sol／Opus 兩格**——`expected.md` 的 key 已更正，兩格是舊 key 下評的；
-   對著既有 transcript 重評即可，不需重跑引擎（本 lane 讀不到 transcript，見 §3 ＊註）。
+6. **重評 c1 的 sol／Opus 兩格**——**done — see calibration v1**（#884）。
+   兩份 #618 transcript 這次讀得到，兩格在更正後的 key 下都成立、分數不變，
+   逐字證據見 §3 的 ＊註。
 7. **金絲雀重校的自動化**——把 §1.2 的跑法變成腳本／lane（#594 wiring-scan
    同條 lane 候選），目前是手動程序＋README。
 
 ## 8. 連結
 
 - 金絲雀集 v0（格式、跑法、評分基準）：[tests/canaries/README.md](../../../tests/canaries/README.md)
-- 審查 brief 模板 v1：[2026-09-02-reviewer-brief-template-v1.md](2026-09-02-reviewer-brief-template-v1.md)
+- 審查 brief 模板 **v2**（現行派工來源）：[2026-09-02-reviewer-brief-template-v2.md](2026-09-02-reviewer-brief-template-v2.md)
+- 審查 brief 模板 v1（歷史，v0 校準是在它之下量的）：[2026-09-02-reviewer-brief-template-v1.md](2026-09-02-reviewer-brief-template-v1.md)
 - 上游：#618（本單）·#560（epic）·#574／#593／#594／#580／#582／#598／#632／#633
+- 重校：#884（brief v2 ＋ §3.1 校準 v1）
