@@ -268,8 +268,13 @@ collect_verdicts() { # $1=pr $2=reviewed sha — every verdict comment pinned to
   # must withhold the status, never let the union rule run on this round's
   # verdict file alone (see post_review_status).
   is_full_sha "$2" || { log "pr$1 collect-verdicts: $2 is not a full lowercase 40-hex SHA"; return 3; }
-  comments=$(gh pr view "$1" --repo "$REPO" --json comments \
-    --jq '.comments[] | "<<<COMMENT \(.id)>>>" , .body' 2>&1)
+  # REST issues comments, not `gh pr view --json comments`: the GraphQL shape
+  # carries only node ids (base64), while the malformed-notice contract needs
+  # the numeric comment id humans can resolve. --paginate keeps the full
+  # comment list (a 30-comment default page would hide older verdicts from
+  # the union); jq runs per page and pages split between comments.
+  comments=$(gh api --paginate "repos/$REPO/issues/$1/comments" \
+    --jq '.[] | "<<<COMMENT \(.id)>>>" , .body' 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
     log "pr$1 comments fetch failed (gh exit $rc): $comments"

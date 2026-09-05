@@ -77,7 +77,59 @@ case "$1" in
     exit 0
     ;;
   api)
-    [ -n "${GH_FAIL_STATUS:-}" ] && exit 1
+    case "$*" in
+      *"/statuses/"*)
+        [ -n "${GH_FAIL_STATUS:-}" ] && exit 1
+        exit 0
+        ;;
+      *"comments"*)
+        # collect_verdicts reads REST issues comments (numeric ids). The
+        # GH_COMMENTS_FILE fixture stores the jq-output shape (sentinel + raw
+        # bodies); re-encode it as the REST array so the real --jq filter in
+        # collect_verdicts runs against the stub, ids included.
+        [ -n "${GH_FAIL_COMMENTS:-}" ] && exit 1
+        [ -z "${GH_COMMENTS_FILE:-}" ] && exit 0
+        # resolve the caller's --jq operand (this stub header has no global loop)
+        jq_expr=
+        prev=
+        for a in "$@"; do
+            [ "$prev" = "--jq" ] && jq_expr=$a
+            prev=$a
+        done
+        json=$(awk '
+          /^<<<COMMENT>>>$/ { n++; id[n] = 1; next }
+          /^<<<COMMENT [0-9]+>>>$/ {
+            n++
+            id[n] = $0
+            sub(/^<<<COMMENT /, "", id[n])
+            sub(/>>>$/, "", id[n])
+            next
+          }
+          {
+            if (n == 0) next
+            esc = $0
+            gsub(/\\/, "\\\\", esc)
+            gsub(/"/, "\\\"", esc)
+            body[n] = body[n] (body[n] == "" ? "" : "\\n") esc
+          }
+          END {
+            printf "["
+            for (i = 1; i <= n; i++) {
+              printf "%s{\"id\":%s,\"body\":\"%s\"}", (i > 1 ? "," : ""), id[i], body[i]
+            }
+            printf "]\n"
+          }
+        ' "$GH_COMMENTS_FILE")
+        # the stub IS gh: apply the caller's --jq itself, exactly like the
+        # real endpoint's --jq would run against this array
+        if [ -n "$jq_expr" ]; then
+            printf '%s' "$json" | jq -r "$jq_expr"
+        else
+            printf '%s\n' "$json"
+        fi
+        exit 0
+        ;;
+    esac
     exit 0
     ;;
   label) exit 0 ;;
