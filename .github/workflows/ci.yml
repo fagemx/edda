@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      fleet: ${{ steps.diff.outputs.fleet }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -59,6 +60,11 @@ jobs:
               base= head= ;;  # unknown event: assume code changed
           esac
           code=true
+          # GH-896: separate, narrower whitelist for the fleet shell-test gate
+          # — unrelated PRs keep it skipped (green-fast). On any diff failure
+          # or unknown base we assume fleet tests changed too, same policy as
+          # code above.
+          fleet=false
           if [ -n "$base" ] \
             && git cat-file -e "$base" 2>/dev/null \
             && git cat-file -e "$head" 2>/dev/null; then
@@ -78,15 +84,22 @@ jobs:
                   crates/*|spec/events/*|tests/fixtures/events/*|Cargo.toml|Cargo.lock|rust-toolchain*|.cargo/*|.github/workflows/*|scripts/*|install.sh|build.rs)
                     code=true ;;
                 esac
+                case "$f" in
+                  scripts/fleet/*|.github/workflows/ci.yml)
+                    fleet=true ;;
+                esac
               done < "$diffout"
             else
               echo "git diff failed; assuming code changed."
+              fleet=true
             fi
             rm -f "$diffout"
           else
             echo "Diff could not be computed (base: '${base:-none}'); assuming code changed."
+            fleet=true
           fi
           echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+          echo "fleet=$fleet" | tee -a "$GITHUB_OUTPUT"
 
   fmt:
     name: Format
@@ -196,6 +209,21 @@ jobs:
           key: msrv-1.91.0
       - run: cargo +1.91.0 check --workspace --all-targets --locked
 
+  # GH-896: the fleet shell tests (scripts/fleet/test-*.sh) had no machine
+  # gate — grep over .github/ found nothing and lefthook runs cargo only, so
+  # their doneWhen rested on hand execution. Glob-driven runner (a test added
+  # later is picked up without touching this file); a red test exits non-zero
+  # and blocks this job, and ci-gate below propagates the failure.
+  fleet-tests:
+    name: Fleet shell tests
+    needs: [detect]
+    if: needs.detect.outputs.fleet == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run fleet shell tests
+        run: sh scripts/fleet/run-fleet-tests.sh
+
   # Aggregate gate: the single check the branch ruleset will pin instead of
   # enumerating the eight individual jobs. `if: always()` keeps it running even
   # when an upstream job fails or is skipped, so the verdict table is always
@@ -205,7 +233,7 @@ jobs:
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
-    needs: [detect, fmt, clippy, test, msrv]
+    needs: [detect, fmt, clippy, test, msrv, fleet-tests]
     if: always()
     steps:
       - name: Evaluate upstream job results
@@ -216,6 +244,8 @@ jobs:
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           TEST_RESULT: ${{ needs.test.result }}
           MSRV_RESULT: ${{ needs.msrv.result }}
+          FLEET_RESULT: ${{ needs.fleet-tests.result }}
+          FLEET: ${{ needs.detect.outputs.fleet }}
         run: |
           fail() { echo "::error::$1"; exit 1; }
           printf '%-10s -> %s\n' detect "$DETECT_RESULT"
@@ -223,8 +253,20 @@ jobs:
           printf '%-10s -> %s\n' clippy "$CLIPPY_RESULT"
           printf '%-10s -> %s\n' test "$TEST_RESULT"
           printf '%-10s -> %s\n' msrv "$MSRV_RESULT"
+          printf '%-10s -> %s\n' fleet-tests "$FLEET_RESULT"
           [ "$DETECT_RESULT" = "success" ] || fail "detect did not succeed (result: $DETECT_RESULT)."
           [ "$FMT_RESULT" = "success" ] || fail "fmt did not succeed (result: $FMT_RESULT)."
+          # GH-896: fleet-tests is evaluated FIRST so its failure cannot be
+          # swallowed by the early success exits below. It is skipped only
+          # when detect decided no scripts/fleet/** (or workflow) change
+          # happened; any other skip, failure, or cancellation fails the gate.
+          if [ "$FLEET_RESULT" = "success" ]; then
+            echo "Fleet shell tests succeeded."
+          elif [ "$FLEET_RESULT" = "skipped" ] && [ "$FLEET" = "false" ]; then
+            echo "Fleet shell tests skipped (no scripts/fleet/** or ci.yml change): accepted."
+          else
+            fail "fleet-tests did not succeed (fleet-tests: $FLEET_RESULT, detect.fleet: $FLEET)."
+          fi
           if [ "$CLIPPY_RESULT" = "success" ] && [ "$TEST_RESULT" = "success" ] && [ "$MSRV_RESULT" = "success" ]; then
             echo "All upstream jobs succeeded."
             exit 0
