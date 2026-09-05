@@ -201,7 +201,7 @@ it, `edda status` produces the same exit code and the same stderr in every
 state (measured). Success is exit `0` with the object on stdout. Failures do
 not emit JSON — a newer ledger schema exits `2` (§1.2), and every other
 failure (no `.edda/`, unreadable database) takes the CLI's shared error path
-and exits `1` (`crates/edda-cli/src/main.rs:1091-1098#if let Err(err) = run(cli) {`).
+and exits `1` (`crates/edda-cli/src/main.rs:1092-1099#if let Err(err) = run(cli) {`).
 
 That last row differs from `edda verify --json`, which answers `2` to the
 same questions. The split is pre-existing and outside #730, but it is
