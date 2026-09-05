@@ -757,11 +757,11 @@ mechanical.
 
 ## 10. Version
 
-- `review-spec-v1.5` (2026-09-05, issue #887): the SHADOW round shape — the
-  `- shadow: true` header field, the ` (SHADOW)` heading suffix, the §8
-  exclusion rule, and the §9 provenance row. Nothing else in the rule set
-  changed; v1.4 verdicts remain valid for their SHAs.
-
+- `review-spec-v1.5` (2026-09-05, issue #887): the SHADOW round shape of
+  the make-up-round ruling recorded in the ledger — a header field, a
+  heading suffix, the §8 exclusion rule, and the §9 provenance row.
+  Nothing else in the rule set changed; v1.4 verdicts remain valid for
+  their SHAs.
 - `review-spec-v1` (2026-09-02, issue #633): first collection. Merges the
   review-fix loop (`.claude/CLAUDE.md`), the wiring verdict (#629) and brief
   template v1 (#618) into one runnable sequence, adds the mechanical class

@@ -203,7 +203,7 @@ verdict_body_lines() { # $1=reviewed sha; stdin: one body per <<<COMMENT>>>
         }
         # A shadow round is never a verdict: the body field is the machine
         # signal, and the round is excluded from the union entirely.
-        if (pinned && L[i] == "- shadow: true") { isshadow = 1 }
+        if (pinned && (L[i] == "- shadow: true" || L[i] == "shadow: true")) { isshadow = 1 }
         if (L[i] ~ /^#{1,}[[:space:]]*Verdict/) { inh = 1; continue }
         if (pinned && inh && vline == "" && L[i] ~ /LGTM|Changes Requested/) {
           vline = L[i]

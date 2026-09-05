@@ -35,6 +35,8 @@ comments=$(gh pr view "$pr" --repo "$repo" --json comments \
     die "gh pr view $pr comments failed"
 
 tmp=$(mktemp "${TMPDIR:-/tmp}/review-compare.XXXXXX")
+findings_tmp2=$(mktemp "${TMPDIR:-/tmp}/review-compare.XXXXXX")
+trap 'rm -f "$tmp" "$tmp".* "$findings_tmp2" "$findings_tmp2".*' 0 HUP INT TERM
 
 # Extract, per comment pinned to the sha, the verdict line, model_observed,
 # and the Findings rows into:
@@ -93,10 +95,12 @@ printf '%s' "$comments" | awk -v sha="$sha" -v tmp="$tmp" '
 # a finding with no file token falls back to its first 60 characters. Two
 # findings sharing any key are the same finding (#883 will make rule ids the
 # primary key; the fallback keeps this usable before that lands).
-findings_tmp2=$(mktemp "${TMPDIR:-/tmp}/review-compare.XXXXXX")
-trap 'rm -f "$tmp" "$tmp".shadow.findings "$tmp".auth.findings "$tmp".shadow.meta "$tmp".auth.meta' 0 HUP INT TERM
-mv "$tmp.shadow.findings" "$findings_tmp2.shadow" 2>/dev/null || printf '' >"$findings_tmp2.shadow"
-[ -f "$tmp.auth.findings" ] && mv "$tmp.auth.findings" "$findings_tmp2.auth" || printf '' >"$findings_tmp2.auth"
+mv "$tmp.shadow.findings" "$findings_tmp2.shadow"
+if [ -f "$tmp.auth.findings" ]; then
+    mv "$tmp.auth.findings" "$findings_tmp2.auth"
+else
+    printf '' >"$findings_tmp2.auth"
+fi
 
 awk -v sf="$findings_tmp2.shadow" '
     function keys(line,   s, k) {
