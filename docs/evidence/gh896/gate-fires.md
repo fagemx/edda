@@ -29,19 +29,38 @@ sh scripts/fleet/run-fleet-tests.sh
 
 ## Excluded test (explicit, never silent)
 
-`test-lane-helpers.sh` is skipped by name, only off Windows, with a printed
-reason: the skip is OS-conditional (`case "$(uname -s)" in
-MINGW*|MSYS*|CYGWIN*)` runs it), and the `fleet-tests-windows` CI job runs
-the same entrypoint on windows-latest, where the test executes instead of
-skipping. It exercises
-`scripts/fleet/lane-*.ps1` through Windows Scheduled Tasks
-(`Register-ScheduledTask` / `Start-ScheduledTask`), `pwsh.exe`,
-`rust-lld.exe` and `taskkill` — none of which exist on the ubuntu CI runner
-(the ScheduledTasks cmdlets are not available to PowerShell on Linux), so the
-test cannot run headless there. It keeps passing on Windows lanes where pwsh
-and the Task Scheduler exist. The other two tests on this base
-(`test-daily-digest.sh`, `test-ready-queue-lint.sh`) are fully offline POSIX sh
-and run on ubuntu.
+`test-lane-helpers.sh` is skipped by name on **every** host, with a printed
+reason, and the `fleet-tests-windows` CI job runs it on windows-latest
+instead. It exercises `scripts/fleet/lane-*.ps1` through Windows Scheduled
+Tasks (`Register-ScheduledTask` / `Start-ScheduledTask`), `pwsh.exe`,
+`rust-lld.exe` and `taskkill` — none of which exist on the ubuntu runner (the
+ScheduledTasks cmdlets are not available to PowerShell on Linux).
+
+An OS-conditional skip was tried first (`case "$(uname -s)" in
+MINGW*|MSYS*|CYGWIN*)` runs it) and **reverted**, because the test is red on
+`origin/main` today on this Windows workstation:
+
+```text
+$ git worktree add --detach <tmp> origin/main && sh scripts/fleet/test-lane-helpers.sh
+FAIL (after case 25): launch dry-run with build lane: expected success
+lane-launch: dry-run task edda-lane-gh626envcheck exists but its scheduler result is unavailable
+rc=1   (183 s)
+```
+
+Executed from this entrypoint it therefore makes the entrypoint itself
+unable to be green on a Windows workstation — which is the doneWhen the script
+exists to satisfy. One CI job carrying one Windows-only test is a signal; an
+always-red entrypoint is not. The red test is pre-existing and belongs to its
+own issue, not to this PR.
+
+One observation recorded without a mechanism, because it was not isolated:
+while the OS-conditional skip was in place, `scripts/test-review-capabilities.sh`
+failed **through the runner** (`FAIL mutate: backend wrote canary`) while
+passing standalone in the same dirty worktree, and passing when run directly
+after a standalone `test-lane-helpers.sh` failure. It has passed on every run
+since `test-lane-helpers.sh` stopped executing from this entrypoint. The cause
+was not identified; it is recorded here so a future change that reintroduces
+an in-runner Windows-only test knows to look for it.
 
 ## Round 2 (GH-896 fix round) — three terms, two groups, one entrypoint
 
@@ -149,6 +168,32 @@ $ echo $?
 0
 ```
 
+## Round 2, part 2 — the gate caught three real test defects on CI
+
+The push of the Round 2 fix (`cbe9561`) put every enumerated test in front of
+the GitHub runners for the first time. The gate went red and stayed red —
+three ungated tests carry portability defects that hand execution never
+exercised (CI run 33986498515 @ `cbe9561`):
+
+- `scripts/fleet/test-next-loop.sh` — exit 128 on BOTH runners:
+  `git rev-parse origin/main` at the fixture line; the fleet-tests checkout
+  is single-ref depth-1, so the remote-tracking ref does not exist. Fixed in
+  the test: fall back to the checkout's own HEAD and its tree object.
+- `scripts/test-review-capabilities.sh` — on ubuntu only: the generated
+  Linux runner is a bash script (`#!/usr/bin/env bash` + `set -o pipefail`);
+  the test executed its copy with `sh`, handing it to dash, which rejects
+  pipefail at line 2. Production execs the shebang (`nohup "$RUNNER"`), so
+  only the test's invocation was wrong. Fixed in the test: `bash`, not `sh`.
+- `scripts/fleet/test-lane-helpers.sh` — on windows-latest only: case 1's
+  registration assertion grepped `git worktree list --porcelain` for the
+  worktree path with `grep -F`; NTFS comparison is case-insensitive and the
+  runner's TEMP case need not match the case lane-prepare.ps1 resolved.
+  Fixed in the test: `grep -iF`.
+
+All three fixes are in the tests themselves; no production script changed.
+The gate is doing exactly what #896 asked: a test that nothing ran was a
+defect reservoir, and the first honest run drained three.
+
 ## Seeded failure — the gate fires, rc=1
 
 Seed: `scripts/fleet/test-ready-queue-lint.sh` copied to
@@ -160,56 +205,47 @@ runner runs it, and the entrypoint exits non-zero:
 
 ```text
 $ sh scripts/fleet/run-fleet-tests.sh
+RUN  scripts/fleet/test-brief-from-issue.sh
+PASS scripts/fleet/test-brief-from-issue.sh
 RUN  scripts/fleet/test-daily-digest.sh
-daily-digest fixtures passed
 PASS scripts/fleet/test-daily-digest.sh
-SKIP scripts/fleet/test-lane-helpers.sh (Windows-only: Scheduled Tasks, pwsh.exe, rust-lld.exe, taskkill)
+SKIP scripts/fleet/test-lane-helpers.sh (Windows-only: Scheduled Tasks, pwsh.exe, rust-lld.exe, taskkill - the fleet-tests-windows CI job runs it)
+RUN  scripts/fleet/test-next-loop.sh
+PASS scripts/fleet/test-next-loop.sh
 RUN  scripts/fleet/test-ready-queue-lint.sh
-ok 1 delivered issues excluded, oldest first, word-boundary holds
-ok 2 --oldest returns exactly the oldest pickable issue
-ok 3 --check exits 1 and names the stale issues
-ok 4 --check on a clean queue exits 0
-ok 5 boundary: '#1234' is not a delivery, 'Fixes #123' is
-ok 6 closing keywords deliver; 'tracked in', 'Issue:', 'see' do not
-ok 7 usage errors -> exit 2
-ok 8 broken gh -> fail closed
-all ready-queue-lint.sh self-tests passed
 PASS scripts/fleet/test-ready-queue-lint.sh
 RUN  scripts/fleet/test-seeded-failure.sh
-ok 1 delivered issues excluded, oldest first, word-boundary holds
-ok 2 --oldest returns exactly the oldest pickable issue
-ok 3 --check exits 1 and names the stale issues
-FAIL: SEED (GH-896) inverted assertion — clean queue must still list: #20 clean ready
+FAIL: SEED (GH-896) inverted assertion - clean queue must still list: #20 clean ready
 FAIL scripts/fleet/test-seeded-failure.sh (exit 1)
+RUN  scripts/test-review-capabilities.sh
+PASS scripts/test-review-capabilities.sh
 $ echo $?
 1
 ```
 
-The seed was then deleted (`rm scripts/fleet/test-seeded-failure.sh`); it is
-not part of the change.
+The seed was deleted afterwards (`rm scripts/fleet/test-seeded-failure.sh`);
+it is not part of the change.
 
 ## Green — same entrypoint, unseeded, rc=0
 
 ```text
 $ sh scripts/fleet/run-fleet-tests.sh
+RUN  scripts/fleet/test-brief-from-issue.sh
+PASS scripts/fleet/test-brief-from-issue.sh
 RUN  scripts/fleet/test-daily-digest.sh
-daily-digest fixtures passed
 PASS scripts/fleet/test-daily-digest.sh
-SKIP scripts/fleet/test-lane-helpers.sh (Windows-only: Scheduled Tasks, pwsh.exe, rust-lld.exe, taskkill)
+SKIP scripts/fleet/test-lane-helpers.sh (Windows-only: Scheduled Tasks, pwsh.exe, rust-lld.exe, taskkill - the fleet-tests-windows CI job runs it)
+RUN  scripts/fleet/test-next-loop.sh
+PASS scripts/fleet/test-next-loop.sh
 RUN  scripts/fleet/test-ready-queue-lint.sh
-ok 1 delivered issues excluded, oldest first, word-boundary holds
-ok 2 --oldest returns exactly the oldest pickable issue
-ok 3 --check exits 1 and names the stale issues
-ok 4 --check on a clean queue exits 0
-ok 5 boundary: '#1234' is not a delivery, 'Fixes #123' is
-ok 6 closing keywords deliver; 'tracked in', 'Issue:', 'see' do not
-ok 7 usage errors -> exit 2
-ok 8 broken gh -> fail closed
-all ready-queue-lint.sh self-tests passed
 PASS scripts/fleet/test-ready-queue-lint.sh
+RUN  scripts/test-review-capabilities.sh
+PASS scripts/test-review-capabilities.sh
 $ echo $?
 0
 ```
+
+280 s on this Windows workstation, six terms, one documented SKIP.
 
 Syntax checks on the added runner both pass:
 `sh -n scripts/fleet/run-fleet-tests.sh` and

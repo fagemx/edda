@@ -35,8 +35,17 @@ export EDDA_FLEET_SCRATCH="$work/scratch"
 export TEMP="$work/lanes"
 export TMPDIR="$work"
 
-HEAD1=$(git rev-parse origin/main)
-HEAD2=$(git rev-parse origin/main~1)
+# The fixture PR SHAs only need two distinct 40-hex ids. The CI fleet
+# checkout is single-ref depth-1, so origin/main is not guaranteed to exist
+# (GH-896 round 2: `git rev-parse origin/main` died there); fall back to the
+# checkout's own HEAD and its tree object.
+if git rev-parse -q --verify origin/main >/dev/null 2>&1; then
+    HEAD1=$(git rev-parse origin/main)
+    HEAD2=$(git rev-parse origin/main~1)
+else
+    HEAD1=$(git rev-parse HEAD)
+    HEAD2=$(git rev-parse HEAD^{tree})
+fi
 BASE_SHA=$HEAD1
 
 fail() {

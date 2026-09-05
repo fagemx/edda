@@ -184,7 +184,9 @@ cur=$(git -C "$lane" symbolic-ref --quiet HEAD)
 [ "$cur" = "refs/heads/codex/gh100-a" ] || fail "prepare: branch is $cur, expected refs/heads/codex/gh100-a"
 base=$(git -C "$repo" rev-parse origin/main)
 [ "$(git -C "$lane" rev-parse HEAD)" = "$base" ] || fail "prepare: tip is not origin/main"
-git -C "$repo" worktree list --porcelain | grep -F "$(cygpath -m "$lane")" >/dev/null \
+# -iF, not -F: NTFS path comparison is case-insensitive, and the CI runner
+# TEMP case need not match the case lane-prepare.ps1 resolved (GH-896 r2).
+git -C "$repo" worktree list --porcelain | grep -iF "$(cygpath -m "$lane")" >/dev/null \
   || fail "prepare: worktree not registered with the repo"
 ok "prepare creates fixed worktree $lanewin on a new branch from origin/main"
 
