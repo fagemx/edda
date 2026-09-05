@@ -165,13 +165,24 @@ if [ "$head_now" != "$head_sha" ]; then
 fi
 verdict_file="$wt/next-review-r$round-verdict.md"
 printf '%s\n' "$verdict" >"$verdict_file"
+# R23 (#917): publish the report only, heading first. Everything before the
+# first `## Code Review: Round` line (the engine's own narration, #867's
+# transcript-dump shape) is discarded into a separate posting file; the raw
+# verdict file is kept untouched beside it. No heading line: post nothing,
+# fail loudly, name the PR and the file.
+first_heading=$(grep -nE '^## Code Review: Round [0-9]+ — PR #[0-9]+ @ [0-9a-f]{40}( \(SHADOW\))?$' \
+    "$verdict_file" | sed -n '1s/:.*//p')
+[ -n "$first_heading" ] ||
+    die "verdict for PR #$pr has no '## Code Review: Round' heading line — posted nothing (raw verdict kept at $verdict_file)"
+posted_file="$wt/next-review-r$round-verdict.posted.md"
+tail -n +"$first_heading" "$verdict_file" >"$posted_file"
 # SHADOW shape (review.gh880-shadow): heading suffix, shadow: true, no
 # labels, no Independent Review status, not a merge authority.
-sed -i "1s/\$/ (SHADOW)/" "$verdict_file"
-sed -i "1a shadow: true" "$verdict_file"
+sed -i "1s/\$/ (SHADOW)/" "$posted_file"
+sed -i "1a shadow: true" "$posted_file"
 cost_line="$cost"
 [ -n "$elapsed_ms" ] && cost_line="$cost / ${elapsed_ms}ms"
-sed -i "s|^- cost: .*|- cost: $cost_line (dispatch --json)|" "$verdict_file"
-gh pr comment "$pr" --repo "$repo" --body-file "$verdict_file" >/dev/null ||
+sed -i "s|^- cost: .*|- cost: $cost_line (dispatch --json)|" "$posted_file"
+gh pr comment "$pr" --repo "$repo" --body-file "$posted_file" >/dev/null ||
     die "gh pr comment failed"
-echo "posted SHADOW round $round: $verdict_file"
+echo "posted SHADOW round $round: $posted_file"

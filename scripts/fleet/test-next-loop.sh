@@ -150,12 +150,41 @@ echo "$*" >>"$EDDA_CALLS"
 if [ -n "${EDDA_STUB_MOVE_HEAD:-}" ]; then
     printf '%s' "$EDDA_STUB_MOVE_HEAD" >"$GH_HEAD_FILE"
 fi
+# R23 (#917): verdict fixtures carry a real §7 heading. EDDA_STUB_RESULT_FILE
+# substitutes the whole dispatch envelope (built with jq below).
+if [ -n "${EDDA_STUB_RESULT_FILE:-}" ]; then
+    cat "$EDDA_STUB_RESULT_FILE"
+    exit 0
+fi
 cat <<'JSON'
-{"outcome":"done","result_text":"## Code Review: Round 2 - PR #886 @ somehead\n\n- model_requested: openrouter/z-ai/glm-5.3-flash\n- model_observed: openrouter/z-ai/glm-5.3-flash\n- spec: review-spec-v1.4\n- class: code-risk\n- cost: placeholder line\n\nbody of the verdict","cost_usd":0.02,"elapsed_ms":1234,"model_requested":"openrouter/z-ai/glm-5.3-flash","model_observed":"openrouter/z-ai/glm-5.3-flash","session_id":"sid","session_observed":"sid","error":null}
+{"outcome":"done","result_text":"## Code Review: Round 2 — PR #886 @ aabbccdd11223344556677889900aabbccddeeff\n\n- model_requested: openrouter/z-ai/glm-5.3-flash\n- model_observed: openrouter/z-ai/glm-5.3-flash\n- spec: review-spec-v1.4\n- class: code-risk\n- cost: placeholder line\n\nbody of the verdict","cost_usd":0.02,"elapsed_ms":1234,"model_requested":"openrouter/z-ai/glm-5.3-flash","model_observed":"openrouter/z-ai/glm-5.3-flash","session_id":"sid","session_observed":"sid","error":null}
 JSON
 exit 0
 STUB
 chmod +x "$work/bin/edda"
+
+# Verdict fixtures for the R23 publication cases: the same envelope with the
+# engine's narration before the heading (#867's transcript-dump shape), and
+# one with no heading line at all.
+verdict_envelope() { # $1=result text file -> dispatch envelope JSON on stdout
+    jq -n --rawfile v "$1" \
+        '{outcome:"done",result_text:$v,cost_usd:0.02,elapsed_ms:1234,model_requested:"openrouter/z-ai/glm-5.3-flash",model_observed:"openrouter/z-ai/glm-5.3-flash",session_id:"sid",session_observed:"sid",error:null}'
+}
+{
+    printf 'I will start by loading the project guide.\n'
+    printf 'Rerunning with a backslash-free harness.\n'
+    for i in 1 2 3 4 5 6 7 8 9 10; do printf 'narration line %s\n' "$i"; done
+    printf -- '---\n'
+    printf '## Code Review: Round 2 — PR #886 @ aabbccdd11223344556677889900aabbccddeeff\n\n'
+    printf -- '- model_requested: openrouter/z-ai/glm-5.3-flash\n- cost: placeholder line\n\nbody of the verdict\n'
+} >"$work/fixtures/verdict-narration.txt"
+verdict_envelope "$work/fixtures/verdict-narration.txt" >"$work/fixtures/verdict-narration.json"
+{
+    printf 'I will start by loading the project guide.\n'
+    for i in 1 2 3; do printf 'narration line %s\n' "$i"; done
+    printf 'no verdict was produced\n'
+} >"$work/fixtures/verdict-noheading.txt"
+verdict_envelope "$work/fixtures/verdict-noheading.txt" >"$work/fixtures/verdict-noheading.json"
 
 cat >"$work/bin/pwsh" <<'STUB'
 #!/bin/sh
@@ -318,5 +347,32 @@ for crafted in 'docs/worker-1" --evil "x' 'docs/'; do
     [ -s "$work/gh-edits" ] && fail "crafted identity '$crafted' touched labels: $(cat "$work/gh-edits")"
 done
 echo "ok 8 machine identity shape refusal"
+
+# ── 9. R23 publication: narration before the heading is trimmed ─────
+
+: >"$work/gh-posted"
+printf '%s' "$HEAD1" >"$work/gh-head"
+EDDA_STUB_RESULT_FILE="$work/fixtures/verdict-narration.json" \
+    run_loop sh "$next_review" 886 --shadow >"$work/out/trim.txt" 2>"$work/out/trim.err" || \
+    fail "narration trim run exit $? : $(cat "$work/out/trim.err")"
+grep -q 'posted SHADOW round' "$work/out/trim.txt" || fail "trim run must post: $(cat "$work/out/trim.txt")"
+posted=$(awk '/^---- comment ----$/{f=1;next} f' "$work/gh-posted")
+printf '%s\n' "$posted" | head -1 | grep -q '^## Code Review: Round' || \
+    fail "posted body must begin with the heading: $(printf '%s\n' "$posted" | head -1)"
+printf '%s\n' "$posted" | grep -q 'narration line' && fail "narration leaked into the posted verdict"
+printf '%s\n' "$posted" | grep -qF 'I will start by loading' && fail "engine preamble leaked into the posted verdict"
+echo "ok 9 R23 publication trims narration"
+
+# ── 10. R23 publication: a verdict with no heading posts nothing ────
+
+: >"$work/gh-posted"
+printf '%s' "$HEAD1" >"$work/gh-head"
+EDDA_STUB_RESULT_FILE="$work/fixtures/verdict-noheading.json" \
+    run_loop sh "$next_review" 886 --shadow >"$work/out/nohead.txt" 2>"$work/out/nohead.err" && \
+    fail "headingless verdict must exit non-zero" || rc=$?
+[ "${rc:-0}" -eq 2 ] || fail "headingless verdict exit ${rc:-0}, want 2: $(cat "$work/out/nohead.err")"
+grep -q 'PR #886' "$work/out/nohead.err" || fail "refusal must name the PR: $(cat "$work/out/nohead.err")"
+[ -s "$work/gh-posted" ] && fail "headingless verdict must post nothing: $(cat "$work/gh-posted")"
+echo "ok 10 R23 publication refuses a headingless verdict"
 
 echo "PASS: scripts/fleet/test-next-loop.sh"
