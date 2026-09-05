@@ -24,8 +24,9 @@
 # Round selection (REVIEW.md §7/§8): among the §7 comments whose heading is
 # `## Code Review: Round <N> — PR #<pr> @ <sha>` — pinned to BOTH the given
 # PR number and the given SHA — the SHADOW round is the last one marked
-# ` (SHADOW)` in the heading (or carrying `- shadow: true` in its header),
-# and the authoritative round is the last one without that mark. "Last" is
+# ` (SHADOW)` in the heading, and the authoritative round is the last one
+# without that mark. The `- shadow: true` header field is documentation that
+# accompanies the suffix; it never marks a round on its own. "Last" is
 # last in the comment stream, which GitHub returns oldest-first.
 #
 # Findings are the `- [P0|P1|P2] ...` lines of the `### Findings` section.
@@ -153,10 +154,6 @@ printf '%s\n' "$stream" | awk -v pr="$PR" -v sha="$SHA" '
       }
       if (inhdr && line ~ /^- model_observed:/) {
         model = trim(substr(line, length("- model_observed:") + 1))
-        continue
-      }
-      if (inhdr && line ~ /^- shadow:[[:space:]]*true([[:space:]]|$)/) {
-        issh = 1
         continue
       }
       if (inf && line ~ /^- \[P[0-2]\]/) store_finding(c, line)
