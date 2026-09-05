@@ -222,8 +222,10 @@ issues the next brief. Success advances to the next numbered step.
 25. git push --porcelain -u origin codex/gh792-brief-template
     output: Git porcelain push status, exit 0, no rejected ref. This is a
     normal push; no force option is authorized. Enforcement is mechanical:
-    `scripts/fleet/guard-push.sh` runs as the lefthook pre-push hook and
-    refuses a non-fast-forward push on a branch with an open PR, with
+    `scripts/fleet/guard-push.sh` runs as the lefthook pre-push hook — the
+    command sets `use_stdin: true`, without which lefthook does not forward
+    the ref records and the guard would hang — and refuses a
+    non-fast-forward push on a branch with an open PR, with
     `FLEET_ALLOW_FORCE_PUSH=1` as its single documented escape.
 26. cat >"$(git rev-parse --git-path gh792-pr-body.md)" <<'PR_BODY'
 ## Problem and change

@@ -11,5 +11,6 @@ pre-push:
   commands:
     guard-push:
       run: sh scripts/fleet/guard-push.sh
+      use_stdin: true
     clippy:
       run: cargo clippy --workspace -- -D warnings

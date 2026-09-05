@@ -47,7 +47,10 @@ printf '#!/bin/sh\nexec sh "%s" "$@"\n' "$guard" >"$clone/.git/hooks/pre-push"
 chmod +x "$clone/.git/hooks/pre-push"
 
 lsremote() {
-    git ls-remote "$repo_url" "refs/heads/$1" | cut -f1
+    # no pipeline on the lookup: a failed git ls-remote must kill the test
+    # under set -e, not surface as an empty value that satisfies an assertion
+    git ls-remote "$repo_url" "refs/heads/$1" >"$work/lsremote.out"
+    cut -f1 "$work/lsremote.out"
 }
 
 fail() {
