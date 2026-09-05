@@ -115,6 +115,13 @@ verdict on the SHA. Anything else waits for the operator.
   (#748), an orphaned scheduled task (#772) — stop the lane with
   `scripts/fleet/lane-stop.ps1 -Name <lane>` before relaunching
 
+## Reporting
+
+1. The operator-facing report is `sh scripts/fleet/daily-digest.sh --board 888`, never a hand-written summary — a hand-written one omits open PRs and misstates states (GH-914).
+2. Before calling any PR complete, compare `gh pr view <n> --json headRefOid --jq .headRefOid` against the SHA in its newest `Code Review: Round` comment; a different SHA means that head has not been reviewed — not complete (GH-914).
+3. `mergeStateStatus` is not a readiness signal: a PR based on a branch other than `main` is not gated by the ruleset, so `CLEAN` with zero verdicts is exactly what it looks like (GH-914).
+
+
 ## Pointers
 
 - Brief shape and the authored-middle contract: `docs/guides/brief-template.md`
