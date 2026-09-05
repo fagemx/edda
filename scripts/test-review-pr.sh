@@ -54,6 +54,7 @@ FIXTURE_PR=9999   # a PR number no real lane uses, so the offline guard is exact
 export EDDA_FLEET_SCRATCH="$tmp/scratch"
 export EDDA_REVIEW_SPEC="$root/REVIEW.md"
 export EDDA_REPO="fagemx/edda"
+export EDDA_REVIEW_PRODUCT_ADAPTER=0
 mkdir -p "$EDDA_FLEET_SCRATCH"
 
 # --- stubs: gh, uname, cygpath ------------------------------------------------
@@ -107,7 +108,7 @@ EOF
 # uname: force the Windows branch so the D1 path is assertable everywhere.
 cat >"$STUBBIN/uname" <<'EOF'
 #!/bin/sh
-echo "MINGW64_NT-10.0-26200"
+if [ "${TEST_PRODUCT_UNIX:-0}" = 1 ]; then echo Linux; else echo "MINGW64_NT-10.0-26200"; fi
 EOF
 
 # cygpath -w: /c/foo/bar -> C:\foo\bar. Like the real one, every absolute POSIX
@@ -584,6 +585,41 @@ dry_run_round 'Issue: #650\n' 2 'cccccccccccccccccccccccccccccccccccccccc' ''
 if ! grep -q 'carries no prior transcript' "$brief"; then
     fail 'D9h: a delta round with no recorded conversation does not warn that the earlier rounds are missing from context'
 fi
+
+# D11 (GH-652): once the installed CLI offers the review command, the
+# scheduler/nohup child invokes that product command from the author root. The
+# adapter accepts only product JSON carrying the actual internal-worktree
+# proof and hard-policy receipt; it does not manufacture legacy TOOL_FLAGS.
+cat >"$STUBBIN/edda" <<'EOF'
+#!/bin/sh
+if [ "$1 $2" = 'review --help' ]; then
+  echo '--pr N --agent AGENT --model MODEL --json --resume'
+  exit 0
+fi
+if [ "$1" = review ]; then
+  printf '%s\n' '{"subject":{"head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","subject_seen":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","worktree_check":"unchanged"},"reviewer":{"tool_policy":"hard","model_requested":"fixture-model","model_observed":"fixture-observed","session_id":"fixture-session"},"verdict":"changes-requested","findings":[{"severity":"P1"}],"cost":{"usd":0.25}}'
+  exit 1
+fi
+exit 2
+EOF
+chmod +x "$STUBBIN/edda"
+hash -r
+export EDDA_REVIEW_PRODUCT_ADAPTER=1 TEST_PRODUCT_UNIX=1 EDDA_FLEET_ROOT="$root"
+rm -f "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.log" "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.done" "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-run.sh"
+out=$(timeout "${EDDA_TEST_TIMEOUT_SECONDS:-60}" sh "$root/scripts/review-pr.sh" "$FIXTURE_PR" 1 2>"$tmp/product.err") || {
+    fail "D11: product adapter launch failed: $(cat "$tmp/product.err")"
+}
+for _ in $(seq 1 30); do [ -f "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.done" ] && break; sleep 1; done
+product_done="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.done"
+product_log="$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.log"
+grep -q '^TRANSPORT=edda-review$' "$product_done" || fail 'D11: product adapter did not record TRANSPORT=edda-review'
+grep -q '^POLICY_RECEIPT=product-json:hard$' "$product_done" || fail 'D11: product adapter did not retain the hard-policy JSON receipt'
+grep -q '^WORKTREE_CHECK=unchanged$' "$product_done" || fail 'D11: product adapter did not carry the product internal-worktree proof'
+if grep -q '^TOOL_FLAGS=' "$product_done"; then fail 'D11: product adapter fabricated legacy tool flags instead of recording product policy'; fi
+grep -q '^Changes Requested, P0=0, P1=1$' "$product_log" || fail 'D11: product JSON was not rendered into the legacy verdict envelope'
+grep -q 'edda review --pr' "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-run.sh" || fail 'D11: nohup child does not call edda review directly'
+if grep -q 'edda dispatch\|claude -p' "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-run.sh"; then fail 'D11: selected product child retained legacy dispatch/fallback'; fi
+unset EDDA_REVIEW_PRODUCT_ADAPTER TEST_PRODUCT_UNIX EDDA_FLEET_ROOT
 
 # D9i: the per-PR worktree is removed only after a successful source proof,
 # then the complete receipt is atomically published. A partial/legacy receipt

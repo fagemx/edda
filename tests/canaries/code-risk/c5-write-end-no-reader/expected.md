@@ -1,3 +1,11 @@
+---
+id: c5-write-end-no-reader
+class: code-risk
+severity: P1
+file: canaries-fixture/c5-write-end-no-reader/lib.rs
+match: '(no (caller|reader|call site|read side)|無人呼叫|沒有呼叫|無呼叫|沒有任何呼叫|never called|uncalled|not called|not referenced|dead (export|code)|unused (export|pub|function)|寫端|讀端|write.end|write.side|read.end|read.side)'
+---
+
 # c5-write-end-no-reader
 
 - class: `code-risk`

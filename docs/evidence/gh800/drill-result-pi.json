@@ -1,0 +1,16 @@
+{
+  "target": "pi",
+  "verifier": false,
+  "supported": false,
+  "failingMethod": "initialize",
+  "failureStatus": "write_failed",
+  "steps": [
+    {
+      "failingMethod": "initialize",
+      "stopReason": null,
+      "status": "write_failed",
+      "step": "1",
+      "ok": false
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+# command: bash C:/ai_agent/edda/scripts/lint-doc-citations.sh --staged
+COMPATIBILITY.md:27: contract line citation requires a literal anchor: crates/edda-ledger/src/sqlite_store/schema.rs:75-79
+COMPATIBILITY.md:28: contract line citation requires a literal anchor: schema.rs:342-356
+COMPATIBILITY.md:30: contract line citation requires a literal anchor: schema.rs:249-341
+COMPATIBILITY.md:34: contract line citation requires a literal anchor: schema.rs:216-226
+COMPATIBILITY.md:36: contract line citation requires a literal anchor: crates/edda-core/src/types.rs:4
+COMPATIBILITY.md:37: contract line citation requires a literal anchor: crates/edda-core/src/event.rs:186
+COMPATIBILITY.md:42: contract line citation requires a literal anchor: crates/edda-ledger/src/sqlite_store/schema.rs:152
+COMPATIBILITY.md:54: contract line citation requires a literal anchor: crates/edda-ledger/src/ledger.rs:32-41
+COMPATIBILITY.md:55: contract line citation requires a literal anchor: crates/edda-ledger/src/sqlite_store/mod.rs:45-53
+COMPATIBILITY.md:56: contract line citation requires a literal anchor: schema.rs:249-341
+COMPATIBILITY.md:63: contract line citation requires a literal anchor: schema.rs:228-247
+COMPATIBILITY.md:65: contract line citation requires a literal anchor: crates/edda-cli/src/cmd_verify.rs:40-43
+COMPATIBILITY.md:75: contract line citation requires a literal anchor: crates/edda-ledger/src/sqlite_store/mod.rs:63-83
+COMPATIBILITY.md:76: contract line citation requires a literal anchor: crates/edda-cli/src/cmd_verify.rs:55-63
+COMPATIBILITY.md:86: contract line citation requires a literal anchor: crates/edda-cli/src/cmd_ask.rs:167-173
+COMPATIBILITY.md:96: contract line citation requires a literal anchor: crates/edda-cli/src/cmd_dispatch.rs:298-310
+COMPATIBILITY.md:97: contract line citation requires a literal anchor: crates/edda-cli/src/main.rs:492-497
+COMPATIBILITY.md:101: contract line citation requires a literal anchor: cmd_dispatch.rs:129-135
+COMPATIBILITY.md:111: contract line citation requires a literal anchor: cmd_dispatch.rs:151-159
+COMPATIBILITY.md:121: contract line citation requires a literal anchor: crates/edda-cli/src/cmd_verify.rs:68-72
+COMPATIBILITY.md:136: contract line citation requires a literal anchor: crates/edda-ask/src/lib.rs:52-75
+COMPATIBILITY.md:137: contract line citation requires a literal anchor: crates/edda-cli/src/cmd_ask.rs:80-82
+COMPATIBILITY.md:144: contract line citation requires a literal anchor: lib.rs:62-73
+COMPATIBILITY.md:161: contract line citation requires a literal anchor: crates/edda-mcp/src/lib.rs:263-287
+COMPATIBILITY.md:164: contract line citation requires a literal anchor: crates/edda-mcp/src/lib.rs:407-417
+COMPATIBILITY.md:165: contract line citation requires a literal anchor: crates/edda-core/src/tool_tier.rs:103-108
+COMPATIBILITY.md:178: contract line citation requires a literal anchor: crates/edda-cli/src/cmd_status.rs:10-29
+COMPATIBILITY.md:179: contract line citation requires a literal anchor: crates/edda-cli/src/main.rs:290-295
+COMPATIBILITY.md:193: contract line citation requires a literal anchor: crates/edda-core/src/event.rs:19-22
+COMPATIBILITY.md:201: contract line citation requires a literal anchor: crates/edda-cli/src/main.rs:1103-1110
+crates/edda-cli/src/cmd_status.rs:184: missing citation target tests/schema_refusal_contract.rs (repo root)
+
+# exit_code: 123

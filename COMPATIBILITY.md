@@ -36,7 +36,7 @@ store version**:
   suggestions queue, v13 the `task_leases` table
   (`crates/edda-ledger/src/sqlite_store/schema.rs:217-226#pub(super) const SCHEMA_V13_SQL: &str = "`).
 - **Event payload version** — `edda_core::SCHEMA_VERSION`
-  (`crates/edda-core/src/types.rs:4#pub const SCHEMA_VERSION: u32 = 1;`, stamped into every event payload at
+  (`crates/edda-core/src/types.rs:5#pub const SCHEMA_VERSION: u32 = 1;`, stamped into every event payload at
   `crates/edda-core/src/event.rs:186#schema_version: SCHEMA_VERSION,` and siblings). This has been `1` for
   the project's entire history and is part of the Layer 1 event format, whose
   stability is governed by the v1 event spec (#608), not by this page.
@@ -159,21 +159,20 @@ Golden fixture: `crates/edda-cli/tests/ask_compat_contract.rs` →
 
 ### edda-mcp tool responses
 
-Of the MCP tools, two return JSON payloads, and their shapes are stable:
+Stable JSON MCP responses are a client contract for the following tools:
 
-- `edda_ask` (`crates/edda-mcp/src/lib.rs:263-287#async fn edda_ask(`) — returns the same
-  `AskResult` envelope as `edda ask --json` (same key set, same optionality
-  rules).
-- `edda_tool_tier` (`crates/edda-mcp/src/lib.rs:407-417#async fn edda_tool_tier(`) — one JSON object,
-  the `ToolTierResult` shape (`crates/edda-core/src/tool_tier.rs:103-108#pub struct ToolTierResult {`):
-  `tool` (string), `tier` (string, `T0`–`T4`), `approval` (string,
-  `none`/`lazy`/`required`/`blocked`), `description` (string).
+- `edda_ask` returns the `AskResult` envelope used by `edda ask --json`.
+- `edda_tool_tier` returns `ToolTierResult`: `tool`, `tier` (`T0`–`T4`),
+  `approval` (`none`/`lazy`/`required`/`blocked`), and `description`.
+- `edda_task_new`, `edda_task_start`, `edda_task_done`, `edda_task_fail`,
+  `edda_receipt`, and `edda_verify` return the JSON payloads consumed by the
+  shared task state-machine and ledger verification paths.
+- `edda_claim` returns the persisted claim-board result.
 
-Other MCP tools return human-readable text; their output is not a contract.
-
-Golden fixtures: `crates/edda-mcp/src/lib.rs` →
-`compat_golden_fixture_ask_tool_response_keys_and_types` and
-`compat_golden_fixture_tool_tier_response_keys_and_types`.
+These response shapes are covered by the live cross-language SDK contract
+scenario (`sdk/run-contract-tests.mjs`), which calls the real MCP server and
+requires TypeScript/Python structural equivalence. Other MCP tool text remains
+human-readable and is not a stable response contract.
 
 ### `edda status --json`
 
@@ -201,7 +200,7 @@ it, `edda status` produces the same exit code and the same stderr in every
 state (measured). Success is exit `0` with the object on stdout. Failures do
 not emit JSON — a newer ledger schema exits `2` (§1.2), and every other
 failure (no `.edda/`, unreadable database) takes the CLI's shared error path
-and exits `1` (`crates/edda-cli/src/main.rs:1091-1098#if let Err(err) = run(cli) {`).
+and exits `1` (`crates/edda-cli/src/main.rs:1092-1099#if let Err(err) = run(cli) {`).
 
 That last row differs from `edda verify --json`, which answers `2` to the
 same questions. The split is pre-existing and outside #730, but it is
@@ -220,8 +219,8 @@ above: on a missing workspace both forms exit alike and neither prints JSON.
 ## 3. Layer 2/3 events are unstable
 
 All Layer 2/3 objects — task, claim, receipt, verdict, plan, and phase
-events, plus the `edda review` review-verdict events (the verb itself is a
-designed future verb, tracked as #652) — are **unstable** until
+events, plus `edda review` events (`review_verdict/0`) and its JSON output
+(delivered in #652) — are **unstable** until
 the v1 event spec (#608) lands and declares otherwise.
 
 That is not re-declared here: it is the recorded decision

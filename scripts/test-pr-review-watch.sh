@@ -551,7 +551,7 @@ unset GH_FAIL_COMMENT_ALWAYS
 reset_stubs
 sha=d29dc8f5861322ed664e39900273b0681396da50
 pending_set 42 1 "$sha" 0 0
-printf '## Code Review: Round 1 — PR #42 @ %s (gpt-5.6-sol, read-only)\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" \
+printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1-verdict.md.posted"
 export GH_FAIL_HEAD=1
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (unknown head)\n' >&2; exit 1; }
@@ -582,6 +582,26 @@ if [ "$(state_get)" != "$(printf '42\t%s\t1' "$sha")" ]; then
 fi
 if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
     printf 'live: head recovered should apply the verdict label\n' >&2
+    exit 1
+fi
+
+# A product review can return an LGTM-shaped sentence with exit 3 when its
+# qualification rules fail. Even a stale/generated envelope must not let that
+# result become review:lgtm when the watcher consumes the receipt.
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-review\nDISPATCH_EXIT=3\nQUALIFIED=false\nDISQUALIFIERS=gates-red,escalation-pending\n' \
+    >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" \
+    >"$EDDA_FLEET_SCRATCH/review-pr42-r1-verdict.md.posted"
+export GH_HEAD="$sha"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (unqualified product LGTM)\n' >&2; exit 1; }
+if grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
+    printf 'live: product exit 3 / qualified=false must never apply review:lgtm\n' >&2
+    exit 1
+fi
+if ! grep -qF -- '--add-label review:unreviewed' "$GH_STUB_LOG"; then
+    printf 'live: unqualified product LGTM must be labeled review:unreviewed\n' >&2
     exit 1
 fi
 

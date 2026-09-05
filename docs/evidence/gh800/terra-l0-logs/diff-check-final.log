@@ -1,0 +1,9 @@
+# command: git diff --check
+warning: in the working copy of 'crates/edda-conductor/src/agent/acp_targets.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'crates/edda-conductor/src/runner/acp.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/evidence/gh800/drill-result-grok.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/evidence/gh800/drill-result-kilo.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'docs/evidence/gh800/drill-result-pi.json', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'scripts/drill-acp-800.ps1', LF will be replaced by CRLF the next time Git touches it
+
+# exit_code: 0
