@@ -210,7 +210,10 @@ issues the next brief. Success advances to the next numbered step.
     carry their reason and 需升級 rows escalate to the reviewer (REVIEW.md
     §6–§7); neither is a FAIL. This is the L0 self-check: the row commands
     are extracted from REVIEW.md at run time, so the lane is judged by the
-    rules its own tree states.
+    rules its own tree states. This no-PR-number pass cannot run U2, U3 and
+    U6 — they read the PR body and the PR's checks, which do not exist
+    pre-push — so those three rows stay N.A.(needs PR number), and a lane
+    must not read "every row PASS" as "every rule checked".
 21. git commit -m "docs(fleet): brief template for role and runtime composition" -m "Issue: #792"
     output: git commit summary, exit 0. Do not infer a PR-body link from it.
 22. git log -1 --format=%B | grep -Fx 'Issue: #792'
