@@ -28,7 +28,8 @@ fail() {
 # --- stubs: gh and edda ---------------------------------------------------------
 # Both log their argv to $ORDER_LOG. `gh` answers per subcommand from env files
 # (GH_READY_TSV, GH_OPEN_PRS_TSV, $BOARD/<n>.body, $DIFFS/<n>.files) and fails
-# everything when GH_RC is non-zero. `edda` answers only `dispatch`.
+# everything when GH_RC is non-zero (`gh pr diff` additionally fails when
+# GH_PRC is non-zero). `edda` answers only `dispatch`.
 STUBBIN="$tmp/bin"
 mkdir -p "$STUBBIN"
 cat >"$STUBBIN/gh" <<'EOF'
@@ -65,6 +66,7 @@ case "$1 $2" in
     ;;
   "pr diff")
     num=$3
+    if [ -n "${GH_PRC:-}" ] && [ "$GH_PRC" != 0 ]; then exit "$GH_PRC"; fi
     [ -f "$DIFFS/$num.files" ] && cat "$DIFFS/$num.files"
     exit 0
     ;;
@@ -102,10 +104,11 @@ new_env() {
     cp "$root/docs/fleet/rules.md" "$RULES"
     : >"$ORDER_LOG"
     GH_RC=0
+    GH_PRC=0
     EDDA_DISPATCH_EXIT=0
     # a realistic successful dispatch: done, cost unmeasured (null -> n/a)
     EDDA_DISPATCH_OUT='{"outcome":"done","result_text":"lane started","cost_usd":null}'
-    export EDDA_DISPATCH_EXIT EDDA_DISPATCH_OUT
+    export GH_PRC EDDA_DISPATCH_EXIT EDDA_DISPATCH_OUT
     export EDDA_MANAGER_STATE="$STATE" EDDA_LANES_DIR="$LANES" EDDA_LANE_ROOT="$LROOT"
     export EDDA_RULES_FILE="$RULES"
 }
@@ -282,6 +285,12 @@ run_tick --no-board
 [ "$tick_rc" != 0 ] || fail 'case 9: a failed dispatch must make the tick exit non-zero'
 grep -q 'manager-tick: FAILED' "$tmp/tick.err" \
     || fail "case 9: FAILED log line missing: $(cat "$tmp/tick.err")"
+# GH-674 doneWhen (死亡可見): the FAILED alarm must also reach the board
+# issue, not only this wake's stderr/log.
+grep -q 'manager-tick: FAILED' "$BOARD/613.body" \
+    || fail "case 9: FAILED alarm missing from the board issue: $(cat "$BOARD/613.body")"
+grep -q 'gh issue comment 613' "$ORDER_LOG" \
+    || fail 'case 9: FAILED alarm was not posted to the board issue'
 awk -F'\t' '$1 == "lane-gh9005"' "$STATE/dispatched.tsv" | grep -q . \
     && fail 'case 9: a failed dispatch must not be tracked in dispatched.tsv'
 
@@ -298,6 +307,8 @@ run_tick --no-board
 [ "$tick_rc" != 0 ] || fail 'case 10: a $0.00 dispatch must make the tick exit non-zero (R15)'
 grep -q 'manager-tick: FAILED' "$tmp/tick.err" \
     || fail "case 10: FAILED log line missing: $(cat "$tmp/tick.err")"
+grep -q 'manager-tick: FAILED' "$BOARD/613.body" \
+    || fail "case 10: FAILED alarm missing from the board issue: $(cat "$BOARD/613.body")"
 
 # --- case 11: daily budget exhausted -> no dispatch (R7/R14) ----------------------
 new_env 11
@@ -360,5 +371,40 @@ run_tick
 grep -q 'gh issue comment 613' "$ORDER_LOG" || fail 'case 14: status line was not posted to the board issue'
 grep -q '^in-progress 0 · blocked 0 · needs-operator 0 · cost today \$0.00 · wake ' "$BOARD/613.body" \
     || fail "case 14: board status body wrong: $(cat "$BOARD/613.body")"
+
+# --- case 15: gh pr diff failure -> fail closed, R2 verdict withheld -------------
+new_env 15
+: >"$tmp/ready15.tsv"
+export GH_READY_TSV="$tmp/ready15.tsv"
+printf '8100\tfeat/gh9100-one\tgh-9100: artifact one\n' >"$tmp/prs15.tsv"
+printf '8101\tfeat/gh9100-two\tgh-9100: artifact two\n' >>"$tmp/prs15.tsv"
+export GH_OPEN_PRS_TSV="$tmp/prs15.tsv"
+printf 'a.sh\nb.md\nc.rs\n' >"$DIFFS/8100.files"
+printf 'a.sh\nb.md\nc.rs\nd.rs\ne.rs\nf.md\ng.md\n' >"$DIFFS/8101.files"
+GH_PRC=1
+export GH_PRC
+
+# A transient `gh pr diff` failure must never read as 0 files: that would
+# post an R2 verdict (board grep + COLLISIONS row) that is never
+# re-adjudicated. The tick fails closed instead — needs-operator once, no
+# R2 comment, no COLLISIONS row.
+run_tick --no-board
+[ "$tick_rc" != 0 ] || fail 'case 15: a gh pr diff failure must make the tick exit non-zero (fail closed)'
+grep -q 'needs-operator: relogin gh on 4090' "$tmp/tick.err" \
+    || fail "case 15: needs-operator line missing: $(cat "$tmp/tick.err")"
+[ ! -s "$BOARD/9100.body" ] \
+    || fail "case 15: R2 verdict must be withheld when the diff read fails: $(cat "$BOARD/9100.body")"
+[ ! -s "$STATE/collisions.tsv" ] \
+    || fail 'case 15: a failed diff read must not record a COLLISIONS row'
+
+# recovery wake: the transient failure is gone — the R2 verdict is decided
+# then, from the full counts (8101 wins, 7 files over 3).
+GH_PRC=0
+: >"$ORDER_LOG"
+
+run_tick --no-board
+[ "$tick_rc" = 0 ] || fail "case 15: recovery tick exited $tick_rc: $(cat "$tmp/tick.err")"
+grep -q 'R2 collision: keep #8101' "$BOARD/9100.body" \
+    || fail "case 15: recovery tick did not post the R2 verdict: $(cat "$BOARD/9100.body")"
 
 printf 'manager-tick fixtures passed\n'

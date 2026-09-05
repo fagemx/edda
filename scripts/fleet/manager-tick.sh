@@ -34,16 +34,25 @@
 # Failure handling:
 #   - a dispatch that exits non-zero or prints nothing, or reports a $0.00
 #     cost (R15: an auth-failed round always costs zero), logs
-#     `manager-tick: FAILED <reason>` and the tick exits 1;
-#   - `gh` read failures post `needs-operator: relogin gh on <machine>` ONCE
-#     (R11), stop all dispatching, and exit 1 (fail closed — never misread a
-#     broken query as an empty board);
+#     `manager-tick: FAILED <reason>` to stderr and tick.log AND posts the
+#     same line to the board issue (GH-674 doneWhen 死亡可見 — a failed
+#     dispatch must be visible on #613, not only in this wake's log); the
+#     tick exits 1;
+#   - `gh` read failures — including a failed `gh pr diff` while counting a
+#     collision candidate's files (fail closed: the R2 verdict is withheld,
+#     never decided from a 0-file count) — post `needs-operator: relogin gh
+#     on <machine>` ONCE (R11), stop all dispatching, and exit 1 (never
+#     misread a broken query as an empty board);
+#   - alarm comments (FAILED, needs-operator) are posted to the board even
+#     under --no-board — that flag silences only the status line; --dry-run
+#     posts nothing anywhere;
 #   - the daily budget cap (R14) and every other R7 situation are never
 #     executed: logged as `BLOCKED-BY-RULE` and skipped.
 #
-# Known v0 gap (visible via the FAILED log, not solved here): a failed
-# dispatch leaves the just-written `taking:` claim standing; an R13 release
-# needs a comment EDIT (strikethrough), which v0 does not attempt.
+# Known v0 gap (visible via the FAILED log and the board FAILED comment, not
+# solved here): a failed dispatch leaves the just-written `taking:` claim
+# standing; an R13 release needs a comment EDIT (strikethrough), which v0
+# does not attempt.
 #
 # usage: manager-tick.sh [--dry-run] [--no-board]
 #
@@ -123,6 +132,14 @@ note_failed() {
     printf '%s: FAILED %s\n' "$prog" "$1" >&2
     if [ "$DRY" != 1 ]; then
         printf '%s %s FAILED %s\n' "$WAKE" "$prog" "$1" >>"$STATE/tick.log" 2>/dev/null || :
+        # GH-674 doneWhen (死亡可見): the failure must be visible on the
+        # board, not only in this wake's stderr/log — post the same alarm
+        # line to the board issue. Best effort (gh may be down; the R11
+        # needs-operator alarm then covers it), posted like that alarm: also
+        # under --no-board, never under --dry-run.
+        printf 'manager-tick: FAILED %s\n' "$1" >"$STATE/failed-latest.txt"
+        gh issue comment "$EDDA_BOARD_ISSUE" --repo "$EDDA_REPO" \
+            --body-file "$STATE/failed-latest.txt" >/dev/null 2>&1 || :
     fi
     failures=$((failures + 1))
 }
@@ -219,8 +236,15 @@ issue_has_open_pr() {
     awk -F'\t' -v i="$1" '$1 == i { found=1 } END { exit !found }' "$REFS_TSV"
 }
 
-pr_file_count() { # pr number -> non-empty diff file lines
-    gh pr diff "$1" --repo "$EDDA_REPO" --name-only 2>/dev/null | grep -c . || true
+pr_file_count() { # pr number -> non-empty diff file lines; non-zero if the read failed
+    # The count must come from a *successful* read. Piping `gh` straight into
+    # `grep -c .` hides its exit status behind the pipeline's last command: a
+    # failed read printed `0` and was indistinguishable from an artifact that
+    # touches no files, so the caller decided R2 from it. Capture first, then
+    # propagate the failure so the caller can withhold the verdict.
+    diff_out=$(gh pr diff "$1" --repo "$EDDA_REPO" --name-only 2>/dev/null) || return 1
+    printf '%s
+' "$diff_out" | grep -c . || true
 }
 
 # --- R8: no-rule requests on the board -------------------------------------------
@@ -337,7 +361,12 @@ collision_pass() {
         wfiles=-1
         losers=""
         for p in $(awk -F'\t' -v i="$issue" '$1 == i { print $2 }' "$REFS_TSV"); do
-            files=$(pr_file_count "$p")
+            # Fail closed: a diff-read failure withholds the verdict this
+            # wake (gh_broke) — it must never count as 0 files and decide R2.
+            if ! files=$(pr_file_count "$p"); then
+                gh_broke
+                return 1
+            fi
             if [ "$files" -gt "$wfiles" ] || { [ "$files" -eq "$wfiles" ] && [ "$p" -lt "$winner" ]; }; then
                 if [ -n "$winner" ]; then
                     losers="$losers #$winner ($wfiles files)"
