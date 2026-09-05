@@ -70,6 +70,27 @@ case "$1" in
             if [ -n "${GH_STATE:-}" ]; then echo "$GH_STATE"; else echo "OPEN"; fi
             exit 0
             ;;
+          *"--json files"*)
+            # R22 (GH-919): the surface classifier reads the PR's changed
+            # paths from GH_FILES_FILE (one path per line); re-encoded as the
+            # REST array with the caller's --jq applied, ids-free.
+            [ -n "${GH_FAIL_FILES:-}" ] && exit 1
+            if [ -n "${GH_FILES_FILE:-}" ]; then
+              printf '{"files":['
+              sep=
+              while IFS= read -r p; do
+                [ -n "$p" ] || continue
+                esc=${p//\\/\\\\}
+                esc=${esc//\"/\\\"}
+                printf '%s{"path":"%s"}' "$sep" "$esc"
+                sep=,
+              done < "$GH_FILES_FILE"
+              printf ']}'
+            else
+              printf '{"files":[]}'
+            fi
+            exit 0
+            ;;
         esac
         exit 0
         ;;
@@ -177,7 +198,8 @@ reset_stubs() {
     : >"$GH_STUB_LOG"; : >"$PI_STUB_LOG"; : >"$EDDA_STUB_LOG"; : >"$REVIEW_STUB_LOG"
     unset GH_FAIL_COMMENT_FIRST GH_FAIL_COMMENT_ALWAYS GH_FAIL_EDIT GH_FAIL_HEAD \
           GH_PR_LIST_FILE GH_HEAD GH_HEAD_FILE DISPATCH_FAIL_PROBE \
-          GH_COMMENTS_FILE GH_FAIL_STATUS GH_FAIL_COMMENTS 2>/dev/null || true
+          GH_COMMENTS_FILE GH_FAIL_STATUS GH_FAIL_COMMENTS \
+          GH_FILES_FILE GH_FAIL_FILES 2>/dev/null || true
     rm -f "$EDDA_FLEET_SCRATCH"/review-* 2>/dev/null || true
     : >"$EDDA_FLEET_SCRATCH/review-state.tsv"
     : >"$EDDA_FLEET_SCRATCH/review-acks.tsv"
@@ -606,7 +628,7 @@ unset GH_FAIL_COMMENT_ALWAYS
 reset_stubs
 sha=d29dc8f5861322ed664e39900273b0681396da50
 pending_set 42 1 "$sha" 0 0
-printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" \
+printf '## Code Review: Round 1 — PR #42 @ %s\n\n- model_observed: claude-opus-5\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1-verdict.md.posted"
 export GH_FAIL_HEAD=1
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (unknown head)\n' >&2; exit 1; }
@@ -647,7 +669,7 @@ reset_stubs
 pending_set 42 1 "$sha" 0 0
 printf 'TRANSPORT=edda-review\nDISPATCH_EXIT=3\nQUALIFIED=false\nDISQUALIFIERS=gates-red,escalation-pending\n' \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
-printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" \
+printf '## Code Review: Round 1 — PR #42 @ %s\n\n- model_observed: claude-opus-5\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" \
     >"$EDDA_FLEET_SCRATCH/review-pr42-r1-verdict.md.posted"
 export GH_HEAD="$sha"
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (unqualified product LGTM)\n' >&2; exit 1; }
@@ -747,7 +769,7 @@ verdict_log_fixture() {
         >> "$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
     {
         printf '<<<VERDICT\n'
-        printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha"
+        printf '## Code Review: Round 1 — PR #42 @ %s\n\n- model_observed: claude-opus-5\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha"
         printf 'VERDICT>>>\n'
         printf 'Model requested: claude-opus-5\nModel observed: claude-opus-5\nCost: $0.33\nSession: 11111111-2222-4333-8444-555555555555\n'
         # The backend's OWN report of the conversation it ran, which is what
@@ -1082,7 +1104,7 @@ r23_dump_fixture() { # $1=comment id $2=sha — #867's shape: narration, ---, he
         printf '<<<COMMENT %s>>>\n' "$1"
         for i in 1 2 3 4 5 6 7 8 9 10 11 12; do printf 'reviewer narration line %s\n' "$i"; done
         printf -- '---\n'
-        printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$2"
+        printf '## Code Review: Round 1 — PR #42 @ %s\n\n- model_observed: claude-opus-5\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$2"
     } >"$tmp/comments-pr42-r23-dump"
 }
 
@@ -1191,6 +1213,209 @@ for r23_state in MERGED CLOSED; do
         printf 'live: r23 case 4 — a %s PR must not be acked\n' "$r23_state" >&2; exit 1
     }
 done
+
+# --- R22 (GH-919): engine x surface decides status/label ----------------------
+# The verdict engine is read from the carrier's first `- model_observed:` line
+# after the heading; the surface from the PR's changed files classified against
+# the rules.md R22 table. Authoritative rounds write status + label exactly as
+# before; SHADOW-declared or non-authoritative rounds write neither.
+
+r22_carrier_log_fixture() { # $1=model_observed carrier value ('' = omit the line)
+    printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' \
+        >> "$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+    {
+        printf '<<<VERDICT\n'
+        if [ -n "$1" ]; then
+            printf '## Code Review: Round 1 — PR #42 @ %s\n\n- model_observed: %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha" "$1"
+        else
+            printf '## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha"
+        fi
+        printf 'VERDICT>>>\n'
+        printf 'Model requested: claude-opus-5\nModel observed: %s\nCost: $0.33\nSession: 11111111-2222-4333-8444-555555555555\nSession observed: 11111111-2222-4333-8444-555555555555\n' \
+            "${1:-unknown}"
+    } >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
+}
+
+r22_files() { # $@=paths -> GH_FILES_FILE fixture
+    : >"$tmp/r22-files"
+    for p in "$@"; do printf '%s\n' "$p" >> "$tmp/r22-files"; done
+    export GH_FILES_FILE="$tmp/r22-files"
+}
+
+r22_case_setup() { # $1=model_observed value; $2..=paths
+    reset_stubs
+    pending_set 42 1 "$sha" 0 0
+    r22_carrier_log_fixture "$1"
+    shift
+    r22_files "$@"
+    export GH_HEAD="$sha"
+}
+
+r22_notices() { # count of R22 SHADOW notices in the stub log
+    command grep -c 'is SHADOW per rules.md R22' "$GH_STUB_LOG" 2>/dev/null || true
+}
+
+# case 1 — glm is authoritative on internal-tools: status + label as before
+r22_case_setup 'openrouter/z-ai/glm-5.3-flash' 'scripts/fleet/next-issue.sh' 'docs/guides/pi-controller-runbook.md'
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r22 case 1)
+' >&2; exit 1; }
+grep -qF -- '-f state=success' "$GH_STUB_LOG" || {
+    printf 'live: r22 case 1 — glm on internal-tools must write the status; watch.log tail:
+%s
+' "$(tail -4 "$PR_REVIEW_WATCH_LOG")" >&2; exit 1
+}
+grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG" || {
+    printf 'live: r22 case 1 — glm on internal-tools must apply the label
+' >&2; exit 1
+}
+[ "$(r22_notices)" = "0" ] || {
+    printf 'live: r22 case 1 — an authoritative round must not draw a SHADOW notice
+' >&2; exit 1
+}
+unset GH_HEAD
+
+# case 2 — glm on the shipping surface is SHADOW: no status, no label, one notice
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+r22_carrier_log_fixture 'openrouter/z-ai/glm-5.3-flash'
+r22_files 'crates/edda-core/src/lib.rs' 'scripts/fleet/next-issue.sh'
+export GH_HEAD="$sha"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r22 case 2)\n' >&2; exit 1; }
+[ "$(statuses_calls)" = "0" ] || {
+    printf 'live: r22 case 2 — glm on shipping must not write a status, got %s calls\n' "$(statuses_calls)" >&2; exit 1
+}
+if grep -qF -- '--add-label review:' "$GH_STUB_LOG"; then
+    printf 'live: r22 case 2 — glm on shipping must not apply any review label\n' >&2; exit 1
+fi
+[ "$(r22_notices)" = "1" ] || {
+    printf 'live: r22 case 2 — exactly one SHADOW notice expected, got:\n%s\n' "$(r22_notices)" >&2; exit 1
+}
+grep -qF 'review: verdict by glm on shipping surface is SHADOW per rules.md R22' "$GH_STUB_LOG" || {
+    printf 'live: r22 case 2 — the notice must name the engine and surface\n' >&2; exit 1
+}
+[ -z "$(pending_get)" ] || {
+    printf 'live: r22 case 2 — a settled SHADOW round must drop the pending entry, got:\n%s\n' "$(pending_get)" >&2; exit 1
+}
+unset GH_HEAD
+
+# case 3 — glm on the judging surface is SHADOW the same way
+r22_case_setup 'openrouter/z-ai/glm-5.3-flash' 'scripts/pr-review-watch.sh'
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r22 case 3)\n' >&2; exit 1; }
+[ "$(statuses_calls)" = "0" ] || {
+    printf 'live: r22 case 3 filesq=%s fixture=[%s]
+' "$(grep -c -- --json\ files "$GH_STUB_LOG")" "$(cat "$GH_FILES_FILE")" >&2; exit 1
+' "$(command grep -c 'json files' "$GH_STUB_LOG")" "$(cat "$GH_FILES_FILE")" >&2; exit 1
+%s
+' "$(tail -4 "$PR_REVIEW_WATCH_LOG")" >&2; exit 1
+}
+grep -qF 'review: verdict by glm on judging surface is SHADOW per rules.md R22' "$GH_STUB_LOG" || {
+    printf 'live: r22 case 3 — the judging-surface notice is missing\n' >&2; exit 1
+}
+unset GH_HEAD
+
+# case 4 — opus is authoritative on the judging surface
+r22_case_setup 'claude-opus-5' 'scripts/pr-review-watch.sh' 'docs/fleet/rules.md'
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r22 case 4)\n' >&2; exit 1; }
+grep -qF -- '-f state=success' "$GH_STUB_LOG" || {
+    printf 'live: r22 case 4 — opus on judging must write the status\n' >&2; exit 1
+}
+grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG" || {
+    printf 'live: r22 case 4 — opus on judging must apply the label\n' >&2; exit 1
+}
+unset GH_HEAD
+
+# case 5 — an unknown engine is never authoritative: no status, only the notice
+r22_case_setup '' 'scripts/fleet/next-issue.sh'
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r22 case 5)\n' >&2; exit 1; }
+[ "$(statuses_calls)" = "0" ] || {
+    printf 'live: r22 case 5 — an unknown engine must not write a status\n' >&2; exit 1
+}
+[ "$(r22_notices)" = "1" ] || {
+    printf 'live: r22 case 5 — exactly the SHADOW notice expected, got:\n%s\n' "$(r22_notices)" >&2; exit 1
+}
+grep -qF 'review: verdict by unknown on internal-tools surface is SHADOW per rules.md R22' "$GH_STUB_LOG" || {
+    printf 'live: r22 case 5 — the notice must name the unknown engine\n' >&2; exit 1
+}
+unset GH_HEAD
+
+# case 6 — a verdict that declares itself SHADOW writes nothing at all
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+    printf 'TRANSPORT=edda-dispatch
+DISPATCH_EXIT=0
+FINAL_EXIT=0
+WORKTREE_CHECK=unchanged
+WORKTREE_CLEANUP=removed
+TASK_CLEANUP=not-applicable
+TERMINAL_RECEIPT=complete
+' \
+    >> "$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+{
+    printf '<<<VERDICT\n'
+    printf '## Code Review: Round 1 — PR #42 @ %s (SHADOW)\n\n- model_observed: claude-opus-5\n\nshadow: true\n\n### Verdict\nLGTM (P0=0, P1=0)\n' "$sha"
+    printf 'VERDICT>>>\n'
+    printf 'Model observed: claude-opus-5\nCost: $0.33\nSession observed: 11111111-2222-4333-8444-555555555555\n'
+} >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
+r22_files 'scripts/fleet/next-issue.sh'
+export GH_HEAD="$sha"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r22 case 6)\n' >&2; exit 1; }
+[ "$(statuses_calls)" = "0" ] || {
+    printf 'live: r22 case 6 — a SHADOW-declared verdict must not write status\n' >&2; exit 1
+}
+if grep -qF -- '--add-label review:' "$GH_STUB_LOG"; then
+    printf 'live: r22 case 6 — a SHADOW-declared verdict must not apply a label; hit=%s
+' "$(grep -F -- '--add-label review:' "$GH_STUB_LOG")" >&2; exit 1
+fi
+[ "$(r22_notices)" = "0" ] || {
+    printf 'live: r22 case 6 — a self-declared SHADOW round draws no notice\n' >&2; exit 1
+}
+[ -z "$(pending_get)" ] || {
+    printf 'live: r22 case 6 — the round should still settle, got:\n%s\n' "$(pending_get)" >&2; exit 1
+}
+unset GH_HEAD
+
+# case 7 — composition with R23: a SHADOW round on a PR that also carries a
+# malformed dump posts the R22 notice and never the malformed notice (the
+# status path where that notice lives is not reached), no status, no label
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+r22_carrier_log_fixture 'openrouter/z-ai/glm-5.3-flash'
+r23_dump_fixture 7777009 "$sha"
+r22_files 'scripts/pr-review-watch.sh'
+export GH_HEAD="$sha"
+export GH_COMMENTS_FILE="$tmp/comments-pr42-r23-dump"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (r22 case 7)\n' >&2; exit 1; }
+[ "$(statuses_calls)" = "0" ] || {
+    printf 'live: r22 case 7 — the SHADOW round must not reach the status path\n' >&2; exit 1
+}
+[ "$(r22_notices)" = "1" ] || {
+    printf 'live: r22 case 7 — exactly one R22 notice expected\n' >&2; exit 1
+}
+grep -qF 'review: malformed verdict comment' "$GH_STUB_LOG" && {
+    printf 'live: r22 case 7 — the malformed notice belongs to the status path and must not fire here\n' >&2; exit 1
+}
+unset GH_HEAD GH_COMMENTS_FILE
+
+# case 8 — anti-drift: the script's path table is exactly rules.md R22's tokens
+path_tokens() {
+    sed 's/`/\n/g' \
+      | awk '/^[A-Za-z0-9_.\/*-]+$/ {
+              if (/\//) { print; next }
+              if (/\*/) { print; next }
+              if (/\.(toml|lock|sh|ps1|yml|md)$/) print
+            }'
+}
+rules_r22_tokens=$(sed -n '/^- \*\*R22 /p' "$root/docs/fleet/rules.md" | path_tokens | sort)
+table_tokens=$(sed -n '/^# shipping:/,/^# internal-tools:/p' "$root/scripts/pr-review-watch.sh" | path_tokens | sort)
+[ "$(printf '%s\n' "$rules_r22_tokens" | command grep -c .)" = "24" ] || {
+    printf 'r22 anti-drift: expected 24 path tokens in rules.md R22, got:\n%s\n' "$rules_r22_tokens" >&2; exit 1
+}
+if [ "$rules_r22_tokens" != "$table_tokens" ]; then
+    printf 'r22 anti-drift: the watcher table drifted from rules.md R22:\n%s\n' \
+        "$(diff <(printf '%s\n' "$rules_r22_tokens") <(printf '%s\n' "$table_tokens"))" >&2
+    exit 1
+fi
+echo "ok r22 anti-drift table"
 
 # --- offline guarantee: the real watcher log was never touched -----------------
 size_after=0
