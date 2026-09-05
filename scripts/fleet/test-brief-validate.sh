@@ -229,6 +229,8 @@ if [ "$run_suite" -eq 1 ]; then
         fail "brief-ok must write the expected diff beside the brief"
     grep -q '+line two edited' "$work/fixtures/brief-ok.md.expected.diff" ||
         fail "expected diff misses the applied edit: $(cat "$work/fixtures/brief-ok.md.expected.diff")"
+    grep -q 'SKIP gate new.txt' "$work/out/ok.txt" ||
+        fail "brief-ok must name the ungated file it skipped: $(cat "$work/out/ok.txt")"
     rm -f "$work/fixtures/brief-ok.md.expected.diff"
     echo "ok a valid brief validates with expected diff"
 

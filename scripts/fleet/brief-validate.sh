@@ -101,11 +101,6 @@ cur_num=
 cur_body=
 cur_exp=
 
-emit_result() {
-    # flush on the next STEP or at the end of the span
-    :
-}
-
 flush_step() {
     [ -n "$cur_num" ] || return 0
     # a distinct name: the caller's read-loop `body` variable must survive
@@ -237,7 +232,8 @@ while IFS="$(printf '\t')" read -r st f; do
             fi
             ;;
         *)
-            : ;;
+            echo "SKIP gate $f (no syntax gate for this file type)"
+            ;;
     esac
 done <"$tmp_gates"
 
