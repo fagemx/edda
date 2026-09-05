@@ -261,9 +261,10 @@ claude -p --model opus --allowedTools "Read,Grep,Glob,Bash(git *),Bash(sh *)" \
 
 `model_observed` 一律由系統取得：glm 讀 pi session 檔的 `modelId`
 （`sessions/*_calib-glm-v2-r<N>.jsonl`），Opus 讀 `claude -p --output-format json`
-的 `modelUsage` 頂層鍵。**五份判決自述的 `model_observed` 全部引用 `PI_MODEL`
-環境變數**——值雖然對，來源不是系統觀察值（v2 §7 已明文禁止），這是 brief 遵循度
-的缺口，不是身分不符；已列為後續。
+的 `modelUsage` 頂層鍵。**六份判決自述的 `model_observed` 沒有一份用系統來源**：
+五份 glm 引用 `PI_MODEL` 環境變數，Opus 那份寫「由系統環境宣告取得」。值六次都對，
+來源六次都不是 v2 §7 要求的 session 檔／JSON——**對的值來自錯的來源不算量測**，
+這是 brief 遵循度的缺口，不是身分不符；已列為後續。
 
 **v0 → v1 的唯一變化是 `[判斷]` 標籤。** v0 的 c1 那格，glm 的解析樹與觸發條件
 全對卻只能標「需升級」，P0 閘記 1/2；v2 讓它裁定並附推導之後，同一顆金絲雀、

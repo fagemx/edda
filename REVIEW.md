@@ -586,8 +586,11 @@ git diff "origin/$BASE..$SHA" --unified=0 | grep -nE '^\+' \
 
 **R2 — shell operator precedence. P0 when a destructive command runs on an
 unintended branch, P1 otherwise.** Zero discretion, and every engine adjudicates
-it. For each line the enumerator prints: write the parse tree, write the truth
-table of the operand outcomes, and state for every row which commands run.
+it. For every added line mixing `||` and `&&`: write the parse tree, write the
+truth table of the operand outcomes, and state for every row which commands run.
+The enumerator below is a **candidate list, not the rule's boundary** — it scans
+the shell-bearing paths (`*.sh`, `*.bash`, `*.ps1`, `.github`), and a mixed line
+added anywhere else in the diff is in scope just the same.
 `A || B && C` is `(A || B) && C` — same precedence, left-associative — so `C`
 runs on the success path too. Severity is a table lookup, not judgement: P0 if
 any row runs a command from the R1 list on a branch the line's stated intent
@@ -598,7 +601,7 @@ writes the finding anyway, marks it `provisional`, and lists it under
 
 # review-spec:check R2
 ```sh
-git diff "origin/$BASE..$SHA" --unified=0 -- '*.sh' '*.bash' '*.ps1' \
+git diff "origin/$BASE..$SHA" --unified=0 -- '*.sh' '*.bash' '*.ps1' '.github' \
   | grep -nE '^\+' | grep -E '\|\|.*&&|&&.*\|\|'
 ```
 # review-spec:check-end
@@ -713,7 +716,7 @@ One comment per round, pinned to the reviewed full SHA
 - model_requested: <the model dispatch asked for>
 - model_observed: <read from the system, or "unverified">
 - reviewer_session: <per-PR UUID the lane was launched with>
-- spec: review-spec-v1.3
+- spec: review-spec-v1.5
 - class: <code-risk | docs-skills>  (REVIEW.md classes: <docs|skills|code-plain|code-risk ...>)
 - escalations: <list of 需升級 items, or "none">
 - shadow: true|false  (documentation for a SHADOW round: true requires the heading suffix ` (SHADOW)` — `## Code Review: Round <N> (SHADOW) — PR #<n> @ <full 40-hex SHA>`; the suffix is the only marker, this field never substitutes for it; a SHADOW round is never a verdict — §8)
@@ -825,7 +828,7 @@ mechanical.
 | C4 | RAN | clean (exit 1) on two real ranges |
 | C5 | RAN (selector) / canonical (gate) | the crate selector was run; `cargo test -p <crate>` is the `ladder` L2 command, unchanged |
 | R1 | RAN | 7 candidates on a real range |
-| R2 | RAN | 6 candidates on `origin/main~40..origin/main` (2026-09-06), all of the `[ … ] && [ … ] \|\| die` shape — a candidate list like R1, not a verdict. Severity is the §5 table lookup, no longer a judgement tag (issue #884; `design` §3 learning 1) |
+| R2 | RAN | 16 candidates on the pinned range `1511e7dcda533aa42237ad004a937ec7cb986fea..a0862fe8fc19a5c9107215fa9772c40a3854e55c` (2026-09-06): 10 of the `[ … ] && [ … ] \|\| die` guard shape, 2 `… ) && rc=0 \|\| rc=$?`, 2 `[ -n "$X" ] && echo A \|\| echo B` inside a quoted string, 1 `( … && … ) \|\| return 1`, 1 already explicitly braced (`&& { … \|\| … }`). A candidate list like R1, not a verdict — the enumerator surfaces exactly the `A && B \|\| C` lines the rule exists to parse. Severity is the §5 table lookup, no longer a judgement tag (issue #884; `design` §3 learning 1) |
 | R3 | RAN | `sh -n` on 3 changed scripts, all exit 0 |
 | R4–R5 | canonical | `brief-v2` §6.1 items 3–4; stated as properties, not commands |
 | §5.5 | RAN | `sh scripts/wiring-scan.sh 6340d94~1 6340d94` |
