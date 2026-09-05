@@ -31,6 +31,46 @@ finding 是什麼（`expected.md`）。引擎定期對金絲雀集跑審查 → 
 
 ## 如何跑一次校準（calibration run）
 
+> **這個流程已腳本化**：`scripts/calibrate-canaries.sh`（issue #881；
+> 設計文件 §1.2、§7 item 7）。它完全執行下列步驟：throwaway clone →
+> fixture commit → canary commit → 目標 diff → 每引擎每輪一次唯讀審查 →
+> 從 session 檔／JSON 讀 `model_observed` → 機械評分 → 列出 Markdown 表
+> 加 `for-ledger` 區塊 → 刪除 clone（`trap` 保證每個退出路徑都清）。
+> 腳本不發 GitHub 請求、不寫帳本（`for-ledger` 區塊由控制者逐字記入）。
+>
+> ```sh
+> # 先看計畫，不啟動任何東西：
+> sh scripts/calibrate-canaries.sh \
+>    --engine pi:openrouter/z-ai/glm-5.3-flash \
+>    --brief <brief.md> --runs 3 --dry-run
+> # 實跑：
+> sh scripts/calibrate-canaries.sh \
+>    --engine pi:openrouter/z-ai/glm-5.3-flash \
+>    --brief <brief.md> --runs 3
+> # --engine 可重複；選擇器語法 <backend>:<catalogue id>，id 逐字照抄
+> # pi --list-models。pi: 帶 Anthropic id、claude: 帶非 Anthropic id 會在
+> # 啟動前 exit 2（fleet.claude-subscription-transport，以目錄資料判定）。
+> ```
+>
+> 離線測試（stub 兩個引擎，不出網、不離開自己的 temp dir）：
+> `sh scripts/test-calibrate-canaries.sh`。
+>
+> **機械評分**：每顆金絲雀的 `expected.md` 帶固定 front matter
+> （`id class severity file match`；缺 key → 腳本 exit 2 指名檔案）。
+> 引擎依 brief 末尾的輸出協定逐行輸出
+> `FINDING P<n> <repo 相對路徑> — <一行描述>`；腳本評分：
+> - **caught**：expected `file` 上的 finding 文字命中 `match` regex；
+>   `severity_match` 比對回報的 severity 與 front-matter severity。
+> - **false-positive**：對該金絲雀面（expected file 或其目錄下）有 finding
+>   但不是預期 finding。
+> - **missed**：其餘。
+> - 引擎 exit ≠ 0 或 `model_observed ≠ model_requested`（從 pi session 檔
+>   `"model"` 欄／claude JSON `modelUsage` 讀，絕不從 transcript 本文取，
+>   #616）→ 該輪每列 **void**，不靜默計分；全程結束後 exit 1。
+> 機械分是保守下界；資格判定的最終權威仍是人工對照各 canary 的評分提示。
+>
+> 以下保留作為腳本所執行步驟的說明（手動跑仍可照做）：
+
 在一個 **$TEMP 的 throwaway clone** 上做，不在工作 worktree：
 
 ```sh
