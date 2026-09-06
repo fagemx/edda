@@ -1595,8 +1595,16 @@ table_tokens=$(sed -n '/^# shipping:/,/^# internal-tools:/p' "$root/scripts/pr-r
     printf 'r22 anti-drift: expected 24 path tokens in rules.md R22, got:\n%s\n' "$rules_r22_tokens" >&2; exit 1
 }
 if [ "$rules_r22_tokens" != "$table_tokens" ]; then
-    printf 'r22 anti-drift: the watcher table drifted from rules.md R22:\n%s\n' \
-        "$(diff <(printf '%s\n' "$rules_r22_tokens") <(printf '%s\n' "$table_tokens"))" >&2
+    # POSIX diff inputs: dash cannot parse bash process substitution
+    # <(...) - GH-927's gate was the first machine run of this script and
+    # caught it. The files live in the test's own mktemp sandbox.
+    printf '%s
+' "$rules_r22_tokens" > "$tmp/rules-r22.tokens"
+    printf '%s
+' "$table_tokens" > "$tmp/table-r22.tokens"
+    printf 'r22 anti-drift: the watcher table drifted from rules.md R22:
+%s
+'         "$(diff "$tmp/rules-r22.tokens" "$tmp/table-r22.tokens")" >&2
     exit 1
 fi
 echo "ok r22 anti-drift table"
