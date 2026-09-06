@@ -197,9 +197,11 @@ after #896/#910 gated only `scripts/fleet/test-*.sh`. #927 adds both as globs:
 
 ### Quarantines
 
-Four tests are quarantined by the runner on this base — #910's three
-(#963 `test-lane-helpers.sh`, #964 `test-next-loop.sh`, #971
-`test-collision-scan.sh`) plus one new: `scripts/test-review-adapter.sh`
+Four tests are quarantined by the runner on this base — #963
+(`test-lane-helpers.sh`) and #964 (`test-next-loop.sh`) from #910 (#971's
+collision-scan entry was removed on main by #995, which fixed the test),
+`scripts/test-review-adapter.sh` (this PR), and `scripts/test-review-pr.sh`
+(see below):
 is red on a Windows workstation against `origin/main` (its pwsh child exits 1
 and `QUALIFIED=True` never lands in the fixture receipt; measured twice),
 tracked as **#987**, which owns removing the entry in the change that turns

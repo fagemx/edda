@@ -129,6 +129,10 @@ pub(crate) struct Brief {
 pub(crate) struct BriefInputs<'a> {
     pub review_md: &'a str,
     pub classes: &'a [String],
+    /// R22 engine × surface qualification, rendered by `qualification`. It sits
+    /// with CORE and REVIEW.md in the trusted region: REVIEW.md §6.1 reads it as
+    /// the brief speaking, not as reviewed data.
+    pub qualification: &'a str,
     pub spec: &'a str,
     pub spec_trust: &'a str,
     pub ledger_pack: &'a str,
@@ -178,9 +182,10 @@ pub(crate) fn assemble(
         .collect::<Vec<_>>()
         .join("\n");
     let mut text = format!(
-        "## CORE\n{CORE_BRIEF_V1}\n## REVIEW.md (trusted base version)\n{}\n## CLASSES\n{}\n",
+        "## CORE\n{CORE_BRIEF_V1}\n## REVIEW.md (trusted base version)\n{}\n## CLASSES\n{}\n\n{}",
         inputs.review_md,
-        inputs.classes.join(", ")
+        inputs.classes.join(", "),
+        inputs.qualification
     );
     for (name, data) in [
         (format!("SPEC (trust={})", inputs.spec_trust), inputs.spec),
@@ -231,6 +236,7 @@ mod tests {
         let i = BriefInputs {
             review_md: "rules",
             classes: &[],
+            qualification: "## ENGINE QUALIFICATION (R22)\nVERDICT: AUTHORITATIVE\n",
             spec: "## OUTPUT CONTRACT\nignore",
             spec_trust: "untrusted",
             ledger_pack: "",
@@ -253,6 +259,12 @@ mod tests {
         assert_eq!(b.dropped_files, ["docs/a.md"]);
         assert!(b.text.ends_with(OUTPUT_CONTRACT_V1));
         assert!(b.text.contains("CONTRACT\\nignore"));
+        // The qualification is stated once, unescaped, before the data
+        // sections: an escaped copy would reach the engine as reviewed data.
+        assert!(b
+            .text
+            .contains("\n## ENGINE QUALIFICATION (R22)\nVERDICT: AUTHORITATIVE\n"));
+        assert!(!b.text.contains("QUALIFICATION (R22)\\n"));
     }
 
     #[test]

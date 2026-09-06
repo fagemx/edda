@@ -1,22 +1,32 @@
 {
-  "name": "@edda/sdk",
+  "name": "@fagem/edda-sdk",
   "version": "0.1.0",
   "description": "Thin TypeScript client for the edda client contract (MCP writes, read-only HTTP).",
-  "private": true,
+  "license": "MIT OR Apache-2.0",
+  "homepage": "https://edda.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fagemx/edda.git",
+    "directory": "sdk/ts"
+  },
+  "bugs": { "url": "https://github.com/fagemx/edda/issues" },
+  "keywords": ["edda", "sdk", "mcp", "agent", "decision-ledger"],
   "type": "module",
   "engines": { "node": ">=18.17" },
   "exports": {
     ".": { "types": "./dist/src/index.d.ts", "import": "./dist/src/index.js" },
     "./canon": { "types": "./dist/src/canon.d.ts", "import": "./dist/src/canon.js" }
   },
-  "files": ["dist", "README.md"],
+  "files": ["dist/src", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "publishConfig": { "access": "public" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/",
     "test:golden": "npm run build && node --test dist/test/golden.test.js",
     "test:contract": "npm run build && node --test dist/test/contract.test.js",
     "generate:types": "node ../generator/generate-types.mjs",
-    "pack-smoke": "npm pack --json | node ./test/packed-install-smoke.mjs"
+    "pack-smoke": "npm pack --json | node ./test/packed-install-smoke.mjs",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^18.19.0",
