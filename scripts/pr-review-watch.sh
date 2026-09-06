@@ -75,8 +75,10 @@
 # review`'s exit: 1 is Changes Requested and 3 an unqualified LGTM, which the
 # adapter publishes under a `Provisional — …` Verdict line (REVIEW.md §6.4).
 # Both are settled reviews: the comment is posted, the status goes through the
-# union rule (a Provisional round is never success), and a Provisional round
-# gets no review:* label. Neither is a dead verdict for the overload rule (#998).
+# union rule (gate_state: a Provisional round is never success on its own — at
+# P0=P1=0 it is pending, with any P0/P1 it stands like any non-qualifying
+# verdict), and a Provisional round gets no review:* label. Neither is a dead
+# verdict for the overload rule (#998).
 #
 # The watcher NEVER merges. Merge stays behind operator authorization
 # (pr.merge-policy).
@@ -183,14 +185,21 @@ gate_state() {
     /^[[:space:]]*$/ { next }
     {
       n++
-      if ($1 == "LGTM" && $2 ~ /^[0-9]+$/ && $2 + 0 == 0 &&
-          $3 ~ /^[0-9]+$/ && $3 + 0 == 0) next
+      zero = ($2 ~ /^[0-9]+$/ && $2 + 0 == 0 && $3 ~ /^[0-9]+$/ && $3 + 0 == 0)
+      if ($1 == "LGTM" && zero) { ok = 1; next }
+      # An unqualified LGTM (Provisional, REVIEW.md §6.4) at P0=P1=0 is pending:
+      # never success on its own, and once the escalation is adjudicated it
+      # does not hold a later qualified LGTM on the same sha at failure. With
+      # any P0/P1 it is a standing non-qualifying verdict like any other
+      # (§8, GH-742; #1023 round 1).
+      if ($1 == "Provisional" && zero) next
       bad = 1
     }
     END {
       if (n == 0)   print "error"
       else if (bad) print "failure"
-      else          print "success"
+      else if (ok)  print "success"
+      else          print "failure"
     }
   '
 # /D8-debt
@@ -638,7 +647,7 @@ post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
     log "pr$1 status withheld this poll: new malformed verdict notice(s):$seen"
     return 3
   fi
-  prior=$(printf '%s\n' "$comments" | awk -F'\t' '$1 == "LGTM" || $1 == "Changes Requested"')
+  prior=$(printf '%s\n' "$comments" | awk -F'\t' '$1 == "LGTM" || $1 == "Changes Requested" || $1 == "Provisional"')
   state=$(printf '%s\n%s\n' "$prior" "$(verdict_body_lines "$2" < "$3")" | gate_state)
   gh api "repos/$REPO/statuses/$2" \
     -f state="$state" -f context="Independent Review" \
