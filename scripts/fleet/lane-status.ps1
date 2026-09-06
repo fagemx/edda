@@ -13,11 +13,35 @@
 # gone/reused flag a registration whose wrapper can never run its completion
 # unregister — a stale registration the reaper (scripts/fleet/lane-reap.ps1)
 # can collect.
+# `delivery` answers the one question the raw fields cannot (GH-748): a lane
+# killed at its execution limit never reaches its wrapper's finally block, so
+# it publishes no terminal receipt — `done=False lastTaskResult=267014` looked
+# exactly like a lane that had not finished yet, and three lanes that had run
+# every gate were read as never having run.
+#   complete     — the wrapper published its terminal receipt
+#   pending      — the task is still Running
+#   not-started  — registered, never run (SCHED_S_TASK_HAS_NOT_RUN)
+#   UNDELIVERED  — the task is finished and there is no receipt; whatever the
+#                  lane did was never handed over
 # Exit codes: 0 = reported (found at least one lane), 1 = no matching task.
 param(
   [string]$Name = '',
   [string]$LogDir = "$env:TEMP\edda-lanes"
 )
+
+# The scheduler result codes a fleet lane actually meets. A bare 267014 is
+# unreadable; the name is the difference between "still working" and "killed
+# without delivering" (GH-748).
+function TaskResultName([int]$Code) {
+  switch ($Code) {
+    0          { 'OK' }
+    267009     { 'SCHED_S_TASK_RUNNING' }
+    267011     { 'SCHED_S_TASK_HAS_NOT_RUN' }
+    267014     { 'SCHED_S_TASK_TERMINATED' }
+    2147942402 { 'ERROR_FILE_NOT_FOUND' }
+    default    { '' }
+  }
+}
 
 $tasks = if ($Name) {
   $cand = @("edda-$Name", "edda-lane-$Name", $Name)
@@ -139,7 +163,16 @@ foreach ($t in $tasks) {
     $liveProcs = $liveSet.Count
   }
 
-  "{0} state={1} lastTaskResult={2} logBytes={3} done={4} head={5} cwd={6} liveProcs={7} controller={8}" -f `
-    $t.TaskName, $t.State, $info.LastTaskResult, $logBytes, $doneExists, $head, $cwd, $liveProcs, $controller
+  $resultName = TaskResultName ([int]$info.LastTaskResult)
+  $resultText = if ($resultName) { "$($info.LastTaskResult)($resultName)" } else { "$($info.LastTaskResult)" }
+  $delivery =
+    if ($doneExists) { 'complete' }
+    elseif ($t.State -eq 'Running') { 'pending' }
+    elseif ([int]$info.LastTaskResult -eq 267011) { 'not-started' }
+    elseif ($resultName) { "UNDELIVERED($resultName)" }
+    else { "UNDELIVERED(result=$($info.LastTaskResult))" }
+
+  "{0} state={1} lastTaskResult={2} logBytes={3} done={4} delivery={5} head={6} cwd={7} liveProcs={8} controller={9}" -f `
+    $t.TaskName, $t.State, $resultText, $logBytes, $doneExists, $delivery, $head, $cwd, $liveProcs, $controller
 }
 exit 0

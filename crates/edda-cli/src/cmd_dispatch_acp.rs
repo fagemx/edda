@@ -279,6 +279,7 @@ mod tests {
             issue: None,
             machine: None,
             json: false,
+            verbose: false,
         }
     }
 
