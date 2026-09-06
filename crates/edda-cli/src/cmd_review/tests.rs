@@ -28,6 +28,13 @@ impl AgentLauncher for Reviewer {
             .iter()
             .any(|v| matches!(v.as_str(), "bash" | "powershell" | "write" | "edit")));
         assert!(prompt.ends_with(brief::OUTPUT_CONTRACT_V1));
+        // Without its R22 qualification the engine is a checklist-type engine
+        // per REVIEW.md 6.1 and escalates D5 on every round (GH-999).
+        assert!(prompt.contains(qualification::SECTION_HEADING), "{prompt}");
+        assert!(
+            prompt.contains("VERDICT: AUTHORITATIVE for this surface"),
+            "{prompt}"
+        );
         let head = std::fs::read_to_string(cwd.join(git::SUBJECT_MARKER))?;
         assert_eq!(git::commit(cwd, "HEAD")?, head);
         *self.session.lock().unwrap() = Some(session.into());
@@ -79,7 +86,12 @@ fn fixture(qualified: bool) -> (tempfile::TempDir, std::path::PathBuf, ReviewArg
     testrepo::run(&root, &["checkout", "-qb", "feature"]);
     let head = testrepo::commit_file(&root, "b.txt", "change\n", "feature change");
     let ledger = edda_ledger::Ledger::open_or_init(&root).unwrap();
-    let mut args = ReviewArgs::default();
+    let mut args = ReviewArgs {
+        // R22 is a table of model ids: the brief can only name an engine the
+        // caller requested, and this one matches what the launcher observes.
+        model: Some("openai-codex/gpt-5.6-sol".into()),
+        ..Default::default()
+    };
     if qualified {
         std::fs::write(root.join("acceptance.txt"), "Review b.txt correctness").unwrap();
         args.spec = Some("acceptance.txt".into());
@@ -121,7 +133,7 @@ async fn end_to_end_four_exit_codes_and_author_ledger() {
             cost: None,
         };
         let prepared = prepare::prepare(&args, &root).unwrap();
-        let (payload, event) = run_with(prepared, &args, &reviewer).await.unwrap();
+        let (payload, event, _) = run_with(prepared, &args, &reviewer).await.unwrap();
         assert_eq!(
             verdict::exit_code(&payload),
             code,
@@ -137,6 +149,23 @@ async fn end_to_end_four_exit_codes_and_author_ledger() {
         assert_eq!(
             saved.payload["subject"]["head_sha"],
             git::commit(&root, "HEAD").unwrap()
+        );
+        // The receipt reads back what the brief told the engine, added
+        // alongside the existing keys rather than replacing any of them.
+        assert_eq!(
+            saved.payload["engine_qualification"],
+            serde_json::json!({
+                "surface": "internal-tool",
+                "deciding_path": serde_json::Value::Null,
+                "engine": "gpt-5.6-sol",
+                "authority": "authoritative",
+                "authoritative_engines": [
+                    "claude-opus-5 (only via Claude Code)",
+                    "gpt-5.6-sol",
+                    "glm-5.3-flash"
+                ],
+                "require_model_diversity": false,
+            })
         );
         assert_eq!(
             testrepo::run(&root, &["worktree", "list", "--porcelain"])
@@ -155,11 +184,11 @@ async fn resume_reuses_ledger_session_and_increments_round() {
         session: Mutex::new(None),
         cost: Some(0.12),
     };
-    let (first, _) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
+    let (first, ..) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
         .await
         .unwrap();
     args.resume = true;
-    let (second, _) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
+    let (second, ..) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
         .await
         .unwrap();
     assert_eq!(first.reviewer.session_id, second.reviewer.session_id);
@@ -268,7 +297,7 @@ async fn default_review_never_executes_declared_gate() {
         session: Mutex::new(None),
         cost: Some(0.01),
     };
-    let (payload, _) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
+    let (payload, ..) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
         .await
         .unwrap();
     assert!(!sentinel.exists());
@@ -288,7 +317,7 @@ async fn proof_failures_are_unreviewed_unqualified_and_do_not_consume_rounds() {
             session: Mutex::new(None),
             cost: Some(0.01),
         };
-        let (payload, _) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
+        let (payload, ..) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
             .await
             .unwrap();
         assert_eq!(payload.subject.worktree_check.as_deref(), Some("failed"));
@@ -313,7 +342,7 @@ async fn mutating_ran_gate_persists_unreviewed_proof_failure_before_engine_launc
         session: Mutex::new(None),
         cost: Some(0.01),
     };
-    let (payload, _) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
+    let (payload, ..) = run_with(prepare::prepare(&args, &root).unwrap(), &args, &reviewer)
         .await
         .unwrap();
     assert_eq!(payload.subject.worktree_check.as_deref(), Some("failed"));
