@@ -34,6 +34,7 @@
 #
 # usage: review-pr.sh <PR> [round] [prev-sha] [--sha <full-sha>] [--dry-run]
 #        review-pr.sh verdict-label < verdict-text        (offline helper)
+#          prints review:lgtm | review:changes-requested | shadow, or nothing
 #
 # Environment:
 #   EDDA_REPO              owner/repo              (default fagemx/edda)
@@ -139,7 +140,23 @@ SHA_GIVEN=""
 # failed` rather than guessing). `Changes Requested` is tested first so a line
 # naming both resolves to the blocking side.
 if [ "${1:-}" = "verdict-label" ]; then
-  vline=$(sed -n '/^#\{1,\}[[:space:]]*Verdict/,$p' | sed '1d' \
+  body=$(cat)
+  # REVIEW.md §8: a round whose §7 heading carries the ` (SHADOW)` suffix is
+  # never a verdict — it sets no `review:*` label and no `Independent Review`
+  # status; it is calibration evidence. Name it, so no caller can turn that
+  # evidence into a gate by reading its Verdict line. The suffix is the only
+  # marker (§7): a `- shadow: true` header field is documentation that
+  # accompanies it and never substitutes for it, and the word in the prose is
+  # no marker at all. Both recorded positions are accepted — after
+  # `Round <N>` (§7) and at line end (the #917 trim contract) — and only on
+  # the first line, because a verdict comment BEGINS with its heading (R23):
+  # a heading quoted further down belongs to some other round.
+  heading=$(printf '%s\n' "$body" | sed -n '1{s/\r$//;p;}')
+  case "$heading" in
+    '## Code Review: Round '*' (SHADOW) — PR #'*) echo shadow; exit 0 ;;
+    '## Code Review: Round '*' — PR #'*' (SHADOW)') echo shadow; exit 0 ;;
+  esac
+  vline=$(printf '%s\n' "$body" | sed -n '/^#\{1,\}[[:space:]]*Verdict/,$p' | sed '1d' \
           | grep -m1 -E 'LGTM|Changes Requested') || vline=""
   case "$vline" in
     *"Changes Requested"*) echo "review:changes-requested" ;;

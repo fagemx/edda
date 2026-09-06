@@ -418,6 +418,51 @@ expect_label \
     '' \
     '## Code Review: Round 1\n\n### Verdict\n(the reviewer stopped here)\n'
 
+# --- GH-887: a SHADOW round is never a verdict --------------------------------
+# REVIEW.md §8: the ` (SHADOW)` heading suffix is the only marker, and such a
+# round sets no review:* label and no Independent Review status. verdict-label
+# must therefore name it rather than resolve it to a verdict a caller would
+# then act on. The suffix is accepted in both recorded positions (§7: after
+# `Round <N>`; the #917 trim contract: line end).
+
+expect_label     'D6a: a SHADOW round after Round <N> is not a verdict'     'shadow'     '## Code Review: Round 1 (SHADOW) — PR #1 @ 6486228c728dff5d488b5756e918af0bccde0eb5
+
+- shadow: true
+
+### Verdict
+LGTM (P0=0, P1=0)
+'
+
+expect_label     'D6b: a SHADOW suffix at line end is the same marker'     'shadow'     '## Code Review: Round 2 — PR #1 @ 6486228c728dff5d488b5756e918af0bccde0eb5 (SHADOW)
+
+### Verdict
+Changes Requested, P0=1, P1=0
+'
+
+expect_label     'D6c: the same round without the suffix keeps its verdict label'     'review:lgtm'     '## Code Review: Round 1 — PR #1 @ 6486228c728dff5d488b5756e918af0bccde0eb5
+
+- shadow: false
+
+### Verdict
+LGTM (P0=0, P1=0)
+'
+
+expect_label     'D6d: the header field alone never makes a round shadow (§7: the suffix is the only marker)'     'review:lgtm'     '## Code Review: Round 1 — PR #1 @ 6486228c728dff5d488b5756e918af0bccde0eb5
+
+- shadow: true
+
+### Verdict
+LGTM (P0=0, P1=0)
+'
+
+expect_label     'D6e: SHADOW in the prose is not a heading suffix'     'review:lgtm'     '## Code Review: Round 1 — PR #1 @ 6486228c728dff5d488b5756e918af0bccde0eb5
+
+The (SHADOW) round on the prior SHA agreed.
+
+### Verdict
+LGTM (P0=0, P1=0)
+'
+
 # verdict-label must still exit 0 when it emits nothing, so the caller decides.
 printf '%b' 'no verdict at all\n' | timeout 60 sh "$root/scripts/review-pr.sh" verdict-label >/dev/null || \
     fail 'D4e: verdict-label must exit 0 when it emits no label'

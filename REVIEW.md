@@ -778,10 +778,13 @@ rather than overwriting it.
   carries the ` (SHADOW)` suffix — the only SHADOW marker; the `- shadow:
   true` header field is documentation that accompanies it, never a
   substitute — sets no `review:*` label and no `Independent Review` status —
-  the union rule below ignores it. It is calibration evidence, not a gate:
-  `scripts/review-compare.sh <pr> <sha>` diffs its findings against the
-  authoritative round (the latest §7 round on that SHA without the suffix)
-  and prints one `for-ledger` line for the calibration ledger (issue #887).
+  the union rule below ignores it, and `sh scripts/review-pr.sh
+  verdict-label` prints `shadow` for it rather than a `review:*` label, so no
+  caller can turn it into a gate by reading its Verdict line. It is
+  calibration evidence, not a gate: `scripts/review-compare.sh <pr> <sha>`
+  diffs its findings against the authoritative round (the latest §7 round on
+  that SHA without the suffix) and prints one `for-ledger` line for the
+  calibration ledger (issue #887).
 
 Internal verifier reports, task receipts and CI do not replace this comment
 (`loop`). For a local-only delivery with no PR, record the same fields in the
