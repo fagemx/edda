@@ -125,6 +125,7 @@ fn write_accepted_to_ledger(
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
 
         let actor = match d.kind {

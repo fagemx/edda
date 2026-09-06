@@ -72,6 +72,7 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
             review_after,
             reversibility,
             village_id,
+            cites: None,
         });
     }
     // Text fallback: "key: value — reason"
@@ -92,6 +93,7 @@ pub fn extract_decision(payload: &Value) -> Option<DecisionPayload> {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     })
 }
 

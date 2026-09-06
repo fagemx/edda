@@ -49,16 +49,7 @@ fn enable_webhook(repo: &std::path::Path, url: &str) {
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Serialize tests that mutate process-global env vars
-/// (EDDA_SESSION_ID/LABEL, EDDA_HOOK_TIMEOUT_MS) — without this they
-/// race each other under the parallel test runner. Same pattern as
-/// edda-bridge-claude's ENV_LOCK. Poisoned locks are recovered so one
-/// failing test doesn't cascade.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
-}
+use crate::test_support::env_guard;
 
 fn setup_workspace() -> (std::path::PathBuf, edda_ledger::Ledger) {
     let n = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -139,6 +130,7 @@ fn decide_writes_binding_to_coordination_log() {
         None,
         &[],
         &[],
+        &[],
     )
     .unwrap();
 
@@ -181,6 +173,7 @@ fn decide_writes_structured_ledger_event() {
         None,
         &[],
         &[],
+        &[],
     )
     .unwrap();
 
@@ -210,76 +203,6 @@ fn decide_writes_structured_ledger_event() {
 }
 
 #[test]
-fn ratify_records_separate_event_and_makes_decision_binding() {
-    let _store = crate::test_support::isolated_store();
-    let _env = env_guard();
-    let (tmp, ledger) = setup_workspace();
-    let pid = edda_store::project_id(&tmp);
-    let _ = edda_store::ensure_dirs(&pid);
-    std::env::set_var("EDDA_SESSION_ID", "test-ratify-s1");
-    std::env::set_var("EDDA_SESSION_LABEL", "worker");
-
-    decide(
-        &tmp,
-        "db.engine=sqlite",
-        Some("embedded"),
-        &[],
-        None,
-        None,
-        &[],
-        &[],
-    )
-    .unwrap();
-
-    // Before ratify: the active decision is not binding.
-    assert!(ledger.ratified_decision_events().unwrap().is_empty());
-
-    ratify(
-        &tmp,
-        "db.engine",
-        Some("looks right"),
-        Some("operator"),
-        None,
-    )
-    .unwrap();
-
-    // A distinct decision_ratify event was written (not a mutation).
-    let ratify_events = ledger.iter_events_by_type("decision_ratify").unwrap();
-    assert_eq!(ratify_events.len(), 1);
-    assert_eq!(ratify_events[0].payload["key"], "db.engine");
-    assert_eq!(ratify_events[0].payload["ratified_by"], "operator");
-
-    // The projection now reports the key as binding.
-    let views = ledger.active_decisions(None, None, None, None).unwrap();
-    let view = views.iter().find(|v| v.key == "db.engine").unwrap();
-    let set = ledger.ratified_decision_events().unwrap();
-    assert!(edda_ledger::view::is_decision_ratified(view, &set));
-
-    std::env::remove_var("EDDA_SESSION_ID");
-    std::env::remove_var("EDDA_SESSION_LABEL");
-    let _ = std::fs::remove_dir_all(&tmp);
-    let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
-}
-
-#[test]
-fn ratify_unknown_key_errors() {
-    let _store = crate::test_support::isolated_store();
-    let _env = env_guard();
-    let (tmp, _ledger) = setup_workspace();
-    let pid = edda_store::project_id(&tmp);
-    let _ = edda_store::ensure_dirs(&pid);
-    let err = ratify(&tmp, "nope.key", None, None, None)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("no active decision"),
-        "unexpected error: {err}"
-    );
-    let _ = std::fs::remove_dir_all(&tmp);
-    let _ = std::fs::remove_dir_all(edda_store::project_dir(&pid));
-}
-
-#[test]
 fn decide_supersedes_prior_decision_same_key() {
     let _store = crate::test_support::isolated_store();
     let _env = env_guard();
@@ -290,7 +213,18 @@ fn decide_supersedes_prior_decision_same_key() {
     std::env::set_var("EDDA_SESSION_ID", "test-decide-super-s3");
     std::env::set_var("EDDA_SESSION_LABEL", "infra");
 
-    decide(&tmp, "db.engine=SQLite", None, &[], None, None, &[], &[]).unwrap();
+    decide(
+        &tmp,
+        "db.engine=SQLite",
+        None,
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+        &[],
+    )
+    .unwrap();
     decide(
         &tmp,
         "db.engine=PostgreSQL",
@@ -298,6 +232,7 @@ fn decide_supersedes_prior_decision_same_key() {
         &[],
         None,
         None,
+        &[],
         &[],
         &[],
     )
@@ -344,6 +279,7 @@ fn bare_decide_beside_two_live_sessions_refuses_without_writing() {
         &[],
         None,
         None,
+        &[],
         &[],
         &[],
     )

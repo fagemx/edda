@@ -1267,6 +1267,7 @@ fn collect_session_ledger_extras_basic() {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     };
     let evt = edda_core::event::new_decision_event(&branch, None, "system", &dp).unwrap();
     let decision_ts = evt.ts.clone();

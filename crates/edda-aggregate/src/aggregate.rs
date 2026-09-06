@@ -891,6 +891,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let event =
             edda_core::event::new_decision_event("main", None, "system", &decision).unwrap();

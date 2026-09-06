@@ -816,6 +816,21 @@ fn vector_norm(
 
 // ── Human-readable formatting ────────────────────────────────────────
 
+/// Render `ratified_by` for a reader.
+///
+/// The value is typed by prefix (`edda ratify`): `evidence:pr#N@sha` is a
+/// merged PR (GH-764), `rule:<name>` is a rule in the binary (GH-761), and
+/// anything else is a person's self-asserted `--by`. Printing the prefix raw
+/// would read as `ratified (by evidence:pr#12@…)`, which buries the one thing
+/// a reader wants — *what* made this binding.
+fn render_authority(by: &str) -> String {
+    match by.split_once(':') {
+        Some(("evidence", what)) => format!("binding (evidence: {what})"),
+        Some(("rule", what)) => format!("binding (rule: {what})"),
+        _ => format!("ratified (by {by})"),
+    }
+}
+
 pub fn format_human(result: &AskResult) -> String {
     let mut out = String::new();
 
@@ -824,13 +839,10 @@ pub fn format_human(result: &AskResult) -> String {
         for d in &result.decisions {
             let status = if d.is_active { "active" } else { "superseded" };
             let gov = match d.governance.status.as_str() {
-                "ratified" => {
-                    if let Some(by) = &d.governance.ratified_by {
-                        format!("ratified (by {by})")
-                    } else {
-                        "ratified".to_string()
-                    }
-                }
+                "ratified" => match &d.governance.ratified_by {
+                    Some(by) => render_authority(by),
+                    None => "ratified".to_string(),
+                },
                 _ => "unratified".to_string(),
             };
             out.push_str(&format!(
@@ -1091,6 +1103,29 @@ pub fn affected_paths_for_hits(ledger: &Ledger, hits: &[DecisionHit]) -> Vec<Vec
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn typed_authority_prefixes_render_as_binding() {
+        use super::render_authority;
+        // GH-764 / GH-761: a reader must see what conferred authority, not a
+        // prefix glued to a name.
+        assert_eq!(
+            render_authority("evidence:pr#764@03c604ffea4b2a1731b7866e7f701374eb03b156"),
+            "binding (evidence: pr#764@03c604ffea4b2a1731b7866e7f701374eb03b156)"
+        );
+        assert_eq!(
+            render_authority("rule:cited-authority"),
+            "binding (rule: cited-authority)"
+        );
+        // A person's free-text `--by` keeps the original wording, including
+        // one that happens to contain a colon.
+        assert_eq!(render_authority("alice"), "ratified (by alice)");
+        assert_eq!(
+            render_authority("operator on 2026-09-03"),
+            "ratified (by operator on 2026-09-03)"
+        );
+        assert_eq!(render_authority("ops:oncall"), "ratified (by ops:oncall)");
+    }
+
     use super::*;
     use edda_core::event::{
         finalize_event, new_checkpoint_event, new_note_event, CheckpointPayload, RejectedHypothesis,
