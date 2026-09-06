@@ -922,6 +922,56 @@ documented surface cannot silently drift from the binary;
 | `skill` | Manage skill registry (scan, list, show, search) | Experimental registry |
 | `tool-tier` | Tool tier governance — query and manage tool risk classifications | Governance plumbing consumed by other tools |
 
+### edda fleet
+
+Fleet health — measure the path-classified mix of recent work. `edda fleet
+health` reads the merged PRs and opened issues of the last `--window` days
+through `gh` (server-side date filters `merged:>=` / `created:>=`), and
+classifies each by changed paths (merged PRs) or by the backticked paths of
+the issue's `## Predicted surface` section (issues): `crates/`, `sdk/` →
+product; `scripts/`, `docs/fleet/`, `.github/`, `REVIEW.md` → mechanism;
+anything else → other. A PR or issue takes the majority class of its paths;
+ties resolve product over mechanism over other. The report states two
+numbers against ledger thresholds: the product share of merged PRs and the
+mechanism issues opened per day.
+
+```bash
+edda fleet health --window 7 --json
+edda fleet health --line
+```
+
+Flags:
+
+- `--window <N>` — rolling window in days; default 7; must be at least 1.
+- `--json` — emit the full health report as JSON.
+- `--line` — emit one digest line, intended for the digest adapter (#1025).
+- `--json` and `--line` are mutually exclusive (usage error, exit 2).
+
+Thresholds come from ledger decisions: `fleet.health.product-share-floor`
+(default 50) and `fleet.health.mech-issues-per-day-ceiling` (default 9).
+`thresholds.source` is `ledger` when both keys resolved, `default` when
+neither did, and `mixed` otherwise.
+
+Sampling: each query fetches at most 200 PRs / 300 issues.
+`merged_prs.fetched`, `merged_prs.truncated`, `issues_opened.fetched` and
+`issues_opened.truncated` record how many rows came back and whether a cap
+was hit. A truncated sample must not be trusted for the freeze decision.
+
+Status: RED when the product share is below the floor or mechanism issues
+per day exceed the ceiling; YELLOW when within 20% of either; GREEN
+otherwise. RED sets `mechanism_dispatch: freeze`, otherwise `open`; the
+ordering layer that consumes it is #1015.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | GREEN |
+| 3 | YELLOW |
+| 4 | RED |
+| 1 | error (a `gh` failure or a failed stdout write) |
+| 2 | usage |
+
 ### edda review
 
 Review a committed branch using an independent read-only agent and record a

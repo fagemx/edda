@@ -16,6 +16,10 @@ use clap::Subcommand;
 use serde::Deserialize;
 use std::path::Path;
 
+/// Server-side caps on the `gh` list queries.
+const PR_CAP: u64 = 200;
+const ISSUE_CAP: u64 = 300;
+
 #[derive(Subcommand)]
 pub enum FleetCmd {
     /// Fleet health: path-classified merge/issue mix, thresholds, status
@@ -103,6 +107,10 @@ pub struct MergedCounts {
     other: u64,
     total: u64,
     product_share_pct: Option<f64>,
+    /// Rows the query returned before window filtering.
+    pub fetched: u64,
+    /// True when the fetch hit its server-side cap (200 PRs).
+    pub truncated: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -113,6 +121,10 @@ pub struct IssueCounts {
     total: u64,
     mechanism_per_day: f64,
     mechanism_last_24h: u64,
+    /// Rows the query returned before window filtering.
+    pub fetched: u64,
+    /// True when the fetch hit its server-side cap (300 issues).
+    pub truncated: bool,
 }
 
 /// The full fleet-health report. Serialized verbatim under `--json`.
@@ -196,13 +208,17 @@ pub fn surface_paths(issue_body: &str) -> Vec<String> {
     result
 }
 
-/// Pure, deterministic, network-free health computation.
+/// Pure, deterministic, network-free health computation. `fetched_prs` and
+/// `fetched_issues` are the raw row counts each `gh` query returned before
+/// window filtering; a fetch is `truncated` when it hit its cap.
 pub fn compute(
     merged: &[MergedPr],
     issues: &[IssueRow],
     now: DateTime<Utc>,
     window_days: u32,
     thresholds: Thresholds,
+    fetched_prs: u64,
+    fetched_issues: u64,
 ) -> Health {
     let mut merged_counts = [0u64; 3];
     for pr in merged {
@@ -246,6 +262,8 @@ pub fn compute(
             other: merged_counts[2],
             total: merged_total,
             product_share_pct,
+            fetched: fetched_prs,
+            truncated: fetched_prs >= PR_CAP,
         },
         issues_opened: IssueCounts {
             product: issue_counts[0],
@@ -254,6 +272,8 @@ pub fn compute(
             total: issue_total,
             mechanism_per_day,
             mechanism_last_24h,
+            fetched: fetched_issues,
+            truncated: fetched_issues >= ISSUE_CAP,
         },
         thresholds,
         status: status.to_string(),
@@ -339,7 +359,8 @@ fn collect_merged(
     repo_root: &Path,
     window_start: DateTime<Utc>,
     now: DateTime<Utc>,
-) -> Vec<MergedPr> {
+) -> (Vec<MergedPr>, u64) {
+    let search = format!("merged:>={}", window_start.format("%Y-%m-%d"));
     let stdout = gh_output(
         repo_root,
         &[
@@ -347,20 +368,35 @@ fn collect_merged(
             "list",
             "--state",
             "merged",
+            "--search",
+            &search,
             "--limit",
             "200",
             "--json",
             "number,mergedAt,files",
         ],
     );
-    let prs: Vec<GhPr> = match serde_json::from_slice(&stdout) {
-        Ok(v) => v,
+    match parse_merged(&stdout, window_start, now) {
+        Ok(result) => result,
         Err(err) => {
             eprintln!("Error: gh pr list output unparseable: {err}");
             std::process::exit(1);
         }
-    };
-    prs.into_iter()
+    }
+}
+
+/// Parse `gh pr list --json number,mergedAt,files` output and keep the rows
+/// whose `mergedAt` falls inside `[window_start, now]`. Returns the kept PRs
+/// and the fetched row count before filtering.
+pub fn parse_merged(
+    bytes: &[u8],
+    window_start: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<(Vec<MergedPr>, u64)> {
+    let prs: Vec<GhPr> = serde_json::from_slice(bytes)?;
+    let fetched = prs.len() as u64;
+    let kept = prs
+        .into_iter()
         .filter_map(|pr| {
             let merged_at = DateTime::parse_from_rfc3339(&pr.merged_at)
                 .ok()?
@@ -374,14 +410,16 @@ fn collect_merged(
                 paths: pr.files.into_iter().map(|f| f.path).collect(),
             })
         })
-        .collect()
+        .collect();
+    Ok((kept, fetched))
 }
 
 fn collect_issues(
     repo_root: &Path,
     window_start: DateTime<Utc>,
     now: DateTime<Utc>,
-) -> Vec<IssueRow> {
+) -> (Vec<IssueRow>, u64) {
+    let search = format!("created:>={}", window_start.format("%Y-%m-%d"));
     let stdout = gh_output(
         repo_root,
         &[
@@ -389,20 +427,34 @@ fn collect_issues(
             "list",
             "--state",
             "all",
+            "--search",
+            &search,
             "--limit",
             "300",
             "--json",
             "number,createdAt,body",
         ],
     );
-    let issues: Vec<GhIssue> = match serde_json::from_slice(&stdout) {
-        Ok(v) => v,
+    match parse_issues(&stdout, window_start, now) {
+        Ok(result) => result,
         Err(err) => {
             eprintln!("Error: gh issue list output unparseable: {err}");
             std::process::exit(1);
         }
-    };
-    issues
+    }
+}
+
+/// Parse `gh issue list --json number,createdAt,body` output and keep the
+/// rows whose `createdAt` falls inside `[window_start, now]`. Returns the
+/// kept issues and the fetched row count before filtering.
+pub fn parse_issues(
+    bytes: &[u8],
+    window_start: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<(Vec<IssueRow>, u64)> {
+    let issues: Vec<GhIssue> = serde_json::from_slice(bytes)?;
+    let fetched = issues.len() as u64;
+    let kept = issues
         .into_iter()
         .filter_map(|issue| {
             let created_at = DateTime::parse_from_rfc3339(&issue.created_at)
@@ -417,14 +469,20 @@ fn collect_issues(
                 body: issue.body,
             })
         })
-        .collect()
+        .collect();
+    Ok((kept, fetched))
 }
 
 fn print_and_exit(output: &str, code: i32) -> ! {
     use std::io::Write;
     let mut stdout = std::io::stdout();
-    let _ = stdout.write_all(output.as_bytes());
-    let _ = stdout.flush();
+    if let Err(err) = stdout
+        .write_all(output.as_bytes())
+        .and_then(|()| stdout.flush())
+    {
+        eprintln!("Error: stdout write failed: {err}");
+        std::process::exit(1);
+    }
     std::process::exit(code);
 }
 
@@ -443,8 +501,9 @@ fn share_display(share: Option<f64>) -> String {
     }
 }
 
-/// The default text report. Exact line formats are a contract consumed by
-/// operators and by `scripts/fleet/daily-digest.sh`.
+/// The default text report. The text, JSON, and one-line formats are
+/// intended for the follow-up digest adapter (#1025) and the ordering layer
+/// (#1015); no in-repo consumer calls them yet.
 pub fn render_text(h: &Health) -> String {
     let window_days = h.window_days;
     let product = h.merged_prs.product;
@@ -459,13 +518,20 @@ pub fn render_text(h: &Health) -> String {
     let source = h.thresholds.source.as_str();
     let status = h.status.as_str();
     let dispatch = h.mechanism_dispatch.as_str();
-    format!(
+    let pr_fetched = h.merged_prs.fetched;
+    let issue_fetched = h.issues_opened.fetched;
+    let mut text = format!(
         "fleet health — last {window_days}d\n\
          merged PRs: product {product}/{total} ({share}% ; floor {floor}%)\n\
          issues opened: mechanism {mech}/{issue_total} ({per_day:.1}/day ; ceiling {ceiling}/day ; last 24h {last_24h})\n\
+         sample: PRs {pr_fetched}/{PR_CAP}, issues {issue_fetched}/{ISSUE_CAP}\n\
          thresholds: {source}\n\
          status: {status} — mechanism dispatch {dispatch}"
-    )
+    );
+    if h.merged_prs.truncated || h.issues_opened.truncated {
+        text.push_str("\nwarning: sample truncated — do not trust status for the freeze decision");
+    }
+    text
 }
 
 /// One-line summary for digest embedding.
@@ -476,9 +542,14 @@ pub fn render_line(h: &Health) -> String {
     let per_day = h.issues_opened.mechanism_per_day;
     let ceiling = h.thresholds.mech_issues_per_day_ceiling;
     let dispatch = h.mechanism_dispatch.as_str();
-    format!(
-        "health: {status} | product share {share}% (floor {floor}%) | mechanism issues {per_day:.1}/day (ceiling {ceiling}/day) | mechanism dispatch {dispatch}"
-    )
+    let source = h.thresholds.source.as_str();
+    let mut line = format!(
+        "health: {status} | product share {share}% (floor {floor}%) | mechanism issues {per_day:.1}/day (ceiling {ceiling}/day) | thresholds {source} | mechanism dispatch {dispatch}"
+    );
+    if h.merged_prs.truncated || h.issues_opened.truncated {
+        line.push_str(" | TRUNCATED");
+    }
+    line
 }
 
 /// CLI entry point. Prints, then exits with the status code:
@@ -496,10 +567,18 @@ pub fn run(cmd: FleetCmd, repo_root: &Path) -> anyhow::Result<()> {
 
     let now = Utc::now();
     let window_start = now - Duration::days(i64::from(window));
-    let merged = collect_merged(repo_root, window_start, now);
-    let issues = collect_issues(repo_root, window_start, now);
+    let (merged, fetched_prs) = collect_merged(repo_root, window_start, now);
+    let (issues, fetched_issues) = collect_issues(repo_root, window_start, now);
     let thresholds = read_thresholds(repo_root);
-    let health = compute(&merged, &issues, now, window, thresholds);
+    let health = compute(
+        &merged,
+        &issues,
+        now,
+        window,
+        thresholds,
+        fetched_prs,
+        fetched_issues,
+    );
 
     let code = exit_code(&health.status);
     if json {
@@ -623,7 +702,15 @@ mod tests {
     fn compute_green_with_healthy_mix() {
         let merged: Vec<MergedPr> = product_prs(8).into_iter().chain(mechanism_prs(2)).collect();
         let issues = vec![issue(1, &mech_issue_body(), days_ago(2))];
-        let h = compute(&merged, &issues, now(), 7, defaults());
+        let h = compute(
+            &merged,
+            &issues,
+            now(),
+            7,
+            defaults(),
+            merged.len() as u64,
+            issues.len() as u64,
+        );
         assert_eq!(h.status, "GREEN");
         assert_eq!(h.mechanism_dispatch, "open");
         assert_eq!(h.merged_prs.product, 8);
@@ -633,7 +720,7 @@ mod tests {
     #[test]
     fn compute_red_when_product_share_below_floor() {
         let merged: Vec<MergedPr> = product_prs(2).into_iter().chain(mechanism_prs(8)).collect();
-        let h = compute(&merged, &[], now(), 7, defaults());
+        let h = compute(&merged, &[], now(), 7, defaults(), merged.len() as u64, 0);
         assert_eq!(h.status, "RED");
         assert_eq!(h.mechanism_dispatch, "freeze");
     }
@@ -643,7 +730,15 @@ mod tests {
         let issues: Vec<IssueRow> = (1..=10)
             .map(|i| issue(i, &mech_issue_body(), now() - Duration::hours(i as i64)))
             .collect();
-        let h = compute(&product_prs(10), &issues, now(), 1, defaults());
+        let h = compute(
+            &product_prs(10),
+            &issues,
+            now(),
+            1,
+            defaults(),
+            10,
+            issues.len() as u64,
+        );
         assert!(h.issues_opened.mechanism_per_day > 9.0);
         assert_eq!(h.status, "RED");
         assert_eq!(h.mechanism_dispatch, "freeze");
@@ -655,7 +750,7 @@ mod tests {
             .into_iter()
             .chain(mechanism_prs(9))
             .collect();
-        let h = compute(&merged, &[], now(), 7, defaults());
+        let h = compute(&merged, &[], now(), 7, defaults(), merged.len() as u64, 0);
         let share = h.merged_prs.product_share_pct.unwrap();
         assert!((share - 55.0).abs() < 1e-9);
         assert_eq!(h.status, "YELLOW");
@@ -664,7 +759,7 @@ mod tests {
 
     #[test]
     fn compute_zero_merged_prs_share_is_none_and_not_red_on_share() {
-        let h = compute(&[], &[], now(), 7, defaults());
+        let h = compute(&[], &[], now(), 7, defaults(), 0, 0);
         assert_eq!(h.merged_prs.product_share_pct, None);
         assert_ne!(h.status, "RED");
     }
@@ -673,7 +768,15 @@ mod tests {
     fn health_json_serializes_required_keys() {
         let merged: Vec<MergedPr> = product_prs(8).into_iter().chain(mechanism_prs(2)).collect();
         let issues = vec![issue(1, &mech_issue_body(), days_ago(2))];
-        let h = compute(&merged, &issues, now(), 7, defaults());
+        let h = compute(
+            &merged,
+            &issues,
+            now(),
+            7,
+            defaults(),
+            merged.len() as u64,
+            issues.len() as u64,
+        );
         let json = serde_json::to_string(&h).unwrap();
         for key in [
             "status",
@@ -685,5 +788,67 @@ mod tests {
         ] {
             assert!(json.contains(&format!("\"{key}\"")), "missing key: {key}");
         }
+    }
+
+    // Inline fixtures shaped exactly like `gh pr list --json number,mergedAt,files`
+    // and `gh issue list --json number,createdAt,body` output.
+    // now() = 2026-09-06T12:00:00Z; window_start = now() - 7d = 2026-08-30T12:00:00Z.
+    const PRS_JSON: &str = r#"[
+        {"number": 1, "mergedAt": "2026-09-05T12:00:00Z",
+         "files": [{"path": "crates/edda-cli/src/main.rs"}, {"path": "sdk/python/x.py"}]},
+        {"number": 2, "mergedAt": "2026-08-30T11:59:59Z",
+         "files": [{"path": "scripts/keep.sh"}]},
+        {"number": 3, "mergedAt": "2026-09-06T12:00:01Z",
+         "files": [{"path": "docs/after.md"}]}
+    ]"#;
+
+    const ISSUES_JSON: &str = r###"[
+        {"number": 10, "createdAt": "2026-09-05T12:00:00Z",
+         "body": "## Predicted surface\n`scripts/fleet/next-issue.sh`\n## doneWhen\ndone.\n"},
+        {"number": 11, "createdAt": "2026-08-30T11:59:59Z",
+         "body": "## Predicted surface\n`none`\n"},
+        {"number": 12, "createdAt": "2026-09-06T12:00:01Z",
+         "body": "## Predicted surface\n`none`\n"}
+    ]"###;
+
+    fn window_start() -> DateTime<Utc> {
+        now() - Duration::days(7)
+    }
+
+    #[test]
+    fn parse_merged_keeps_only_rows_inside_the_window() {
+        let (prs, fetched) = parse_merged(PRS_JSON.as_bytes(), window_start(), now()).unwrap();
+        assert_eq!(fetched, 3);
+        assert_eq!(prs.len(), 1);
+        assert_eq!(prs[0].number, 1);
+    }
+
+    #[test]
+    fn parse_merged_kept_paths_classify_product() {
+        let (prs, _) = parse_merged(PRS_JSON.as_bytes(), window_start(), now()).unwrap();
+        assert_eq!(prs[0].paths.len(), 2);
+        assert_eq!(classify_path(&prs[0].paths[0]), Class::Product);
+        assert_eq!(classify_path(&prs[0].paths[1]), Class::Product);
+        assert_eq!(classify_paths(&prs[0].paths), Class::Product);
+    }
+
+    #[test]
+    fn parse_issues_keeps_only_rows_inside_the_window() {
+        let (issues, fetched) =
+            parse_issues(ISSUES_JSON.as_bytes(), window_start(), now()).unwrap();
+        assert_eq!(fetched, 3);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].number, 10);
+        assert_eq!(
+            classify_paths(&surface_paths(&issues[0].body)),
+            Class::Mechanism
+        );
+    }
+
+    #[test]
+    fn parse_malformed_json_is_err() {
+        let bad: &[u8] = br#"[{"number": 1, "mergedAt": "#;
+        assert!(parse_merged(bad, window_start(), now()).is_err());
+        assert!(parse_issues(bad, window_start(), now()).is_err());
     }
 }
