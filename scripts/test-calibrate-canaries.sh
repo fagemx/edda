@@ -328,6 +328,60 @@ case $out in
   *) bad 'claude model_observed mismatch did not void the row' ;;
 esac
 
+# --- 9. model_observed sourcing (GH-949) ------------------------------------
+# Regression corpus: the six calibration-v1 verdicts (#884, recorded in
+# #949) all supplied a model_observed value whose cited source violates
+# template v2 §7 — the five glm runs cited the PI_MODEL environment variable
+# (documented shape: `（env PI_MODEL）` and close variants), the Opus run
+# self-certified an "environment declaration" (`（由系統環境宣告取得）`), which
+# names no system carrier. Each corpus row below must void the run with a
+# sourcing violation on stderr and exit 1 — the value being correct is not a
+# measurement. A verdict citing the session file (the system carrier) is not
+# flagged; a verdict reporting no model_observed line at all is not flagged
+# either (nothing to compare — the #574 receipt is the durable shape), which
+# is what the earlier scenarios' transcripts already exercise.
+sourcing_case() { # <name> <model_observed-line> <want-rc> <want-stderr-substr>
+  name=$1
+  {
+    printf '%s
+' 'FINDING P0 canaries-fixture/c1-shell-precedence/deploy.sh:7 — POSIX sh 把 || 與 && 同優先序、左結合'
+    printf '%s
+' "$2"
+  } > "$WORK/transcript.txt"
+  CALIB_STUB_TRANSCRIPT="$WORK/transcript.txt"
+  export CALIB_STUB_TRANSCRIPT
+  unset CALIB_STUB_SESSION_MODEL
+  out=$(run_calibrate --runs 1)
+  got=$?
+  if [ "$got" -eq "$3" ]; then
+    good "$name exit $got"
+  else
+    bad "$name: expected exit $3, got $got (stderr: $(head -2 "$WORK/stderr.txt"))"
+  fi
+  case $(cat "$WORK/stderr.txt") in
+    *"$4"*) good "$name stderr: $4" ;;
+    *) bad "$name: stderr '$4' not found ($(head -2 "$WORK/stderr.txt"))" ;;
+  esac
+}
+
+# the six calibration-v1 verdicts (regression corpus) — all flagged
+sourcing_case 'corpus glm r1 (env PI_MODEL)'   'model_observed: z-ai/glm-5.3-flash（env PI_MODEL）' 1 'sourcing violation (environment variable cited'
+sourcing_case 'corpus glm r2 (env var words)'   'model_observed: z-ai/glm-5.3-flash (from PI_MODEL env var)' 1 'sourcing violation (environment variable cited'
+sourcing_case 'corpus glm r3 (bare PI_MODEL)'   'model_observed: z-ai/glm-5.3-flash（PI_MODEL）' 1 'sourcing violation (environment variable cited'
+sourcing_case 'corpus glm r4 (env-var zh)'   'model_observed: z-ai/glm-5.3-flash（環境變數 PI_MODEL）' 1 'sourcing violation (environment variable cited'
+sourcing_case 'corpus glm r5 (environment variable en)'   'model_observed: z-ai/glm-5.3-flash (copied from environment variable)' 1 'sourcing violation (environment variable cited'
+sourcing_case 'corpus opus o1 (self-certified declaration)'   'model_observed: claude-opus-5（由系統環境宣告取得）' 1 'sourcing violation (source is not a system carrier'
+
+# correct value, forbidden source — still a violation (#949 doneWhen 3)
+sourcing_case 'env source with correct value'   'model_observed: openrouter/z-ai/glm-5.3-flash（env PI_MODEL）' 1 'sourcing violation'
+
+# verdict citing the session file — the system carrier — is not flagged
+sourcing_case 'session-file citation is clean'   'model_observed: openrouter/z-ai/glm-5.3-flash (pi session file, modelId)' 0 ''
+
+# sourcing-ok but the verdict value differs from the system read — its own
+# outcome (a sourcing mismatch, not a swap: requested == observed here)
+sourcing_case 'sourcing mismatch is distinct from swap'   'model_observed: some/other-model (pi session file, modelId)' 1 'sourcing mismatch (verdict reports some/other-model; system read openrouter/z-ai/glm-5.3-flash'
+
 # --- nothing written outside the temp dir -----------------------------------
 # By construction every script write goes under $TMPDIR (clone, out files,
 # session dirs); the per-scenario assertions proved the clone is removed and

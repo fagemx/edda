@@ -172,6 +172,12 @@ sol 抓到而他人漏掉的 finding 會固化為新清單項或新金絲雀，�
 `total_cost_usd`、`usage`、`modelUsage`、`session_id` … 但**沒有** `model`）。
 引擎的自我標示、模板照抄值、環境變數身分（`PI_MODEL`）都不是系統觀察值；
 取不到就寫 `unverified`。長期來源是 #574 S5（dispatch 收據自動附帶）。
+**違反來源規則有後果**：校準 runner（`scripts/calibrate-canaries.sh`）會把判決
+自報的 `model_observed` 與它自己從系統讀到的值比對，並對來源分類——引用環境
+變數、未命名來源、或自我認證（宣稱「系統告知」卻不指名系統載體）皆記為
+sourcing violation、該次 run 記 `void`；引用了系統載體但值與系統讀值不符記為
+sourcing mismatch。兩者都是獨立於 swap 的 void 結果（#949：校準 v1 六份判決
+全部違反本條，即為迴歸語料）。
 合併政策讀**欄位**不讀標頭（裁定 `fleet.review-engine`）。
 
 ### Review elapsed source (GH-644)

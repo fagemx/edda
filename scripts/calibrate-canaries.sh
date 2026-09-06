@@ -38,6 +38,15 @@
 # front-matter severity. A run whose engine exit ≠ 0 or whose model_observed
 # differs from model_requested marks every row of that run `void` — never
 # silently scored (model_requested ≠ model_observed is a P0 incident).
+#
+# Sourcing (GH-949): the verdict's own `model_observed` line is classified
+# against template v2 §7 — the system is the only source. A verdict citing an
+# environment variable, naming no source, or self-certifying ("由系統環境宣告
+# 取得" names no carrier) is a sourcing violation and voids the run with its
+# own reason; a verdict citing a system carrier whose value differs from the
+# system-read value is a sourcing mismatch. Both are distinct outcomes from
+# the swap void. A verdict reporting no model_observed at all is not flagged —
+# nothing to compare; the #574 dispatch receipt is the durable shape.
 # The mechanical score is conservative: human scoring per the expected.md
 # 評分提示 remains the authority for qualification decisions.
 #
@@ -420,6 +429,64 @@ score_run() { # <transcript> -> ROW lines (canary result severity_match) on stdo
   rm -f "$findings_file"
 }
 
+# verdict_sourcing <transcript> — classify the verdict's own `model_observed`
+# line (template v2 §7, GH-949). Prints "<kind><TAB><value>"; prints nothing
+# when the verdict reports no model_observed line at all. kind:
+#   ok         the citation names a system carrier (session file / modelUsage)
+#   env        the citation names an environment variable
+#   unnamed    a value is reported but no source is named
+#   unverified the citation names something that is not a system carrier
+#              (self-certification, e.g. 由系統環境宣告取得)
+verdict_sourcing() { # <transcript>
+  awk '
+    index($0, "model_observed") > 0 {
+      i = index($0, "model_observed") + 14
+      if (substr($0, i) ~ /^[[:space:]]*:/) line = $0
+    }
+    END {
+      if (line == "") exit 0
+      sub(/^[^:]*:[[:space:]]*/, "", line)
+      value = line
+      cit = ""
+      p = index(line, "（")
+      q = index(line, "(")
+      if (p > 0 && (q == 0 || p < q)) { value = substr(line, 1, p - 1); cit = substr(line, p) }
+      else if (q > 0) { value = substr(line, 1, q - 1); cit = substr(line, q) }
+      sub(/[[:space:]]+$/, "", value)
+      kind = "unnamed"
+      if (cit != "") {
+        if (cit ~ /PI_MODEL|環境變數|environment variable|env var/) kind = "env"
+        else if (cit ~ /session|\.jsonl|modelUsage|modelId|output-format/) kind = "ok"
+        else kind = "unverified"
+      }
+      printf "%s\t%s\n", kind, value
+    }' "$1"
+}
+
+# sourcing_outcome <transcript> <system-observed> — the void reason for the
+# verdict's own model_observed claim, or empty when clean (#949). Distinct
+# from the swap check: a sourcing violation voids a run whose requested and
+# observed models agree, because a correct value from a forbidden source is
+# not a measurement.
+sourcing_outcome() { # <transcript> <system-observed>
+  sv=$(verdict_sourcing "$1")
+  [ -n "$sv" ] || return 0
+  skind=$(printf '%s' "$sv" | cut -f1)
+  svalue=$(printf '%s' "$sv" | cut -f2)
+  case $skind in
+    env)
+      printf 'model_observed sourcing violation (environment variable cited: %s; template v2 §7 — the system is the only source)' "$svalue" ;;
+    unnamed)
+      printf 'model_observed sourcing violation (no source named: %s)' "$svalue" ;;
+    unverified)
+      printf 'model_observed sourcing violation (source is not a system carrier: %s)' "$svalue" ;;
+    ok)
+      if [ "$2" != unknown ] && [ "$svalue" != "$2" ]; then
+        printf 'model_observed sourcing mismatch (verdict reports %s; system read %s — a sourcing mismatch, not a swap)' "$svalue" "$2"
+      fi ;;
+  esac
+}
+
 for pair in $VALIDATED; do
   backend=${pair%%|*}
   id=${pair#*|}
@@ -434,6 +501,7 @@ for pair in $VALIDATED; do
   costs=''
   last_observed=unknown
   last_cost='-'
+  last_sourcing=''
 
   run=1
   while [ "$run" -le "$RUNS" ]; do
@@ -476,12 +544,22 @@ for pair in $VALIDATED; do
     if [ "$exit_code" -ne 0 ]; then
       any_void=1
       reason="engine exit $exit_code"
+      sourcing_reason=''
     elif [ "$observed" != "$id" ]; then
       any_void=1
       reason='model_observed mismatch (model_requested ≠ model_observed is a P0 incident)'
+      sourcing_reason=''
     else
-      reason=''
+      sourcing_reason=$(sourcing_outcome "$out" "$observed")
+      if [ -n "$sourcing_reason" ]; then
+        any_void=1
+        reason=$sourcing_reason
+      else
+        reason=''
+      fi
     fi
+
+    last_sourcing=$sourcing_reason
 
     rows_file="$CLONE/rows-$san-$run"
     if [ -n "$reason" ]; then
@@ -558,6 +636,7 @@ UNIONEOF
   echo "engine: $backend:$id"
   echo "requested: $id"
   echo "observed: $last_observed"
+  echo "sourcing: ${last_sourcing:--}"
   echo "cost_usd: $usum"
   echo "runs: $RUNS (void runs are marked void in the table)"
   echo
