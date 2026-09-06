@@ -41,8 +41,10 @@
    多個 scope 用逗號或分號串成同一個字串，例如
    `-Owns "crates/edda-cli/src/cmd_dispatch.rs,docs/guides/operator-runbook.md"`。
    舊的 `-Owns a b c` 寫法已不再接受：`pwsh -File` 只綁第一個值，其餘會被
-   `-Brief`／`-LogDir`／`-BuildLane` 這些還空著的具名參數悄悄吃掉（GH-937），
-   現在會在綁定階段就大聲失敗。
+   `-SessionId`／`-LogDir` 這些還空著的具名參數悄悄吃掉——實測基準版，
+   被 `-LogDir` 吃掉那次把 lane 的 wrapper/log/done 寫進了 repo 裡（GH-937）。
+   `-BuildLane` 不在此列：它的 allowlist 會在建任何 log 目錄前大聲失敗。
+   現在整個寫法都會在綁定階段就大聲失敗。
    scope 必須是 canonical repository-relative path：不可用 absolute、drive/UNC、`..` 或 `./`
    alias；review lane 是唯讀可省略。
    Rust lane 要明確傳，如 `-BuildLane worker-1`；docs lane 只寫文件不編譯，

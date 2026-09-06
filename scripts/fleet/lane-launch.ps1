@@ -47,10 +47,13 @@
 # That shape is forced by `pwsh -File`, which passes every argument as a
 # literal string and binds them one at a time: the older `-Owns a b c`
 # spelling bound only `a`, and each trailing value was silently taken by
-# whichever optional parameter still had a free positional slot - observed
-# filling -Brief, -LogDir and -BuildLane, the last of which wrote a lane's
-# wrapper/log/done into a repository directory named after a scope path
-# (GH-937). Re-reading the raw argv tail could not repair that: the
+# whichever optional parameter still had a free positional slot - measured
+# on the base tree, the strays filled -SessionId and then -LogDir, and it
+# was the -LogDir hit that wrote a lane's wrapper/log/done into a repository
+# directory named after a scope path (GH-937). -BuildLane cannot produce
+# that outcome: its allowlist check fails loudly well before any log
+# directory is created, so a scope path there is a refusal, not a silent
+# relocation. Re-reading the raw argv tail could not repair any of it: the
 # misbinding happens inside the binder, before the first script line runs.
 # The param block is therefore declared PositionalBinding=$false, so a stray
 # value can never reach another parameter - `-Owns a b c` now fails loudly
