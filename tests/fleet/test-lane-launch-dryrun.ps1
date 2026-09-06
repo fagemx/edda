@@ -89,9 +89,10 @@ $name = "gh822-test-$PID-$(Get-Date -Format 'HHmmss')"
 $logDir = Join-Path $env:TEMP "gh822-lane-test-$PID"
 $cwd = Join-Path $env:TEMP "gh822-lane-test-cwd-$PID"
 $realLog = Join-Path $logDir "$name.log"
-# Every write-enabled lane needs at least one -Owns scope (GH-772); this
-# test predates that guard and every leg below died at it until GH-937
-# made the parameter usable from a `pwsh -File` caller in the first place.
+# Every write-enabled lane needs at least one -Owns scope (GH-772). This
+# test predates that guard and passed none, so every leg below died at it —
+# not for want of GH-937: the single-value spelling used here bound on the
+# base too. GH-937 is why one argument now carries every scope.
 $ownsScope = "tests/fleet/test-lane-launch-dryrun.ps1"
 $realDone = Join-Path $logDir "$name.done"
 
