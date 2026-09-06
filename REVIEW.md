@@ -136,9 +136,11 @@ safety boundary.
 
 A PR that implements a recorded decision names it on a `Decision: <key>[,
 <key>]` line, in the same shape as `Issue: #N` (GH-764). It is a machine
-field, not prose: on merge, `scripts/fleet/ratify-merged.sh` reads that line
-and runs `edda ratify <key> --evidence "pr#<N>@<sha>"` for each key, so the
-line is what makes the decision binding. Mine it with the same shape as the
+field, not prose: `scripts/fleet/ratify-merged.sh` reads that line and runs
+`edda ratify <key> --evidence "pr#<N>@<sha>"` for each key, which is what
+makes the decision binding. Nothing invokes that script on merge yet — the
+merge step is #769, and until it calls the hook the line is ratified by
+running the script by hand after a merge. Mine it with the same shape as the
 issue line:
 
 # review-spec:check DECISIONS
@@ -404,11 +406,13 @@ non-product cycles without useful progress and route the finding instead
 **U8 — a `Decision:` key is implemented by this diff. P1.** Input is the §1
 DECISIONS block; for every key it prints, run `edda ask <key>` for the value
 and reason, then read the diff: the change must deliver that decision, not
-merely mention it. The finding is *claimed but not implemented* — merging
-writes `ratified_by: evidence:pr#N@sha` against that key (GH-764), so an
-unbacked line confers binding authority on a decision no reviewed code
-implements, and unlike the `--by` free text this typed form replaces, it
-cannot even be read as one named person's assertion. A decision implemented
+merely mention it. The finding is *claimed but not implemented* — the line is
+the input to `scripts/fleet/ratify-merged.sh`, which writes `ratified_by:
+evidence:pr#N@sha` against that key (GH-764; run by hand after a merge until
+the merge step calls it — #769), so an unbacked line confers binding authority
+on a decision no reviewed code implements, and unlike the `--by` free text
+this typed form replaces, it cannot even be read as one named person's
+assertion. A decision implemented
 **without** the line is not this finding: it ratifies nothing, which is a
 missed convention rather than a false fact. Empty DECISIONS output makes the
 rule inapplicable, never failed.

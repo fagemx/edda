@@ -217,6 +217,9 @@ which authority conferred binding status:
 | `edda ratify <KEY> --evidence pr#<N>@<sha>` | `evidence:pr#N@sha` | a merged PR (GH-764) |
 | `edda ratify --by-rule <RULE>` | `rule:<RULE>` | a rule in the binary (GH-761) |
 
+`edda log --type decision_ratify` prints `<key> by <ratified_by>` in its detail
+column, so the three forms are told apart there without `--json`.
+
 ```bash
 edda ratify [OPTIONS] <KEY>
 edda ratify --by-rule <RULE> [--dry-run] [OPTIONS]
