@@ -18,6 +18,7 @@ mod cmd_dispatch;
 mod cmd_dispatch_acp;
 mod cmd_draft;
 mod cmd_export;
+mod cmd_fleet;
 mod cmd_gc;
 mod cmd_group;
 mod cmd_init;
@@ -516,6 +517,11 @@ enum Command {
         json: bool,
         #[command(subcommand)]
         cmd: Option<cmd_phase::PhaseCmd>,
+    },
+    /// Fleet health and ordering (GH-1014)
+    Fleet {
+        #[command(subcommand)]
+        cmd: cmd_fleet::FleetCmd,
     },
     /// Scan and record PR events from GitHub
     Prs {
@@ -1337,6 +1343,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Some(phase_cmd) => cmd_phase::run_gate_sugar(phase_cmd, &repo_root),
             None => cmd_phase::execute(&repo_root, json),
         },
+        Command::Fleet { cmd } => cmd_fleet::run(cmd, &repo_root),
         Command::Prs { cmd } => cmd_prs::run_prs(cmd, &repo_root),
         Command::Pipeline { cmd } => match cmd {
             PipelineCmd::Run { issue_id, dry_run } => {
