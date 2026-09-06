@@ -1,6 +1,6 @@
 {
-  "spec_sha": "1a7bed557908a5d4e998015bc8ea00f096b9bd73",
-  "spec_ref": "main @ 1a7bed5 — PR #872 (review_verdict schema + fixture) landed on trunk; pin moved off the PR857 candidate per #934 (2026-09-06)",
+  "spec_sha": "9f31ea0ed0fce7bbd1bbd4c1149ee68da5774ce4",
+  "spec_ref": "review-verdict correction tree — commit 9f31ea0 on fix/gh934-repin-spec-review-verdict restores the fixture digest 92e34d0 broke (#872); moved per #934 round 2 (2026-09-06). Repin to a trunk SHA at the next spec change.",
   "layout": {
     "schemas": "spec/events/*.schema.json + registry.json + canonical-v1.json",
     "fixtures": "tests/fixtures/events/*.jsonl"
