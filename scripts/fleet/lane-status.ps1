@@ -32,7 +32,12 @@ param(
 # The scheduler result codes a fleet lane actually meets. A bare 267014 is
 # unreadable; the name is the difference between "still working" and "killed
 # without delivering" (GH-748).
-function TaskResultName([int]$Code) {
+# [long], not [int]: LastTaskResult is a CIM System.UInt32 and
+# ERROR_FILE_NOT_FOUND (2147942402) overflows Int32. Casting it threw, which
+# left delivery= empty — a fifth, undocumented state — made this very arm
+# unreachable, and still exited 0. That code is the one #694 records and the
+# one a relative -File argument produces, so it is the case that matters most.
+function TaskResultName([long]$Code) {
   switch ($Code) {
     0          { 'OK' }
     267009     { 'SCHED_S_TASK_RUNNING' }
@@ -163,12 +168,12 @@ foreach ($t in $tasks) {
     $liveProcs = $liveSet.Count
   }
 
-  $resultName = TaskResultName ([int]$info.LastTaskResult)
+  $resultName = TaskResultName ([long]$info.LastTaskResult)
   $resultText = if ($resultName) { "$($info.LastTaskResult)($resultName)" } else { "$($info.LastTaskResult)" }
   $delivery =
     if ($doneExists) { 'complete' }
     elseif ($t.State -eq 'Running') { 'pending' }
-    elseif ([int]$info.LastTaskResult -eq 267011) { 'not-started' }
+    elseif ([long]$info.LastTaskResult -eq 267011) { 'not-started' }
     elseif ($resultName) { "UNDELIVERED($resultName)" }
     else { "UNDELIVERED(result=$($info.LastTaskResult))" }
 

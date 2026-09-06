@@ -134,6 +134,13 @@ fn foreground_argv(args: &DispatchArgs, cwd: &Path, prompt: &Path, session: &str
     if args.json {
         out.push("--json".into());
     }
+    // GH-748: without this the detached worker runs verbose:false and leaves
+    // the zero-byte log this issue exists to remove — and the detached path is
+    // the lane path, which is where logBytes=0 was reported. Fixing only the
+    // foreground dispatch would have left the observed case broken.
+    if args.verbose {
+        out.push("--verbose".into());
+    }
     out
 }
 
@@ -288,6 +295,7 @@ pub fn update_worker_manifest(path: Option<&Path>, code: Option<i32>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_kind::AgentKind;
     use std::sync::Mutex;
 
     static MANIFEST_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -313,6 +321,55 @@ mod tests {
             Some(value) => std::env::set_var("EDDA_DETACHED_MANIFEST", value),
             None => std::env::remove_var("EDDA_DETACHED_MANIFEST"),
         }
+    }
+
+    fn detach_args(verbose: bool) -> DispatchArgs {
+        DispatchArgs {
+            owns: vec![],
+            detach: true,
+            build_lane: None,
+            detach_log_dir: None,
+            agent: AgentKind::Claude,
+            task_id: None,
+            prompt_file: Some("p.txt".into()),
+            session_id: None,
+            resume: false,
+            cwd: None,
+            budget_usd: None,
+            timeout_sec: None,
+            permission_mode: None,
+            model: None,
+            thinking: None,
+            tools: None,
+            exclude_tools: None,
+            session_dir: None,
+            list_models: None,
+            issue: None,
+            machine: None,
+            json: false,
+            verbose,
+        }
+    }
+
+    #[test]
+    fn detached_worker_inherits_verbose() {
+        // GH-748: the zero-byte log was reported on LANES, which dispatch
+        // through the detached supervisor. A --verbose that stops at the
+        // supervisor leaves the observed case exactly as broken as before.
+        let cwd = Path::new("cwd");
+        let prompt = Path::new("prompt.md");
+
+        let argv = foreground_argv(&detach_args(true), cwd, prompt, "session");
+        assert!(
+            argv.iter().any(|a| a == "--verbose"),
+            "--verbose must reach the worker: {argv:?}"
+        );
+
+        let quiet = foreground_argv(&detach_args(false), cwd, prompt, "session");
+        assert!(
+            !quiet.iter().any(|a| a == "--verbose"),
+            "quiet stays the default: {quiet:?}"
+        );
     }
 }
 

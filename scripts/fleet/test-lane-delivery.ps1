@@ -182,6 +182,30 @@ function Get-CimInstance { param([Parameter(Position = 0)]$ClassName, [string]$F
   Set-Content -LiteralPath (Join-Path $statusLog 'gh748-timeout.done') -Value '0' -Encoding ascii
   $doneOut = (& pwsh -NoProfile -NonInteractive -File $statusDriver 2>&1) -join "`n"
   Assert-True ($doneOut -match 'delivery=complete') "a lane with a terminal receipt reports delivery=complete; output was:`n$doneOut"
+
+  # ERROR_FILE_NOT_FOUND, typed the way CIM really types it. The mock above
+  # writes an untyped 267014, which PowerShell makes an Int32 — that is why an
+  # [int] cast survived the fixture while overflowing on the one code that
+  # matters most: 0x80070002 is what a relative -File argument produces, it is
+  # the value GH-694 records, and casting it threw, so delivery= printed empty
+  # (a fifth, undocumented state), the ERROR_FILE_NOT_FOUND arm was
+  # unreachable, and lane-status still exited 0.
+  $notFoundDriver = Join-Path $scratch 'status-notfound-driver.ps1'
+  @'
+$ErrorActionPreference = 'Stop'
+function Get-ScheduledTask {
+  [CmdletBinding()] param([string]$TaskName)
+  [pscustomobject]@{ TaskName = 'edda-lane-gh694-notfound'; State = 'Ready'; Actions = @([pscustomobject]@{ Arguments = '-File nowhere.ps1'; WorkingDirectory = '' }) }
+}
+function Get-ScheduledTaskInfo { [CmdletBinding()] param([string]$TaskName) [pscustomobject]@{ LastTaskResult = [uint32]2147942402 } }
+function Get-CimInstance { param([Parameter(Position = 0)]$ClassName, [string]$Filter) @() }
+& $env:GH748_STATUS -Name gh694-notfound -LogDir $env:GH748_NOTFOUNDLOG
+'@ | Set-Content -LiteralPath $notFoundDriver -Encoding utf8
+  $notFoundLog = Join-Path $scratch 'notfoundlog'; New-Item -ItemType Directory -Force -Path $notFoundLog | Out-Null
+  $env:GH748_NOTFOUNDLOG = $notFoundLog
+  $nf = (& pwsh -NoProfile -NonInteractive -File $notFoundDriver 2>&1) -join "`n"
+  Assert-True ($nf -match 'ERROR_FILE_NOT_FOUND') "lane-status names a uint32 0x80070002 result; output was:`n$nf"
+  Assert-True ($nf -match 'delivery=UNDELIVERED\(ERROR_FILE_NOT_FOUND\)') "delivery names the not-found result rather than printing empty; output was:`n$nf"
 }
 finally {
   Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

@@ -121,6 +121,15 @@ fn validate_args(args: &DispatchArgs) -> Result<()> {
     if args.prompt_file.is_some() || args.session_id.is_some() || args.resume {
         bail!("ACP dispatch derives prompt and session continuity from --task-id; --prompt-file, --session-id, and --resume are not accepted");
     }
+    // GH-574 honesty gate: an option the backend cannot enforce is refused,
+    // never accepted and dropped. ACP has no live-activity stream, so
+    // --verbose would silently do nothing and the caller would read the empty
+    // log as "the agent produced nothing".
+    if args.verbose {
+        bail!(
+            "ACP dispatch does not support --verbose: there is no live activity stream to enable"
+        );
+    }
     if args.budget_usd.is_some()
         || args.permission_mode.is_some()
         || args.model.is_some()
@@ -291,6 +300,14 @@ mod tests {
         detach.detach = true;
         let error = validate_args(&detach).unwrap_err();
         assert!(error.to_string().contains("--detach"), "{error}");
+
+        // GH-574 honesty gate: ACP has no live-activity stream, so accepting
+        // --verbose and dropping it would leave the caller reading an empty
+        // log as "the agent produced nothing".
+        let mut verbose = acp_args();
+        verbose.verbose = true;
+        let error = validate_args(&verbose).unwrap_err();
+        assert!(error.to_string().contains("--verbose"), "{error}");
 
         let mut prompt = acp_args();
         prompt.prompt_file = Some("prompt.txt".into());
