@@ -107,8 +107,10 @@ EOF
     fi
 
     # R24 field (3). CONFLICTING holds the PR; UNKNOWN is surfaced without
-    # holding it; MERGEABLE and an empty value (an older gh without the
-    # field) add nothing to the line.
+    # holding it; MERGEABLE and an empty value add nothing to the line. An
+    # empty value means the object carried no mergeable key at all, as the
+    # older fixtures do — NOT an older gh, which rejects an unknown --json
+    # field before the request and so lands in fail_read instead.
     line="#$num $head12 $base $state"
     if [ "$mergeable" = "CONFLICTING" ]; then
         line="$line mergeable=CONFLICTING"
