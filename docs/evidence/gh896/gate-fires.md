@@ -33,7 +33,7 @@ quarantine arms — so an excluded test cannot rot unnoticed while it sits out.
 
 ## What is excluded, and the measurement behind each
 
-Three tests are **quarantined**: excluded from every job, named and printed at
+These tests are **quarantined**: excluded from every job, named and printed at
 runtime with the issue that owns letting them back in. The count is printed
 too, so the list cannot grow quietly.
 
@@ -45,14 +45,15 @@ too, so the list cannot grow quietly.
 
 One test is **platform-bound** rather than quarantined:
 `scripts/test-review-capabilities.sh` generates a helper carrying
-`set -o pipefail` (`scripts/review-pr.sh:806`); ubuntu's `sh` is dash and
+`set -o pipefail` (the `set -o pipefail` it writes into that runner — `scripts/review-pr.sh`, no line number here on purpose: this citation has already gone stale once); ubuntu's `sh` is dash and
 rejects it with `Illegal option`, so there it would fail for the shell rather
 than for anything it asserts. The windows job runs it, where `sh` is Git Bash.
 
-Two of the quarantined tests are green in exactly one place each — the
-workstation where they have always been hand-run. That is #896's premise as a
-measurement rather than an argument: a test nothing executes drifts until it
-only passes where its author was standing.
+One quarantined test, `test-next-loop.sh`, is green in exactly one place —
+the workstation where it has always been hand-run. That is #896's premise as
+a measurement rather than an argument: a test nothing executes drifts until it
+only passes where its author was standing. The other two are red everywhere,
+which is the same story further along.
 
 **#896's doneWhen names `test-lane-helpers.sh` among the tests that must run,
 and it runs nowhere.** That is why the PR opening this gate carries
@@ -71,7 +72,7 @@ Three were changed, by an earlier round:
 
 - **`test-review-capabilities.sh`** — it executed its generated Linux runner
   with `sh`; production execs the shebang (`#!/usr/bin/env bash`,
-  `review-pr.sh:805-806`). Changed to `bash`. This did **not** rescue ubuntu:
+  `review-pr.sh`, which writes a `#!/usr/bin/env bash` shebang and `set -o pipefail` into that runner). Changed to `bash`. This did **not** rescue ubuntu:
   its own commit `38875ca` still shows `Illegal option -o pipefail` in job
   `101396161654`, which is why the test is platform-bound rather than fixed.
 - **`test-lane-helpers.sh`** — case 1 grepped `git worktree list --porcelain`

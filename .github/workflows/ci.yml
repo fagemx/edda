@@ -220,10 +220,10 @@ jobs:
   #
   # Not everything runs here. scripts/test-review-capabilities.sh runs in
   # fleet-tests-windows below (ubuntu's dash rejects the `set -o pipefail` in
-  # the helper it generates). Three tests are QUARANTINED in the runner — red
-  # on every environment that could carry them — named at runtime with #963
-  # (test-lane-helpers.sh), #964 (test-next-loop.sh) and #971
-  # (test-collision-scan.sh), and counted so the list cannot grow quietly.
+  # the helper it generates). Some tests are QUARANTINED in the runner, which
+  # names each one, the measured failure, and the issue that owns removing it,
+  # and prints a count so the list cannot grow quietly. That file is the single
+  # source for which tests those are — deliberately not repeated here.
   fleet-tests:
     name: Fleet shell tests
     needs: [detect]
@@ -241,7 +241,7 @@ jobs:
   # GH-896 round 1 (P0-1) asked for the second route #896's doneWhen offers,
   # since some of its tests cannot run on ubuntu. This job is it, and it runs
   # exactly one test: scripts/test-review-capabilities.sh, whose generated
-  # helper carries `set -o pipefail` (scripts/review-pr.sh:806) — ubuntu's sh
+  # helper carries `set -o pipefail` (the `set -o pipefail` it writes into that runner, `scripts/review-pr.sh`) — ubuntu's sh
   # is dash and rejects it with `Illegal option`, so there the test would fail
   # for the shell rather than for anything it asserts. Here sh is Git Bash.
   #
@@ -271,11 +271,16 @@ jobs:
           fetch-depth: 0
       - name: Run the Windows-only fleet tests
         # Not the glob runner: this is the one test the ubuntu job cannot run
-        # but this one can. test-review-capabilities.sh generates a helper
-        # carrying `set -o pipefail` (scripts/review-pr.sh:806) which ubuntu's
-        # dash rejects with 'Illegal option'; here `sh` is Git Bash, so it runs.
-        # test-lane-helpers.sh (#963) and test-next-loop.sh (#964) are NOT here:
-        # both are red on this runner too, quarantined in run-fleet-tests.sh.
+        # but this one can. test-review-capabilities.sh generates a Linux
+        # runner from scripts/review-pr.sh carrying a bash shebang and
+        # `set -o pipefail`; ubuntu's sh is dash and rejects it with 'Illegal
+        # option', so there the test fails for the shell rather than for
+        # anything it asserts. Here sh is Git Bash, so it runs.
+        #
+        # The quarantined tests are NOT here either — they are red on this
+        # runner too. run-fleet-tests.sh is the single place that names them
+        # and the issue that owns each; no list is duplicated here, because a
+        # second copy is a second thing to forget to update.
         run: |
           sh scripts/test-review-capabilities.sh
 
