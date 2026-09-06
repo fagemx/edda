@@ -357,6 +357,112 @@ export interface ReviewBundlePayload {
   [k: string]: unknown;
 }
 
+/** Event type `review_verdict` — stability: unstable (source: crates/edda-core/src/event.rs). */
+export interface ReviewVerdictPayload {
+  "schema": string;
+  "subject": {
+    "base_sha": string;
+    "head_sha": string;
+    "files": number /* integer */;
+    "lines": number /* integer */;
+    "coverage": string;
+    "subject_seen"?: string;
+    "worktree_check"?: string;
+    [k: string]: unknown;
+  };
+  "refs": {
+    "pr"?: number /* integer */;
+    "issue"?: number /* integer */;
+    "supersedes"?: string;
+    "previous"?: string;
+    "round"?: number /* integer */;
+    "history_rewritten"?: boolean;
+    [k: string]: unknown;
+  };
+  "spec": {
+    "mode": string;
+    "source": string;
+    "trust": string;
+    [k: string]: unknown;
+  };
+  "brief": {
+    "core": string;
+    "review_md_sha"?: string;
+    "classes"?: Array<string>;
+    [k: string]: unknown;
+  };
+  "reviewer": {
+    "agent": string;
+    "transport": string;
+    "model_requested": string;
+    "model_observed": string;
+    "observed_via": string;
+    "model_self_report"?: string;
+    "session_id": string;
+    "session_label": string;
+    "tool_policy": string;
+    [k: string]: unknown;
+  };
+  "independence": string;
+  "independence_policy": string;
+  "gates": {
+    "status": string;
+    "declared_by"?: Array<string>;
+    "read"?: Array<{
+      "kind": string;
+      "ref": string;
+      "cmd": string;
+      "result": string;
+      [k: string]: unknown;
+    }>;
+    "ran"?: Array<{
+      "cmd": string;
+      "exit": number /* integer */;
+      "duration_ms": number /* integer */;
+      "stdout_blob"?: string;
+      "timed_out"?: boolean;
+      [k: string]: unknown;
+    }>;
+    [k: string]: unknown;
+  };
+  "probes"?: Array<{
+    "cmd": string;
+    "exit": number /* integer */;
+    [k: string]: unknown;
+  }>;
+  "verdict": string;
+  "outcome": string;
+  "qualified": boolean;
+  "disqualifiers"?: Array<string>;
+  "findings"?: Array<{
+    "id": string;
+    "severity": string;
+    "file": string;
+    "line"?: number /* integer */;
+    "claim": string;
+    "evidence": string;
+    "rule": string;
+    "status": string;
+    [k: string]: unknown;
+  }>;
+  "checklist"?: Array<{
+    "item": string;
+    "result": string;
+    "measure": string;
+    [k: string]: unknown;
+  }>;
+  "escalations"?: Array<string>;
+  "cost": {
+    "usd"?: number;
+    "measured": boolean;
+    "duration_ms": number /* integer */;
+    [k: string]: unknown;
+  };
+  "parse": string;
+  "notes"?: string;
+  [k: string]: unknown;
+}
+
 /** Event type `task.created` — stability: unstable (source: crates/edda-core/src/event.rs). */
 export interface TaskCreatedPayload {
   "task_id": number /* integer */;
@@ -434,4 +540,4 @@ export interface VerdictRecordedPayload {
 export type Layer1Payload = BranchCreatePayload | BranchSwitchPayload | CheckpointPayload | CmdPayload | CommitPayload | DecisionImportPayload | DecisionRatifyPayload | MergePayload | NotePayload | RebuildPayload;
 
 /** Layer 2 experimental payload union (registry stability "unstable") — may change in any release. */
-export type Layer2Payload = AgentPhaseChangePayload | ApprovalPayload | ApprovalPolicyMatchPayload | ApprovalRequestPayload | CycleTelemetryPayload | DecideSnapshotPayload | DevicePairPayload | DeviceRevokePayload | ExecutionEventPayload | IngestionPayload | PrPayload | ReviewBundlePayload | TaskCreatedPayload | TaskDonePayload | TaskFailedPayload | TaskRequeuedPayload | TaskSessionPayload | TaskStartedPayload | TaskIntakePayload | VerdictRecordedPayload;
+export type Layer2Payload = AgentPhaseChangePayload | ApprovalPayload | ApprovalPolicyMatchPayload | ApprovalRequestPayload | CycleTelemetryPayload | DecideSnapshotPayload | DevicePairPayload | DeviceRevokePayload | ExecutionEventPayload | IngestionPayload | PrPayload | ReviewBundlePayload | ReviewVerdictPayload | TaskCreatedPayload | TaskDonePayload | TaskFailedPayload | TaskRequeuedPayload | TaskSessionPayload | TaskStartedPayload | TaskIntakePayload | VerdictRecordedPayload;
