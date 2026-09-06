@@ -4153,6 +4153,53 @@ phases:
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// GH-752 round 1, f1: the reset must happen at the RUNNER's attempt
+    /// boundary, not merely exist on `PhaseState`. Every other test here
+    /// stays green if `begin_attempt()` at the top of the dispatch is
+    /// reverted to `phase_state.attempts + 1`, because no test crosses an
+    /// attempt boundary with a per-attempt counter already dirty. This one
+    /// seeds exactly what a spent attempt leaves behind and runs an UNGATED
+    /// phase — nothing in that path bumps the counter — so a value still
+    /// standing at the end can only mean the boundary did not clear it.
+    #[tokio::test]
+    async fn runner_opens_an_attempt_with_a_cleared_redispatch_counter() {
+        let root = fresh_root("rdreset");
+        init_git_repo(&root);
+        let yaml = r#"
+name: rdreset
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: None,
+            }],
+        );
+        let plan = parse_plan(yaml).unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        // The state a prior attempt that spent its whole gate budget leaves.
+        state.phases[0].gate_redispatches = MAX_GATE_REDISPATCHES;
+
+        let (state, _notifier, _launcher) = spawn_runner(yaml, root.clone(), launcher, state)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            state.phases[0].attempts, 1,
+            "the phase must actually have been dispatched"
+        );
+        assert_eq!(
+            state.phases[0].gate_redispatches, 0,
+            "opening an attempt clears the redispatch counter"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     // ── Phase claims carry owned write surfaces (GH-561) ────────────
 
     /// Serialize tests that redirect `EDDA_STORE_ROOT`.
