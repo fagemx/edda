@@ -63,10 +63,10 @@ jobs:
           # GH-896: separate, narrower whitelist for the fleet shell-test gate
           # — unrelated PRs keep it skipped (green-fast). On any diff failure
           # or unknown base we assume fleet tests changed too, same policy as
-          # code above. scripts/test-review-capabilities.sh is named
-          # explicitly: the issue's doneWhen lists it among the fleet shell
-          # tests, but it lives in scripts/ — one directory above the
-          # scripts/fleet/ glob the runner matches.
+          # code above. The terms are globs: scripts/test-*.sh (added by
+          # #927) subsumes the scripts/test-review-capabilities.sh name an
+          # earlier revision listed here, and scripts/fleet/test-*.ps1 brings
+          # the Windows-only PowerShell tests under the same trigger.
           fleet=false
           if [ -n "$base" ] \
             && git cat-file -e "$base" 2>/dev/null \
@@ -88,7 +88,7 @@ jobs:
                     code=true ;;
                 esac
                 case "$f" in
-                  scripts/fleet/*|scripts/test-review-capabilities.sh|.github/workflows/ci.yml)
+                  scripts/fleet/*|scripts/test-*.sh|scripts/fleet/test-*.ps1|.github/workflows/ci.yml)
                     fleet=true ;;
                 esac
               done < "$diffout"
@@ -281,8 +281,31 @@ jobs:
         # runner too. run-fleet-tests.sh is the single place that names them
         # and the issue that owns each; no list is duplicated here, because a
         # second copy is a second thing to forget to update.
+        #
+        # GH-927: this job also carries the scripts/fleet/test-*.ps1 group —
+        # glob-driven, fail-closed, one run each on windows-latest. On a
+        # Windows workstation the entrypoint runs the same group itself, so
+        # the glob exists in exactly two places that never both execute.
         run: |
           sh scripts/test-review-capabilities.sh
+          status=0
+          for p in scripts/fleet/test-*.ps1; do
+            if [ ! -e "$p" ]; then
+              echo "FAIL: $p matched no file" >&2
+              exit 1
+            fi
+            case "$p" in
+              scripts/fleet/test-detached-dispatch.ps1)
+                # Harness-bound: -Edda is Mandatory (a compiled edda binary,
+                # GH-605) and no CI job compiles the workspace. Stated per
+                # #927's doneWhen.
+                echo "SKIP $p (harness-bound: needs -Edda <built edda binary>)"
+                continue ;;
+            esac
+            echo "RUN  $p"
+            pwsh -NoProfile -File "$p" || status=1
+          done
+          exit "$status"
 
   # Aggregate gate: the single check the branch ruleset will pin instead of
   # enumerating the eight individual jobs. `if: always()` keeps it running even

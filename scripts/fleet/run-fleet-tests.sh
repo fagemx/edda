@@ -1,18 +1,28 @@
 #!/bin/sh
 # GH-896 — machine gate for the fleet shell tests.
 #
-# Runs every scripts/fleet/test-*.sh under POSIX sh and exits non-zero if any
-# fails, so a red test blocks CI. That one glob is the whole match list: tests
-# added later under scripts/fleet/ are picked up without editing this file or
-# the workflow. Widening to scripts/test-*.sh is intentionally NOT done here —
-# tracked separately as #927.
+# Runs the fleet shell tests under POSIX sh and exits non-zero if any fails,
+# so a red test blocks CI. Three groups, two runners (GH-896 + GH-927):
 #
-# scripts/test-review-capabilities.sh is #896's other hand-named test and is
-# NOT matched here. It lives one directory up, and the helper it generates
-# carries `set -o pipefail` (the `set -o pipefail` it writes into that runner, `scripts/review-pr.sh`) which ubuntu's dash
-# rejects with `Illegal option`, so it would fail for the shell rather than for
-# anything it asserts. The `fleet-tests-windows` job in
-# .github/workflows/ci.yml invokes it directly, where sh is Git Bash.
+#   1. scripts/fleet/test-*.sh (glob) — the ubuntu `fleet-tests` job carries
+#      this group. Tests added later under scripts/fleet/ are picked up
+#      without editing this file or the workflow.
+#   2. scripts/test-*.sh (glob) — same loop, same carrier; #927 added it
+#      because the tests one directory up were machine-run by nothing.
+#   3. scripts/fleet/test-*.ps1 (glob) — Windows-only. On a Windows host this
+#      entrypoint runs each match through `pwsh -NoProfile -File`; anywhere
+#      else it prints one SKIP line per match naming the `fleet-tests-windows`
+#      job, which runs the group on windows-latest.
+#
+# Every glob term is guarded individually: a term that matches no file fails
+# the run with a message naming it — a silently empty glob is the defect this
+# gate exists to prevent, wearing a different hat.
+#
+# scripts/test-review-capabilities.sh is matched by the second glob and is
+# platform-bound, not quarantined: the helper it generates carries
+# `set -o pipefail`, which ubuntu's dash rejects, so a case arm below SKIPs it
+# with a printed reason; the `fleet-tests-windows` job runs it on
+# windows-latest, where sh is Git Bash.
 #
 # Some tests are QUARANTINED — excluded from every job, named and printed at
 # runtime with the issue that owns letting each back in, and counted, so the
@@ -20,9 +30,10 @@
 # comment 35 lines above the arms it describes has already gone stale once.
 # The arms below carry the measured failure for each.
 #
-# #896's doneWhen names test-lane-helpers.sh among the tests that must run,
-# and it runs nowhere, which is why the PR opening this gate carries
-# `Issue: #896` and no closing keyword.
+# #896's doneWhen names test-lane-helpers.sh and #927's names
+# scripts/test-review-adapter.sh among the tests that must run; each runs
+# nowhere, which is why the PRs opening these gates carry `Issue:` lines and
+# no closing keywords.
 #
 # Entry point used by the `fleet-tests` job in .github/workflows/ci.yml; the
 # same command is reproducible locally on any POSIX sh.
@@ -34,7 +45,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 status=0
 quarantined=0
-for t in scripts/fleet/test-*.sh; do
+for t in scripts/fleet/test-*.sh scripts/test-*.sh; do
     if [ ! -e "$t" ]; then
         # Reached only when the glob matched no file at all: fail closed.
         printf 'FAIL: %s matched no file\n' "$t" >&2
@@ -60,6 +71,25 @@ for t in scripts/fleet/test-*.sh; do
     q_issue=''
     q_why=''
     case "$t" in
+        scripts/test-review-capabilities.sh)
+            # Platform-bound, not quarantined: the helper this test generates
+            # carries `set -o pipefail`, which ubuntu's dash rejects with
+            # `Illegal option` — there it would fail for the shell rather
+            # than for anything it asserts. The `fleet-tests-windows` job
+            # runs it on windows-latest, where sh is Git Bash (GH-927).
+            printf 'SKIP %s (platform-bound: the fleet-tests-windows job runs it)
+' "$t"
+            continue
+            ;;
+        scripts/test-review-adapter.sh)
+            # Red on a Windows workstation against origin/main: the pwsh child
+            # of its Windows block exits 1 and `QUALIFIED=True` never lands in
+            # the fixture receipt. Measured twice, not a timing flake.
+            # Tracked as #987, which owns removing this entry in the same
+            # change that turns the test green.
+            q_issue='#987'
+            q_why='red on a Windows workstation (QUALIFIED=True never lands)'
+            ;;
         scripts/fleet/test-collision-scan.sh)
             # Its Windows block is gated on `command -v pwsh` (:138), but
             # ubuntu runners ship pwsh, so the block runs there and
@@ -101,6 +131,50 @@ for t in scripts/fleet/test-*.sh; do
         rc=$?
         printf 'FAIL %s (exit %d)\n' "$t" "$rc" >&2
         status=1
+    fi
+done
+# Group 3 — the Windows-only .ps1 tests (GH-927). On a Windows host this
+# entrypoint runs each match itself through pwsh; anywhere else it prints one
+# SKIP line per match naming the `fleet-tests-windows` job that runs the
+# group on windows-latest. The per-term guard matches the shell globs above:
+# a .ps1 glob that matches nothing fails the run loudly.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) on_windows=1 ;;
+    *) on_windows=0 ;;
+esac
+for p in scripts/fleet/test-*.ps1; do
+    if [ ! -e "$p" ]; then
+        printf 'FAIL: %s matched no file
+' "$p" >&2
+        status=1
+        continue
+    fi
+    case "$p" in
+        scripts/fleet/test-detached-dispatch.ps1)
+            # Harness-bound, not a self-contained test: its -Edda parameter is
+            # Mandatory — it drives a compiled edda binary (GH-605), and no CI
+            # job in this workflow compiles the workspace. Stated per #927's
+            # doneWhen ("or the issue records a stated reason").
+            printf 'SKIP %s (harness-bound: needs -Edda <built edda binary>; no CI job compiles the workspace)
+' "$p"
+            continue
+            ;;
+    esac
+    if [ "$on_windows" -eq 1 ]; then
+        printf 'RUN  %s
+' "$p"
+        if pwsh -NoProfile -File "$p"; then
+            printf 'PASS %s
+' "$p"
+        else
+            rc=$?
+            printf 'FAIL %s (exit %d)
+' "$p" "$rc" >&2
+            status=1
+        fi
+    else
+        printf 'SKIP %s (needs Windows: pwsh -NoProfile -File; the fleet-tests-windows job runs it)
+' "$p"
     fi
 done
 # The count is printed so the quarantine list cannot grow quietly: a rising
