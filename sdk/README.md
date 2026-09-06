@@ -24,9 +24,33 @@ sdk/
 | Transports (MCP/HTTP) | implemented; MCP writes, HTTP read-only, typed timeout/cancel |
 | Contract tests | both languages + cross-language equivalence runner (task/receipt/claim/verify included) |
 | Spec pin | pinned: `9e3f6ddb8660e730be2cee631aa1eff7dd208a18` (sdk/SPEC_PIN.json) |
-| Publication | **blocked: no npm/PyPI namespace/account authorization** (no NPM_TOKEN, `npm whoami` → ENEEDAUTH, no TWINE_PASSWORD) |
+| Publication | packages are publishable; **the publish itself needs the operator's registry accounts** — see below |
 
 See `SDK_HANDOFF.md` at the repo root for open controller decisions.
+
+## Publishing the first version (operator)
+
+Everything a repository can settle is settled: both packages build, carry
+dual MIT/Apache-2.0 licences, and pass their registries' own validators
+(`npm pack`, `twine check`). What is left needs credentials this repository
+does not hold, so it is the operator's to run.
+
+`@edda/sdk` is a **scoped** name: publishing it needs the `edda` npm
+organisation to exist and the publishing account to be a member. All three
+names — `@edda/sdk`, `edda-sdk` on npm, `edda-sdk` on PyPI — were unclaimed
+when this was written; verify before assuming.
+
+```sh
+# TypeScript — prepublishOnly runs the build; publishConfig sets public access
+cd sdk/ts && npm login && npm publish
+
+# Python
+cd sdk/python && python -m build && python -m twine upload dist/*
+```
+
+`0.1.0` is deliberate: the SDKs track **spec v1** at the commit pinned in
+`SPEC_PIN.json`, and stay `0.x` until the client contract is frozen
+(`docs/reference/client-contract.md`).
 
 ## Running the contract tests
 
