@@ -23,7 +23,7 @@
 # usage:
 #   pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name <lane> -Brief <brief.md> `
 #        -Cwd <worktree> [-Agent pi|codex|claude] [-BudgetUsd <n>] [-TimeoutSec <s>] `
-#        [-SessionId <id>] [-LogDir <dir>] [-BuildLane <lane>] [-Owns <path>...] [-DryRun]
+#        [-SessionId <id>] [-LogDir <dir>] [-BuildLane <lane>] [-Owns <path>[,<path>]] [-DryRun]
 #
 # -BuildLane is optional and accepts exactly the ratified build lanes
 # worker-1|worker-2|verifier|verifier-2 (verification.cost-discipline); when
@@ -41,6 +41,20 @@
 # scopes they need to claim (for example `crates/edda-cli/src/cmd_dispatch.rs`);
 # read-only review lanes omit them. The launcher forwards each supplied value
 # to `edda dispatch --owns` and does not invent a global ownership policy.
+#
+# -Owns takes ONE argument: a comma- or semicolon-separated scope list,
+# `-Owns 'crates/edda-cli/src/cmd_dispatch.rs,docs/guides/operator-runbook.md'`.
+# That shape is forced by `pwsh -File`, which passes every argument as a
+# literal string and binds them one at a time: the older `-Owns a b c`
+# spelling bound only `a`, and each trailing value was silently taken by
+# whichever optional parameter still had a free positional slot - observed
+# filling -Brief, -LogDir and -BuildLane, the last of which wrote a lane's
+# wrapper/log/done into a repository directory named after a scope path
+# (GH-937). Re-reading the raw argv tail could not repair that: the
+# misbinding happens inside the binder, before the first script line runs.
+# The param block is therefore declared PositionalBinding=$false, so a stray
+# value can never reach another parameter - `-Owns a b c` now fails loudly
+# at the binder instead of quietly relocating the lane's artifacts.
 #
 # Prints, one line each: the .git/config backup verdict (GH-715), then task
 # name, state, wrapper path, log path, done path.
@@ -65,6 +79,7 @@
 # after a dry run starts with a clean log and no stale done-file. That
 # namespace is why any -Name containing the dryrun segment is rejected by
 # the guard rails below.
+[CmdletBinding(PositionalBinding = $false)]
 param(
   [Parameter(Mandatory = $true)][string]$Name,
   [string]$Brief = '',
@@ -75,10 +90,10 @@ param(
   [string]$SessionId = '',
   [string]$LogDir = "$env:TEMP\edda-lanes",
   [string]$BuildLane = '',
-  # PowerShell -File binds only the first whitespace-separated value to an
-  # array parameter; unbound trailing values remain in automatic $args and
-  # are folded into this public parameter below.
-  [string[]]$Owns = @(),
+  # ONE argument, comma/semicolon separated - see the -Owns note in the
+  # header. PositionalBinding above is what keeps a stray value from
+  # silently binding to some other parameter.
+  [string]$Owns = '',
   # Explicit for arbitrary lane names; conventional review/reviewer names
   # imply it so historical review-pr<N> callers cannot omit the restriction.
   [switch]$Review,
@@ -86,18 +101,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-# PowerShell's -File binder silently leaves all but the first `-Owns a b`
-# value unbound.  Read the process argv before helper code runs, replacing the
-# binder result with the documented trailing scope list.  -Owns is deliberately
-# documented as the final option, so every remaining token is a scope.
-$remainingOwns = @($args)
-$rawArgv = [Environment]::GetCommandLineArgs()
-$ownsAt = [Array]::LastIndexOf($rawArgv, '-Owns')
-if ($ownsAt -ge 0) {
-  $remainingOwns = @()
-  for ($i = $ownsAt + 1; $i -lt $rawArgv.Length; $i++) { $remainingOwns += $rawArgv[$i] }
-  $Owns = @()
-}
 
 function Fail([string]$Msg) {
   [Console]::Error.WriteLine("lane-launch: $Msg")
@@ -134,26 +137,33 @@ $allowedBuildLanes = @('worker-1', 'worker-2', 'verifier', 'verifier-2')
 if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {
   Fail "-BuildLane '$BuildLane' is not an allowed build lane (verification.cost-discipline allows only: $($allowedBuildLanes -join ', ')); omit the parameter for lanes that compile nothing"
 }
-$allOwns = [System.Collections.Generic.List[string]]::new()
-foreach ($scope in @($Owns)) { if ($null -ne $scope -and $scope -ne '') { $allOwns.Add([string]$scope) } }
-foreach ($scope in $remainingOwns) { if ($null -ne $scope -and $scope -ne '') { $allOwns.Add([string]$scope) } }
-$Owns = @($allOwns)
-foreach ($scope in $Owns) {
+# Split the one -Owns argument on , or ; and trim each element, so a list
+# written with spaces after the separators still lands as clean scopes.
+# An empty element (leading, doubled, or trailing separator) is dropped
+# rather than becoming an empty scope; the default '' yields none at all.
+# The result CANNOT go back into $Owns: the parameter is [string]-typed for
+# the whole scope, so assigning an array to it silently re-joins the scopes
+# into one space-separated string.
+$ownsScopes = @($Owns -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+foreach ($scope in $ownsScopes) {
   # Dispatch claims are compared lexically, so allow exactly one portable
   # spelling: a non-empty slash-separated repository-relative path.  Reject
   # drive-relative forms too (`C:foo` is not rooted on Windows), and every
   # dot component in any position — leading, interior, terminal (`a/.`), or
   # standalone (`.`) — since those alias a canonical directory scope while
-  # the lexical claim consumer treats the spellings as distinct.
-  if ([string]::IsNullOrWhiteSpace($scope) -or $scope -match '[\r\n\\]' -or
+  # the lexical claim consumer treats the spellings as distinct.  Interior
+  # whitespace is rejected too: it is what an in-process caller passing an
+  # ARRAY to the now-scalar -Owns collapses to (@('a','b') -> 'a b'), and
+  # that must fail loudly rather than claim one scope named after two.
+  if ([string]::IsNullOrWhiteSpace($scope) -or $scope -match '[\s\\]' -or
       [IO.Path]::IsPathRooted($scope) -or $scope -match '^[A-Za-z]:' -or
       $scope -match '(^|/)\.{1,2}(/|$)' -or
       $scope -match '//' -or $scope.EndsWith('/')) {
-    Fail "-Owns entry '$scope' must be a canonical non-empty slash-separated repository-relative path scope"
+    Fail "-Owns entry '$scope' must be a canonical non-empty slash-separated repository-relative path scope; pass several as ONE comma-separated argument"
   }
 }
-if (-not $isReview -and $Owns.Count -eq 0) {
-  Fail 'write-enabled lanes require at least one -Owns repository-relative path scope; refusing an unclaimed scheduled writer'
+if (-not $isReview -and $ownsScopes.Count -eq 0) {
+  Fail 'write-enabled lanes require at least one -Owns repository-relative path scope (comma-separate several in the one argument); refusing an unclaimed scheduled writer'
 }
 $TaskName = "edda-lane-$Name"
 $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -189,8 +199,28 @@ if ($guardExit -ne 0) {
   [Console]::Error.WriteLine("lane-launch: warning: git metadata backup/verify failed (git-config-guard exit $guardExit); launching anyway, but lane-stop will have nothing to restore from")
 }
 
-New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$LogDir = (Resolve-Path -LiteralPath $LogDir).Path
+# GH-937: a lane's artifacts never belong inside a git working tree. When a
+# stray -Owns value bound to -LogDir, the launcher created
+# <repo>/scripts/fleet/<scope-path>/ inside the main checkout and filled it
+# with wrapper/log/done files. PositionalBinding above makes that misbinding
+# unreachable; this refuses the same shape however it is reached (a typo, a
+# relative -LogDir resolved against a repo cwd), and refuses it BEFORE
+# creating anything: resolve the requested path without touching the disk,
+# then ask its nearest existing ancestor whether it is inside a worktree.
+$requestedLogDir = if ([IO.Path]::IsPathRooted($LogDir)) { [IO.Path]::GetFullPath($LogDir) }
+                   else { [IO.Path]::GetFullPath((Join-Path (Get-Location).Path $LogDir)) }
+$logDirProbe = $requestedLogDir
+while ($logDirProbe -and -not (Test-Path -LiteralPath $logDirProbe)) {
+  $logDirProbe = Split-Path -Parent $logDirProbe
+}
+if ($logDirProbe) {
+  $logDirTop = (& git -C $logDirProbe rev-parse --show-toplevel 2>$null)
+  if ($LASTEXITCODE -eq 0 -and $logDirTop) {
+    Fail "-LogDir '$LogDir' resolves to '$requestedLogDir', inside the git working tree '$logDirTop'; lane artifacts never belong in a repository"
+  }
+}
+New-Item -ItemType Directory -Force -Path $requestedLogDir | Out-Null
+$LogDir = (Resolve-Path -LiteralPath $requestedLogDir).Path
 if (-not $SessionId) { $SessionId = "lane-$Name" }
 if ($BuildLane) {
   $laneRoot = if ($env:FLEET_LANE_ROOT) { $env:FLEET_LANE_ROOT } else { "$env:LOCALAPPDATA\fleet-workstation\lanes" }
@@ -221,7 +251,7 @@ if (-not $PwshExe) { Fail 'pwsh.exe not found on PATH; cannot register the task'
 # The real `edda dispatch` command line (also printed verbatim by -DryRun).
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
 $argLine += $reviewArgs
-foreach ($scope in $Owns) { $argLine += " --owns $(PsQuote $scope)" }
+foreach ($scope in $ownsScopes) { $argLine += " --owns $(PsQuote $scope)" }
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 
 # Wrapper the scheduled task actually runs: outside the controller's job
@@ -346,7 +376,7 @@ if ($DryRun) {
   )
   $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
   $argLine += $reviewArgs
-  foreach ($scope in $Owns) { $argLine += " --owns $(PsQuote $scope)" }
+  foreach ($scope in $ownsScopes) { $argLine += " --owns $(PsQuote $scope)" }
   if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
   # Dry-run artifacts carry their own names: teeing into $Name.log or writing
   # $Name.done here would put a foreign === EXIT === record in the real lane's
@@ -401,6 +431,17 @@ if ($DryRun) {
   do {
     Start-Sleep -Seconds 2
     $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $info = if ($task) { Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue } else { $null }
+    if ($task -and -not $info) {
+      # The owned wrapper unregisters itself in its finally block, and it can
+      # do so BETWEEN the two queries above — the ordinary end of a dry run,
+      # not an unreadable scheduler. Re-read the registration before judging;
+      # only a task that is still registered with no readable info is a real
+      # scheduler failure. Without this the dry run failed at random (measured
+      # on pristine main: 1 of 4 runs), taking the lane-helper suite with it.
+      $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+      if ($task) { Fail "dry-run task $TaskName exists but its scheduler result is unavailable" }
+    }
     if (-not $task) {
       # The owned wrapper unregisters itself in its finally block.  That is a
       # successful dry-run only when its terminal receipt exists and reports
@@ -415,8 +456,6 @@ if ($DryRun) {
       $selfUnregistered = $true
       break
     }
-    $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
-    if (-not $info) { Fail "dry-run task $TaskName exists but its scheduler result is unavailable" }
   } while (($task.State -eq 'Running' -or $info.LastTaskResult -eq 267009) -and (Get-Date) -lt $deadline)
 
   if ($selfUnregistered) {
@@ -440,7 +479,7 @@ if (-not (Test-Path -LiteralPath $Brief -PathType Leaf)) {
 $Brief = (Resolve-Path -LiteralPath $Brief).Path
 $argLine = "dispatch --agent $Agent --prompt-file $(PsQuote $Brief) --session-id $(PsQuote $SessionId) --cwd $(PsQuote $Cwd) --timeout-sec $TimeoutSec"
 $argLine += $reviewArgs
-foreach ($scope in $Owns) { $argLine += " --owns $(PsQuote $scope)" }
+foreach ($scope in $ownsScopes) { $argLine += " --owns $(PsQuote $scope)" }
 if ($BudgetUsd -gt 0) { $argLine += " --budget-usd $BudgetUsd" }
 $runReal = "& edda $argLine 2>&1 | Tee-Object -FilePath $(PsQuote $Log) -Append"
 

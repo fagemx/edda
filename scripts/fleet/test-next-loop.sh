@@ -214,6 +214,18 @@ grep -q '^cmd: edda task new ' "$work/out/dry.txt" || fail "dry-run output misse
 grep -q '^brief path: ' "$work/out/dry.txt" || fail "dry-run output misses the brief path"
 grep -q 'fleet-claim-issue.sh 886 docs/worker-1' "$work/out/dry.txt" || fail "dry-run output misses the claim command"
 grep -q 'lane-launch.ps1 -Name edda-lane-gh886 ' "$work/out/dry.txt" || fail "dry-run output misses the launch command"
+# GH-936: the launch line must carry the brief's scope paths as -Owns.
+# Without it lane-launch.ps1's write-lane guard refuses the launch AFTER the
+# worktree, task and claim already exist, which is where every next-issue.sh
+# run died on current main. GH-937 fixes the shape: ONE comma-separated
+# argument, because `pwsh -File` binds only the first value of a multi-token
+# option and lets the rest bind to whatever named parameter is still free.
+grep -qF -- '-Owns "scripts/fleet/next-issue.sh,docs/guides/pi-controller-runbook.md"' "$work/out/dry.txt" ||
+    fail "launch command misses the -Owns scope list :: $(grep 'lane-launch.ps1' "$work/out/dry.txt" || true)"
+# -Owns stays the final option, so a future trailing addition cannot be read
+# as one of its scopes by a human copying the line.
+grep -q 'lane-launch.ps1 .*-Owns "[^"]*"$' "$work/out/dry.txt" ||
+    fail "-Owns is not the final option on the launch line :: $(grep 'lane-launch.ps1' "$work/out/dry.txt" || true)"
 grep -q 'nothing created, claimed, or launched' "$work/out/dry.txt" || fail "dry-run output misses the closing line"
 grep -qF -- '--path "scripts/fleet/next-issue.sh"' "$work/out/dry.txt" || fail "task-new line misses the first scope path"
 grep -qF -- '--path "docs/guides/pi-controller-runbook.md"' "$work/out/dry.txt" || fail "task-new line misses the second scope path"

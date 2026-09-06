@@ -89,6 +89,10 @@ $name = "gh822-test-$PID-$(Get-Date -Format 'HHmmss')"
 $logDir = Join-Path $env:TEMP "gh822-lane-test-$PID"
 $cwd = Join-Path $env:TEMP "gh822-lane-test-cwd-$PID"
 $realLog = Join-Path $logDir "$name.log"
+# Every write-enabled lane needs at least one -Owns scope (GH-772); this
+# test predates that guard and every leg below died at it until GH-937
+# made the parameter usable from a `pwsh -File` caller in the first place.
+$ownsScope = "tests/fleet/test-lane-launch-dryrun.ps1"
 $realDone = Join-Path $logDir "$name.done"
 
 New-Item -ItemType Directory -Force -Path $logDir, $cwd | Out-Null
@@ -115,7 +119,7 @@ try {
   # --- leg 1: dry-run on a clean LogDir (AC2, AC3, AC4) ----------------------
 
   "=== leg 1: dry-run on a clean LogDir ==="
-  $dry = Invoke-ChildScript $launch @("-Name", $name, "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"", "-DryRun")
+  $dry = Invoke-ChildScript $launch @("-Name", $name, "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"", "-DryRun", "-Owns", $ownsScope)
   if ($dry.ExitCode -ne 0) {
     "--- dry-run stdout ---"; $dry.StdOut; "--- dry-run stderr ---"; $dry.StdErr
     throw "lane-launch -DryRun exited $($dry.ExitCode)"
@@ -148,7 +152,7 @@ try {
       '# regression-test brief (GH-822)'
       'Trivial turn: reply with the single word ok and do nothing else.'
     )
-    $real = Invoke-ChildScript $launch @("-Name", $name, "-Brief", "`"$brief`"", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"", "-TimeoutSec", "90")
+    $real = Invoke-ChildScript $launch @("-Name", $name, "-Brief", "`"$brief`"", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"", "-TimeoutSec", "90", "-Owns", $ownsScope)
     if ($real.ExitCode -ne 0) {
       "--- real-launch stdout ---"; $real.StdOut; "--- real-launch stderr ---"; $real.StdErr
       throw "lane-launch (real) exited $($real.ExitCode)"
@@ -194,7 +198,7 @@ try {
   # --- leg 3: the guard rail reserves the dryrun namespace (P1-1) -------------
 
   "=== leg 3: -Name containing 'dryrun' is rejected ==="
-  $collision = Invoke-ChildScript $launch @("-Name", "$name.dryrun", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"")
+  $collision = Invoke-ChildScript $launch @("-Name", "$name.dryrun", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"", "-Owns", $ownsScope)
   Assert-True ($collision.ExitCode -ne 0) "guard rail: lane-launch rejects -Name '$name.dryrun' (GH-822 P1-1)"
   Assert-True ($collision.StdErr -match "may not contain 'dryrun'") "guard rail: the rejection names the dryrun reservation (stderr: $($collision.StdErr.Trim()))"
 
@@ -202,10 +206,10 @@ try {
   # dryrun segment onto the lane name — dot, underscore, and hyphen all end
   # in a distinct $Name.dryrun.log/$Name.dryrun.done-style artifact family,
   # so each must be rejected too.
-  $collisionUnder = Invoke-ChildScript $launch @("-Name", "${name}_dryrun", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"")
+  $collisionUnder = Invoke-ChildScript $launch @("-Name", "${name}_dryrun", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"", "-Owns", $ownsScope)
   Assert-True ($collisionUnder.ExitCode -ne 0) "guard rail: lane-launch rejects underscore delimiter -Name '${name}_dryrun' (GH-822 P1-1)"
 
-  $collisionHyphen = Invoke-ChildScript $launch @("-Name", "$name-dryrun", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"")
+  $collisionHyphen = Invoke-ChildScript $launch @("-Name", "$name-dryrun", "-Cwd", "`"$cwd`"", "-LogDir", "`"$logDir`"", "-Owns", $ownsScope)
   Assert-True ($collisionHyphen.ExitCode -ne 0) "guard rail: lane-launch rejects hyphen delimiter -Name '$name-dryrun' (GH-822 P1-1)"
 
   # --- leg 4: lane-status after unregister (AC5) ------------------------------
