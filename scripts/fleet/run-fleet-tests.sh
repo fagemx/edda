@@ -1,27 +1,24 @@
 #!/bin/sh
 # GH-896 — machine gate for the fleet shell tests.
 #
-# Runs every scripts/fleet/test-*.sh plus scripts/test-review-capabilities.sh
-# under POSIX sh and exits non-zero if any of them fails, so a red test blocks
-# CI. The scripts/fleet glob is deliberate: tests added later under
-# scripts/fleet/ (test-brief-from-issue.sh landed in 6849b90 / GH-885;
-# test-next-loop.sh with GH-899) are picked up automatically without editing
-# this file or the workflow. scripts/test-review-capabilities.sh is matched
-# explicitly by name because the issue's doneWhen lists it among these tests
-# but it lives one directory above the glob (scripts/, not scripts/fleet/);
-# widening to all of scripts/test-*.sh is intentionally NOT done here —
+# Runs every scripts/fleet/test-*.sh under POSIX sh and exits non-zero if any
+# fails, so a red test blocks CI. That one glob is the whole match list: tests
+# added later under scripts/fleet/ are picked up without editing this file or
+# the workflow. Widening to scripts/test-*.sh is intentionally NOT done here —
 # tracked separately as #927.
 #
-# Exclusion (explicit, never silent): test-lane-helpers.sh is Windows-only by
-# construction — it exercises scripts/fleet/lane-*.ps1 through Windows
-# Scheduled Tasks (Register-ScheduledTask / Start-ScheduledTask), pwsh.exe,
-# rust-lld.exe and taskkill, none of which exist on the ubuntu CI runner. The
-# skip below is therefore OS-conditional, not absolute: on Windows hosts
-# (MINGW/MSYS/CYGWIN) the test runs through this entrypoint, and the
-# `fleet-tests-windows` job in .github/workflows/ci.yml runs this same
-# entrypoint on windows-latest, where the test executes instead of skipping,
-# so a red lane-helpers test blocks the merge gate too.
-# Everywhere else the SKIP is printed with its reason.
+# scripts/test-review-capabilities.sh is #896's other hand-named test and is
+# NOT matched here. It lives one directory up, and the helper it generates
+# carries `set -o pipefail` (scripts/review-pr.sh:806) which ubuntu's dash
+# rejects with `Illegal option`, so it would fail for the shell rather than for
+# anything it asserts. The `fleet-tests-windows` job in
+# .github/workflows/ci.yml invokes it directly, where sh is Git Bash.
+#
+# Two tests are QUARANTINED — excluded from every job, named and printed at
+# runtime with the issue that owns letting them back in. Each is red on every
+# environment that could carry it; see the case arms below for the measured
+# failures. This is the one doneWhen item #896 does not get, which is why the
+# PR opening this gate carries `Issue: #896` and no closing keyword.
 #
 # Entry point used by the `fleet-tests` job in .github/workflows/ci.yml; the
 # same command is reproducible locally on any POSIX sh.
@@ -34,12 +31,23 @@ cd "$(git rev-parse --show-toplevel)"
 status=0
 for t in scripts/fleet/test-*.sh; do
     if [ ! -e "$t" ]; then
-        # Reached only when a term above matched no file at all (empty glob,
+        # Reached only when the glob matched no file at all: fail closed.
         # or the explicitly named test was deleted): fail closed.
         printf 'FAIL: %s matched no file\n' "$t" >&2
         status=1
         continue
     fi
+    # `sh -n` runs before the quarantine arms, so an excluded test still has
+    # its syntax checked and cannot rot unnoticed while it sits out. What this
+    # cannot detect is a quarantined test that has become green again — that
+    # would mean executing it, which is the thing the quarantine exists to
+    # avoid. #963 and #964 each own removing their own entry, so the exclusion
+    # is released by the fix rather than by this script noticing.
+    sh -n "$t" || {
+        printf 'FAIL: sh -n %s\n' "$t" >&2
+        status=1
+        continue
+    }
     case "$t" in
         scripts/fleet/test-lane-helpers.sh)
             # QUARANTINED, not platform-bound: red on windows-latest (case 0,
@@ -64,11 +72,6 @@ for t in scripts/fleet/test-*.sh; do
             continue
             ;;
     esac
-    sh -n "$t" || {
-        printf 'FAIL: sh -n %s\n' "$t" >&2
-        status=1
-        continue
-    }
     printf 'RUN  %s\n' "$t"
     if sh "$t"; then
         printf 'PASS %s\n' "$t"

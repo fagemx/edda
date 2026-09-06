@@ -212,15 +212,17 @@ jobs:
           key: msrv-1.91.0
       - run: cargo +1.91.0 check --workspace --all-targets --locked
 
-  # GH-896: the fleet shell tests (scripts/fleet/test-*.sh plus the explicitly
-  # and scripts/test-review-capabilities.sh) had no machine gate — grep over
-  # .github/ found nothing and lefthook runs cargo only, so their doneWhen
-  # rested on hand execution. The runner is glob-driven for scripts/fleet/ (a
-  # test added later there is picked up without touching this file) plus one
-  # explicit term; a red test exits non-zero and blocks this job, and ci-gate
-  # below propagates the failure. test-lane-helpers.sh is skipped on ubuntu
-  # (OS-conditional in the runner); fleet-tests-windows below runs the same
-  # entrypoint on windows-latest, where it executes.
+  # GH-896: no machine gate ran any fleet shell test — grep over .github/
+  # found nothing and lefthook runs cargo only, so their doneWhen rested on
+  # hand execution. This job is that gate. The runner is glob-driven over
+  # scripts/fleet/test-*.sh, so a test added there later is picked up without
+  # touching this file; a red test exits non-zero and ci-gate propagates it.
+  #
+  # Two of the tests #896 names by hand are not here. scripts/test-review-
+  # capabilities.sh runs in fleet-tests-windows below (ubuntu's dash rejects
+  # the `set -o pipefail` in the helper it generates). test-lane-helpers.sh
+  # and test-next-loop.sh are QUARANTINED in the runner — red on every
+  # environment that could carry them, named at runtime with #963 and #964.
   fleet-tests:
     name: Fleet shell tests
     needs: [detect]
@@ -235,15 +237,22 @@ jobs:
       - name: Run fleet shell tests
         run: sh scripts/fleet/run-fleet-tests.sh
 
-  # GH-896 round 1 (P0-1): two of the tests #896 names cannot run on the
-  # ubuntu runner, so this windows-latest sibling job runs them directly.
-  # test-lane-helpers.sh drives the Windows Task Scheduler; 
-  # test-review-capabilities.sh generates a helper carrying `set -o pipefail`
-  # (scripts/review-pr.sh:806) which ubuntu's dash rejects. Both are skipped
-  # by run-fleet-tests.sh with a printed reason naming this job, so every test
-  # #896 names runs in CI exactly once and a red one blocks. It shares the
-  # detect.fleet path filter with the ubuntu job; ci-gate evaluates its verdict
-  # the same way: a skip is accepted only when detect.fleet == 'false'.
+  # GH-896 round 1 (P0-1) asked for the second route #896's doneWhen offers,
+  # since some of its tests cannot run on ubuntu. This job is it, and it runs
+  # exactly one test: scripts/test-review-capabilities.sh, whose generated
+  # helper carries `set -o pipefail` (scripts/review-pr.sh:806) — ubuntu's sh
+  # is dash and rejects it with `Illegal option`, so there the test would fail
+  # for the shell rather than for anything it asserts. Here sh is Git Bash.
+  #
+  # It does NOT run test-lane-helpers.sh: that test is red on this runner too
+  # (case 0, `prepare: worktree not registered`) as well as on a Windows
+  # workstation, so it is quarantined in run-fleet-tests.sh under #963 and
+  # executes nowhere. That is the one #896 doneWhen item this gate does not
+  # deliver, which is why the PR carries no closing keyword.
+  #
+  # Shares the detect.fleet path filter with the ubuntu job; ci-gate evaluates
+  # its verdict the same way: a skip is accepted only when detect.fleet is
+  # 'false', and any failure or cancellation fails the gate.
   fleet-tests-windows:
     name: Fleet shell tests (windows)
     needs: [detect]
