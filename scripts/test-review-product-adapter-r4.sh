@@ -75,5 +75,9 @@ env PATH="$windows_path" "$pwsh_bin" -NoProfile -NonInteractive -ExecutionPolicy
 grep -qx 'DISPATCH_EXIT=3' "$scratch/review-pr9998-r2.done"
 grep -qx 'QUALIFIED=false' "$scratch/review-pr9998-r2.done"
 grep -qx 'DISQUALIFIERS=gate-red' "$scratch/review-pr9998-r2.done"
-! grep -q '^<<<VERDICT' "$scratch/review-pr9998-r2.log"
+# #998: exit 3 publishes its payload under a provisional Verdict line — never
+# an `LGTM` line the watcher could map to review:lgtm.
+grep -q '^<<<VERDICT' "$scratch/review-pr9998-r2.log"
+grep -qx 'Provisional — unqualified (disqualifiers: gate-red), P0=0, P1=0 — not a merge-gate verdict' "$scratch/review-pr9998-r2.log"
+! grep -qE '^(LGTM|Changes Requested)' "$scratch/review-pr9998-r2.log"
 echo 'review product adapter R4 fixture passed'
