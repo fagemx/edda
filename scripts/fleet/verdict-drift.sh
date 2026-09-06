@@ -7,19 +7,36 @@
 # reports CLEAN with zero verdicts.
 #
 # Output, one line per open PR:
-#   #<n> <head12> <base> <state> [ base=<branch> (status contexts not enforced) ]
+#   #<n> <head12> <base> <state> [ mergeable=<v> ] [ base=<branch> (...) ]
 # with <state> one of:
 #   no verdict on head | stale from <sha12> | SHADOW only | LGTM | Changes Requested
 # The base annotation is appended when the PR's base is not `main`, whose
 # status contexts are the only ones any ruleset enforces.
 #
-# Exit 0 every PR carries a verdict on its head; exit 1 when any PR has
-# `no verdict on head` or is `stale from ...`; exit 2 when a gh read fails —
-# a check that could not read must never print nothing and exit 0.
+# GH-958: R24 names THREE readiness fields, and this check now covers all
+# three — (1) the newest verdict's SHA equals the head, (2) the
+# mergeStateStatus caveat above, and (3) `mergeable` is not CONFLICTING,
+# which used to be left to the digest's DIRTY row and so went missing
+# whenever this check ran standalone. CONFLICTING is a not-ready state;
+# UNKNOWN (GitHub has not computed the merge yet) is annotated but does not
+# hold the PR, because it is a transient answer, not a verdict.
+#
+# The open-PR enumeration limit is shared with daily-digest.sh through
+# EDDA_OPEN_PR_LIMIT (GH-958): the two used 200 and 100, so a PR past the
+# digest's 100 got a drift line here that could never reach a digest row —
+# invisible in the one artefact R24 calls the report.
+#
+# Exit 0 every PR carries a verdict on its head and is not CONFLICTING;
+# exit 1 when any PR has `no verdict on head`, is `stale from ...`, or is
+# CONFLICTING; exit 2 when a gh read fails — a check that could not read
+# must never print nothing and exit 0.
 # Read-only: no posting, no labels, no merges, no ledger writes.
 set -eu
 
 repo=${EDDA_REPO:-fagemx/edda}
+# Shared with daily-digest.sh; see the note above. A saturated enumeration
+# is announced on stderr rather than silently dropping the tail.
+open_limit=${EDDA_OPEN_PR_LIMIT:-200}
 
 fail_read() {
     echo "verdict-drift: could not read PR state from gh ($1) — refusing to print a clean bill" >&2
@@ -29,13 +46,16 @@ fail_read() {
 # The R23 verdict heading, canonical REVIEW.md §7 shape: the ` (SHADOW)`
 # suffix follows `Round <N>`. The trailing-suffix variant is also accepted so
 # the issue #914 spelling of the pattern matches the same comments.
-open_rows=$(gh pr list --repo "$repo" --state open --limit 200 \
-    --json number,headRefOid,baseRefName \
-    --jq '.[] | [.number, .headRefOid, .baseRefName] | @tsv' \
+open_rows=$(gh pr list --repo "$repo" --state open --limit "$open_limit" \
+    --json number,headRefOid,baseRefName,mergeable \
+    --jq '.[] | [.number, .headRefOid, .baseRefName, .mergeable] | @tsv' \
 ) || fail_read "pr list"
+if [ "$(printf %s "$open_rows" | grep -c .)" -ge "$open_limit" ]; then
+    echo "verdict-drift: the open-PR enumeration hit its limit of $open_limit; PRs past it were not examined (raise EDDA_OPEN_PR_LIMIT)" >&2
+fi
 
 not_ready=0
-while IFS="$(printf '\t')" read -r num head base; do
+while IFS="$(printf '\t')" read -r num head base mergeable; do
     [ -n "$num" ] || continue
     verdicts=$(gh pr view "$num" --repo "$repo" --json comments --jq '
         .comments[]
@@ -86,7 +106,16 @@ EOF
         state="Changes Requested"
     fi
 
+    # R24 field (3). CONFLICTING holds the PR; UNKNOWN is surfaced without
+    # holding it; MERGEABLE and an empty value (an older gh without the
+    # field) add nothing to the line.
     line="#$num $head12 $base $state"
+    if [ "$mergeable" = "CONFLICTING" ]; then
+        line="$line mergeable=CONFLICTING"
+        not_ready=1
+    elif [ "$mergeable" = "UNKNOWN" ]; then
+        line="$line mergeable=UNKNOWN"
+    fi
     if [ "$base" != "main" ]; then
         line="$line base=$base (status contexts not enforced)"
     fi
