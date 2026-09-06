@@ -1938,6 +1938,7 @@ async fn test_sse_stream_type_filter() {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     };
     let decision = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
     ledger.append_event(&decision).unwrap();
@@ -2913,6 +2914,7 @@ async fn batch_returns_multiple_results() {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     };
     let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
     ledger.append_event(&event).unwrap();
@@ -3059,6 +3061,7 @@ async fn batch_domain_as_query() {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     };
     let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
     ledger.append_event(&event).unwrap();
@@ -3113,6 +3116,7 @@ async fn decisions_supports_context_summary_param() {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     };
     let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
     ledger.append_event(&event).unwrap();
@@ -3157,6 +3161,7 @@ async fn batch_supports_context_summary_query() {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     };
     let event = new_decision_event("main", parent_hash.as_deref(), "user", &dp).unwrap();
     ledger.append_event(&event).unwrap();
@@ -3932,6 +3937,7 @@ async fn get_patterns_returns_recurring() {
             review_after: None,
             reversibility: None,
             village_id: Some("v-test".to_string()),
+            cites: None,
         };
         let event =
             edda_core::event::new_decision_event("main", prev_hash.as_deref(), "system", &dp)
@@ -5008,6 +5014,7 @@ async fn village_stats_returns_counts() {
             review_after: None,
             reversibility: None,
             village_id: Some("v-stats".to_string()),
+            cites: None,
         };
         let event = new_decision_event("main", prev_hash.as_deref(), "system", &dp).unwrap();
         prev_hash = Some(event.hash.clone());
@@ -5220,6 +5227,7 @@ async fn log_filters_by_type() {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     };
     let decide = new_decision_event("main", Some(&note.hash), "system", &dp).unwrap();
     ledger.append_event(&decide).unwrap();

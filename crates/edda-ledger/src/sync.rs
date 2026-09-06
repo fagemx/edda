@@ -289,6 +289,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         ledger.append_event(&event).unwrap();
@@ -306,6 +307,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         ledger.append_event(&event).unwrap();
@@ -421,6 +423,7 @@ mod tests {
             review_after: Some("2027-01-01".to_string()),
             reversibility: Some("hard".to_string()),
             village_id: Some("village-alpha".to_string()),
+            cites: None,
         };
         let event = edda_core::event::new_decision_event("main", None, "system", &payload).unwrap();
         source.append_event(&event).unwrap();

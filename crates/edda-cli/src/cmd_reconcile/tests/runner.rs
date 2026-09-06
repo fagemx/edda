@@ -479,6 +479,11 @@ pub(super) fn first_spawn_failure_does_not_prevent_later_plan_launch() -> anyhow
 #[test]
 pub(super) fn fake_runner_records_session_in_main_ledger_before_turn_and_fails_without_receipt(
 ) -> anyhow::Result<()> {
+    // This test writes process env (`EDDA_FAKE_*`) and resolves a session,
+    // which reads `EDDA_SESSION_ID`. Both are process-global, so it takes the
+    // crate-wide env guard as well as its own two locks — otherwise it races
+    // any other test that sets a session id.
+    let _env = crate::test_support::env_guard();
     let _fake = test_lock(&FAKE_CODEX_LOCK);
     let _doorbell = test_lock(&DOORBELL_LOCK);
     let dir = tempfile::tempdir()?;
@@ -645,6 +650,7 @@ pub(super) fn periodic_renewal_stops_old_runner_before_failure_after_lease_repla
 #[test]
 pub(super) fn fake_runner_resumes_current_attempt_after_slow_startup_before_turn(
 ) -> anyhow::Result<()> {
+    let _env = crate::test_support::env_guard();
     let _fake = test_lock(&FAKE_CODEX_LOCK);
     let dir = tempfile::tempdir()?;
     let repo = dir.path().join("repo");

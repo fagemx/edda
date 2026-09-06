@@ -16,7 +16,7 @@ mod tests;
 pub use bg_review::bg_review;
 pub use claim::{claim, unclaim};
 pub use claude::{digest, doctor, hook_claude, index_verify, install, uninstall};
-pub use decide::{decide, ratify};
+pub use decide::decide;
 pub use peers::peers;
 pub use render::{
     heartbeat_remove, heartbeat_touch, heartbeat_write, render_coordination, render_fleet,
@@ -369,6 +369,7 @@ pub fn run_bridge(cmd: BridgeCmd, repo_root: &Path) -> anyhow::Result<()> {
                 None,
                 &paths,
                 &tags,
+                &[],
             ),
             BridgeClaudeCmd::Request {
                 to,

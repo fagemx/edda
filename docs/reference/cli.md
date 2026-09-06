@@ -189,32 +189,61 @@ edda decide <DECISION> [OPTIONS]
 |--------|-------------|
 | `DECISION` | Key=value format (e.g. `"db.engine=postgres"`) |
 | `--reason TEXT` | Reason for the decision |
+| `--cite CITATION` | Authority this decision rests on, repeatable: `operator:<when>`, `issue:#<n>`, or `decision:<key>`. Read by `edda ratify --by-rule` (GH-761). Anything else exits 2 |
 | `--session ID` | Explicit session attribution; otherwise uses process-carried `EDDA_SESSION_ID` |
 
 ```bash
 edda decide "db.engine=sqlite" --reason "embedded, zero-config"
 edda decide "auth.strategy=JWT" --reason "stateless, scales horizontally"
+edda decide "review.engine=opus" --reason "window day 0" --cite issue:#888
 ```
+
+A decision written without `--cite` still works everywhere; the ratify rule
+falls back to reading the `--reason` text for an issue number, a binding
+decision key, or the word "operator".
 
 ### `edda ratify`
 
-Ratify an active decision — confer operator authority (GH-401). An
-agent-authored decision from `edda decide` is unratified; ratification is
-what makes it binding.
+Ratify a decision — confer authority (GH-401). An agent-authored decision from
+`edda decide` is unratified; ratification is what makes it binding.
+
+Three forms, mutually exclusive. Each writes a different, permanently
+distinguishable `ratified_by` prefix, so `edda log` and `edda ask` always say
+which authority conferred binding status:
+
+| Form | `ratified_by` | Who is asserting |
+|------|---------------|------------------|
+| `edda ratify <KEY> [--by WHO]` | `<WHO>` or the session label | a person |
+| `edda ratify <KEY> --evidence pr#<N>@<sha>` | `evidence:pr#N@sha` | a merged PR (GH-764) |
+| `edda ratify --by-rule <RULE>` | `rule:<RULE>` | a rule in the binary (GH-761) |
+
+`edda log --type decision_ratify` prints `<key> by <ratified_by>` in its detail
+column, so the three forms are told apart there without `--json`.
 
 ```bash
 edda ratify [OPTIONS] <KEY>
+edda ratify --by-rule <RULE> [--dry-run] [OPTIONS]
 ```
 
 | Argument / Option | Description |
 |-------------------|-------------|
-| `KEY` | Decision key to ratify (e.g. `"db.engine"`) |
+| `KEY` | Decision key to ratify (e.g. `"db.engine"`). Omit it with `--by-rule` |
 | `--note TEXT` | Optional note recorded with the ratification |
 | `--by TEXT` | Who ratified — recorded for audit; self-asserted, not verified (identity enforcement is a policy-layer concern). Defaults to the resolved session label |
+| `--evidence pr#N@SHA` | The merged PR that made this decision binding. The SHA is a full 40-hex commit; an abbreviated one is refused |
+| `--by-rule RULE` | Sweep every active, unratified decision with a named rule. Today: `cited-authority` |
+| `--dry-run` | With `--by-rule`: print the table and write nothing |
 | `--session ID` | Session ID (uses `EDDA_SESSION_ID`; `--session` required when identity is ambiguous) |
+
+Exit codes (`claim-check.exit-codes=0/1/2`): **0** success, including the no-op
+when the key is already binding; **1** no active decision for that key; **2**
+malformed input — a bad evidence string, an unknown rule, or a key given
+together with `--by-rule`.
 
 ```bash
 edda ratify "demo.engine" --note "confirmed after load test" --by operator
+edda ratify "demo.engine" --evidence "pr#764@03c604ffea4b2a1731b7866e7f701374eb03b156"
+edda ratify --by-rule cited-authority --dry-run
 ```
 
 Output:
@@ -223,6 +252,33 @@ Output:
 Ratified 'demo.engine' (by operator) — now binding.
   note: confirmed after load test
 ```
+
+#### Rule `cited-authority`
+
+Ratifies an active, unratified decision when it names the authority it rests
+on — a `--cite` value, or failing that an issue number, a binding decision key,
+or the word "operator" in its reason. It holds:
+
+- keys under `product.`, `commercial.` and `spend.` — these bind money or
+  product promises, and a cited issue is not authority for either;
+- anything a later decision's reason names, which has already been overtaken;
+- anything with no citation at all.
+
+`--dry-run` prints the same table it would act on, so the sweep can be read
+before it runs:
+
+```
+key                action  why
+db.engine          ratify  issue:#742
+product.tier       hold    held domain 'product.' — operator ratifies these
+review.engine      hold    superseded — a later decision 'review.pool' names it
+cache.ttl          hold    no citation — add --cite operator:<when> | issue:#<n> | decision:<key>
+dry run — would ratify 1, hold 3 (rule: cited-authority); nothing written.
+```
+
+Ratification is per decision event, not per key: re-deciding a key resets it to
+unratified, so a sweep run after a re-decide judges the new value on its own
+merits.
 
 ### `edda checkpoint`
 

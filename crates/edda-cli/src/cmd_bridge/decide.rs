@@ -22,7 +22,16 @@ pub fn decide(
     scope_str: Option<&str>,
     paths: &[String],
     tags: &[String],
+    cites: &[String],
 ) -> anyhow::Result<()> {
+    // GH-761: a citation is typed input, so a typo is rejected here rather
+    // than stored as an uninterpretable string the ratify rule silently
+    // ignores later.
+    for c in cites {
+        if let Err(msg) = crate::cmd_ratify::validate_citation(c) {
+            crate::cmd_ratify::usage_exit(&msg);
+        }
+    }
     let (key, value) = decision.split_once('=').ok_or_else(|| {
         anyhow::anyhow!("decision must be in key=value format (e.g. \"auth.method=JWT RS256\")")
     })?;
@@ -124,6 +133,11 @@ pub fn decide(
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: if cites.is_empty() {
+            None
+        } else {
+            Some(cites.to_vec())
+        },
     };
     let mut event =
         edda_core::event::new_decision_event(&branch, parent_hash.as_deref(), actor, &dp)?;
@@ -200,6 +214,9 @@ pub fn decide(
     if !tags.is_empty() {
         println!("  tags: {}", tags.join(", "));
     }
+    if !cites.is_empty() {
+        println!("  cites: {}", cites.join(", "));
+    }
 
     // Refresh derived markdown views (log.md / main.md / commit.md) so operators
     // reading the ledger by eye see the decision immediately, not only after the
@@ -207,56 +224,5 @@ pub fn decide(
     // edda-serve::api::drafts.rs:508 — failure never blocks a successful decide.
     let _ = edda_derive::rebuild_branch(&ledger, &branch);
 
-    Ok(())
-}
-
-/// `edda ratify <key>` — confer operator authority on an active decision (GH-401).
-///
-/// Ratification is a separate append-only fact (`decision_ratify` event),
-/// never a mutation of the decision, so operator authority is conferred by a
-/// deliberate act and is fully auditable via `ratified_by`. This is the
-/// operator counterpart to `edda decide`; agents are taught `decide` only
-/// (see the write-back protocol), so a compliant agent never self-ratifies.
-///
-/// Identity is not cryptographically enforced here — a session can record any
-/// `ratified_by`. That enforcement is a policy-layer concern (GH-401 scope);
-/// this layer delivers the separation of act, the rendering split, and the
-/// audit trail.
-pub fn ratify(
-    repo_root: &Path,
-    key: &str,
-    note: Option<&str>,
-    by: Option<&str>,
-    cli_session: Option<&str>,
-) -> anyhow::Result<()> {
-    let key = key.trim();
-    let project_id = edda_store::project_id(repo_root);
-    let (_session_id, label) = resolve_session_id(cli_session, &project_id, "cli")?;
-    let ratified_by = by.unwrap_or(&label);
-
-    let ledger = edda_ledger::Ledger::open(repo_root).context("cmd_bridge: opening ledger")?;
-    let _lock = edda_ledger::lock::WorkspaceLock::acquire(&ledger.paths)?;
-    let branch = ledger.head_branch()?;
-
-    // Only an existing active decision can be ratified.
-    if ledger.find_active_decision(&branch, key)?.is_none() {
-        anyhow::bail!("no active decision for key '{key}' — nothing to ratify (see `edda ask`)");
-    }
-
-    let parent_hash = ledger.last_event_hash()?;
-    let event = edda_core::event::new_decision_ratify_event(
-        &branch,
-        parent_hash.as_deref(),
-        key,
-        ratified_by,
-        note,
-    )?;
-    ledger.append_event(&event)?;
-    let _ = edda_derive::rebuild_branch(&ledger, &branch);
-
-    println!("Ratified '{key}' (by {ratified_by}) — now binding.");
-    if let Some(n) = note {
-        println!("  note: {n}");
-    }
     Ok(())
 }

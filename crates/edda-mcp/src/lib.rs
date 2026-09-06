@@ -300,6 +300,7 @@ impl EddaServer {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let mut event = new_decision_event(&branch, parent_hash.as_deref(), "system", &dp)
             .map_err(to_mcp_err)?;

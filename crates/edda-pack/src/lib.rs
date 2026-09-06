@@ -1150,6 +1150,7 @@ mod tests {
                 review_after: None,
                 reversibility: None,
                 village_id: None,
+                cites: None,
             };
             let ev = edda_core::event::new_decision_event("main", parent.as_deref(), "worker", &dp)
                 .unwrap();

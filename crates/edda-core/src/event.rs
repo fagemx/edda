@@ -1232,6 +1232,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let event = new_decision_event("main", None, "system", &dp).unwrap();
         assert_eq!(event.event_type, "note");
@@ -1261,6 +1262,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let event = new_decision_event("main", None, "system", &dp).unwrap();
         assert_eq!(event.payload["decision"]["key"], "auth.method");
@@ -1282,6 +1284,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let event = new_decision_event("main", None, "system", &dp).unwrap();
         let extracted = crate::decision::extract_decision(&event.payload).unwrap();
