@@ -1,6 +1,6 @@
 {
-  "spec_sha": "9f31ea0ed0fce7bbd1bbd4c1149ee68da5774ce4",
-  "spec_ref": "review-verdict correction tree — commit 9f31ea0 on fix/gh934-repin-spec-review-verdict restores the fixture digest 92e34d0 broke (#872); moved per #934 round 2 (2026-09-06). Repin to a trunk SHA at the next spec change.",
+  "spec_sha": "04b58b1e8efbc589417cd44120e2611fecf89229",
+  "spec_ref": "review-verdict fixture-fidelity tree — commit 04b58b1 on fix/gh934-repin-spec-review-verdict drops the refs.events key the typed Refs model skips (#934 round 2, 2026-09-06). Repin to a trunk SHA at the next spec change.",
   "layout": {
     "schemas": "spec/events/*.schema.json + registry.json + canonical-v1.json",
     "fixtures": "tests/fixtures/events/*.jsonl"
