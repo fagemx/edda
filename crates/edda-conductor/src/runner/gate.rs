@@ -107,13 +107,13 @@ impl ReadErrorTracker {
 /// never trips — this counter is the real loop bound. Exhausting it fails
 /// the phase like `on_reject: halt`, with a distinct error naming the bound.
 ///
-/// Fixed at 3 rather than plan-configurable, on purpose: this bound exists
-/// to kill loop-shaped defects (the D6 loop measured 176 cycles before the
-/// fix), and a plan-author-tunable ceiling would let the same optimism that
-/// wrote an unbounded gate re-open the loop from inside the plan file. Three
-/// covers the multi-round review cycles this repo actually ships (e.g. the
-/// three-round review of GH-534); a phase that genuinely needs more review
-/// rounds should be split into smaller phases instead of raising the bound.
+/// Fixed at 3 rather than plan-configurable, on purpose: a plan-tunable
+/// ceiling would let the same optimism that wrote an unbounded gate (the D6
+/// loop measured 176 cycles) re-open it from inside the plan file. Three
+/// covers the review cycles this repo ships (e.g. GH-534's three rounds) PER
+/// ATTEMPT — a scope claim that was false until GH-752, since nothing reset
+/// the counter; `PhaseState::begin_attempt` now does, and its doc carries the
+/// cost of the old per-lifetime budget and the GH-540 refund ruling.
 pub(super) const MAX_GATE_REDISPATCHES: u32 = 3;
 
 /// `<plan-name>/<phase-id>` — the subject an `edda verdict` targets (D1/D3).

@@ -25,7 +25,7 @@ crates/edda-conductor/src/agent/codex_rpc.rs 1378
 crates/edda-conductor/src/agent/pi_rpc.rs 1480
 crates/edda-conductor/src/runner/acp.rs 1503
 crates/edda-conductor/src/runner/gate.rs 1020
-crates/edda-conductor/src/runner/sequential.rs 4593
+crates/edda-conductor/src/runner/sequential.rs 4640
 crates/edda-core/src/event.rs 2191
 crates/edda-derive/src/context/session.rs 1072
 crates/edda-ledger/src/ledger.rs 1951
