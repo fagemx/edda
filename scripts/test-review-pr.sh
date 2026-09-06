@@ -651,7 +651,9 @@ chmod +x "$STUBBIN/edda"
 hash -r
 export EDDA_REVIEW_PRODUCT_ADAPTER=1 TEST_PRODUCT_UNIX=1 EDDA_FLEET_ROOT="$root"
 rm -f "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.log" "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.done" "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1-run.sh"
-out=$(timeout "${EDDA_TEST_TIMEOUT_SECONDS:-60}" sh "$root/scripts/review-pr.sh" "$FIXTURE_PR" 1 2>"$tmp/product.err") || {
+# The product path reserves the shared round like the brief path (#998);
+# keep that machine-local state out of the real ~/.edda/review-coordination.
+out=$(EDDA_REVIEW_COORD_DIR="$tmp/coord" timeout "${EDDA_TEST_TIMEOUT_SECONDS:-60}" sh "$root/scripts/review-pr.sh" "$FIXTURE_PR" 1 2>"$tmp/product.err") || {
     fail "D11: product adapter launch failed: $(cat "$tmp/product.err")"
 }
 for _ in $(seq 1 30); do [ -f "$EDDA_FLEET_SCRATCH/review-pr$FIXTURE_PR-r1.done" ] && break; sleep 1; done

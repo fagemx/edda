@@ -538,6 +538,174 @@ ReviewBundlePayload = TypedDict(
     total=False,
 )
 
+ReviewVerdictPayloadSubject = TypedDict(
+    'ReviewVerdictPayloadSubject',
+    {
+        'base_sha': Required[str],
+        'head_sha': Required[str],
+        'files': Required[int],
+        'lines': Required[int],
+        'coverage': Required[str],
+        'subject_seen': NotRequired[str],
+        'worktree_check': NotRequired[str],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadRefs = TypedDict(
+    'ReviewVerdictPayloadRefs',
+    {
+        'pr': NotRequired[int],
+        'issue': NotRequired[int],
+        'supersedes': NotRequired[str],
+        'previous': NotRequired[str],
+        'round': NotRequired[int],
+        'history_rewritten': NotRequired[bool],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadSpec = TypedDict(
+    'ReviewVerdictPayloadSpec',
+    {
+        'mode': Required[str],
+        'source': Required[str],
+        'trust': Required[str],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadBrief = TypedDict(
+    'ReviewVerdictPayloadBrief',
+    {
+        'core': Required[str],
+        'review_md_sha': NotRequired[str],
+        'classes': NotRequired[list[str]],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadReviewer = TypedDict(
+    'ReviewVerdictPayloadReviewer',
+    {
+        'agent': Required[str],
+        'transport': Required[str],
+        'model_requested': Required[str],
+        'model_observed': Required[str],
+        'observed_via': Required[str],
+        'model_self_report': NotRequired[str],
+        'session_id': Required[str],
+        'session_label': Required[str],
+        'tool_policy': Required[str],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadGatesReadItem = TypedDict(
+    'ReviewVerdictPayloadGatesReadItem',
+    {
+        'kind': Required[str],
+        'ref': Required[str],
+        'cmd': Required[str],
+        'result': Required[str],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadGatesRanItem = TypedDict(
+    'ReviewVerdictPayloadGatesRanItem',
+    {
+        'cmd': Required[str],
+        'exit': Required[int],
+        'duration_ms': Required[int],
+        'stdout_blob': NotRequired[str],
+        'timed_out': NotRequired[bool],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadGates = TypedDict(
+    'ReviewVerdictPayloadGates',
+    {
+        'status': Required[str],
+        'declared_by': NotRequired[list[str]],
+        'read': NotRequired[list[ReviewVerdictPayloadGatesReadItem]],
+        'ran': NotRequired[list[ReviewVerdictPayloadGatesRanItem]],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadProbesItem = TypedDict(
+    'ReviewVerdictPayloadProbesItem',
+    {
+        'cmd': Required[str],
+        'exit': Required[int],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadFindingsItem = TypedDict(
+    'ReviewVerdictPayloadFindingsItem',
+    {
+        'id': Required[str],
+        'severity': Required[str],
+        'file': Required[str],
+        'line': NotRequired[int],
+        'claim': Required[str],
+        'evidence': Required[str],
+        'rule': Required[str],
+        'status': Required[str],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadChecklistItem = TypedDict(
+    'ReviewVerdictPayloadChecklistItem',
+    {
+        'item': Required[str],
+        'result': Required[str],
+        'measure': Required[str],
+    },
+    total=False,
+)
+
+ReviewVerdictPayloadCost = TypedDict(
+    'ReviewVerdictPayloadCost',
+    {
+        'usd': NotRequired[float],
+        'measured': Required[bool],
+        'duration_ms': Required[int],
+    },
+    total=False,
+)
+
+ReviewVerdictPayload = TypedDict(
+    'ReviewVerdictPayload',
+    {
+        'schema': Required[str],
+        'subject': Required[ReviewVerdictPayloadSubject],
+        'refs': Required[ReviewVerdictPayloadRefs],
+        'spec': Required[ReviewVerdictPayloadSpec],
+        'brief': Required[ReviewVerdictPayloadBrief],
+        'reviewer': Required[ReviewVerdictPayloadReviewer],
+        'independence': Required[str],
+        'independence_policy': Required[str],
+        'gates': Required[ReviewVerdictPayloadGates],
+        'probes': NotRequired[list[ReviewVerdictPayloadProbesItem]],
+        'verdict': Required[str],
+        'outcome': Required[str],
+        'qualified': Required[bool],
+        'disqualifiers': NotRequired[list[str]],
+        'findings': NotRequired[list[ReviewVerdictPayloadFindingsItem]],
+        'checklist': NotRequired[list[ReviewVerdictPayloadChecklistItem]],
+        'escalations': NotRequired[list[str]],
+        'cost': Required[ReviewVerdictPayloadCost],
+        'parse': Required[str],
+        'notes': NotRequired[str],
+    },
+    total=False,
+)
+
 TaskCreatedPayload = TypedDict(
     'TaskCreatedPayload',
     {
@@ -634,4 +802,4 @@ VerdictRecordedPayload = TypedDict(
 
 # Stability-partitioned unions (client contract §3).
 Layer1Payload: TypeAlias = BranchCreatePayload | BranchSwitchPayload | CheckpointPayload | CmdPayload | CommitPayload | DecisionImportPayload | DecisionRatifyPayload | MergePayload | NotePayload | RebuildPayload
-Layer2Payload: TypeAlias = AgentPhaseChangePayload | ApprovalPayload | ApprovalPolicyMatchPayload | ApprovalRequestPayload | CycleTelemetryPayload | DecideSnapshotPayload | DevicePairPayload | DeviceRevokePayload | ExecutionEventPayload | IngestionPayload | PrPayload | ReviewBundlePayload | TaskCreatedPayload | TaskDonePayload | TaskFailedPayload | TaskRequeuedPayload | TaskSessionPayload | TaskStartedPayload | TaskIntakePayload | VerdictRecordedPayload
+Layer2Payload: TypeAlias = AgentPhaseChangePayload | ApprovalPayload | ApprovalPolicyMatchPayload | ApprovalRequestPayload | CycleTelemetryPayload | DecideSnapshotPayload | DevicePairPayload | DeviceRevokePayload | ExecutionEventPayload | IngestionPayload | PrPayload | ReviewBundlePayload | ReviewVerdictPayload | TaskCreatedPayload | TaskDonePayload | TaskFailedPayload | TaskRequeuedPayload | TaskSessionPayload | TaskStartedPayload | TaskIntakePayload | VerdictRecordedPayload

@@ -140,7 +140,7 @@ printf ORIGINAL > "$CANARY"
 : > "$CALLS"
 printf brief > "$tmp/scratch/review-pr9998-r1-brief.md"
 failures=0
-sh "$tmp/unguarded-old-run.sh" > "$tmp/old-out" 2>&1 || old_rc=$?
+bash "$tmp/unguarded-old-run.sh" > "$tmp/old-out" 2>&1 || old_rc=$?
 old_rc=${old_rc:-0}
 # This control asks one thing: does an UNGUARDED dispatch reach the backend?
 # So it reads DISPATCH_EXIT from the receipt, not the runner's process exit.
@@ -171,7 +171,7 @@ for BACKEND in old modern old-claude fallback mutate; do
    printf brief > "$tmp/scratch/review-pr9998-r1-brief.md"
  fi
  rc=0
- sh "$tmp/run.sh" > "$tmp/out" 2>&1 || rc=$?
+ bash "$tmp/run.sh" > "$tmp/out" 2>&1 || rc=$?
  if [ "$(cat "$CANARY")" != ORIGINAL ]; then
    echo "FAIL $BACKEND: backend wrote canary"; failures=$((failures + 1))
  fi

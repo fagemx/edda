@@ -26,6 +26,7 @@ trap 'rm -rf "$tmp"' 0 HUP INT TERM
 mkdir -p "$tmp/bin"
 cat >"$tmp/bin/gh" <<'EOF'
 #!/bin/sh
+[ -n "${GH_ARGV_LOG:-}" ] && echo "gh $*" >>"$GH_ARGV_LOG"
 if [ -n "${GH_FAIL:-}" ]; then
     echo "gh: stub failure" >&2
     exit 1
@@ -137,5 +138,50 @@ unset GH_FAIL
 grep -q 'could not read' "$tmp/err" ||
     fail 7 "stderr must say the read failed, got: $(cat "$tmp/err")"
 echo "PASS 7"
+
+# --- case 8: mergeable CONFLICTING holds the PR (R24 field 3, GH-958) ----------
+# The head carries an authoritative LGTM, so every field the check covered
+# before says ready. R24's third field does not, and used to be left to the
+# digest's DIRTY row — invisible whenever this check ran standalone.
+printf '[{"number":8,"headRefOid":"%s","baseRefName":"main","mergeable":"CONFLICTING"}]\n' "$SHA1" >"$tmp/prs.json"
+printf '{"comments":[{"body":"## Code Review: Round 1 — PR #8 @ %s\\n\\n### Verdict\\nLGTM (P0=0, P1=0)"}]}\n' "$SHA1" >"$tmp/comments-8.json"
+run_drift
+expect 8 1 "#8 111111111111 main LGTM mergeable=CONFLICTING"
+
+# --- case 9: mergeable UNKNOWN is surfaced but does not hold the PR ------------
+# GitHub has not computed the merge yet; that is a transient answer, not a
+# verdict, so it is annotated and the exit code stays 0.
+printf '[{"number":9,"headRefOid":"%s","baseRefName":"main","mergeable":"UNKNOWN"}]\n' "$SHA2" >"$tmp/prs.json"
+printf '{"comments":[{"body":"## Code Review: Round 1 — PR #9 @ %s\\n\\n### Verdict\\nLGTM (P0=0, P1=0)"}]}\n' "$SHA2" >"$tmp/comments-9.json"
+run_drift
+expect 9 0 "#9 222222222222 main LGTM mergeable=UNKNOWN"
+
+# --- case 10: the enumeration limit is EDDA_OPEN_PR_LIMIT, shared with the -----
+# digest (GH-958). The two scripts hardcoded 200 and 100, so a PR past the
+# digest's 100 got a line here that could never reach a digest row.
+printf '[{"number":10,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE"}]\n' "$SHA3" >"$tmp/prs.json"
+printf '{"comments":[{"body":"## Code Review: Round 1 — PR #10 @ %s\\n\\n### Verdict\\nLGTM (P0=0, P1=0)"}]}\n' "$SHA3" >"$tmp/comments-10.json"
+: >"$tmp/gh-argv.log"
+GH_ARGV_LOG="$tmp/gh-argv.log"
+export GH_ARGV_LOG
+EDDA_OPEN_PR_LIMIT=7
+export EDDA_OPEN_PR_LIMIT
+run_drift
+unset EDDA_OPEN_PR_LIMIT
+grep -q -- '--limit 7' "$tmp/gh-argv.log" ||
+    fail 10 "the pr list call ignored EDDA_OPEN_PR_LIMIT: $(cat "$tmp/gh-argv.log")"
+[ "$rc" = 0 ] || fail 10 "exit $rc, expected 0 (stderr: $(cat "$tmp/err"))"
+echo "PASS 10"
+
+# --- case 11: a saturated enumeration says so on stderr instead of dropping ----
+# the tail in silence.
+EDDA_OPEN_PR_LIMIT=1
+export EDDA_OPEN_PR_LIMIT
+run_drift
+unset EDDA_OPEN_PR_LIMIT
+grep -q 'hit its limit' "$tmp/err" ||
+    fail 11 "a saturated enumeration printed no warning: $(cat "$tmp/err")"
+echo "PASS 11"
+unset GH_ARGV_LOG
 
 echo "verdict-drift fixtures passed"

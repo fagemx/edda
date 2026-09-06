@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      fleet: ${{ steps.diff.outputs.fleet }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -59,6 +60,14 @@ jobs:
               base= head= ;;  # unknown event: assume code changed
           esac
           code=true
+          # GH-896: separate, narrower whitelist for the fleet shell-test gate
+          # — unrelated PRs keep it skipped (green-fast). On any diff failure
+          # or unknown base we assume fleet tests changed too, same policy as
+          # code above. scripts/test-review-capabilities.sh is named
+          # explicitly: the issue's doneWhen lists it among the fleet shell
+          # tests, but it lives in scripts/ — one directory above the
+          # scripts/fleet/ glob the runner matches.
+          fleet=false
           if [ -n "$base" ] \
             && git cat-file -e "$base" 2>/dev/null \
             && git cat-file -e "$head" 2>/dev/null; then
@@ -78,15 +87,22 @@ jobs:
                   crates/*|spec/events/*|tests/fixtures/events/*|Cargo.toml|Cargo.lock|rust-toolchain*|.cargo/*|.github/workflows/*|scripts/*|install.sh|build.rs)
                     code=true ;;
                 esac
+                case "$f" in
+                  scripts/fleet/*|scripts/test-review-capabilities.sh|.github/workflows/ci.yml)
+                    fleet=true ;;
+                esac
               done < "$diffout"
             else
               echo "git diff failed; assuming code changed."
+              fleet=true
             fi
             rm -f "$diffout"
           else
             echo "Diff could not be computed (base: '${base:-none}'); assuming code changed."
+            fleet=true
           fi
           echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+          echo "fleet=$fleet" | tee -a "$GITHUB_OUTPUT"
 
   fmt:
     name: Format
@@ -196,6 +212,78 @@ jobs:
           key: msrv-1.91.0
       - run: cargo +1.91.0 check --workspace --all-targets --locked
 
+  # GH-896: no machine gate ran any fleet shell test — grep over .github/
+  # found nothing and lefthook runs cargo only, so their doneWhen rested on
+  # hand execution. This job is that gate. The runner is glob-driven over
+  # scripts/fleet/test-*.sh, so a test added there later is picked up without
+  # touching this file; a red test exits non-zero and ci-gate propagates it.
+  #
+  # Not everything runs here. scripts/test-review-capabilities.sh runs in
+  # fleet-tests-windows below (ubuntu's dash rejects the `set -o pipefail` in
+  # the helper it generates). Some tests are QUARANTINED in the runner, which
+  # names each one, the measured failure, and the issue that owns removing it,
+  # and prints a count so the list cannot grow quietly. That file is the single
+  # source for which tests those are — deliberately not repeated here.
+  fleet-tests:
+    name: Fleet shell tests
+    needs: [detect]
+    if: needs.detect.outputs.fleet == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # see fleet-tests-windows: origin/main must exist for the tests that
+          # resolve it, and a depth-1 checkout has no such ref.
+          fetch-depth: 0
+      - name: Run fleet shell tests
+        run: sh scripts/fleet/run-fleet-tests.sh
+
+  # GH-896 round 1 (P0-1) asked for the second route #896's doneWhen offers,
+  # since some of its tests cannot run on ubuntu. This job is it, and it runs
+  # exactly one test: scripts/test-review-capabilities.sh, whose generated
+  # helper carries `set -o pipefail` (the `set -o pipefail` it writes into that runner, `scripts/review-pr.sh`) — ubuntu's sh
+  # is dash and rejects it with `Illegal option`, so there the test would fail
+  # for the shell rather than for anything it asserts. Here sh is Git Bash.
+  #
+  # It does NOT run test-lane-helpers.sh: that test is red on this runner too
+  # (case 0, `prepare: worktree not registered`) as well as on a Windows
+  # workstation, so it is quarantined in run-fleet-tests.sh under #963 and
+  # executes nowhere. That is the one #896 doneWhen item this gate does not
+  # deliver, which is why the PR carries no closing keyword.
+  #
+  # Shares the detect.fleet path filter with the ubuntu job; ci-gate evaluates
+  # its verdict the same way: a skip is accepted only when detect.fleet is
+  # 'false', and any failure or cancellation fails the gate.
+  fleet-tests-windows:
+    name: Fleet shell tests (windows)
+    needs: [detect]
+    if: needs.detect.outputs.fleet == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # test-next-loop.sh and test-issue-freshness.sh resolve origin/main;
+          # the default depth-1 checkout has no such ref and they exit non-zero
+          # on a fatal 'ambiguous argument' rather than on anything they test.
+          fetch-depth: 0
+      - name: Run the Windows-only fleet tests
+        # Not the glob runner: this is the one test the ubuntu job cannot run
+        # but this one can. test-review-capabilities.sh generates a Linux
+        # runner from scripts/review-pr.sh carrying a bash shebang and
+        # `set -o pipefail`; ubuntu's sh is dash and rejects it with 'Illegal
+        # option', so there the test fails for the shell rather than for
+        # anything it asserts. Here sh is Git Bash, so it runs.
+        #
+        # The quarantined tests are NOT here either — they are red on this
+        # runner too. run-fleet-tests.sh is the single place that names them
+        # and the issue that owns each; no list is duplicated here, because a
+        # second copy is a second thing to forget to update.
+        run: |
+          sh scripts/test-review-capabilities.sh
+
   # Aggregate gate: the single check the branch ruleset will pin instead of
   # enumerating the eight individual jobs. `if: always()` keeps it running even
   # when an upstream job fails or is skipped, so the verdict table is always
@@ -205,7 +293,7 @@ jobs:
   ci-gate:
     name: CI Gate
     runs-on: ubuntu-latest
-    needs: [detect, fmt, clippy, test, msrv]
+    needs: [detect, fmt, clippy, test, msrv, fleet-tests, fleet-tests-windows]
     if: always()
     steps:
       - name: Evaluate upstream job results
@@ -216,15 +304,39 @@ jobs:
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           TEST_RESULT: ${{ needs.test.result }}
           MSRV_RESULT: ${{ needs.msrv.result }}
+          FLEET_RESULT: ${{ needs.fleet-tests.result }}
+          FLEET_WIN_RESULT: ${{ needs.fleet-tests-windows.result }}
+          FLEET: ${{ needs.detect.outputs.fleet }}
         run: |
           fail() { echo "::error::$1"; exit 1; }
-          printf '%-10s -> %s\n' detect "$DETECT_RESULT"
-          printf '%-10s -> %s\n' fmt "$FMT_RESULT"
-          printf '%-10s -> %s\n' clippy "$CLIPPY_RESULT"
-          printf '%-10s -> %s\n' test "$TEST_RESULT"
-          printf '%-10s -> %s\n' msrv "$MSRV_RESULT"
+          printf '%-19s -> %s\n' detect "$DETECT_RESULT"
+          printf '%-19s -> %s\n' fmt "$FMT_RESULT"
+          printf '%-19s -> %s\n' clippy "$CLIPPY_RESULT"
+          printf '%-19s -> %s\n' test "$TEST_RESULT"
+          printf '%-19s -> %s\n' msrv "$MSRV_RESULT"
+          printf '%-19s -> %s\n' fleet-tests "$FLEET_RESULT"
+          printf '%-19s -> %s\n' fleet-tests-windows "$FLEET_WIN_RESULT"
           [ "$DETECT_RESULT" = "success" ] || fail "detect did not succeed (result: $DETECT_RESULT)."
           [ "$FMT_RESULT" = "success" ] || fail "fmt did not succeed (result: $FMT_RESULT)."
+          # GH-896: fleet-tests and fleet-tests-windows are evaluated FIRST
+          # so their failure cannot be swallowed by the early success exits
+          # below. Each is skipped only when detect decided no fleet path
+          # (scripts/fleet/**, scripts/test-review-capabilities.sh, workflow)
+          # changed; any other skip, failure, or cancellation fails the gate.
+          if [ "$FLEET_RESULT" = "success" ]; then
+            echo "Fleet shell tests succeeded."
+          elif [ "$FLEET_RESULT" = "skipped" ] && [ "$FLEET" = "false" ]; then
+            echo "Fleet shell tests skipped (no fleet path change): accepted."
+          else
+            fail "fleet-tests did not succeed (fleet-tests: $FLEET_RESULT, detect.fleet: $FLEET)."
+          fi
+          if [ "$FLEET_WIN_RESULT" = "success" ]; then
+            echo "Fleet shell tests (windows) succeeded."
+          elif [ "$FLEET_WIN_RESULT" = "skipped" ] && [ "$FLEET" = "false" ]; then
+            echo "Fleet shell tests (windows) skipped (no fleet path change): accepted."
+          else
+            fail "fleet-tests-windows did not succeed (fleet-tests-windows: $FLEET_WIN_RESULT, detect.fleet: $FLEET)."
+          fi
           if [ "$CLIPPY_RESULT" = "success" ] && [ "$TEST_RESULT" = "success" ] && [ "$MSRV_RESULT" = "success" ]; then
             echo "All upstream jobs succeeded."
             exit 0

@@ -71,6 +71,15 @@
 # Changes Requested on the same sha. Posting reuses the comment's bounded
 # retry path (postfails, POSTFAIL_CAP, review:post-failed) — never best-effort.
 #
+# A product round (TRANSPORT=edda-review) carries its verdict in `edda
+# review`'s exit: 1 is Changes Requested and 3 an unqualified LGTM, which the
+# adapter publishes under a `Provisional — …` Verdict line (REVIEW.md §6.4).
+# Both are settled reviews: the comment is posted, the status goes through the
+# union rule (gate_state: a Provisional round is never success on its own — at
+# P0=P1=0 it is pending, with any P0/P1 it stands like any non-qualifying
+# verdict), and a Provisional round gets no review:* label. Neither is a dead
+# verdict for the overload rule (#998).
+#
 # The watcher NEVER merges. Merge stays behind operator authorization
 # (pr.merge-policy).
 set -u
@@ -176,14 +185,21 @@ gate_state() {
     /^[[:space:]]*$/ { next }
     {
       n++
-      if ($1 == "LGTM" && $2 ~ /^[0-9]+$/ && $2 + 0 == 0 &&
-          $3 ~ /^[0-9]+$/ && $3 + 0 == 0) next
+      zero = ($2 ~ /^[0-9]+$/ && $2 + 0 == 0 && $3 ~ /^[0-9]+$/ && $3 + 0 == 0)
+      if ($1 == "LGTM" && zero) { ok = 1; next }
+      # An unqualified LGTM (Provisional, REVIEW.md §6.4) at P0=P1=0 is pending:
+      # never success on its own, and once the escalation is adjudicated it
+      # does not hold a later qualified LGTM on the same sha at failure. With
+      # any P0/P1 it is a standing non-qualifying verdict like any other
+      # (§8, GH-742; #1023 round 1).
+      if ($1 == "Provisional" && zero) next
       bad = 1
     }
     END {
       if (n == 0)   print "error"
       else if (bad) print "failure"
-      else          print "success"
+      else if (ok)  print "success"
+      else          print "failure"
     }
   '
 # /D8-debt
@@ -236,13 +252,17 @@ verdict_body_lines() { # $1=reviewed sha; stdin: one body per <<<COMMENT>>> bloc
       inh = 0; vline = ""
       for (i = 2; i <= n; i++) {
         if (L[i] ~ /^#{1,}[[:space:]]*Verdict/) { inh = 1; continue }
-        if (inh && vline == "" && L[i] ~ /LGTM|Changes Requested/) {
+        if (inh && vline == "" && L[i] ~ /LGTM|Changes Requested|^Provisional/) {
           vline = L[i]
         }
       }
       if (vline == "") return
+      # Blocking side first; then the line the product adapter writes for an
+      # unqualified LGTM (edda review exit 3; REVIEW.md §6.4), which starts
+      # with Provisional and never qualifies (#998); plain LGTM last.
       v = "LGTM"
       if (vline ~ /Changes Requested/) v = "Changes Requested"
+      else if (vline ~ /^Provisional/) v = "Provisional"
       p0 = ""; p1 = ""
       if (match(vline, /P0=[0-9]+/)) p0 = substr(vline, RSTART + 3, RLENGTH - 3)
       if (match(vline, /P1=[0-9]+/)) p1 = substr(vline, RSTART + 3, RLENGTH - 3)
@@ -440,7 +460,24 @@ extract_verdict() { # $1=log file, $2=out file
 }
 
 verdict_ok() { # $1=verdict file
-  grep -qE '^(LGTM|Changes Requested)' "$1" 2>/dev/null
+  # `Provisional` is the product adapter's Verdict line for an unqualified LGTM
+  # (edda review exit 3; REVIEW.md §6.4) — a settled review to publish, never
+  # a dead verdict to retry (#998).
+  grep -qE '^(LGTM|Changes Requested|Provisional)' "$1" 2>/dev/null
+}
+
+# The exit pair a clean terminal receipt may carry. A lane's `edda dispatch`
+# exits 0 on any completed review — the verdict is text — so DISPATCH_EXIT and
+# FINAL_EXIT must both be 0. `edda review` (TRANSPORT=edda-review) encodes the
+# verdict in its exit instead: 0 qualified LGTM, 1 Changes Requested, 3
+# unqualified LGTM (provisional); 2 alone is a failure (#998).
+receipt_exit_ok() { # $1=.done file
+  d=$(sed -n 's/^DISPATCH_EXIT=//p' "$1" 2>/dev/null | tail -1)
+  f=$(sed -n 's/^FINAL_EXIT=//p' "$1" 2>/dev/null | tail -1)
+  case "$(sed -n 's/^TRANSPORT=//p' "$1" 2>/dev/null | tail -1)" in
+    edda-review) case "$d/$f" in 0/0|1/1|3/3) return 0 ;; esac; return 1 ;;
+    *) [ "$d" = "0" ] && [ "$f" = "0" ] ;;
+  esac
 }
 
 # Model observed + cost, read from the transcript's receipt lines (edda
@@ -610,7 +647,7 @@ post_review_status() { # $1=pr $2=reviewed sha $3=verdict file
     log "pr$1 status withheld this poll: new malformed verdict notice(s):$seen"
     return 3
   fi
-  prior=$(printf '%s\n' "$comments" | awk -F'\t' '$1 == "LGTM" || $1 == "Changes Requested"')
+  prior=$(printf '%s\n' "$comments" | awk -F'\t' '$1 == "LGTM" || $1 == "Changes Requested" || $1 == "Provisional"')
   state=$(printf '%s\n%s\n' "$prior" "$(verdict_body_lines "$2" < "$3")" | gate_state)
   gh api "repos/$REPO/statuses/$2" \
     -f state="$state" -f context="Independent Review" \
@@ -713,6 +750,12 @@ settle_pending() {
         return 0
       fi
       vl=$(sh "$LABEL_PR" verdict-label < "$1")
+      # The Verdict line decides, not the prose after it: a Provisional round
+      # (unqualified LGTM, REVIEW.md §6.4) carries no review:* label even when
+      # a finding under it says "LGTM" — verdict-label reads on past the line
+      # it does not recognise, so its answer is overridden here (#998).
+      vw=$(verdict_body_lines "$sha" < "$1" | head -1 | cut -f1)
+      [ "$vw" != "Provisional" ] || vl=""
       if ! verdict_body_lines "$sha" < "$1" | grep -q .; then
         # The strict pin rejects SHADOW headings on purpose (a SHADOW verdict
         # never enters the union), so a well-formed SHADOW-declared carrier
@@ -786,6 +829,14 @@ settle_pending() {
           return 0
         fi
       fi
+      if [ "$vw" = "Provisional" ]; then
+        # Published and status-gated (the union above cannot be success), but
+        # not a merge-gate verdict (REVIEW.md §6.4/§8): no review:* label.
+        log "pr$pr r$round Provisional verdict on $sha — not a merge-gate verdict (REVIEW.md §6.4): no review:* label; round settled"
+        state_set "$pr" "$sha" "$round"
+        pending_drop "$pr"
+        return 0
+      fi
       if [ -n "$vl" ] && gh pr edit "$pr" --repo "$REPO" --add-label "$vl" >/dev/null 2>&1; then
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:unreviewed"  >/dev/null 2>&1 || true
         gh pr edit "$pr" --repo "$REPO" --remove-label "review:post-failed" >/dev/null 2>&1 || true
@@ -850,8 +901,7 @@ settle_pending() {
         # and partial receipts fail
         # closed: source verification, worktree removal and task teardown must
         # all be proven before this watcher publishes a verdict.
-        if ! grep -qx 'DISPATCH_EXIT=0' "$DONE" 2>/dev/null \
-          || ! grep -qx 'FINAL_EXIT=0' "$DONE" 2>/dev/null \
+        if ! receipt_exit_ok "$DONE" \
           || ! grep -qx 'WORKTREE_CHECK=unchanged' "$DONE" 2>/dev/null \
           || ! grep -qx 'WORKTREE_CLEANUP=removed' "$DONE" 2>/dev/null \
           || ! grep -Eq '^TASK_CLEANUP=(unregistered|not-applicable)$' "$DONE" 2>/dev/null \

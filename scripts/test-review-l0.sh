@@ -168,7 +168,7 @@ echo "clean fixture: all rows PASS/N.A./需升級, runner exit 0 — OK"
 # Cut the U1 marker pair out of a temp copy of the spec; the U1 fence then
 # has no markers and the runner must never skip it silently.
 awk '
-  !open_cut && /^# review-spec:check U1$/  { open_cut = 1; next }
+  !open_cut && /^# review-spec:check U1( |$)/ { open_cut = 1; next }
   open_cut && !end_cut && /^# review-spec:check-end$/ { end_cut = 1; next }
   { print }
 ' "$SPEC" > "$TMP/unmarked-spec.md"
@@ -215,5 +215,38 @@ grep -Fq '| R1 | code-risk | P0 | FAIL' "$TMP/cjk.out" \
 grep -F '| R1 |' "$TMP/cjk.out" | iconv -f UTF-8 -t UTF-8 >/dev/null \
   || fail "cjk fixture: R1 evidence cell does not decode as valid UTF-8"
 echo "cjk fixture: R1 evidence cell survives the cap as valid UTF-8 — OK"
+
+# ---- 6. marker attributes: a declared capability, not a text guess (GH-958) -
+# The $N gate used to decide a block could run without a PR number by grepping
+# its command text for the string REVIEW_FILES. The capability is now declared
+# on the marker (`# review-spec:check U1 no-pr-needed`), so:
+#   (a) an unknown attribute is a spec error, exit 2 — a typo must not silently
+#       send the rule back to N.A. on every pre-push pass;
+#   (b) dropping the attribute while the body still mentions REVIEW_FILES puts
+#       U1 back to N.A.(needs PR number). Under the old textual gate the block
+#       still ran, which is exactly the coupling this replaces.
+make_fixture dirty
+
+sed 's/^# review-spec:check U1 no-pr-needed$/# review-spec:check U1 no-pr-neded/' \
+  "$SPEC" > "$TMP/typo-spec.md"
+grep -q '^# review-spec:check U1 no-pr-neded$' "$TMP/typo-spec.md" \
+  || fail "attribute fixture: the typo copy was not produced"
+rc=0
+run_l0 "$FIXDIR" "$TMP/typo-spec.md" "$TMP/typo.out" || rc=$?
+[ "$rc" -eq 2 ] || fail "attribute fixture: unknown attribute should exit 2, got $rc"
+# run_l0 folds the runner stderr into the out file
+grep -q 'unknown review-spec:check attribute' "$TMP/typo.out" \
+  || fail "attribute fixture: output does not name the unknown attribute: $(cat "$TMP/typo.out")"
+echo "attribute fixture: an unknown marker attribute exits 2 — OK"
+
+sed 's/^# review-spec:check U1 no-pr-needed$/# review-spec:check U1/' \
+  "$SPEC" > "$TMP/undeclared-spec.md"
+rc=0
+run_l0 "$FIXDIR" "$TMP/undeclared-spec.md" "$TMP/undeclared.out" || rc=$?
+grep -F '| U1 |' "$TMP/undeclared.out" | grep -Fq 'N.A.(needs PR number)' \
+  || fail "attribute fixture: U1 without the marker attribute should be N.A.(needs PR number), got: $(grep -F '| U1 |' "$TMP/undeclared.out" || true)"
+grep -F '| C5 |' "$TMP/undeclared.out" | grep -Fq 'N.A.(needs PR number)' \
+  && fail "attribute fixture: C5 keeps its attribute and must still run"
+echo "attribute fixture: the gate reads the marker, not the command text — OK"
 
 echo "test-review-l0.sh: all fixture assertions held"

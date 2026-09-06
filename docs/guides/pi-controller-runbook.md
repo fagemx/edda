@@ -67,11 +67,16 @@ Expected: one row per lane with its state. The done marker is
 last five lines of the log are the lane's report.
 
 - `DONE issue=#<issue> task=<id>` + PR URL + SHA — go to the review step.
-- `STOP step=<n> output=<...>` — read the five lines, fix the brief
+- `STOP step=<n> output=<...>` — route by controller engine. An authoritative
+  engine (Opus/sol) reads the five lines, fixes the brief
   (`~/.edda/fleet/brief-gh<issue>.md`) so the failing step cannot recur, and
-  relaunch: delete the stale marker only if the lane is not running, and start
-  the next round with the `-r<n+1>` lane name (next-issue.sh picks the next
-  free suffix automatically). Do not continue a stopped lane's session.
+  relaunches: delete the stale marker only if the lane is not running, and
+  start the next round with the `-r<n+1>` lane name (next-issue.sh picks the
+  next free suffix automatically). Do not continue a stopped lane's session.
+  A flash-level controller never modifies the brief: the 09-05 window measured
+  five STOPs — all brief-authoring defects, zero engine misjudgments — so
+  brief authoring is not a flash function; label `needs-operator` and stop
+  (GH-933).
 - Round cap: three rounds without a PR → STOP `needs-operator`.
 
 ## Review the PR
@@ -109,6 +114,8 @@ verdict on the SHA. Anything else waits for the operator.
 - round cap (three rounds without a delivered PR, or a fourth review round
   without `--operator-granted`)
 - a `[判斷]` escalation on a code-risk PR that the controller cannot adjudicate
+- a flash-level controller's `STOP step=<n>` on a lane — brief authoring is
+  not a flash function; label `needs-operator`, do not fix the brief (GH-933)
 - any operator-only action: merging a code-risk PR, `edda ratify`, ruleset
   changes, force push, deleting unmerged branches
 - known lane failure modes: a lane that delivers nothing before timeout

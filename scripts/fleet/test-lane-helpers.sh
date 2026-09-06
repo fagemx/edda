@@ -41,11 +41,19 @@ command -v git >/dev/null 2>&1 || { echo "SKIP: git not on PATH"; exit 0; }
 tmp=$(mktemp -d)
 BUSY_TASK='edda-lane-busytest'
 
+# Every lane name this file passes to -Name, read out of the file itself.
+# An enumerated list drifts: the GH-937 case added a third name and the sweep
+# still released two, so three Fail arms could exit with a machine-global task
+# standing. Scoped to names this suite actually uses — never a blanket
+# edda-lane-* sweep, which would unregister other sessions' live lanes.
+lane_names=$(sed -n 's/.*-Name \([A-Za-z0-9_-][A-Za-z0-9_-]*\).*/\1/p' "$0" |
+  sort -u | sed "s/^/'/;s/$/'/" | paste -sd, -)
+
 cleanup() {
   pwsh -NoProfile -NonInteractive -Command "
     Stop-ScheduledTask -TaskName '$BUSY_TASK' -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName '$BUSY_TASK' -Confirm:\$false -ErrorAction SilentlyContinue
-    foreach (\$n in @('gh626envcheck', 'gh626noenv')) {
+    foreach (\$n in @($lane_names)) {
       Unregister-ScheduledTask -TaskName ('edda-lane-' + \$n) -Confirm:\$false -ErrorAction SilentlyContinue
     }
     foreach (\$h in @(Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -and \$_.CommandLine.Contains('lane-helper-busy.ps1') })) {
@@ -184,7 +192,9 @@ cur=$(git -C "$lane" symbolic-ref --quiet HEAD)
 [ "$cur" = "refs/heads/codex/gh100-a" ] || fail "prepare: branch is $cur, expected refs/heads/codex/gh100-a"
 base=$(git -C "$repo" rev-parse origin/main)
 [ "$(git -C "$lane" rev-parse HEAD)" = "$base" ] || fail "prepare: tip is not origin/main"
-git -C "$repo" worktree list --porcelain | grep -F "$(cygpath -m "$lane")" >/dev/null \
+# -iF, not -F: NTFS path comparison is case-insensitive, and the CI runner
+# TEMP case need not match the case lane-prepare.ps1 resolved (GH-896 r2).
+git -C "$repo" worktree list --porcelain | grep -iF "$(cygpath -m "$lane")" >/dev/null \
   || fail "prepare: worktree not registered with the repo"
 ok "prepare creates fixed worktree $lanewin on a new branch from origin/main"
 
@@ -486,13 +496,55 @@ if grep -q 'CARGO_' "$llog/gh626noenv.dryrun-wrapper.ps1"; then
 fi
 ok "lane-launch without -BuildLane sets no CARGO env (docs lanes compile nothing)"
 
-out=$(launch -Name gh772ownsargv -Cwd "$repo" -LogDir "$llog" -TimeoutSec 60 \
-  -DryRun -Owns scripts/fleet/lane-launch.ps1 docs/guides/operator-runbook.md 2>&1) ||
-  fail "launch accepts repeated -Owns values after -File binding: $out"
+# GH-937: -Owns takes ONE argument. Three scopes written with mixed , and ;
+# separators (and a space after one) must reach `edda dispatch` as three
+# --owns values through `pwsh -File` — the shape next-issue.sh emits. Red
+# before the fix: the binder bound only the first value and each trailing one
+# was silently taken by whichever optional parameter still had a free
+# positional slot.
+out=$(launch -Name gh937ownslist -Cwd "$repo" -LogDir "$llog" -TimeoutSec 60 \
+  -DryRun -Owns 'scripts/fleet/lane-launch.ps1, docs/guides/operator-runbook.md;scripts/fleet/next-issue.sh' 2>&1) ||
+  fail "launch rejected a comma/semicolon -Owns list :: $out"
 case "$out" in
-  *"--owns 'scripts/fleet/lane-launch.ps1'"*"--owns 'docs/guides/operator-runbook.md'"*) : ;;
-  *) fail "launch did not forward both -Owns values verbatim :: $out" ;;
+  *"--owns 'scripts/fleet/lane-launch.ps1'"*"--owns 'docs/guides/operator-runbook.md'"*"--owns 'scripts/fleet/next-issue.sh'"*) : ;;
+  *) fail "launch did not forward all three -Owns scopes :: $out" ;;
 esac
+# The misbind is not only absent from --owns: the parameters that used to
+# swallow the trailing values must still hold what the caller asked for.
+# -Brief goes first (lowest free position); in a dry run it is always the
+# generated $Name.dryrun-brief.md.
+case "$out" in
+  *"--prompt-file '"*"gh937ownslist.dryrun-brief.md'"*) : ;;
+  *) fail "a scope value displaced the dry-run brief :: $out" ;;
+esac
+[ -f "$llog/gh937ownslist.dryrun-wrapper.ps1" ] ||
+  fail "dry-run artifacts are not in the requested -LogDir $llog"
+ok "lane-launch takes several -Owns scopes as one comma/semicolon argument"
+
+# The old `-Owns a b` spelling must now fail LOUDLY at the binder instead of
+# quietly relocating the trailing value.
+expect_fail "launch multi-token owns" "positional parameter" launch -Name gh937ownsmulti \
+  -Cwd "$repo" -LogDir "$llog" -DryRun -Owns scripts/fleet/lane-launch.ps1 docs/guides/operator-runbook.md
+if [ -e "$llog/gh937ownsmulti.dryrun-wrapper.ps1" ]; then
+  fail "the refused multi-token launch still wrote artifacts"
+fi
+# An in-process caller handing an ARRAY to the now-scalar -Owns collapses it
+# to one space-joined string; refuse that rather than claim a single scope
+# named after two.
+expect_fail "launch space-joined owns" "repository-relative" launch -Name gh937ownsspace \
+  -Cwd "$repo" -LogDir "$llog" -DryRun -Owns 'scripts/fleet/lane-launch.ps1 docs/guides/operator-runbook.md'
+ok "lane-launch refuses the old multi-token spelling and space-joined scopes"
+
+# A -LogDir inside a git working tree is refused BEFORE anything is created —
+# exactly the shape the misbind produced: <repo>/scripts/fleet/<scope-path>/
+# filled with wrapper, log and done files inside the main checkout.
+expect_fail "launch logdir inside a repo" "never belong in a repository" launch \
+  -Name gh937logdir -Cwd "$repo" -LogDir "$repo/scripts/fleet/docs" -DryRun \
+  -Owns scripts/fleet/lane-launch.ps1
+if [ -e "$repo/scripts" ]; then
+  fail "the refused -LogDir was created anyway inside $repo"
+fi
+ok "lane-launch refuses a -LogDir inside a git working tree and creates nothing"
 expect_fail "launch absolute owns" "repository-relative" launch -Name gh772ownsabs -Cwd "$repo" \
   -LogDir "$llog" -DryRun -Owns 'C:\\outside'
 expect_fail "launch traversal owns" "repository-relative" launch -Name gh772ownstraversal -Cwd "$repo" \
@@ -501,7 +553,7 @@ expect_fail "launch standalone dot owns" "repository-relative" launch -Name gh77
   -LogDir "$llog" -DryRun -Owns '.'
 expect_fail "launch terminal dot owns" "repository-relative" launch -Name gh772ownstermdot -Cwd "$repo" \
   -LogDir "$llog" -DryRun -Owns 'scripts/fleet/.'
-ok "lane-launch binds every -Owns value and rejects absolute, traversal, and dot-component aliases"
+ok "lane-launch rejects absolute, traversal, and dot-component -Owns aliases"
 
 echo "1..$case_number"
 echo "PASS: lane helper self-test ($case_number cases)"

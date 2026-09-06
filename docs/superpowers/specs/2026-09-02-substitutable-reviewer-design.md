@@ -13,7 +13,7 @@
   - 並用：`fleet.review-brief-framing`（驗證清單非攻擊計畫）、
     `fleet.review-provider-overload`（換運輸不降級模型）、`fleet.agent-model-split`（補充）。
 - 配套文件：brief 模板
-  [2026-09-02-reviewer-brief-template-v1.md](2026-09-02-reviewer-brief-template-v1.md)、
+  [2026-09-02-reviewer-brief-template-v2.md](2026-09-02-reviewer-brief-template-v2.md)、
   金絲雀集 [tests/canaries/README.md](../../../tests/canaries/README.md)。
 
 ---

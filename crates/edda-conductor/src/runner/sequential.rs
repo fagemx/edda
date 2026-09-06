@@ -484,7 +484,10 @@ async fn run_next_phase(
         .find(|p| p.id == phase_id)
         .context("runnable phase not found in plan")?;
     let phase_state = state.get_phase_mut(&phase_id)?;
-    let attempt = phase_state.attempts + 1;
+    // GH-752: asking for the attempt number performs the per-attempt reset,
+    // so no boundary can be opened while a per-attempt counter still holds
+    // the last attempt's value.
+    let attempt = phase_state.begin_attempt();
     let phase_cwd = phase
         .cwd
         .as_deref()
@@ -494,12 +497,9 @@ async fn run_next_phase(
 
     let phase_num = order.iter().position(|id| id == &phase_id).unwrap_or(0) + 1;
 
-    // Clear retry_context on new attempt start (it was already consumed for prompt building)
+    // Clear retry_context on new attempt start (already consumed for prompt
+    // building); it stays here because the caller needs the value it takes.
     let retry_ctx = phase_state.retry_context.take();
-    // A fresh attempt starts unmeasured; prior cost belongs to its terminal event.
-    phase_state.cost_usd = None;
-    // Duration has the same boundary; never render prior-attempt timing while this runs.
-    phase_state.duration_ms = None;
 
     // 3. Transition: pending → running
     transition(
@@ -4149,6 +4149,53 @@ phases:
             err.message.contains("redispatch bound exhausted"),
             "distinct error naming the bound, got: {}",
             err.message
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// GH-752 round 1, f1: the reset must happen at the RUNNER's attempt
+    /// boundary, not merely exist on `PhaseState`. Every other test here
+    /// stays green if `begin_attempt()` at the top of the dispatch is
+    /// reverted to `phase_state.attempts + 1`, because no test crosses an
+    /// attempt boundary with a per-attempt counter already dirty. This one
+    /// seeds exactly what a spent attempt leaves behind and runs an UNGATED
+    /// phase — nothing in that path bumps the counter — so a value still
+    /// standing at the end can only mean the boundary did not clear it.
+    #[tokio::test]
+    async fn runner_opens_an_attempt_with_a_cleared_redispatch_counter() {
+        let root = fresh_root("rdreset");
+        init_git_repo(&root);
+        let yaml = r#"
+name: rdreset
+phases:
+  - id: a
+    prompt: "do it"
+"#;
+        let launcher = MockLauncher::new();
+        launcher.set_results(
+            "a",
+            vec![PhaseResult::AgentDone {
+                cost_usd: None,
+                result_text: None,
+            }],
+        );
+        let plan = parse_plan(yaml).unwrap();
+        let mut state = PlanState::from_plan(&plan, "test.yaml");
+        // The state a prior attempt that spent its whole gate budget leaves.
+        state.phases[0].gate_redispatches = MAX_GATE_REDISPATCHES;
+
+        let (state, _notifier, _launcher) = spawn_runner(yaml, root.clone(), launcher, state)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            state.phases[0].attempts, 1,
+            "the phase must actually have been dispatched"
+        );
+        assert_eq!(
+            state.phases[0].gate_redispatches, 0,
+            "opening an attempt clears the redispatch counter"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
