@@ -135,9 +135,13 @@ fn foreground_argv(args: &DispatchArgs, cwd: &Path, prompt: &Path, session: &str
         out.push("--json".into());
     }
     // GH-748: without this the detached worker runs verbose:false and leaves
-    // the zero-byte log this issue exists to remove — and the detached path is
-    // the lane path, which is where logBytes=0 was reported. Fixing only the
-    // foreground dispatch would have left the observed case broken.
+    // the zero-byte log this issue exists to remove.
+    //
+    // This is NOT the path the reported lanes took — no lane passes --detach;
+    // scripts/fleet/lane-launch.ps1 dispatches plainly and detaches via a
+    // Scheduled Task wrapper, and it asks for --verbose on its own dispatch
+    // line. --detach is the second way to get a background worker, and it had
+    // the same gap for the same reason.
     if args.verbose {
         out.push("--verbose".into());
     }
@@ -353,9 +357,11 @@ mod tests {
 
     #[test]
     fn detached_worker_inherits_verbose() {
-        // GH-748: the zero-byte log was reported on LANES, which dispatch
-        // through the detached supervisor. A --verbose that stops at the
-        // supervisor leaves the observed case exactly as broken as before.
+        // GH-748: a --verbose that stops at the supervisor leaves a
+        // --detach worker running verbose:false, which is the zero-byte log
+        // this issue exists to remove. (The reported lanes take a different
+        // route — a Scheduled Task wrapper, not --detach — and lane-launch.ps1
+        // covers that one by asking for --verbose itself.)
         let cwd = Path::new("cwd");
         let prompt = Path::new("prompt.md");
 
