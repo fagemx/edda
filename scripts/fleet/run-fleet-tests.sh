@@ -60,16 +60,6 @@ for t in scripts/fleet/test-*.sh; do
     q_issue=''
     q_why=''
     case "$t" in
-        scripts/fleet/test-collision-scan.sh)
-            # Its Windows block is gated on `command -v pwsh` (:138), but
-            # ubuntu runners ship pwsh, so the block runs there and
-            # task_query() (:178-180) calls Get-ScheduledTask — a Windows-only
-            # cmdlet — and :192 fires every run. A presence check for pwsh is
-            # not a check for Windows. Landed on main in 586cb07 (#967) after
-            # this branch's base, red on ubuntu from its first gated run.
-            q_issue='#971'
-            q_why='Windows block gated on pwsh presence, not on Windows'
-            ;;
         scripts/fleet/test-lane-helpers.sh)
             # Red on windows-latest (case 0, `prepare: worktree not
             # registered`) and on a Windows workstation against origin/main
