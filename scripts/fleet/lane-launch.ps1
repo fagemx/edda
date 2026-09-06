@@ -75,6 +75,10 @@ param(
   [string]$SessionId = '',
   [string]$LogDir = "$env:TEMP\edda-lanes",
   [string]$BuildLane = '',
+  # fleet.lane-launch-claim-gate (GH-912): required for issue-shaped lane
+  # names (^edda-lane-gh<N>(-r<N>)?$); hostname guessing is banned (R9/R21),
+  # so the claim identity must be explicit: <machine>/<role>.
+  [string]$Machine = '',
   # PowerShell -File binds only the first whitespace-separated value to an
   # array parameter; unbound trailing values remain in automatic $args and
   # are folded into this public parameter below.
@@ -129,6 +133,22 @@ if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
 # the segment is reserved (GH-822 P1-1).
 if ($Name -match '(?i)(^|[._-])dryrun($|[._-])') {
   Fail "-Name '$Name' may not contain 'dryrun'; reserved for dry-run artifacts"
+}
+# fleet.lane-launch-claim-gate (GH-912): a lane bound to an issue must go
+# through the claim guard before anything is registered (#887 was claimed by
+# two machines and built twice). Hostname guessing is banned (R9/R21), so the
+# identity is a required explicit parameter for issue-shaped lanes.
+$issueNumber = $null
+if ($Name -match '^edda-lane-gh(\d+)(-r\d+)?$') { $issueNumber = $Matches[1] }
+if ($null -ne $issueNumber) {
+  if ([string]::IsNullOrWhiteSpace($Machine)) {
+    Fail "issue-bound lane '$Name' requires -Machine <machine>/<role> (rules.md R9/R21; fleet.lane-launch-claim-gate)"
+  }
+  $claimGuard = Join-Path $PSScriptRoot '..\fleet-claim-issue.sh'
+  $guardOut = & sh $claimGuard --check $issueNumber $Machine 2>&1
+  if ($LASTEXITCODE -ne 0) {
+    Fail ("claim guard refused lane '$Name' for '$Machine': " + (($guardOut | Out-String).Trim()))
+  }
 }
 $allowedBuildLanes = @('worker-1', 'worker-2', 'verifier', 'verifier-2')
 if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {

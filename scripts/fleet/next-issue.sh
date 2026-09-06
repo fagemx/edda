@@ -175,7 +175,7 @@ echo "cmd: $claim_cmd"
 echo "== launch"
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-        launch_cmd="pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name $lane -Brief $brief_path -Cwd $wt -Agent pi -TimeoutSec 5400 -BudgetUsd 3" ;;
+        launch_cmd="pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name $lane -Brief $brief_path -Cwd $wt -Agent pi -TimeoutSec 5400 -BudgetUsd 3 -Machine $machine" ;;
     *)
         launch_cmd="pi --model openrouter/z-ai/glm-5.3-flash --session-id lane-$lane \"\$(cat $brief_path)\"  # unattended runs need a process supervisor" ;;
 esac
@@ -205,7 +205,8 @@ echo "== launching lane"
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
         pwsh -NoProfile -File "$self_dir/lane-launch.ps1" -Name "$lane" \
-            -Brief "$brief_path" -Cwd "$wt" -Agent pi -TimeoutSec 5400 -BudgetUsd 3 ;;
+            -Brief "$brief_path" -Cwd "$wt" -Agent pi -TimeoutSec 5400 -BudgetUsd 3 \
+            -Machine "$machine" ;;
     *)
         die "unattended launch on POSIX needs a process supervisor — run interactively: $launch_cmd" ;;
 esac
