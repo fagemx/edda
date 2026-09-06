@@ -62,6 +62,9 @@ grep -q '^POLICY_RECEIPT=product-json:hard$' "$done"
 grep -q '^Changes Requested, P0=0, P1=1$' "$log"
 if grep -q '^TOOL_FLAGS=' "$done"; then echo 'ok: legacy policy string was fabricated' >&2; exit 1; fi
 grep -q 'nohup "\$RUNNER"' "$root/scripts/review-pr.sh"
+if grep -qF -- 'File \`\"$LANEW' "$root/scripts/review-pr.sh"; then echo 'product arm: scheduled-task -File argument carries literal backticks (GH-1026)' >&2; exit 1; fi
+grep -qF -- 'File \"$LANEW\"' "$root/scripts/review-pr.sh"
+grep -qF -- 'echo "review_round=$ROUND"' "$root/scripts/review-pr.sh"
 
 for case_name in changed policy wrong-head malformed; do run_case "$case_name" 'failed;' 1; done
 ADAPTER_CASE=ok run_case ok unchanged 2

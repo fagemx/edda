@@ -319,6 +319,7 @@ exit \$code
 PS
     [ -s "$LANE" ] || { echo "review-pr.sh: Windows product lane generation produced no artifact" >&2; exit 1; }
     echo "lane_file_arg=$LANEW"
+    echo "review_round=$ROUND"
   else
     cat > "$RUNNER" <<RUN
 #!/bin/sh
@@ -374,7 +375,7 @@ RUN
   rm -f "$LOG" "$DONE"
   if [ "$IS_WIN" = "1" ]; then
     TASK="edda-review-pr$PR-r$ROUND"
-    pwsh -NoProfile -Command "Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue; \$a=New-ScheduledTaskAction -Execute '$PWSH_EXE' -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`\"$LANEW\`\"' -WorkingDirectory '$ROOTW'; Register-ScheduledTask -TaskName '$TASK' -Action \$a -RunLevel Limited | Out-Null; Start-ScheduledTask -TaskName '$TASK'" || exit 1
+    pwsh -NoProfile -Command "Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue; \$a=New-ScheduledTaskAction -Execute '$PWSH_EXE' -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"$LANEW\"' -WorkingDirectory '$ROOTW'; Register-ScheduledTask -TaskName '$TASK' -Action \$a -RunLevel Limited | Out-Null; Start-ScheduledTask -TaskName '$TASK'" || exit 1
   else
     nohup "$RUNNER" >/dev/null 2>&1 &
     pid=$!
