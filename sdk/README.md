@@ -8,7 +8,7 @@ writes, HTTP read-only (until write authorization lands, GH-609), types
 ```
 sdk/
   generator/            type generator + spec pinning (no deps)
-  ts/                   TypeScript client (@edda/sdk draft)
+  ts/                   TypeScript client (@fagem/edda-sdk)
   python/               Python client (edda-sdk draft)
   run-contract-tests.mjs  cross-language contract runner
   spec-pin/             pinned spec checkout (created by pin-spec.sh; gitignored)
@@ -35,14 +35,21 @@ dual MIT/Apache-2.0 licences, and pass their registries' own validators
 (`npm pack`, `twine check`). What is left needs credentials this repository
 does not hold, so it is the operator's to run.
 
-`@edda/sdk` is a **scoped** name: publishing it needs the `edda` npm
-organisation to exist and the publishing account to be a member. All three
-names — `@edda/sdk`, `edda-sdk` on npm, `edda-sdk` on PyPI — were unclaimed
-when this was written; verify before assuming.
+The npm package is `@fagem/edda-sdk` — the maintainer's own npm user scope,
+which exists by virtue of the account and needs no organisation to be created
+first. It deliberately does not match the GitHub org (`fagemx`): matching that
+would mean creating an npm organisation and waiting on it, and the scope is
+transferable to one later if the project ever wants that. PyPI has no scopes,
+so the Python package is plain `edda-sdk`.
+
+`@fagem/edda-sdk` and PyPI `edda-sdk` were both unclaimed when this was
+written; verify before assuming.
 
 ```sh
-# TypeScript — prepublishOnly runs the build; publishConfig sets public access
-cd sdk/ts && npm login && npm publish
+# TypeScript — npm ci first: prepublishOnly runs tsc, which a fresh clone
+# does not have until devDependencies are installed. publishConfig sets
+# public access.
+cd sdk/ts && npm ci && npm login && npm publish
 
 # Python
 cd sdk/python && python -m build && python -m twine upload dist/*

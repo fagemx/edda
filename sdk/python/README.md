@@ -1,4 +1,4 @@
-# edda-sdk (draft name — publication pending namespace authorization)
+# edda-sdk
 
 Thin Python client for the edda client contract. Zero runtime dependencies
 (stdlib only). Types are **generated** from the v1 event spec — do not

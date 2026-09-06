@@ -1,5 +1,5 @@
 {
-  "name": "@edda/sdk",
+  "name": "@fagem/edda-sdk",
   "version": "0.1.0",
   "description": "Thin TypeScript client for the edda client contract (MCP writes, read-only HTTP).",
   "license": "MIT OR Apache-2.0",
