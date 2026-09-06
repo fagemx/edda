@@ -110,10 +110,32 @@ impl ReadErrorTracker {
 /// Fixed at 3 rather than plan-configurable, on purpose: this bound exists
 /// to kill loop-shaped defects (the D6 loop measured 176 cycles before the
 /// fix), and a plan-author-tunable ceiling would let the same optimism that
-/// wrote an unbounded gate re-open the loop from inside the plan file. Three
-/// covers the multi-round review cycles this repo actually ships (e.g. the
-/// three-round review of GH-534); a phase that genuinely needs more review
-/// rounds should be split into smaller phases instead of raising the bound.
+/// wrote an unbounded gate re-open the loop from inside the plan file.
+///
+/// Three covers the multi-round review cycles this repo actually ships
+/// (e.g. the three-round review of GH-534) **per attempt** — which is a
+/// claim about the counter's scope, and GH-752 is the record of it having
+/// been false. `gate_redispatches` was never reset, so the budget was
+/// per-phase-LIFETIME: attempt 2 inherited attempt 1's count, a phase
+/// retried twice shared one redispatch between the two, and a `conduct
+/// retry` after exhaustion burned a full agent turn only to fail
+/// identically. `PhaseState::begin_attempt` now resets it at the attempt
+/// boundary, which is the scope the bound was designed for: the loop it
+/// kills — reject, redispatch, reject, on the same `(subject, gate_sha)` —
+/// lives inside one attempt.
+///
+/// That reset also settles the GH-540 question this bound raised: an
+/// environmental fault on a redispatch turn does NOT permanently consume a
+/// cycle. Such a turn is charged to `env_retries`, not to the attempt
+/// ladder, and it ends the attempt — the next one opens a fresh budget. A
+/// machine fault costs the agent nothing here either.
+///
+/// The product stays bounded: cycles are capped per attempt, attempts by
+/// `max_attempts`, and environmental re-dispatches by `MAX_ENV_RETRIES`.
+/// Exhausting the cycle bound fails the phase non-retryably, so only a
+/// deliberate `conduct retry` ever opens a fresh budget. A phase that
+/// genuinely needs more review rounds inside ONE attempt should be split
+/// into smaller phases instead of raising the bound.
 pub(super) const MAX_GATE_REDISPATCHES: u32 = 3;
 
 /// `<plan-name>/<phase-id>` — the subject an `edda verdict` targets (D1/D3).

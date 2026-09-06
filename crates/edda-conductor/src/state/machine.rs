@@ -93,11 +93,15 @@ pub struct PhaseState {
     /// RFC3339 timestamp of when the phase entered AWAITING_VERDICT (D3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_entered_at: Option<String>,
-    /// Completed redispatch cycles at the verdict gate (D6). Persisted and
-    /// counted separately from `attempts` — D3 forbids incrementing attempt
-    /// on redispatch, and a redispatch turn is not guaranteed to produce a
-    /// new commit, so `max_attempts` can never bound the (subject, gate_sha)
-    /// loop. This counter is the real bound.
+    /// Completed redispatch cycles at the verdict gate, WITHIN THE CURRENT
+    /// ATTEMPT (D6). Persisted and counted separately from `attempts` — D3
+    /// forbids incrementing attempt on redispatch, and a redispatch turn is
+    /// not guaranteed to produce a new commit, so `max_attempts` can never
+    /// bound the (subject, gate_sha) loop. This counter is the real bound.
+    ///
+    /// Reset by [`PhaseState::begin_attempt`] (GH-752): the loop it bounds
+    /// lives inside one attempt, so carrying the count across attempts made
+    /// it a per-phase-lifetime budget instead — see that method.
     #[serde(default)]
     pub gate_redispatches: u32,
     /// Verdict metadata recorded when the gate resolved (D3).
@@ -346,6 +350,43 @@ pub fn transition(
 }
 
 // ── PlanState methods ──
+
+impl PhaseState {
+    /// Open a new attempt: return the attempt number to run under, and
+    /// clear the per-attempt state that must not leak from the previous
+    /// one. The number and the reset are one operation on purpose — the
+    /// caller cannot compute the attempt number without also performing
+    /// the reset, which is how the attempt boundary stays a single fact.
+    ///
+    /// GH-752. `gate_redispatches` was never reset — not on approval, not
+    /// on retry, not on a new attempt — which made a counter documented as
+    /// covering "the multi-round review cycles this repo actually ships"
+    /// into a per-phase-LIFETIME budget. Attempt 2 inherited attempt 1's
+    /// count, so a phase retried twice got one redispatch between them; a
+    /// `conduct retry` after exhaustion burned a full agent turn and then
+    /// failed identically with zero redispatch turns available; and an
+    /// environmental fault on a redispatch turn consumed a cycle
+    /// permanently, against the GH-540 rule that a machine fault is not
+    /// the agent's. Resetting here answers all three, and the environmental
+    /// case structurally: an environmental failure ends the attempt and the
+    /// next one starts here, so the cycle it consumed is refunded with the
+    /// rest of the budget.
+    ///
+    /// The loop bound survives: redispatch cycles are still capped per
+    /// attempt, and attempts are capped by `max_attempts` (environmental
+    /// ones by `MAX_ENV_RETRIES`), so the product is bounded. Exhausting
+    /// the cycle bound fails the phase non-retryably, so only a deliberate
+    /// `conduct retry` opens a fresh budget.
+    pub fn begin_attempt(&mut self) -> u32 {
+        // A fresh attempt starts unmeasured; prior cost belongs to its
+        // terminal event. Duration has the same boundary — never render
+        // prior-attempt timing while this one runs.
+        self.cost_usd = None;
+        self.duration_ms = None;
+        self.gate_redispatches = 0;
+        self.attempts + 1
+    }
+}
 
 impl PlanState {
     /// Create initial state from a plan.
@@ -780,5 +821,88 @@ phases:
             phase.gate_entered_at.as_deref(),
             Some("2026-01-01T00:00:00Z")
         );
+    }
+
+    /// GH-752: an attempt boundary clears the per-attempt state, and the
+    /// attempt number cannot be obtained without it. The gate redispatch
+    /// budget is the one that was leaking: it had no reset at all, so a
+    /// counter documented as covering three review cycles was really a
+    /// per-phase-lifetime budget shared by every attempt.
+    #[test]
+    fn begin_attempt_resets_per_attempt_state_and_returns_the_number() {
+        let mut phase = PhaseState {
+            id: "build".into(),
+            status: PhaseStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            attempts: 1,
+            checks: Vec::new(),
+            error: None,
+            skip_reason: None,
+            retry_context: None,
+            gate_sha: None,
+            gate_entered_at: None,
+            gate_redispatches: 3,
+            verdict_decision: None,
+            verdict_actor: None,
+            verdict_comment: None,
+            env_retries: 1,
+            cost_usd: Some(1.25),
+            duration_ms: Some(9_000),
+        };
+
+        assert_eq!(
+            phase.begin_attempt(),
+            2,
+            "attempt 1 is followed by attempt 2"
+        );
+        assert_eq!(
+            phase.gate_redispatches, 0,
+            "a spent redispatch budget must not carry into the next attempt: \
+             the loop it bounds lives inside one attempt"
+        );
+        assert_eq!(phase.cost_usd, None, "a fresh attempt starts unmeasured");
+        assert_eq!(
+            phase.duration_ms, None,
+            "prior-attempt timing must not render"
+        );
+        assert_eq!(
+            phase.attempts, 1,
+            "begin_attempt reports the next number; the transition records it"
+        );
+        assert_eq!(
+            phase.env_retries, 1,
+            "env_retries is per phase run, not per attempt (GH-540) — it keys \
+             the product attempt count and must survive the boundary"
+        );
+    }
+
+    /// The reset is unconditional: an attempt that never reached the gate
+    /// still opens with a full budget, so the bound means the same thing on
+    /// every attempt.
+    #[test]
+    fn begin_attempt_is_idempotent_on_already_clean_state() {
+        let mut phase = PhaseState {
+            id: "build".into(),
+            status: PhaseStatus::Pending,
+            started_at: None,
+            completed_at: None,
+            attempts: 0,
+            checks: Vec::new(),
+            error: None,
+            skip_reason: None,
+            retry_context: None,
+            gate_sha: None,
+            gate_entered_at: None,
+            gate_redispatches: 0,
+            verdict_decision: None,
+            verdict_actor: None,
+            verdict_comment: None,
+            env_retries: 0,
+            cost_usd: None,
+            duration_ms: None,
+        };
+        assert_eq!(phase.begin_attempt(), 1);
+        assert_eq!(phase.gate_redispatches, 0);
     }
 }
