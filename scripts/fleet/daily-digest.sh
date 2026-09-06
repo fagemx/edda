@@ -144,7 +144,13 @@ blocked_body="$tmp/blocked-body.md"
 # CLEAN with zero verdicts and must still appear. BLOCKED/DIRTY PRs keep the
 # status-reasons treatment below; every other state is reachable only through
 # its drift reason.
-open_rows=$(gh pr list --repo "$EDDA_REPO" --state open --limit 100 \
+# GH-958: the same enumeration limit verdict-drift.sh uses, from the same
+# variable. They were 100 here and 200 there, so PRs 101-200 got a drift
+# line that could never reach a digest row — invisible in the one artefact
+# R24 calls the report. It is exported below so the drift subprocess reads
+# the value this run actually used, not its own default.
+open_pr_limit=${EDDA_OPEN_PR_LIMIT:-200}
+open_rows=$(gh pr list --repo "$EDDA_REPO" --state open --limit "$open_pr_limit" \
     --json number,title,mergeStateStatus,headRefOid \
     --jq '.[] | [.number, .title, .mergeStateStatus, .headRefOid] | @tsv' \
 ) || { printf '%s: gh pr list (open) failed\n' "$prog" >&2; exit 1; }
@@ -159,7 +165,7 @@ open_rows=$(gh pr list --repo "$EDDA_REPO" --state open --limit 100 \
 # post-jq `gh pr list` output is not re-parsed as raw JSON by the drift check.
 drift_out="$tmp/drift.txt"
 drift_rc=0
-GH_OPEN_JSON= sh "$self_dir/verdict-drift.sh" >"$drift_out" 2>"$tmp/drift.err" || drift_rc=$?
+GH_OPEN_JSON= EDDA_OPEN_PR_LIMIT="$open_pr_limit" sh "$self_dir/verdict-drift.sh" >"$drift_out" 2>"$tmp/drift.err" || drift_rc=$?
 if [ "$drift_rc" -ge 2 ]; then
     printf '%s: verdict-drift.sh failed (exit %s)\n' "$prog" "$drift_rc" >&2
     cat "$tmp/drift.err" >&2

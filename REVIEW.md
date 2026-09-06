@@ -275,7 +275,7 @@ must hold and input shapes to confirm — never as an attack plan (decision
 **U1 — surface. P0.** Every changed file is inside the surface the issue or the
 lane brief allows. A file outside it is a lane-boundary violation.
 
-# review-spec:check U1
+# review-spec:check U1 no-pr-needed
 ```sh
 if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi
 ```
@@ -564,7 +564,7 @@ the ladder's own L2 command for that crate — `cargo test -p <crate>` on
 Windows — not a new gate invented here (`ladder`). One focused check per
 uncovered crate; never the whole workspace to reach one.
 
-# review-spec:check C5
+# review-spec:check C5 no-pr-needed
 ```sh
 { if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi; } \
   | grep '^crates/' | cut -d/ -f2 | sort -u \
@@ -609,7 +609,7 @@ git diff "origin/$BASE..$SHA" --unified=0 -- '*.sh' '*.bash' '*.ps1' '.github' \
 
 **R3 — every changed shell script parses. P0.** Exit code is the signal.
 
-# review-spec:check R3
+# review-spec:check R3 no-pr-needed
 ```sh
 for f in $(if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi | grep -E '\.(sh|bash)$'); do
   [ -f "$f" ] && { sh -n "$f"; echo "$f -> sh -n exit=$?"; }
