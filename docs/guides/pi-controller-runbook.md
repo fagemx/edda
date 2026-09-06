@@ -122,6 +122,12 @@ verdict on the SHA. Anything else waits for the operator.
 3. `mergeStateStatus` is not a readiness signal: a PR based on a branch other than `main` is not gated by the ruleset, so `CLEAN` with zero verdicts is exactly what it looks like (GH-914).
 
 
+## 回報
+
+- 給操作者的報告是 `sh scripts/fleet/daily-digest.sh --board 888` 的輸出，不是手寫摘要（rules.md R24）。
+- 宣稱任何一張 PR 完成之前先跑 `sh scripts/fleet/verdict-drift.sh`；它 exit 1 就沒有一張 PR 可以被稱作完成。
+- `mergeStateStatus` 不是就緒訊號：ruleset 只保護 `main`，base 不是 `main` 的 PR 在零判決時回報 CLEAN（來源 #914）。
+
 ## Pointers
 
 - Brief shape and the authored-middle contract: `docs/guides/brief-template.md`

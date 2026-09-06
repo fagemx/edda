@@ -161,7 +161,7 @@ issues the next brief. Success advances to the next numbered step.
 1. gh issue view 792 --repo fagemx/edda --json state --jq .state
    output: `OPEN`.
 2. git status --porcelain=v1 --untracked-files=all --branch
-   output: exactly ## codex/gh792-brief-template, no other lines.
+   output: exactly ## codex/gh792-brief-template...origin/main, no other lines.
 3. git rev-parse HEAD
    output: fb6ab1b503c3abb8502b3964678977aa23d316c4 (the base full SHA).
 4. edda context
@@ -210,7 +210,10 @@ issues the next brief. Success advances to the next numbered step.
     carry their reason and 需升級 rows escalate to the reviewer (REVIEW.md
     §6–§7); neither is a FAIL. This is the L0 self-check: the row commands
     are extracted from REVIEW.md at run time, so the lane is judged by the
-    rules its own tree states.
+    rules its own tree states. This no-PR-number pass cannot run U2, U3 and
+    U6 — they read the PR body and the PR's checks, which do not exist
+    pre-push — so those three rows stay N.A.(needs PR number), and a lane
+    must not read "every row PASS" as "every rule checked".
 21. git commit -m "docs(fleet): brief template for role and runtime composition" -m "Issue: #792"
     output: git commit summary, exit 0. Do not infer a PR-body link from it.
 22. git log -1 --format=%B | grep -Fx 'Issue: #792'
@@ -221,7 +224,12 @@ issues the next brief. Success advances to the next numbered step.
     output: one 40-character hexadecimal SHA; retain as delivery_sha.
 25. git push --porcelain -u origin codex/gh792-brief-template
     output: Git porcelain push status, exit 0, no rejected ref. This is a
-    normal push; no force option is authorized.
+    normal push; no force option is authorized. Enforcement is mechanical:
+    `scripts/fleet/guard-push.sh` runs as the lefthook pre-push hook — the
+    command sets `use_stdin: true`, without which lefthook does not forward
+    the ref records and the guard would hang — and refuses a
+    non-fast-forward push on a branch with an open PR, with
+    `FLEET_ALLOW_FORCE_PUSH=1` as its single documented escape.
 26. cat >"$(git rev-parse --git-path gh792-pr-body.md)" <<'PR_BODY'
 ## Problem and change
 Lane briefs lacked a shared contract for role and runtime. This adds the

@@ -8,6 +8,7 @@
 #   pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/pr-review-launch.ps1 -Stop      # unregister
 #   pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/pr-review-launch.ps1 -DryRun    # register + start in
 #       # --once --dry-run mode, print Get-ScheduledTaskInfo (LastTaskResult must be 0), unregister
+#   pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/pr-review-launch.ps1 -Agent pi -Model openrouter/z-ai/glm-5.3-flash
 #
 # The watcher runs scripts/pr-review-watch.sh (Git Bash) in an endless poll
 # loop; it restarts at logon and on failure. Logs: $HOME\.edda\fleet\watch.log
@@ -17,6 +18,7 @@ param(
   [string]$BashPath = "",
   [string]$Repo = "fagemx/edda",
   [string]$Model = "claude-opus-5",
+  [string]$Agent = "claude",
   [string]$TaskName = "edda-pr-review-watcher",
   [switch]$Stop,
   [switch]$DryRun
@@ -61,6 +63,7 @@ $Wrapper = Join-Path $Scratch $wrapperName
 `$env:EDDA_FLEET_SCRATCH = '$Scratch'
 `$env:EDDA_REPO = '$Repo'
 `$env:EDDA_REVIEW_MODEL = '$Model'
+`$env:EDDA_REVIEW_AGENT = '$Agent'
 Set-Location '$RepoRoot'
 & '$BashPath' -l -c 'exec $WatchSh $WatchArgs'
 exit `$LASTEXITCODE

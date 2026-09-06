@@ -48,6 +48,14 @@ case "$machine" in
     */*) : ;;
     *) die "machine identity must be <machine>/<role>, got '$machine'" ;;
 esac
+# The identity is interpolated into the double-quoted sh -c task-new line
+# below, so every segment must be [A-Za-z0-9._-]+ — a quote, dollar, backtick,
+# backslash, or whitespace surviving this check would break out of that string.
+for machine_segment in "${machine%%/*}" "${machine#*/}"; do
+    case "$machine_segment" in
+        ''|*[!A-Za-z0-9._-]*) die "machine identity segments must match [A-Za-z0-9._-]+, got '$machine'" ;;
+    esac
+done
 
 self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 root=$(CDPATH= cd -- "$self_dir/../.." && pwd)
@@ -68,6 +76,11 @@ if [ "$has_claimed" = "true" ]; then
 fi
 has_ready=$(printf '%s' "$json" | jq '[.labels[].name] | index("fleet:ready") != null')
 [ "$has_ready" = "true" ] || die "issue $issue does not carry fleet:ready"
+if [ "$dry" = 0 ]; then
+    echo "== issue freshness"
+    sh "$self_dir/issue-freshness.sh" "$issue" ||
+        die "issue $issue failed the freshness gate (labelled fleet:stale) — not dispatching"
+fi
 title=$(printf '%s' "$json" | jq -r .title)
 [ -n "$title" ] && [ "$title" != "null" ] || die "issue $issue has no title"
 # interpolated into the double-quoted task-new line below; the backslash is
@@ -140,6 +153,11 @@ if [ "$dry" = 0 ] && grep -q '^<<AUTHORED STEPS>>$' "$brief_path"; then
     die "brief still contains <<AUTHORED STEPS>> — fill the authored middle in $brief_path, then rerun"
 fi
 
+if [ "$dry" = 0 ]; then
+    echo "== brief validate"
+    sh "$self_dir/brief-validate.sh" "$brief_path" ||
+        die "brief-validate INVALID — fix the failing step in the brief, then rerun"
+fi
 echo "== task"
 echo "cmd: $task_cmd"
 
@@ -157,7 +175,7 @@ echo "cmd: $claim_cmd"
 echo "== launch"
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-        launch_cmd="pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name $lane -Brief $brief_path -Cwd $wt -Agent pi -TimeoutSec 5400 -BudgetUsd 3" ;;
+        launch_cmd="pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name $lane -Brief $brief_path -Cwd $wt -Agent pi -TimeoutSec 5400 -BudgetUsd 3 -Machine $machine" ;;
     *)
         launch_cmd="pi --model openrouter/z-ai/glm-5.3-flash --session-id lane-$lane \"\$(cat $brief_path)\"  # unattended runs need a process supervisor" ;;
 esac
@@ -187,7 +205,8 @@ echo "== launching lane"
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
         pwsh -NoProfile -File "$self_dir/lane-launch.ps1" -Name "$lane" \
-            -Brief "$brief_path" -Cwd "$wt" -Agent pi -TimeoutSec 5400 -BudgetUsd 3 ;;
+            -Brief "$brief_path" -Cwd "$wt" -Agent pi -TimeoutSec 5400 -BudgetUsd 3 \
+            -Machine "$machine" ;;
     *)
         die "unattended launch on POSIX needs a process supervisor — run interactively: $launch_cmd" ;;
 esac

@@ -178,6 +178,26 @@ esac
 status_lines=$(printf '%s\n' "$paths_space" | tr ' ' '\n' | sed '/^$/d')
 first_path=$(printf '%s' "$status_lines" | head -1)
 
+# GH-898: --task-id is optional. With no rail task, fixed steps 6 and 24 would
+# render `edda task show none` and `edda task done none`, which must fail —
+# the lane stops at step 6 on a valid render. Rail-free forms render instead
+# and step 24's receipt becomes a session note.
+if [ "$task" = "none" ]; then
+    step5="5. edda task list
+   output: task-list text, exit 0."
+    step6="6. git rev-parse --is-inside-work-tree
+   output: true."
+    step24="24. edda note 'GH${issue} delivered: PR <pr_url> @ <delivery_sha>; lane tests green.' --tag session
+    output: Wrote NOTE <event-id>, exit 0."
+else
+    step5="5. edda task list
+   output: task-list text, exit 0, including task ${task}."
+    step6="6. edda task show ${task}
+   output: task ${task} and this brief, exit 0."
+    step24="24. edda task done ${task} --receipt \"PR <pr_url> @ <delivery_sha>\"
+    output: task ${task} marked done, exit 0."
+fi
+
 cat <<EOF
 role: worker · lane: ${lane} · task id: ${task} · issue: #${issue} ·
 base full SHA: ${sha} ·
@@ -185,7 +205,7 @@ scope paths: ${paths_csv} ·
 entry: none: procedure below · gate owner: not you; review queue ·
 out-of-scope: every path and concern not listed in scope paths
 
-Launcher contract: you are pi 0.84.4 in an exclusively owned, clean worktree at ${worktree} on branch ${branch} at the base full SHA, with task ${task} assigned, issue #${issue} claimed, lane name ${lane_name}, and no existing PR for that branch. Your tools are bash({"command": string}) running Git Bash, write({"path": string, "content": string}) and edit({"path": string, "edits": [{"oldText": string, "newText": string}]}). Shell commands go in bash.command; file changes are write/edit tool calls, never shell programs that rewrite files (no sed -i, no cat > file). git, gh and edda are authenticated on PATH. Build lane: ${lane}.
+Launcher contract: you are pi 0.84.4 in an exclusively owned, clean worktree at ${worktree} on branch ${branch} at the base full SHA, with task ${task} assigned, issue #${issue} claimed, lane name ${lane_name}, and no existing PR for that branch. The one sanctioned prep command that produced this worktree is git worktree add -b ${branch} ${worktree} origin/main — a prep from any other start point cannot satisfy step 2. Your tools are bash({"command": string}) running Git Bash, write({"path": string, "content": string}) and edit({"path": string, "edits": [{"oldText": string, "newText": string}]}). Shell commands go in bash.command; file changes are write/edit tool calls, never shell programs that rewrite files (no sed -i, no cat > file). git, gh and edda are authenticated on PATH. Build lane: ${lane}.
 
 ${host_fact}
 
@@ -203,10 +223,8 @@ issues the next brief. Success advances to the next numbered step.
    output: ${sha}.
 4. edda context
    output: context text, exit 0; an off-limits overlap with a scope path is a STOP under the failure rule.
-5. edda task list
-   output: task-list text, exit 0, including task ${task}.
-6. edda task show ${task}
-   output: task ${task} and this brief, exit 0.
+${step5}
+${step6}
 7. edda claim gh${issue}-worker${paths_claim}
    output: successful claim for gh${issue}-worker and the scope paths, exit 0.
 8. gh issue view ${issue} --repo ${repo} --json body --jq .body
@@ -245,8 +263,7 @@ ${status_lines}
     output: one https://github.com/${repo}/pull/<integer> URL, exit 0. Retain as pr_url.
 23. gh pr view ${branch} --repo ${repo} --json headRefOid --jq .headRefOid
     output: delivery_sha from step 18, exactly.
-24. edda task done ${task} --receipt "PR <pr_url> @ <delivery_sha>"
-    output: task ${task} marked done, exit 0.
+${step24}
 25. Report, as the final message, exactly these five lines and nothing else:
     DONE issue=#${issue} task=${task}
     pr=<pr_url>

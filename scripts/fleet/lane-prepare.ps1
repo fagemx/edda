@@ -60,6 +60,14 @@ if ($BuildLane -and $allowedBuildLanes -notcontains $BuildLane) {
   Fail "-BuildLane '$BuildLane' is not an allowed build lane (verification.cost-discipline allows only: $($allowedBuildLanes -join ', '))"
 }
 
+# GH-897: the rendered brief's step 2 expects the '## <branch>...origin/main'
+# tracking line, and git sets that upstream only when the branch starts from
+# a remote-tracking refname — a raw SHA start point silently skips it. So the
+# sanctioned lane prep starts from an origin/* ref, never a resolved SHA.
+if ($StartRef -notmatch '^origin/') {
+  Fail "start ref '$StartRef' is not a remote-tracking ref: git sets the branch tracking line ('## <branch>...origin/main' in the rendered brief's step 2) only from an origin/* refname, never from a raw SHA"
+}
+
 # The FIXED lane worktree path (lane-launch.ps1 and lane-warm.ps1 derive the
 # same path; do not change one without the other).
 function Get-LaneWorktreePath([string]$MainRepo, [string]$Lane) {
@@ -228,10 +236,10 @@ $baseSha = & git -C $MainRepo rev-parse --verify "$StartRef^{commit}"
 if ($LASTEXITCODE -ne 0 -or -not $baseSha) { Fail "start ref '$StartRef' does not resolve after fetch" }
 
 if (Test-Path -LiteralPath $WtPath) {
-  & git -C $WtPath checkout -b $Branch $baseSha 2>$null
+  & git -C $WtPath checkout -b $Branch $StartRef 2>$null
   if ($LASTEXITCODE -ne 0) { Fail "git checkout -b $Branch failed in '$WtPath'" }
 } else {
-  & git -C $MainRepo worktree add -b $Branch $WtPath $baseSha 2>$null
+  & git -C $MainRepo worktree add -b $Branch $WtPath $StartRef 2>$null
   if ($LASTEXITCODE -ne 0) { Fail "git worktree add -b $Branch $WtPath failed" }
 }
 

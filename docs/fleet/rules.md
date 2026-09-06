@@ -33,6 +33,7 @@
 - **R25 政策面**：跨機器的政策只有一個面：本檔在 `origin/main` 的版本。控制者每次 tick 起手先 `git fetch origin`，再讀 `git show origin/main:docs/fleet/rules.md`（不讀本機 checkout——它可能在別的分支或落後）。單機帳本裡未 ratify 的控制者決策只約束記錄它的那台機器，寫進本檔或 ratify 之前不是政策；兩台機器對同一件事執行不同政策時，以本檔為準，差異記在 #888。來源：#671（帳本不跨機）、#888（09-05 兩台各跑一套：SHADOW 不合 vs 權威全合）。
 - **R26 工作以 origin 為準**：lane 的每個 commit 在同一次執行內推到 origin 的同名分支；結束時還有未推的 commit 或未 commit 的檔案，就是失敗的 lane，收據必須逐一列出這些檔案與分支。沒有推到 origin 的工作視為不存在——下一個行動者不會知道它在。控制者的 digest 列出本機所有領先 origin 的分支。來源：#888（gh557／gh772／gh792 是 Opus 時代、gh881／gh882 是 flash 時代，同一種丟法）。
 - **R27 運輸**：Anthropic 模型（Opus、Sonnet、Haiku）只經 Claude Code（`edda dispatch --agent claude` 或 `claude -p`），不經 pi／openrouter／任何其他 runtime——即使 pi 的 model 列表顯示 `anthropic/*` 為 ready。sol 經 pi `--model openai-codex/…` 或 codex app-server；glm 經 pi／openrouter。違反的 dispatch 要 fail-closed 拒絕，不是警告。來源：`fleet.claude-subscription-transport`（Tim 09-02 親裁）、#890 的拒絕測試。
+- **R28 起手閘**：issue-bound lane 只能經 fleet-claim-issue.sh 的 gate 或 next-issue.sh 啟動；lane-launch.ps1 對 `edda-lane-gh<N>` 形狀的 -Name 要求 -Machine <machine>/<role> 並先跑 claim guard --check，別台已認領就拒絕註冊。手寫的 taking: 留言不是認領；碰撞掃描 scripts/fleet/collision-scan.sh 在 wave 起手時跑，掃到就擋。來源：`fleet.lane-launch-claim-gate`、#887（兩台各建一套）、#906/#907。
 
 ## 管理者自訂
 
