@@ -978,6 +978,56 @@ documented surface cannot silently drift from the binary;
 | `skill` | Manage skill registry (scan, list, show, search) | Experimental registry |
 | `tool-tier` | Tool tier governance — query and manage tool risk classifications | Governance plumbing consumed by other tools |
 
+### edda fleet
+
+Fleet health — measure the path-classified mix of recent work. `edda fleet
+health` reads the merged PRs and opened issues of the last `--window` days
+through `gh` (server-side date filters `merged:>=` / `created:>=`), and
+classifies each by changed paths (merged PRs) or by the backticked paths of
+the issue's `## Predicted surface` section (issues): `crates/`, `sdk/` →
+product; `scripts/`, `docs/fleet/`, `.github/`, `REVIEW.md` → mechanism;
+anything else → other. A PR or issue takes the majority class of its paths;
+ties resolve product over mechanism over other. The report states two
+numbers against ledger thresholds: the product share of merged PRs and the
+mechanism issues opened per day.
+
+```bash
+edda fleet health --window 7 --json
+edda fleet health --line
+```
+
+Flags:
+
+- `--window <N>` — rolling window in days; default 7; must be at least 1.
+- `--json` — emit the full health report as JSON.
+- `--line` — emit one digest line, intended for the digest adapter (#1025).
+- `--json` and `--line` are mutually exclusive (usage error, exit 2).
+
+Thresholds come from ledger decisions: `fleet.health.product-share-floor`
+(default 50) and `fleet.health.mech-issues-per-day-ceiling` (default 9).
+`thresholds.source` is `ledger` when both keys resolved, `default` when
+neither did, and `mixed` otherwise.
+
+Sampling: each query fetches at most 200 PRs / 300 issues.
+`merged_prs.fetched`, `merged_prs.truncated`, `issues_opened.fetched` and
+`issues_opened.truncated` record how many rows came back and whether a cap
+was hit. A truncated sample must not be trusted for the freeze decision.
+
+Status: RED when the product share is below the floor or mechanism issues
+per day exceed the ceiling; YELLOW when within 20% of either; GREEN
+otherwise. RED sets `mechanism_dispatch: freeze`, otherwise `open`; the
+ordering layer that consumes it is #1015.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | GREEN |
+| 3 | YELLOW |
+| 4 | RED |
+| 1 | error (a `gh` failure or a failed stdout write) |
+| 2 | usage |
+
 ### edda review
 
 Review a committed branch using an independent read-only agent and record a
@@ -1006,6 +1056,24 @@ reviewer session. `--resume` requires that prior review and reuses its
 reviewer session; a backend fork disqualifies it. `--thinking` selects pi's
 thinking level; Claude and Codex reject the option rather than silently
 ignoring it.
+
+The brief also carries an `ENGINE QUALIFICATION (R22)` section naming the PR's
+R22 surface (`review`, `gate`, `shipping` or `internal-tool`, strictest first)
+with the changed path that decided it, the canonical requested model id, and
+whether R22's engine table makes that engine authoritative for the surface. An
+authoritative engine decides the specification's judgment item itself; any other
+engine escalates it, as REVIEW.md §6.1 requires of a checklist-type engine. An
+engine the table does not name — including a round that passes no `--model`,
+since R22 names model ids — is never authoritative: it records the
+`engine-not-authoritative` disqualifier and cannot exit 0. `--json` and the
+ledger event carry the same statement under `engine_qualification`.
+
+`--require-model-diversity` is unchanged by that section and remains
+independent of it. Without the flag the independence policy is `session`: an
+author and reviewer on the same model are recorded in the receipt as
+`independence: same-model` and stated in the brief, but do not disqualify the
+round. With the flag the policy is `model` and any independence other than
+`verified` disqualifies it.
 
 Gates are READ from clean exact-SHA command receipts and required exact-SHA CI.
 Missing checks remain unverified; any red evidence wins. `--run-gates` opts in

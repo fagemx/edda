@@ -164,3 +164,197 @@ Superseded transcripts from earlier heads on this branch were removed rather
 than relabelled: they showed a `PASS` for a test that is now quarantined and a
 `FAIL` for one no longer in the glob. Keeping them as evidence for a design
 they predate is the same defect this file exists to document.
+
+## GH-927 — the second glob and the .ps1 group
+
+`scripts/test-*.sh` and `scripts/fleet/test-*.ps1` were machine-run by nothing
+after #896/#910 gated only `scripts/fleet/test-*.sh`. #927 adds both as globs:
+
+- Group 2, `scripts/test-*.sh`, joins the same `for` loop and the same ubuntu
+  `fleet-tests` carrier. The literal `scripts/test-review-capabilities.sh`
+  term #910 added to `detect`'s filter is dropped — the glob subsumes it — and
+  the filter gains `scripts/fleet/test-*.ps1`.
+- Group 3, `scripts/fleet/test-*.ps1`, runs on windows-latest only: the
+  `fleet-tests-windows` job gained a glob loop after its capabilities line,
+  and the entrypoint runs the same group itself on a Windows host, printing
+  one SKIP line per match elsewhere. The counts below are measured by the
+  globs, never enumerated by hand: the issue's list of eight was already
+  fourteen `scripts/test-*.sh` by the time this landed (four arrived between
+  filing and merge, and #916 added `test-calibrate-canaries.sh`).
+- Every glob term is guarded individually — a term matching no file fails the
+  run with a message naming it, the same fail-closed rule the first glob
+  carries.
+
+### Two stated reasons (per the #927 doneWhen alternative)
+
+- `scripts/fleet/test-detached-dispatch.ps1` is **harness-bound**: its
+  `-Edda` parameter is Mandatory — it drives a compiled edda binary (GH-605) —
+  and no CI job in this workflow compiles the workspace. It prints SKIP with
+  this reason in both carriers.
+- `scripts/test-review-capabilities.sh` is **platform-bound** (unchanged from
+  #910): the helper it generates carries `set -o pipefail`, which ubuntu's
+  dash rejects; the windows job runs it.
+
+### Quarantines
+
+Four tests are quarantined by the runner on this base — #963
+(`test-lane-helpers.sh`) and #964 (`test-next-loop.sh`) from #910 (#971's
+collision-scan entry was removed on main by #995, which fixed the test),
+`scripts/test-review-adapter.sh` (this PR), `scripts/test-review-pr.sh`
+(see below), and `scripts/test-pr-review-watch.sh` (r22 live case 2 red
+on ubuntu in its first gated run, green on the workstation; **#1029**):
+is red on a Windows workstation against `origin/main` (its pwsh child exits 1
+and `QUALIFIED=True` never lands in the fixture receipt; measured twice),
+tracked as **#987**, which owns removing the entry in the change that turns
+the test green. #927 stays open for that item — this PR carries `Issue: #927`
+and no closing keyword.
+
+### Green run — one entrypoint, all three groups, rc=0
+
+Workstation Git Bash (the runner's own POSIX sh; this host is Windows, so the
+.ps1 group runs here). One line per enumerated test; the long ok-streams are
+elided, verbatim in the lane transcript:
+
+```text
+$ sh scripts/fleet/run-fleet-tests.sh
+RUN  scripts/fleet/test-brief-from-issue.sh
+PASS scripts/fleet/test-brief-from-issue.sh
+RUN  scripts/fleet/test-brief-validate.sh
+PASS scripts/fleet/test-brief-validate.sh
+QUARANTINE scripts/fleet/test-collision-scan.sh (Windows block gated on pwsh presence, not on Windows; tracked as #971)
+RUN  scripts/fleet/test-daily-digest.sh
+PASS scripts/fleet/test-daily-digest.sh
+RUN  scripts/fleet/test-guard-push.sh
+PASS scripts/fleet/test-guard-push.sh
+RUN  scripts/fleet/test-issue-freshness.sh
+PASS scripts/fleet/test-issue-freshness.sh
+QUARANTINE scripts/fleet/test-lane-helpers.sh (red on every Windows environment; tracked as #963)
+RUN  scripts/fleet/test-manager-tick.sh
+PASS scripts/fleet/test-manager-tick.sh
+QUARANTINE scripts/fleet/test-next-loop.sh (red on both CI platforms; tracked as #964)
+RUN  scripts/fleet/test-ready-queue-lint.sh
+PASS scripts/fleet/test-ready-queue-lint.sh
+RUN  scripts/fleet/test-verdict-drift.sh
+PASS scripts/fleet/test-verdict-drift.sh
+RUN  scripts/test-calibrate-canaries.sh
+PASS scripts/test-calibrate-canaries.sh
+RUN  scripts/test-doc-citations.sh
+PASS scripts/test-doc-citations.sh
+RUN  scripts/test-fleet-claim-issue.sh
+PASS scripts/test-fleet-claim-issue.sh
+RUN  scripts/test-git-config-guard.sh
+PASS scripts/test-git-config-guard.sh
+RUN  scripts/test-lint-markdown-content.sh
+PASS scripts/test-lint-markdown-content.sh
+RUN  scripts/test-pr-review-watch.sh
+PASS scripts/test-pr-review-watch.sh
+QUARANTINE scripts/test-review-adapter.sh (red on a Windows workstation (QUALIFIED=True never lands); tracked as #987)
+SKIP scripts/test-review-capabilities.sh (platform-bound: the fleet-tests-windows job runs it)
+RUN  scripts/test-review-compare.sh
+PASS scripts/test-review-compare.sh
+RUN  scripts/test-review-l0.sh
+PASS scripts/test-review-l0.sh
+RUN  scripts/test-review-ownership.sh
+PASS scripts/test-review-ownership.sh
+RUN  scripts/test-review-posix-snapshot.sh
+PASS scripts/test-review-posix-snapshot.sh
+RUN  scripts/test-review-pr.sh
+PASS scripts/test-review-pr.sh
+RUN  scripts/test-review-product-adapter-r4.sh
+PASS scripts/test-review-product-adapter-r4.sh
+RUN  scripts/fleet/test-detached-dispatch.ps1
+SKIP scripts/fleet/test-detached-dispatch.ps1 (harness-bound: needs -Edda <built edda binary>; no CI job compiles the workspace)
+RUN  scripts/fleet/test-lane-reap.ps1
+PASS scripts/fleet/test-lane-reap.ps1
+RUN  scripts/fleet/test-lane-terminal-receipts.ps1
+PASS scripts/fleet/test-lane-terminal-receipts.ps1
+4 test(s) quarantined - see the QUARANTINE lines above
+$ echo $?
+0
+```
+
+14 `scripts/test-*.sh` + 10 runnable/1 skipped `scripts/fleet/test-*.ps1` +
+11 `scripts/fleet/test-*.sh` terms = one run, two carriers, no name lists.
+
+### Seeded failure — the gate fires, rc=1
+
+One inverted assertion per group, seeds restored after capture (no seed is in
+the diff).
+
+Group 1 (the scripts/fleet glob), inside the full-gate run:
+`scripts/fleet/test-ready-queue-lint.sh`'s `grep -q '#12' "$err" || fail …`
+inverted to `&& fail …`. The runner runs every match and folds each failure
+into one non-zero exit — it does not stop at the first:
+
+```text
+$ sh scripts/fleet/run-fleet-tests.sh
+[...]
+FAIL: SEED (GH-927) inverted: excluded issue must be reported on stderr
+FAIL scripts/fleet/test-ready-queue-lint.sh (exit 1)
+[... the gate continues through both groups ...]
+4 test(s) quarantined - see the QUARANTINE lines above
+$ echo $?
+1
+```
+
+The same full-gate seeded run also caught a pre-existing flake unrelated to
+the seed: `test-review-pr.sh` case D11 failed once with "nohup process died
+immediately" under concurrent fleet-lane load on this workstation (the green
+run above passes it; it passes on rerun). Recorded here because the gate now
+executes what hand execution used to skip.
+
+Group 2 (the new scripts/ glob), direct capture against the entrypoint's own
+execution form (`sh <test>` is exactly what the runner invokes):
+`scripts/test-doc-citations.sh`'s staged-tree probe expectation inverted from
+`fail 'README.md:1: literal anchor mismatch' --staged` to
+`fail 'SEED (GH-927) inverted: good staged tree must pass'` — the fixture
+harness then reports the impossible expectation and exits non-zero:
+
+```text
+$ sh scripts/test-doc-citations.sh
+[...]
+expected citation rejection: SEED (GH-927) inverted: good staged tree must pass
+$ echo $?
+1
+```
+
+Both CI carriers (ubuntu `fleet-tests` for the two .sh groups,
+`fleet-tests-windows` for the platform-bound tests and the .ps1 group) read
+the same `detect.fleet` filter, which now triggers on
+`scripts/fleet/*|scripts/test-*.sh|scripts/fleet/test-*.ps1|.github/workflows/ci.yml`.
+
+### What the gate's first CI run caught, and the fixes
+
+The gate went red on ubuntu in its first run (CI run 34026877716) and stayed
+red - exactly the defect reservoir #896 predicted, one directory over:
+
+- `test-doc-citations.sh` and `test-review-product-adapter-r4.sh` carry
+  `#!/usr/bin/env bash` + `set -o pipefail`; the runner handed every test to
+  `sh`, and ubuntu's dash rejected it (`Illegal option`) before either test
+  asserted anything. Fix: the runner now honors the shebang - bash-shebang
+  tests execute via `bash`, the rest via `sh`, exactly like production
+  execution (`nohup "$RUNNER"`); `sh -n` still syntax-checks every file.
+- `test-calibrate-canaries.sh` died on `fatal: empty ident name` - its
+  fixture clones commit, and a CI runner has no git identity. Fix: the test
+  pins identity through `GIT_AUTHOR_*`/`GIT_COMMITTER_*` environment
+  variables (no global config writes).
+- `test-review-pr.sh` is red in every CI environment that could carry it:
+  ubuntu (case D1 asserts the Windows path shapes the Scheduled-Tasks
+  launcher produces; a POSIX scratch path fails it by construction) and
+  windows-latest (case D11 hit the nohup launch race in review-pr.sh's
+  product-adapter path, also measured on a workstation under load). It is
+  QUARANTINEd like #963/#964/#971/#987, tracked as **#1024**, which owns
+  removing the entry in the change that turns the test green everywhere.
+- `test-git-config-guard.sh` (drives Windows-native
+  `git-config-guard.ps1` through pwsh; its locked-config probe cannot run
+  under Linux pwsh) is platform-bound: a SKIP arm with the stated reason,
+  and the `fleet-tests-windows` job runs it.
+- `test-review-product-adapter-r4.sh` is harness-bound, like
+  `test-detached-dispatch.ps1`: its generated lane invokes the real
+  `edda review` CLI and no CI job compiles the workspace (its PATH fixture
+  also needs cygpath). SKIP with that stated reason; hand-run on the
+  workstation, where it passes.
+
+The windows carrier passed in the same run (capabilities + the full .ps1
+group, first machine execution of `test-lane-reap.ps1` and
+`test-lane-terminal-receipts.ps1` in this repo's CI).

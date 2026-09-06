@@ -7,11 +7,14 @@
 # the bytes are reproducible from the sha, so the checkout is not committed).
 sdk/spec-pin/
 
-# Python
+# Python build/install artifacts; `python -m build`, which the publish runbook
+# in README.md tells the operator to run, writes both of these.
 __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+python/dist/
+python/build/
 
 # TypeScript build/install artifacts; the packed smoke installs only from the
 # generated tarball and must not leave an artifact in the source tree.

@@ -28,6 +28,9 @@ pub(crate) fn render(p: &ReviewVerdictPayload, event: &str) -> String {
             "model-mismatch" => "inspect requested/observed model and select the intended model",
             "coverage-partial" => "review a smaller range or raise EDDA_REVIEW_DIFF_BUDGET_CHARS",
             "escalation-pending" => "resolve the listed review escalations",
+            "engine-not-authoritative" => {
+                "dispatch --model with an engine R22 makes authoritative for this PR's surface"
+            }
             "session-mismatch" | "session-unverified" => {
                 "inspect the backend session before resuming"
             }

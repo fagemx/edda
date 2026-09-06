@@ -28,6 +28,12 @@ failures=0
 bad() { failures=$((failures + 1)); printf 'FAIL: %s\n' "$1" >&2; }
 good() { printf 'ok: %s\n' "$1" >&2; }
 
+# Fixture clones commit; a CI runner has no git identity, so pin one through
+# the environment (no global config writes) - GH-927's first gated run died
+# here on `fatal: empty ident name`.
+export GIT_AUTHOR_NAME='edda-fixture' GIT_AUTHOR_EMAIL='fixture@example.invalid'
+export GIT_COMMITTER_NAME='edda-fixture' GIT_COMMITTER_EMAIL='fixture@example.invalid'
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/test-calibrate-canaries.XXXXXX") || exit 1
 cleanup() { rm -rf -- "$WORK"; }
 trap cleanup EXIT

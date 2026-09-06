@@ -297,7 +297,7 @@ must hold and input shapes to confirm — never as an attack plan (decision
 **U1 — surface. P0.** Every changed file is inside the surface the issue or the
 lane brief allows. A file outside it is a lane-boundary violation.
 
-# review-spec:check U1
+# review-spec:check U1 no-pr-needed
 ```sh
 if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi
 ```
@@ -605,7 +605,7 @@ the ladder's own L2 command for that crate — `cargo test -p <crate>` on
 Windows — not a new gate invented here (`ladder`). One focused check per
 uncovered crate; never the whole workspace to reach one.
 
-# review-spec:check C5
+# review-spec:check C5 no-pr-needed
 ```sh
 { if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi; } \
   | grep '^crates/' | cut -d/ -f2 | sort -u \
@@ -650,7 +650,7 @@ git diff "origin/$BASE..$SHA" --unified=0 -- '*.sh' '*.bash' '*.ps1' '.github' \
 
 **R3 — every changed shell script parses. P0.** Exit code is the signal.
 
-# review-spec:check R3
+# review-spec:check R3 no-pr-needed
 ```sh
 for f in $(if [ -n "${REVIEW_FILES:-}" ]; then cat "$REVIEW_FILES"; else gh pr diff "$N" --name-only; fi | grep -E '\.(sh|bash)$'); do
   [ -f "$f" ] && { sh -n "$f"; echo "$f -> sh -n exit=$?"; }
@@ -819,10 +819,13 @@ rather than overwriting it.
   carries the ` (SHADOW)` suffix — the only SHADOW marker; the `- shadow:
   true` header field is documentation that accompanies it, never a
   substitute — sets no `review:*` label and no `Independent Review` status —
-  the union rule below ignores it. It is calibration evidence, not a gate:
-  `scripts/review-compare.sh <pr> <sha>` diffs its findings against the
-  authoritative round (the latest §7 round on that SHA without the suffix)
-  and prints one `for-ledger` line for the calibration ledger (issue #887).
+  the union rule below ignores it, and `sh scripts/review-pr.sh
+  verdict-label` prints `shadow` for it rather than a `review:*` label, so no
+  caller can turn it into a gate by reading its Verdict line. It is
+  calibration evidence, not a gate: `scripts/review-compare.sh <pr> <sha>`
+  diffs its findings against the authoritative round (the latest §7 round on
+  that SHA without the suffix) and prints one `for-ledger` line for the
+  calibration ledger (issue #887).
 
 Internal verifier reports, task receipts and CI do not replace this comment
 (`loop`). For a local-only delivery with no PR, record the same fields in the

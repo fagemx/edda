@@ -137,8 +137,13 @@ fi
 [ -n "$scope_csv" ] || die "rendered brief has no scope paths line"
 # The facts line reads "scope paths: a, b, c ·" — strip the trailing dot, then
 # split on ", " into repeatable --path flags (every path, not just the first).
+# The same walk builds owns_csv: the identical scopes joined by a bare comma,
+# which is the one argument lane-launch.ps1 -Owns takes (GH-937 — `pwsh
+# -File` binds only the first value of a multi-token option and lets the rest
+# bind to whatever named parameter still has a free positional slot).
 scope_csv=${scope_csv% ·}
 task_paths=
+owns_csv=
 while [ -n "$scope_csv" ]; do
     p=${scope_csv%%, *}
     case "$scope_csv" in
@@ -146,7 +151,11 @@ while [ -n "$scope_csv" ]; do
         *) scope_csv= ;;
     esac
     task_paths="$task_paths --path \"$p\""
+    owns_csv="${owns_csv:+$owns_csv,}$p"
 done
+# A launch with no scope is refused by lane-launch.ps1's write-lane guard
+# AFTER the worktree, task and claim already exist (GH-936). Refuse here.
+[ -n "$owns_csv" ] || die "brief scope paths yielded no -Owns scope for the lane launch"
 task_cmd="edda task new \"$title_safe\" --assignee \"${machine#*/}\"$task_paths --brief \"$brief_path\" --key gh$issue"
 
 if [ "$dry" = 0 ] && grep -q '^<<AUTHORED STEPS>>$' "$brief_path"; then
@@ -175,7 +184,7 @@ echo "cmd: $claim_cmd"
 echo "== launch"
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
-        launch_cmd="pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name $lane -Brief $brief_path -Cwd $wt -Agent pi -TimeoutSec 5400 -BudgetUsd 3 -Machine $machine" ;;
+        launch_cmd="pwsh -NoProfile -File scripts/fleet/lane-launch.ps1 -Name $lane -Brief $brief_path -Cwd $wt -Agent pi -TimeoutSec 5400 -BudgetUsd 3 -Machine $machine -Owns \"$owns_csv\"" ;;
     *)
         launch_cmd="pi --model openrouter/z-ai/glm-5.3-flash --session-id lane-$lane \"\$(cat $brief_path)\"  # unattended runs need a process supervisor" ;;
 esac
@@ -206,7 +215,7 @@ case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
         pwsh -NoProfile -File "$self_dir/lane-launch.ps1" -Name "$lane" \
             -Brief "$brief_path" -Cwd "$wt" -Agent pi -TimeoutSec 5400 -BudgetUsd 3 \
-            -Machine "$machine" ;;
+            -Machine "$machine" -Owns "$owns_csv" ;;
     *)
         die "unattended launch on POSIX needs a process supervisor — run interactively: $launch_cmd" ;;
 esac

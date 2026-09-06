@@ -29,9 +29,11 @@
 #            committed range — the pre-push shape of Example B step 20.
 #   [PR-number]  blocks referencing "$N" (U2, U3, U6) run only when a PR
 #            number is passed; without one they report N.A.(needs PR number)
-#            instead of failing. U1, C5 and R3 enumerate the changed files
-#            from REVIEW_FILES (GH-922 d-004 option A), so the pre-push pass
-#            — no PR number — runs them too. Offline callers can still fake
+#            instead of failing. A block whose marker declares
+#            `no-pr-needed` (U1, C5, R3) runs anyway: it enumerates the
+#            changed files from REVIEW_FILES (GH-922 d-004 option A) and
+#            reaches the "$N" only in a fallback branch that stays
+#            unreached, so the pre-push pass runs it too. Offline callers can still fake
 #            the PR surface by putting a stub gh earlier in PATH —
 #            scripts/test-review-l0.sh does exactly that.
 #   REVIEW_L0_SPEC  spec file to extract from (default REVIEW.md in the cwd —
@@ -97,21 +99,30 @@ trap 'exit 130' INT TERM
 # ---- extract the marked blocks ---------------------------------------------
 # One pass over the spec. A fenced sh block inside check markers lands in
 # $TMP/blocks as:
-#   @@BLOCK@@ <RULE> <n>
+#   @@BLOCK@@ <RULE> <n> <attrs>
 #   ...block body...
 #   @@END@@
 # A fenced sh block with no check markers prints "UNMARKED <first line>" and
 # the run dies with 3 — an unmarked check is never silently skipped.
 : > "$TMP/blocks"
 unmarked=$(awk -v out="$TMP/blocks" '
-  !infence && /^# review-spec:check /    { marked = 1; id = $3; next }
+  # GH-958: the marker carries optional attributes after the rule id
+  # (`# review-spec:check U1 no-pr-needed`). They are metadata about the
+  # block, so they live in the marker, not in the block body, and the
+  # runner never has to infer a capability from what the command text
+  # happens to mention.
+  !infence && /^# review-spec:check / {
+    marked = 1; id = $3; attrs = "-"
+    for (i = 4; i <= NF; i++) attrs = (attrs == "-" ? $i : attrs "," $i)
+    next
+  }
   !infence && /^# review-spec:check-end/ { marked = 0; next }
   !infence && /^```sh/ { infence = 1; body = ""; first = ""; next }
   infence && /^```/ {
     infence = 0
     if (marked) {
       n++
-      print "@@BLOCK@@ " id " " n > out
+      print "@@BLOCK@@ " id " " n " " attrs > out
       printf "%s", body > out
       print "@@END@@" > out
     } else {
@@ -131,10 +142,24 @@ if [ "$ext_status" -ne 0 ]; then
   exit "$ext_status"
 fi
 
-# block map: "<line of @@BLOCK@@ header in blocks file> <rule id>"
+# block map: "<line of @@BLOCK@@ header in blocks file> <rule id> <attrs>"
 grep -n '^@@BLOCK@@ ' "$TMP/blocks" \
-  | sed 's/^\([0-9]*\):@@BLOCK@@ \([^ ]*\) [0-9]*$/\1 \2/' > "$TMP/map"
+  | sed 's/^\([0-9]*\):@@BLOCK@@ \([^ ]*\) [0-9]* \(.*\)$/\1 \2 \3/' > "$TMP/map"
 [ -s "$TMP/map" ] || { echo "review-l0.sh: spec has no check-marked blocks" >&2; exit 2; }
+# A marker attribute is a contract between the spec and this runner, so an
+# unrecognised one is a spec error, not something to ignore: a typo in
+# `no-pr-needed` would otherwise silently send the rule back to
+# N.A.(needs PR number) on every pre-push pass.
+bad_attrs=$(awk '
+  $3 != "-" {
+    n = split($3, a, ",")
+    for (i = 1; i <= n; i++) if (a[i] != "no-pr-needed") print $2 ":" a[i]
+  }
+' "$TMP/map")
+[ -z "$bad_attrs" ] || {
+  echo "review-l0.sh: unknown review-spec:check attribute(s): $bad_attrs" >&2
+  exit 2
+}
 
 block_body_at() { # <line of @@BLOCK@@ header> — the body below it
   awk -v start="$1" '
@@ -229,13 +254,23 @@ oneline() { # first line of stdin, pipes escaped for the table cell, capped
   # would end in a partial UTF-8 sequence. The cap is a byte cap (LC_ALL=C)
   # plus a back-off that strips a trailing partial multi-byte sequence, so
   # the cell always decodes as valid UTF-8.
+  #
+  # The back-off is deliberately blunt (GH-958): the pattern matches ANY
+  # trailing lead byte plus its continuation bytes, so when the cut lands
+  # exactly on a character boundary it removes one COMPLETE character
+  # instead of nothing. That over-strip is accepted — the cell is truncated
+  # evidence either way, one glyph shorter changes no verdict, and the
+  # alternative (decoding to count characters) is more machinery than a
+  # table cell is worth. What it must never do is emit invalid UTF-8, and
+  # stripping one character too many cannot.
   head -n 1 | sed 's/|/\\|/g' \
     | LC_ALL=C cut -c1-160 \
     | LC_ALL=C sed -E 's/[\xC0-\xFF][\x80-\xBF]*$//'
 }
 
-run_block() { # <rule> <class> <severity> <blocks-file line>
+run_block() { # <rule> <class> <severity> <blocks-file line> <marker attrs>
   rule=$1
+  attrs=${5:--}
   block_body_at "$4" > "$TMP/block.sh"
 
   # A block with a <placeholder> needs reviewer input (D2's decision key);
@@ -245,18 +280,23 @@ run_block() { # <rule> <class> <severity> <blocks-file line>
     return
   fi
   # Blocks referencing "$N" are PR-surface probes; without a number they
-  # cannot run and must say so rather than fail — unless the block reads its
-  # file list from REVIEW_FILES (GH-922 d-004 option A): there the "$N" lives
-  # only in the fallback branch, which REVIEW_FILES being set keeps unreached.
+  # cannot run and must say so rather than fail — unless the block's own
+  # marker declares `no-pr-needed` (GH-958). Those blocks (U1, C5, R3) take
+  # their file list from REVIEW_FILES and reach the "$N" only in a fallback
+  # branch REVIEW_FILES keeps unreached (GH-922 d-004 option A). The gate
+  # used to infer that by grepping the command text for the string
+  # REVIEW_FILES: correct for every block that existed, but it coupled the
+  # runner to one variable name inside someone else's command, and a block
+  # mentioning it for any other reason would have been waved through.
   case "$(cat "$TMP/block.sh")" in
     *'$N'*)
       if [ -z "$N" ]; then
-        if [ -n "${REVIEW_FILES:-}" ] && grep -q 'REVIEW_FILES' "$TMP/block.sh"; then
-          :
-        else
-          print_row "$rule" "$2" "$3" 'N.A.(needs PR number)' '-'
-          return
-        fi
+        case ",$attrs," in
+          *,no-pr-needed,*) : ;;
+          *)
+            print_row "$rule" "$2" "$3" 'N.A.(needs PR number)' '-'
+            return ;;
+        esac
       fi
       ;;
   esac
@@ -354,7 +394,8 @@ process_rule() { # <rule> <class> <severity>
   found=0
   for ln in $(awk -v want="$1" '$2 == want { print $1 }' "$TMP/map"); do
     found=1
-    run_block "$1" "$2" "$3" "$ln"
+    battrs=$(awk -v l="$ln" '$1 == l { print $3 }' "$TMP/map")
+    run_block "$1" "$2" "$3" "$ln" "$battrs"
   done
   if [ "$found" -eq 0 ]; then
     print_row "$1" "$2" "$3" 'N.A.(no command block in the spec)' '-'

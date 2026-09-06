@@ -34,6 +34,7 @@
 #
 # usage: review-pr.sh <PR> [round] [prev-sha] [--sha <full-sha>] [--dry-run]
 #        review-pr.sh verdict-label < verdict-text        (offline helper)
+#          prints review:lgtm | review:changes-requested | shadow, or nothing
 #
 # Environment:
 #   EDDA_REPO              owner/repo              (default fagemx/edda)
@@ -59,7 +60,15 @@
 #                                  source proof, worktree removal and task
 #                                  teardown ("TRANSPORT=<arm>", "SESSION=<uuid>",
 #                                  raw "DISPATCH_EXIT=<code>", final exit and
-#                                  terminal WORKTREE/TASK cleanup proof)
+#                                  terminal WORKTREE/TASK cleanup proof); the
+#                                  product arm (TRANSPORT=edda-review) publishes
+#                                  the same shape, where DISPATCH_EXIT is
+#                                  `edda review`'s verdict-bearing exit (0
+#                                  qualified LGTM, 1 Changes Requested, 3
+#                                  unqualified LGTM = provisional, #998)
+#   review-pr<N>-r<R>-launch.ps1   Windows: the Task Scheduler launcher, written
+#                                  even on --dry-run so the registered -File
+#                                  argument is inspectable
 #   wt-review-pr<N>/               detached worktree at the PR head, removed by
 #                                  the lane once the round's verdict is in the
 #                                  log and recreated at the same path next
@@ -131,7 +140,23 @@ SHA_GIVEN=""
 # failed` rather than guessing). `Changes Requested` is tested first so a line
 # naming both resolves to the blocking side.
 if [ "${1:-}" = "verdict-label" ]; then
-  vline=$(sed -n '/^#\{1,\}[[:space:]]*Verdict/,$p' | sed '1d' \
+  body=$(cat)
+  # REVIEW.md §8: a round whose §7 heading carries the ` (SHADOW)` suffix is
+  # never a verdict — it sets no `review:*` label and no `Independent Review`
+  # status; it is calibration evidence. Name it, so no caller can turn that
+  # evidence into a gate by reading its Verdict line. The suffix is the only
+  # marker (§7): a `- shadow: true` header field is documentation that
+  # accompanies it and never substitutes for it, and the word in the prose is
+  # no marker at all. Both recorded positions are accepted — after
+  # `Round <N>` (§7) and at line end (the #917 trim contract) — and only on
+  # the first line, because a verdict comment BEGINS with its heading (R23):
+  # a heading quoted further down belongs to some other round.
+  heading=$(printf '%s\n' "$body" | sed -n '1{s/\r$//;p;}')
+  case "$heading" in
+    '## Code Review: Round '*' (SHADOW) — PR #'*) echo shadow; exit 0 ;;
+    '## Code Review: Round '*' — PR #'*' (SHADOW)') echo shadow; exit 0 ;;
+  esac
+  vline=$(printf '%s\n' "$body" | sed -n '/^#\{1,\}[[:space:]]*Verdict/,$p' | sed '1d' \
           | grep -m1 -E 'LGTM|Changes Requested') || vline=""
   case "$vline" in
     *"Changes Requested"*) echo "review:changes-requested" ;;
@@ -241,15 +266,124 @@ product_review_supported() {
   done
 }
 
+# ---- launchers shared by the product and legacy transports ------------------
+# Windows: Task Scheduler, not nohup (fleet.lane-launch). The launcher is a
+# generated .ps1, written before the dry-run exit, so the exact -Argument it
+# registers is inspectable on disk: a -File argument pwsh cannot open is the
+# #683 failure, and the product path used to register it inline in a
+# single-quoted PowerShell string whose backticks stayed literal
+# (`-File `"C:\…`"`), so every product task ended with LastTaskResult=64
+# before its lane ran (#998). Callers set LANE_FILE_ARG (cygpath -w of the
+# lane), LAUNCH_DIRW (the task's working directory), LOGW, DONEW, PWSH_EXE,
+# SID and SESSION_MODE first.
+write_windows_launcher() {
+  TASK="edda-review-pr$PR-r$ROUND"
+  cat > "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" <<PS
+foreach (\$f in @("$LOGW", "$DONEW", "$DONEW.err")) { if (Test-Path \$f) { [System.IO.File]::Delete(\$f) } }
+Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue
+\$action = New-ScheduledTaskAction -Execute "$PWSH_EXE" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$LANE_FILE_ARG\`"" -WorkingDirectory '$LAUNCH_DIRW'
+# The dispatch timeout is handled inside the child lane. Scheduler must not
+# preempt its finally block before it publishes the terminal receipt and
+# unregisters itself.
+\$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+try {
+  Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited -ErrorAction Stop | Out-Null
+  try { Start-ScheduledTask -TaskName '$TASK' -ErrorAction Stop }
+  catch {
+    \$startFailure = \$_.Exception.Message
+    \$taskCleanup = 'failed; task start did not reach cleanup'
+    try {
+      Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction Stop
+      \$taskCleanup = 'unregistered'
+    } catch {
+      \$taskCleanup = "failed; \$(\$_.Exception.Message)"
+      \$_ | Out-File '$LOGW' -Append -Encoding utf8
+    }
+    "review-pr launcher: Start-ScheduledTask failed: \$startFailure" | Out-File '$LOGW' -Append -Encoding utf8
+    \$receiptTmp = "$DONEW.pending-\$PID"
+    try {
+      [System.IO.File]::WriteAllLines(\$receiptTmp, [string[]]@(
+        'TRANSPORT=not-started',
+        'TOOL_FLAGS=not-started',
+        'SESSION=$SID',
+        'SESSION_MODE=$SESSION_MODE',
+        'DISPATCH_EXIT=2',
+        'FINAL_EXIT=2',
+        'WORKTREE_CHECK=not-started',
+        'WORKTREE_CLEANUP=preserved; scheduler start failed',
+        "TASK_CLEANUP=\$taskCleanup",
+        'TERMINAL_RECEIPT=complete'
+      ), [System.Text.UTF8Encoding]::new(\$false))
+      Move-Item -LiteralPath \$receiptTmp -Destination '$DONEW' -Force
+    } catch {
+      \$_ | Out-File '$LOGW' -Append -Encoding utf8
+    }
+    throw
+  }
+} catch { throw }
+\$st = ""
+for (\$i = 0; \$i -lt 20; \$i++) {
+  Start-Sleep -Seconds 1
+  \$st = (Get-ScheduledTask -TaskName '$TASK').State
+  if (\$st -eq 'Running') { break }
+}
+\$info = Get-ScheduledTaskInfo -TaskName '$TASK'
+"task=$TASK state=\$st lastTaskResult=\$(\$info.LastTaskResult)"
+PS
+
+}
+
+# Run the generated launcher and require the task to reach Running.
+start_windows_launcher() {
+  command -v pwsh >/dev/null 2>&1 || { echo "review-pr.sh: pwsh not found" >&2; exit 1; }
+  out=$(pwsh -NoProfile -ExecutionPolicy Bypass -File "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" 2>&1); rc=$?
+  echo "$out"
+  [ $rc -eq 0 ] || exit 1
+  case "$out" in
+    *state=Running*) : ;;
+    *)
+      # Task Scheduler says nothing useful about why. LastTaskResult=64 has now
+      # been observed from three unrelated path faults on two machines, and the
+      # lane script that everyone reads next was never reached, so name the one
+      # thing only this process knows: whether the -File argument it generated
+      # resolves for the pwsh that Task Scheduler starts (issue #683).
+      echo "review-pr.sh: scheduled task did not reach Running" >&2
+      if pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+           -Command "if (Test-Path -LiteralPath '$LANE_FILE_ARG') { exit 0 } else { exit 1 }" \
+           >/dev/null 2>&1; then
+        echo "review-pr.sh: the task's -File argument resolves for pwsh: $LANE_FILE_ARG — the fault is inside the lane script or its environment, not the path. Read $SCRATCH/review-pr$PR-r$ROUND.log" >&2
+      else
+        echo "review-pr.sh: the task's -File argument does NOT resolve for pwsh: $LANE_FILE_ARG — this is the LastTaskResult=64 failure of issue #683: the task registers and starts, then exits before writing any log or .done file. Check that \$EDDA_FLEET_SCRATCH is Windows-resolvable" >&2
+      fi
+      exit 1
+      ;;
+  esac
+}
+
+# Linux: nohup. A runner that dies within a second never launched.
+start_posix_runner() {
+  nohup "$RUNNER" >/dev/null 2>&1 &
+  pid=$!
+  sleep 1
+  kill -0 "$pid" 2>/dev/null || { echo "review-pr.sh: nohup process $pid died immediately" >&2; exit 1; }
+  echo "task=nohup pid=$pid state=Running"
+}
+
 launch_product_review() {
-  # This branch owns its per-round artifacts, including on its first use.
-  mkdir -p "$SCRATCH" || { echo "review-pr.sh: cannot create scratch directory $SCRATCH" >&2; exit 1; }
+  # Runs after the round reservation below, so $ROUND is the shared round and
+  # the receipts this prints (`review_round=`) are what the watcher tracks it
+  # by; the reservation is released only through this round's terminal
+  # receipt, which the generated adapters publish in full (#998).
   LOG="$SCRATCH/review-pr$PR-r$ROUND.log"
   DONE="$SCRATCH/review-pr$PR-r$ROUND.done"
   LANE="$SCRATCH/review-pr$PR-r$ROUND-lane.ps1"
   RUNNER="$SCRATCH/review-pr$PR-r$ROUND-run.sh"
   PRODUCT_RESUME=""
-  [ "$ROUND" -gt 1 ] && PRODUCT_RESUME="--resume"
+  SESSION_MODE=new
+  if [ "$ROUND" -gt 1 ]; then PRODUCT_RESUME="--resume"; SESSION_MODE=resume; fi
+  # edda review assigns and resumes its own reviewer session; the launched id
+  # is unknown here, and the .done SESSION= line records what it reported.
+  SID=assigned-by-edda-review
   [ -n "$ROOT" ] || { echo "review-pr.sh: cannot locate main checkout (set EDDA_FLEET_ROOT)" >&2; exit 1; }
 
   if [ "$IS_WIN" = "1" ]; then
@@ -273,11 +407,14 @@ function Invoke-EddaReview {
 \$payload = \$null
 try { \$payload = \$json | ConvertFrom-Json } catch { }
 \$proof = \$payload -and \$payload.subject.head_sha -eq '$SHA' -and \$payload.subject.subject_seen -eq '$SHA' -and \$payload.subject.worktree_check -eq 'unchanged' -and \$payload.reviewer.tool_policy -eq 'hard'
+\$qualified = \$false
+\$disqualifiers = ''
 if (-not \$proof) {
   'edda review product receipt failed subject, internal-worktree, or hard-policy validation' | Out-File '$LOGW' -Encoding utf8
   \$json | Add-Content '$LOGW' -Encoding utf8
   \$code = 2
   \$tree = 'failed; product JSON lacked a matching internal worktree proof'
+  \$treeCleanup = 'not-attempted'
   \$policy = 'missing'
   \$session = 'unknown'
 } else {
@@ -288,14 +425,26 @@ if (-not \$proof) {
   \$p0 = @(\$findings | Where-Object severity -eq 'P0').Count
   \$p1 = @(\$findings | Where-Object severity -eq 'P1').Count
   \$qualified = (\$payload.qualified -eq \$true) -and (\$disqualifierItems.Count -eq 0)
-  \$label = if (\$payload.verdict -eq 'lgtm' -and \$qualified) { 'LGTM' } elseif (\$payload.verdict -eq 'changes-requested') { 'Changes Requested' } else { '' }
+  \$disqualifierList = if (\$disqualifierItems.Count -eq 0) { 'none' } else { \$disqualifierItems -join ', ' }
+  # An unqualified LGTM (product exit 3) is provisional under REVIEW.md §6.4
+  # and never the merge gate (§8): its Verdict line says so without the LGTM
+  # token, so \`verdict-label\` cannot resolve it to review:lgtm, and its
+  # payload is published like any other outcome instead of discarded (#998).
+  \$label = if (\$payload.verdict -eq 'lgtm' -and \$qualified) { 'LGTM' } elseif (\$payload.verdict -eq 'changes-requested') { 'Changes Requested' } elseif (\$payload.verdict -eq 'lgtm') { "Provisional — unqualified (disqualifiers: \$disqualifierList)" } else { '' }
+  \$gate = if (\$label -like 'Provisional*') { ' — not a merge-gate verdict' } else { '' }
+  \$escalationList = if (\$escalations.Count -eq 0) { 'none' } else { (\$escalations | ForEach-Object { "\$_" -replace '\s+', ' ' }) -join '; ' }
+  # REVIEW.md §7 order — the Verdict line is the LAST line of the envelope,
+  # so every first-match reader (verdict-label, the watcher, the merge guard)
+  # reads the verdict and never a finding's prose.
   if (\$label) {
-    "<<<VERDICT\`n## Code Review: Round $ROUND — PR #$PR @ $SHA\`n\`n### Verdict\`n\$label, P0=\$p0, P1=\$p1\`nEvent identity: \$(\$payload.event_id ?? 'unknown')\`nQualification: \$qualified\`nDisqualifiers: \$((\$disqualifierItems -join ', ') ?? 'none')\`n### Findings" | Out-File '$LOGW' -Encoding utf8
+    "<<<VERDICT\`n## Code Review: Round $ROUND — PR #$PR @ $SHA\`n\`n- model_requested: \$(\$payload.reviewer.model_requested)\`n- model_observed: \$(\$payload.reviewer.model_observed)\`n- reviewer_session: \$(\$payload.reviewer.session_id)\`n- escalations: \$escalationList\`n\`nEvent identity: \$(\$payload.event_id ?? 'unknown')\`nQualification: \$qualified\`nDisqualifiers: \$disqualifierList\`n### Findings" | Out-File '$LOGW' -Encoding utf8
     foreach (\$finding in \$findings) { Add-Content '$LOGW' ("finding: " + (\$finding | ConvertTo-Json -Compress)) -Encoding utf8 }
     Add-Content '$LOGW' '### Checklist' -Encoding utf8
     foreach (\$item in \$checklist) { Add-Content '$LOGW' ("checklist: " + (\$item | ConvertTo-Json -Compress)) -Encoding utf8 }
     Add-Content '$LOGW' '### Escalations' -Encoding utf8
     foreach (\$escalation in \$escalations) { Add-Content '$LOGW' ("escalation: " + (\$escalation | ConvertTo-Json -Compress)) -Encoding utf8 }
+    Add-Content '$LOGW' '### Verdict' -Encoding utf8
+    Add-Content '$LOGW' "\$label, P0=\$p0, P1=\$p1\$gate" -Encoding utf8
     Add-Content '$LOGW' 'VERDICT>>>' -Encoding utf8
   }
   Add-Content '$LOGW' "Model requested: \$(\$payload.reviewer.model_requested)" -Encoding utf8
@@ -303,18 +452,44 @@ if (-not \$proof) {
   if (\$null -ne \$payload.cost.usd) { Add-Content '$LOGW' ("Cost: \$" + [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, '{0:0.####}', \$payload.cost.usd)) -Encoding utf8 }
   Add-Content '$LOGW' "Session: \$(\$payload.reviewer.session_id)" -Encoding utf8
   \$tree = 'unchanged'
+  # edda review removes the internal worktree it added and reports a failure
+  # only in its notes; the receipt relays that report, never assumes it.
+  \$treeCleanup = if ("\$(\$payload.notes)" -match 'worktree removal failed') { 'failed; product notes report a worktree removal failure' } else { 'removed' }
   \$policy = 'product-json:hard'
   \$session = \$payload.reviewer.session_id
   \$disqualifiers = \$disqualifierItems -join ','
 }
-"TRANSPORT=edda-review" | Out-File '$DONEW' -Encoding utf8
-"POLICY_RECEIPT=\$policy" | Add-Content '$DONEW' -Encoding utf8
-"SESSION=\$session" | Add-Content '$DONEW' -Encoding utf8
-"SESSION_MODE=$( [ -n "$PRODUCT_RESUME" ] && echo resume || echo new )" | Add-Content '$DONEW' -Encoding utf8
-"DISPATCH_EXIT=\$code" | Add-Content '$DONEW' -Encoding utf8
-"WORKTREE_CHECK=\$tree" | Add-Content '$DONEW' -Encoding utf8
-"QUALIFIED=\$(if (\$qualified) { 'true' } else { 'false' })" | Add-Content '$DONEW' -Encoding utf8
-"DISQUALIFIERS=\$disqualifiers" | Add-Content '$DONEW' -Encoding utf8
+\$dispatchExit = \$code
+# The scheduled task that runs this lane unregisters itself, as the legacy
+# lane does; a direct run (fixtures) has no task to clean.
+\$taskCleanup = 'not-applicable'
+if (Get-ScheduledTask -TaskName 'edda-review-pr$PR-r$ROUND' -ErrorAction SilentlyContinue) {
+  try { Unregister-ScheduledTask -TaskName 'edda-review-pr$PR-r$ROUND' -Confirm:\$false -ErrorAction Stop; \$taskCleanup = 'unregistered' }
+  catch { \$taskCleanup = "failed; \$(\$_.Exception.Message)"; \$_ | Out-File '$LOGW' -Append -Encoding utf8; \$code = 2 }
+}
+# One atomic terminal receipt, the shape review-round.sh reserve and the
+# watcher admit: buffered, then renamed into place.
+\$receiptTmp = "$DONEW.pending-\$PID"
+try {
+  [System.IO.File]::WriteAllLines(\$receiptTmp, [string[]]@(
+    'TRANSPORT=edda-review',
+    "POLICY_RECEIPT=\$policy",
+    "SESSION=\$session",
+    'SESSION_MODE=$SESSION_MODE',
+    "DISPATCH_EXIT=\$dispatchExit",
+    "FINAL_EXIT=\$code",
+    "WORKTREE_CHECK=\$tree",
+    "WORKTREE_CLEANUP=\$treeCleanup",
+    "TASK_CLEANUP=\$taskCleanup",
+    'TERMINAL_RECEIPT=complete',
+    "QUALIFIED=\$(if (\$qualified) { 'true' } else { 'false' })",
+    "DISQUALIFIERS=\$disqualifiers"
+  ), [System.Text.UTF8Encoding]::new(\$false))
+  Move-Item -LiteralPath \$receiptTmp -Destination '$DONEW' -Force
+} catch {
+  \$_ | Out-File '$LOGW' -Append -Encoding utf8
+  \$code = 2
+}
 exit \$code
 PS
     [ -s "$LANE" ] || { echo "review-pr.sh: Windows product lane generation produced no artifact" >&2; exit 1; }
@@ -335,18 +510,36 @@ if ! command -v jq >/dev/null 2>&1 || ! jq -e --arg sha '$SHA' '.subject.head_sh
   policy=missing
   session=unknown
   code=2
+  tree_cleanup=not-attempted
 else
   verdict=\$(jq -r '.verdict' "\$json")
   p0=\$(jq '[(.findings // [])[] | select(.severity == "P0")] | length' "\$json")
   p1=\$(jq '[(.findings // [])[] | select(.severity == "P1")] | length' "\$json")
   qualified=\$(jq -r '.qualified == true and ((.disqualifiers // []) | length == 0)' "\$json")
   disqualifiers=\$(jq -r '(.disqualifiers // []) | join(",")' "\$json")
-  case "\$verdict" in lgtm) label=LGTM;; changes-requested) label='Changes Requested';; *) label='';; esac
-  [ "\$label" != LGTM ] || [ "\$qualified" = true ] || label=''
+  disqualifier_list=\$(jq -r '(.disqualifiers // []) | if length == 0 then "none" else join(", ") end' "\$json")
+  # An unqualified LGTM (product exit 3) is provisional under REVIEW.md §6.4
+  # and never the merge gate (§8): its Verdict line says so without the LGTM
+  # token, so \`verdict-label\` cannot resolve it to review:lgtm, and its
+  # payload is published like any other outcome instead of discarded (#998).
+  gate=''
+  case "\$verdict" in
+    lgtm) if [ "\$qualified" = true ]; then label=LGTM; else label="Provisional — unqualified (disqualifiers: \$disqualifier_list)"; gate=' — not a merge-gate verdict'; fi ;;
+    changes-requested) label='Changes Requested' ;;
+    *) label='' ;;
+  esac
   : > '$LOG'
+  # REVIEW.md §7 order — the Verdict line is the LAST line of the envelope,
+  # so every first-match reader (verdict-label, the watcher, the merge guard)
+  # reads the verdict and never a finding's prose.
   if [ -n "\$label" ]; then
-    printf '<<<VERDICT\n## Code Review: Round $ROUND — PR #$PR @ $SHA\n\n### Verdict\n%s, P0=%s, P1=%s\n' "\$label" "\$p0" "\$p1" >> '$LOG'
+    printf '<<<VERDICT\n## Code Review: Round $ROUND — PR #$PR @ $SHA\n\n' >> '$LOG'
     jq -r '
+      "- model_requested: " + .reviewer.model_requested,
+      "- model_observed: " + .reviewer.model_observed,
+      "- reviewer_session: " + .reviewer.session_id,
+      "- escalations: " + ((.escalations // []) | if length == 0 then "none" else map(tostring | gsub("[[:space:]]+"; " ")) | join("; ") end),
+      "",
       "Event identity: " + (.event_id // "unknown"),
       "Qualification: " + ((.qualified == true and ((.disqualifiers // []) | length == 0)) | tostring),
       "Disqualifiers: " + ((.disqualifiers // []) | if length == 0 then "none" else join(", ") end),
@@ -356,39 +549,47 @@ else
       (.checklist[]? | "checklist: " + tojson),
       "### Escalations",
       (.escalations[]? | "escalation: " + tojson),
-      "VERDICT>>>"
+      "### Verdict"
     ' "\$json" >> '$LOG'
+    printf '%s, P0=%s, P1=%s%s\nVERDICT>>>\n' "\$label" "\$p0" "\$p1" "\$gate" >> '$LOG'
   fi
   jq -r '"Model requested: " + .reviewer.model_requested, "Model observed: " + .reviewer.model_observed, (if .cost.usd == null then empty else "Cost: $" + (.cost.usd|tostring) end), "Session: " + .reviewer.session_id' "\$json" >> '$LOG'
   tree=unchanged
+  # edda review removes the internal worktree it added and reports a failure
+  # only in its notes; the receipt relays that report, never assumes it.
+  tree_cleanup=\$(jq -r 'if ((.notes // "") | test("worktree removal failed")) then "failed; product notes report a worktree removal failure" else "removed" end' "\$json")
   policy=product-json:hard
   session=\$(jq -r '.reviewer.session_id' "\$json")
 fi
-printf 'TRANSPORT=edda-review\nPOLICY_RECEIPT=%s\nSESSION=%s\nSESSION_MODE=$( [ -n "$PRODUCT_RESUME" ] && echo resume || echo new )\nDISPATCH_EXIT=%s\nWORKTREE_CHECK=%s\nQUALIFIED=%s\nDISQUALIFIERS=%s\n' "\$policy" "\$session" "\$code" "\$tree" "\${qualified:-false}" "\${disqualifiers:-}" > '$DONE'
+# One atomic terminal receipt, the shape review-round.sh reserve and the
+# watcher admit: buffered, then renamed into place.
+receipt_tmp='$DONE.pending-'"\$\$"
+if printf 'TRANSPORT=edda-review\nPOLICY_RECEIPT=%s\nSESSION=%s\nSESSION_MODE=$SESSION_MODE\nDISPATCH_EXIT=%s\nFINAL_EXIT=%s\nWORKTREE_CHECK=%s\nWORKTREE_CLEANUP=%s\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\nQUALIFIED=%s\nDISQUALIFIERS=%s\n' \
+     "\$policy" "\$session" "\$code" "\$code" "\$tree" "\$tree_cleanup" "\${qualified:-false}" "\${disqualifiers:-}" > "\$receipt_tmp" \
+   && mv -f "\$receipt_tmp" '$DONE'; then :; else
+  echo "review-pr runner: terminal receipt publish failed; retained \$receipt_tmp" >> '$LOG'
+  code=2
+fi
 exit "\$code"
 RUN
     sh -n "$RUNNER" || exit 1
     chmod +x "$RUNNER"
   fi
+  if [ "$IS_WIN" = "1" ]; then
+    LANE_FILE_ARG=$LANEW
+    LAUNCH_DIRW=$ROOTW
+    write_windows_launcher
+  fi
   if [ "$DRY" = "1" ]; then echo "dry-run: product review adapter generated; nothing launched."; exit 0; fi
   rm -f "$LOG" "$DONE"
-  if [ "$IS_WIN" = "1" ]; then
-    TASK="edda-review-pr$PR-r$ROUND"
-    pwsh -NoProfile -Command "Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue; \$a=New-ScheduledTaskAction -Execute '$PWSH_EXE' -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`\"$LANEW\`\"' -WorkingDirectory '$ROOTW'; Register-ScheduledTask -TaskName '$TASK' -Action \$a -RunLevel Limited | Out-Null; Start-ScheduledTask -TaskName '$TASK'" || exit 1
-  else
-    nohup "$RUNNER" >/dev/null 2>&1 &
-    pid=$!
-    sleep 1
-    kill -0 "$pid" 2>/dev/null || { echo "review-pr.sh: nohup process $pid died immediately" >&2; exit 1; }
-    echo "task=nohup pid=$pid state=Running"
-  fi
-  echo "log=$LOG"; echo "done=$DONE"
+  REVIEW_MAY_BE_RUNNING=1
+  if [ "$IS_WIN" = "1" ]; then start_windows_launcher; else start_posix_runner; fi
+  echo "log=$LOG"
+  echo "done=$DONE"
+  echo "session=$SID"
+  echo "review_round=$ROUND"
   exit 0
 }
-
-if [ "${EDDA_REVIEW_PRODUCT_ADAPTER:-1}" != "0" ] && product_review_supported; then
-  launch_product_review
-fi
 
 # ---- the spec, read at the BASE SHA -----------------------------------------
 # review.brief-source: REVIEW.md is always the base_sha version, never the head,
@@ -410,6 +611,13 @@ trap 'exit 1' HUP INT TERM
 if [ "$DRY" = 0 ]; then
   ROUND=$(sh "$SELF_DIR/review-round.sh" reserve "$PR" "$SHA" "$ROUND" "$SCRATCH") || exit 1
   REVIEW_RESERVED=1
+fi
+
+# The product-owned review command, once the shared round is reserved: it
+# launches and exits here, so the brief/spec machinery below is the legacy
+# transport only.
+if [ "${EDDA_REVIEW_PRODUCT_ADAPTER:-1}" != "0" ] && product_review_supported; then
+  launch_product_review
 fi
 SPEC="$SCRATCH/review-pr$PR-r$ROUND-spec.md"
 if [ -n "$SPEC_OVERRIDE" ]; then
@@ -644,6 +852,7 @@ fi
 if [ "$IS_WIN" = "1" ]; then
   command -v cygpath >/dev/null 2>&1 || { echo "review-pr.sh: cygpath not found" >&2; exit 1; }
   WTW=$(cygpath -w "$WT")
+  LAUNCH_DIRW=$WTW
   BRIEFW=$(cygpath -w "$BRIEF")
   LOGW=$(cygpath -w "$LOG")
   DONEW=$(cygpath -w "$DONE")
@@ -959,63 +1168,6 @@ if [ -z "$ISSUES" ]; then
   echo "review-pr.sh: WARNING: PR #$PR links no issue — the brief carries NO doneWhen, so this review has no acceptance ceiling (issue #683). The brief states this; obtain the issue before trusting the verdict." >&2
 fi
 
-write_windows_launcher() {
-  TASK="edda-review-pr$PR-r$ROUND"
-  cat > "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" <<PS
-foreach (\$f in @("$LOGW", "$DONEW", "$DONEW.err")) { if (Test-Path \$f) { [System.IO.File]::Delete(\$f) } }
-Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue
-\$action = New-ScheduledTaskAction -Execute "$PWSH_EXE" -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`"$LANE_FILE_ARG\`"" -WorkingDirectory '$WTW'
-# The dispatch timeout is handled inside the child lane. Scheduler must not
-# preempt its finally block before it publishes the terminal receipt and
-# unregisters itself.
-\$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-try {
-  Register-ScheduledTask -TaskName '$TASK' -Action \$action -Settings \$settings -RunLevel Limited -ErrorAction Stop | Out-Null
-  try { Start-ScheduledTask -TaskName '$TASK' -ErrorAction Stop }
-  catch {
-    \$startFailure = \$_.Exception.Message
-    \$taskCleanup = 'failed; task start did not reach cleanup'
-    try {
-      Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction Stop
-      \$taskCleanup = 'unregistered'
-    } catch {
-      \$taskCleanup = "failed; \$(\$_.Exception.Message)"
-      \$_ | Out-File '$LOGW' -Append -Encoding utf8
-    }
-    "review-pr launcher: Start-ScheduledTask failed: \$startFailure" | Out-File '$LOGW' -Append -Encoding utf8
-    \$receiptTmp = "$DONEW.pending-\$PID"
-    try {
-      [System.IO.File]::WriteAllLines(\$receiptTmp, [string[]]@(
-        'TRANSPORT=not-started',
-        'TOOL_FLAGS=not-started',
-        'SESSION=$SID',
-        'SESSION_MODE=$SESSION_MODE',
-        'DISPATCH_EXIT=2',
-        'FINAL_EXIT=2',
-        'WORKTREE_CHECK=not-started',
-        'WORKTREE_CLEANUP=preserved; scheduler start failed',
-        "TASK_CLEANUP=\$taskCleanup",
-        'TERMINAL_RECEIPT=complete'
-      ), [System.Text.UTF8Encoding]::new(\$false))
-      Move-Item -LiteralPath \$receiptTmp -Destination '$DONEW' -Force
-    } catch {
-      \$_ | Out-File '$LOGW' -Append -Encoding utf8
-    }
-    throw
-  }
-} catch { throw }
-\$st = ""
-for (\$i = 0; \$i -lt 20; \$i++) {
-  Start-Sleep -Seconds 1
-  \$st = (Get-ScheduledTask -TaskName '$TASK').State
-  if (\$st -eq 'Running') { break }
-}
-\$info = Get-ScheduledTaskInfo -TaskName '$TASK'
-"task=$TASK state=\$st lastTaskResult=\$(\$info.LastTaskResult)"
-PS
-
-}
-
 if [ "$DRY" = "1" ] && [ "$IS_WIN" = "1" ]; then
   write_windows_launcher
 fi
@@ -1073,45 +1225,12 @@ if [ "$IS_WIN" = "1" ]; then
   # Windows: Task Scheduler, not nohup (fleet.lane-launch). HOME and UTF-8 are
   # empty/CP950 in the scheduled-task environment; the lane script generated
   # above sets them explicitly before dispatching.
-  command -v pwsh >/dev/null 2>&1 || { echo "review-pr.sh: pwsh not found" >&2; exit 1; }
   write_windows_launcher
-
   REVIEW_MAY_BE_RUNNING=1
-  out=$(pwsh -NoProfile -ExecutionPolicy Bypass -File "$SCRATCH/review-pr$PR-r$ROUND-launch.ps1" 2>&1); rc=$?
-  echo "$out"
-  [ $rc -eq 0 ] || exit 1
-  case "$out" in
-    *state=Running*) : ;;
-    *)
-      # Task Scheduler says nothing useful about why. LastTaskResult=64 has now
-      # been observed from three unrelated path faults on two machines, and the
-      # lane script that everyone reads next was never reached, so name the one
-      # thing only this process knows: whether the -File argument it generated
-      # resolves for the pwsh that Task Scheduler starts (issue #683).
-      echo "review-pr.sh: scheduled task did not reach Running" >&2
-      if pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass \
-           -Command "if (Test-Path -LiteralPath '$LANE_FILE_ARG') { exit 0 } else { exit 1 }" \
-           >/dev/null 2>&1; then
-        echo "review-pr.sh: the task's -File argument resolves for pwsh: $LANE_FILE_ARG — the fault is inside the lane script or its environment, not the path. Read $SCRATCH/review-pr$PR-r$ROUND.log" >&2
-      else
-        echo "review-pr.sh: the task's -File argument does NOT resolve for pwsh: $LANE_FILE_ARG — this is the LastTaskResult=64 failure of issue #683: the task registers and starts, then exits before writing any log or .done file. Check that \$EDDA_FLEET_SCRATCH is Windows-resolvable" >&2
-      fi
-      exit 1
-      ;;
-  esac
-fi
-
-if [ "$IS_WIN" = "0" ]; then
+  start_windows_launcher
+else
   REVIEW_MAY_BE_RUNNING=1
-  nohup "$RUNNER" >/dev/null 2>&1 &
-  pid=$!
-  sleep 1
-  if kill -0 "$pid" 2>/dev/null; then
-    echo "task=nohup pid=$pid state=Running"
-  else
-    echo "review-pr.sh: nohup process $pid died immediately" >&2
-    exit 1
-  fi
+  start_posix_runner
 fi
 
 echo "log=$LOG"
