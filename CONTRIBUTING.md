@@ -9,8 +9,8 @@ Thanks for your interest in contributing! This guide covers how to build, test, 
 
 ## Git Hooks
 
-Enable the git-native pre-commit and commit-msg hooks (zero external
-dependencies — no lefthook, no npm, nothing to install):
+Enable the git-native pre-commit, commit-msg and pre-push hooks (zero
+external dependencies — no lefthook, no npm, nothing to install):
 
 ```bash
 sh scripts/githooks/install.sh
@@ -27,6 +27,15 @@ and CI runs it as well:
 - staged `*.md` → `sh scripts/lint-markdown-content.sh`
 - conventional-commit subject check (`<type>(<scope>): <description>`)
 
+On every push the `pre-push` hook runs `scripts/fleet/guard-push.sh`, the
+same guard `lefthook.yml` wires under `use_stdin: true`. It refuses a
+non-fast-forward push over the head of an open PR, any update to an
+existing tag, and any push whose open-PR lookup cannot run (fail closed).
+A first push of a branch or tag, and a fast-forward, pass with no network
+call. The single escape is `FLEET_ALLOW_FORCE_PUSH=1` for one push.
+Before GH-957 this hook did not exist, so a clone installed this way
+pushed unguarded while a lefthook clone did not.
+
 Merge commits and `wip(…)` lane checkpoints pass the message check.
 `SKIP_CLIPPY=1 git commit …` skips the clippy gate — any other value,
 including `SKIP_CLIPPY=0`, runs it — and the hook then appends
@@ -36,11 +45,13 @@ push: it runs on pull requests and on pushes to `main`
 (`.github/workflows/ci.yml`), so a feature branch is gated only through its
 PR's CI Gate.
 
-The hook scripts live in `scripts/githooks/`; `commit-msg` is POSIX `sh`,
-while `pre-commit` is `bash` — it iterates the staged-path listing NUL-safely
+The hook scripts live in `scripts/githooks/`; `commit-msg` and `pre-push`
+are POSIX `sh`, while `pre-commit` is `bash` — it iterates the staged-path
+listing NUL-safely
 (`read -d ''`), so paths containing newlines or non-ASCII bytes stay one
 record; `bash` is present on Git Bash and on Linux. A self-test
-that exercises all scenarios in a throwaway repo is `sh scripts/githooks/test.sh`.
+that exercises all scenarios in a throwaway repo is `sh scripts/githooks/test.sh`;
+the push guard has its own, `sh scripts/fleet/test-guard-push.sh`.
 
 ## Build and Test
 
