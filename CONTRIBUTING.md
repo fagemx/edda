@@ -29,10 +29,15 @@ and CI runs it as well:
 
 On every push the `pre-push` hook runs `scripts/fleet/guard-push.sh`, the
 same guard `lefthook.yml` wires under `use_stdin: true`. It refuses a
-non-fast-forward push over the head of an open PR, any update to an
-existing tag, and any push whose open-PR lookup cannot run (fail closed).
-A first push of a branch or tag, and a fast-forward, pass with no network
-call. The single escape is `FLEET_ALLOW_FORCE_PUSH=1` for one push.
+non-fast-forward push over the head of an open PR, any update to a ref
+that already exists outside `refs/heads/` (a tag, `refs/notes/*`,
+`refs/replace/*`), and any push whose open-PR lookup cannot run (fail
+closed). A first push of a branch or tag, and a fast-forward, pass with no
+network call. Two things get past it: `FLEET_ALLOW_FORCE_PUSH=1` stands the
+guard down for one push, and `git push --no-verify` skips it outright,
+because git then never runs the hook at all. CI compensates for neither —
+it gates what a head contains, and cannot restore a reviewed head that a
+force-push has already overwritten.
 Before GH-957 this hook did not exist, so a clone installed this way
 pushed unguarded while a lefthook clone did not.
 
@@ -40,7 +45,8 @@ Merge commits and `wip(…)` lane checkpoints pass the message check.
 `SKIP_CLIPPY=1 git commit …` skips the clippy gate — any other value,
 including `SKIP_CLIPPY=0`, runs it — and the hook then appends
 `[skip-clippy]` to the commit message so reviewers can see the skip.
-`git commit --no-verify` bypasses all local hooks. CI does not gate every
+`git commit --no-verify` bypasses the commit-time hooks (`git push
+--no-verify` is the push-side equivalent, above). CI does not gate every
 push: it runs on pull requests and on pushes to `main`
 (`.github/workflows/ci.yml`), so a feature branch is gated only through its
 PR's CI Gate.

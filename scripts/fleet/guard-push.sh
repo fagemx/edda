@@ -1,6 +1,8 @@
 #!/bin/sh
-# guard-push.sh — lefthook pre-push gate against force-pushes over reviewed
-# heads (GH-913). Reads lefthook's pre-push stdin, one record per line:
+# guard-push.sh — pre-push gate against force-pushes over reviewed heads
+# (GH-913). Two callers reach it with the same stdin contract: `lefthook.yml`
+# under `use_stdin: true`, and the git-native `scripts/githooks/pre-push`
+# installed by `scripts/githooks/install.sh` (GH-957). One record per line:
 #   <local-ref> <local-sha> <remote-ref> <remote-sha>
 # A fast-forward push, a new branch or tag, or a deletion passes without any
 # network call. A non-fast-forward push is refused when the branch has an
