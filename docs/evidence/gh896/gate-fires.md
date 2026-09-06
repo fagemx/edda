@@ -344,9 +344,13 @@ red - exactly the defect reservoir #896 predicted, one directory over:
   removing the entry in the change that turns the test green everywhere.
 - `test-git-config-guard.sh` (drives Windows-native
   `git-config-guard.ps1` through pwsh; its locked-config probe cannot run
-  under Linux pwsh) and `test-review-product-adapter-r4.sh` (a
-  cygpath-driven Windows-workstation fixture) are platform-bound: SKIP arms
-  with the stated reason, and the `fleet-tests-windows` job runs both.
+  under Linux pwsh) is platform-bound: a SKIP arm with the stated reason,
+  and the `fleet-tests-windows` job runs it.
+- `test-review-product-adapter-r4.sh` is harness-bound, like
+  `test-detached-dispatch.ps1`: its generated lane invokes the real
+  `edda review` CLI and no CI job compiles the workspace (its PATH fixture
+  also needs cygpath). SKIP with that stated reason; hand-run on the
+  workstation, where it passes.
 
 The windows carrier passed in the same run (capabilities + the full .ps1
 group, first machine execution of `test-lane-reap.ps1` and

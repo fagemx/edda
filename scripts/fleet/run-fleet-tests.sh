@@ -103,6 +103,16 @@ for t in scripts/fleet/test-*.sh scripts/test-*.sh; do
 ' "$t"
             continue
             ;;
+        scripts/test-review-product-adapter-r4.sh)
+            # Harness-bound, like test-detached-dispatch.ps1: its generated
+            # lane invokes the real `edda review` CLI, and no CI job compiles
+            # the workspace (it also needs cygpath for its Windows PATH
+            # fixture). Stated per #927's doneWhen; hand-run on the
+            # workstation, where it passes.
+            printf 'SKIP %s (harness-bound: needs the edda binary on PATH; no CI job compiles the workspace)
+' "$t"
+            continue
+            ;;
         scripts/test-review-adapter.sh)
             # Red on a Windows workstation against origin/main: the pwsh child
             # of its Windows block exits 1 and `QUALIFIED=True` never lands in
