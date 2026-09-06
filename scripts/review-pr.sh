@@ -264,6 +264,7 @@ launch_product_review() {
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 \$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
 Set-Location '$ROOTW'
+if (-not (Get-Command sh -ErrorAction SilentlyContinue)) { \$gitExe = (Get-Command git -ErrorAction SilentlyContinue).Source; if (\$gitExe) { \$gitRoot = Split-Path (Split-Path \$gitExe); \$env:PATH = "\$gitRoot\usr\bin;\$gitRoot\bin;" + \$env:PATH } }
 function Invoke-EddaReview {
   & edda review --pr '$PR' --agent claude --model '$MODEL' --json $PRODUCT_RESUME
   \$script:reviewExit = \$LASTEXITCODE
