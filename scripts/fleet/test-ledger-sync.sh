@@ -4,7 +4,11 @@
 # Runs the trigger against a throwaway git repository with a stubbed `edda`
 # binary, so no production ledger, no real export, and no production
 # Scheduled Task is ever registered (GH-671 constraint).
-set -euo pipefail
+# POSIX `set -eu` only: scripts/fleet/run-fleet-tests.sh runs every
+# scripts/fleet/test-*.sh under `sh`, and ubuntu's dash rejects
+# `-o pipefail` with `Illegal option` — the test then fails for the shell
+# rather than for anything it asserts.
+set -eu
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 tmp=$(mktemp -d)
