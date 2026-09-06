@@ -316,6 +316,32 @@ $ echo $?
 ```
 
 Both CI carriers (ubuntu `fleet-tests` for the two .sh groups,
-`fleet-tests-windows` for the capabilities test and the .ps1 group) read the
-same `detect.fleet` filter, which now triggers on
+`fleet-tests-windows` for the platform-bound tests and the .ps1 group) read
+the same `detect.fleet` filter, which now triggers on
 `scripts/fleet/*|scripts/test-*.sh|scripts/fleet/test-*.ps1|.github/workflows/ci.yml`.
+
+### What the gate's first CI run caught, and the fixes
+
+The gate went red on ubuntu in its first run (CI run 34026877716) and stayed
+red - exactly the defect reservoir #896 predicted, one directory over:
+
+- `test-doc-citations.sh` and `test-review-product-adapter-r4.sh` carry
+  `#!/usr/bin/env bash` + `set -o pipefail`; the runner handed every test to
+  `sh`, and ubuntu's dash rejected it (`Illegal option`) before either test
+  asserted anything. Fix: the runner now honors the shebang - bash-shebang
+  tests execute via `bash`, the rest via `sh`, exactly like production
+  execution (`nohup "$RUNNER"`); `sh -n` still syntax-checks every file.
+- `test-calibrate-canaries.sh` died on `fatal: empty ident name` - its
+  fixture clones commit, and a CI runner has no git identity. Fix: the test
+  pins identity through `GIT_AUTHOR_*`/`GIT_COMMITTER_*` environment
+  variables (no global config writes).
+- `test-review-pr.sh` (case D1 asserts the Windows path shapes the
+  Scheduled-Tasks launcher produces - red on a POSIX scratch path by
+  construction) and `test-git-config-guard.sh` (drives Windows-native
+  `git-config-guard.ps1` through pwsh; its locked-config probe cannot run
+  under Linux pwsh) are platform-bound: SKIP arms with the stated reason,
+  and the `fleet-tests-windows` job now runs both.
+
+The windows carrier passed in the same run (capabilities + the full .ps1
+group, first machine execution of `test-lane-reap.ps1` and
+`test-lane-terminal-receipts.ps1` in this repo's CI).

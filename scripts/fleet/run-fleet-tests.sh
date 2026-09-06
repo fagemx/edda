@@ -81,6 +81,24 @@ for t in scripts/fleet/test-*.sh scripts/test-*.sh; do
 ' "$t"
             continue
             ;;
+        scripts/test-review-pr.sh)
+            # Platform-bound fixture: its cases assert the Windows path shapes
+            # the Scheduled-Tasks lane launcher produces (case D1 fails on a
+            # POSIX scratch path by construction). The fleet-tests-windows
+            # job runs it (GH-927).
+            printf 'SKIP %s (platform-bound: Windows-path fixtures; the fleet-tests-windows job runs it)
+' "$t"
+            continue
+            ;;
+        scripts/test-git-config-guard.sh)
+            # Platform-bound subject: it drives git-config-guard.ps1, a
+            # Windows-native tool, through pwsh; its locked-config probe
+            # cannot run under Linux pwsh. The fleet-tests-windows job runs
+            # it (GH-927).
+            printf 'SKIP %s (platform-bound: drives Windows-native git-config-guard.ps1; the fleet-tests-windows job runs it)
+' "$t"
+            continue
+            ;;
         scripts/test-review-adapter.sh)
             # Red on a Windows workstation against origin/main: the pwsh child
             # of its Windows block exits 1 and `QUALIFIED=True` never lands in
@@ -124,12 +142,24 @@ for t in scripts/fleet/test-*.sh scripts/test-*.sh; do
         quarantined=$((quarantined + 1))
         continue
     fi
-    printf 'RUN  %s\n' "$t"
-    if sh "$t"; then
-        printf 'PASS %s\n' "$t"
+    printf 'RUN  %s
+' "$t"
+    # Honor the shebang, like production execution does: a `#!/usr/bin/env
+    # bash` test (pipefail) dies under ubuntu's dash when handed to `sh` -
+    # GH-927's first gated run proved it on two tests. `sh -n` above still
+    # syntax-checks every file.
+    if head -n 1 "$t" | grep -q '^#!.*bash'; then
+        run_shell=bash
+    else
+        run_shell=sh
+    fi
+    if "$run_shell" "$t"; then
+        printf 'PASS %s
+' "$t"
     else
         rc=$?
-        printf 'FAIL %s (exit %d)\n' "$t" "$rc" >&2
+        printf 'FAIL %s (exit %d)
+' "$t" "$rc" >&2
         status=1
     fi
 done
