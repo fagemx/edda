@@ -1,4 +1,4 @@
-# @edda/sdk (draft name — publication pending namespace authorization)
+# @fagem/edda-sdk
 
 Thin TypeScript client for the edda client contract. Zero runtime
 dependencies. Types are **generated** from the v1 event spec — do not
@@ -17,7 +17,7 @@ hand-edit `src/types.gen.ts` (generated on demand; see `../generator/`).
 ## Ten-line example
 
 ```ts
-import { EddaClient } from "@edda/sdk";
+import { EddaClient } from "@fagem/edda-sdk";
 const client = new EddaClient({ mcp: { command: "edda", args: ["mcp", "serve"], cwd: "." } });
 const caps = await client.capabilities();
 await client.call("note", { note: "hello from the SDK" });

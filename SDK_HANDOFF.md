@@ -46,11 +46,14 @@ Scope claimed: `sdk/*`, `docs/reference/client-contract.md`,
 
 ## Remaining (do NOT do unilaterally)
 
-1. **Publication BLOCKED**: npm/PyPI namespace and credentials pending user
-   (no NPM_TOKEN/TWINE_PASSWORD; `@edda` / `edda-sdk` names are assumptions).
-   Release files are prepared as reviewed drafts. GH-611 doneWhen includes
-   the real release — this is the separate acceptance blocker, tracked, not
-   silently dropped. Issue reference carries `Issue: #611`, **no Closes**.
+1. **Publication pending the operator**: npm/PyPI credentials are not in this
+   repository (no NPM_TOKEN/TWINE_PASSWORD), and `@fagem/edda-sdk` (npm) /
+   `edda-sdk` (PyPI) were unclaimed when written — verify before assuming. The
+   packages themselves are publishable as of GH-611: both build, carry dual
+   licences, and pass their registries' own validators. GH-611 doneWhen
+   includes the real release — this is the separate acceptance blocker,
+   tracked, not silently dropped. Issue reference carries `Issue: #611`, **no
+   Closes**.
 2. `claim check` glob-intersection stays CLI-only (documented in contract
    §5); extracting it would touch `cmd_claim.rs`, outside the granted scope.
 3. CI branch protection must mark the `contract` job required for the
