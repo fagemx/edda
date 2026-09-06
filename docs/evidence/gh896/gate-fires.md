@@ -335,12 +335,18 @@ red - exactly the defect reservoir #896 predicted, one directory over:
   fixture clones commit, and a CI runner has no git identity. Fix: the test
   pins identity through `GIT_AUTHOR_*`/`GIT_COMMITTER_*` environment
   variables (no global config writes).
-- `test-review-pr.sh` (case D1 asserts the Windows path shapes the
-  Scheduled-Tasks launcher produces - red on a POSIX scratch path by
-  construction) and `test-git-config-guard.sh` (drives Windows-native
+- `test-review-pr.sh` is red in every CI environment that could carry it:
+  ubuntu (case D1 asserts the Windows path shapes the Scheduled-Tasks
+  launcher produces; a POSIX scratch path fails it by construction) and
+  windows-latest (case D11 hit the nohup launch race in review-pr.sh's
+  product-adapter path, also measured on a workstation under load). It is
+  QUARANTINEd like #963/#964/#971/#987, tracked as **#1024**, which owns
+  removing the entry in the change that turns the test green everywhere.
+- `test-git-config-guard.sh` (drives Windows-native
   `git-config-guard.ps1` through pwsh; its locked-config probe cannot run
-  under Linux pwsh) are platform-bound: SKIP arms with the stated reason,
-  and the `fleet-tests-windows` job now runs both.
+  under Linux pwsh) and `test-review-product-adapter-r4.sh` (a
+  cygpath-driven Windows-workstation fixture) are platform-bound: SKIP arms
+  with the stated reason, and the `fleet-tests-windows` job runs both.
 
 The windows carrier passed in the same run (capabilities + the full .ps1
 group, first machine execution of `test-lane-reap.ps1` and

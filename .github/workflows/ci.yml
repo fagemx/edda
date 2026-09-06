@@ -289,7 +289,7 @@ jobs:
         run: |
           sh scripts/test-review-capabilities.sh
           sh scripts/test-git-config-guard.sh
-          sh scripts/test-review-pr.sh
+          sh scripts/test-review-product-adapter-r4.sh
           status=0
           for p in scripts/fleet/test-*.ps1; do
             if [ ! -e "$p" ]; then
