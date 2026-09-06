@@ -64,7 +64,7 @@ if grep -q '^TOOL_FLAGS=' "$done"; then echo 'ok: legacy policy string was fabri
 grep -q 'nohup "\$RUNNER"' "$root/scripts/review-pr.sh"
 if grep -qF -- 'File \`\"$LANEW' "$root/scripts/review-pr.sh"; then echo 'product arm: scheduled-task -File argument carries literal backticks (GH-1026)' >&2; exit 1; fi
 grep -qF -- 'File \"$LANEW\"' "$root/scripts/review-pr.sh"
-grep -qF -- 'echo "review_round=$ROUND"' "$root/scripts/review-pr.sh"
+# the review_round= receipt is asserted behaviourally on both platform arms below (GH-1026)
 grep -qF -- 'usr\bin;' "$root/scripts/review-pr.sh"
 
 for case_name in changed policy wrong-head malformed; do run_case "$case_name" 'failed;' 1; done
@@ -125,4 +125,8 @@ grep -q '^TRANSPORT=edda-review$' "$done"
 grep -q '^WORKTREE_CHECK=unchanged$' "$done"
 grep -q '^QUALIFIED=True$' "$done"
 grep -q '"claim":"windows fixture"' "$log"
+
+# GH-1026: both product-arm branches must print the shared round receipt the watcher greps for, dry-run included.
+ADAPTER_CASE=ok timeout 20 "$root/scripts/review-pr.sh" 9999 7 --dry-run | grep -q '^review_round=7$' || { echo 'product arm (POSIX dry-run): no review_round= receipt on stdout (GH-1026)' >&2; exit 1; }
+ADAPTER_PLATFORM=MINGW64_NT ADAPTER_CASE=ok timeout 20 "$root/scripts/review-pr.sh" 9999 8 --dry-run | grep -q '^review_round=8$' || { echo 'product arm (Windows dry-run): no review_round= receipt on stdout (GH-1026)' >&2; exit 1; }
 printf 'review product-adapter fixtures passed (proof, qualification, detail carrier, fresh scratch, generated Windows lane)\n'

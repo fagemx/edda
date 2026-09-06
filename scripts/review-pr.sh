@@ -320,7 +320,6 @@ exit \$code
 PS
     [ -s "$LANE" ] || { echo "review-pr.sh: Windows product lane generation produced no artifact" >&2; exit 1; }
     echo "lane_file_arg=$LANEW"
-    echo "review_round=$ROUND"
   else
     cat > "$RUNNER" <<RUN
 #!/bin/sh
@@ -372,6 +371,7 @@ RUN
     sh -n "$RUNNER" || exit 1
     chmod +x "$RUNNER"
   fi
+  echo "review_round=$ROUND"
   if [ "$DRY" = "1" ]; then echo "dry-run: product review adapter generated; nothing launched."; exit 0; fi
   rm -f "$LOG" "$DONE"
   if [ "$IS_WIN" = "1" ]; then
