@@ -218,11 +218,12 @@ jobs:
   # scripts/fleet/test-*.sh, so a test added there later is picked up without
   # touching this file; a red test exits non-zero and ci-gate propagates it.
   #
-  # Two of the tests #896 names by hand are not here. scripts/test-review-
-  # capabilities.sh runs in fleet-tests-windows below (ubuntu's dash rejects
-  # the `set -o pipefail` in the helper it generates). test-lane-helpers.sh
-  # and test-next-loop.sh are QUARANTINED in the runner — red on every
-  # environment that could carry them, named at runtime with #963 and #964.
+  # Not everything runs here. scripts/test-review-capabilities.sh runs in
+  # fleet-tests-windows below (ubuntu's dash rejects the `set -o pipefail` in
+  # the helper it generates). Three tests are QUARANTINED in the runner — red
+  # on every environment that could carry them — named at runtime with #963
+  # (test-lane-helpers.sh), #964 (test-next-loop.sh) and #971
+  # (test-collision-scan.sh), and counted so the list cannot grow quietly.
   fleet-tests:
     name: Fleet shell tests
     needs: [detect]

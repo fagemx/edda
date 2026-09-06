@@ -29,10 +29,10 @@ set -eu
 cd "$(git rev-parse --show-toplevel)"
 
 status=0
+quarantined=0
 for t in scripts/fleet/test-*.sh; do
     if [ ! -e "$t" ]; then
         # Reached only when the glob matched no file at all: fail closed.
-        # or the explicitly named test was deleted): fail closed.
         printf 'FAIL: %s matched no file\n' "$t" >&2
         status=1
         continue
@@ -49,6 +49,18 @@ for t in scripts/fleet/test-*.sh; do
         continue
     }
     case "$t" in
+        scripts/fleet/test-collision-scan.sh)
+            # QUARANTINED. Its Windows block is gated on `command -v pwsh`
+            # (:138), but ubuntu runners ship pwsh, so the block runs there and
+            # task_query() (:178-180) calls Get-ScheduledTask — a Windows-only
+            # cmdlet — and :192 fires every run. A presence check for pwsh is
+            # not a check for Windows. Landed on main in 586cb07 (#967) after
+            # this branch's base and was red on ubuntu from its first gated run.
+            # Tracked as #971, which owns the guard and this entry.
+            printf 'QUARANTINE %s (Windows block gated on pwsh presence, not on Windows; tracked as #971)\n' "$t"
+            quarantined=$((quarantined + 1))
+            continue
+            ;;
         scripts/fleet/test-lane-helpers.sh)
             # QUARANTINED, not platform-bound: red on windows-latest (case 0,
             # `prepare: worktree not registered`) and on a Windows workstation
@@ -57,6 +69,7 @@ for t in scripts/fleet/test-*.sh; do
             # entry in the same PR that turns the test green. #896 stays open
             # for this item — that is why this PR carries no closing keyword.
             printf 'QUARANTINE %s (red on every Windows environment; tracked as #963)\n' "$t"
+            quarantined=$((quarantined + 1))
             continue
             ;;
         scripts/fleet/test-next-loop.sh)
@@ -69,6 +82,7 @@ for t in scripts/fleet/test-*.sh; do
             # hand-run — which is #896's premise in a single test. Tracked as
             # #964, which owns removing this entry.
             printf 'QUARANTINE %s (red on both CI platforms; tracked as #964)\n' "$t"
+            quarantined=$((quarantined + 1))
             continue
             ;;
     esac
@@ -81,4 +95,8 @@ for t in scripts/fleet/test-*.sh; do
         status=1
     fi
 done
+# The count is printed so the quarantine list cannot grow quietly: a rising
+# number in CI output is the only signal that this gate is covering less than
+# it did. Each entry names the issue that owns removing it.
+[ "$quarantined" -eq 0 ] || printf '%d test(s) quarantined - see the QUARANTINE lines above\n' "$quarantined"
 exit "$status"
