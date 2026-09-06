@@ -9,8 +9,11 @@
 #     sh scripts/githooks/install.sh
 # Verify:
 #     git config core.hooksPath
-# Bypass everything:
+# Bypass the commit-time hooks:
 #     git commit --no-verify
+# Bypass the push guard (a separate hook, and --no-verify does not carry
+# from one to the other):
+#     git push --no-verify
 # Skip clippy only (message gets a [skip-clippy] tag):
 #     SKIP_CLIPPY=1 git commit ...
 
