@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "review_verdict payload",
+  "description": "Unstable SHA-pinned independent review payload; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "schema": { "type": "string" },
+    "subject": {
+      "type": "object",
+      "properties": {
+        "base_sha": { "type": "string" },
+        "head_sha": { "type": "string" },
+        "files": { "type": "integer", "minimum": 0 },
+        "lines": { "type": "integer", "minimum": 0 },
+        "coverage": { "type": "string" },
+        "subject_seen": { "type": "string" },
+        "worktree_check": { "type": "string" }
+      },
+      "required": ["base_sha", "head_sha", "files", "lines", "coverage"],
+      "additionalProperties": true
+    },
+    "refs": {
+      "type": "object",
+      "properties": {
+        "pr": { "type": "integer", "minimum": 0 },
+        "issue": { "type": "integer", "minimum": 0 },
+        "supersedes": { "type": "string" },
+        "previous": { "type": "string" },
+        "round": { "type": "integer", "minimum": 0 },
+        "history_rewritten": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "spec": {
+      "type": "object",
+      "properties": { "mode": { "type": "string" }, "source": { "type": "string" }, "trust": { "type": "string" } },
+      "required": ["mode", "source", "trust"],
+      "additionalProperties": true
+    },
+    "brief": {
+      "type": "object",
+      "properties": { "core": { "type": "string" }, "review_md_sha": { "type": "string" }, "classes": { "type": "array", "items": { "type": "string" } } },
+      "required": ["core"],
+      "additionalProperties": true
+    },
+    "reviewer": {
+      "type": "object",
+      "properties": {
+        "agent": { "type": "string" }, "transport": { "type": "string" }, "model_requested": { "type": "string" }, "model_observed": { "type": "string" }, "observed_via": { "type": "string" }, "model_self_report": { "type": "string" }, "session_id": { "type": "string" }, "session_label": { "type": "string" }, "tool_policy": { "type": "string" }
+      },
+      "required": ["agent", "transport", "model_requested", "model_observed", "observed_via", "session_id", "session_label", "tool_policy"],
+      "additionalProperties": true
+    },
+    "independence": { "type": "string" },
+    "independence_policy": { "type": "string" },
+    "gates": {
+      "type": "object",
+      "properties": {
+        "status": { "type": "string" },
+        "declared_by": { "type": "array", "items": { "type": "string" } },
+        "read": { "type": "array", "items": { "type": "object", "properties": { "kind": { "type": "string" }, "ref": { "type": "string" }, "cmd": { "type": "string" }, "result": { "type": "string" } }, "required": ["kind", "ref", "cmd", "result"], "additionalProperties": true } },
+        "ran": { "type": "array", "items": { "type": "object", "properties": { "cmd": { "type": "string" }, "exit": { "type": "integer" }, "duration_ms": { "type": "integer", "minimum": 0 }, "stdout_blob": { "type": "string" }, "timed_out": { "type": "boolean" } }, "required": ["cmd", "exit", "duration_ms"], "additionalProperties": true } }
+      },
+      "required": ["status"],
+      "additionalProperties": true
+    },
+    "probes": { "type": "array", "items": { "type": "object", "properties": { "cmd": { "type": "string" }, "exit": { "type": "integer" } }, "required": ["cmd", "exit"], "additionalProperties": true } },
+    "verdict": { "type": "string" },
+    "outcome": { "type": "string" },
+    "qualified": { "type": "boolean" },
+    "disqualifiers": { "type": "array", "items": { "type": "string" } },
+    "findings": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "severity": { "type": "string" }, "file": { "type": "string" }, "line": { "type": "integer", "minimum": 0 }, "claim": { "type": "string" }, "evidence": { "type": "string" }, "rule": { "type": "string" }, "status": { "type": "string" } }, "required": ["id", "severity", "file", "claim", "evidence", "rule", "status"], "additionalProperties": true } },
+    "checklist": { "type": "array", "items": { "type": "object", "properties": { "item": { "type": "string" }, "result": { "type": "string" }, "measure": { "type": "string" } }, "required": ["item", "result", "measure"], "additionalProperties": true } },
+    "escalations": { "type": "array", "items": { "type": "string" } },
+    "cost": { "type": "object", "properties": { "usd": { "type": "number", "minimum": 0 }, "measured": { "type": "boolean" }, "duration_ms": { "type": "integer", "minimum": 0 } }, "required": ["measured", "duration_ms"], "additionalProperties": true },
+    "parse": { "type": "string" },
+    "notes": { "type": "string" }
+  },
+  "required": ["schema", "subject", "refs", "spec", "brief", "reviewer", "independence", "independence_policy", "gates", "verdict", "outcome", "qualified", "cost", "parse"],
+  "additionalProperties": true
+}

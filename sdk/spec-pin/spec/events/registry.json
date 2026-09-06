@@ -132,6 +132,12 @@
     "source": "crates/edda-core/src/event.rs"
   },
   {
+    "type": "review_verdict",
+    "schema": "review_verdict.schema.json",
+    "stability": "unstable",
+    "source": "crates/edda-core/src/event.rs"
+  },
+  {
     "type": "task.created",
     "schema": "task.created.schema.json",
     "stability": "unstable",
