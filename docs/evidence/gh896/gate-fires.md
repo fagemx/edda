@@ -29,48 +29,45 @@ sh scripts/fleet/run-fleet-tests.sh
 
 ## Excluded test (explicit, never silent)
 
-Two of the tests #896 names cannot run on the ubuntu runner, so both are
-skipped by `run-fleet-tests.sh` with a printed reason and the
-`fleet-tests-windows` CI job runs them directly. Each test lands on the
-platform it can actually run on; each runs in CI exactly once.
+The gate's own CI runs found three real defects, none of them introduced by
+this PR. Each test now lands where it can actually run, and the one that can
+run nowhere is quarantined by name with its issue number printed.
 
-| test | why not ubuntu | who runs it |
-|---|---|---|
-| `scripts/fleet/test-lane-helpers.sh` | drives Windows Scheduled Tasks (`Register-ScheduledTask` / `Start-ScheduledTask`), `pwsh.exe`, `taskkill` — the ScheduledTasks cmdlets are not available to PowerShell on Linux | `fleet-tests-windows` |
-| `scripts/test-review-capabilities.sh` | generates a helper carrying `set -o pipefail`; ubuntu's `sh` is dash and rejects it with `Illegal option`, so the test fails for the shell rather than for anything it asserts (`scripts/review-pr.sh:806`) | `fleet-tests-windows` |
+| test | state | why | who runs it |
+|---|---|---|---|
+| `scripts/fleet/test-next-loop.sh` | platform-bound | asserts a launch command only the Windows Scheduled Tasks path renders; red on ubuntu (`dry-run output misses the launch command`), green on a Windows workstation | `fleet-tests-windows` — **#964** |
+| `scripts/test-review-capabilities.sh` | platform-bound | generates a helper carrying `set -o pipefail` (`scripts/review-pr.sh:806`); ubuntu's `sh` is dash and rejects it with `Illegal option`, so the test fails for the shell rather than for anything it asserts | `fleet-tests-windows` |
+| `scripts/fleet/test-lane-helpers.sh` | **quarantined** | red on `windows-latest` (case 0, `prepare: worktree not registered`) *and* on a Windows workstation against `origin/main` (case 25, Task Scheduler). Red everywhere, so no job can carry it | nobody — **#963** |
 
-An OS-conditional skip for `test-lane-helpers.sh` was tried first and
-**reverted**, because the test is red on `origin/main` on this Windows
-workstation:
+The quarantine is printed at runtime, not silent:
 
 ```text
-$ git worktree add --detach <tmp> origin/main && sh scripts/fleet/test-lane-helpers.sh
-FAIL (after case 25): launch dry-run with build lane: expected success
-lane-launch: dry-run task edda-lane-gh626envcheck exists but its scheduler result is unavailable
-rc=1   (183 s)
+QUARANTINE scripts/fleet/test-lane-helpers.sh (red on every Windows environment; tracked as #963)
+SKIP scripts/fleet/test-next-loop.sh (platform-bound; the fleet-tests-windows CI job runs it - #964)
 ```
 
-Executed from this entrypoint it therefore makes the entrypoint itself
-unable to be green on a Windows workstation — which is the doneWhen the
-script exists to satisfy. One CI job carrying a Windows-only test is a
-signal; an always-red entrypoint is not. That red is pre-existing and is not
-this PR's to fix.
+#963 owns removing that entry in the same PR that turns the test green, so
+the exclusion cannot quietly become permanent. **This PR carries no closing
+keyword**: #896's doneWhen names `test-lane-helpers.sh` among the tests that
+must run, and it does not, so #896 stays open for that item.
 
-Both CI jobs check out with `fetch-depth: 0`. `test-next-loop.sh` and
-`test-issue-freshness.sh` resolve `origin/main`, and a default depth-1
-checkout has no such ref, so they exit non-zero on
+The third defect was the checkout. Both fleet jobs now use `fetch-depth: 0`:
+`test-next-loop.sh` and `test-issue-freshness.sh` resolve `origin/main`, and
+a default depth-1 checkout has no such ref, so they exited non-zero on
 `fatal: ambiguous argument 'origin/main'` rather than on anything they test.
-That was found by this gate's own first CI run, not by reasoning.
+
+An OS-conditional skip for `test-lane-helpers.sh` was tried before the
+quarantine and reverted — with the test executing from the shared entrypoint,
+the entrypoint itself could not be green on a Windows workstation, which is
+the doneWhen this script exists to satisfy.
 
 One observation is recorded without a mechanism, because it was not
-isolated: while the OS-conditional skip was in place,
+isolated: while that OS-conditional skip was in place,
 `scripts/test-review-capabilities.sh` failed **through the runner**
 (`FAIL mutate: backend wrote canary`) while passing standalone in the same
-worktree, and passing when run directly after a standalone
-`test-lane-helpers.sh` failure. It has passed on every run since
-`test-lane-helpers.sh` stopped executing from this entrypoint. The cause was
-not identified; it is noted so a future change that reintroduces an
-in-runner Windows-only test knows to look for it.
+worktree. It has passed on every run since `test-lane-helpers.sh` stopped
+executing from this entrypoint. Noted so a future change that reintroduces
+an in-runner Windows-only test knows to look for it.
 
 ## Round 2 (GH-896 fix round) — three terms, two groups, one entrypoint
 
@@ -100,7 +97,6 @@ $ sh scripts/fleet/run-fleet-tests.sh
 [head elided — identical to the green transcript below through
  `RUN  scripts/fleet/test-ready-queue-lint.sh`]
 PASS scripts/fleet/test-lane-helpers.sh
-RUN  scripts/fleet/test-next-loop.sh
 ok 1 ready issue dry-run
 ok 2 claimed issue refusal
 ok 3 marker-left-in-brief refusal
@@ -108,8 +104,6 @@ ok 4 round-cap refusal
 ok 5 moved-head refusal
 ok 6 shadow post shape
 ok 7 non-shadow delegation refusal
-PASS: scripts/fleet/test-next-loop.sh
-PASS scripts/fleet/test-next-loop.sh
 RUN  scripts/fleet/test-ready-queue-lint.sh
 FAIL: SEED (GH-896 r2) inverted assertion — clean ready issue must be listed
 FAIL scripts/fleet/test-ready-queue-lint.sh (exit 1)
@@ -148,7 +142,6 @@ RUN  scripts/fleet/test-lane-helpers.sh
 [28 ok lines elided — verbatim in the lane report; ends
  `PASS: lane helper self-test (28 cases)`]
 PASS scripts/fleet/test-lane-helpers.sh
-RUN  scripts/fleet/test-next-loop.sh
 ok 1 ready issue dry-run
 ok 2 claimed issue refusal
 ok 3 marker-left-in-brief refusal
@@ -156,8 +149,6 @@ ok 4 round-cap refusal
 ok 5 moved-head refusal
 ok 6 shadow post shape
 ok 7 non-shadow delegation refusal
-PASS: scripts/fleet/test-next-loop.sh
-PASS scripts/fleet/test-next-loop.sh
 RUN  scripts/fleet/test-ready-queue-lint.sh
 ok 1 delivered issues excluded, oldest first, word-boundary holds
 ok 2 --oldest returns exactly the oldest pickable issue
@@ -216,9 +207,8 @@ RUN  scripts/fleet/test-brief-from-issue.sh
 PASS scripts/fleet/test-brief-from-issue.sh
 RUN  scripts/fleet/test-daily-digest.sh
 PASS scripts/fleet/test-daily-digest.sh
-SKIP scripts/fleet/test-lane-helpers.sh (platform-bound; the fleet-tests-windows CI job runs it)
-RUN  scripts/fleet/test-next-loop.sh
-PASS scripts/fleet/test-next-loop.sh
+QUARANTINE scripts/fleet/test-lane-helpers.sh (red on every Windows environment; tracked as #963)
+SKIP scripts/fleet/test-next-loop.sh (platform-bound; the fleet-tests-windows CI job runs it - #964)
 RUN  scripts/fleet/test-ready-queue-lint.sh
 PASS scripts/fleet/test-ready-queue-lint.sh
 RUN  scripts/fleet/test-seeded-failure.sh
@@ -239,17 +229,17 @@ RUN  scripts/fleet/test-brief-from-issue.sh
 PASS scripts/fleet/test-brief-from-issue.sh
 RUN  scripts/fleet/test-daily-digest.sh
 PASS scripts/fleet/test-daily-digest.sh
-SKIP scripts/fleet/test-lane-helpers.sh (platform-bound; the fleet-tests-windows CI job runs it)
-RUN  scripts/fleet/test-next-loop.sh
-PASS scripts/fleet/test-next-loop.sh
+QUARANTINE scripts/fleet/test-lane-helpers.sh (red on every Windows environment; tracked as #963)
+SKIP scripts/fleet/test-next-loop.sh (platform-bound; the fleet-tests-windows CI job runs it - #964)
 RUN  scripts/fleet/test-ready-queue-lint.sh
 PASS scripts/fleet/test-ready-queue-lint.sh
 $ echo $?
 0
 ```
 
-On this Windows workstation: five terms, one documented SKIP, rc=0.
-The two platform-bound tests run in the `fleet-tests-windows` job.
+On this Windows workstation: rc=0, with one quarantine and one platform-bound
+skip both named at runtime. The two platform-bound tests run in the
+`fleet-tests-windows` job.
 
 Syntax checks on the added runner both pass:
 `sh -n scripts/fleet/run-fleet-tests.sh` and

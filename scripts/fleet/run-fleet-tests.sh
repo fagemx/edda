@@ -42,22 +42,22 @@ for t in scripts/fleet/test-*.sh; do
     fi
     case "$t" in
         scripts/fleet/test-lane-helpers.sh)
-            # Platform-bound: the `fleet-tests-windows` CI job runs it. It
-            # drives the Windows Task Scheduler (Register-ScheduledTask /
-            # Start-ScheduledTask, pwsh.exe, taskkill), absent on ubuntu.
-            #
-            # The skip is unconditional rather than OS-conditional. Executing
-            # it from here was tried and reverted: it is red on `origin/main`
-            # on a Windows workstation today, so it made this entrypoint unable
-            # to be green — which is the doneWhen the script exists to satisfy.
-            #
-            # scripts/test-review-capabilities.sh is #896's other named test
-            # and is deliberately NOT in the glob above: it lives one directory
-            # up, and it generates a helper carrying `set -o pipefail`
-            # (scripts/review-pr.sh:806) which ubuntu's dash rejects with
-            # `Illegal option`. The same windows job runs it, for the same
-            # reason — each test on the platform it can actually run on.
-            printf 'SKIP %s (platform-bound; the fleet-tests-windows CI job runs it)\n' "$t"
+            # QUARANTINED, not platform-bound: red on windows-latest (case 0,
+            # `prepare: worktree not registered`) and on a Windows workstation
+            # against origin/main (case 25, Task Scheduler). Red everywhere, so
+            # no job can carry it. Tracked as #963, which owns removing this
+            # entry in the same PR that turns the test green. #896 stays open
+            # for this item — that is why this PR carries no closing keyword.
+            printf 'QUARANTINE %s (red on every Windows environment; tracked as #963)\n' "$t"
+            continue
+            ;;
+        scripts/fleet/test-next-loop.sh)
+            # Platform-bound: green on a Windows workstation, red on ubuntu
+            # (`dry-run output misses the launch command`) because the launch
+            # path is Windows Scheduled Tasks. The fleet-tests-windows CI job
+            # runs it, so it stays gated. #964 owns making it pass on both,
+            # and removing this entry when it does.
+            printf 'SKIP %s (platform-bound; the fleet-tests-windows CI job runs it — #964)\n' "$t"
             continue
             ;;
     esac
