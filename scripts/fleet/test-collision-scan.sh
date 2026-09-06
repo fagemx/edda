@@ -297,7 +297,13 @@ STUB
     # case 7 — non-issue-shaped lane names are unchanged (no -Machine needed)
     # The dry run races the Task Scheduler's own state query; retry a couple
     # of times before declaring the receipt broken.
-    scratch_lane=scratch-lane
+    # The scratch name carries the edda-lane- prefix like the issue-shaped
+    # lane whose doubled prefix case 4's absence assertion depends on, but
+    # it is not issue-shaped (no gh<n>), so the receipt below exercises the
+    # doubled-prefix class edda-lane-edda-lane-scratch: a migration that
+    # stops re-prefixing issue-shaped names (#1012) turns this case red
+    # instead of leaving case 4 vacuous again (Round 2 P1).
+    scratch_lane=edda-lane-scratch
     scratch_task="edda-lane-$scratch_lane"
     reap_later "$scratch_task"
     rc=1
