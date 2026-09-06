@@ -41,11 +41,19 @@ command -v git >/dev/null 2>&1 || { echo "SKIP: git not on PATH"; exit 0; }
 tmp=$(mktemp -d)
 BUSY_TASK='edda-lane-busytest'
 
+# Every lane name this file passes to -Name, read out of the file itself.
+# An enumerated list drifts: the GH-937 case added a third name and the sweep
+# still released two, so three Fail arms could exit with a machine-global task
+# standing. Scoped to names this suite actually uses — never a blanket
+# edda-lane-* sweep, which would unregister other sessions' live lanes.
+lane_names=$(sed -n 's/.*-Name \([A-Za-z0-9_-][A-Za-z0-9_-]*\).*/\1/p' "$0" |
+  sort -u | sed "s/^/'/;s/$/'/" | paste -sd, -)
+
 cleanup() {
   pwsh -NoProfile -NonInteractive -Command "
     Stop-ScheduledTask -TaskName '$BUSY_TASK' -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName '$BUSY_TASK' -Confirm:\$false -ErrorAction SilentlyContinue
-    foreach (\$n in @('gh626envcheck', 'gh626noenv')) {
+    foreach (\$n in @($lane_names)) {
       Unregister-ScheduledTask -TaskName ('edda-lane-' + \$n) -Confirm:\$false -ErrorAction SilentlyContinue
     }
     foreach (\$h in @(Get-CimInstance Win32_Process | Where-Object { \$_.CommandLine -and \$_.CommandLine.Contains('lane-helper-busy.ps1') })) {
