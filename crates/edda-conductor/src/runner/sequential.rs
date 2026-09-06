@@ -484,10 +484,9 @@ async fn run_next_phase(
         .find(|p| p.id == phase_id)
         .context("runnable phase not found in plan")?;
     let phase_state = state.get_phase_mut(&phase_id)?;
-    // The attempt number and the per-attempt reset are one operation
-    // (GH-752): asking for the number performs the reset, so no future
-    // attempt boundary can be opened while some per-attempt counter — the
-    // gate redispatch budget among them — still holds the last one's value.
+    // GH-752: asking for the attempt number performs the per-attempt reset,
+    // so no boundary can be opened while a per-attempt counter still holds
+    // the last attempt's value.
     let attempt = phase_state.begin_attempt();
     let phase_cwd = phase
         .cwd
@@ -498,9 +497,8 @@ async fn run_next_phase(
 
     let phase_num = order.iter().position(|id| id == &phase_id).unwrap_or(0) + 1;
 
-    // Clear retry_context on new attempt start (it was already consumed for
-    // prompt building). It stays here rather than in begin_attempt() because
-    // the caller needs the value it takes.
+    // Clear retry_context on new attempt start (already consumed for prompt
+    // building); it stays here because the caller needs the value it takes.
     let retry_ctx = phase_state.retry_context.take();
 
     // 3. Transition: pending → running
