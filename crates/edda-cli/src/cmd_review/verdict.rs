@@ -1,3 +1,4 @@
+use super::qualification::Qualification;
 use anyhow::{bail, Context, Result};
 use edda_core::{ReviewChecklistItem, ReviewFinding, ReviewVerdictPayload};
 use serde::Deserialize;
@@ -125,8 +126,15 @@ impl EngineVerdict {
     }
 }
 
-pub(crate) fn qualify(payload: &mut ReviewVerdictPayload) {
+/// `engine` is the qualification the brief stated. An engine R22 does not make
+/// authoritative for this PR's surface cannot produce a qualified round even if
+/// it forgot to escalate `D5`, so the table stays fail-closed on both sides:
+/// the brief tells the engine to escalate, and this refuses to qualify it.
+pub(crate) fn qualify(payload: &mut ReviewVerdictPayload, engine: &Qualification) {
     let mut reasons = Vec::new();
+    if !engine.authoritative {
+        reasons.push("engine-not-authoritative".into());
+    }
     for (bad, reason) in [
         (payload.verdict == "unreviewed", "unreviewed"),
         (payload.spec.mode != "spec-backed", "spec-convention-only"),
@@ -310,6 +318,44 @@ mod tests {
         }
     }
 
+    fn engine(authoritative: bool) -> Qualification {
+        let files = ["crates/edda-cli/src/cmd_review/mod.rs".to_owned()];
+        let model = if authoritative {
+            "openai-codex/gpt-5.6-sol"
+        } else {
+            "openrouter/z-ai/glm-5.3-flash"
+        };
+        let engine = super::super::qualification::assess(&files, model, "pi", false).unwrap();
+        assert_eq!(engine.authoritative, authoritative);
+        engine
+    }
+
+    #[test]
+    fn authoritative_engine_that_closed_d5_qualifies_and_exits_zero() {
+        let mut payload = qualified_payload_with_findings(vec![]);
+        qualify(&mut payload, &engine(true));
+        assert!(payload.qualified, "{:?}", payload.disqualifiers);
+        assert_eq!(exit_code(&payload), 0);
+        // An escalation the engine did raise still disqualifies, unchanged.
+        let mut payload = qualified_payload_with_findings(vec![]);
+        payload.escalations = vec!["D5 wording/structure".into()];
+        qualify(&mut payload, &engine(true));
+        assert!(payload.disqualifiers.contains(&"escalation-pending".into()));
+        assert_eq!(exit_code(&payload), 3);
+    }
+
+    #[test]
+    fn engine_outside_the_r22_table_cannot_qualify_even_with_a_clean_review() {
+        let mut payload = qualified_payload_with_findings(vec![]);
+        qualify(&mut payload, &engine(false));
+        assert!(!payload.qualified);
+        assert_eq!(
+            payload.disqualifiers,
+            ["engine-not-authoritative".to_owned()]
+        );
+        assert_eq!(exit_code(&payload), 3);
+    }
+
     #[test]
     fn final_blocking_findings_disqualify_lgtm_and_never_exit_zero() {
         let mut payload = qualified_payload_with_findings(vec![ReviewFinding {
@@ -322,7 +368,7 @@ mod tests {
             rule: "core".into(),
             status: "open".into(),
         }]);
-        qualify(&mut payload);
+        qualify(&mut payload, &engine(true));
         assert!(!payload.qualified);
         assert!(payload
             .disqualifiers
@@ -334,7 +380,7 @@ mod tests {
     fn missing_final_worktree_proof_never_qualifies_lgtm() {
         let mut payload = qualified_payload_with_findings(vec![]);
         payload.subject.worktree_check = None;
-        qualify(&mut payload);
+        qualify(&mut payload, &engine(true));
         assert!(!payload.qualified);
         assert!(payload
             .disqualifiers

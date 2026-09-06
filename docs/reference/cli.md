@@ -951,6 +951,24 @@ reviewer session; a backend fork disqualifies it. `--thinking` selects pi's
 thinking level; Claude and Codex reject the option rather than silently
 ignoring it.
 
+The brief also carries an `ENGINE QUALIFICATION (R22)` section naming the PR's
+R22 surface (`review`, `gate`, `shipping` or `internal-tool`, strictest first)
+with the changed path that decided it, the canonical requested model id, and
+whether R22's engine table makes that engine authoritative for the surface. An
+authoritative engine decides the specification's judgment item itself; any other
+engine escalates it, as REVIEW.md §6.1 requires of a checklist-type engine. An
+engine the table does not name — including a round that passes no `--model`,
+since R22 names model ids — is never authoritative: it records the
+`engine-not-authoritative` disqualifier and cannot exit 0. `--json` and the
+ledger event carry the same statement under `engine_qualification`.
+
+`--require-model-diversity` is unchanged by that section and remains
+independent of it. Without the flag the independence policy is `session`: an
+author and reviewer on the same model are recorded in the receipt as
+`independence: same-model` and stated in the brief, but do not disqualify the
+round. With the flag the policy is `model` and any independence other than
+`verified` disqualifies it.
+
 Gates are READ from clean exact-SHA command receipts and required exact-SHA CI.
 Missing checks remain unverified; any red evidence wins. `--run-gates` opts in
 to execution of trusted declared commands, bounded by `--max-ran-sec` (300 by
