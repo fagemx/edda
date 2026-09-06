@@ -52,12 +52,15 @@ for t in scripts/fleet/test-*.sh; do
             continue
             ;;
         scripts/fleet/test-next-loop.sh)
-            # Platform-bound: green on a Windows workstation, red on ubuntu
-            # (`dry-run output misses the launch command`) because the launch
-            # path is Windows Scheduled Tasks. The fleet-tests-windows CI job
-            # runs it, so it stays gated. #964 owns making it pass on both,
-            # and removing this entry when it does.
-            printf 'SKIP %s (platform-bound; the fleet-tests-windows CI job runs it — #964)\n' "$t"
+            # QUARANTINED. Green on a Windows workstation, red on BOTH CI
+            # platforms and for different reasons: on ubuntu `dry-run output
+            # misses the launch command` (the launch line is rendered only on
+            # the Scheduled Tasks path); on windows-latest case 7 gets the
+            # transport refusal rather than the missing-arm one it asserts.
+            # Green in exactly one place — the machine where it has always been
+            # hand-run — which is #896's premise in a single test. Tracked as
+            # #964, which owns removing this entry.
+            printf 'QUARANTINE %s (red on both CI platforms; tracked as #964)\n' "$t"
             continue
             ;;
     esac

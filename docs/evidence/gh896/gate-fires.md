@@ -35,18 +35,23 @@ run nowhere is quarantined by name with its issue number printed.
 
 | test | state | why | who runs it |
 |---|---|---|---|
-| `scripts/fleet/test-next-loop.sh` | platform-bound | asserts a launch command only the Windows Scheduled Tasks path renders; red on ubuntu (`dry-run output misses the launch command`), green on a Windows workstation | `fleet-tests-windows` — **#964** |
 | `scripts/test-review-capabilities.sh` | platform-bound | generates a helper carrying `set -o pipefail` (`scripts/review-pr.sh:806`); ubuntu's `sh` is dash and rejects it with `Illegal option`, so the test fails for the shell rather than for anything it asserts | `fleet-tests-windows` |
-| `scripts/fleet/test-lane-helpers.sh` | **quarantined** | red on `windows-latest` (case 0, `prepare: worktree not registered`) *and* on a Windows workstation against `origin/main` (case 25, Task Scheduler). Red everywhere, so no job can carry it | nobody — **#963** |
+| `scripts/fleet/test-lane-helpers.sh` | **quarantined** | red on `windows-latest` (case 0, `prepare: worktree not registered`) *and* on a Windows workstation against `origin/main` (case 25, Task Scheduler) | nobody — **#963** |
+| `scripts/fleet/test-next-loop.sh` | **quarantined** | green on a Windows workstation, red on **both** CI platforms for different reasons: ubuntu `dry-run output misses the launch command`; `windows-latest` case 7 receives the transport refusal rather than the missing-arm one it asserts | nobody — **#964** |
+
+The two quarantined tests are green in exactly one place each — the
+workstation where they have always been hand-run. That is #896's premise
+restated as a measurement rather than an argument: a test nothing executes
+drifts until it only passes where its author happened to be standing.
 
 The quarantine is printed at runtime, not silent:
 
 ```text
 QUARANTINE scripts/fleet/test-lane-helpers.sh (red on every Windows environment; tracked as #963)
-SKIP scripts/fleet/test-next-loop.sh (platform-bound; the fleet-tests-windows CI job runs it - #964)
+QUARANTINE scripts/fleet/test-next-loop.sh (red on both CI platforms; tracked as #964)
 ```
 
-#963 owns removing that entry in the same PR that turns the test green, so
+Each issue owns removing its entry in the same PR that turns the test green, so
 the exclusion cannot quietly become permanent. **This PR carries no closing
 keyword**: #896's doneWhen names `test-lane-helpers.sh` among the tests that
 must run, and it does not, so #896 stays open for that item.
@@ -208,7 +213,7 @@ PASS scripts/fleet/test-brief-from-issue.sh
 RUN  scripts/fleet/test-daily-digest.sh
 PASS scripts/fleet/test-daily-digest.sh
 QUARANTINE scripts/fleet/test-lane-helpers.sh (red on every Windows environment; tracked as #963)
-SKIP scripts/fleet/test-next-loop.sh (platform-bound; the fleet-tests-windows CI job runs it - #964)
+QUARANTINE scripts/fleet/test-next-loop.sh (red on both CI platforms; tracked as #964)
 RUN  scripts/fleet/test-ready-queue-lint.sh
 PASS scripts/fleet/test-ready-queue-lint.sh
 RUN  scripts/fleet/test-seeded-failure.sh
@@ -230,7 +235,7 @@ PASS scripts/fleet/test-brief-from-issue.sh
 RUN  scripts/fleet/test-daily-digest.sh
 PASS scripts/fleet/test-daily-digest.sh
 QUARANTINE scripts/fleet/test-lane-helpers.sh (red on every Windows environment; tracked as #963)
-SKIP scripts/fleet/test-next-loop.sh (platform-bound; the fleet-tests-windows CI job runs it - #964)
+QUARANTINE scripts/fleet/test-next-loop.sh (red on both CI platforms; tracked as #964)
 RUN  scripts/fleet/test-ready-queue-lint.sh
 PASS scripts/fleet/test-ready-queue-lint.sh
 $ echo $?

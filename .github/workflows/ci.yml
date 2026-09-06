@@ -260,15 +260,13 @@ jobs:
           # on a fatal 'ambiguous argument' rather than on anything they test.
           fetch-depth: 0
       - name: Run the Windows-only fleet tests
-        # Not the glob runner: these two are the tests the ubuntu job cannot
-        # run. test-next-loop.sh asserts a launch command that only the Windows
-        # Scheduled Tasks path renders (#964), and test-review-capabilities.sh
-        # generates a helper carrying `set -o pipefail` (scripts/review-pr.sh:806)
-        # which ubuntu's dash rejects with 'Illegal option'. Here `sh` is Git
-        # Bash, so both run. test-lane-helpers.sh is NOT here: it is red on this
-        # runner too, quarantined in run-fleet-tests.sh and tracked as #963.
+        # Not the glob runner: this is the one test the ubuntu job cannot run
+        # but this one can. test-review-capabilities.sh generates a helper
+        # carrying `set -o pipefail` (scripts/review-pr.sh:806) which ubuntu's
+        # dash rejects with 'Illegal option'; here `sh` is Git Bash, so it runs.
+        # test-lane-helpers.sh (#963) and test-next-loop.sh (#964) are NOT here:
+        # both are red on this runner too, quarantined in run-fleet-tests.sh.
         run: |
-          sh scripts/fleet/test-next-loop.sh
           sh scripts/test-review-capabilities.sh
 
   # Aggregate gate: the single check the branch ruleset will pin instead of
