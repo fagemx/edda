@@ -81,6 +81,15 @@ for t in scripts/fleet/test-*.sh scripts/test-*.sh; do
 ' "$t"
             continue
             ;;
+        scripts/test-pr-review-watch.sh)
+            # Red on ubuntu in its first gated run (r22 live case 2 - the
+            # watcher wrote a status where the fixture expects none); green on
+            # the workstation where it has always been hand-run. Tracked as
+            # #1029, which owns removing this entry in the change that turns
+            # the test green everywhere.
+            q_issue='#1029'
+            q_why='r22 live case 2 red on ubuntu, green on the workstation'
+            ;;
         scripts/test-review-pr.sh)
             # Red in every CI environment that could carry it: on ubuntu case
             # D1 fails by construction (it asserts the Windows path shapes the

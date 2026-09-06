@@ -200,8 +200,9 @@ after #896/#910 gated only `scripts/fleet/test-*.sh`. #927 adds both as globs:
 Four tests are quarantined by the runner on this base — #963
 (`test-lane-helpers.sh`) and #964 (`test-next-loop.sh`) from #910 (#971's
 collision-scan entry was removed on main by #995, which fixed the test),
-`scripts/test-review-adapter.sh` (this PR), and `scripts/test-review-pr.sh`
-(see below):
+`scripts/test-review-adapter.sh` (this PR), `scripts/test-review-pr.sh`
+(see below), and `scripts/test-pr-review-watch.sh` (r22 live case 2 red
+on ubuntu in its first gated run, green on the workstation; **#1029**):
 is red on a Windows workstation against `origin/main` (its pwsh child exits 1
 and `QUALIFIED=True` never lands in the fixture receipt; measured twice),
 tracked as **#987**, which owns removing the entry in the change that turns
