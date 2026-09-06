@@ -6,6 +6,7 @@ mod git;
 mod github;
 mod identity;
 mod prepare;
+mod qualification;
 mod render;
 mod subject;
 #[cfg(test)]
@@ -28,9 +29,10 @@ use tokio_util::sync::CancellationToken;
 pub fn run(args: ReviewArgs, cwd: &Path) -> Result<()> {
     let result = run_inner(&args, cwd);
     match result {
-        Ok((payload, event_id)) => {
+        Ok((payload, event_id, qualified)) => {
             if args.json {
                 let mut value = serde_json::to_value(&payload)?;
+                qualification::augment(&mut value, &qualified);
                 value["event_id"] = serde_json::json!(event_id);
                 println!("{value}");
             } else {
@@ -49,7 +51,24 @@ pub fn run(args: ReviewArgs, cwd: &Path) -> Result<()> {
     }
 }
 
-fn run_inner(args: &ReviewArgs, cwd: &Path) -> Result<(ReviewVerdictPayload, String)> {
+type Reviewed = (ReviewVerdictPayload, String, qualification::Qualification);
+
+/// The engine the brief names. R22 is a table of model ids, so a round that
+/// requests no model names none and can never be authoritative.
+pub(super) fn model_requested(args: &ReviewArgs) -> String {
+    args.model.clone().unwrap_or_else(|| "inherited".into())
+}
+
+/// R22 grants Opus authority only through Claude Code (R27).
+pub(super) fn transport(agent: AgentKind) -> &'static str {
+    if agent == AgentKind::Claude {
+        "claude-code"
+    } else {
+        agent.as_str()
+    }
+}
+
+fn run_inner(args: &ReviewArgs, cwd: &Path) -> Result<Reviewed> {
     // Empty diff and same-author refusal happen before launcher probing/spawn.
     let prepared = prepare::prepare(args, cwd)?;
     validate(args)?;
@@ -259,7 +278,7 @@ async fn run_with(
     mut prepared: prepare::Prepared,
     args: &ReviewArgs,
     launcher: &dyn AgentLauncher,
-) -> Result<(ReviewVerdictPayload, String)> {
+) -> Result<Reviewed> {
     validate(args)?;
     let scratch = review_scratch(&prepared);
     let mut worktree = git::WorktreeGuard::create(
@@ -271,7 +290,7 @@ async fn run_with(
     let (gates, probes, evidence_text) =
         prepare::collect_evidence(&mut prepared, args, &worktree.path)?;
     let checklist_measures = evidence::checklist_measures(&gates.ran, &probes);
-    let (assembled, classes) = prepare::assemble(&prepared, &evidence_text)?;
+    let (assembled, classes, qualified) = prepare::assemble(&prepared, args, &evidence_text)?;
     match worktree.verify_unchanged(&prepared.subject.head_sha) {
         Ok(true) => {}
         Ok(false) => {
@@ -283,6 +302,7 @@ async fn run_with(
                 probes,
                 assembled.coverage,
                 classes,
+                qualified,
                 "worktree-changed",
                 "review evidence changed the detached subject worktree",
             );
@@ -296,6 +316,7 @@ async fn run_with(
                 probes,
                 assembled.coverage,
                 classes,
+                qualified,
                 "worktree-check-failed",
                 &format!("worktree verification failed before launch: {error}"),
             );
@@ -369,13 +390,8 @@ async fn run_with(
         },
         reviewer: ReviewReviewer {
             agent: args.agent.as_str().into(),
-            transport: if args.agent == AgentKind::Claude {
-                "claude-code"
-            } else {
-                args.agent.as_str()
-            }
-            .into(),
-            model_requested: args.model.clone().unwrap_or_else(|| "inherited".into()),
+            transport: transport(args.agent).into(),
+            model_requested: model_requested(args),
             model_observed: observed,
             observed_via: if launcher.last_observed_model().is_some() {
                 "in-band"
@@ -510,8 +526,9 @@ async fn run_with(
             .push(format!("worktree removal failed: {error}"));
     }
     payload.notes = Some(prepared.notes.join("\n"));
-    verdict::qualify(&mut payload);
-    persist(&prepared.ledger, &payload, &raw)
+    verdict::qualify(&mut payload, &qualified);
+    let (payload, event_id) = persist(&prepared.ledger, &payload, &raw, &qualified)?;
+    Ok((payload, event_id, qualified))
 }
 
 fn union_findings(prior: &[ReviewFinding], current: &[ReviewFinding]) -> Vec<ReviewFinding> {
@@ -543,9 +560,10 @@ fn persist_prelaunch_worktree_failure(
     probes: Vec<edda_core::ReviewProbe>,
     coverage: String,
     classes: Vec<String>,
+    qualified: qualification::Qualification,
     outcome: &str,
     note: &str,
-) -> Result<(ReviewVerdictPayload, String)> {
+) -> Result<Reviewed> {
     prepared.notes.push(note.into());
     let policy = if args.require_model_diversity {
         "model"
@@ -577,13 +595,8 @@ fn persist_prelaunch_worktree_failure(
         },
         reviewer: ReviewReviewer {
             agent: args.agent.as_str().into(),
-            transport: if args.agent == AgentKind::Claude {
-                "claude-code"
-            } else {
-                args.agent.as_str()
-            }
-            .into(),
-            model_requested: args.model.clone().unwrap_or_else(|| "inherited".into()),
+            transport: transport(args.agent).into(),
+            model_requested: model_requested(args),
             model_observed: "unknown".into(),
             observed_via: "none".into(),
             model_self_report: None,
@@ -621,8 +634,9 @@ fn persist_prelaunch_worktree_failure(
             .push(format!("worktree removal failed: {error}"));
     }
     payload.notes = Some(prepared.notes.join("\n"));
-    verdict::qualify(&mut payload);
-    persist(&prepared.ledger, &payload, "")
+    verdict::qualify(&mut payload, &qualified);
+    let (payload, event_id) = persist(&prepared.ledger, &payload, "", &qualified)?;
+    Ok((payload, event_id, qualified))
 }
 
 fn outcome(result: Result<PhaseResult>) -> (String, String, Option<f64>) {
@@ -654,6 +668,7 @@ fn persist(
     ledger: &edda_ledger::Ledger,
     payload: &ReviewVerdictPayload,
     raw: &str,
+    qualified: &qualification::Qualification,
 ) -> Result<(ReviewVerdictPayload, String)> {
     let _lock = edda_ledger::lock::WorkspaceLock::acquire(&ledger.paths)?;
     let blob = edda_ledger::blob_store::blob_put(&ledger.paths, raw.as_bytes())?;
@@ -665,7 +680,7 @@ fn persist(
             .iter()
             .filter_map(|row| row.stdout_blob.clone()),
     );
-    let event = edda_core::event::new_review_verdict_event(
+    let mut event = edda_core::event::new_review_verdict_event(
         &ledger.head_branch()?,
         ledger.last_event_hash()?.as_deref(),
         payload,
@@ -673,6 +688,11 @@ fn persist(
         payload.refs.previous.as_deref(),
         &blobs,
     )?;
+    // review_verdict/0 is unstable and its payload struct lives outside this
+    // command; the brief's qualification is added to the serialized receipt and
+    // the event re-finalized so the ledger copy stays hash-consistent.
+    qualification::augment(&mut event.payload, qualified);
+    edda_core::event::finalize_event(&mut event)?;
     ledger.append_event(&event)?;
     Ok((payload.clone(), event.event_id))
 }
