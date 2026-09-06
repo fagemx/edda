@@ -29,16 +29,19 @@ sh scripts/fleet/run-fleet-tests.sh
 
 ## Excluded test (explicit, never silent)
 
-`test-lane-helpers.sh` is skipped by name on **every** host, with a printed
-reason, and the `fleet-tests-windows` CI job runs it on windows-latest
-instead. It exercises `scripts/fleet/lane-*.ps1` through Windows Scheduled
-Tasks (`Register-ScheduledTask` / `Start-ScheduledTask`), `pwsh.exe`,
-`rust-lld.exe` and `taskkill` — none of which exist on the ubuntu runner (the
-ScheduledTasks cmdlets are not available to PowerShell on Linux).
+Two of the tests #896 names cannot run on the ubuntu runner, so both are
+skipped by `run-fleet-tests.sh` with a printed reason and the
+`fleet-tests-windows` CI job runs them directly. Each test lands on the
+platform it can actually run on; each runs in CI exactly once.
 
-An OS-conditional skip was tried first (`case "$(uname -s)" in
-MINGW*|MSYS*|CYGWIN*)` runs it) and **reverted**, because the test is red on
-`origin/main` today on this Windows workstation:
+| test | why not ubuntu | who runs it |
+|---|---|---|
+| `scripts/fleet/test-lane-helpers.sh` | drives Windows Scheduled Tasks (`Register-ScheduledTask` / `Start-ScheduledTask`), `pwsh.exe`, `taskkill` — the ScheduledTasks cmdlets are not available to PowerShell on Linux | `fleet-tests-windows` |
+| `scripts/test-review-capabilities.sh` | generates a helper carrying `set -o pipefail`; ubuntu's `sh` is dash and rejects it with `Illegal option`, so the test fails for the shell rather than for anything it asserts (`scripts/review-pr.sh:806`) | `fleet-tests-windows` |
+
+An OS-conditional skip for `test-lane-helpers.sh` was tried first and
+**reverted**, because the test is red on `origin/main` on this Windows
+workstation:
 
 ```text
 $ git worktree add --detach <tmp> origin/main && sh scripts/fleet/test-lane-helpers.sh
@@ -48,19 +51,26 @@ rc=1   (183 s)
 ```
 
 Executed from this entrypoint it therefore makes the entrypoint itself
-unable to be green on a Windows workstation — which is the doneWhen the script
-exists to satisfy. One CI job carrying one Windows-only test is a signal; an
-always-red entrypoint is not. The red test is pre-existing and belongs to its
-own issue, not to this PR.
+unable to be green on a Windows workstation — which is the doneWhen the
+script exists to satisfy. One CI job carrying a Windows-only test is a
+signal; an always-red entrypoint is not. That red is pre-existing and is not
+this PR's to fix.
 
-One observation recorded without a mechanism, because it was not isolated:
-while the OS-conditional skip was in place, `scripts/test-review-capabilities.sh`
-failed **through the runner** (`FAIL mutate: backend wrote canary`) while
-passing standalone in the same dirty worktree, and passing when run directly
-after a standalone `test-lane-helpers.sh` failure. It has passed on every run
-since `test-lane-helpers.sh` stopped executing from this entrypoint. The cause
-was not identified; it is recorded here so a future change that reintroduces
-an in-runner Windows-only test knows to look for it.
+Both CI jobs check out with `fetch-depth: 0`. `test-next-loop.sh` and
+`test-issue-freshness.sh` resolve `origin/main`, and a default depth-1
+checkout has no such ref, so they exit non-zero on
+`fatal: ambiguous argument 'origin/main'` rather than on anything they test.
+That was found by this gate's own first CI run, not by reasoning.
+
+One observation is recorded without a mechanism, because it was not
+isolated: while the OS-conditional skip was in place,
+`scripts/test-review-capabilities.sh` failed **through the runner**
+(`FAIL mutate: backend wrote canary`) while passing standalone in the same
+worktree, and passing when run directly after a standalone
+`test-lane-helpers.sh` failure. It has passed on every run since
+`test-lane-helpers.sh` stopped executing from this entrypoint. The cause was
+not identified; it is noted so a future change that reintroduces an
+in-runner Windows-only test knows to look for it.
 
 ## Round 2 (GH-896 fix round) — three terms, two groups, one entrypoint
 
@@ -103,7 +113,6 @@ PASS scripts/fleet/test-next-loop.sh
 RUN  scripts/fleet/test-ready-queue-lint.sh
 FAIL: SEED (GH-896 r2) inverted assertion — clean ready issue must be listed
 FAIL scripts/fleet/test-ready-queue-lint.sh (exit 1)
-RUN  scripts/test-review-capabilities.sh
 review capability canaries passed (unguarded baseline; old/modern dispatch and fallback; all source scopes)
 Windows generated lane canaries passed (old/modern transport and source-snapshot cases)
 FAIL scripts/test-review-capabilities.sh (exit 1)
@@ -160,10 +169,8 @@ ok 7 usage errors -> exit 2
 ok 8 broken gh -> fail closed
 all ready-queue-lint.sh self-tests passed
 PASS scripts/fleet/test-ready-queue-lint.sh
-RUN  scripts/test-review-capabilities.sh
 review capability canaries passed (unguarded baseline; old/modern dispatch and fallback; all source scopes)
 Windows generated lane canaries passed (old/modern transport and source-snapshot cases)
-PASS scripts/test-review-capabilities.sh
 $ echo $?
 0
 ```
@@ -209,7 +216,7 @@ RUN  scripts/fleet/test-brief-from-issue.sh
 PASS scripts/fleet/test-brief-from-issue.sh
 RUN  scripts/fleet/test-daily-digest.sh
 PASS scripts/fleet/test-daily-digest.sh
-SKIP scripts/fleet/test-lane-helpers.sh (Windows-only: Scheduled Tasks, pwsh.exe, rust-lld.exe, taskkill - the fleet-tests-windows CI job runs it)
+SKIP scripts/fleet/test-lane-helpers.sh (platform-bound; the fleet-tests-windows CI job runs it)
 RUN  scripts/fleet/test-next-loop.sh
 PASS scripts/fleet/test-next-loop.sh
 RUN  scripts/fleet/test-ready-queue-lint.sh
@@ -217,8 +224,6 @@ PASS scripts/fleet/test-ready-queue-lint.sh
 RUN  scripts/fleet/test-seeded-failure.sh
 FAIL: SEED (GH-896) inverted assertion - clean queue must still list: #20 clean ready
 FAIL scripts/fleet/test-seeded-failure.sh (exit 1)
-RUN  scripts/test-review-capabilities.sh
-PASS scripts/test-review-capabilities.sh
 $ echo $?
 1
 ```
@@ -234,18 +239,17 @@ RUN  scripts/fleet/test-brief-from-issue.sh
 PASS scripts/fleet/test-brief-from-issue.sh
 RUN  scripts/fleet/test-daily-digest.sh
 PASS scripts/fleet/test-daily-digest.sh
-SKIP scripts/fleet/test-lane-helpers.sh (Windows-only: Scheduled Tasks, pwsh.exe, rust-lld.exe, taskkill - the fleet-tests-windows CI job runs it)
+SKIP scripts/fleet/test-lane-helpers.sh (platform-bound; the fleet-tests-windows CI job runs it)
 RUN  scripts/fleet/test-next-loop.sh
 PASS scripts/fleet/test-next-loop.sh
 RUN  scripts/fleet/test-ready-queue-lint.sh
 PASS scripts/fleet/test-ready-queue-lint.sh
-RUN  scripts/test-review-capabilities.sh
-PASS scripts/test-review-capabilities.sh
 $ echo $?
 0
 ```
 
-280 s on this Windows workstation, six terms, one documented SKIP.
+On this Windows workstation: five terms, one documented SKIP, rc=0.
+The two platform-bound tests run in the `fleet-tests-windows` job.
 
 Syntax checks on the added runner both pass:
 `sh -n scripts/fleet/run-fleet-tests.sh` and

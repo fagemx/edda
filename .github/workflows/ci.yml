@@ -213,7 +213,7 @@ jobs:
       - run: cargo +1.91.0 check --workspace --all-targets --locked
 
   # GH-896: the fleet shell tests (scripts/fleet/test-*.sh plus the explicitly
-  # named scripts/test-review-capabilities.sh) had no machine gate — grep over
+  # and scripts/test-review-capabilities.sh) had no machine gate — grep over
   # .github/ found nothing and lefthook runs cargo only, so their doneWhen
   # rested on hand execution. The runner is glob-driven for scripts/fleet/ (a
   # test added later there is picked up without touching this file) plus one
@@ -228,21 +228,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          # see fleet-tests-windows: origin/main must exist for the tests that
+          # resolve it, and a depth-1 checkout has no such ref.
+          fetch-depth: 0
       - name: Run fleet shell tests
         run: sh scripts/fleet/run-fleet-tests.sh
 
-  # GH-896 round 1 (P0-1): test-lane-helpers.sh drives Windows Scheduled
-  # Tasks (Register-ScheduledTask / Start-ScheduledTask), pwsh.exe and
-  # taskkill, none of which exist on the ubuntu runner, so the ubuntu fleet
-  # job skips it (run-fleet-tests.sh does so OS-conditionally). This windows
-  # sibling job runs exactly that excluded test so the doneWhen — every named
-  # fleet shell test runs in CI and a red test blocks — holds for it too. It
-  # runs the same entrypoint as the ubuntu job (one entrypoint, two runners):
-  # on windows-latest the runner executes test-lane-helpers.sh instead of
-  # skipping it, so the doneWhen — every named fleet shell test runs in CI and
-  # a red test blocks — holds for it too. It shares the detect.fleet path
-  # filter with the ubuntu job; ci-gate below evaluates its verdict the same
-  # way: a skip is accepted only when detect.fleet == 'false'.
+  # GH-896 round 1 (P0-1): two of the tests #896 names cannot run on the
+  # ubuntu runner, so this windows-latest sibling job runs them directly.
+  # test-lane-helpers.sh drives the Windows Task Scheduler; 
+  # test-review-capabilities.sh generates a helper carrying `set -o pipefail`
+  # (scripts/review-pr.sh:806) which ubuntu's dash rejects. Both are skipped
+  # by run-fleet-tests.sh with a printed reason naming this job, so every test
+  # #896 names runs in CI exactly once and a red one blocks. It shares the
+  # detect.fleet path filter with the ubuntu job; ci-gate evaluates its verdict
+  # the same way: a skip is accepted only when detect.fleet == 'false'.
   fleet-tests-windows:
     name: Fleet shell tests (windows)
     needs: [detect]
@@ -253,8 +254,20 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v6
-      - name: Run fleet shell tests
-        run: sh scripts/fleet/run-fleet-tests.sh
+        with:
+          # test-next-loop.sh and test-issue-freshness.sh resolve origin/main;
+          # the default depth-1 checkout has no such ref and they exit non-zero
+          # on a fatal 'ambiguous argument' rather than on anything they test.
+          fetch-depth: 0
+      - name: Run the Windows-only fleet tests
+        # Not the glob runner: these two are the tests that cannot run on the
+        # ubuntu job. test-lane-helpers.sh drives the Windows Task Scheduler,
+        # and test-review-capabilities.sh generates a helper carrying
+        # `set -o pipefail` (scripts/review-pr.sh:806), which ubuntu's dash
+        # rejects with 'Illegal option'. Here `sh` is Git Bash, so both run.
+        run: |
+          sh scripts/fleet/test-lane-helpers.sh
+          sh scripts/test-review-capabilities.sh
 
   # Aggregate gate: the single check the branch ruleset will pin instead of
   # enumerating the eight individual jobs. `if: always()` keeps it running even

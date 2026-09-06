@@ -32,7 +32,7 @@ set -eu
 cd "$(git rev-parse --show-toplevel)"
 
 status=0
-for t in scripts/fleet/test-*.sh scripts/test-review-capabilities.sh; do
+for t in scripts/fleet/test-*.sh; do
     if [ ! -e "$t" ]; then
         # Reached only when a term above matched no file at all (empty glob,
         # or the explicitly named test was deleted): fail closed.
@@ -42,16 +42,22 @@ for t in scripts/fleet/test-*.sh scripts/test-review-capabilities.sh; do
     fi
     case "$t" in
         scripts/fleet/test-lane-helpers.sh)
-            # Skipped on every host, including Windows; the CI job
-            # `fleet-tests-windows` runs it instead. Making the skip
-            # OS-conditional was tried and reverted: this test drives the
-            # Windows Task Scheduler and is red on `origin/main` today
-            # (`dry-run task ... exists but its scheduler result is
-            # unavailable`), so running it from here makes this entrypoint
-            # unable to be green on a Windows workstation — which is the
-            # doneWhen the script exists to satisfy. One CI job carrying one
-            # Windows-only test is a signal; an always-red entrypoint is not.
-            printf 'SKIP %s (Windows-only: Scheduled Tasks, pwsh.exe, rust-lld.exe, taskkill — the fleet-tests-windows CI job runs it)\n' "$t"
+            # Platform-bound: the `fleet-tests-windows` CI job runs it. It
+            # drives the Windows Task Scheduler (Register-ScheduledTask /
+            # Start-ScheduledTask, pwsh.exe, taskkill), absent on ubuntu.
+            #
+            # The skip is unconditional rather than OS-conditional. Executing
+            # it from here was tried and reverted: it is red on `origin/main`
+            # on a Windows workstation today, so it made this entrypoint unable
+            # to be green — which is the doneWhen the script exists to satisfy.
+            #
+            # scripts/test-review-capabilities.sh is #896's other named test
+            # and is deliberately NOT in the glob above: it lives one directory
+            # up, and it generates a helper carrying `set -o pipefail`
+            # (scripts/review-pr.sh:806) which ubuntu's dash rejects with
+            # `Illegal option`. The same windows job runs it, for the same
+            # reason — each test on the platform it can actually run on.
+            printf 'SKIP %s (platform-bound; the fleet-tests-windows CI job runs it)\n' "$t"
             continue
             ;;
     esac
