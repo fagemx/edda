@@ -73,6 +73,20 @@ try {
   Assert-True ($dry.Out -match '=== DIGEST EXIT code=') 'the wrapper appends a terminal receipt each firing'
   Assert-True ($dry.Out -match 'Tee-Object -FilePath') 'the wrapper tees the digest output to the log'
 
+  # A RELATIVE -LogDir must reach the task action already absolute. Task
+  # Scheduler resolves a relative -File against the task's own working
+  # directory (here -Cwd, the worktree), while the wrapper is written
+  # relative to the caller's location — two different places, so every firing
+  # dies 0x80070002 before the wrapper can append its receipt, destroying the
+  # one signal that tells "ran and failed" from "never fired". Registration
+  # still looks successful, which is what makes this worth pinning.
+  $rel = Invoke-Schedule @('-Cwd', $repo, '-Board', '888', '-At', '09:30', '-LogDir', 'reldir', '-DryRun')
+  Assert-True ($rel.Exit -eq 0) "a relative -LogDir is accepted; output was:`n$($rel.Out)"
+  $relAction = ($rel.Out -split "`r?`n" | Where-Object { $_ -match '^dry-run: action: ' }) -join ''
+  # A drive letter and colon is enough to prove it is no longer relative.
+  Assert-True ($relAction -match '-File "[A-Za-z]:') `
+    "a relative -LogDir reaches the action as an absolute path; action was:`n$relAction"
+
   # --- refusals precede registration ---------------------------------------
   $noBoard = Invoke-Schedule @('-Cwd', $repo, '-At', '09:30', '-LogDir', $logDir, '-DryRun')
   Assert-True ($noBoard.Exit -ne 0) 'a missing board issue is refused'

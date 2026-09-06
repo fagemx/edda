@@ -88,6 +88,19 @@ if (-not $ShExe) { Fail 'sh.exe (Git Bash) not found on PATH; cannot build the t
 $PwshExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
 if (-not $PwshExe) { Fail 'pwsh.exe not found on PATH; cannot register the task' }
 
+# -LogDir is made absolute HERE, before the wrapper text, the log path and the
+# task action are derived from it. Resolving it after those were already built
+# from the raw value registers `-File <relative>`, which Task Scheduler
+# resolves against its own working directory rather than the operator's: the
+# task registers looking successful and every firing dies 0x80070002 BEFORE
+# the wrapper can append its `=== DIGEST EXIT code=N ===` receipt, so the one
+# signal that distinguishes "ran and failed" from "never fired" is destroyed
+# (the #683 shape, `scripts/review-pr.sh` documents it for -File arguments).
+# GetFullPath rather than Resolve-Path because -DryRun must create nothing,
+# and it resolves against the caller's location, which is what Resolve-Path
+# did here before.
+$LogDir = [System.IO.Path]::GetFullPath($LogDir, (Get-Location).ProviderPath)
+
 # Wrapper the scheduled task actually runs: outside any controller's job
 # object, UTF-8, HOME and GIT_CONFIG_PARAMETERS set explicitly (empty or
 # hostile in the task environment) — same contract as the lane and manager
@@ -145,9 +158,6 @@ if ($existing -and $existing.State -eq 'Running') {
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$LogDir = (Resolve-Path -LiteralPath $LogDir).Path
-$Log = Join-Path $LogDir 'edda-digest.log'
-$Wrapper = Join-Path $LogDir 'edda-digest.wrapper.ps1'
 $wrapperText | Set-Content -LiteralPath $Wrapper -Encoding utf8
 
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
