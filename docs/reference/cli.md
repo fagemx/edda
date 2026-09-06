@@ -702,6 +702,7 @@ edda dispatch --agent <AGENT> --prompt-file <FILE> [OPTIONS]
 | `--build-lane NAME` | Optional Cargo lane for a detached worker: `worker-1`, `worker-2`, `verifier`, or `verifier-2`. Requires `--detach`. |
 | `--detach-log-dir DIR` | Directory for detached logs, manifests, and the prompt snapshot (default: system temp `edda-dispatch` directory). Requires `--detach`. |
 | `--json` | Print exactly one JSON object to stdout instead of text lines |
+| `--verbose` | Stream the agent's activity to stdout while the turn runs, instead of printing nothing until it ends. An unattended lane's log is its only diagnostic: without this a lane killed at its timeout leaves a zero-byte log (GH-748). Refused with `--json`, which promises exactly one object on stdout |
 
 A `codex` agent that must reach the network — posting a PR comment with
 `gh`, pushing a branch — should be launched through
