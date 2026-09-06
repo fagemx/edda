@@ -16,7 +16,12 @@ trap 'rm -rf "$tmp"' EXIT
 
 # ── fixture: a git repo with unrelated WIP ──────────────────────────────
 git init -q -b main "$tmp/repo"
-git -C "$tmp/repo" -c user.name=test -c user.email=test@test commit -q --allow-empty -m init
+# Identity goes in the fixture repo config, not on a single `git -c`
+# invocation: ledger-sync.sh makes the mirror commit itself, and a CI
+# runner has no global user.name/user.email for it to fall back on.
+git -C "$tmp/repo" config user.name ledger-sync-test
+git -C "$tmp/repo" config user.email ledger-sync-test@example.com
+git -C "$tmp/repo" commit -q --allow-empty -m init
 printf 'work in progress\n' > "$tmp/repo/WIP.txt"
 
 # ── stub `edda`: writes a mirror into --out ─────────────────────────────
