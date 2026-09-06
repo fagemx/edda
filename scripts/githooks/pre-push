@@ -1,0 +1,23 @@
+#!/bin/sh
+# Git-native pre-push gate (zero external dependencies).
+# Enable with: sh scripts/githooks/install.sh   (sets core.hooksPath)
+#
+# GH-957: CONTRIBUTING.md points clones at scripts/githooks/install.sh, which
+# wired pre-commit and commit-msg only — so every clone installed the
+# git-native way pushed with NO force-push guard at all, while lefthook.yml
+# users had one. This hook closes that gap by handing git's own pre-push
+# records to the single implementation both layers share.
+#
+# git delivers one record per line on stdin:
+#   <local-ref> <local-sha> <remote-ref> <remote-sha>
+# which is byte-identical to what lefthook forwards under `use_stdin: true`,
+# so guard-push.sh needs no branch for the two callers. `exec` keeps the
+# guard's exit code as the hook's, and "$@" passes the remote name and URL
+# through unread — the guard's contract is stdin.
+#
+# Bypass: git push --no-verify, or the guard's own FLEET_ALLOW_FORCE_PUSH=1.
+
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+exec sh "$root/scripts/fleet/guard-push.sh" "$@"

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "device_revoke payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "device_name": {
+      "type": "string"
+    },
+    "revoke_all": {
+      "type": "boolean"
+    }
+  },
+  "required": [],
+  "additionalProperties": true,
+  "anyOf": [
+    {
+      "required": [
+        "device_name"
+      ]
+    },
+    {
+      "required": [
+        "revoke_all"
+      ]
+    }
+  ]
+}

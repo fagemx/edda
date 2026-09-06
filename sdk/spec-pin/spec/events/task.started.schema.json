@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "task.started payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "lease_ttl_s": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "task_id",
+    "lease_ttl_s",
+    "attempt"
+  ],
+  "additionalProperties": true
+}

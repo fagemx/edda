@@ -1,0 +1,22 @@
+# command: cargo test -p edda-conductor acp
+   Compiling edda-conductor v0.4.0 (C:\ai_agent\edda-wt-infra-acp\crates\edda-conductor)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.90s
+     Running unittests src\lib.rs (C:/Users/fagem/AppData/Local/fleet-workstation/lanes/verifier\debug\deps\edda_conductor-f9aa58aa2610f7a6.exe)
+
+running 11 tests
+test agent::acp_targets::tests::parses_agent_kind_suffixes_and_prefixes ... ok
+test agent::acp_targets::tests::grok_worker_endpoint_is_bare_subcommand ... ok
+test agent::acp_targets::tests::grok_verifier_endpoint_prepends_read_only_sandbox ... ok
+test agent::acp_targets::tests::keys_round_trip ... ok
+test runner::acp::tests::absent_usage_is_none_not_zero ... ok
+test runner::acp::tests::meta_usage_is_parsed_when_typed_field_is_absent ... ok
+test agent::acp_targets::tests::targets_without_documented_readonly_flags_get_none ... ok
+test runner::acp::tests::unlocated_request_fails_closed ... ok
+test runner::acp::tests::task_scope_allows_once_but_never_always ... ok
+test runner::acp::tests::policy_denies_traversal_peer_scope_and_verifier ... ok
+test runner::acp::tests::fake_agent_exercises_initialize_new_prompt_and_load ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 375 filtered out; finished in 0.01s
+
+
+# exit_code: 0

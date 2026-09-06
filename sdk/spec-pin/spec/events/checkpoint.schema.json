@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "checkpoint payload",
+  "description": "Layer 1 v1 payload.",
+  "type": "object",
+  "properties": {
+    "role": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "hypotheses": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rejected": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "hypothesis": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "hypothesis",
+          "reason"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "open": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "next": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "role",
+    "tags",
+    "hypotheses",
+    "rejected",
+    "open",
+    "next"
+  ],
+  "additionalProperties": true
+}

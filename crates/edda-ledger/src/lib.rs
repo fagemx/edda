@@ -7,6 +7,7 @@ pub mod lock;
 pub mod paths;
 pub(crate) mod sqlite_store;
 pub mod sync;
+pub mod task_actions;
 pub mod tasks;
 pub mod tombstone;
 pub mod verdict;

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "task.created payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "title": {
+      "type": "string"
+    },
+    "after": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "scope_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "assignee": {
+      "type": "string"
+    },
+    "agent_kind": {
+      "type": "string"
+    },
+    "plan_id": {
+      "type": "string"
+    },
+    "work_unit_ref": {
+      "type": "string"
+    },
+    "brief_ref": {
+      "type": "string"
+    },
+    "idempotency_key": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_id",
+    "title",
+    "after"
+  ],
+  "additionalProperties": true
+}

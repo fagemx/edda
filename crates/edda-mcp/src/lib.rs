@@ -16,6 +16,81 @@ use edda_derive::{rebuild_branch, render_context, DeriveOptions};
 use edda_ledger::lock::WorkspaceLock;
 use edda_ledger::Ledger;
 
+mod client_ops;
+#[cfg(test)]
+mod tests;
+
+// --- Client-contract tool parameter structs (GH-611) ---
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskNewParams {
+    /// Task title
+    title: String,
+    /// Agent label this task is assigned to (e.g. "tester")
+    assignee: Option<String>,
+    /// Agent transport kind (e.g. "claude-acp")
+    agent_kind: Option<String>,
+    /// Task ids that must be done first
+    after: Option<Vec<u64>>,
+    /// Paths this task may write
+    scope_paths: Option<Vec<String>>,
+    /// Plan this task belongs to
+    plan: Option<String>,
+    /// Work unit this task delivers
+    work_unit: Option<String>,
+    /// Brief reference (path or free text)
+    brief: Option<String>,
+    /// Idempotency key — the same key never creates a twin task
+    idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskStartParams {
+    /// Task id
+    id: u64,
+    /// Lease TTL in seconds (default 3600)
+    lease_ttl_s: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskDoneParams {
+    /// Task id
+    id: u64,
+    /// What was done, verifiable. Required: no receipt, no done.
+    receipt: String,
+    /// Evidence paths
+    evidence_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct TaskFailParams {
+    /// Task id
+    id: u64,
+    /// Why the task failed
+    reason: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReceiptParams {
+    /// Task id to read the recorded receipt for
+    task_id: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ClaimParams {
+    /// Scope label (e.g. "auth")
+    label: String,
+    /// Paths this session may write (globs)
+    paths: Option<Vec<String>>,
+    /// Optional subject this scope is for
+    subject: Option<String>,
+    /// Session id (default: deterministic "mcp-<label>")
+    session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct VerifyParams {}
+
 // --- Tool parameter structs ---
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -415,6 +490,135 @@ impl EddaServer {
         let json = serde_json::to_string_pretty(&result).map_err(|e| to_mcp_err(e.into()))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
+
+    // --- Client-contract operations (GH-611); shared state machine lives in
+    // `edda_ledger::task_actions` / `client_ops`, not here. ---
+
+    /// Create a task on the rail (idempotent by key)
+    #[tool(
+        description = "Create a task on the task rail. State transitions are hash-chained task events; the same idempotency key never creates a twin task."
+    )]
+    async fn edda_task_new(
+        &self,
+        Parameters(params): Parameters<TaskNewParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = edda_ledger::task_actions::NewTaskArgs {
+            title: &params.title,
+            assignee: params.assignee.as_deref(),
+            agent_kind: params.agent_kind.as_deref(),
+            after: params.after.as_deref().unwrap_or(&[]),
+            plan: params.plan.as_deref(),
+            work_unit: params.work_unit.as_deref(),
+            brief: params.brief.as_deref(),
+            idempotency_key: params.idempotency_key.as_deref(),
+            scope_paths: params.scope_paths.as_deref().unwrap_or(&[]),
+        };
+        let result = client_ops::task_new(&self.repo_root, &args).map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| to_mcp_err(e.into()))?,
+        )]))
+    }
+
+    /// Take the lease on a task and mark it running
+    #[tool(
+        description = "Start a task: take the lease and mark it running (attempt incremented; blocked/done/running tasks refuse)."
+    )]
+    async fn edda_task_start(
+        &self,
+        Parameters(params): Parameters<TaskStartParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = client_ops::task_start(
+            &self.repo_root,
+            params.id,
+            params.lease_ttl_s.unwrap_or(3600),
+        )
+        .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| to_mcp_err(e.into()))?,
+        )]))
+    }
+
+    /// Complete a task with a receipt (no receipt, no done)
+    #[tool(
+        description = "Complete a task — one action: done + receipt. Requires a non-empty receipt; successors become ready."
+    )]
+    async fn edda_task_done(
+        &self,
+        Parameters(params): Parameters<TaskDoneParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = client_ops::task_done(
+            &self.repo_root,
+            params.id,
+            &params.receipt,
+            params.evidence_paths.as_deref().unwrap_or(&[]),
+        )
+        .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| to_mcp_err(e.into()))?,
+        )]))
+    }
+
+    /// Mark a running task failed
+    #[tool(
+        description = "Mark a running task failed with a reason; the task can be started again to retry."
+    )]
+    async fn edda_task_fail(
+        &self,
+        Parameters(params): Parameters<TaskFailParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = client_ops::task_fail(&self.repo_root, params.id, &params.reason)
+            .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| to_mcp_err(e.into()))?,
+        )]))
+    }
+
+    /// Read the recorded receipt of a task
+    #[tool(description = "Read the receipt recorded by `task done` for a task id.")]
+    async fn edda_receipt(
+        &self,
+        Parameters(params): Parameters<ReceiptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = client_ops::receipt(&self.repo_root, params.task_id).map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| to_mcp_err(e.into()))?,
+        )]))
+    }
+
+    /// Claim a coordination scope on the session board
+    #[tool(
+        description = "Claim a coordination scope (label + path globs) for this session. One claim per session: a second claim replaces the first."
+    )]
+    async fn edda_claim(
+        &self,
+        Parameters(params): Parameters<ClaimParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = client_ops::claim(
+            &self.repo_root,
+            &params.label,
+            params.paths.as_deref().unwrap_or(&[]),
+            params.subject.as_deref(),
+            params.session.as_deref(),
+        )
+        .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| to_mcp_err(e.into()))?,
+        )]))
+    }
+
+    /// Verify the ledger hash chain (read-only)
+    #[tool(
+        description = "Verify the ledger hash chain read-only; reports ok/events/first_bad_event (same payload as `edda verify --json`)."
+    )]
+    async fn edda_verify(
+        &self,
+        Parameters(_params): Parameters<VerifyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = client_ops::verify(&self.repo_root).map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&result).map_err(|e| to_mcp_err(e.into()))?,
+        )]))
+    }
 }
 
 #[tool_handler]
@@ -517,683 +721,4 @@ pub async fn serve(repo_root: &Path) -> anyhow::Result<()> {
     let service = server.serve(rmcp::transport::stdio()).await?;
     service.waiting().await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn setup_workspace() -> (TempDir, PathBuf) {
-        let tmp = TempDir::new().unwrap();
-        let root = tmp.path().to_path_buf();
-        let paths = edda_ledger::paths::EddaPaths::discover(&root);
-        paths.ensure_layout().unwrap();
-        edda_ledger::ledger::init_workspace(&paths).unwrap();
-        edda_ledger::ledger::init_head(&paths, "main").unwrap();
-        edda_ledger::ledger::init_branches_json(&paths, "main").unwrap();
-        (tmp, root)
-    }
-
-    #[test]
-    fn server_info_has_tools_and_resources() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-        let info = server.get_info();
-        assert!(info.capabilities.tools.is_some());
-        assert!(info.capabilities.resources.is_some());
-    }
-
-    #[test]
-    fn open_ledger_works_for_valid_workspace() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-        assert!(server.open_ledger().is_ok());
-    }
-
-    #[test]
-    fn open_ledger_fails_for_invalid_path() {
-        let server = EddaServer::new(PathBuf::from("/nonexistent/path"));
-        assert!(server.open_ledger().is_err());
-    }
-
-    // ── GH-651 compat golden fixtures ──
-
-    /// GH-651 golden fixture for the `edda_ask` MCP tool response (ledger
-    /// decision `compat.stable-json-surfaces`; policy page: COMPATIBILITY.md
-    /// § "Stable `--json` contracts"). Within 0.x, keys may be added, never
-    /// deleted, renamed, or retyped. The tool returns an `AskResult` rendered
-    /// as JSON text, so the pinned shape matches `edda ask --json`.
-    #[tokio::test]
-    async fn compat_golden_fixture_ask_tool_response_keys_and_types() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.engine=postgres".to_string(),
-                reason: Some("golden fixture".to_string()),
-            }))
-            .await
-            .unwrap();
-
-        let result = server
-            .edda_ask(Parameters(AskParams {
-                query: Some("db".to_string()),
-                context_summary: None,
-                limit: None,
-                include_superseded: None,
-                branch: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        let v: serde_json::Value = serde_json::from_str(text).expect("tool returns valid JSON");
-
-        let mut keys: Vec<&str> = v
-            .as_object()
-            .expect("one JSON object")
-            .keys()
-            .map(|k| k.as_str())
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            vec![
-                "conversations",
-                "decisions",
-                "input_type",
-                "query",
-                "related_commits",
-                "related_notes",
-                "timeline",
-                "workspace_decision_count",
-                "workspace_event_count",
-            ],
-            "edda_ask tool response key set changed — this is a stable contract; \
-             see COMPATIBILITY.md (tasks/dependents/override_risk and the \
-             workspace counts are absent when empty/unknown by the \
-             skip_serializing_if contract)"
-        );
-        // The two workspace counts are integers when the ledger is readable,
-        // and absent from the key set above when unknown (#728).
-        assert!(
-            v["workspace_event_count"].is_u64(),
-            "workspace_event_count must be an integer: {v}"
-        );
-        assert!(
-            v["workspace_decision_count"].is_u64(),
-            "workspace_decision_count must be an integer: {v}"
-        );
-        assert!(v["query"].is_string());
-        assert!(v["input_type"].is_string());
-        for section in [
-            "decisions",
-            "timeline",
-            "related_commits",
-            "related_notes",
-            "conversations",
-        ] {
-            assert!(v[section].is_array(), "{section} must be an array: {v}");
-        }
-
-        let d = &v["decisions"][0];
-        let mut dkeys: Vec<&str> = d
-            .as_object()
-            .expect("decision object")
-            .keys()
-            .map(|k| k.as_str())
-            .collect();
-        dkeys.sort_unstable();
-        assert_eq!(
-            dkeys,
-            vec![
-                "branch",
-                "domain",
-                "event_id",
-                "governance",
-                "is_active",
-                "key",
-                "reason",
-                "ts",
-                "value",
-            ],
-            "DecisionHit key set changed — this is a stable contract; \
-             see COMPATIBILITY.md"
-        );
-        assert!(d["event_id"].is_string());
-        assert_eq!(d["key"], "db.engine");
-        assert_eq!(d["value"], "postgres");
-        assert_eq!(d["is_active"], serde_json::Value::Bool(true));
-        assert!(d["governance"].is_object());
-        assert_eq!(d["governance"]["status"], "unratified");
-    }
-
-    /// GH-651 golden fixture for the `edda_tool_tier` MCP tool response —
-    /// the other JSON-returning MCP tool. Pins the exact key set and types
-    /// of `ToolTierResult`.
-    #[tokio::test]
-    async fn compat_golden_fixture_tool_tier_response_keys_and_types() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        let result = server
-            .edda_tool_tier(Parameters(ToolTierParams {
-                tool_name: "bash".to_string(),
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        let v: serde_json::Value = serde_json::from_str(text).expect("tool returns valid JSON");
-
-        let mut keys: Vec<&str> = v
-            .as_object()
-            .expect("one JSON object")
-            .keys()
-            .map(|k| k.as_str())
-            .collect();
-        keys.sort_unstable();
-        assert_eq!(
-            keys,
-            vec!["approval", "description", "tier", "tool"],
-            "edda_tool_tier response key set changed — this is a stable contract; \
-             see COMPATIBILITY.md"
-        );
-        assert_eq!(v["tool"], "bash");
-        assert!(v["tier"].is_string(), "tier must be a string: {v}");
-        assert!(v["approval"].is_string(), "approval must be a string: {v}");
-        assert!(v["description"].is_string());
-    }
-
-    // --- edda_decide tests ---
-
-    #[tokio::test]
-    async fn test_decide_basic() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root.clone());
-
-        let result = server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.engine=postgres".to_string(),
-                reason: Some("JSONB support".to_string()),
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("Decision recorded: db.engine = postgres"));
-        assert!(text.contains("evt_"));
-
-        // Verify event in ledger
-        let ledger = Ledger::open(&root).unwrap();
-        let events = ledger.iter_events().unwrap();
-        let dec = events.iter().find(|e| {
-            e.payload
-                .get("tags")
-                .and_then(|v| v.as_array())
-                .map(|arr| arr.iter().any(|t| t.as_str() == Some("decision")))
-                .unwrap_or(false)
-        });
-        assert!(dec.is_some());
-        let dec = dec.unwrap();
-        assert_eq!(
-            dec.payload["decision"]["key"].as_str().unwrap(),
-            "db.engine"
-        );
-        assert_eq!(
-            dec.payload["decision"]["value"].as_str().unwrap(),
-            "postgres"
-        );
-        assert_eq!(
-            dec.payload["decision"]["reason"].as_str().unwrap(),
-            "JSONB support"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_decide_auto_supersede() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root.clone());
-
-        // First decision
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.engine=sqlite".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
-
-        // Second decision with same key, different value
-        let result = server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.engine=postgres".to_string(),
-                reason: Some("need JSONB".to_string()),
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("supersedes"));
-
-        // Verify provenance link in ledger
-        let ledger = Ledger::open(&root).unwrap();
-        let events = ledger.iter_events().unwrap();
-        let last_dec = events
-            .iter()
-            .rev()
-            .find(|e| {
-                e.payload
-                    .get("decision")
-                    .and_then(|d| d.get("value"))
-                    .and_then(|v| v.as_str())
-                    == Some("postgres")
-            })
-            .unwrap();
-        assert_eq!(last_dec.refs.provenance.len(), 1);
-        assert_eq!(last_dec.refs.provenance[0].rel, "supersedes");
-    }
-
-    #[tokio::test]
-    async fn test_decide_idempotent_no_supersede() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root.clone());
-
-        // Same key, same value twice — should NOT create supersede link
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.engine=postgres".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
-
-        let result = server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.engine=postgres".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(!text.contains("supersedes"));
-
-        // Verify no provenance link on second event
-        let ledger = Ledger::open(&root).unwrap();
-        let events = ledger.iter_events().unwrap();
-        let last = events.last().unwrap();
-        assert!(last.refs.provenance.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_decide_invalid_format() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        let result = server
-            .edda_decide(Parameters(DecideParams {
-                decision: "no-equals-sign".to_string(),
-                reason: None,
-            }))
-            .await;
-
-        assert!(result.is_err());
-    }
-
-    // --- edda_ask tests ---
-
-    #[tokio::test]
-    async fn test_ask_finds_decisions() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.engine=postgres".to_string(),
-                reason: Some("JSONB support".to_string()),
-            }))
-            .await
-            .unwrap();
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "auth.method=JWT".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
-
-        let result = server
-            .edda_ask(Parameters(AskParams {
-                query: Some("postgres".to_string()),
-                context_summary: None,
-                limit: None,
-                include_superseded: None,
-                branch: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["input_type"], "keyword");
-        assert_eq!(parsed["decisions"].as_array().unwrap().len(), 1);
-        assert_eq!(parsed["decisions"][0]["key"], "db.engine");
-    }
-
-    #[tokio::test]
-    async fn test_ask_empty_returns_all_active() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.engine=postgres".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "auth.method=JWT".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
-
-        let result = server
-            .edda_ask(Parameters(AskParams {
-                query: None,
-                context_summary: None,
-                limit: None,
-                include_superseded: None,
-                branch: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["input_type"], "overview");
-        assert_eq!(parsed["decisions"].as_array().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_ask_domain_browse() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.engine=postgres".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "db.pool=10".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "auth.method=JWT".to_string(),
-                reason: None,
-            }))
-            .await
-            .unwrap();
-
-        let result = server
-            .edda_ask(Parameters(AskParams {
-                query: Some("db".to_string()),
-                context_summary: None,
-                limit: None,
-                include_superseded: None,
-                branch: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["input_type"], "domain");
-        assert_eq!(parsed["decisions"].as_array().unwrap().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_ask_no_results() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        let result = server
-            .edda_ask(Parameters(AskParams {
-                query: Some("nonexistent".to_string()),
-                context_summary: None,
-                limit: None,
-                include_superseded: None,
-                branch: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert!(parsed["decisions"].as_array().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_ask_context_summary_fallback() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        server
-            .edda_decide(Parameters(DecideParams {
-                decision: "pricing.discount_policy=daytime_revenue_shield".to_string(),
-                reason: Some("avoid aggressive daytime markdowns".to_string()),
-            }))
-            .await
-            .unwrap();
-
-        let result = server
-            .edda_ask(Parameters(AskParams {
-                query: None,
-                context_summary: Some("daytime discount outcome".to_string()),
-                limit: None,
-                include_superseded: None,
-                branch: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
-        assert_eq!(parsed["input_type"], "keyword");
-        assert!(parsed["decisions"].is_array());
-        assert_eq!(parsed["decisions"][0]["key"], "pricing.discount_policy");
-    }
-
-    // --- edda_log tests ---
-
-    #[tokio::test]
-    async fn test_log_filter_by_type() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        // Add a note
-        server
-            .edda_note(Parameters(NoteParams {
-                text: "test note".to_string(),
-                role: None,
-                tags: None,
-            }))
-            .await
-            .unwrap();
-
-        // Filter by note type — should find the event
-        let result = server
-            .edda_log(Parameters(LogParams {
-                event_type: Some("note".to_string()),
-                keyword: None,
-                after: None,
-                before: None,
-                limit: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("note"));
-        assert!(text.contains("test note"));
-
-        // Filter by non-existent type — should return nothing
-        let result = server
-            .edda_log(Parameters(LogParams {
-                event_type: Some("commit".to_string()),
-                keyword: None,
-                after: None,
-                before: None,
-                limit: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("No events match"));
-    }
-
-    #[tokio::test]
-    async fn test_log_filter_by_keyword() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        server
-            .edda_note(Parameters(NoteParams {
-                text: "authentication flow".to_string(),
-                role: None,
-                tags: None,
-            }))
-            .await
-            .unwrap();
-
-        server
-            .edda_note(Parameters(NoteParams {
-                text: "database schema".to_string(),
-                role: None,
-                tags: None,
-            }))
-            .await
-            .unwrap();
-
-        let result = server
-            .edda_log(Parameters(LogParams {
-                event_type: None,
-                keyword: Some("auth".to_string()),
-                after: None,
-                before: None,
-                limit: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("authentication"));
-        assert!(!text.contains("database"));
-    }
-
-    #[tokio::test]
-    async fn test_log_date_filter() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        server
-            .edda_note(Parameters(NoteParams {
-                text: "some note".to_string(),
-                role: None,
-                tags: None,
-            }))
-            .await
-            .unwrap();
-
-        // Filter with future date should show nothing
-        let result = server
-            .edda_log(Parameters(LogParams {
-                event_type: None,
-                keyword: None,
-                after: Some("2099-01-01".to_string()),
-                before: None,
-                limit: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("No events match"));
-
-        // Filter with past date should show the event
-        let result = server
-            .edda_log(Parameters(LogParams {
-                event_type: None,
-                keyword: None,
-                after: Some("2020-01-01".to_string()),
-                before: None,
-                limit: None,
-            }))
-            .await
-            .unwrap();
-
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("some note"));
-    }
-
-    // --- edda_draft_inbox tests ---
-
-    #[tokio::test]
-    async fn test_draft_inbox_empty() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root);
-
-        let result = server.edda_draft_inbox().await.unwrap();
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert_eq!(text, "No pending items.");
-    }
-
-    #[tokio::test]
-    async fn test_draft_inbox_with_pending() {
-        let (_tmp, root) = setup_workspace();
-        let server = EddaServer::new(root.clone());
-
-        // Create a mock draft file
-        let drafts_dir = root.join(".edda").join("drafts");
-        let draft_json = serde_json::json!({
-            "version": 1,
-            "draft_id": "drf_test123",
-            "title": "Add auth module",
-            "status": "proposed",
-            "stages": [
-                {
-                    "stage_id": "lead",
-                    "role": "lead",
-                    "min_approvals": 1,
-                    "approved_by": [],
-                    "status": "pending"
-                }
-            ]
-        });
-        std::fs::write(
-            drafts_dir.join("drf_test123.json"),
-            serde_json::to_string_pretty(&draft_json).unwrap(),
-        )
-        .unwrap();
-
-        let result = server.edda_draft_inbox().await.unwrap();
-        let text = result.content[0].raw.as_text().unwrap().text.as_str();
-        assert!(text.contains("drf_test123"));
-        assert!(text.contains("Add auth module"));
-        assert!(text.contains("stage: lead"));
-        assert!(text.contains("approvals: 0/1"));
-    }
 }

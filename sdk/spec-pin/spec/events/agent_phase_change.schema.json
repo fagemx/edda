@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "agent_phase_change payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "session_id": {
+      "type": "string"
+    },
+    "label": {
+      "type": "string"
+    },
+    "from": {
+      "type": "string"
+    },
+    "to": {
+      "type": "string"
+    },
+    "issue": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "confidence": {
+      "type": "number"
+    },
+    "signals": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "session_id",
+    "from",
+    "to",
+    "confidence",
+    "signals"
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,3 @@
+# command: scripts/lint-file-length.sh --tree
+
+# exit_code: 0

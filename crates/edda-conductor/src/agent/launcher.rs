@@ -5,6 +5,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -122,13 +123,15 @@ impl Default for ClaudeCodeLauncher {
 }
 
 impl ClaudeCodeLauncher {
-    /// Assemble the `claude -p` command line for one phase. Split out from
-    /// [`AgentLauncher::run_phase`] so tests can assert the exact spawn
-    /// arguments without launching a real backend (GH-574).
+    /// Assemble the `claude -p` command line for one phase. The user prompt is
+    /// sent on stdin by [`AgentLauncher::run_phase`], which Claude documents as
+    /// supported for `--print` text input. Keeping it out of argv prevents a
+    /// large review brief from exceeding Windows' command-line limit. Split
+    /// out so tests can assert the exact spawn arguments without launching a
+    /// real backend (GH-574).
     fn build_command(
         &self,
         phase: &Phase,
-        prompt: &str,
         plan_context: &str,
         session_id: &str,
         cwd: &Path,
@@ -144,7 +147,6 @@ impl ClaudeCodeLauncher {
             "--session-id"
         };
         cmd.arg("-p")
-            .arg(prompt)
             .arg("--verbose")
             .arg("--output-format")
             .arg("stream-json")
@@ -153,6 +155,7 @@ impl ClaudeCodeLauncher {
             .arg("--permission-mode")
             .arg(&phase.permission_mode)
             .current_dir(cwd)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             // Allow nesting — remove markers that prevent Claude Code from spawning
@@ -301,10 +304,14 @@ impl AgentLauncher for ClaudeCodeLauncher {
                 phase.id
             );
         }
-        let mut cmd = self.build_command(phase, prompt, plan_context, session_id, cwd);
+        let mut cmd = self.build_command(phase, plan_context, session_id, cwd);
 
         let started = Instant::now();
         let mut child = cmd.spawn()?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("failed to capture Claude stdin"))?;
         let stdout = child
             .stdout
             .take()
@@ -321,8 +328,25 @@ impl AgentLauncher for ClaudeCodeLauncher {
 
         let result = async {
             tokio::select! {
-                result = monitor.run() => {
-                    let monitor_result = result?;
+                result = async {
+                    // A large stdin write can wait for a child that has not
+                    // started reading yet. Drain stream-json concurrently so
+                    // output cannot deadlock the write; the outer timeout and
+                    // cancellation branches still own this child lifecycle.
+                    let (monitor_result, prompt_write) = tokio::join!(
+                        monitor.run(),
+                        async move {
+                            stdin.write_all(prompt.as_bytes()).await?;
+                            // Tokio's ChildStdin::shutdown is a no-op for a
+                            // process pipe. Drop the write end instead, so a
+                            // print-mode backend that reads all input sees
+                            // EOF before it decides whether to emit output.
+                            drop(stdin);
+                            Ok::<(), std::io::Error>(())
+                        },
+                    );
+                    prompt_write?;
+                    let monitor_result = monitor_result?;
                     // In-band model observation: whatever the backend itself
                     // reported, or nothing. Never inferred from config.
                     self.record_observed_model(monitor_result.model.clone());
@@ -332,6 +356,8 @@ impl AgentLauncher for ClaudeCodeLauncher {
                     self.record_observed_session(monitor_result.session_id.clone());
                     let exit = child.wait().await?;
                     Ok(classify_result(&monitor_result, exit.code()))
+                } => {
+                    result
                 }
                 _ = tokio::time::sleep(Duration::from_secs(timeout_sec)) => {
                     child.kill().await.ok();
@@ -501,7 +527,7 @@ mod tests {
     fn claude_command_for(yaml: &str) -> tokio::process::Command {
         let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude"));
         let phase = phase_from_yaml(yaml);
-        launcher.build_command(&phase, "do the task", "", "sess-1", Path::new("."))
+        launcher.build_command(&phase, "", "sess-1", Path::new("."))
     }
 
     fn phase_from_yaml(yaml: &str) -> Phase {
@@ -534,8 +560,7 @@ mod tests {
         // session must spell the same id as --resume (GH-708).
         let launcher = ClaudeCodeLauncher::with_bin(PathBuf::from("claude")).with_resume(true);
         let phase = phase_from_yaml("  - id: a\n    prompt: x\n");
-        let args =
-            args_of(&launcher.build_command(&phase, "do the task", "", "sess-1", Path::new(".")));
+        let args = args_of(&launcher.build_command(&phase, "", "sess-1", Path::new(".")));
         let pos = args
             .iter()
             .position(|a| a == "--resume")
@@ -656,6 +681,108 @@ mod tests {
             "the deny list must be a single flag, got: {args:?}"
         );
         assert_eq!(args[deny_positions[0] + 1], "Write,Edit,mcp__*");
+    }
+
+    /// Windows has a 32,767-character command-line ceiling. Claude documents
+    /// `--print` text input on stdin, so a product review brief must arrive at
+    /// the real child there while the session and tool policy stay in argv.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn claude_large_prompt_reaches_windows_child_through_eof() {
+        let temp = tempfile::tempdir().expect("fixture directory");
+        let prompt_path = temp.path().join("received-prompt.txt");
+        let launcher_path = temp.path().join("claude.cmd");
+        let reader_path = temp.path().join("claude.ps1");
+        std::fs::write(
+            &launcher_path,
+            "@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0claude.ps1\"\r\n",
+        )
+        .expect("fixture launcher");
+        std::fs::write(
+            &reader_path,
+            r#"$expected = [int]$env:CLAUDE_STDIN_EXPECTED
+$builder = [Text.StringBuilder]::new()
+$buffer = New-Object char[] 4096
+while ($true) {
+  $read = [Console]::In.Read($buffer, 0, $buffer.Length)
+  if ($read -le 0) { break }
+  [void]$builder.Append($buffer, 0, $read)
+}
+$prompt = $builder.ToString()
+[IO.File]::WriteAllText($env:CLAUDE_STDIN_FIXTURE, $prompt)
+if ($prompt.Length -ne $expected) { throw "expected $expected characters before EOF, received $($prompt.Length)" }
+Write-Output '{"type":"system","subtype":"init","session_id":"sess-1","model":"fixture-model"}'
+Write-Output '{"type":"result","subtype":"success","total_cost_usd":0,"result":"done"}'
+"#,
+        )
+        .expect("fixture reader");
+
+        let launcher = ClaudeCodeLauncher::with_bin(launcher_path);
+        let mut phase = phase_from_yaml(
+            "  - id: review\n    prompt: x\n    tools: [Read]\n    exclude_tools: [Write]\n",
+        );
+        phase.env.insert(
+            "CLAUDE_STDIN_FIXTURE".into(),
+            prompt_path.to_string_lossy().into_owned(),
+        );
+        let prompt = "review brief ".to_owned() + &"x".repeat(36_000);
+        phase
+            .env
+            .insert("CLAUDE_STDIN_EXPECTED".into(), prompt.len().to_string());
+        let result = launcher
+            .run_phase(
+                &phase,
+                &prompt,
+                "",
+                "sess-1",
+                temp.path(),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("large prompt fixture runs");
+
+        assert!(matches!(result, PhaseResult::AgentDone { .. }));
+        assert_eq!(std::fs::read_to_string(prompt_path).unwrap(), prompt);
+        assert_eq!(launcher.last_observed_session().as_deref(), Some("sess-1"));
+        assert_eq!(
+            launcher.last_observed_model().as_deref(),
+            Some("fixture-model")
+        );
+    }
+
+    /// A backend can emit its terminal stream without reading stdin. The
+    /// concurrent pump must still let the bounded launcher return instead of
+    /// waiting forever to finish a large pipe write.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn claude_large_prompt_without_reader_stays_bounded() {
+        let temp = tempfile::tempdir().expect("fixture directory");
+        let launcher_path = temp.path().join("claude.cmd");
+        std::fs::write(
+            &launcher_path,
+            "@echo off\r\necho {\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"sess-1\",\"model\":\"fixture-model\"}\r\necho {\"type\":\"result\",\"subtype\":\"success\",\"total_cost_usd\":0}\r\nexit /b 0\r\n",
+        )
+        .expect("fixture launcher");
+        let launcher = ClaudeCodeLauncher::with_bin(launcher_path);
+        let phase = phase_from_yaml("  - id: review\n    prompt: x\n");
+        let prompt = "review brief ".to_owned() + &"x".repeat(36_000);
+
+        let bounded = tokio::time::timeout(
+            Duration::from_secs(5),
+            launcher.run_phase(
+                &phase,
+                &prompt,
+                "",
+                "sess-1",
+                temp.path(),
+                CancellationToken::new(),
+            ),
+        )
+        .await;
+        assert!(
+            bounded.is_ok(),
+            "a non-reading child must not block the launcher"
+        );
     }
 
     /// GH-574: claude's CLI exposes no thinking-level flag, so a phase that

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "approval_policy_match payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "task_id": {
+      "type": "string"
+    },
+    "step": {
+      "type": "string"
+    },
+    "matched_rule": {
+      "type": "string"
+    },
+    "action": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "risk_level": {
+      "type": "string"
+    },
+    "files_changed": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "task_id",
+    "step",
+    "action",
+    "reason"
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,71 @@
+{
+  "protocol_version": "adapter-normalized-protocol/0.1",
+  "contract_version": "adapter-contract/0.1",
+  "description": [
+    "Normalized hook events shared by every conformance run. `event` is the",
+    "contract-level name; `payload` carries vendor-neutral fields that each",
+    "vendor encoder maps into its own stdin shape. An adapter driven via",
+    "--adapter-cmd receives this JSON verbatim on stdin and must answer with",
+    "the normalized response JSON described in docs/guides/writing-a-bridge.md."
+  ],
+  "events": [
+    {
+      "event": "session.start",
+      "description": "A new agent session begins; adapter should write a heartbeat and inject full context (doctrine + workspace + hot pack + write-back tail)."
+    },
+    {
+      "event": "prompt.submit",
+      "description": "The user submitted a prompt; adapter should inject a lightweight workspace diff, deduped against the previous identical injection.",
+      "payload": { "prompt": "conformance probe: summarize workspace state" }
+    },
+    {
+      "event": "tool.pre",
+      "description": "A Bash tool call is pending; L3 rules are advisory — the decision stays allow.",
+      "payload": {
+        "tool_name": "Bash",
+        "tool_input": { "command": "printf 'untouched';\nwhoami" }
+      }
+    },
+    {
+      "event": "tool.post",
+      "description": "A tool call finished; counts toward session activity and may carry a decision signal.",
+      "payload": {
+        "tool_name": "Bash",
+        "tool_input": { "command": "git status --short" },
+        "tool_output": { "stdout": " M file.rs", "exit_code": 0 }
+      }
+    },
+    {
+      "event": "tool.post.signal",
+      "description": "A tool call that carries a decision signal (edit/commit activity); nudges must be rate-limited.",
+      "payload": {
+        "tool_name": "Bash",
+        "tool_input": { "command": "git commit -m 'probe'" },
+        "tool_output": { "stdout": "[main abc123] probe", "exit_code": 0 }
+      }
+    },
+    {
+      "event": "tool.post.secret",
+      "description": "A tool call whose payload contains a sentinel secret; the durable store must never contain the raw value. The sentinel is AWS's documented example key (public, not a real credential).",
+      "payload": {
+        "tool_name": "Bash",
+        "tool_input": { "command": "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE" },
+        "tool_output": { "stdout": "", "exit_code": 0 }
+      }
+    },
+    {
+      "event": "compact.pre",
+      "description": "Context compaction is about to run; adapter may rebuild the hot pack as a side effect but must not try to inject (vendor schemas forbid it)."
+    },
+    {
+      "event": "session.end",
+      "description": "The session ended; adapter must digest the session exactly once (idempotent), remove its heartbeat and per-session state, and release claims.",
+      "payload": { "reason": "clear" }
+    },
+    {
+      "event": "event.from.the.future.v9",
+      "description": "Unknown future event; the adapter must exit 0 with a permissive response (forward compatibility).",
+      "payload": { "note": "conformance probe" }
+    }
+  ]
+}

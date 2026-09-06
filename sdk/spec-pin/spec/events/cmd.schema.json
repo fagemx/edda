@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cmd payload",
+  "description": "Layer 1 v1 payload.",
+  "type": "object",
+  "properties": {
+    "argv": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "exit_code": {
+      "type": "integer"
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stdout_blob": {
+      "type": "string"
+    },
+    "stderr_blob": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "argv",
+    "cwd",
+    "exit_code",
+    "duration_ms",
+    "stdout_blob",
+    "stderr_blob"
+  ],
+  "additionalProperties": true
+}

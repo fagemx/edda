@@ -1,3 +1,11 @@
+---
+id: c2-stale-ratify-claim
+class: docs-skills
+severity: P1
+file: canaries-fixture/c2-stale-ratify-claim/STATUS.md
+match: '(D-042|ratif|ratified|unratified).*(矛盾|contradict|stale|過期|outdated|conflict|inconsist|不符|不一致)|((矛盾|contradict|stale|過期|outdated|conflict|inconsist|不符|不一致).*(D-042|ratif))'
+---
+
 # c2-stale-ratify-claim
 
 - class: `docs-skills`（docs）

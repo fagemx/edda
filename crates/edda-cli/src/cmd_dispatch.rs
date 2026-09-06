@@ -38,12 +38,16 @@ pub struct DispatchArgs {
     /// Directory for detached logs and manifests (default: system temp/edda-dispatch).
     #[arg(long, requires = "detach")]
     pub detach_log_dir: Option<String>,
-    /// Agent backend that runs the turn
+    /// Agent backend that runs the turn. ACP targets use `acp:<target>`.
     #[arg(long, value_enum)]
     pub agent: AgentKind,
+    /// Task-rail id for an ACP turn. ACP dispatches derive their prompt,
+    /// scope, and resume id from this task rather than accepting substitutes.
+    #[arg(long)]
+    pub task_id: Option<u64>,
     /// Path to a file containing the prompt (read verbatim). Required
     /// unless --list-models is given.
-    #[arg(long, required_unless_present = "list_models")]
+    #[arg(long)]
     pub prompt_file: Option<String>,
     /// Session id passed to the backend verbatim. Continuity semantics are
     /// per-backend, and all three persist conversations across invocations:
@@ -437,6 +441,10 @@ pub fn run(args: DispatchArgs) -> Result<()> {
 
 #[allow(clippy::too_many_lines)] // 162 lines at #779; split tracked in none
 fn run_inner(args: DispatchArgs) -> Result<i32> {
+    let is_acp = args.agent.is_acp();
+    if !is_acp && args.task_id.is_some() {
+        bail!("--task-id is only valid with an ACP agent");
+    }
     // GH-574 honesty gate: refuse unsupported backend/option combinations
     // instead of accepting them and silently doing nothing. An explicitly
     // passed --permission-mode on a backend with no permission concept is
@@ -444,18 +452,20 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
     // so an absent flag claims nothing and drops nothing. Round 3 (P1-2):
     // this gate runs before EVERY short-circuit, including --list-models —
     // listing mode must not accept and drop a permission contract either.
-    validate_dispatch_options(
-        args.agent,
-        &DispatchOptions {
-            model: args.model.as_deref(),
-            thinking: args.thinking.as_deref(),
-            tools: args.tools.as_deref(),
-            exclude_tools: args.exclude_tools.as_deref(),
-            session_dir: args.session_dir.as_deref(),
-            permission_mode: args.permission_mode.as_deref(),
-            resume: args.resume,
-        },
-    )?;
+    if !is_acp {
+        validate_dispatch_options(
+            args.agent,
+            &DispatchOptions {
+                model: args.model.as_deref(),
+                thinking: args.thinking.as_deref(),
+                tools: args.tools.as_deref(),
+                exclude_tools: args.exclude_tools.as_deref(),
+                session_dir: args.session_dir.as_deref(),
+                permission_mode: args.permission_mode.as_deref(),
+                resume: args.resume,
+            },
+        )?;
+    }
 
     // --list-models short-circuits dispatch: print the provider/model table
     // and exit 0 (GH-574 — callers look up patterns instead of guessing a
@@ -486,12 +496,18 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
     // F1): an unreadable --prompt-file or an invalid --cwd must fail with no
     // claim comment/label/assignee mutation and no agent started, because a
     // `taking:` claim cannot be withdrawn (GH-682).
-    let prompt_file = args
-        .prompt_file
-        .as_deref()
-        .context("--prompt-file is required unless --list-models is given")?;
-    let prompt = std::fs::read_to_string(prompt_file)
-        .with_context(|| format!("--prompt-file not readable: {prompt_file}"))?;
+    let prompt = if is_acp {
+        None
+    } else {
+        let prompt_file = args
+            .prompt_file
+            .as_deref()
+            .context("--prompt-file is required unless --list-models is given")?;
+        Some(
+            std::fs::read_to_string(prompt_file)
+                .with_context(|| format!("--prompt-file not readable: {prompt_file}"))?,
+        )
+    };
 
     let cwd = match args.cwd.as_deref() {
         Some(dir) => {
@@ -509,6 +525,9 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
             "--cwd does not exist or is not a directory: {}",
             cwd.display()
         );
+    }
+    if is_acp {
+        crate::cmd_dispatch_acp::preflight(&args, &cwd)?;
     }
 
     // Check GitHub ownership and write the claim before starting any agent,
@@ -531,6 +550,13 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         return Ok(2);
     }
 
+    // ACP reaches this point only after the same GitHub ownership check as
+    // legacy dispatch. Its task-derived policy is then applied in its module.
+    if is_acp {
+        return crate::cmd_dispatch_acp::run(args);
+    }
+
+    let prompt = prompt.context("legacy dispatch prompt missing")?;
     let session_id = args.session_id.clone().unwrap_or_else(generate_session_id);
 
     if args.detach {
@@ -946,16 +972,41 @@ mod tests {
         assert!(!args.json);
     }
 
+    /// GH-800: clap no longer requires --prompt-file because ACP dispatch
+    /// derives its prompt from --task-id. The requirement moved to run_inner,
+    /// which still refuses a missing prompt file for legacy backends before
+    /// any cwd, claim, or backend work.
     #[test]
-    fn dispatch_requires_prompt_file() {
-        let error = match TestCli::try_parse_from(["edda", "--agent", "pi"]) {
-            Err(error) => error,
-            Ok(_) => panic!("missing --prompt-file must be an error"),
-        };
+    fn dispatch_parses_without_prompt_file_for_acp_and_refuses_it_at_runtime_for_legacy() {
+        let args = parse(&["edda", "--agent", "acp:grok", "--task-id", "9"]);
+        assert!(args.prompt_file.is_none());
+        assert!(args.task_id == Some(9));
+
+        let legacy = parse(&["edda", "--agent", "pi"]);
+        let error =
+            run_inner(legacy).expect_err("legacy dispatch without --prompt-file must be refused");
         assert!(
-            error.to_string().contains("prompt-file"),
-            "error should mention --prompt-file: {error}"
+            error
+                .to_string()
+                .contains("--prompt-file is required unless --list-models is given"),
+            "{error}"
         );
+    }
+
+    #[test]
+    fn task_id_is_refused_for_legacy_agents() {
+        let args = parse(&[
+            "edda",
+            "--agent",
+            "pi",
+            "--prompt-file",
+            "p.txt",
+            "--task-id",
+            "9",
+        ]);
+        let error = run_inner(args)
+            .expect_err("--task-id is an ACP-only flag and must be refused for legacy agents");
+        assert!(error.to_string().contains("--task-id"), "{error}");
     }
 
     #[test]

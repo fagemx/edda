@@ -1,0 +1,216 @@
+{
+  "provenance": {
+    "contract_version": "adapter-contract/0.1",
+    "protocol_version": "adapter-normalized-protocol/0.1",
+    "source_basis_sha": "03d0f6ee7d06442f7d72f899de0e8c2fc0b68d4f",
+    "source_base_sha": "9de7662",
+    "edda_version": "edda 0.4.0",
+    "edda_sha256": "3b930e658613ea2e6f3e0130bd41d90a4751a8aed52444be16fb943e5eb0678e",
+    "edda_path": "C:\\Users\\fagem\\.cargo\\bin\\edda.exe",
+    "provenance_note": "source_basis_sha is supplied build provenance, not binary attestation. The embedded version string and SHA-256 are recorded independently; if its embedded revision differs from source_basis_sha (or is dirty), this report is a pinned-binary observation only and is not evidence about current main or the supplied frozen source."
+  },
+  "runs": [
+    {
+      "target": "adapter-cmd",
+      "results": [
+        {
+          "id": "H-STORE-ISOLATION",
+          "title": "isolated store only; real store untouched",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "no confc1c9016e artifacts in C:\\Users\\fagem\\.edda; C:\\Users\\fagem\\AppData\\Roaming\\edda; C:\\Users\\fagem\\.local\\share\\edda",
+          "note": ""
+        },
+        {
+          "id": "H-FAIL-OPEN",
+          "title": "malformed stdin exits 0, never blocks the host agent",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{\"continue\": true}'",
+          "note": ""
+        },
+        {
+          "id": "H-UNKNOWN-EVENT",
+          "title": "unknown event exits 0 permissively",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{}'",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-START",
+          "title": "session start injects bounded context with write-back protocol",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "injection 595 chars, boundary+writeback present",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-BUDGET",
+          "title": "pack budget truncates body, preserves write-back tail",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "injection 247 chars under 300-char budget; tail preserved",
+          "note": ""
+        },
+        {
+          "id": "H-PROMPT-DEDUP",
+          "title": "identical consecutive prompt injections are deduped",
+          "severity": "SHOULD",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "first 142 chars, second 0 chars",
+          "note": ""
+        },
+        {
+          "id": "H-LEDGER-APPEND",
+          "title": "hook events append to durable evidence",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "public CLI ledger contains lifecycle and activity markers",
+          "note": ""
+        },
+        {
+          "id": "H-HEARTBEAT",
+          "title": "heartbeat written on start, removed on end",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "public heartbeat lifecycle markers present",
+          "note": ""
+        },
+        {
+          "id": "H-DIGEST-IDEMPOTENT",
+          "title": "repeated digest triggers produce exactly one digest",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "exactly one session digest across a repeated session end",
+          "note": ""
+        },
+        {
+          "id": "H-REDACT-STORE",
+          "title": "secrets redacted before durable store write",
+          "severity": "SHOULD",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "sentinel absent from public CLI ledger and private durable state",
+          "note": ""
+        },
+        {
+          "id": "H-END-CLEANUP",
+          "title": "session end removes per-session state",
+          "severity": "SHOULD",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "private durable state cleaned after session end",
+          "note": ""
+        },
+        {
+          "id": "H-PRETOOL-IDENTITY",
+          "title": "PreToolUse stays allow + carries session identity (codex capability)",
+          "severity": "SHOULD",
+          "vendor": "adapter-cmd",
+          "status": "SKIP",
+          "evidence": "decision='allow' updatedInput=no",
+          "note": "vendor has no session-identity rewrite capability (documented capability difference)"
+        },
+        {
+          "id": "H-NUDGE-RATE",
+          "title": "decision nudges are rate-limited",
+          "severity": "SHOULD",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "2 nudges over 6 signal events (rate-limited)",
+          "note": ""
+        },
+        {
+          "id": "H-STORE-ISOLATION-AFTER",
+          "title": "isolated store only; real store untouched after events",
+          "severity": "MUST",
+          "vendor": "adapter-cmd",
+          "status": "PASS",
+          "evidence": "no confc1c9016e artifacts in C:\\Users\\fagem\\.edda; C:\\Users\\fagem\\AppData\\Roaming\\edda; C:\\Users\\fagem\\.local\\share\\edda",
+          "note": ""
+        },
+        {
+          "id": "L-RECEIPT-CLAUDE",
+          "title": "launcher receipt has all required fields",
+          "severity": "MUST",
+          "vendor": "launcher-claude",
+          "status": "PASS",
+          "evidence": "fixture receipt fields=['heartbeat_owner', 'model_observed', 'model_requested', 'outcome', 'session_observed', 'tools_applied', 'tools_requested'] tools=['Read', 'Grep'] owner='launcher'",
+          "note": ""
+        },
+        {
+          "id": "L-EXIT-CLASS-CLAUDE",
+          "title": "launcher crash receipt remains complete",
+          "severity": "MUST",
+          "vendor": "launcher-claude",
+          "status": "PASS",
+          "evidence": "deterministic crash receipt outcome='crash'",
+          "note": ""
+        },
+        {
+          "id": "L-RECEIPT-PI",
+          "title": "launcher receipt has all required fields",
+          "severity": "MUST",
+          "vendor": "launcher-pi",
+          "status": "PASS",
+          "evidence": "fixture receipt fields=['heartbeat_owner', 'model_observed', 'model_requested', 'outcome', 'session_observed', 'tools_applied', 'tools_requested'] tools=['Read', 'Grep'] owner='launcher'",
+          "note": ""
+        },
+        {
+          "id": "L-EXIT-CLASS-PI",
+          "title": "launcher crash receipt remains complete",
+          "severity": "MUST",
+          "vendor": "launcher-pi",
+          "status": "PASS",
+          "evidence": "deterministic crash receipt outcome='crash'",
+          "note": ""
+        },
+        {
+          "id": "L-RECEIPT-CODEX",
+          "title": "launcher receipt has all required fields",
+          "severity": "MUST",
+          "vendor": "launcher-codex",
+          "status": "PASS",
+          "evidence": "fixture receipt fields=['heartbeat_owner', 'model_observed', 'model_requested', 'outcome', 'session_observed', 'tools_applied', 'tools_requested'] tools=['Read', 'Grep'] owner='launcher'",
+          "note": ""
+        },
+        {
+          "id": "L-EXIT-CLASS-CODEX",
+          "title": "launcher crash receipt remains complete",
+          "severity": "MUST",
+          "vendor": "launcher-codex",
+          "status": "PASS",
+          "evidence": "deterministic crash receipt outcome='crash'",
+          "note": ""
+        },
+        {
+          "id": "L-RECEIPT-NEGATIVE",
+          "title": "incomplete launcher receipt is rejected",
+          "severity": "MUST",
+          "vendor": "launcher-fixture",
+          "status": "PASS",
+          "evidence": "missing fields=['model_requested', 'model_observed', 'session_observed', 'tools_requested', 'tools_applied', 'heartbeat_owner']",
+          "note": ""
+        }
+      ],
+      "violations": 0,
+      "skipped": [
+        "H-PRETOOL-IDENTITY"
+      ]
+    }
+  ],
+  "summary": {
+    "contract_violations": 0,
+    "verdict": "CONFORMANT (within documented gaps)"
+  }
+}

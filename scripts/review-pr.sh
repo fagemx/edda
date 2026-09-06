@@ -41,6 +41,11 @@
 #   EDDA_FLEET_SCRATCH     state/log dir           (default $HOME/.edda/fleet)
 #   EDDA_REVIEW_MODEL      review model            (default claude-opus-5; passed
 #                                                  to `edda dispatch --model`)
+#   EDDA_REVIEW_AGENT      review backend          (default claude; pi = edda
+#                                                  dispatch --agent pi with the
+#                                                  read-only allowlist
+#                                                  read,grep,find,ls; Anthropic
+#                                                  models refused on pi)
 #   EDDA_REVIEW_SPEC       explicit REVIEW.md path (override; default: read
 #                                                  REVIEW.md at the PR base SHA)
 #
@@ -71,6 +76,27 @@ usage() {
 REPO=${EDDA_REPO:-fagemx/edda}
 MODEL=${EDDA_REVIEW_MODEL:-claude-opus-5}
 MODEL_SHORT=${MODEL##*/}
+# Review backend (GH-880): claude (default) or pi. Decision
+# fleet.claude-subscription-transport: an Anthropic model may only run through
+# Claude Code — pi routes through openrouter, so an Anthropic model id on the
+# pi arm is refused fail-closed here, before any directory is created or file
+# written (so --dry-run refuses too).
+AGENT=${EDDA_REVIEW_AGENT:-claude}
+case "$AGENT" in
+  claude) : ;;
+  pi)
+    case "$MODEL" in
+      anthropic/*|claude-*|*/claude-*)
+        echo "fleet.claude-subscription-transport: refusing EDDA_REVIEW_AGENT=pi with model $MODEL — an Anthropic model may only run through Claude Code" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    echo "review-pr.sh: unknown EDDA_REVIEW_AGENT value '$AGENT' (expected claude or pi)" >&2
+    exit 2
+    ;;
+esac
 SCRATCH=${EDDA_FLEET_SCRATCH:-$HOME/.edda/fleet}
 
 # The spec is read out of git, not off the working tree. Resolve the checkout
@@ -204,6 +230,165 @@ ISSUES=$(
 # Allowed surface = the PR's changed files.
 FILES=$(gh pr diff "$PR" --repo "$REPO" --name-only)
 SURFACE=$(printf '%s\n' "$FILES" | paste -sd, - | sed 's/,$//')
+
+# Prefer the product-owned review command when the installed CLI exposes its
+# complete, machine-readable contract. The legacy dispatch path below remains
+# only for installations that cannot run that command yet.
+product_review_supported() {
+  product_help=$(edda review --help 2>&1) || return 1
+  for product_flag in --pr --agent --model --json --resume; do
+    printf '%s\n' "$product_help" | grep -qE -- "(^|[[:space:],])$product_flag([[:space:]=]|$)" || return 1
+  done
+}
+
+launch_product_review() {
+  # This branch owns its per-round artifacts, including on its first use.
+  mkdir -p "$SCRATCH" || { echo "review-pr.sh: cannot create scratch directory $SCRATCH" >&2; exit 1; }
+  LOG="$SCRATCH/review-pr$PR-r$ROUND.log"
+  DONE="$SCRATCH/review-pr$PR-r$ROUND.done"
+  LANE="$SCRATCH/review-pr$PR-r$ROUND-lane.ps1"
+  RUNNER="$SCRATCH/review-pr$PR-r$ROUND-run.sh"
+  PRODUCT_RESUME=""
+  [ "$ROUND" -gt 1 ] && PRODUCT_RESUME="--resume"
+  [ -n "$ROOT" ] || { echo "review-pr.sh: cannot locate main checkout (set EDDA_FLEET_ROOT)" >&2; exit 1; }
+
+  if [ "$IS_WIN" = "1" ]; then
+    command -v cygpath >/dev/null 2>&1 || { echo "review-pr.sh: cygpath not found" >&2; exit 1; }
+    ROOTW=$(cygpath -w "$ROOT")
+    LOGW=$(cygpath -w "$LOG")
+    DONEW=$(cygpath -w "$DONE")
+    LANEW=$(cygpath -w "$LANE")
+    PWSH_EXE="pwsh.exe"
+    command -v pwsh >/dev/null 2>&1 && PWSH_EXE=$(cygpath -w "$(command -v pwsh)")
+    cat > "$LANE" <<PS
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
+\$OutputEncoding = [System.Text.UTF8Encoding]::new(\$false)
+Set-Location '$ROOTW'
+function Invoke-EddaReview {
+  & edda review --pr '$PR' --agent claude --model '$MODEL' --json $PRODUCT_RESUME
+  \$script:reviewExit = \$LASTEXITCODE
+}
+\$json = Invoke-EddaReview
+\$code = \$script:reviewExit
+\$payload = \$null
+try { \$payload = \$json | ConvertFrom-Json } catch { }
+\$proof = \$payload -and \$payload.subject.head_sha -eq '$SHA' -and \$payload.subject.subject_seen -eq '$SHA' -and \$payload.subject.worktree_check -eq 'unchanged' -and \$payload.reviewer.tool_policy -eq 'hard'
+if (-not \$proof) {
+  'edda review product receipt failed subject, internal-worktree, or hard-policy validation' | Out-File '$LOGW' -Encoding utf8
+  \$json | Add-Content '$LOGW' -Encoding utf8
+  \$code = 2
+  \$tree = 'failed; product JSON lacked a matching internal worktree proof'
+  \$policy = 'missing'
+  \$session = 'unknown'
+} else {
+  \$findings = if (\$null -eq \$payload.findings) { @() } else { @(\$payload.findings) }
+  \$disqualifierItems = if (\$null -eq \$payload.disqualifiers) { @() } else { @(\$payload.disqualifiers) }
+  \$checklist = if (\$null -eq \$payload.checklist) { @() } else { @(\$payload.checklist) }
+  \$escalations = if (\$null -eq \$payload.escalations) { @() } else { @(\$payload.escalations) }
+  \$p0 = @(\$findings | Where-Object severity -eq 'P0').Count
+  \$p1 = @(\$findings | Where-Object severity -eq 'P1').Count
+  \$qualified = (\$payload.qualified -eq \$true) -and (\$disqualifierItems.Count -eq 0)
+  \$label = if (\$payload.verdict -eq 'lgtm' -and \$qualified) { 'LGTM' } elseif (\$payload.verdict -eq 'changes-requested') { 'Changes Requested' } else { '' }
+  if (\$label) {
+    "<<<VERDICT\`n## Code Review: Round $ROUND — PR #$PR @ $SHA\`n\`n### Verdict\`n\$label, P0=\$p0, P1=\$p1\`nEvent identity: \$(\$payload.event_id ?? 'unknown')\`nQualification: \$qualified\`nDisqualifiers: \$((\$disqualifierItems -join ', ') ?? 'none')\`n### Findings" | Out-File '$LOGW' -Encoding utf8
+    foreach (\$finding in \$findings) { Add-Content '$LOGW' ("finding: " + (\$finding | ConvertTo-Json -Compress)) -Encoding utf8 }
+    Add-Content '$LOGW' '### Checklist' -Encoding utf8
+    foreach (\$item in \$checklist) { Add-Content '$LOGW' ("checklist: " + (\$item | ConvertTo-Json -Compress)) -Encoding utf8 }
+    Add-Content '$LOGW' '### Escalations' -Encoding utf8
+    foreach (\$escalation in \$escalations) { Add-Content '$LOGW' ("escalation: " + (\$escalation | ConvertTo-Json -Compress)) -Encoding utf8 }
+    Add-Content '$LOGW' 'VERDICT>>>' -Encoding utf8
+  }
+  Add-Content '$LOGW' "Model requested: \$(\$payload.reviewer.model_requested)" -Encoding utf8
+  Add-Content '$LOGW' "Model observed: \$(\$payload.reviewer.model_observed)" -Encoding utf8
+  if (\$null -ne \$payload.cost.usd) { Add-Content '$LOGW' ("Cost: \$" + [string]::Format([System.Globalization.CultureInfo]::InvariantCulture, '{0:0.####}', \$payload.cost.usd)) -Encoding utf8 }
+  Add-Content '$LOGW' "Session: \$(\$payload.reviewer.session_id)" -Encoding utf8
+  \$tree = 'unchanged'
+  \$policy = 'product-json:hard'
+  \$session = \$payload.reviewer.session_id
+  \$disqualifiers = \$disqualifierItems -join ','
+}
+"TRANSPORT=edda-review" | Out-File '$DONEW' -Encoding utf8
+"POLICY_RECEIPT=\$policy" | Add-Content '$DONEW' -Encoding utf8
+"SESSION=\$session" | Add-Content '$DONEW' -Encoding utf8
+"SESSION_MODE=$( [ -n "$PRODUCT_RESUME" ] && echo resume || echo new )" | Add-Content '$DONEW' -Encoding utf8
+"DISPATCH_EXIT=\$code" | Add-Content '$DONEW' -Encoding utf8
+"WORKTREE_CHECK=\$tree" | Add-Content '$DONEW' -Encoding utf8
+"QUALIFIED=\$(if (\$qualified) { 'true' } else { 'false' })" | Add-Content '$DONEW' -Encoding utf8
+"DISQUALIFIERS=\$disqualifiers" | Add-Content '$DONEW' -Encoding utf8
+exit \$code
+PS
+    [ -s "$LANE" ] || { echo "review-pr.sh: Windows product lane generation produced no artifact" >&2; exit 1; }
+    echo "lane_file_arg=$LANEW"
+  else
+    cat > "$RUNNER" <<RUN
+#!/bin/sh
+export HOME="\${HOME:-$(getent passwd "\$(id -u)" 2>/dev/null | cut -d: -f6)}"
+cd '$ROOT' || exit 2
+run_edda_review() { edda review --pr '$PR' --agent claude --model '$MODEL' --json $PRODUCT_RESUME; }
+json='$LOG.json'
+run_edda_review > "\$json" 2>&1
+code=\$?
+if ! command -v jq >/dev/null 2>&1 || ! jq -e --arg sha '$SHA' '.subject.head_sha == \$sha and .subject.subject_seen == \$sha and .subject.worktree_check == "unchanged" and .reviewer.tool_policy == "hard"' "\$json" >/dev/null 2>&1; then
+  echo 'edda review product receipt failed subject, internal-worktree, or hard-policy validation' > '$LOG'
+  cat "\$json" >> '$LOG'
+  tree='failed; product JSON lacked a matching internal worktree proof'
+  policy=missing
+  session=unknown
+  code=2
+else
+  verdict=\$(jq -r '.verdict' "\$json")
+  p0=\$(jq '[(.findings // [])[] | select(.severity == "P0")] | length' "\$json")
+  p1=\$(jq '[(.findings // [])[] | select(.severity == "P1")] | length' "\$json")
+  qualified=\$(jq -r '.qualified == true and ((.disqualifiers // []) | length == 0)' "\$json")
+  disqualifiers=\$(jq -r '(.disqualifiers // []) | join(",")' "\$json")
+  case "\$verdict" in lgtm) label=LGTM;; changes-requested) label='Changes Requested';; *) label='';; esac
+  [ "\$label" != LGTM ] || [ "\$qualified" = true ] || label=''
+  : > '$LOG'
+  if [ -n "\$label" ]; then
+    printf '<<<VERDICT\n## Code Review: Round $ROUND — PR #$PR @ $SHA\n\n### Verdict\n%s, P0=%s, P1=%s\n' "\$label" "\$p0" "\$p1" >> '$LOG'
+    jq -r '
+      "Event identity: " + (.event_id // "unknown"),
+      "Qualification: " + ((.qualified == true and ((.disqualifiers // []) | length == 0)) | tostring),
+      "Disqualifiers: " + ((.disqualifiers // []) | if length == 0 then "none" else join(", ") end),
+      "### Findings",
+      (.findings[]? | "finding: " + tojson),
+      "### Checklist",
+      (.checklist[]? | "checklist: " + tojson),
+      "### Escalations",
+      (.escalations[]? | "escalation: " + tojson),
+      "VERDICT>>>"
+    ' "\$json" >> '$LOG'
+  fi
+  jq -r '"Model requested: " + .reviewer.model_requested, "Model observed: " + .reviewer.model_observed, (if .cost.usd == null then empty else "Cost: $" + (.cost.usd|tostring) end), "Session: " + .reviewer.session_id' "\$json" >> '$LOG'
+  tree=unchanged
+  policy=product-json:hard
+  session=\$(jq -r '.reviewer.session_id' "\$json")
+fi
+printf 'TRANSPORT=edda-review\nPOLICY_RECEIPT=%s\nSESSION=%s\nSESSION_MODE=$( [ -n "$PRODUCT_RESUME" ] && echo resume || echo new )\nDISPATCH_EXIT=%s\nWORKTREE_CHECK=%s\nQUALIFIED=%s\nDISQUALIFIERS=%s\n' "\$policy" "\$session" "\$code" "\$tree" "\${qualified:-false}" "\${disqualifiers:-}" > '$DONE'
+exit "\$code"
+RUN
+    sh -n "$RUNNER" || exit 1
+    chmod +x "$RUNNER"
+  fi
+  if [ "$DRY" = "1" ]; then echo "dry-run: product review adapter generated; nothing launched."; exit 0; fi
+  rm -f "$LOG" "$DONE"
+  if [ "$IS_WIN" = "1" ]; then
+    TASK="edda-review-pr$PR-r$ROUND"
+    pwsh -NoProfile -Command "Unregister-ScheduledTask -TaskName '$TASK' -Confirm:\$false -ErrorAction SilentlyContinue; \$a=New-ScheduledTaskAction -Execute '$PWSH_EXE' -Argument '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \`\"$LANEW\`\"' -WorkingDirectory '$ROOTW'; Register-ScheduledTask -TaskName '$TASK' -Action \$a -RunLevel Limited | Out-Null; Start-ScheduledTask -TaskName '$TASK'" || exit 1
+  else
+    nohup "$RUNNER" >/dev/null 2>&1 &
+    pid=$!
+    sleep 1
+    kill -0 "$pid" 2>/dev/null || { echo "review-pr.sh: nohup process $pid died immediately" >&2; exit 1; }
+    echo "task=nohup pid=$pid state=Running"
+  fi
+  echo "log=$LOG"; echo "done=$DONE"
+  exit 0
+}
+
+if [ "${EDDA_REVIEW_PRODUCT_ADAPTER:-1}" != "0" ] && product_review_supported; then
+  launch_product_review
+fi
 
 # ---- the spec, read at the BASE SHA -----------------------------------------
 # review.brief-source: REVIEW.md is always the base_sha version, never the head,
@@ -428,6 +613,9 @@ echo "spec=$SPEC_SOURCE ($SPEC_VERSION)"
 echo "base=$BASE_SHA"
 echo "session=$SID"
 echo "session_mode=$SESSION_MODE"
+if [ "$AGENT" = pi ]; then
+  echo "launch: edda dispatch --agent pi --model $MODEL --tools $PI_REVIEW_TOOLS --session-id $SID (session_mode=$SESSION_MODE)"
+fi
 
 # ---- what would be launched: lane script + exact -File argument -------------
 # Both launchers are GENERATED BEFORE the dry-run exit so the whole transport
@@ -562,11 +750,23 @@ function Remove-ReviewWorktree {
 # edda dispatch hands the prompt to 'claude -p' as a command-line argument,
 # and Windows caps a command line at 32767 chars. The fallback keeps the same
 # restricted read-only capability shape; both arms join the single final receipt
-# below instead of independently appending half a .done file.
+# below instead of independently appending half a .done file. The pi arm
+# (GH-880) needs no size fallback: its prompt travels by --prompt-file, so the
+# command-line cap never applies to it.
+\$agent = '$AGENT'
 try {
   if (-not \$sourceReady) { throw 'source check did not establish a baseline' }
   \$briefChars = (Get-Content -Raw "$BRIEFW").Length
-  if (\$briefChars -lt 30000) {
+  if (\$agent -eq 'pi') {
+    Assert-ReviewCapabilities 'pi-dispatch'
+    \$transport = 'pi-dispatch'
+    # Receipt and launch interpolate the same allowlist variable, so a .done
+    # can never claim a boundary the dispatch did not carry (GH-880 round 1).
+    \$toolFlags = "--tools '\$PiReviewTools'"
+    & edda dispatch --agent pi --model '$MODEL' --tools "\$PiReviewTools" --session-id '$SID' --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
+    \$rawDispatchExit = \$LASTEXITCODE
+    \$dispatchCode = \$rawDispatchExit
+  } elseif (\$briefChars -lt 30000) {
     Assert-ReviewCapabilities 'edda-dispatch'
     \$transport = 'edda-dispatch'
     & edda dispatch --agent claude --model '$MODEL' --permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file "$BRIEFW" 2>&1 | Out-File -FilePath "$LOGW" -Encoding utf8
@@ -688,10 +888,22 @@ remove_review_worktree() {
   [ ! -e '$WT' ]
 }
 # Same size guard as the Windows lane: dispatch while the brief fits, otherwise
-# the read-only-allowlisted stdin fallback. Both converge on one final receipt.
+# the read-only-allowlisted stdin fallback. The pi arm (GH-880) skips the guard
+# — its prompt travels by --prompt-file. All three converge on one final receipt.
+agent='$AGENT'
 if [ "\$source_ready" = 1 ]; then
   chars=\$(wc -m < '$BRIEF')
-  if [ "\$chars" -lt 30000 ]; then
+  if [ "\$agent" = pi ]; then
+    if review_capabilities pi-dispatch > '$LOG' 2>&1; then
+      transport=pi-dispatch
+      # Receipt and launch read the same sourced allowlist, so a .done can
+      # never claim a boundary the dispatch did not carry (GH-880 round 1).
+      tool_flags="--tools '\$PI_REVIEW_TOOLS'"
+      edda dispatch --agent pi --model '$MODEL' --tools "\$PI_REVIEW_TOOLS" --session-id '$SID' --prompt-file '$BRIEF' > '$LOG' 2>&1
+      raw_dispatch_exit=\$?
+      final_exit=\$raw_dispatch_exit
+    fi
+  elif [ "\$chars" -lt 30000 ]; then
     if review_capabilities edda-dispatch > '$LOG' 2>&1; then
       transport=edda-dispatch
       edda dispatch --agent claude --model '$MODEL' --permission-mode '$REVIEW_PERMISSION_MODE' --tools '$REVIEW_TOOLS' --exclude-tools '$REVIEW_DENIED' $DISPATCH_SESSION_ARGS --prompt-file '$BRIEF' > '$LOG' 2>&1
@@ -824,7 +1036,9 @@ command -v edda >/dev/null 2>&1 || {
 }
 # Reject before creating the worktree or scheduling a job, then recheck in the
 # generated lane because its PATH (and installed binary) may differ.
-if [ "$(wc -m < "$BRIEF")" -lt 30000 ]; then
+if [ "$AGENT" = pi ]; then
+  review_capabilities pi-dispatch || exit 2
+elif [ "$(wc -m < "$BRIEF")" -lt 30000 ]; then
   review_capabilities edda-dispatch || exit 2
 else
   review_capabilities claude-stdin || exit 2

@@ -1,3 +1,4 @@
+pub mod acp_targets;
 pub mod budget;
 pub mod codex_app_server;
 pub mod codex_rpc;

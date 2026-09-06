@@ -1,0 +1,4 @@
+# command: pwsh -NoProfile -File scripts/test-drill-acp-800.ps1
+safe trace canaries: passed
+
+# exit_code: 0

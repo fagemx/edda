@@ -1,3 +1,11 @@
+---
+id: c1-shell-precedence
+class: code-risk
+severity: P0
+file: canaries-fixture/c1-shell-precedence/deploy.sh
+match: '\|\|.*&&|&&.*\|\||同優先序|左結合|同优先|left.associat|same precedence'
+---
+
 # c1-shell-precedence
 
 - class: `code-risk`

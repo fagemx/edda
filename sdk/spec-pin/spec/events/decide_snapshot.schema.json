@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "decide_snapshot payload",
+  "description": "SQLite materialization requires context_hash and engine_version; body values may be inline or blob references.",
+  "type": "object",
+  "properties": {
+    "context_hash": {
+      "type": "string"
+    },
+    "engine_version": {
+      "type": "string"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "redaction_level": {
+      "type": "string"
+    },
+    "village_id": {
+      "type": "string"
+    },
+    "cycle_id": {
+      "type": "string"
+    },
+    "context_blob": {
+      "type": "string"
+    },
+    "result_blob": {
+      "type": "string"
+    },
+    "context_inline": {},
+    "result_inline": {}
+  },
+  "required": [
+    "context_hash",
+    "engine_version"
+  ],
+  "additionalProperties": true
+}

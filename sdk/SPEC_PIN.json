@@ -1,0 +1,9 @@
+{
+  "spec_sha": "04b58b1e8efbc589417cd44120e2611fecf89229",
+  "spec_ref": "review-verdict fixture-fidelity tree — commit 04b58b1 on fix/gh934-repin-spec-review-verdict drops the refs.events key the typed Refs model skips (#934 round 2, 2026-09-06). Repin to a trunk SHA at the next spec change.",
+  "layout": {
+    "schemas": "spec/events/*.schema.json + registry.json + canonical-v1.json",
+    "fixtures": "tests/fixtures/events/*.jsonl"
+  },
+  "note": "Single source of truth for SDK type generation and contract tests. Move only with controller approval; every move requires regenerating sdk/ts/src/types.gen.ts and sdk/python/src/edda_sdk/types_gen.py and committing both (CI fails on stale types). Release/publication waits independent acceptance. A PR which changes spec/ or tests/fixtures/events/ must move this pin in the same PR and commit the regenerated type files with it — a pin moved in a later PR leaves contract red on main in between (#934)."
+}

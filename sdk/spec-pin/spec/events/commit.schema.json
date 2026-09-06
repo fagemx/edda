@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "commit payload",
+  "description": "Layer 1 v1 payload.",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "purpose": {
+      "type": "string"
+    },
+    "prev_summary": {
+      "type": "string"
+    },
+    "contribution": {
+      "type": "string"
+    },
+    "evidence": {
+      "type": "array",
+      "items": {}
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "title",
+    "purpose",
+    "prev_summary",
+    "contribution",
+    "evidence",
+    "labels"
+  ],
+  "additionalProperties": true
+}

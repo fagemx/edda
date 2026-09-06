@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pr payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "pr_number": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "pr_status": {
+      "type": "string"
+    },
+    "review_result": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "blocker_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "time_to_merge_hours": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "merged_at": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "author": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "pr_number",
+    "pr_status",
+    "review_result",
+    "blocker_count",
+    "time_to_merge_hours",
+    "created_at",
+    "merged_at",
+    "author",
+    "title"
+  ],
+  "additionalProperties": true
+}

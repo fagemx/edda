@@ -82,6 +82,7 @@ and registry must change in the same patch when a new producer is added.
 | `task_intake` | unstable | [External source, title, intent, priority and constraints](../../spec/events/task_intake.schema.json) |
 | `agent_phase_change` | unstable | [Session phase transition, confidence and signals](../../spec/events/agent_phase_change.schema.json) |
 | `review_bundle` | unstable | [Changes, tests, risk and suggested review action](../../spec/events/review_bundle.schema.json) |
+| `review_verdict` | unstable | [SHA-pinned independent review outcome and evidence](../../spec/events/review_verdict.schema.json) |
 | `pr` | unstable | [Pull request status and review/merge metadata](../../spec/events/pr.schema.json) |
 | `verdict.recorded` | unstable | [Subject, approved/rejected decision, full SHA and actor](../../spec/events/verdict.recorded.schema.json) |
 | `device_pair` | unstable | [Device name, pairing address and token hash prefix](../../spec/events/device_pair.schema.json) |

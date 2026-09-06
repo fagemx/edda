@@ -1,0 +1,5 @@
+36dd3c7bff56562c0b88818363816171a220912bce254602db1e585621b118b7 *reference/edda_reference_adapter.py
+91e54492622f8cbb3ed4f65d0b5a83f3a4d4119cfc5007b6e0aac339948e675b *reference/test_reference_adapter.py
+cd3dc13088bbe1781fdd3d38c12276c6679bd8ac5444bf298125da090f247419 *reference/control_stub.py
+0ad2b0c5e236e1cd078f2de2c0bd2f3a171567163caa2574dd030bc9f4b55833 *tools/edda.exe
+edda 0.4.0 (467e8be02eb9-dirty 2026-09-04)

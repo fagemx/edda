@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "device_pair payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "device_name": {
+      "type": "string"
+    },
+    "paired_from_ip": {
+      "type": "string"
+    },
+    "token_hash_prefix": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "device_name",
+    "paired_from_ip",
+    "token_hash_prefix"
+  ],
+  "additionalProperties": true
+}

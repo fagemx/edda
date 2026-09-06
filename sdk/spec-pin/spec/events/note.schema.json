@@ -1,0 +1,304 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "note payload",
+  "description": "Readable note; decisions and session digests are note variants, not types.",
+  "type": "object",
+  "properties": {
+    "role": {
+      "type": "string"
+    },
+    "text": {
+      "type": "string"
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decision": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "anyOf": [
+            {
+              "enum": [
+                "local",
+                "shared",
+                "global"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "authority": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "affected_paths": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "review_after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reversibility": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "village_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "key",
+        "value"
+      ],
+      "additionalProperties": true
+    },
+    "source": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "session_stats": {
+      "type": "object",
+      "properties": {
+        "tool_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tool_failures": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "user_prompts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duration_minutes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "nudge_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "decide_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "signal_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_read_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cache_creation_tokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "files_modified": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failed_commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "commits_made": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deps_added": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tasks_snapshot": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "subject": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "subject",
+              "status"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "activity": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "edit_ratio": {
+          "type": "number"
+        },
+        "search_ratio": {
+          "type": "number"
+        },
+        "estimated_cost_usd": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_call_breakdown": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "file_edit_counts": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer",
+                "minimum": 0
+              }
+            ],
+            "minItems": 2,
+            "maxItems": 2
+          }
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    },
+    "digest_watermark": {
+      "type": "object",
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "prefix_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "offset",
+        "prefix_hash"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "role",
+    "text",
+    "tags"
+  ],
+  "additionalProperties": true
+}

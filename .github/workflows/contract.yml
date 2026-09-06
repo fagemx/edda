@@ -1,0 +1,96 @@
+# GH-611 focused SDK contract job — additive to existing CI coverage.
+# One OS (ubuntu), one required job on SDK or spec-schema changes: build the
+# edda binary, check out the event spec at the SHA pinned in sdk/SPEC_PIN.json,
+# regenerate SDK types (fail on stale), and run TS + Python golden/vector and
+# live contract tests, requiring cross-language structural equivalence.
+#
+# There is no optional skip: if the pinned spec sha is unavailable, the job
+# FAILS (the pin manifest is the contract's type source, not a preference).
+name: contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdk/**"
+      - "spec/events/**"
+      - "tests/fixtures/events/**"
+      - "crates/edda-mcp/**"
+      - "crates/edda-ledger/src/task_actions.rs"
+      - "crates/edda-bridge-*/**"
+      - "crates/edda-cli/**"
+      - "crates/edda-serve/**"
+      - ".github/workflows/contract.yml"
+  pull_request:
+    paths:
+      - "sdk/**"
+      - "spec/events/**"
+      - "tests/fixtures/events/**"
+      - "crates/edda-mcp/**"
+      - "crates/edda-ledger/src/task_actions.rs"
+      - "crates/edda-bridge-*/**"
+      - "crates/edda-cli/**"
+      - "crates/edda-serve/**"
+      - ".github/workflows/contract.yml"
+
+concurrency:
+  group: contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      # Focused build of the binary only — this job does not gate the Rust
+      # workspace (that is ci.yml's job; this one must not widen coverage).
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the pinned event spec (fail loudly if unavailable)
+        run: |
+          SPEC_SHA=$(node -p "require('./sdk/SPEC_PIN.json').spec_sha")
+          echo "pinned spec sha: $SPEC_SHA"
+          git fetch --depth=1 origin "$SPEC_SHA" || {
+            echo "::error::pinned spec sha $SPEC_SHA not fetchable — sdk/SPEC_PIN.json points at a commit origin does not serve"
+            exit 1
+          }
+          git checkout "$SPEC_SHA" -- spec tests/fixtures
+          test -f spec/events/canonical-v1.json
+          test -f spec/events/registry.json
+          # The checked-in fallback is a cache, never an independent source.
+          git diff --no-index --exit-code spec sdk/spec-pin/spec
+          git diff --no-index --exit-code tests/fixtures sdk/spec-pin/tests/fixtures
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install "$(grep -oP '(?<=channel = ")[^"]+' rust-toolchain.toml)" --profile minimal
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build edda binary (focused)
+        run: cargo build -p edda
+
+      - name: Generate SDK types and fail on stale committed types
+        run: |
+          node sdk/generator/generate-types.mjs --spec "$GITHUB_WORKSPACE/spec/events" --out sdk/ts/src/types.gen.ts
+          python sdk/generator/generate_types.py --spec "$GITHUB_WORKSPACE/spec/events" --out sdk/python/src/edda_sdk/types_gen.py
+          git diff --exit-code -- sdk/ts/src/types.gen.ts sdk/python/src/edda_sdk/types_gen.py || {
+            echo "::error::committed SDK types are stale against the pinned spec $(node -p "require('./sdk/SPEC_PIN.json').spec_sha") — regenerate and commit"
+            exit 1
+          }
+
+      - name: Install TypeScript package build dependencies
+        run: npm --prefix sdk/ts ci --ignore-scripts
+
+      - name: Cross-language contract tests (TS + Python, real edda, isolated stores)
+        env:
+          EDDA_BIN: ${{ github.workspace }}/target/debug/edda
+        run: node sdk/run-contract-tests.mjs

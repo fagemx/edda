@@ -1,0 +1,4 @@
+# compact evidence redacted/count-only check
+literal-leak-marker-count=0
+raw-payload-marker-count=0
+# exit_code: 0

@@ -33,18 +33,49 @@ cat >"$STUBBIN/gh" <<'EOF'
 #!/bin/sh
 echo "gh $*" >>"$GH_STUB_LOG"
 echo "gh $*" >>"$ORDER_LOG"
+# GH-958: apply the caller's --jq when the fixture is raw JSON, the way
+# scripts/fleet/test-verdict-drift.sh already does. With the old cat-the-TSV
+# stub the script's own --jq never ran, so restoring a
+# `select(.mergeStateStatus …)` to the open-PR query would have dropped PRs
+# from the digest with every fixture still green — the #914 defect exactly.
+# TSV fixtures are passed through untouched, so the older cases still read.
+# The --jq argument is captured HERE, from the real argv: a filter like
+# '.[] | [.number, .title] | @tsv' carries spaces, and re-splitting a
+# flattened "$*" inside the function would keep only its first word.
+gh_jq=
+gh_prev=
+for a in "$@"; do
+    [ "$gh_prev" = "--jq" ] && gh_jq=$a
+    gh_prev=$a
+done
+emit() { # <fixture file>
+    [ -n "${1:-}" ] && [ -f "$1" ] || return 0
+    case "$(head -c 1 "$1")" in
+        '['|'{')
+            if [ -n "$gh_jq" ]; then jq -r "$gh_jq" <"$1"; else cat "$1"; fi ;;
+        *) cat "$1" ;;
+    esac
+}
 case "$1" in
   pr)
     case "$2" in
       list)
         case "$*" in
-          *"--state merged"*) [ -n "${GH_MERGED_JSON:-}" ] && cat "$GH_MERGED_JSON" ; exit 0 ;;
-          *"--state open"*)   [ -n "${GH_OPEN_JSON:-}" ] && cat "$GH_OPEN_JSON" ; exit 0 ;;
+          *"--state merged"*) emit "${GH_MERGED_JSON:-}" ; exit 0 ;;
+          # The digest clears GH_OPEN_JSON for the verdict-drift subprocess,
+          # so an empty one means this call came from the drift check.
+          *"--state open"*)
+            if [ -n "${GH_OPEN_JSON:-}" ]; then emit "$GH_OPEN_JSON"
+            else emit "${GH_DRIFT_OPEN_JSON:-}"
+            fi
+            exit 0 ;;
         esac
         exit 0
         ;;
       view)
-        [ -n "${GH_COMMENTS_FILE:-}" ] && cat "$GH_COMMENTS_FILE"
+        if [ -n "${GH_OPEN_JSON:-}" ]; then emit "${GH_COMMENTS_FILE:-}"
+        else emit "${GH_DRIFT_COMMENTS_JSON:-${GH_COMMENTS_FILE:-}}"
+        fi
         exit 0
         ;;
     esac
@@ -100,7 +131,8 @@ export PATH="$STUBBIN:$PATH"
 reset_stubs() {
     : >"$GH_STUB_LOG"; : >"$EDDA_STUB_LOG"; : >"$ORDER_LOG"
     unset GH_MERGED_JSON GH_OPEN_JSON GH_STATUS_JSON GH_CHECK_RUNS_JSON GH_COMMENTS_FILE \
-          GH_BOARD_FILE GH_READY_JSON EDDA_RECAP_FILE 2>/dev/null || true
+          GH_BOARD_FILE GH_READY_JSON EDDA_RECAP_FILE \
+          GH_DRIFT_OPEN_JSON GH_DRIFT_COMMENTS_JSON 2>/dev/null || true
 }
 
 # canned recap digest (the three ledger blocks, exactly as edda recap --digest prints)
@@ -184,6 +216,8 @@ awk '/^## 擋住什麼/{f=1;next} /^## /{f=0} f' "$tmp/case2.out" | grep -qxF '�
 printf '%s\n' "$out" | grep -qF -- '- 審查（gh verdict 留言 Cost:）：n/a' \
     || fail 'case 2: review cost line should be n/a'
 
+SHA79=7979797979797979797979797979797979797979
+
 # --- case 3: one BLOCKED PR with a failing Independent Review ------------------
 reset_stubs
 printf '77\tBlocked thing\tBLOCKED\tabc123\n' >"$tmp/open.tsv"
@@ -210,6 +244,33 @@ export EDDA_RECAP_FILE="$RECAP_CANNED"
 out=$(run_digest --dry-run 2>&1) || fail 'case 3b: daily-digest.sh exited non-zero'
 printf '%s\n' "$out" | grep -qF -- '- #78 Check run thing — Independent Review=failure' \
     || fail "case 3b: check-run CI Gate should be accepted, got: $(printf '%s' "$out" | grep '#78' || true)"
+
+# --- case 3c: a CLEAN PR that the drift check calls not-ready still gets a row -
+# GH-958. Two things are proven only with the jq-applying stub above:
+#   * the open-PR query's own --jq runs, so restoring a
+#     `select(.mergeStateStatus …)` would drop #79 and fail here (the #914
+#     defect: the blocked-PR filter skipped a CLEAN PR and #899 was reported
+#     complete on a stale SHA);
+#   * both enumerations use the same --limit, so no PR gets a drift line it
+#     can never turn into a digest row.
+reset_stubs
+printf '[{"number":79,"title":"Clean but unreviewed","mergeStateStatus":"CLEAN","headRefOid":"%s"}]\n' "$SHA79" >"$tmp/open-clean.json"
+printf '[{"number":79,"headRefOid":"%s","baseRefName":"main","mergeable":"MERGEABLE"}]\n' "$SHA79" >"$tmp/drift-open.json"
+printf '{"comments":[]}\n' >"$tmp/drift-comments.json"
+export GH_OPEN_JSON="$tmp/open-clean.json"
+export GH_DRIFT_OPEN_JSON="$tmp/drift-open.json"
+export GH_DRIFT_COMMENTS_JSON="$tmp/drift-comments.json"
+export EDDA_RECAP_FILE="$RECAP_CANNED"
+out=$(run_digest --dry-run 2>&1) || fail 'case 3c: daily-digest.sh exited non-zero'
+printf '%s\n' "$out" | grep -qF -- '- #79 Clean but unreviewed — no verdict on head' \
+    || fail "case 3c: a CLEAN drift-not-ready PR is missing from 擋住什麼, got: $(printf '%s' "$out" | grep '#79' || true)"
+printf '%s\n' "$out" | awk '/^## 擋住什麼/{f=1;next} /^## /{f=0} f' | grep -qF '#79' \
+    || fail 'case 3c: the #79 row is not inside the 擋住什麼 section'
+# both enumerations request the same page size — the mismatch GH-958 names
+limits=$(grep -- '--state open' "$GH_STUB_LOG" | sed -n 's/.*--limit \([0-9]*\).*/\1/p' | sort -u)
+[ "$(printf '%s\n' "$limits" | grep -c .)" = 1 ] \
+    || fail "case 3c: digest and verdict-drift enumerate different --limit values: $(printf '%s' "$limits" | tr '\n' ' ')"
+unset GH_DRIFT_OPEN_JSON GH_DRIFT_COMMENTS_JSON
 
 # --- case 4: board comment with needs-operator lands under 例外 ----------------
 reset_stubs

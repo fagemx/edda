@@ -40,6 +40,16 @@
 
 ## Why Edda?
 
+Keep your existing coding harness and ask a second provider to review the
+committed branch. For example, after authoring with Claude Code, use pi with
+an OpenAI reviewer: `edda review --agent pi --model openai-codex/gpt-5.6-sol`.
+The result records the reviewed SHA, reviewer session and observed model,
+findings, and measured or unmeasured cost. Add `--spec <path>` and declared
+`--gate <command>` evidence to qualify the verdict; `edda run -- <command>`
+records a clean-SHA local receipt. `--pr <number> --resume` continues the
+recorded reviewer conversation. See the [review CLI contract](docs/reference/cli.md#edda-review)
+for qualification and exit codes.
+
 Agent work disappears in two ways.
 
 **The session dies, and the decisions die with it.** Yesterday you and your agent argued through the tradeoffs and settled on SQLite. Today's session opens — and it proposes Postgres. Again. The reasoning died with the transcript, and compaction can't bring it back.

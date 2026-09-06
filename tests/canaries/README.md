@@ -31,11 +31,52 @@ finding 是什麼（`expected.md`）。引擎定期對金絲雀集跑審查 → 
 
 ## 如何跑一次校準（calibration run）
 
+> **這個流程已腳本化**：`scripts/calibrate-canaries.sh`（issue #881；
+> 設計文件 §1.2、§7 item 7）。它完全執行下列步驟：throwaway clone →
+> fixture commit → canary commit → 目標 diff → 每引擎每輪一次唯讀審查 →
+> 從 session 檔／JSON 讀 `model_observed` → 機械評分 → 列出 Markdown 表
+> 加 `for-ledger` 區塊 → 刪除 clone（`trap` 保證每個退出路徑都清）。
+> 腳本不發 GitHub 請求、不寫帳本（`for-ledger` 區塊由控制者逐字記入）。
+>
+> ```sh
+> # 先看計畫，不啟動任何東西：
+> sh scripts/calibrate-canaries.sh \
+>    --engine pi:openrouter/z-ai/glm-5.3-flash \
+>    --brief <brief.md> --runs 3 --dry-run
+> # 實跑：
+> sh scripts/calibrate-canaries.sh \
+>    --engine pi:openrouter/z-ai/glm-5.3-flash \
+>    --brief <brief.md> --runs 3
+> # --engine 可重複；選擇器語法 <backend>:<catalogue id>，id 逐字照抄
+> # pi --list-models。pi: 帶 Anthropic id、claude: 帶非 Anthropic id 會在
+> # 啟動前 exit 2（fleet.claude-subscription-transport，以目錄資料判定）。
+> ```
+>
+> 離線測試（stub 兩個引擎，不出網、不離開自己的 temp dir）：
+> `sh scripts/test-calibrate-canaries.sh`。
+>
+> **機械評分**：每顆金絲雀的 `expected.md` 帶固定 front matter
+> （`id class severity file match`；缺 key → 腳本 exit 2 指名檔案）。
+> 引擎依 brief 末尾的輸出協定逐行輸出
+> `FINDING P<n> <repo 相對路徑> — <一行描述>`；腳本評分：
+> - **caught**：expected `file` 上的 finding 文字命中 `match` regex；
+>   `severity_match` 比對回報的 severity 與 front-matter severity。
+> - **false-positive**：對該金絲雀面（expected file 或其目錄下）有 finding
+>   但不是預期 finding。
+> - **missed**：其餘。
+> - 引擎 exit ≠ 0 或 `model_observed ≠ model_requested`（從 pi session 檔
+>   `"model"` 欄／claude JSON `modelUsage` 讀，絕不從 transcript 本文取，
+>   #616）→ 該輪每列 **void**，不靜默計分；全程結束後 exit 1。
+> 機械分是保守下界；資格判定的最終權威仍是人工對照各 canary 的評分提示。
+>
+> 以下保留作為腳本所執行步驟的說明（手動跑仍可照做）：
+
 在一個 **$TEMP 的 throwaway clone** 上做，不在工作 worktree：
 
 ```sh
 WT=<this worktree>
-CLONE="$TMPDIR/edda-calib-$$"
+CALIB_TMP=$(mktemp -d "${TMPDIR:-/tmp}/edda-calib.XXXXXX")
+CLONE="$CALIB_TMP/repo"
 git clone "$WT" "$CLONE" && cd "$CLONE"
 git checkout -b calib-canary-v0 origin/main
 
@@ -61,8 +102,9 @@ git commit -m "calibration: canary set v0"
 git diff HEAD~1..HEAD > /tmp/canary-v0.diff
 ```
 
-然後對每個引擎，用審查 brief 模板 v1
-（`docs/superpowers/specs/2026-09-02-reviewer-brief-template-v1.md`）跑
+然後對每個引擎，用審查 brief 模板 **v2**
+（`docs/superpowers/specs/2026-09-02-reviewer-brief-template-v2.md`——現行派工來源；
+v1 保留為歷史，v0 校準是在 v1 之下量的，兩者的抓取率不可直接相比）跑
 **一次唯讀審查**，引擎的 cwd 是上述 clone：
 
 - pi 系（sol／gemini／glm）：
@@ -75,6 +117,12 @@ git diff HEAD~1..HEAD > /tmp/canary-v0.diff
 對每顆金絲雀、每個引擎記一格：**caught / missed / false positive**
 （評分基準在各 canary 的 `expected.md`）。抓取率進帳本，構成引擎 × 類別表；
 合格門檻與重校節奏見設計文件 §1.3。
+
+每一格另記 `severity_match`（該格給的嚴重度是否等於 `expected.md` 的
+severity——學習 2：低估連錨都有）與 `model_observed`（由系統取得：pi 讀 session
+檔的 `modelId`，claude 讀 `--output-format json` 的 `modelUsage`；引擎自述與
+`PI_MODEL` 環境變數都不算數）。已跑過的校準：v0（brief v1）＝設計文件 §3；
+**v1（brief v2，glm ×5 ＋ Opus ×1）＝設計文件 §3.1**。
 
 ## 線只升不降
 

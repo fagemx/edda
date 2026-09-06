@@ -74,7 +74,10 @@ pub(crate) fn append_to_session_ledger(
         "event_data": &envelope.event_data,
     });
 
-    let line = serde_json::to_string(&record)?;
+    // Hook event data can contain tool arguments and outputs. Scrub the entire
+    // serialized record before opening the durable ledger so no raw secret
+    // reaches disk through any string-valued field.
+    let (line, _) = edda_core::secret_guard::redact(&serde_json::to_string(&record)?);
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -166,6 +169,42 @@ mod tests {
 
         let content = fs::read_to_string(&ledger_path).unwrap();
         assert!(content.contains("before_agent_start"));
+
+        let _ = fs::remove_dir_all(edda_store::project_dir(pid));
+    }
+
+    #[test]
+    fn append_session_ledger_redacts_tool_payload_before_durable_write() {
+        let _store = edda_store::test_support::isolated_store_root().unwrap();
+        let pid = "test_oc_ledger_redaction";
+        let _ = edda_store::ensure_dirs(pid);
+        let sentinel = "AKIAIOSFODNN7EXAMPLE";
+        let envelope = OpenClawEnvelope {
+            hook_event_name: "after_tool_call".into(),
+            session_id: "redact-s1".into(),
+            session_key: "agent:main:redact-s1".into(),
+            agent_id: "main".into(),
+            workspace_dir: "/tmp".into(),
+            session_file: None,
+            event_data: serde_json::json!({
+                "tool_name": "bash",
+                "tool_input": {"command": format!("echo {sentinel}")},
+                "tool_output": {"token": sentinel},
+            }),
+        };
+
+        append_to_session_ledger(pid, "redact-s1", &envelope).unwrap();
+
+        let ledger_path = edda_store::project_dir(pid)
+            .join("ledger")
+            .join("redact-s1.jsonl");
+        let content = fs::read_to_string(&ledger_path).unwrap();
+        assert!(
+            !content.contains(sentinel),
+            "raw sentinel must never reach disk"
+        );
+        assert!(content.contains("[REDACTED:aws_access_key_id]"));
+        assert!(content.contains("after_tool_call"));
 
         let _ = fs::remove_dir_all(edda_store::project_dir(pid));
     }

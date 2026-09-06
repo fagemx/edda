@@ -18,6 +18,18 @@ pub enum AgentKind {
     Pi,
     /// codex CLI via `codex app-server`
     Codex,
+    /// ACP v1 target selected by `edda dispatch --agent acp:grok`.
+    #[value(name = "acp:grok")]
+    AcpGrok,
+    /// ACP v1 target selected by `edda dispatch --agent acp:kilo`.
+    #[value(name = "acp:kilo")]
+    AcpKilo,
+    /// ACP v1 target selected by `edda dispatch --agent acp:pi`.
+    #[value(name = "acp:pi")]
+    AcpPi,
+    /// ACP v1 target selected by `edda dispatch --agent acp:claude`.
+    #[value(name = "acp:claude")]
+    AcpClaude,
 }
 
 impl AgentKind {
@@ -26,7 +38,18 @@ impl AgentKind {
             AgentKind::Claude => "claude",
             AgentKind::Pi => "pi",
             AgentKind::Codex => "codex",
+            AgentKind::AcpGrok => "acp:grok",
+            AgentKind::AcpKilo => "acp:kilo",
+            AgentKind::AcpPi => "acp:pi",
+            AgentKind::AcpClaude => "acp:claude",
         }
+    }
+
+    pub fn is_acp(self) -> bool {
+        matches!(
+            self,
+            Self::AcpGrok | Self::AcpKilo | Self::AcpPi | Self::AcpClaude
+        )
     }
 
     /// Whether this backend tees per-phase transcripts to disk, which the
@@ -35,7 +58,11 @@ impl AgentKind {
         match self {
             AgentKind::Claude => true,
             AgentKind::Pi => false,
-            AgentKind::Codex => false,
+            AgentKind::Codex
+            | AgentKind::AcpGrok
+            | AgentKind::AcpKilo
+            | AgentKind::AcpPi
+            | AgentKind::AcpClaude => false,
         }
     }
 
@@ -240,6 +267,9 @@ pub(crate) fn build_launcher(
             launcher.verify_available()?;
             Box::new(launcher)
         }
+        AgentKind::AcpGrok | AgentKind::AcpKilo | AgentKind::AcpPi | AgentKind::AcpClaude => {
+            bail!("ACP agents are routed by edda dispatch before launcher construction")
+        }
     })
 }
 
@@ -257,6 +287,43 @@ mod tests {
         assert_eq!(AgentKind::Claude.as_str(), "claude");
         assert_eq!(AgentKind::Pi.as_str(), "pi");
         assert_eq!(AgentKind::Codex.as_str(), "codex");
+    }
+
+    #[test]
+    fn acp_kinds_advertise_no_legacy_capabilities_and_refuse_launcher_construction() {
+        for (kind, key) in [
+            (AgentKind::AcpGrok, "acp:grok"),
+            (AgentKind::AcpKilo, "acp:kilo"),
+            (AgentKind::AcpPi, "acp:pi"),
+            (AgentKind::AcpClaude, "acp:claude"),
+        ] {
+            assert!(kind.is_acp());
+            assert_eq!(kind.as_str(), key);
+            // ACP targets are driven by the task-rail runner, not a legacy
+            // launcher; they advertise no legacy capability flags.
+            assert!(!kind.writes_transcripts());
+            assert!(!kind.supports_model());
+            assert!(!kind.supports_thinking());
+            assert!(!kind.supports_tool_policy());
+            assert!(!kind.supports_permission_mode());
+            assert!(!kind.supports_session_dir());
+            assert!(!kind.supports_model_listing());
+            assert!(!kind.supports_resume());
+            let error = match build_launcher(
+                kind,
+                LauncherOptions {
+                    verbose: false,
+                    transcript_dir: None,
+                    persistent_codex_threads: false,
+                    session_dir: None,
+                    resume: false,
+                },
+            ) {
+                Ok(_) => panic!("ACP agents must be routed before launcher construction"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("routed"), "{error}");
+        }
     }
 
     // ── GH-574 backend × option support matrix ──

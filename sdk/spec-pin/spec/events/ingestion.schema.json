@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ingestion payload",
+  "description": "Unstable payload inventory; not a v1 stability commitment.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "triggerType": {
+      "enum": [
+        "auto",
+        "suggested",
+        "manual"
+      ]
+    },
+    "eventType": {
+      "type": "string"
+    },
+    "sourceLayer": {
+      "enum": [
+        "L0",
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5"
+      ]
+    },
+    "sourceRefs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "layer": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "layer",
+          "kind",
+          "id"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "summary": {
+      "type": "string"
+    },
+    "detail": {},
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "createdAt": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "triggerType",
+    "eventType",
+    "sourceLayer",
+    "summary",
+    "detail",
+    "createdAt"
+  ],
+  "additionalProperties": true
+}

@@ -1,0 +1,16 @@
+{
+  "target": "kilo",
+  "verifier": false,
+  "supported": false,
+  "failingMethod": "spawn",
+  "failureStatus": "spawn_failed",
+  "steps": [
+    {
+      "failingMethod": "spawn",
+      "stopReason": null,
+      "status": "spawn_failed",
+      "step": "1",
+      "ok": false
+    }
+  ]
+}

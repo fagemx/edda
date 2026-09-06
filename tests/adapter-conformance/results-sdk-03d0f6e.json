@@ -1,0 +1,792 @@
+{
+  "provenance": {
+    "contract_version": "adapter-contract/0.1",
+    "protocol_version": "adapter-normalized-protocol/0.1",
+    "basis_sha": "467e8be02eb98fb47d0eca82e9dd400d91d67e6a",
+    "edda_version": "edda 0.4.0 (467e8be02eb9-dirty 2026-09-04)",
+    "edda_sha256": "0ad2b0c5e236e1cd078f2de2c0bd2f3a171567163caa2574dd030bc9f4b55833",
+    "edda_path": "C:\\Users\\fagem\\AppData\\Local\\fleet-workstation\\lanes\\verifier\\debug\\edda.exe",
+    "provenance_note": "the installed binary embeds no build commit; its version string alone does not pin provenance. Features observed (GH-574/GH-708 dispatch surface) postdate the v0.4.0 tag, so the binary is newer than the tag but its exact commit is unknown. Findings that depend on post-tag fixes are annotated for re-adjudication on a binary built from the frozen basis SHA."
+  },
+  "runs": [
+    {
+      "target": "claude",
+      "results": [
+        {
+          "id": "H-STORE-ISOLATION",
+          "title": "isolated store only; real store untouched",
+          "severity": "MUST",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "no conf90b976fc artifacts in C:\\Users\\fagem\\.edda; C:\\Users\\fagem\\AppData\\Roaming\\edda; C:\\Users\\fagem\\.local\\share\\edda",
+          "note": ""
+        },
+        {
+          "id": "H-FAIL-OPEN",
+          "title": "malformed stdin exits 0, never blocks the host agent",
+          "severity": "MUST",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "exit=0 stdout=''",
+          "note": ""
+        },
+        {
+          "id": "H-UNKNOWN-EVENT",
+          "title": "unknown event exits 0 permissively",
+          "severity": "MUST",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "exit=0 stdout=''",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-START",
+          "title": "session start injects bounded context with write-back protocol",
+          "severity": "MUST",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "injection 1319 chars, boundary+writeback present",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-BUDGET",
+          "title": "pack budget truncates body, preserves write-back tail",
+          "severity": "MUST",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "injection 1669 chars under 300-char budget; tail preserved",
+          "note": ""
+        },
+        {
+          "id": "H-PROMPT-DEDUP",
+          "title": "identical consecutive prompt injections are deduped",
+          "severity": "SHOULD",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "first 683 chars, second 474 chars",
+          "note": ""
+        },
+        {
+          "id": "H-LEDGER-APPEND",
+          "title": "hook events append to per-session ledger in the store",
+          "severity": "MUST",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "2 lines, 2 tool-bearing, at C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\claude\\store\\projects\\d6f6b73871e28812315edd18375d7e60\\ledger\\conf90b976fc-ledger.jsonl",
+          "note": ""
+        },
+        {
+          "id": "H-HEARTBEAT",
+          "title": "heartbeat written on start, removed on end",
+          "severity": "MUST",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "written then removed; shape ok=True",
+          "note": ""
+        },
+        {
+          "id": "H-DIGEST-IDEMPOTENT",
+          "title": "repeated digest triggers produce exactly one digest",
+          "severity": "MUST",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "digest notes stable at 1 across a repeated session end",
+          "note": ""
+        },
+        {
+          "id": "H-REDACT-STORE",
+          "title": "secrets redacted before durable store write",
+          "severity": "SHOULD",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "sentinel absent from C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\claude\\store\\projects\\d6f6b73871e28812315edd18375d7e60\\ledger\\conf90b976fc-redact.jsonl",
+          "note": "payload persisted and secret redacted"
+        },
+        {
+          "id": "H-END-CLEANUP",
+          "title": "session end removes per-session state",
+          "severity": "SHOULD",
+          "vendor": "claude",
+          "status": "PASS",
+          "evidence": "no conf90b976fc-clean-state files remain under C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\claude\\store\\projects\\d6f6b73871e28812315edd18375d7e60\\state",
+          "note": ""
+        },
+        {
+          "id": "H-PRETOOL-IDENTITY",
+          "title": "PreToolUse stays allow + carries session identity (codex capability)",
+          "severity": "SHOULD",
+          "vendor": "claude",
+          "status": "SKIP",
+          "evidence": "decision='allow' updatedInput=no",
+          "note": "vendor has no session-identity rewrite capability (documented capability difference)"
+        },
+        {
+          "id": "H-NUDGE-RATE",
+          "title": "decision nudges are rate-limited",
+          "severity": "SHOULD",
+          "vendor": "claude",
+          "status": "SKIP",
+          "evidence": "0 nudges over 6 signal events",
+          "note": "no nudge observed at probe cadence (threshold not reached) \u2014 not a violation"
+        }
+      ],
+      "violations": 0,
+      "skipped": [
+        "H-PRETOOL-IDENTITY",
+        "H-NUDGE-RATE"
+      ]
+    },
+    {
+      "target": "codex",
+      "results": [
+        {
+          "id": "H-STORE-ISOLATION",
+          "title": "isolated store only; real store untouched",
+          "severity": "MUST",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "no confc0f83768 artifacts in C:\\Users\\fagem\\.edda; C:\\Users\\fagem\\AppData\\Roaming\\edda; C:\\Users\\fagem\\.local\\share\\edda",
+          "note": ""
+        },
+        {
+          "id": "H-FAIL-OPEN",
+          "title": "malformed stdin exits 0, never blocks the host agent",
+          "severity": "MUST",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{\"continue\":true}'",
+          "note": ""
+        },
+        {
+          "id": "H-UNKNOWN-EVENT",
+          "title": "unknown event exits 0 permissively",
+          "severity": "MUST",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{\"continue\":true}\\n'",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-START",
+          "title": "session start injects bounded context with write-back protocol",
+          "severity": "MUST",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "injection 1616 chars, boundary+writeback present",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-BUDGET",
+          "title": "pack budget truncates body, preserves write-back tail",
+          "severity": "MUST",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "injection 1717 chars under 300-char budget; tail preserved",
+          "note": ""
+        },
+        {
+          "id": "H-PROMPT-DEDUP",
+          "title": "identical consecutive prompt injections are deduped",
+          "severity": "SHOULD",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "first 333 chars, second 0 chars",
+          "note": ""
+        },
+        {
+          "id": "H-LEDGER-APPEND",
+          "title": "hook events append to per-session ledger in the store",
+          "severity": "MUST",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "2 lines, 2 tool-bearing, at C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\codex\\store\\projects\\fc60ee0c0cc754f2da17c9eb36ccf6d1\\ledger\\confc0f83768-ledger.jsonl",
+          "note": ""
+        },
+        {
+          "id": "H-HEARTBEAT",
+          "title": "heartbeat written on start, removed on end",
+          "severity": "MUST",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "written then removed; shape ok=True",
+          "note": ""
+        },
+        {
+          "id": "H-DIGEST-IDEMPOTENT",
+          "title": "repeated digest triggers produce exactly one digest",
+          "severity": "MUST",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "digest notes stable at 1 across a repeated session end",
+          "note": ""
+        },
+        {
+          "id": "H-REDACT-STORE",
+          "title": "secrets redacted before durable store write",
+          "severity": "SHOULD",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "sentinel absent from C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\codex\\store\\projects\\fc60ee0c0cc754f2da17c9eb36ccf6d1\\ledger\\confc0f83768-redact.jsonl",
+          "note": "tool payloads are not persisted by this bridge; leak path vacuously closed"
+        },
+        {
+          "id": "H-END-CLEANUP",
+          "title": "session end removes per-session state",
+          "severity": "SHOULD",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "no confc0f83768-clean-state files remain under C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\codex\\store\\projects\\fc60ee0c0cc754f2da17c9eb36ccf6d1\\state",
+          "note": ""
+        },
+        {
+          "id": "H-PRETOOL-IDENTITY",
+          "title": "PreToolUse stays allow + carries session identity (codex capability)",
+          "severity": "SHOULD",
+          "vendor": "codex",
+          "status": "PASS",
+          "evidence": "allow + EDDA_SESSION_ID prefix, command bytes preserved",
+          "note": ""
+        },
+        {
+          "id": "H-NUDGE-RATE",
+          "title": "decision nudges are rate-limited",
+          "severity": "SHOULD",
+          "vendor": "codex",
+          "status": "SKIP",
+          "evidence": "0 nudges over 6 signal events",
+          "note": "no nudge observed at probe cadence (threshold not reached) \u2014 not a violation"
+        }
+      ],
+      "violations": 0,
+      "skipped": [
+        "H-NUDGE-RATE"
+      ]
+    },
+    {
+      "target": "cursor",
+      "results": [
+        {
+          "id": "H-STORE-ISOLATION",
+          "title": "isolated store only; real store untouched",
+          "severity": "MUST",
+          "vendor": "cursor",
+          "status": "PASS",
+          "evidence": "no conf1bf0e51e artifacts in C:\\Users\\fagem\\.edda; C:\\Users\\fagem\\AppData\\Roaming\\edda; C:\\Users\\fagem\\.local\\share\\edda",
+          "note": ""
+        },
+        {
+          "id": "H-FAIL-OPEN",
+          "title": "malformed stdin exits 0, never blocks the host agent",
+          "severity": "MUST",
+          "vendor": "cursor",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{}'",
+          "note": ""
+        },
+        {
+          "id": "H-UNKNOWN-EVENT",
+          "title": "unknown event exits 0 permissively",
+          "severity": "MUST",
+          "vendor": "cursor",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{}'",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-START",
+          "title": "session start injects bounded context with write-back protocol",
+          "severity": "MUST",
+          "vendor": "cursor",
+          "status": "PASS",
+          "evidence": "injection 1616 chars, boundary+writeback present",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-BUDGET",
+          "title": "pack budget truncates body, preserves write-back tail",
+          "severity": "MUST",
+          "vendor": "cursor",
+          "status": "PASS",
+          "evidence": "injection 1717 chars under 300-char budget; tail preserved",
+          "note": ""
+        },
+        {
+          "id": "H-PROMPT-DEDUP",
+          "title": "identical consecutive prompt injections are deduped",
+          "severity": "SHOULD",
+          "vendor": "cursor",
+          "status": "SKIP",
+          "evidence": "no injection on first prompt.submit: '{\"continue\":true}'",
+          "note": "vendor prompt.submit event does not inject (capability note, see gaps list)"
+        },
+        {
+          "id": "H-LEDGER-APPEND",
+          "title": "hook events append to per-session ledger in the store",
+          "severity": "MUST",
+          "vendor": "cursor",
+          "status": "PASS",
+          "evidence": "2 lines, 2 tool-bearing, at C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\cursor\\store\\projects\\e9e8a70530dcf933b6d4b11e2a7d24e2\\ledger\\conf1bf0e51e-ledger.jsonl",
+          "note": ""
+        },
+        {
+          "id": "H-HEARTBEAT",
+          "title": "heartbeat written on start, removed on end",
+          "severity": "MUST",
+          "vendor": "cursor",
+          "status": "PASS",
+          "evidence": "written then removed; shape ok=True",
+          "note": ""
+        },
+        {
+          "id": "H-DIGEST-IDEMPOTENT",
+          "title": "repeated digest triggers produce exactly one digest",
+          "severity": "MUST",
+          "vendor": "cursor",
+          "status": "PASS",
+          "evidence": "digest notes stable at 1 across a repeated session end",
+          "note": ""
+        },
+        {
+          "id": "H-REDACT-STORE",
+          "title": "secrets redacted before durable store write",
+          "severity": "SHOULD",
+          "vendor": "cursor",
+          "status": "PASS",
+          "evidence": "sentinel absent from C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\cursor\\store\\projects\\e9e8a70530dcf933b6d4b11e2a7d24e2\\ledger\\conf1bf0e51e-redact.jsonl",
+          "note": "tool payloads are not persisted by this bridge; leak path vacuously closed"
+        },
+        {
+          "id": "H-END-CLEANUP",
+          "title": "session end removes per-session state",
+          "severity": "SHOULD",
+          "vendor": "cursor",
+          "status": "PASS",
+          "evidence": "no conf1bf0e51e-clean-state files remain under C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\cursor\\store\\projects\\e9e8a70530dcf933b6d4b11e2a7d24e2\\state",
+          "note": ""
+        },
+        {
+          "id": "H-PRETOOL-IDENTITY",
+          "title": "PreToolUse stays allow + carries session identity (codex capability)",
+          "severity": "SHOULD",
+          "vendor": "cursor",
+          "status": "SKIP",
+          "evidence": "decision=None updatedInput=no",
+          "note": "vendor has no session-identity rewrite capability (documented capability difference)"
+        },
+        {
+          "id": "H-NUDGE-RATE",
+          "title": "decision nudges are rate-limited",
+          "severity": "SHOULD",
+          "vendor": "cursor",
+          "status": "SKIP",
+          "evidence": "0 nudges over 6 signal events",
+          "note": "no nudge observed at probe cadence (threshold not reached) \u2014 not a violation"
+        }
+      ],
+      "violations": 0,
+      "skipped": [
+        "H-PROMPT-DEDUP",
+        "H-PRETOOL-IDENTITY",
+        "H-NUDGE-RATE"
+      ]
+    },
+    {
+      "target": "hermes",
+      "results": [
+        {
+          "id": "H-STORE-ISOLATION",
+          "title": "isolated store only; real store untouched",
+          "severity": "MUST",
+          "vendor": "hermes",
+          "status": "PASS",
+          "evidence": "no conf6417a824 artifacts in C:\\Users\\fagem\\.edda; C:\\Users\\fagem\\AppData\\Roaming\\edda; C:\\Users\\fagem\\.local\\share\\edda",
+          "note": ""
+        },
+        {
+          "id": "H-FAIL-OPEN",
+          "title": "malformed stdin exits 0, never blocks the host agent",
+          "severity": "MUST",
+          "vendor": "hermes",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{}'",
+          "note": ""
+        },
+        {
+          "id": "H-UNKNOWN-EVENT",
+          "title": "unknown event exits 0 permissively",
+          "severity": "MUST",
+          "vendor": "hermes",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{}\\n'",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-START",
+          "title": "session start injects bounded context with write-back protocol",
+          "severity": "MUST",
+          "vendor": "hermes",
+          "status": "PASS",
+          "evidence": "injection 1616 chars, boundary+writeback present",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-BUDGET",
+          "title": "pack budget truncates body, preserves write-back tail",
+          "severity": "MUST",
+          "vendor": "hermes",
+          "status": "PASS",
+          "evidence": "injection 1367 chars under 300-char budget; tail preserved",
+          "note": ""
+        },
+        {
+          "id": "H-PROMPT-DEDUP",
+          "title": "identical consecutive prompt injections are deduped",
+          "severity": "SHOULD",
+          "vendor": "hermes",
+          "status": "PASS",
+          "evidence": "first 1616 chars, second 0 chars",
+          "note": ""
+        },
+        {
+          "id": "H-LEDGER-APPEND",
+          "title": "hook events append to per-session ledger in the store",
+          "severity": "MUST",
+          "vendor": "hermes",
+          "status": "PASS",
+          "evidence": "2 lines, 2 tool-bearing, at C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\hermes\\store\\projects\\98791c28e7fbd3e8e201574257d3e00d\\ledger\\conf6417a824-ledger.jsonl",
+          "note": ""
+        },
+        {
+          "id": "H-HEARTBEAT",
+          "title": "heartbeat written on start, removed on end",
+          "severity": "MUST",
+          "vendor": "hermes",
+          "status": "FAIL",
+          "evidence": "no heartbeat file for conf6417a824-hb after session.start under C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\hermes\\store",
+          "note": ""
+        },
+        {
+          "id": "H-DIGEST-IDEMPOTENT",
+          "title": "repeated digest triggers produce exactly one digest",
+          "severity": "MUST",
+          "vendor": "hermes",
+          "status": "PASS",
+          "evidence": "digest notes stable at 1 across a repeated session end",
+          "note": ""
+        },
+        {
+          "id": "H-REDACT-STORE",
+          "title": "secrets redacted before durable store write",
+          "severity": "SHOULD",
+          "vendor": "hermes",
+          "status": "PASS",
+          "evidence": "sentinel absent from C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\hermes\\store\\projects\\98791c28e7fbd3e8e201574257d3e00d\\ledger\\conf6417a824-redact.jsonl",
+          "note": "tool payloads are not persisted by this bridge; leak path vacuously closed"
+        },
+        {
+          "id": "H-END-CLEANUP",
+          "title": "session end removes per-session state",
+          "severity": "SHOULD",
+          "vendor": "hermes",
+          "status": "PASS",
+          "evidence": "no conf6417a824-clean-state files remain under C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\hermes\\store\\projects\\98791c28e7fbd3e8e201574257d3e00d\\state",
+          "note": ""
+        },
+        {
+          "id": "H-PRETOOL-IDENTITY",
+          "title": "PreToolUse stays allow + carries session identity (codex capability)",
+          "severity": "SHOULD",
+          "vendor": "hermes",
+          "status": "SKIP",
+          "evidence": "decision=None updatedInput=no",
+          "note": "vendor has no session-identity rewrite capability (documented capability difference)"
+        },
+        {
+          "id": "H-NUDGE-RATE",
+          "title": "decision nudges are rate-limited",
+          "severity": "SHOULD",
+          "vendor": "hermes",
+          "status": "SKIP",
+          "evidence": "0 nudges over 6 signal events",
+          "note": "no nudge observed at probe cadence (threshold not reached) \u2014 not a violation"
+        }
+      ],
+      "violations": 1,
+      "skipped": [
+        "H-PRETOOL-IDENTITY",
+        "H-NUDGE-RATE"
+      ]
+    },
+    {
+      "target": "openclaw",
+      "results": [
+        {
+          "id": "H-STORE-ISOLATION",
+          "title": "isolated store only; real store untouched",
+          "severity": "MUST",
+          "vendor": "openclaw",
+          "status": "PASS",
+          "evidence": "no confd1e27321 artifacts in C:\\Users\\fagem\\.edda; C:\\Users\\fagem\\AppData\\Roaming\\edda; C:\\Users\\fagem\\.local\\share\\edda",
+          "note": ""
+        },
+        {
+          "id": "H-FAIL-OPEN",
+          "title": "malformed stdin exits 0, never blocks the host agent",
+          "severity": "MUST",
+          "vendor": "openclaw",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{\"ok\":true}'",
+          "note": ""
+        },
+        {
+          "id": "H-UNKNOWN-EVENT",
+          "title": "unknown event exits 0 permissively",
+          "severity": "MUST",
+          "vendor": "openclaw",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{\"ok\":true}'",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-START",
+          "title": "session start injects bounded context with write-back protocol",
+          "severity": "MUST",
+          "vendor": "openclaw",
+          "status": "PASS",
+          "evidence": "injection 1616 chars, boundary+writeback present",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-BUDGET",
+          "title": "pack budget truncates body, preserves write-back tail",
+          "severity": "MUST",
+          "vendor": "openclaw",
+          "status": "PASS",
+          "evidence": "injection 1367 chars under 300-char budget; tail preserved",
+          "note": ""
+        },
+        {
+          "id": "H-PROMPT-DEDUP",
+          "title": "identical consecutive prompt injections are deduped",
+          "severity": "SHOULD",
+          "vendor": "openclaw",
+          "status": "PASS",
+          "evidence": "first 1616 chars, second 0 chars",
+          "note": ""
+        },
+        {
+          "id": "H-LEDGER-APPEND",
+          "title": "hook events append to per-session ledger in the store",
+          "severity": "MUST",
+          "vendor": "openclaw",
+          "status": "PASS",
+          "evidence": "2 lines, 2 tool-bearing, at C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\openclaw\\store\\projects\\16685fc4a1549c9d10f7405e4f9e96ae\\ledger\\confd1e27321-ledger.jsonl",
+          "note": ""
+        },
+        {
+          "id": "H-HEARTBEAT",
+          "title": "heartbeat written on start, removed on end",
+          "severity": "MUST",
+          "vendor": "openclaw",
+          "status": "FAIL",
+          "evidence": "no heartbeat file for confd1e27321-hb after session.start under C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\openclaw\\store",
+          "note": ""
+        },
+        {
+          "id": "H-DIGEST-IDEMPOTENT",
+          "title": "repeated digest triggers produce exactly one digest",
+          "severity": "MUST",
+          "vendor": "openclaw",
+          "status": "PASS",
+          "evidence": "digest notes stable at 1 across a repeated session end",
+          "note": ""
+        },
+        {
+          "id": "H-REDACT-STORE",
+          "title": "secrets redacted before durable store write",
+          "severity": "SHOULD",
+          "vendor": "openclaw",
+          "status": "FAIL",
+          "evidence": "raw sentinel secret present in C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\openclaw\\store\\projects\\16685fc4a1549c9d10f7405e4f9e96ae\\ledger\\confd1e27321-redact.jsonl",
+          "note": ""
+        },
+        {
+          "id": "H-END-CLEANUP",
+          "title": "session end removes per-session state",
+          "severity": "SHOULD",
+          "vendor": "openclaw",
+          "status": "PASS",
+          "evidence": "no confd1e27321-clean-state files remain under C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\openclaw\\store\\projects\\16685fc4a1549c9d10f7405e4f9e96ae\\state",
+          "note": ""
+        },
+        {
+          "id": "H-PRETOOL-IDENTITY",
+          "title": "PreToolUse stays allow + carries session identity (codex capability)",
+          "severity": "SHOULD",
+          "vendor": "openclaw",
+          "status": "SKIP",
+          "evidence": "decision=None updatedInput=no",
+          "note": "vendor has no session-identity rewrite capability (documented capability difference)"
+        },
+        {
+          "id": "H-NUDGE-RATE",
+          "title": "decision nudges are rate-limited",
+          "severity": "SHOULD",
+          "vendor": "openclaw",
+          "status": "SKIP",
+          "evidence": "0 nudges over 6 signal events",
+          "note": "no nudge observed at probe cadence (threshold not reached) \u2014 not a violation"
+        }
+      ],
+      "violations": 2,
+      "skipped": [
+        "H-PRETOOL-IDENTITY",
+        "H-NUDGE-RATE"
+      ]
+    },
+    {
+      "target": "control (mutation-negative; not bridge evidence)",
+      "results": [
+        {
+          "id": "H-STORE-ISOLATION",
+          "title": "isolated store only; real store untouched",
+          "severity": "MUST",
+          "vendor": "control-stub",
+          "status": "PASS",
+          "evidence": "no conf2b8d4a84 artifacts in C:\\Users\\fagem\\.edda; C:\\Users\\fagem\\AppData\\Roaming\\edda; C:\\Users\\fagem\\.local\\share\\edda",
+          "note": ""
+        },
+        {
+          "id": "H-FAIL-OPEN",
+          "title": "malformed stdin exits 0, never blocks the host agent",
+          "severity": "MUST",
+          "vendor": "control-stub",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{\"continue\": true}'",
+          "note": ""
+        },
+        {
+          "id": "H-UNKNOWN-EVENT",
+          "title": "unknown event exits 0 permissively",
+          "severity": "MUST",
+          "vendor": "control-stub",
+          "status": "PASS",
+          "evidence": "exit=0 stdout='{\"continue\": true}'",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-START",
+          "title": "session start injects bounded context with write-back protocol",
+          "severity": "MUST",
+          "vendor": "control-stub",
+          "status": "FAIL",
+          "evidence": "no injection key in stdout: '{\"continue\": true}'",
+          "note": ""
+        },
+        {
+          "id": "H-INJECT-BUDGET",
+          "title": "pack budget truncates body, preserves write-back tail",
+          "severity": "MUST",
+          "vendor": "control-stub",
+          "status": "FAIL",
+          "evidence": "no injection under tiny budget: '{\"continue\": true}'",
+          "note": ""
+        },
+        {
+          "id": "H-PROMPT-DEDUP",
+          "title": "identical consecutive prompt injections are deduped",
+          "severity": "SHOULD",
+          "vendor": "control-stub",
+          "status": "SKIP",
+          "evidence": "no injection on first prompt.submit: '{\"continue\": true}'",
+          "note": "vendor prompt.submit event does not inject (capability note, see gaps list)"
+        },
+        {
+          "id": "H-LEDGER-APPEND",
+          "title": "hook events append to per-session ledger in the store",
+          "severity": "MUST",
+          "vendor": "control-stub",
+          "status": "FAIL",
+          "evidence": "no per-session ledger for conf2b8d4a84-ledger anywhere under C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\control\\store",
+          "note": ""
+        },
+        {
+          "id": "H-HEARTBEAT",
+          "title": "heartbeat written on start, removed on end",
+          "severity": "MUST",
+          "vendor": "control-stub",
+          "status": "FAIL",
+          "evidence": "no heartbeat file for conf2b8d4a84-hb after session.start under C:\\Users\\fagem\\AppData\\Local\\Temp\\edda-conf-it0e2r6w\\control\\store",
+          "note": ""
+        },
+        {
+          "id": "H-DIGEST-IDEMPOTENT",
+          "title": "repeated digest triggers produce exactly one digest",
+          "severity": "MUST",
+          "vendor": "control-stub",
+          "status": "SKIP",
+          "evidence": "digest notes after end#1=0, after end#2=0",
+          "note": "no digest note produced (zero-call session or digest-on-next-start semantics) \u2014 see gaps list"
+        },
+        {
+          "id": "H-REDACT-STORE",
+          "title": "secrets redacted before durable store write",
+          "severity": "SHOULD",
+          "vendor": "control-stub",
+          "status": "SKIP",
+          "evidence": "",
+          "note": "no session ledger produced \u2014 nothing durable to leak (store-write path untested)"
+        },
+        {
+          "id": "H-END-CLEANUP",
+          "title": "session end removes per-session state",
+          "severity": "SHOULD",
+          "vendor": "control-stub",
+          "status": "SKIP",
+          "evidence": "",
+          "note": "no state dir located for session"
+        },
+        {
+          "id": "H-PRETOOL-IDENTITY",
+          "title": "PreToolUse stays allow + carries session identity (codex capability)",
+          "severity": "SHOULD",
+          "vendor": "control-stub",
+          "status": "SKIP",
+          "evidence": "decision=None updatedInput=no",
+          "note": "vendor has no session-identity rewrite capability (documented capability difference)"
+        },
+        {
+          "id": "H-NUDGE-RATE",
+          "title": "decision nudges are rate-limited",
+          "severity": "SHOULD",
+          "vendor": "control-stub",
+          "status": "SKIP",
+          "evidence": "0 nudges over 6 signal events",
+          "note": "no nudge observed at probe cadence (threshold not reached) \u2014 not a violation"
+        },
+        {
+          "id": "X-CONTROL-NEGATIVE",
+          "title": "mutation-negative control is flagged",
+          "severity": "MUST",
+          "vendor": "harness",
+          "status": "PASS",
+          "evidence": "4 violations: ['H-INJECT-START', 'H-INJECT-BUDGET', 'H-LEDGER-APPEND', 'H-HEARTBEAT']",
+          "note": "harness self-test: a do-nothing adapter must be detected, not passed"
+        }
+      ],
+      "violations": 4,
+      "skipped": [
+        "H-PROMPT-DEDUP",
+        "H-DIGEST-IDEMPOTENT",
+        "H-REDACT-STORE",
+        "H-END-CLEANUP",
+        "H-PRETOOL-IDENTITY",
+        "H-NUDGE-RATE"
+      ]
+    }
+  ],
+  "summary": {
+    "contract_violations": 3,
+    "verdict": "VIOLATIONS FOUND"
+  }
+}
