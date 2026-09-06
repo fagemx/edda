@@ -455,6 +455,16 @@ expect_gate_state 'an unknown verdict word is failure' 'failure' 'Needs Discussi
 # REVIEW.md §6.4/§8: an unqualified LGTM (edda review exit 3) is provisional —
 # it never satisfies the gate, even at P0=0 P1=0 (#998).
 expect_gate_state 'a provisional verdict never qualifies' 'failure' 'Provisional\t0\t0\n'
+# A Provisional round stands in the union by its counts (#1023 round 1):
+# at P0=P1=0 it is pending — never success on its own, cleared by a later
+# qualified LGTM on the same sha once the escalation is adjudicated (REVIEW.md
+# §6.4); with any P0/P1 it stands like any other non-qualifying verdict (§8,
+# GH-742), so a later LGTM on that sha cannot turn the gate green.
+expect_gate_state 'a provisional 0/0 is cleared by a later qualified LGTM on the same sha' \
+    'success' 'Provisional\t0\t0\nLGTM\t0\t0\n'
+expect_gate_state 'a provisional round with findings holds a later LGTM at failure' \
+    'failure' 'Provisional\t0\t2\nLGTM\t0\t0\n'
+expect_gate_state 'a provisional round with findings alone is failure' 'failure' 'Provisional\t0\t2\n'
 
 # --- collect-verdicts: read the §7 verdict comments pinned to one SHA ---------
 # The fixture holds the OUTPUT of the gh --jq pipeline (sentinel + raw
@@ -1240,6 +1250,24 @@ export GH_COMMENTS_FILE="$tmp/comments-pr42-prior-provisional"
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (prior provisional)\n' >&2; exit 1; }
 grep -qF -- '-f state=success' "$GH_STUB_LOG" || {
     printf 'live: a prior provisional round must not hold a later qualified LGTM at failure, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2; exit 1
+}
+unset GH_HEAD GH_COMMENTS_FILE
+
+# A prior Provisional round WITH findings is a standing non-qualifying verdict:
+# its counts stay in the union, so a later qualified LGTM on the same sha does
+# not turn the gate green (REVIEW.md §8, GH-742; #1023 round 1).
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+printf '<<<COMMENT>>>\n## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nProvisional — unqualified (disqualifiers: escalation-pending), P0=0, P1=1 — not a merge-gate verdict\n' \
+    "$sha" >"$tmp/comments-pr42-prior-provisional-findings"
+export GH_HEAD="$sha"
+export GH_COMMENTS_FILE="$tmp/comments-pr42-prior-provisional-findings"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (prior provisional with findings)\n' >&2; exit 1; }
+grep -qF -- '-f state=failure' "$GH_STUB_LOG" || {
+    printf 'live: a prior provisional round with open findings must hold a later LGTM at failure, got:\n%s\n' \
         "$(grep 'statuses/' "$GH_STUB_LOG")" >&2; exit 1
 }
 unset GH_HEAD GH_COMMENTS_FILE
