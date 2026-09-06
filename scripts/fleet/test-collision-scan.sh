@@ -8,8 +8,9 @@
 # registration (no scheduled task by the name lane-launch.ps1 builds), the
 # launcher's own claim and the no-claim dry run behave exactly as before.
 # Those cases are Windows-only, gated on the OS rather than on pwsh being
-# installed, and the absence query carries a control case proving it can also
-# report presence (GH-971).
+# installed; the absence query carries a control case proving it can also
+# report presence, and case 7 binds the test's edda-lane-$Name derivation to
+# the name the launcher itself prints on registration (GH-971).
 #
 # Everything is written under one temp dir, plus the scheduled tasks named in
 # cleanup(); nothing else is touched. No script under test ever comments,
@@ -30,9 +31,10 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/test-collision-scan.XXXXXX")
 # Scheduled tasks outlive the temp dir, so every task this test can register
 # is reclaimed here too: the task_absent control, and the dry-run tasks a raced
 # scheduler poll leaves registered when the launcher exits early. Each name is
-# appended BEFORE the launch that would create it, so a kill mid-launch still
-# reclaims it. By name, never by wildcard — this must never reap a task it
-# did not create.
+# added by reap_later BEFORE the launch that would create it (a kill mid-launch
+# still reclaims it), and only when no task by that name pre-exists — so a
+# production task that happens to share a name is never reaped (PR #995
+# Round 1 P2-1). By name, never by wildcard.
 registered_tasks=
 cleanup() {
     for t in $registered_tasks; do
@@ -212,6 +214,13 @@ STUB
     task_absent() { # 0 when no scheduled task named $1 exists, 1 when one does
         pwsh -NoProfile -Command "if (Get-ScheduledTask -TaskName '$1' -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }"
     }
+    reap_later() { # mark $1 for cleanup — unless a foreign task pre-exists
+        if task_absent "$1"; then
+            registered_tasks="$registered_tasks $1"
+        else
+            echo "WARN: scheduled task $1 pre-exists; this run will not reap it" >&2
+        fi
+    }
 
     # case 3a — control. An assertion that can only ever pass proves nothing,
     # so before relying on task_absent, prove it reports BOTH answers: register
@@ -219,7 +228,7 @@ STUB
     # this a query naming a task nobody registers reads exactly like a launcher
     # that registered nothing, which is how the doubled prefix survived review.
     control="edda-selftest-collision-$$"
-    registered_tasks="$registered_tasks $control"
+    reap_later "$control"
     pwsh -NoProfile -Command "\$a = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit 0'; Register-ScheduledTask -TaskName '$control' -Action \$a -RunLevel Limited | Out-Null" >/dev/null 2>&1 \
         || fail "control: cannot register a scheduled task; every absence assertion below would be untestable"
     if task_absent "$control"; then
@@ -230,7 +239,11 @@ STUB
     task_absent "$control" || fail "control: task_absent still reports $control after removal"
     echo "ok 3a task_absent reports both presence and absence"
 
-    # case 4 — foreign claim refuses before registering anything
+    # case 4 — foreign claim refuses before registering anything.
+    # $task is marked for cleanup here — before the FIRST launch that could
+    # register it under the regression this case exists to detect (Round 1
+    # P2-2), not merely before case 5's dry run.
+    reap_later "$task"
     : >"$work/gate-fixture.json"
     rc=0
     out=$(GF="$gf" GF_MODE=foreign PATH="$work/bin-gate:$PATH" \
@@ -256,7 +269,6 @@ STUB
     # with the retries the race needs; asserting it a second time here bought
     # no coverage and put a flaky assertion in a blocking CI gate (GH-971, same
     # scheduler path as GH-963).
-    registered_tasks="$registered_tasks $task"
     rc=0
     out=$(GF="$gf" GF_MODE=self PATH="$work/bin-gate:$PATH" \
         pwsh -NoProfile -File "$launcher" -Name "$lane" \
@@ -285,21 +297,32 @@ STUB
     # case 7 — non-issue-shaped lane names are unchanged (no -Machine needed)
     # The dry run races the Task Scheduler's own state query; retry a couple
     # of times before declaring the receipt broken.
-    registered_tasks="$registered_tasks edda-lane-scratch-lane"
+    scratch_lane=scratch-lane
+    scratch_task="edda-lane-$scratch_lane"
+    reap_later "$scratch_task"
     rc=1
     attempt=0
     while [ "$rc" != "0" ] && [ "$attempt" -lt 3 ]; do
         attempt=$((attempt + 1))
         rc=0
         out=$(PATH="$work/bin-gate:$PATH" \
-            pwsh -NoProfile -File "$launcher" -Name scratch-lane \
+            pwsh -NoProfile -File "$launcher" -Name "$scratch_lane" \
             -Brief "$work/gate-fixture.json" -Cwd "$work/cwd" \
             -LogDir "$work/lanes" -DryRun \
             -Owns scripts/fleet/test-collision-scan.sh 2>&1) || rc=$?
         [ "$rc" = "0" ] || sleep 2
     done
     [ "$rc" = "0" ] || fail "non-issue lane dry run exit $rc after retries: $out"
-    echo "ok 7 non-issue-shaped lane unchanged"
+    # Round 1 P0-1: bind this test's name derivation to the name the launcher
+    # actually registered. On the success path the launcher prints
+    # "dry-run task=<registered name> state=..." from its own $TaskName, so
+    # this grep goes red the moment lane-launch.ps1 stops building
+    # "edda-lane-$Name" — the drift that made task_query unfalsifiable in
+    # #967. Zero timing dependence: the line is printed by the same invocation
+    # whose exit 0 the assertion above already requires.
+    printf '%s' "$out" | command grep -q "dry-run task=$scratch_task " \
+        || fail "dry-run receipt does not name the derived task $scratch_task: $out"
+    echo "ok 7 non-issue lane unchanged; registered name matches the derivation"
 
     # case 8 — the PowerShell change parses
     pwsh -NoProfile -Command "\$e=\$null; [void][System.Management.Automation.Language.Parser]::ParseFile('$root/scripts/fleet/lane-launch.ps1', [ref]\$null, [ref]\$e); if (\$e) { \$e | ForEach-Object { Write-Error \$_.Message }; exit 1 }" \
