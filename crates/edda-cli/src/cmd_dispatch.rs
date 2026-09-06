@@ -130,10 +130,8 @@ pub struct DispatchArgs {
     /// Print one JSON object to stdout instead of text lines
     #[arg(long)]
     pub json: bool,
-    /// Stream the agent's activity to stdout while the turn runs, instead of
-    /// printing nothing until it ends. An unattended lane's log is its only
-    /// diagnostic: without this a lane killed at its timeout leaves a
-    /// zero-byte log and its cause of death is unrecoverable (GH-748).
+    /// Stream agent activity to stdout while the turn runs; without it an
+    /// unattended lane killed at its timeout leaves a zero-byte log (GH-748)
     #[arg(long)]
     pub verbose: bool,
 }
@@ -473,15 +471,10 @@ fn run_inner(args: DispatchArgs) -> Result<i32> {
         )?;
     }
 
-    // GH-748: --verbose streams the agent's activity as text lines, which is
-    // the same promise --json breaks for --list-models below. Refuse the
-    // combination rather than interleaving activity into a JSON consumer.
+    // Activity is text lines; --json promises one object (as for --list-models).
     if args.verbose && args.json {
-        bail!(
-            "--json cannot be combined with --verbose: live agent activity is              text, and --json promises exactly one JSON object on stdout"
-        );
+        bail!("--json cannot be combined with --verbose: live agent activity is text");
     }
-
     // --list-models short-circuits dispatch: print the provider/model table
     // and exit 0 (GH-574 — callers look up patterns instead of guessing a
     // provider prefix).
@@ -1871,42 +1864,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── GH-748: --verbose ──
-
-    #[test]
-    fn verbose_streams_live_activity_into_the_launcher() {
-        // A lane's log is its only diagnostic. Before this flag existed the
-        // launcher had no way to ask for live output, so a lane killed at its
-        // timeout left a zero-byte log (three lanes, 2026-09-03).
-        let args = parse(&[
-            "edda",
-            "--agent",
-            "claude",
-            "--prompt-file",
-            "p.txt",
-            "--verbose",
-        ]);
-        assert!(args.verbose, "--verbose must parse");
-        let quiet = parse(&["edda", "--agent", "claude", "--prompt-file", "p.txt"]);
-        assert!(!quiet.verbose, "quiet stays the default");
-    }
-
-    #[test]
-    fn run_inner_refuses_verbose_with_json() {
-        // --json promises exactly one JSON object on stdout; interleaved
-        // activity lines would break every consumer of it.
-        let args = parse(&[
-            "edda",
-            "--agent",
-            "claude",
-            "--prompt-file",
-            "p.txt",
-            "--verbose",
-            "--json",
-        ]);
-        let error = run_inner(args).expect_err("--verbose with --json must be refused");
-        assert!(error.to_string().contains("--verbose"), "{error}");
-    }
+    include!("cmd_dispatch_verbose_tests.rs");
 
     // ── GH-708: --resume ──
 
