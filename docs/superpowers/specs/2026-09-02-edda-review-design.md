@@ -13,7 +13,7 @@
   `fleet.claude-subscription-transport`、`fleet.review-provider-overload`、
   `scope.layer3`、`roadmap.stage1-order`
 - 讀者：#652 的實作 lane、審查者、#633 / #632 / #580 / #582 / #593 / #602 的作者
-- 相關文件：[reviewer-brief-template-v1](2026-09-02-reviewer-brief-template-v1.md)、
+- 相關文件：[reviewer-brief-template-v2](2026-09-02-reviewer-brief-template-v2.md)、
   [substitutable-reviewer-design](2026-09-02-substitutable-reviewer-design.md)、
   [tests/canaries/README.md](../../../tests/canaries/README.md)
 
