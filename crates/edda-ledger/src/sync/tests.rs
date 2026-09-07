@@ -437,6 +437,55 @@ fn mirror_parse_unescapes_value_and_reason() {
     );
 }
 
+/// Every caller-supplied field in its escaped form (GH-671 R5) — not only
+/// Value and Reason. `\n` here is the two-character escape the export writes,
+/// never a real line break; a real one would make the line below it a
+/// *field* of the same decision, which is the whole defect.
+const MIRROR_TOTAL_ESCAPE_FIXTURE: &str = concat!(
+    "# Domain: `esc\\ndomain`\n\n",
+    "## `esc.multi\\nline \\\\ key`\n\n",
+    "- **Value**: `v`\n",
+    "- **Reason**: r\n",
+    "- **Branch/ts**: `main` · 2026-09-05T03:00:00Z\n",
+    "- **Governance**: ratified by op\\nerator \\\\ x at 2026-09-05T04:00:00Z\n",
+    "- **Scope**: local\\n- **Scope**: global\n",
+    "- **Authority**: agent\\nhuman \\\\ x\n",
+    "- **Reversibility**: hard\\\\ish\n",
+    "- **Review after**: 2027-01-01\\ntrailing\n",
+    "- **Village**: village-a\\\\one\\n- **Reversibility**: forged\n",
+    "- **event_id**: `evt_01esc\\nid`\n",
+);
+
+/// The read half of the R5 pair: a field the export escaped must be unescaped
+/// on import, or the row lands carrying literal `\n` and doubled backslashes.
+///
+/// The forged `- **Scope**:` / `- **Reversibility**:` text inside Scope and
+/// Village is the point of the encoding: after unescaping it is *data* sitting
+/// inside one column, never a second field line the parser obeyed.
+#[test]
+fn mirror_parse_unescapes_every_caller_supplied_field() {
+    let parsed = parse_domain_markdown("file-stem", MIRROR_TOTAL_ESCAPE_FIXTURE).unwrap();
+    assert_eq!(parsed.len(), 1, "one section, not one plus injected lines");
+    let d = &parsed[0];
+
+    assert_eq!(d.row.key, "esc.multi\nline \\ key");
+    assert_eq!(d.row.domain, "esc\ndomain");
+    assert_eq!(d.row.scope, "local\n- **Scope**: global");
+    assert_eq!(d.row.authority, "agent\nhuman \\ x");
+    assert_eq!(d.row.reversibility, "hard\\ish");
+    assert_eq!(d.row.review_after.as_deref(), Some("2027-01-01\ntrailing"));
+    assert_eq!(
+        d.row.village_id.as_deref(),
+        Some("village-a\\one\n- **Reversibility**: forged")
+    );
+    assert_eq!(d.row.event_id, "evt_01esc\nid");
+    assert_eq!(d.ratified_by.as_deref(), Some("op\nerator \\ x"));
+    // Machine-generated, never escaped: an RFC3339 stamp and a branch name
+    // `validate_branch_name` restricts to [A-Za-z0-9._/-].
+    assert_eq!(d.row.branch, "main");
+    assert_eq!(d.ratified_at.as_deref(), Some("2026-09-05T04:00:00Z"));
+}
+
 #[test]
 fn mirror_parse_defaults_when_optional_lines_absent() {
     // A pre-GH-671 mirror (no Scope/Authority/Reversibility lines) must

@@ -584,14 +584,17 @@ fn parse_domain_markdown(file_domain: &str, text: &str) -> anyhow::Result<Vec<Mi
 
     for line in text.lines() {
         if let Some(rest) = line.strip_prefix("# Domain: `") {
-            header_domain = rest.strip_suffix('`').map(str::to_string);
+            header_domain = rest.strip_suffix('`').map(unescape_field);
             continue;
         }
         if let Some(rest) = line.strip_prefix("## `") {
             if let Some(done) = current.take() {
                 finish_mirror_decision(done, &mut out)?;
             }
-            let key = rest.strip_suffix('`').unwrap_or(rest).trim().to_string();
+            // Trim before unescaping, never after: unescaping first can
+            // produce a trailing newline that `trim` would then eat, silently
+            // shortening the very key this escape exists to carry whole.
+            let key = unescape_field(rest.strip_suffix('`').unwrap_or(rest).trim());
             if key.is_empty() {
                 continue;
             }
@@ -666,6 +669,13 @@ fn finish_mirror_decision(
 
 /// Match one `- **Field**: value` line inside a decision section.
 /// Unrecognized lines (headers, prose, gloss) are ignored.
+///
+/// Every caller-supplied field is unescaped here, because `cmd_export` escapes
+/// every caller-supplied field on write — the two halves are one encoding and
+/// only work as a pair. Branch and ts are the exception on both sides: a
+/// branch name is restricted to `[A-Za-z0-9._/-]` by
+/// [`crate::validate_branch_name`] and a ts is a machine RFC3339 stamp, so
+/// neither can carry an escape to undo.
 fn parse_mirror_field_line(line: &str, decision: &mut MirrorDecision) {
     let row = &mut decision.row;
     if let Some(v) = line.strip_prefix("- **Value**: `") {
@@ -681,29 +691,33 @@ fn parse_mirror_field_line(line: &str, decision: &mut MirrorDecision) {
     } else if let Some(v) = line.strip_prefix("- **Governance**: ") {
         if let Some(rest) = v.strip_prefix("ratified by ") {
             if let Some((who, ts)) = rest.rsplit_once(" at ") {
-                decision.ratified_by = Some(who.trim().to_string());
+                // The name is unauthenticated either way — `append_mirror_
+                // ratification` records the mirror, not this string — but it
+                // is quoted into that event's note, so it is carried exactly
+                // rather than half-decoded.
+                decision.ratified_by = Some(unescape_field(who.trim()));
                 decision.ratified_at = Some(ts.trim().to_string());
             }
         } else if let Some(rest) = v.strip_prefix("unratified (") {
             let auth = rest.strip_suffix(')').unwrap_or(rest).trim();
             if !auth.is_empty() {
-                row.authority = auth.to_string();
+                row.authority = unescape_field(auth);
             }
         }
     } else if let Some(v) = line.strip_prefix("- **Scope**: ") {
-        row.scope = v.trim().to_string();
+        row.scope = unescape_field(v.trim());
     } else if let Some(v) = line.strip_prefix("- **Authority**: ") {
-        row.authority = v.trim().to_string();
+        row.authority = unescape_field(v.trim());
     } else if let Some(v) = line.strip_prefix("- **Affected paths**: ") {
         row.affected_paths = backtick_list_to_json(v);
     } else if let Some(v) = line.strip_prefix("- **Tags**: ") {
         row.tags = backtick_list_to_json(v);
     } else if let Some(v) = line.strip_prefix("- **Review after**: ") {
-        row.review_after = Some(v.trim().to_string());
+        row.review_after = Some(unescape_field(v.trim()));
     } else if let Some(v) = line.strip_prefix("- **Reversibility**: ") {
-        row.reversibility = v.trim().to_string();
+        row.reversibility = unescape_field(v.trim());
     } else if let Some(v) = line.strip_prefix("- **Village**: ") {
-        row.village_id = Some(v.trim().to_string());
+        row.village_id = Some(unescape_field(v.trim()));
     } else if let Some(v) = line.strip_prefix("- **Cites**: ") {
         // GH-761 citations ride the mirror as a backtick list, same encoding
         // as Tags and Affected paths. Dropping them would make the mirror lie
@@ -711,7 +725,7 @@ fn parse_mirror_field_line(line: &str, decision: &mut MirrorDecision) {
         decision.cites = backtick_list(v);
     } else if let Some(v) = line.strip_prefix("- **event_id**: `") {
         let v = v.strip_suffix('`').unwrap_or(v);
-        row.event_id = v.trim().to_string();
+        row.event_id = unescape_field(v.trim());
     }
 }
 
@@ -734,6 +748,10 @@ fn backtick_list(s: &str) -> Vec<String> {
 
 /// Inverse of `edda-cli::cmd_export::escape_field` — a left-to-right scan so
 /// `\\n` (escaped backslash followed by `n`) never collapses into a newline.
+///
+/// Safe to apply to fields that older mirrors wrote raw: an unknown escape is
+/// passed through unchanged (`\p` stays `\p`), so a Windows path in a
+/// pre-GH-671 `- **Scope**:` line reads back byte-identically.
 fn unescape_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();

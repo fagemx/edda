@@ -92,29 +92,44 @@ pub fn origins_for_hits(
     }
     let now = OffsetDateTime::now_utc();
     // Read once for the whole list: it is the same mirror for every hit.
-    let live = repo_root.and_then(live_mirror_stamp);
+    let live = repo_root.and_then(live_mirror);
     hits.iter()
         .map(|h| {
-            ledger
-                .get_event(&h.event_id)
-                .ok()
-                .flatten()
-                .and_then(|e| origin_from_payload(&e.payload, now, live.as_deref()))
+            ledger.get_event(&h.event_id).ok().flatten().and_then(|e| {
+                origin_from_payload(
+                    &e.payload,
+                    now,
+                    live.as_ref().map(|(s, m)| (s.as_str(), m.as_str())),
+                )
+            })
         })
         .collect()
 }
 
-/// The `- **Exported at**:` stamp of the committed mirror in this checkout.
+/// The committed mirror in this checkout: its stamp **and whose it is**.
 ///
-/// Prefix and trimming match `edda_ledger::sync::parse_index_meta` and
-/// `edda_bridge_claude::mirror_import::read_stamp` — three readers of one line,
+/// Both halves matter. A checkout's `docs/decisions/` is rewritten by this
+/// machine's own wave-close export (`scripts/fleet/ratify-merged.sh`), so its
+/// stamp routinely belongs to a *different* machine than the one a given
+/// decision arrived from. Ageing a decision from `4090` against this box's own
+/// fresh export would clear the marker for a mirror nobody re-pulled, and print
+/// `from 4090 — exported <this box's timestamp>`, which is simply false.
+///
+/// Prefixes and trimming match `edda_ledger::sync::parse_index_meta` and
+/// `edda_bridge_claude::mirror_import::read_stamp` — three readers of one file,
 /// which only stay in agreement if they all strip it the same way.
-fn live_mirror_stamp(repo_root: &Path) -> Option<String> {
+fn live_mirror(repo_root: &Path) -> Option<(String, String)> {
     let text = std::fs::read_to_string(repo_root.join(MIRROR_INDEX)).ok()?;
-    text.lines()
-        .find_map(|l| l.strip_prefix("- **Exported at**:"))
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
+    let field = |name: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(name))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    Some((
+        field("- **Exported at**:")?,
+        field("- **Exporting machine**:")?,
+    ))
 }
 
 /// Whether a per-hit lookup could find any provenance at all.
@@ -143,7 +158,7 @@ pub fn annotate_hits(hits: &mut [DecisionHit], origins: &[Option<MirrorOrigin>])
 fn origin_from_payload(
     payload: &serde_json::Value,
     now: OffsetDateTime,
-    live: Option<&str>,
+    live: Option<(&str, &str)>,
 ) -> Option<MirrorOrigin> {
     let mirror = payload.get("mirror")?.as_object()?;
     let machine = mirror
@@ -155,7 +170,13 @@ fn origin_from_payload(
         .get("exported_at")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let exported_at = live.map(str::to_string).or(frozen);
+    // The live stamp only speaks for this decision if the mirror in the
+    // checkout is the same machine's. Anyone else's — including this box's own
+    // re-export — says nothing about how current `machine`'s rulings are.
+    let exported_at = live
+        .filter(|(_, live_machine)| *live_machine == machine)
+        .map(|(stamp, _)| stamp.to_string())
+        .or(frozen);
     let age_hours = exported_at.as_deref().and_then(|ts| {
         OffsetDateTime::parse(ts, &Rfc3339)
             .ok()
@@ -328,8 +349,12 @@ mod tests {
             "no live mirror to read ⇒ the frozen stamp is all we have"
         );
 
-        let with_live = origin_from_payload(&frozen_and_ancient, now, Some("2026-09-06T18:00:00Z"))
-            .expect("mirror payload");
+        let with_live = origin_from_payload(
+            &frozen_and_ancient,
+            now,
+            Some(("2026-09-06T18:00:00Z", "4090")),
+        )
+        .expect("mirror payload");
         assert!(
             !with_live.is_stale,
             "a mirror re-exported 6h ago is not stale, whatever the import stamp said"
@@ -343,6 +368,37 @@ mod tests {
             with_live.machine, "4090",
             "provenance still comes from the import event, not the live index"
         );
+    }
+
+    #[test]
+    fn another_machines_fresh_export_does_not_clear_this_ones_marker() {
+        // Round 4. The checkout's `docs/decisions/` is rewritten by whichever
+        // machine last ran the wave-close export — routinely this box, not the
+        // one a given decision came from. Taking its stamp unconditionally
+        // cleared the marker for a mirror nobody re-pulled and printed
+        // "from 4090 — exported <this box's timestamp>", which is false.
+        let from_4090 = payload(Some("2026-08-01T00:00:00Z"));
+        let now = at("2026-09-07T00:00:00Z");
+
+        let foreign =
+            origin_from_payload(&from_4090, now, Some(("2026-09-06T23:00:00Z", "docs-box")))
+                .expect("mirror payload");
+        assert!(
+            foreign.is_stale,
+            "a fresh export by docs-box says nothing about how current 4090's rulings are"
+        );
+        assert_eq!(
+            foreign.exported_at.as_deref(),
+            Some("2026-08-01T00:00:00Z"),
+            "the frozen stamp is reported, never another machine's"
+        );
+
+        // Same stamp, same machine: that is the pull the marker exists to
+        // reward, and it must still clear.
+        let ours = origin_from_payload(&from_4090, now, Some(("2026-09-06T23:00:00Z", "4090")))
+            .expect("mirror payload");
+        assert!(!ours.is_stale);
+        assert_eq!(ours.exported_at.as_deref(), Some("2026-09-06T23:00:00Z"));
     }
 
     #[test]
