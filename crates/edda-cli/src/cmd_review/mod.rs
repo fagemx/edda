@@ -2,6 +2,7 @@
 mod args;
 mod brief;
 mod evidence;
+mod gate;
 mod git;
 mod github;
 mod identity;
@@ -23,8 +24,31 @@ use edda_conductor::agent::launcher::{AgentLauncher, PhaseResult};
 use edda_core::{
     ReviewBrief, ReviewCost, ReviewFinding, ReviewReviewer, ReviewSubject, ReviewVerdictPayload,
 };
+pub use gate::GateArgs;
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
+
+/// Verbs under `edda review`.
+///
+/// `edda review` itself stays a bare command with flags: `--pr`, `--spec` and
+/// the rest are what `scripts/review-pr.sh` and `pr-review-watch.sh` invoke
+/// today, and a subcommand layer must not move them.
+#[derive(clap::Subcommand)]
+pub enum ReviewCmd {
+    /// Union rule and window check over the verdicts standing on a SHA
+    ///
+    /// Reads only. Exit: 0 pass, 1 fail, 2 cannot judge.
+    Gate {
+        #[command(flatten)]
+        args: GateArgs,
+    },
+}
+
+pub fn run_cmd(cmd: ReviewCmd, cwd: &Path) -> Result<()> {
+    match cmd {
+        ReviewCmd::Gate { args } => gate::run(args, cwd),
+    }
+}
 
 pub fn run(args: ReviewArgs, cwd: &Path) -> Result<()> {
     let result = run_inner(&args, cwd);
