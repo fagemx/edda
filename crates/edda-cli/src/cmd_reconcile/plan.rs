@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use super::runner::{
     acquire_workspace_lock, append_failed, append_requeued, append_started, clock_now,
-    ensure_attempt_worktree, replace_lease, task_view,
+    ensure_attempt_worktree, renew_lease, replace_lease, task_view,
 };
 use super::{PersistOutcome, ReconcileConfig, RunnerPlan};
 
@@ -223,6 +223,14 @@ struct ClaimedAction {
 /// conflicts on `task_id`), so a peer that took the task over replaced the
 /// owner: a mismatch — or a missing row — means the claim is no longer ours,
 /// neither to commit on nor to delete.
+///
+/// Under the workspace lock an owner match is decisive on its own, which is why
+/// expiry is deliberately not part of the test. Every writer of this row either
+/// replaces the owner (`replace_lease`, the only claim path) or removes the row
+/// (`delete_task_lease`); `renew_task_lease` moves only the deadline. So a
+/// surviving owner match proves nobody re-planned this task while phase 2 ran,
+/// expired or not — and refusing an uncontended claim merely because a slow
+/// `git worktree add` outran its TTL would drop a dispatch that is safe to make.
 fn claim_still_ours(ledger: &Ledger, entry: &ClaimedAction) -> anyhow::Result<Option<TaskLease>> {
     Ok(ledger
         .task_lease(entry.task.task_id)?
@@ -403,26 +411,20 @@ fn commit_claimed_attempts(
     prepared: Vec<Option<PathBuf>>,
 ) -> anyhow::Result<(Vec<RunnerPlan>, Vec<String>)> {
     let lock = acquire_workspace_lock(&ledger.paths)?;
-    let now = clock_now();
     let mut plans = Vec::new();
     let mut errors = Vec::new();
     for (entry, worktree) in claimed.into_iter().zip(prepared) {
         // Phase 2 ran unlocked and unbounded, so the claim that authorises this
-        // write may have expired and been taken over meanwhile. Commit only
-        // what a concurrent planner would still read as claimed by us — the
-        // same re-check `record_session_if_current` and `finish_runner` make
-        // before they write on a lease they took earlier.
+        // write may have been taken over meanwhile. Re-verify ownership before
+        // writing on it, the way `record_session_if_current` and `finish_runner`
+        // re-check a lease they took under an earlier hold.
         match claim_still_ours(ledger, &entry) {
-            Ok(Some(claim)) if claim.expires_at > now => {
-                match commit_claimed_attempt(ledger, config, &entry, worktree) {
-                    Ok(Some(plan)) => plans.push(plan),
-                    Ok(None) => {}
-                    Err(error) => {
-                        errors.push(format!("task action persistence failed: {error:#}"));
-                    }
-                }
-            }
-            Ok(_) => errors.push(format!(
+            Ok(Some(_)) => match commit_claimed_attempt(ledger, config, &entry, worktree) {
+                Ok(Some(plan)) => plans.push(plan),
+                Ok(None) => {}
+                Err(error) => errors.push(format!("task action persistence failed: {error:#}")),
+            },
+            Ok(None) => errors.push(format!(
                 "task #{} lost its claim on attempt {} while its worktree was prepared and was not dispatched; raise --lease-ttl-s above the cost of `git worktree add`",
                 entry.task.task_id, entry.attempt
             )),
@@ -485,6 +487,14 @@ fn append_claimed_truth(
         ReconcileAction::Resume { .. } => (false, false),
     };
     let worktree = worktree.context("prepared reconciliation worktree disappeared")?;
+    // The claim's TTL has been running since phase 1, across a `git worktree
+    // add` of unbounded cost. Extend it here so the runner inherits a full
+    // `--lease-ttl-s` measured from the dispatch rather than from the plan —
+    // `task.started` carries the TTL but writes no lease of its own.
+    anyhow::ensure!(
+        renew_lease(ledger, task_id, attempt, config.lease_ttl_s)?,
+        "claim lease for task #{task_id} attempt {attempt} vanished before its dispatch"
+    );
     if requeue {
         append_requeued(ledger, task_id, attempt)?;
     }
