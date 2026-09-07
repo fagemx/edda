@@ -361,6 +361,24 @@ fn format_event_detail(event: &Event) -> String {
                 .unwrap_or("");
             format!("switch -> {to}")
         }
+        // The typed `ratified_by` prefixes (`evidence:`, `rule:`, or a bare
+        // person) are the whole point of GH-764/GH-761, so the human log has
+        // to print them: without this arm the default empty detail makes a
+        // merged-PR ratification and an operator one indistinguishable
+        // outside `--json`.
+        "decision_ratify" => {
+            let key = event
+                .payload
+                .get("key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let ratified_by = event
+                .payload
+                .get("ratified_by")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            format!("{key} by {ratified_by}")
+        }
         "approval" => {
             let decision = event
                 .payload
@@ -778,5 +796,46 @@ mod tests {
         assert!(detail.contains("60k"), "detail: {detail}"); // 50k+10k
                                                              // Should NOT contain $ when cost is 0
         assert!(!detail.contains("$"), "detail: {detail}");
+    }
+
+    /// GH-764/GH-761: a ratification's authority must be readable in the
+    /// human `edda log`, not only in `--json`. Without a `decision_ratify`
+    /// arm the detail column is empty and an evidence, rule and operator
+    /// ratification are byte-identical there.
+    #[test]
+    fn test_decision_ratify_detail_names_key_and_authority() {
+        let ratify = |ratified_by: &str| {
+            let event = Event {
+                event_id: "evt_test123456789".into(),
+                event_type: "decision_ratify".into(),
+                ts: "2026-03-01T10:00:00Z".into(),
+                branch: "main".into(),
+                event_family: Some("governance".into()),
+                payload: serde_json::json!({
+                    "key": "db.engine",
+                    "ratified_by": ratified_by,
+                }),
+                refs: edda_core::types::Refs::default(),
+                hash: String::new(),
+                parent_hash: None,
+                digests: vec![],
+                event_level: None,
+                schema_version: 1,
+            };
+            format_event_detail(&event)
+        };
+
+        let evidence = ratify("evidence:pr#1016@8d943560d00053d5372745579b74b633da36a830");
+        let rule = ratify("rule:cited-authority");
+        let operator = ratify("tim");
+
+        for detail in [&evidence, &rule, &operator] {
+            assert!(detail.contains("db.engine"), "detail: {detail}");
+        }
+        assert!(evidence.contains("evidence:pr#1016@"), "detail: {evidence}");
+        assert!(rule.contains("rule:cited-authority"), "detail: {rule}");
+        assert!(operator.contains("tim"), "detail: {operator}");
+        assert_ne!(evidence, rule);
+        assert_ne!(rule, operator);
     }
 }

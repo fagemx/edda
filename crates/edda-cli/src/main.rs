@@ -18,6 +18,7 @@ mod cmd_dispatch;
 mod cmd_dispatch_acp;
 mod cmd_draft;
 mod cmd_export;
+mod cmd_fleet;
 mod cmd_gc;
 mod cmd_group;
 mod cmd_init;
@@ -34,6 +35,7 @@ mod cmd_plan;
 mod cmd_policy;
 mod cmd_propose;
 mod cmd_prs;
+mod cmd_ratify;
 mod cmd_rebuild;
 mod cmd_recap;
 mod cmd_recap_digest;
@@ -127,22 +129,17 @@ enum Command {
         /// Comma-separated tags for this decision
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
+        /// Authority this decision cites, repeatable: `operator:<when>`,
+        /// `issue:#<n>`, or `decision:<key>` (GH-761). `edda ratify
+        /// --by-rule` reads these instead of guessing from the reason text.
+        #[arg(long = "cite")]
+        cites: Vec<String>,
     },
-    /// Ratify an active decision — confer operator authority (GH-401)
+    /// Ratify a decision — confer authority (GH-401): an operator's, a
+    /// merged PR's (`--evidence`, GH-764), or a rule's (`--by-rule`, GH-761)
     Ratify {
-        /// Decision key to ratify (e.g. "db.engine")
-        key: String,
-        /// Optional note recorded with the ratification
-        #[arg(long)]
-        note: Option<String>,
-        /// Who ratified — recorded for audit; self-asserted, not verified
-        /// (identity enforcement is a policy-layer concern). Defaults to the
-        /// resolved session label.
-        #[arg(long)]
-        by: Option<String>,
-        /// Session ID (uses EDDA_SESSION_ID; --session required when identity is ambiguous)
-        #[arg(long)]
-        session: Option<String>,
+        #[command(flatten)]
+        args: cmd_ratify::RatifyArgs,
     },
     /// Manage project groups for cross-project sync
     Group {
@@ -522,6 +519,11 @@ enum Command {
         json: bool,
         #[command(subcommand)]
         cmd: Option<cmd_phase::PhaseCmd>,
+    },
+    /// Fleet health and ordering (GH-1014)
+    Fleet {
+        #[command(subcommand)]
+        cmd: cmd_fleet::FleetCmd,
     },
     /// Scan and record PR events from GitHub
     Prs {
@@ -1144,6 +1146,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             scope,
             paths,
             tags,
+            cites,
         } => cmd_bridge::decide(
             &repo_root,
             &decision,
@@ -1153,19 +1156,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Some(&scope),
             &paths,
             &tags,
+            &cites,
         ),
-        Command::Ratify {
-            key,
-            note,
-            by,
-            session,
-        } => cmd_bridge::ratify(
-            &repo_root,
-            &key,
-            note.as_deref(),
-            by.as_deref(),
-            session.as_deref(),
-        ),
+        Command::Ratify { args } => cmd_ratify::run(&repo_root, &args),
         Command::Group { cmd } => cmd_group::execute(cmd, &repo_root),
         Command::Sync {
             from,
@@ -1347,6 +1340,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Some(phase_cmd) => cmd_phase::run_gate_sugar(phase_cmd, &repo_root),
             None => cmd_phase::execute(&repo_root, json),
         },
+        Command::Fleet { cmd } => cmd_fleet::run(cmd, &repo_root),
         Command::Prs { cmd } => cmd_prs::run_prs(cmd, &repo_root),
         Command::Pipeline { cmd } => match cmd {
             PipelineCmd::Run { issue_id, dry_run } => {

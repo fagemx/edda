@@ -452,6 +452,19 @@ expect_gate_state 'two qualifying LGTMs are success' 'success' 'LGTM\t0\t0\nLGTM
 expect_gate_state 'a missing count is non-zero, never success' 'failure' 'LGTM\t0\n'
 expect_gate_state 'a non-numeric count is non-zero, never success' 'failure' 'LGTM\tx\ty\n'
 expect_gate_state 'an unknown verdict word is failure' 'failure' 'Needs Discussion\t0\t0\n'
+# REVIEW.md §6.4/§8: an unqualified LGTM (edda review exit 3) is provisional —
+# it never satisfies the gate, even at P0=0 P1=0 (#998).
+expect_gate_state 'a provisional verdict never qualifies' 'failure' 'Provisional\t0\t0\n'
+# A Provisional round stands in the union by its counts (#1023 round 1):
+# at P0=P1=0 it is pending — never success on its own, cleared by a later
+# qualified LGTM on the same sha once the escalation is adjudicated (REVIEW.md
+# §6.4); with any P0/P1 it stands like any other non-qualifying verdict (§8,
+# GH-742), so a later LGTM on that sha cannot turn the gate green.
+expect_gate_state 'a provisional 0/0 is cleared by a later qualified LGTM on the same sha' \
+    'success' 'Provisional\t0\t0\nLGTM\t0\t0\n'
+expect_gate_state 'a provisional round with findings holds a later LGTM at failure' \
+    'failure' 'Provisional\t0\t2\nLGTM\t0\t0\n'
+expect_gate_state 'a provisional round with findings alone is failure' 'failure' 'Provisional\t0\t2\n'
 
 # --- collect-verdicts: read the §7 verdict comments pinned to one SHA ---------
 # The fixture holds the OUTPUT of the gh --jq pipeline (sentinel + raw
@@ -511,6 +524,13 @@ f="$tmp/comments-wrong-sha"
 verdict_comment 1 "$csha2" 'Changes Requested, P0=1, P1=0 — x' >"$f"
 expect_collect 'a verdict pinned to another sha contributes nothing' \
     '' "$f" "$csha1"
+
+# #998: the product adapter's exit-3 Verdict line carries no LGTM token; the
+# reader names it Provisional and still reads its counts.
+f="$tmp/comments-provisional"
+verdict_comment 1 "$csha1" 'Provisional — unqualified (disqualifiers: escalation-pending), P0=0, P1=1 — not a merge-gate verdict' >"$f"
+expect_collect 'a provisional (unqualified LGTM) verdict line is read as Provisional with its counts' \
+    "$(printf 'Provisional\t0\t1')" "$f" "$csha1"
 
 # T1: a failed comments fetch must be an error, never "no prior verdicts" —
 # otherwise the union rule would run on this round's verdict alone.
@@ -1088,6 +1108,170 @@ if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
     exit 1
 fi
 
+# --- live loop: an exit-3 product round is published, not retried (#998) ------
+# `edda review` exit 3 is an unqualified LGTM — provisional under REVIEW.md
+# §6.4, never `LGTM (P0=0, P1=0)`, never the merge gate (§8). The product
+# adapter writes the whole payload under a `Provisional — …` Verdict line. The
+# watcher posts that comment, writes the Independent Review status through the
+# union rule (non-success), applies no review:* label and settles the round —
+# it neither probes the provider nor spends the single dispatch retry. The
+# stale-envelope guard above (an LGTM line with exit 3) is untouched.
+
+product_done_fixture() { # $1=product exit (DISPATCH_EXIT and FINAL_EXIT) $2=qualified $3=disqualifiers
+    printf 'TRANSPORT=edda-review\nPOLICY_RECEIPT=product-json:hard\nSESSION=11111111-2222-4333-8444-555555555555\nSESSION_MODE=new\nDISPATCH_EXIT=%s\nFINAL_EXIT=%s\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\nQUALIFIED=%s\nDISQUALIFIERS=%s\n' \
+        "$1" "$1" "$2" "$3" >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+}
+
+product_log_fixture() { # $1=Verdict line $2=prose after it (default none) — the envelope
+                        # scripts/review-pr.sh's product adapter writes: §7 order, Verdict last
+    {
+        printf '<<<VERDICT\n## Code Review: Round 1 — PR #42 @ %s\n\n' "$sha"
+        printf -- '- model_requested: claude-opus-5\n- model_observed: claude-opus-5\n- reviewer_session: 11111111-2222-4333-8444-555555555555\n- escalations: D5 escalation-pending\n\n'
+        printf 'Event identity: evt_fixture\nQualification: false\nDisqualifiers: escalation-pending\n'
+        printf '### Findings\nfinding: {"severity":"P1","file":"scripts/x.sh","line":1,"claim":"would be LGTM once D5 closes","evidence":"x:1","rule":"D5","status":"open"}\n'
+        printf '### Checklist\nchecklist: {"item":"D5","result":"escalate","measure":"cannot close"}\n'
+        printf '### Escalations\nescalation: "D5 escalation-pending"\n'
+        printf '### Verdict\n%s\n' "$1"
+        [ -z "${2:-}" ] || printf '%s\n' "$2"
+        printf 'VERDICT>>>\n'
+        printf 'Model requested: claude-opus-5\nModel observed: claude-opus-5\nCost: $3.12\nSession: 11111111-2222-4333-8444-555555555555\n'
+    } >"$EDDA_FLEET_SCRATCH/review-pr42-r1.log"
+}
+
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+product_done_fixture 3 false escalation-pending
+product_log_fixture 'Provisional — unqualified (disqualifiers: escalation-pending), P0=0, P1=1 — not a merge-gate verdict'
+export GH_HEAD="$sha"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (product exit 3)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+[ -n "$cfile" ] || {
+    printf 'live: product exit 3 — the provisional verdict comment was not posted; watch.log tail:\n%s\n' \
+        "$(tail -4 "$PR_REVIEW_WATCH_LOG")" >&2; exit 1
+}
+comment_head_is_heading "$cfile" || {
+    printf 'live: product exit 3 — the posted comment must begin with the §7 heading, got:\n%s\n' "$(head -1 "$cfile")" >&2; exit 1
+}
+grep -qF 'Provisional — unqualified' "$cfile" || {
+    printf 'live: product exit 3 — the posted comment lost the provisional Verdict line\n' >&2; exit 1
+}
+grep -qF '"rule":"D5"' "$cfile" || {
+    printf 'live: product exit 3 — the posted comment lost the findings\n' >&2; exit 1
+}
+[ "$(statuses_calls)" = "1" ] || {
+    printf 'live: product exit 3 — exactly one Independent Review status expected, got %s\n' "$(statuses_calls)" >&2; exit 1
+}
+grep -qF -- '-f state=failure' "$GH_STUB_LOG" || {
+    printf 'live: product exit 3 — a provisional round must not be status success, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2; exit 1
+}
+grep -qF -- '-f description=Provisional P0=0 P1=1' "$GH_STUB_LOG" || {
+    printf 'live: product exit 3 — the status description must name the provisional verdict, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2; exit 1
+}
+if grep -qF -- '--add-label review:' "$GH_STUB_LOG"; then
+    printf 'live: product exit 3 — a provisional round applies no review:* label, got:\n%s\n' \
+        "$(grep -F -- '--add-label review:' "$GH_STUB_LOG")" >&2; exit 1
+fi
+[ -z "$(cat "$REVIEW_STUB_LOG")" ] || {
+    printf 'live: product exit 3 — must not spend the dispatch retry, got:\n%s\n' "$(cat "$REVIEW_STUB_LOG")" >&2; exit 1
+}
+if grep -q 'agent claude' "$EDDA_STUB_LOG"; then
+    printf 'live: product exit 3 — must not probe the provider (it is not a dead verdict)\n' >&2; exit 1
+fi
+[ "$(state_get)" = "$(printf '42\t%s\t1' "$sha")" ] || {
+    printf 'live: product exit 3 — the round must settle as reviewed, got:\n%s\n' "$(state_get)" >&2; exit 1
+}
+[ -z "$(pending_get)" ] || {
+    printf 'live: product exit 3 — the pending entry must be dropped, got:\n%s\n' "$(pending_get)" >&2; exit 1
+}
+grep -qF 'not a merge-gate verdict' "$PR_REVIEW_WATCH_LOG" || {
+    printf 'live: product exit 3 — the log must say why no label was applied, got:\n%s\n' "$(tail -3 "$PR_REVIEW_WATCH_LOG")" >&2; exit 1
+}
+unset GH_HEAD
+
+# The Verdict line decides, not prose after it: verdict-label reads on past a
+# line it does not recognise and would answer review:lgtm here; the watcher
+# still applies no label to a Provisional round.
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+product_done_fixture 3 false escalation-pending
+product_log_fixture 'Provisional — unqualified (disqualifiers: escalation-pending), P0=0, P1=1 — not a merge-gate verdict' \
+    'Note: would be LGTM once D5 closes.'
+export GH_HEAD="$sha"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (product exit 3, trailing prose)\n' >&2; exit 1; }
+if grep -qF -- '--add-label review:' "$GH_STUB_LOG"; then
+    printf 'live: product exit 3 — prose after the Provisional line must not earn a label, got:\n%s\n' \
+        "$(grep -F -- '--add-label review:' "$GH_STUB_LOG")" >&2; exit 1
+fi
+grep -qF -- '-f state=failure' "$GH_STUB_LOG" || {
+    printf 'live: product exit 3 (trailing prose) — the status must still be failure\n' >&2; exit 1
+}
+[ -z "$(pending_get)" ] || {
+    printf 'live: product exit 3 (trailing prose) — the round must settle, got:\n%s\n' "$(pending_get)" >&2; exit 1
+}
+unset GH_HEAD
+
+# A Changes Requested product round exits 1 — the verdict, not a failure — and
+# is published the same way, with its label.
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+product_done_fixture 1 true ''
+product_log_fixture 'Changes Requested, P0=0, P1=1'
+export GH_HEAD="$sha"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (product exit 1)\n' >&2; exit 1; }
+cfile=$(header_comment_path)
+[ -n "$cfile" ] || {
+    printf 'live: product exit 1 — the Changes Requested comment was not posted; watch.log tail:\n%s\n' \
+        "$(tail -4 "$PR_REVIEW_WATCH_LOG")" >&2; exit 1
+}
+grep -qF -- '-f state=failure' "$GH_STUB_LOG" || {
+    printf 'live: product exit 1 — the status must be failure\n' >&2; exit 1
+}
+grep -qF -- '--add-label review:changes-requested' "$GH_STUB_LOG" || {
+    printf 'live: product exit 1 — the label must be applied\n' >&2; exit 1
+}
+[ -z "$(pending_get)" ] || {
+    printf 'live: product exit 1 — the round must settle, got:\n%s\n' "$(pending_get)" >&2; exit 1
+}
+unset GH_HEAD
+
+# A prior Provisional comment on the same sha is not a standing verdict: once
+# the escalation is adjudicated, a qualified LGTM round on that sha clears the
+# gate (the merge guard reads the latest round, and so does this union).
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+printf '<<<COMMENT>>>\n## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nProvisional — unqualified (disqualifiers: escalation-pending), P0=0, P1=0 — not a merge-gate verdict\n' \
+    "$sha" >"$tmp/comments-pr42-prior-provisional"
+export GH_HEAD="$sha"
+export GH_COMMENTS_FILE="$tmp/comments-pr42-prior-provisional"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (prior provisional)\n' >&2; exit 1; }
+grep -qF -- '-f state=success' "$GH_STUB_LOG" || {
+    printf 'live: a prior provisional round must not hold a later qualified LGTM at failure, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2; exit 1
+}
+unset GH_HEAD GH_COMMENTS_FILE
+
+# A prior Provisional round WITH findings is a standing non-qualifying verdict:
+# its counts stay in the union, so a later qualified LGTM on the same sha does
+# not turn the gate green (REVIEW.md §8, GH-742; #1023 round 1).
+reset_stubs
+pending_set 42 1 "$sha" 0 0
+printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
+verdict_log_fixture
+printf '<<<COMMENT>>>\n## Code Review: Round 1 — PR #42 @ %s\n\n### Verdict\nProvisional — unqualified (disqualifiers: escalation-pending), P0=0, P1=1 — not a merge-gate verdict\n' \
+    "$sha" >"$tmp/comments-pr42-prior-provisional-findings"
+export GH_HEAD="$sha"
+export GH_COMMENTS_FILE="$tmp/comments-pr42-prior-provisional-findings"
+run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (prior provisional with findings)\n' >&2; exit 1; }
+grep -qF -- '-f state=failure' "$GH_STUB_LOG" || {
+    printf 'live: a prior provisional round with open findings must hold a later LGTM at failure, got:\n%s\n' \
+        "$(grep 'statuses/' "$GH_STUB_LOG")" >&2; exit 1
+}
+unset GH_HEAD GH_COMMENTS_FILE
+
 # --- R23 (#917): verdict shape and non-open PRs --------------------------------
 # 1. the happy path is unchanged: a §7 carrier (heading first) posts the
 #    comment, writes the status, and applies the label
@@ -1411,8 +1595,16 @@ table_tokens=$(sed -n '/^# shipping:/,/^# internal-tools:/p' "$root/scripts/pr-r
     printf 'r22 anti-drift: expected 24 path tokens in rules.md R22, got:\n%s\n' "$rules_r22_tokens" >&2; exit 1
 }
 if [ "$rules_r22_tokens" != "$table_tokens" ]; then
-    printf 'r22 anti-drift: the watcher table drifted from rules.md R22:\n%s\n' \
-        "$(diff <(printf '%s\n' "$rules_r22_tokens") <(printf '%s\n' "$table_tokens"))" >&2
+    # POSIX diff inputs: dash cannot parse bash process substitution
+    # <(...) - GH-927's gate was the first machine run of this script and
+    # caught it. The files live in the test's own mktemp sandbox.
+    printf '%s
+' "$rules_r22_tokens" > "$tmp/rules-r22.tokens"
+    printf '%s
+' "$table_tokens" > "$tmp/table-r22.tokens"
+    printf 'r22 anti-drift: the watcher table drifted from rules.md R22:
+%s
+'         "$(diff "$tmp/rules-r22.tokens" "$tmp/table-r22.tokens")" >&2
     exit 1
 fi
 echo "ok r22 anti-drift table"

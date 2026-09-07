@@ -206,6 +206,13 @@ pub struct DecisionPayload {
     /// Village scope identifier. Default: None (not village-scoped).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub village_id: Option<String>,
+    /// Structured citations for the authority this decision rests on
+    /// (GH-761): `operator:<when>`, `issue:#<n>`, `decision:<key>`.
+    /// Written by `edda decide --cite`, read by `edda ratify --by-rule`.
+    /// `None` on every decision written before the flag existed — the rule
+    /// falls back to scanning `reason`, so old decisions still work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cites: Option<Vec<String>>,
 }
 
 /// An issued verdict on a gated subject (GH-519).
@@ -619,6 +626,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let json = serde_json::to_string(&dp).expect("serialize");
         let decoded: DecisionPayload = serde_json::from_str(&json).expect("deserialize");
@@ -636,6 +644,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let json2 = serde_json::to_string(&dp_no_reason).expect("serialize");
         assert!(!json2.contains("reason"), "None reason should be omitted");
@@ -657,6 +666,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let json = serde_json::to_string(&dp).expect("serialize");
         assert!(json.contains("\"scope\":\"shared\""));

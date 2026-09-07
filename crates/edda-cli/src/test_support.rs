@@ -2,6 +2,21 @@
 
 use edda_store::test_support::IsolatedStoreRoot;
 
+/// Serialize tests that mutate process-global env vars (`EDDA_SESSION_ID`,
+/// `EDDA_SESSION_LABEL`, `EDDA_HOOK_TIMEOUT_MS`) — without this they race each
+/// other under the parallel test runner.
+///
+/// It lives here rather than in one test module because the modules that need
+/// it compile into the **same** test binary: two private mutexes would not
+/// serialize against each other, so a `cmd_ratify` test setting
+/// `EDDA_SESSION_ID` could still race a `cmd_bridge` one. Poisoned locks are
+/// recovered so a single failing test does not cascade.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// Point the per-user store at a throwaway directory for this test.
 ///
 /// Anything that writes to the store — `edda init` and `edda group` both call

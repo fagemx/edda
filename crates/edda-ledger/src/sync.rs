@@ -6,7 +6,7 @@
 //! Two carrier kinds:
 //!
 //! - SQLite ledgers of registered group members ([`sync_from_sources`]).
-//! - Committed markdown mirrors (GH-671): a git-tracked `docs/ledger/`
+//! - Committed markdown mirrors (GH-671): a git-tracked `docs/decisions/`
 //!   directory produced by `edda export md --out` on another machine
 //!   ([`sync_from_mirror`]). Same #394 rule as the sqlite path: same key with
 //!   a different value imports **inactive** — merge, never overwrite.
@@ -285,7 +285,7 @@ struct MirrorDecision {
 /// Import decisions from a committed markdown mirror (GH-671).
 ///
 /// Machine B with an empty or different ledger checks out the repo, points
-/// [`MirrorSource`] at `docs/ledger/`, and every active decision of the
+/// [`MirrorSource`] at `docs/decisions/`, and every active decision of the
 /// source machine becomes visible locally:
 ///
 /// - values, reasons, authority (original actor), scope, paths, tags and

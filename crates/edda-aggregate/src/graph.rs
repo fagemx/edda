@@ -107,6 +107,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         }
     }
 

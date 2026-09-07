@@ -5,11 +5,25 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "edda-sdk"
 version = "0.1.0"
-description = "Thin Python client for the edda client contract (MCP writes, read-only HTTP). Types generated from the v1 event spec (GH-608). Publishing pending namespace authorization — see SDK_HANDOFF.md."
+description = "Thin Python client for the edda client contract: MCP writes, read-only HTTP, types generated from the v1 event spec."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT OR Apache-2.0" }
+keywords = ["edda", "sdk", "mcp", "agent", "decision-ledger"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed",
+]
 dependencies = []
+
+[project.urls]
+Homepage = "https://edda.sh"
+Repository = "https://github.com/fagemx/edda"
+Issues = "https://github.com/fagemx/edda/issues"
 
 [project.optional-dependencies]
 dev = []

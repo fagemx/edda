@@ -189,32 +189,61 @@ edda decide <DECISION> [OPTIONS]
 |--------|-------------|
 | `DECISION` | Key=value format (e.g. `"db.engine=postgres"`) |
 | `--reason TEXT` | Reason for the decision |
+| `--cite CITATION` | Authority this decision rests on, repeatable: `operator:<when>`, `issue:#<n>`, or `decision:<key>`. Read by `edda ratify --by-rule` (GH-761). Anything else exits 2 |
 | `--session ID` | Explicit session attribution; otherwise uses process-carried `EDDA_SESSION_ID` |
 
 ```bash
 edda decide "db.engine=sqlite" --reason "embedded, zero-config"
 edda decide "auth.strategy=JWT" --reason "stateless, scales horizontally"
+edda decide "review.engine=opus" --reason "window day 0" --cite issue:#888
 ```
+
+A decision written without `--cite` still works everywhere; the ratify rule
+falls back to reading the `--reason` text for an issue number, a binding
+decision key, or the word "operator".
 
 ### `edda ratify`
 
-Ratify an active decision — confer operator authority (GH-401). An
-agent-authored decision from `edda decide` is unratified; ratification is
-what makes it binding.
+Ratify a decision — confer authority (GH-401). An agent-authored decision from
+`edda decide` is unratified; ratification is what makes it binding.
+
+Three forms, mutually exclusive. Each writes a different, permanently
+distinguishable `ratified_by` prefix, so `edda log` and `edda ask` always say
+which authority conferred binding status:
+
+| Form | `ratified_by` | Who is asserting |
+|------|---------------|------------------|
+| `edda ratify <KEY> [--by WHO]` | `<WHO>` or the session label | a person |
+| `edda ratify <KEY> --evidence pr#<N>@<sha>` | `evidence:pr#N@sha` | a merged PR (GH-764) |
+| `edda ratify --by-rule <RULE>` | `rule:<RULE>` | a rule in the binary (GH-761) |
+
+`edda log --type decision_ratify` prints `<key> by <ratified_by>` in its detail
+column, so the three forms are told apart there without `--json`.
 
 ```bash
 edda ratify [OPTIONS] <KEY>
+edda ratify --by-rule <RULE> [--dry-run] [OPTIONS]
 ```
 
 | Argument / Option | Description |
 |-------------------|-------------|
-| `KEY` | Decision key to ratify (e.g. `"db.engine"`) |
+| `KEY` | Decision key to ratify (e.g. `"db.engine"`). Omit it with `--by-rule` |
 | `--note TEXT` | Optional note recorded with the ratification |
 | `--by TEXT` | Who ratified — recorded for audit; self-asserted, not verified (identity enforcement is a policy-layer concern). Defaults to the resolved session label |
+| `--evidence pr#N@SHA` | The merged PR that made this decision binding. The SHA is a full 40-hex commit; an abbreviated one is refused |
+| `--by-rule RULE` | Sweep every active, unratified decision with a named rule. Today: `cited-authority` |
+| `--dry-run` | With `--by-rule`: print the table and write nothing |
 | `--session ID` | Session ID (uses `EDDA_SESSION_ID`; `--session` required when identity is ambiguous) |
+
+Exit codes (`claim-check.exit-codes=0/1/2`): **0** success, including the no-op
+when the key is already binding; **1** no active decision for that key; **2**
+malformed input — a bad evidence string, an unknown rule, or a key given
+together with `--by-rule`.
 
 ```bash
 edda ratify "demo.engine" --note "confirmed after load test" --by operator
+edda ratify "demo.engine" --evidence "pr#764@03c604ffea4b2a1731b7866e7f701374eb03b156"
+edda ratify --by-rule cited-authority --dry-run
 ```
 
 Output:
@@ -223,6 +252,33 @@ Output:
 Ratified 'demo.engine' (by operator) — now binding.
   note: confirmed after load test
 ```
+
+#### Rule `cited-authority`
+
+Ratifies an active, unratified decision when it names the authority it rests
+on — a `--cite` value, or failing that an issue number, a binding decision key,
+or the word "operator" in its reason. It holds:
+
+- keys under `product.`, `commercial.` and `spend.` — these bind money or
+  product promises, and a cited issue is not authority for either;
+- anything a later decision's reason names, which has already been overtaken;
+- anything with no citation at all.
+
+`--dry-run` prints the same table it would act on, so the sweep can be read
+before it runs:
+
+```
+key                action  why
+db.engine          ratify  issue:#742
+product.tier       hold    held domain 'product.' — operator ratifies these
+review.engine      hold    superseded — a later decision 'review.pool' names it
+cache.ttl          hold    no citation — add --cite operator:<when> | issue:#<n> | decision:<key>
+dry run — would ratify 1, hold 3 (rule: cited-authority); nothing written.
+```
+
+Ratification is per decision event, not per key: re-deciding a key resets it to
+unratified, so a sweep run after a re-decide judges the new value on its own
+merits.
 
 ### `edda checkpoint`
 
@@ -922,6 +978,56 @@ documented surface cannot silently drift from the binary;
 | `skill` | Manage skill registry (scan, list, show, search) | Experimental registry |
 | `tool-tier` | Tool tier governance — query and manage tool risk classifications | Governance plumbing consumed by other tools |
 
+### edda fleet
+
+Fleet health — measure the path-classified mix of recent work. `edda fleet
+health` reads the merged PRs and opened issues of the last `--window` days
+through `gh` (server-side date filters `merged:>=` / `created:>=`), and
+classifies each by changed paths (merged PRs) or by the backticked paths of
+the issue's `## Predicted surface` section (issues): `crates/`, `sdk/` →
+product; `scripts/`, `docs/fleet/`, `.github/`, `REVIEW.md` → mechanism;
+anything else → other. A PR or issue takes the majority class of its paths;
+ties resolve product over mechanism over other. The report states two
+numbers against ledger thresholds: the product share of merged PRs and the
+mechanism issues opened per day.
+
+```bash
+edda fleet health --window 7 --json
+edda fleet health --line
+```
+
+Flags:
+
+- `--window <N>` — rolling window in days; default 7; must be at least 1.
+- `--json` — emit the full health report as JSON.
+- `--line` — emit one digest line, intended for the digest adapter (#1025).
+- `--json` and `--line` are mutually exclusive (usage error, exit 2).
+
+Thresholds come from ledger decisions: `fleet.health.product-share-floor`
+(default 50) and `fleet.health.mech-issues-per-day-ceiling` (default 9).
+`thresholds.source` is `ledger` when both keys resolved, `default` when
+neither did, and `mixed` otherwise.
+
+Sampling: each query fetches at most 200 PRs / 300 issues.
+`merged_prs.fetched`, `merged_prs.truncated`, `issues_opened.fetched` and
+`issues_opened.truncated` record how many rows came back and whether a cap
+was hit. A truncated sample must not be trusted for the freeze decision.
+
+Status: RED when the product share is below the floor or mechanism issues
+per day exceed the ceiling; YELLOW when within 20% of either; GREEN
+otherwise. RED sets `mechanism_dispatch: freeze`, otherwise `open`; the
+ordering layer that consumes it is #1015.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | GREEN |
+| 3 | YELLOW |
+| 4 | RED |
+| 1 | error (a `gh` failure or a failed stdout write) |
+| 2 | usage |
+
 ### edda review
 
 Review a committed branch using an independent read-only agent and record a
@@ -950,6 +1056,24 @@ reviewer session. `--resume` requires that prior review and reuses its
 reviewer session; a backend fork disqualifies it. `--thinking` selects pi's
 thinking level; Claude and Codex reject the option rather than silently
 ignoring it.
+
+The brief also carries an `ENGINE QUALIFICATION (R22)` section naming the PR's
+R22 surface (`review`, `gate`, `shipping` or `internal-tool`, strictest first)
+with the changed path that decided it, the canonical requested model id, and
+whether R22's engine table makes that engine authoritative for the surface. An
+authoritative engine decides the specification's judgment item itself; any other
+engine escalates it, as REVIEW.md §6.1 requires of a checklist-type engine. An
+engine the table does not name — including a round that passes no `--model`,
+since R22 names model ids — is never authoritative: it records the
+`engine-not-authoritative` disqualifier and cannot exit 0. `--json` and the
+ledger event carry the same statement under `engine_qualification`.
+
+`--require-model-diversity` is unchanged by that section and remains
+independent of it. Without the flag the independence policy is `session`: an
+author and reviewer on the same model are recorded in the receipt as
+`independence: same-model` and stated in the brief, but do not disqualify the
+round. With the flag the policy is `model` and any independence other than
+`verified` disqualifies it.
 
 Gates are READ from clean exact-SHA command receipts and required exact-SHA CI.
 Missing checks remain unverified; any red evidence wins. `--run-gates` opts in

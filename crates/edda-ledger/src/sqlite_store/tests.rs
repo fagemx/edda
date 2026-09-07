@@ -3395,6 +3395,7 @@ fn test_status_is_active_sync_on_insert() {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     };
     let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
     store.append_event(&event).unwrap();
@@ -3423,6 +3424,7 @@ fn test_status_is_active_sync_on_insert() {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     };
     let mut event2 =
         edda_core::event::new_decision_event("main", Some(&event.hash), "system", &dp2).unwrap();
@@ -3495,6 +3497,7 @@ fn test_decision_payload_new_fields_roundtrip() {
         review_after: Some("2026-06-01".to_string()),
         reversibility: Some("hard".to_string()),
         village_id: None,
+        cites: None,
     };
     let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
     store.append_event(&event).unwrap();
@@ -3542,6 +3545,7 @@ fn test_decision_payload_defaults_when_none() {
         review_after: None,
         reversibility: None,
         village_id: None,
+        cites: None,
     };
     let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
     store.append_event(&event).unwrap();
@@ -3676,6 +3680,7 @@ fn test_village_stats_basic() {
         review_after: None,
         reversibility: None,
         village_id: Some("village-abc".to_string()),
+        cites: None,
     };
     let event1 = edda_core::event::new_decision_event("main", None, "system", &dp1).unwrap();
     store.append_event(&event1).unwrap();
@@ -3691,6 +3696,7 @@ fn test_village_stats_basic() {
         review_after: None,
         reversibility: None,
         village_id: Some("village-abc".to_string()),
+        cites: None,
     };
     let event2 =
         edda_core::event::new_decision_event("main", Some(&event1.hash), "system", &dp2).unwrap();
@@ -3708,6 +3714,7 @@ fn test_village_stats_basic() {
         review_after: None,
         reversibility: None,
         village_id: Some("village-other".to_string()),
+        cites: None,
     };
     let event3 =
         edda_core::event::new_decision_event("main", Some(&event2.hash), "system", &dp3).unwrap();
@@ -3756,6 +3763,7 @@ fn test_village_stats_with_temporal_filter() {
         review_after: None,
         reversibility: None,
         village_id: Some("village-t".to_string()),
+        cites: None,
     };
     let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
     store.append_event(&event).unwrap();
@@ -3792,6 +3800,7 @@ fn test_village_id_stored_and_queried() {
         review_after: None,
         reversibility: None,
         village_id: Some("my-village".to_string()),
+        cites: None,
     };
     let event = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
     store.append_event(&event).unwrap();
@@ -3838,6 +3847,7 @@ fn make_dp(
         review_after: None,
         reversibility: None,
         village_id: Some(village.to_string()),
+        cites: None,
     }
 }
 

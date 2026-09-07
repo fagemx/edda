@@ -134,6 +134,28 @@ PR does beyond it, and anything you want beyond it, is a `FOLLOW-UP ISSUE`, not
 a blocking finding — except evidence needed to prove a required fact or a
 safety boundary.
 
+A PR that implements a recorded decision names it on a `Decision: <key>[,
+<key>]` line, in the same shape as `Issue: #N` (GH-764). It is a machine
+field, not prose: `scripts/fleet/ratify-merged.sh` reads that line and runs
+`edda ratify <key> --evidence "pr#<N>@<sha>"` for each key, which is what
+makes the decision binding. Nothing invokes that script on merge yet — the
+merge step is #769, and until it calls the hook the line is ratified by
+running the script by hand after a merge. Mine it with the same shape as the
+issue line:
+
+# review-spec:check DECISIONS
+```sh
+gh pr view "$N" --json body --jq .body \
+  | sed -n 's/^[Dd]ecision:[[:space:]]*//p' \
+  | tr ',' '\n' \
+  | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+  | grep -v '^$' | sort -u
+```
+# review-spec:check-end
+
+Each key it prints is a claim the diff must back (U8). No line means the PR
+implements no decision, which is the ordinary case and not a finding.
+
 ## 2. Step 2 — diff it
 
 # review-spec:check DIFF
@@ -380,6 +402,25 @@ raised in a later round must be fix-caused or previously unobservable;
 otherwise it is a `FOLLOW-UP ISSUE` (`loop` items 1–2). Stop after two
 non-product cycles without useful progress and route the finding instead
 (`loop` item 6).
+
+**U8 — a `Decision:` key is implemented by this diff. P1.** Input is the §1
+DECISIONS block; for every key it prints, run `edda ask <key>` for the value
+and reason, then read the diff: the change must deliver that decision, not
+merely mention it. The finding is *claimed but not implemented* — the line is
+the input to `scripts/fleet/ratify-merged.sh`, which writes `ratified_by:
+evidence:pr#N@sha` against that key (GH-764; run by hand after a merge until
+the merge step calls it — #769), so an unbacked line confers binding authority
+on a decision no reviewed code implements, and unlike the `--by` free text
+this typed form replaces, it cannot even be read as one named person's
+assertion. A decision implemented
+**without** the line is not this finding: it ratifies nothing, which is a
+missed convention rather than a false fact. Empty DECISIONS output makes the
+rule inapplicable, never failed.
+
+`scripts/review-l0.sh` does not route U8: its key list comes from the PR body,
+so like U1/C5/R3 before GH-922 it has nothing to read in the pre-push pass
+(no PR number). It is a reviewer step, judged against the DECISIONS output the
+fetch step already printed.
 
 ### 5.1 docs
 
@@ -778,10 +819,13 @@ rather than overwriting it.
   carries the ` (SHADOW)` suffix — the only SHADOW marker; the `- shadow:
   true` header field is documentation that accompanies it, never a
   substitute — sets no `review:*` label and no `Independent Review` status —
-  the union rule below ignores it. It is calibration evidence, not a gate:
-  `scripts/review-compare.sh <pr> <sha>` diffs its findings against the
-  authoritative round (the latest §7 round on that SHA without the suffix)
-  and prints one `for-ledger` line for the calibration ledger (issue #887).
+  the union rule below ignores it, and `sh scripts/review-pr.sh
+  verdict-label` prints `shadow` for it rather than a `review:*` label, so no
+  caller can turn it into a gate by reading its Verdict line. It is
+  calibration evidence, not a gate: `scripts/review-compare.sh <pr> <sha>`
+  diffs its findings against the authoritative round (the latest §7 round on
+  that SHA without the suffix) and prints one `for-ledger` line for the
+  calibration ledger (issue #887).
 
 Internal verifier reports, task receipts and CI do not replace this comment
 (`loop`). For a local-only delivery with no PR, record the same fields in the

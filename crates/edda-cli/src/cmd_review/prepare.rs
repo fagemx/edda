@@ -1,4 +1,4 @@
-use super::{args::ReviewArgs, brief, evidence, git, github, identity, subject};
+use super::{args::ReviewArgs, brief, evidence, git, github, identity, qualification, subject};
 use anyhow::{bail, Result};
 use edda_core::{ReviewRefs, ReviewSpec, ReviewVerdictPayload};
 use edda_ledger::Ledger;
@@ -190,8 +190,20 @@ pub(crate) fn collect_evidence(
     ))
 }
 
-pub(crate) fn assemble(prepared: &Prepared, evidence: &str) -> Result<(brief::Brief, Vec<String>)> {
+pub(crate) fn assemble(
+    prepared: &Prepared,
+    args: &ReviewArgs,
+    evidence: &str,
+) -> Result<(brief::Brief, Vec<String>, qualification::Qualification)> {
     let classes = brief::route_classes(&prepared.subject.files, &prepared.fm.classes);
+    // REVIEW.md §6.1 reads brief silence as "checklist-type engine", so the
+    // brief must name the engine's R22 authority for this PR's surface.
+    let qualified = qualification::assess(
+        &prepared.subject.files,
+        &super::model_requested(args),
+        super::transport(args.agent),
+        args.require_model_diversity,
+    )?;
     let paths = prepared
         .subject
         .files
@@ -235,9 +247,11 @@ pub(crate) fn assemble(prepared: &Prepared, evidence: &str) -> Result<(brief::Br
         .map(|v| v.parse::<usize>())
         .transpose()?
         .unwrap_or(200_000);
+    let qualification_text = qualified.brief_section();
     let inputs = brief::BriefInputs {
         review_md: &prepared.review_md,
         classes: &classes,
+        qualification: &qualification_text,
         spec: &prepared.spec_text,
         spec_trust: &prepared.spec.trust,
         ledger_pack: &pack,
@@ -247,5 +261,6 @@ pub(crate) fn assemble(prepared: &Prepared, evidence: &str) -> Result<(brief::Br
     Ok((
         brief::assemble(&inputs, chunks, &prepared.fm.classes, budget)?,
         classes,
+        qualified,
     ))
 }

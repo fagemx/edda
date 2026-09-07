@@ -518,6 +518,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let p1 = ledger.last_event_hash().unwrap();
         let ev1 = edda_core::event::new_decision_event("main", p1.as_deref(), "system", &dp_unrat)
@@ -536,6 +537,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let p2 = ledger.last_event_hash().unwrap();
         let ev2 =
@@ -601,6 +603,7 @@ mod tests {
             review_after: None,
             reversibility: None,
             village_id: None,
+            cites: None,
         };
         let ev = edda_core::event::new_decision_event("main", None, "system", &dp).unwrap();
         ledger.append_event(&ev).unwrap();
