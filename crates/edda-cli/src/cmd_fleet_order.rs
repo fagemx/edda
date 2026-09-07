@@ -13,19 +13,24 @@
 //!   weight is zeroed. The one exception is an issue whose body cites a red
 //!   run/gate link; without a link it is not a pipeline blocker.
 //! * **Per-file collision** — collisions are the pairwise intersection of
-//!   `## Predicted surface` paths, never labels (#1005). #671 and #685 both
-//!   name `crates/edda-cli/src/main.rs` and share no label at all.
+//!   `## Predicted surface` paths, never labels (#1005). Labels are issue-level
+//!   and conflicts are file-level, so a shared label neither predicts nor
+//!   excludes one: #671 and #685 share two labels (`enhancement`,
+//!   `lane:feature`) and their real collision is `crates/edda-ledger/src/sync.rs`
+//!   and `docs/guides/multi-agent.md`, which no label says anything about.
 //! * **Freshness judgment in the product** (#970) — the applicability re-check
 //!   runs against the pinned tree and this binary's own verb table, so a stale
 //!   `edda` on `PATH` can no longer produce a false FAIL, and a path or command
 //!   the issue itself declares it will create WARNs instead of FAILing.
 //!
-//! Computation is pure and network-free: `gh`, `git`, and the ledger are read
-//! once at collection time into [`OrderInput`], and [`compute_order`] is a
-//! total function over it. Flash criteria that would need a subprocess (the
-//! brief render, the #945 dry-run validator) are emitted as named pending
-//! checks on the row instead of being shelled out mid-computation or silently
-//! skipped.
+//! Computation is pure and network-free: `gh`, `git`, the ledger, and the two
+//! flash criteria that need a subprocess (the #885 brief render, the #945
+//! dry-run validator) are all resolved once at collection time into
+//! [`OrderInput`], and [`compute_order`] is a total function over it. The
+//! subprocess criteria arrive as [`FlashCheck`] data like any other input, so
+//! [`route`] applies all four of the criteria #1015 names while the ranker
+//! stays pure and fixture-testable. A criterion that was not evaluated is not a
+//! pass: the row routes `strong` and says which check forced it.
 
 mod cli;
 mod render;
@@ -58,9 +63,12 @@ const W_RED_RUN_BLOCKER: i64 = 50;
 const W_COLLISION_PEER: i64 = -10;
 const W_STALE: i64 = -100;
 
-/// Flash criteria that need a subprocess and are therefore reported, not run.
-const PENDING_BRIEF_RENDER: &str = "brief-render";
-const PENDING_DISPATCH_DRY_RUN: &str = "dispatch-dry-run";
+/// The two flash criteria that need a subprocess. Run on the impure edge in
+/// `cli`, applied here; the order is #1015's, and `route` short-circuits on the
+/// first failure, so a row never reports a check the queue did not reach.
+const CHECK_BRIEF_RENDER: &str = "brief-render";
+const CHECK_DISPATCH_DRY_RUN: &str = "dispatch-dry-run";
+pub const FLASH_SUBPROCESS_CHECKS: [&str; 2] = [CHECK_BRIEF_RENDER, CHECK_DISPATCH_DRY_RUN];
 
 // ---------------------------------------------------------------------------
 // Input
@@ -84,9 +92,35 @@ pub struct OpenIssue {
     pub labels: Vec<GhLabel>,
 }
 
+/// One flash criterion that only a subprocess can decide, resolved before the
+/// ranker runs. Carried as data so `compute_order` applies it without shelling
+/// out: determinism holds because the result is an input like any other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FlashCheck {
+    /// One of [`FLASH_SUBPROCESS_CHECKS`].
+    pub name: String,
+    pub passed: bool,
+    /// What was run and what it said. Quoted verbatim in the row's reasons.
+    pub note: String,
+}
+
+impl FlashCheck {
+    fn new(name: &str, passed: bool, note: impl Into<String>) -> Self {
+        FlashCheck {
+            name: name.to_string(),
+            passed,
+            note: note.into(),
+        }
+    }
+}
+
 /// Everything [`compute_order`] is allowed to read. Collected once, up front.
 pub struct OrderInput {
     pub issues: Vec<OpenIssue>,
+    /// Subprocess flash-criterion results, keyed by issue number. An issue
+    /// absent from this map had its checks skipped, not passed — [`route`]
+    /// reads the absence as "not evaluated" and routes `strong`.
+    pub flash_checks: BTreeMap<u64, Vec<FlashCheck>>,
     /// Every path tracked at the pinned tree. Freshness resolves against this,
     /// never against the filesystem or a binary on `PATH`.
     pub tree_paths: BTreeSet<String>,
@@ -215,9 +249,10 @@ pub struct Row {
     pub lane: Lane,
     /// Why the lane came out the way it did.
     pub lane_reasons: Vec<String>,
-    /// Flash criteria that need a subprocess; the dispatcher runs these.
+    /// Results of the subprocess flash criteria, in the order they were
+    /// applied. Empty when the row never reached them.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub pending_checks: Vec<String>,
+    pub flash_checks: Vec<FlashCheck>,
     pub status: Status,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hold_reason: Option<String>,
@@ -256,7 +291,7 @@ struct Draft {
     cites_red_run: bool,
     lane: Lane,
     lane_reasons: Vec<String>,
-    pending_checks: Vec<String>,
+    flash_checks: Vec<FlashCheck>,
 }
 
 /// Rank and route every issue in `input`. Pure, total and deterministic: the
@@ -301,16 +336,13 @@ pub fn compute_order(input: &OrderInput) -> Queue {
 
 fn draft(issue: &OpenIssue, input: &OrderInput) -> Draft {
     let surface = surface_paths(&issue.body);
-    let labels: BTreeSet<String> = issue
-        .labels
-        .iter()
-        .map(|label| label.name.trim().to_ascii_lowercase())
-        .collect();
-    let (lane, lane_reasons, pending_checks) = route(
+    let labels = issue_labels(issue);
+    let (lane, lane_reasons, flash_checks) = route(
         &surface,
         &labels,
         &issue.body,
         input.flash_max_surface_files,
+        input.flash_checks.get(&issue.number),
     );
     Draft {
         number: issue.number,
@@ -322,8 +354,18 @@ fn draft(issue: &OpenIssue, input: &OrderInput) -> Draft {
         surface,
         lane,
         lane_reasons,
-        pending_checks,
+        flash_checks,
     }
+}
+
+/// An issue's labels, trimmed and lowercased. Shared with `cli`, which needs
+/// the same view to decide which issues are still flash candidates.
+pub fn issue_labels(issue: &OpenIssue) -> BTreeSet<String> {
+    issue
+        .labels
+        .iter()
+        .map(|label| label.name.trim().to_ascii_lowercase())
+        .collect()
 }
 
 fn row(draft: &Draft, peers: BTreeSet<u64>, frozen_health: bool) -> Row {
@@ -380,7 +422,7 @@ fn row(draft: &Draft, peers: BTreeSet<u64>, frozen_health: bool) -> Row {
         surface: draft.surface.clone(),
         lane: draft.lane,
         lane_reasons: draft.lane_reasons.clone(),
-        pending_checks: draft.pending_checks.clone(),
+        flash_checks: draft.flash_checks.clone(),
         status,
         hold_reason: None,
         collides_with: peers.into_iter().collect(),
@@ -439,7 +481,11 @@ fn class_name(class: Class) -> &'static str {
 }
 
 /// Pairwise `## Predicted surface` intersection (#1005). Labels are never
-/// consulted: #671 and #685 carried no label in common and both got built.
+/// consulted, because a label cannot answer the question: labels are
+/// issue-level and conflicts are file-level. #671 and #685 are the live
+/// example — two labels in common (`enhancement`, `lane:feature`), which
+/// predicts nothing, and a real collision on `crates/edda-ledger/src/sync.rs`
+/// and `docs/guides/multi-agent.md`, which no label mentions.
 fn collision_matrix(drafts: &[Draft]) -> BTreeMap<u64, BTreeSet<u64>> {
     let sets: Vec<BTreeSet<&str>> = drafts
         .iter()
@@ -464,59 +510,80 @@ fn collision_matrix(drafts: &[Draft]) -> BTreeMap<u64, BTreeSet<u64>> {
     matrix
 }
 
-/// Lane routing. Every criterion here is mechanical; the two that would need a
-/// subprocess are named as pending checks rather than run (see module docs).
+/// The routing criteria decidable from the issue body alone: the two
+/// controller escapes, plus #1015's first two flash criteria. `Some` is the
+/// lane the row takes and why; `None` means it is still a flash candidate and
+/// only the subprocess criteria are left.
+///
+/// `cli` calls this to decide which issues are worth spending a subprocess on,
+/// so the cheap criteria have exactly one implementation.
+pub fn non_flash_reason(
+    surface: &[String],
+    labels: &BTreeSet<String>,
+    body: &str,
+    flash_cap: usize,
+) -> Option<(Lane, String)> {
+    if labels.contains("governance") || labels.contains("fleet:goal") {
+        return Some((Lane::Controller, "governance label".into()));
+    }
+    if body.contains(JUDGMENT_MARKER) {
+        return Some((
+            Lane::Controller,
+            format!("judgment marker {JUDGMENT_MARKER} in body"),
+        ));
+    }
+    if surface.is_empty() {
+        return Some((Lane::Strong, "no declared surface".into()));
+    }
+    if surface.len() > flash_cap {
+        return Some((
+            Lane::Strong,
+            format!("surface {} files > flash cap {flash_cap}", surface.len()),
+        ));
+    }
+    if let Some(path) = surface.iter().find(|p| p.starts_with("scripts/")) {
+        return Some((Lane::Strong, format!("surface touches scripts/ ({path})")));
+    }
+    None
+}
+
+/// Lane routing. All four of #1015's flash criteria are applied here: the two
+/// cheap ones from [`non_flash_reason`], then the two subprocess ones, whose
+/// results `cli` resolved at collection time and handed over as data.
+///
+/// `任一不過 → strong` is taken literally, and so is its silent half: a check
+/// that was never evaluated has not passed either, so a missing result routes
+/// `strong` exactly like a failing one. Both cases name the check in the
+/// returned reasons, so the row says what forced the lane.
 fn route(
     surface: &[String],
     labels: &BTreeSet<String>,
     body: &str,
     flash_cap: usize,
-) -> (Lane, Vec<String>, Vec<String>) {
-    if labels.contains("governance") || labels.contains("fleet:goal") {
-        return (
-            Lane::Controller,
-            vec!["governance label".into()],
-            Vec::new(),
-        );
+    checks: Option<&Vec<FlashCheck>>,
+) -> (Lane, Vec<String>, Vec<FlashCheck>) {
+    if let Some((lane, reason)) = non_flash_reason(surface, labels, body, flash_cap) {
+        return (lane, vec![reason], Vec::new());
     }
-    if body.contains(JUDGMENT_MARKER) {
-        return (
-            Lane::Controller,
-            vec![format!("judgment marker {JUDGMENT_MARKER} in body")],
-            Vec::new(),
-        );
+    let checks = checks.cloned().unwrap_or_default();
+    let mut reasons = vec![format!(
+        "surface {} files <= flash cap {flash_cap}, no scripts/ path",
+        surface.len()
+    )];
+    for name in FLASH_SUBPROCESS_CHECKS {
+        match checks.iter().find(|check| check.name == name) {
+            Some(check) if check.passed => reasons.push(format!("{name} passed: {}", check.note)),
+            Some(check) => {
+                reasons.push(format!("{name} failed: {}", check.note));
+                return (Lane::Strong, reasons, checks);
+            }
+            None => {
+                reasons.push(format!("{name} not evaluated"));
+                return (Lane::Strong, reasons, checks);
+            }
+        }
     }
-    if surface.is_empty() {
-        return (Lane::Strong, vec!["no declared surface".into()], Vec::new());
-    }
-    if surface.len() > flash_cap {
-        return (
-            Lane::Strong,
-            vec![format!(
-                "surface {} files > flash cap {flash_cap}",
-                surface.len()
-            )],
-            Vec::new(),
-        );
-    }
-    if let Some(path) = surface.iter().find(|p| p.starts_with("scripts/")) {
-        return (
-            Lane::Strong,
-            vec![format!("surface touches scripts/ ({path})")],
-            Vec::new(),
-        );
-    }
-    (
-        Lane::Flash,
-        vec![format!(
-            "surface {} files <= flash cap {flash_cap}, no scripts/ path",
-            surface.len()
-        )],
-        vec![
-            PENDING_BRIEF_RENDER.to_string(),
-            PENDING_DISPATCH_DRY_RUN.to_string(),
-        ],
-    )
+    (Lane::Flash, reasons, checks)
 }
 
 /// The RED-freeze exception: the body cites a run or gate link. A mechanism

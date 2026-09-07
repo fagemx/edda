@@ -5,7 +5,7 @@
 //! Every one of them prints the score decomposition, because a bare rank the
 //! operator cannot check is a rank they cannot veto.
 
-use super::{Queue, Row, Score, Status};
+use super::{Lane, Queue, Row, Score, Status};
 
 /// Every non-zero score component, in the order [`Score`] declares them.
 pub fn decomposition(score: &Score) -> String {
@@ -48,8 +48,13 @@ pub fn notes(row: &Row) -> String {
             finding.note
         ));
     }
-    if !row.pending_checks.is_empty() {
-        notes.push(format!("pending checks: {}", row.pending_checks.join(", ")));
+    // Which of the four criteria stopped this row, which `route` puts last in
+    // `lane_reasons`. Neither the text nor the markdown rendering prints the
+    // surface, so without this a `strong` row is a verdict with no evidence —
+    // the thing this queue exists to stop. A flash row needs no note: reaching
+    // that lane means all four criteria passed.
+    if row.lane != Lane::Flash {
+        notes.extend(row.lane_reasons.last().cloned());
     }
     notes.join("; ")
 }
@@ -123,7 +128,7 @@ pub fn render_text(queue: &Queue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd_fleet_order::{Lane, Score};
+    use crate::cmd_fleet_order::{FlashCheck, Score};
 
     fn score() -> Score {
         Score {
@@ -144,10 +149,26 @@ mod tests {
             number: 671,
             title: "committed mirror".to_string(),
             class: "product".to_string(),
-            surface: vec!["crates/edda-cli/src/main.rs".to_string()],
-            lane: Lane::Flash,
-            lane_reasons: vec!["surface 1 files <= flash cap 3, no scripts/ path".to_string()],
-            pending_checks: vec!["brief-render".to_string()],
+            surface: vec!["crates/edda-ledger/src/sync.rs".to_string()],
+            // The cheap criteria passed and a subprocess criterion did not, so
+            // the row is `strong` and the note has to say which one.
+            lane: Lane::Strong,
+            lane_reasons: vec![
+                "surface 1 files <= flash cap 3, no scripts/ path".to_string(),
+                "dispatch-dry-run failed: no authored brief".to_string(),
+            ],
+            flash_checks: vec![
+                FlashCheck {
+                    name: "brief-render".to_string(),
+                    passed: true,
+                    note: "brief-from-issue.sh exited 0".to_string(),
+                },
+                FlashCheck {
+                    name: "dispatch-dry-run".to_string(),
+                    passed: false,
+                    note: "no authored brief".to_string(),
+                },
+            ],
             status: Status::Ready,
             hold_reason: None,
             collides_with: vec![685],
@@ -194,8 +215,8 @@ mod tests {
             "### Fleet order — 2026-09-07T12:00:00Z (health GREEN, mechanism dispatch open)"
         ));
         assert!(rendered.contains(
-            "| 1 | #671 | 70 | product | flash | ready | class +40, ready +25, priority +15, \
-             collision -10 | pending checks: brief-render |"
+            "| 1 | #671 | 70 | product | strong | ready | class +40, ready +25, priority +15, \
+             collision -10 | dispatch-dry-run failed: no authored brief |"
         ));
         // Every table row has the same cell count as the header.
         let pipes = |line: &str| line.matches('|').count();
@@ -206,6 +227,28 @@ mod tests {
         for line in rendered.lines().filter(|l| l.starts_with("| 1 ")) {
             assert_eq!(pipes(line), pipes(header));
         }
+    }
+
+    /// A `strong` row that cleared the cheap criteria must say which criterion
+    /// stopped it — including the row shape a `--issues` run produces, where
+    /// the checks were never evaluated and so left no `flash_checks` behind.
+    #[test]
+    fn a_strong_row_names_the_criterion_that_stopped_it() {
+        let mut queue = queue();
+        queue.rows[0].lane_reasons = vec![
+            "surface 1 files <= flash cap 3, no scripts/ path".to_string(),
+            "brief-render not evaluated".to_string(),
+        ];
+        queue.rows[0].flash_checks.clear();
+        assert_eq!(notes(&queue.rows[0]), "brief-render not evaluated");
+
+        // A row a cheap criterion routed names that criterion instead.
+        queue.rows[0].lane_reasons = vec!["surface 5 files > flash cap 3".to_string()];
+        assert_eq!(notes(&queue.rows[0]), "surface 5 files > flash cap 3");
+
+        // A flash row cleared all four; there is nothing left to report.
+        queue.rows[0].lane = Lane::Flash;
+        assert_eq!(notes(&queue.rows[0]), "");
     }
 
     #[test]

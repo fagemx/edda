@@ -1080,10 +1080,13 @@ or `/checks` — which instead earns the `blocker` bonus. Without a link the
 issue is not a pipeline blocker.
 
 Collision: computed from the pairwise intersection of `## Predicted surface`
-paths, never from labels (#1005 — #671 and #685 shared
-`crates/edda-cli/src/main.rs` and no label at all). Every colliding peer costs
-a penalty, and walking the ranked queue puts the head on `ready` and the rest
-on `hold` naming the owner and the shared path.
+paths, never from labels (#1005). Labels are issue-level and conflicts are
+file-level, so a shared label neither predicts nor excludes one — #671 and #685
+are the live example: they share two labels (`enhancement`, `lane:feature`),
+which says nothing either way, and they really do collide, on
+`crates/edda-ledger/src/sync.rs` and `docs/guides/multi-agent.md`. Every
+colliding peer costs a penalty, and walking the ranked queue puts the head on
+`ready` and the rest on `hold` naming the owner and the shared path.
 
 Freshness (#970) is re-derived here rather than trusted from a label. It
 resolves paths against the pinned tree (`git ls-tree -r HEAD`) and commands
@@ -1098,14 +1101,29 @@ headings match case-insensitively. Cited line ranges (`lib.rs:288-296`) resolve
 to their file, and crate- or module-relative references resolve as a suffix of
 the tracked paths.
 
-Lane routing, in evaluation order: a `governance` or `fleet:goal` label or a
-`[判斷]` marker in the body routes to `controller`; an empty surface, a surface
-wider than the flash cap, or any `scripts/` path routes to `strong`; everything
-else routes to `flash`. The cap is the ledger key
-`fleet.order.flash-max-surface-files` (default 3), and `flash_cap_source`
-records whether it resolved. The two flash criteria that need a subprocess —
-the brief render and the #945 dry-run validator — are reported on the row as
-`pending_checks` for the dispatcher to run, never shelled out mid-computation.
+Lane routing, in evaluation order. A `governance` or `fleet:goal` label or a
+`[判斷]` marker in the body routes to `controller`. Then the four flash criteria,
+any one of which failing routes to `strong`:
+
+1. the surface is non-empty and no wider than the flash cap — the ledger key
+   `fleet.order.flash-max-surface-files` (default 3), with `flash_cap_source`
+   recording whether it resolved from the ledger or the built-in default;
+2. no `scripts/` path in the surface;
+3. `brief-render` — `scripts/fleet/brief-from-issue.sh <issue>` exits 0 (#885);
+4. `dispatch-dry-run` — `scripts/fleet/brief-validate.sh` reports VALID for the
+   issue's authored brief under `$EDDA_FLEET_SCRATCH` (default `~/.edda/fleet`),
+   which is the same brief `next-issue.sh` would launch with (#945).
+
+Criteria 3 and 4 need a subprocess, so they are run once at collection time
+alongside `gh` and `git ls-tree` and handed to the ranker as data; ranking
+itself stays pure and network-free. Only issues that criteria 1 and 2 have not
+already routed away are spent a process on, and a failed render short-circuits
+the dry-run. Each result is reported on the row under `flash_checks`.
+
+**A criterion that was not evaluated is not a pass.** An unwritten authored
+brief, a missing `sh`, or a `--issues` fixture run (where the issue numbers are
+synthetic and the scripts are not run at all) routes the row to `strong`, and
+`lane_reasons` names the check that decided it.
 
 Statuses: `ready`, `hold` (behind a higher-ranked row on a shared path),
 `frozen` (mechanism under a RED freeze), `stale` (freshness FAILed), `claimed`

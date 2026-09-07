@@ -41,6 +41,7 @@ fn tree() -> BTreeSet<String> {
         "crates/edda-serve/src/main.rs",
         "crates/edda-cli/src/cmd_fleet.rs",
         "crates/edda-cli/src/cmd_export.rs",
+        "crates/edda-ledger/src/sync.rs",
         "crates/edda-core/src/types.rs",
         "scripts/fleet/next-issue.sh",
         "scripts/fleet/guard-push.sh",
@@ -60,6 +61,7 @@ fn verbs() -> BTreeSet<String> {
 fn input(issues: &[OpenIssue], health: &str) -> OrderInput {
     OrderInput {
         issues: issues.to_vec(),
+        flash_checks: BTreeMap::new(),
         tree_paths: tree(),
         known_verbs: verbs(),
         health_status: health.to_string(),
@@ -67,6 +69,35 @@ fn input(issues: &[OpenIssue], health: &str) -> OrderInput {
         flash_cap_source: "default".to_string(),
         now: now(),
     }
+}
+
+/// Both subprocess criteria resolved for one issue. `cli` produces this shape
+/// by running the scripts; a fixture states it, which is the point of moving
+/// the checks onto [`OrderInput`].
+fn checks(number: u64, render: bool, dry_run: bool) -> BTreeMap<u64, Vec<FlashCheck>> {
+    let mut results = vec![FlashCheck {
+        name: CHECK_BRIEF_RENDER.to_string(),
+        passed: render,
+        note: if render {
+            "brief-from-issue.sh exited 0".to_string()
+        } else {
+            "brief-from-issue.sh exited 2: no ## Predicted surface".to_string()
+        },
+    }];
+    // The real collector short-circuits: a brief that did not render leaves
+    // the validator nothing to run, so no second result exists.
+    if render {
+        results.push(FlashCheck {
+            name: CHECK_DISPATCH_DRY_RUN.to_string(),
+            passed: dry_run,
+            note: if dry_run {
+                "brief-validate.sh VALID".to_string()
+            } else {
+                "brief-validate.sh exited 1: INVALID step=3".to_string()
+            },
+        });
+    }
+    BTreeMap::from([(number, results)])
 }
 
 fn row(queue: &Queue, number: u64) -> &Row {
@@ -92,9 +123,12 @@ fn verdict_for(body: &str, target: &str) -> Option<Verdict> {
 // The two properties #1015 names explicitly
 // ---------------------------------------------------------------------------
 
-/// #671 and #685 both declare `crates/edda-cli/src/main.rs`. Label-based
-/// detection saw two unrelated issues and both got built (#887's shape); the
-/// per-file rule (#1005) sees one collision and serializes them.
+/// The measured #671/#685 shape: two labels in common (`enhancement`,
+/// `lane:feature`) and a real overlap on `crates/edda-ledger/src/sync.rs`.
+/// Label-based detection reads the shared labels and still cannot answer the
+/// question — labels are issue-level, conflicts are file-level — which is how
+/// two lanes built the same file (#887's shape). The per-file rule (#1005)
+/// sees one collision and serializes them.
 #[test]
 fn per_file_collision_holds_the_lower_ranked_peer() {
     let issues = vec![
@@ -103,24 +137,24 @@ fn per_file_collision_holds_the_lower_ranked_peer() {
             "committed mirror",
             &body(
                 &[
-                    "crates/edda-cli/src/main.rs",
+                    "crates/edda-ledger/src/sync.rs",
                     "crates/edda-cli/src/cmd_export.rs",
                 ],
                 "",
             ),
-            &["fleet:ready", "P1"],
+            &["enhancement", "lane:feature", "fleet:ready", "P1"],
         ),
         open_issue(
             685,
             "sync surface",
             &body(
                 &[
-                    "crates/edda-cli/src/main.rs",
+                    "crates/edda-ledger/src/sync.rs",
                     "crates/edda-cli/src/cmd_fleet.rs",
                 ],
                 "",
             ),
-            &["fleet:ready", "P2"],
+            &["enhancement", "lane:feature", "fleet:ready", "P2"],
         ),
         open_issue(
             999,
@@ -142,7 +176,7 @@ fn per_file_collision_holds_the_lower_ranked_peer() {
     assert_eq!(row(&queue, 685).status, Status::Hold);
     assert_eq!(
         row(&queue, 685).hold_reason.as_deref(),
-        Some("surface collision with #671 on crates/edda-cli/src/main.rs")
+        Some("surface collision with #671 on crates/edda-ledger/src/sync.rs")
     );
     assert_eq!(row(&queue, 999).status, Status::Ready);
     assert!(row(&queue, 999).hold_reason.is_none());
@@ -540,16 +574,23 @@ fn lane_routing_is_mechanical() {
             &["fleet:ready"],
         ),
     ];
-    let queue = compute_order(&input(&issues, "GREEN"));
+    let mut order_input = input(&issues, "GREEN");
+    order_input.flash_checks = checks(1, true, true);
+    let queue = compute_order(&order_input);
 
     assert_eq!(row(&queue, 1).lane, Lane::Flash);
     assert_eq!(
-        row(&queue, 1).pending_checks,
-        vec![PENDING_BRIEF_RENDER, PENDING_DISPATCH_DRY_RUN]
+        row(&queue, 1)
+            .flash_checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![CHECK_BRIEF_RENDER, CHECK_DISPATCH_DRY_RUN]
     );
     assert_eq!(row(&queue, 2).lane, Lane::Strong);
     assert!(row(&queue, 2).lane_reasons[0].contains("> flash cap 3"));
-    assert!(row(&queue, 2).pending_checks.is_empty());
+    // A row the cheap criteria already routed away never reaches the scripts.
+    assert!(row(&queue, 2).flash_checks.is_empty());
     assert_eq!(row(&queue, 3).lane, Lane::Strong);
     assert!(row(&queue, 3).lane_reasons[0].contains("scripts/"));
     assert_eq!(row(&queue, 4).lane, Lane::Strong);
@@ -557,6 +598,56 @@ fn lane_routing_is_mechanical() {
     assert_eq!(row(&queue, 5).lane, Lane::Controller);
     assert_eq!(row(&queue, 6).lane, Lane::Controller);
     assert!(row(&queue, 6).lane_reasons[0].contains(JUDGMENT_MARKER));
+}
+
+/// #1015 doneWhen bullet 4: `任一不過 → strong`. The row below satisfies both
+/// cheap criteria — one product file, no `scripts/` path — so the only thing
+/// that can keep it off the flash lane is a subprocess criterion, and each of
+/// the three ways one can come back short has to do exactly that.
+#[test]
+fn a_failed_subprocess_criterion_forces_strong() {
+    let issues = vec![open_issue(
+        1,
+        "small product change",
+        &body(&["crates/edda-core/src/types.rs"], ""),
+        &["fleet:ready"],
+    )];
+
+    // Baseline: with both criteria satisfied the same row is flash, so the
+    // assertions below isolate the criterion and nothing else.
+    let mut both_pass = input(&issues, "GREEN");
+    both_pass.flash_checks = checks(1, true, true);
+    assert_eq!(row(&compute_order(&both_pass), 1).lane, Lane::Flash);
+
+    // The #945 dry-run validator reported INVALID.
+    let mut dry_run_failed = input(&issues, "GREEN");
+    dry_run_failed.flash_checks = checks(1, true, false);
+    let queue = compute_order(&dry_run_failed);
+    assert_eq!(row(&queue, 1).lane, Lane::Strong);
+    assert!(row(&queue, 1).lane_reasons[0].contains("<= flash cap 3"));
+    assert_eq!(
+        row(&queue, 1).lane_reasons[2],
+        "dispatch-dry-run failed: brief-validate.sh exited 1: INVALID step=3"
+    );
+
+    // The brief did not render, so the validator was never reached: the row
+    // carries one check, not two, and the render is what it names.
+    let mut render_failed = input(&issues, "GREEN");
+    render_failed.flash_checks = checks(1, false, true);
+    let queue = compute_order(&render_failed);
+    assert_eq!(row(&queue, 1).lane, Lane::Strong);
+    assert_eq!(row(&queue, 1).flash_checks.len(), 1);
+    assert_eq!(
+        row(&queue, 1).lane_reasons[1],
+        "brief-render failed: brief-from-issue.sh exited 2: no ## Predicted surface"
+    );
+
+    // Nothing ran at all (a `--issues` fixture run). Not evaluated is not a
+    // pass, so the safe lane wins and the row names the check that decided it.
+    let queue = compute_order(&input(&issues, "GREEN"));
+    assert_eq!(row(&queue, 1).lane, Lane::Strong);
+    assert!(row(&queue, 1).flash_checks.is_empty());
+    assert_eq!(row(&queue, 1).lane_reasons[1], "brief-render not evaluated");
 }
 
 #[test]

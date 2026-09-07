@@ -1,16 +1,19 @@
 //! GH-1015: collection and CLI entry point for `edda fleet order`.
 //!
-//! Everything impure lives here: `gh`, `git`, the ledger, and clap. Each is
-//! read exactly once into an [`OrderInput`], so the ranker itself stays a pure
-//! function that a fixture can drive.
+//! Everything impure lives here: `gh`, `git`, the ledger, clap, and the two
+//! flash criteria that can only be decided by running something. Each is
+//! resolved exactly once into an [`OrderInput`], so the ranker itself stays a
+//! pure function that a fixture can drive.
 
 use super::{
-    compute_order, render_markdown, render_text, OpenIssue, OrderInput, FLASH_CAP_DEFAULT,
+    compute_order, issue_labels, non_flash_reason, render_markdown, render_text, FlashCheck,
+    OpenIssue, OrderInput, CHECK_BRIEF_RENDER, CHECK_DISPATCH_DRY_RUN, FLASH_CAP_DEFAULT,
     FLASH_CAP_KEY,
 };
+use crate::cmd_fleet::surface_paths;
 use chrono::Utc;
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 /// Server-side cap on the open-issue query.
 const OPEN_ISSUE_CAP: u64 = 400;
@@ -66,19 +69,30 @@ pub fn run(args: OrderArgs, repo_root: &Path) -> anyhow::Result<()> {
         },
         None => crate::cmd_fleet::live_health_status(repo_root, args.window),
     };
-    let issues = match &args.issues {
+    // A fixture's issue numbers are synthetic, so running the two subprocess
+    // criteria against them would ask GitHub about issues the fixture invented.
+    // The checks are skipped there instead, and every affected row says
+    // `<check> not evaluated` and routes `strong` — never a silent flash.
+    let (issues, run_flash_checks) = match &args.issues {
         Some(path) => {
             let bytes = std::fs::read(path)
                 .map_err(|err| anyhow::anyhow!("reading {}: {err}", path.display()))?;
-            parse_open_issues(&bytes)
-                .map_err(|err| anyhow::anyhow!("parsing {}: {err}", path.display()))?
+            let issues = parse_open_issues(&bytes)
+                .map_err(|err| anyhow::anyhow!("parsing {}: {err}", path.display()))?;
+            (issues, false)
         }
-        None => collect_open_issues(repo_root),
+        None => (collect_open_issues(repo_root), true),
     };
     let (flash_max_surface_files, flash_cap_source) = read_flash_cap(repo_root);
+    let flash_checks = if run_flash_checks {
+        collect_flash_checks(repo_root, &issues, flash_max_surface_files)
+    } else {
+        BTreeMap::new()
+    };
 
     let mut queue = compute_order(&OrderInput {
         issues,
+        flash_checks,
         tree_paths: collect_tree_paths(repo_root),
         known_verbs: collect_known_verbs(),
         health_status,
@@ -123,6 +137,196 @@ fn read_flash_cap(repo_root: &Path) -> (usize, String) {
         }
     }
     (FLASH_CAP_DEFAULT, "default".to_string())
+}
+
+/// Renders in flight at once. Each is a process spawn plus one `gh issue view`
+/// round trip; measured serially over the 60-issue corpus the whole collection
+/// took 7m44s, which is not a queue command. They are independent reads that
+/// touch nothing in the repo, so they overlap safely — unlike the dry-run,
+/// which does `git worktree add` and stays serial below.
+const RENDER_CONCURRENCY: usize = 6;
+
+/// Resolve the two subprocess flash criteria, for the issues that can still
+/// reach the flash lane. [`non_flash_reason`] has already routed the rest, so
+/// spending a process on them would buy a result nothing reads.
+///
+/// The order is #1015's, and a failed render short-circuits: the dry-run
+/// validator has nothing to validate once the brief did not render. Results are
+/// keyed by issue number, so thread scheduling cannot reach the output.
+fn collect_flash_checks(
+    repo_root: &Path,
+    issues: &[OpenIssue],
+    flash_cap: usize,
+) -> BTreeMap<u64, Vec<FlashCheck>> {
+    let candidates: Vec<u64> = issues
+        .iter()
+        .filter(|issue| {
+            let surface = surface_paths(&issue.body);
+            non_flash_reason(&surface, &issue_labels(issue), &issue.body, flash_cap).is_none()
+        })
+        .map(|issue| issue.number)
+        .collect();
+
+    let mut checks: BTreeMap<u64, Vec<FlashCheck>> = BTreeMap::new();
+    std::thread::scope(|scope| {
+        for batch in candidates.chunks(RENDER_CONCURRENCY) {
+            let handles: Vec<_> = batch
+                .iter()
+                .map(|&number| {
+                    (
+                        number,
+                        scope.spawn(move || run_brief_render(repo_root, number)),
+                    )
+                })
+                .collect();
+            for (number, handle) in handles {
+                // A panicked worker decided nothing, and "not decided" is not a
+                // pass: it records as a failure and the row routes strong.
+                let render = handle.join().unwrap_or_else(|_| {
+                    FlashCheck::new(CHECK_BRIEF_RENDER, false, "brief-render worker panicked")
+                });
+                checks.insert(number, vec![render]);
+            }
+        }
+    });
+
+    for (number, results) in checks.iter_mut() {
+        if results.iter().all(|check| check.passed) {
+            results.push(run_dispatch_dry_run(repo_root, *number));
+        }
+    }
+    checks
+}
+
+/// #885's renderer, invoked the way `next-issue.sh` invokes it. It only prints
+/// — no worktree, branch or lane is created — so the arguments below are the
+/// names the launch *would* use, not names that exist. Exit 0 is the criterion.
+fn run_brief_render(repo_root: &Path, number: u64) -> FlashCheck {
+    let worktree = format!("{}-wt-gh{number}", repo_root.display());
+    let output = std::process::Command::new("sh")
+        .args([
+            "scripts/fleet/brief-from-issue.sh",
+            &number.to_string(),
+            "--lane-name",
+            &format!("edda-lane-gh{number}"),
+            "--worktree",
+            &worktree,
+            "--branch",
+            &format!("feat/gh{number}"),
+        ])
+        .current_dir(repo_root)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            FlashCheck::new(CHECK_BRIEF_RENDER, true, "brief-from-issue.sh exited 0")
+        }
+        Ok(output) => FlashCheck::new(
+            CHECK_BRIEF_RENDER,
+            false,
+            format!(
+                "brief-from-issue.sh exited {}: {}",
+                exit_code(&output.status),
+                first_line([&output.stderr, &output.stdout])
+            ),
+        ),
+        Err(err) => FlashCheck::new(
+            CHECK_BRIEF_RENDER,
+            false,
+            format!("could not run brief-from-issue.sh: {err}"),
+        ),
+    }
+}
+
+/// #945's dry-run validator, which applies a brief's authored span in a
+/// throwaway worktree at the pinned base SHA.
+///
+/// Its precondition is an *authored* brief: a freshly rendered one carries the
+/// `<<AUTHORED STEPS>>` placeholder and no `<<AUTHORED: BEGIN>>` span, and the
+/// validator refuses it with exit 2. That refusal is not a pass, so an issue
+/// whose authored middle nobody has written yet routes `strong` — which is the
+/// safe direction, and the note says exactly what is missing.
+fn run_dispatch_dry_run(repo_root: &Path, number: u64) -> FlashCheck {
+    let Some(path) = authored_brief_path(number) else {
+        return FlashCheck::new(
+            CHECK_DISPATCH_DRY_RUN,
+            false,
+            "cannot resolve the fleet scratch directory",
+        );
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return FlashCheck::new(
+            CHECK_DISPATCH_DRY_RUN,
+            false,
+            format!("no authored brief at {}", path.display()),
+        );
+    };
+    if text.lines().any(|line| line == "<<AUTHORED STEPS>>") {
+        return FlashCheck::new(
+            CHECK_DISPATCH_DRY_RUN,
+            false,
+            format!(
+                "brief at {} still carries the <<AUTHORED STEPS>> placeholder; nothing to dry-run",
+                path.display()
+            ),
+        );
+    }
+    let output = std::process::Command::new("sh")
+        .args([
+            "scripts/fleet/brief-validate.sh",
+            &path.display().to_string(),
+        ])
+        .current_dir(repo_root)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            FlashCheck::new(CHECK_DISPATCH_DRY_RUN, true, "brief-validate.sh VALID")
+        }
+        Ok(output) => FlashCheck::new(
+            CHECK_DISPATCH_DRY_RUN,
+            false,
+            format!(
+                "brief-validate.sh exited {}: {}",
+                exit_code(&output.status),
+                first_line([&output.stdout, &output.stderr])
+            ),
+        ),
+        Err(err) => FlashCheck::new(
+            CHECK_DISPATCH_DRY_RUN,
+            false,
+            format!("could not run brief-validate.sh: {err}"),
+        ),
+    }
+}
+
+/// Where `next-issue.sh` writes and re-reads a lane brief. Same env var, same
+/// name, so the validator sees the brief the launch would actually use.
+fn authored_brief_path(number: u64) -> Option<PathBuf> {
+    let scratch = match std::env::var("EDDA_FLEET_SCRATCH") {
+        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+        _ => edda_core::paths::home_dir()?.join(".edda").join("fleet"),
+    };
+    Some(scratch.join(format!("brief-gh{number}.md")))
+}
+
+fn exit_code(status: &std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(code) => code.to_string(),
+        None => "by signal".to_string(),
+    }
+}
+
+/// The one line worth quoting back into a lane reason: these scripts report
+/// their refusal first, and a row note is not a place for a transcript. Streams
+/// are searched in the order given — `brief-from-issue.sh` dies on stderr,
+/// `brief-validate.sh` prints `INVALID step=<n>` on stdout.
+fn first_line(streams: [&[u8]; 2]) -> String {
+    for bytes in streams {
+        let text = String::from_utf8_lossy(bytes);
+        if let Some(line) = text.lines().map(str::trim).find(|line| !line.is_empty()) {
+            return line.to_string();
+        }
+    }
+    "(no output)".to_string()
 }
 
 /// Every path tracked at the pinned tree. A scan that cannot see the tree must
@@ -200,7 +404,19 @@ fn collect_open_issues(repo_root: &Path) -> Vec<OpenIssue> {
         ],
     );
     match parse_open_issues(&stdout) {
-        Ok(issues) => issues,
+        Ok(issues) => {
+            // A full page is indistinguishable from a truncated corpus, so say
+            // so: `total_issues` in the header would otherwise report the
+            // prefix as the whole queue. Same signal `edda fleet health` gives
+            // for its own PR and issue caps.
+            if issues.len() as u64 >= OPEN_ISSUE_CAP {
+                eprintln!(
+                    "warning: open-issue fetch hit its cap ({OPEN_ISSUE_CAP}) — the queue ranks a \
+                     prefix of the corpus, not all of it"
+                );
+            }
+            issues
+        }
         Err(err) => {
             eprintln!("Error: gh issue list output unparseable: {err}");
             std::process::exit(1);
