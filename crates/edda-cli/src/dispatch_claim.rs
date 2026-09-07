@@ -12,28 +12,27 @@ pub struct Claim {
 
 /// Does this board claim still stand against a new writer?
 ///
-/// A session that heartbeats is judged by the one shared session criterion,
-/// exactly as before.
-///
 /// A bare-CLI claim (`cli-*`) never heartbeats — its claimant is a one-shot
-/// process — so that criterion can only ever call it dead. GH-705 answered
-/// that by treating every such claim as live, fail-closed, so a one-shot
-/// writer could not be stomped on mid-write. Unconditionally, though,
+/// process — so the session criterion can only ever call it dead. GH-705
+/// answered that by treating every such claim as live, fail-closed, so a
+/// one-shot writer could not be stomped on mid-write. Unconditionally, though,
 /// "fail-closed" reads as "never expires": GH-1018 found 100 claims left from
 /// July and August still refusing September lanes, with no `unclaim` able to
-/// clear them, which made the guard something lanes had to route around
-/// rather than obey.
+/// clear them, which made the guard something lanes had to route around rather
+/// than obey.
 ///
-/// The claim's own timestamp is judgeable even when its session's heartbeat
-/// is not, and `edda peers --json` already publishes exactly that verdict
-/// (GH-569). Sharing that one rule bounds the bare-CLI case in time without
-/// weakening it: a claim written moments ago still refuses a second writer.
+/// The claim's own timestamp is judgeable even when its session's heartbeat is
+/// not, so the bare-CLI arm is bounded by [`peers::liveness::claim_ttl_secs`]
+/// — a day, deliberately not the heartbeat window: a claim is written once and
+/// never refreshed, and an operator's claimed surface is occupied for the
+/// length of a working session, not for two minutes.
+///
+/// The rule itself is `claim_standing::claim_standing`, shared with `edda claim
+/// check`, because two verbs reading one board to decide one thing must not be
+/// able to answer differently.
 fn claim_still_stands(project: &str, claim: &peers::ClaimEntry, now_epoch: u64) -> bool {
-    if peers::liveness::classify_session_liveness(project, &claim.session_id).is_live() {
-        return true;
-    }
-    crate::cmd_claim::is_bare_cli_session(&claim.session_id)
-        && !peers::liveness::claim_is_stale_at(&claim.ts, now_epoch)
+    crate::claim_standing::claim_standing(project, claim, now_epoch)
+        != crate::claim_standing::ClaimStanding::Expired
 }
 
 pub fn acquire(cwd: &Path, session: &str, paths: &[String]) -> Result<Option<Claim>> {
@@ -236,6 +235,55 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("cli-just-now"), "{error:#}");
+    }
+
+    #[test]
+    fn the_dispatch_guard_and_claim_check_read_one_rule() {
+        // Before GH-1018 these were two expressions that happened to agree
+        // (`live || cli-*` written twice). Bounding the bare-CLI arm in only
+        // one of them would have made them disagree, and the failure is
+        // silent: `edda claim check` reporting CONFLICT on a surface `edda
+        // dispatch` has already admitted a writer to. Pin both sides of the
+        // boundary against the bucket `claim check` actually reads.
+        let _store = crate::test_support::isolated_store();
+        let cwd = tempfile::tempdir().expect("dispatch claim cwd");
+        let project = edda_store::project_id(cwd.path());
+        crate::test_support::write_aged_claim(
+            &project,
+            "cli-three-weeks",
+            60 * 60 * 24 * 22,
+            &["docs/three-weeks.md".to_owned()],
+        );
+        crate::test_support::write_aged_claim(
+            &project,
+            "cli-seconds",
+            5,
+            &["docs/seconds.md".to_owned()],
+        );
+
+        let now_epoch = peers::liveness::now_epoch();
+        let board = crate::cmd_claim::read_active_claims(&project).expect("read board");
+        assert_eq!(board.len(), 2, "both claims must be on the board");
+
+        for claim in &board {
+            let expired = crate::claim_standing::claim_standing(&project, claim, now_epoch)
+                == crate::claim_standing::ClaimStanding::Expired;
+            let admitted = match acquire(cwd.path(), "lane-agreement", &claim.paths) {
+                Ok(guard) => {
+                    guard
+                        .expect("admitted writer claim")
+                        .release()
+                        .expect("release the admitted claim");
+                    true
+                }
+                Err(_) => false,
+            };
+            assert_eq!(
+                expired, admitted,
+                "claim {} is bucketed one way by `claim check` and the other by `dispatch`",
+                claim.session_id
+            );
+        }
     }
 
     #[test]

@@ -61,9 +61,20 @@ fn write_board(store_root: &Path, project_id: &str, lines: &[String]) {
         .expect("coordination.jsonl");
 }
 
+/// A claim recorded now.
+///
+/// The timestamp is load-bearing: since GH-1018 a claim stops refusing
+/// writers once it is older than `claim_ttl_secs`, so a fixture pinned to a
+/// fixed calendar date would silently become an expired claim as the repo
+/// ages. Tests that want an old claim ask for one — `coord_event_aged`.
 fn coord_event(session: &str, label: &str, paths: &[&str]) -> String {
+    coord_event_aged(session, label, paths, 0)
+}
+
+/// A claim recorded `age_secs` ago.
+fn coord_event_aged(session: &str, label: &str, paths: &[&str], age_secs: u64) -> String {
     serde_json::json!({
-        "ts": "2026-01-01T00:00:00Z",
+        "ts": rfc3339_now_minus(age_secs),
         "session_id": session,
         "event_type": "claim",
         "payload": { "label": label, "paths": paths }
@@ -291,7 +302,7 @@ fn e2e_bare_cli_claim_is_visible_to_claim_check() {
 }
 
 #[test]
-fn e2e_aged_bare_cli_claim_still_conflicts() {
+fn e2e_bare_cli_claim_with_an_aged_heartbeat_still_conflicts() {
     // GH-705 round-1 P0: the claimant is a one-shot process, gone the
     // moment the command returns, so a heartbeat written at claim time
     // ages with nothing to refresh it. Backdating it past stale_secs
@@ -299,6 +310,10 @@ fn e2e_aged_bare_cli_claim_still_conflicts() {
     // to clear: the claim stands on the board until it is unclaimed, so
     // the gate keeps counting it (fail-closed) instead of dismissing it
     // as a dead session's claim.
+    //
+    // The variable here is the *heartbeat* age; the claim itself is fresh.
+    // GH-1018 bounds the other age — see
+    // `e2e_bare_cli_claim_past_its_ttl_no_longer_conflicts`.
     let repo = e2e_repo();
     let project_id = edda_store::project_id(repo.path());
     let store = tempfile::tempdir().expect("store tempdir");
@@ -378,6 +393,76 @@ fn e2e_non_intersecting_bare_cli_claim_is_listed_in_json() {
 }
 
 #[test]
+fn e2e_a_live_session_holding_a_cli_claim_is_a_live_conflict() {
+    // The bare-CLI arm exists because a one-shot process leaves no heartbeat
+    // to judge (GH-705). When a heartbeat *is* there and live, there is
+    // nothing unjudgeable about the occupation, and the report must keep
+    // saying so: `conflicts`, not `unjudgeable_claims`. Both refuse a writer,
+    // so the exit code cannot tell these apart — only the JSON can, which is
+    // why the distinction is pinned here and not through an exit code.
+    let repo = e2e_repo();
+    let project_id = edda_store::project_id(repo.path());
+    let store = tempfile::tempdir().expect("store tempdir");
+    write_board(
+        store.path(),
+        &project_id,
+        &[coord_event("cli-here-now", "live-cli", &["src/*"])],
+    );
+    write_heartbeat(store.path(), &project_id, "cli-here-now", 0);
+    let (code, stdout, stderr) = run_edda_bare(
+        &["claim", "check", "src/main.rs", "--json"],
+        repo.path(),
+        store.path(),
+    );
+    assert_eq!(code, 1, "stdout={stdout:?} stderr={stderr:?}");
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
+    assert_eq!(
+        parsed["conflicts"][0]["session_id"], "cli-here-now",
+        "a live session's claim must be a live conflict, got {parsed:?}"
+    );
+    assert!(
+        parsed["unjudgeable_claims"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "a judgeable claim must not be filed as unjudgeable, got {parsed:?}"
+    );
+}
+
+#[test]
+fn e2e_bare_cli_claim_past_its_ttl_no_longer_conflicts() {
+    // GH-1018: fail-closed was unconditional, so it read as "never
+    // expires" — 100 claims left from July and August were still refusing
+    // September lanes, and no `unclaim` could reach them. The claim's own
+    // timestamp is judgeable even when its session's heartbeat is not, so
+    // the occupation is bounded: past `claim_ttl_secs` (24h) the surface is
+    // genuinely clear. Everything the three tests around this one pin is
+    // unchanged inside that window.
+    let repo = e2e_repo();
+    let project_id = edda_store::project_id(repo.path());
+    let store = tempfile::tempdir().expect("store tempdir");
+    write_board(
+        store.path(),
+        &project_id,
+        &[coord_event_aged(
+            "cli-july",
+            "ghost-cli",
+            &["src/*"],
+            60 * 60 * 24 * 60,
+        )],
+    );
+    let (code, stdout, stderr) = run_edda_bare(
+        &["claim", "check", "src/main.rs"],
+        repo.path(),
+        store.path(),
+    );
+    assert_eq!(
+        code, 0,
+        "a two-month-old bare-CLI claim must not refuse a new writer; \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+}
+
+#[test]
 fn e2e_never_heartbeated_bare_cli_claim_conflicts() {
     // The same fail-closed verdict when the one-shot claim left no
     // heartbeat at all: for a session id this binary itself mints,
@@ -408,7 +493,7 @@ fn e2e_never_heartbeated_bare_cli_claim_conflicts() {
 }
 
 #[test]
-fn e2e_aged_bare_cli_claim_is_classified_in_json() {
+fn e2e_bare_cli_claim_with_an_aged_heartbeat_is_classified_in_json() {
     // Machine-readable classification (GH-705 doneWhen): an overlapping
     // bare-CLI claim appears in its own `unjudgeable_claims` bucket — an
     // occupation whose liveness cannot be judged, distinct from a live

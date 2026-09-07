@@ -374,6 +374,16 @@ session replaces its previous label and complete path list; it does not add a
 second claim. Pass each path pattern with its own `--paths` flag; comma-separated
 values are not split.
 
+A claim stops refusing writers 24 hours after it was recorded
+(`EDDA_CLAIM_TTL_SECS`). That window is deliberately not the 120-second
+heartbeat window `edda peers` uses: a heartbeat is refreshed every 30 seconds,
+while a claim is written once and never refreshed, so a refresh-calibrated
+window would open a surface two minutes after its owner claimed it. Before the
+guard was bounded, claims from months-gone sessions refused every new lane and
+no `unclaim` could reach them (GH-1018). `edda claim check` and the `edda
+dispatch --owns` admission guard read one rule, so they cannot answer
+differently about the same board.
+
 ### `edda request`
 
 Send a request to another active session.

@@ -115,6 +115,7 @@ scoping, and durability guarantees.
 | Signal | Default | Env Override | Notes |
 |--------|---------|-------------|-------|
 | Heartbeat liveness | 120 s | `EDDA_PEER_STALE_SECS` | Peers older than this are excluded from discovery |
+| Board claim guard | 86 400 s | `EDDA_CLAIM_TTL_SECS` | How long a claim may refuse a writer. Deliberately not the heartbeat window: a heartbeat is refreshed every 30 s, a claim is written once (GH-1018) |
 | Sub-agent heartbeat | 1800 s (15×) | — | Sub-agents cannot fire hooks; extended threshold |
 | Nudge cooldown | 180 s | `EDDA_NUDGE_COOLDOWN_SECS` | Minimum interval between nudge injections |
 | Hook timeout | 10 000 ms | `EDDA_HOOK_TIMEOUT_MS` | Max hook execution time before graceful exit |

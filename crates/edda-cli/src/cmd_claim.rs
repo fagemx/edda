@@ -22,8 +22,9 @@
 //!   meant to become the machine judgement GH-563's dispatch guard calls
 //!   before letting two lanes write the same file.
 
+use crate::claim_standing::{claim_standing, is_bare_cli_session, ClaimStanding};
 use anyhow::Context;
-use edda_bridge_claude::peers::{classify_session_liveness, ClaimEntry, SessionLiveness};
+use edda_bridge_claude::peers::{self, classify_session_liveness_at, ClaimEntry, SessionLiveness};
 use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io::ErrorKind;
@@ -141,23 +142,32 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
     // counted toward the exit code when its surface intersects the query
     // (fail-closed). A session with a live heartbeat still conflicts
     // normally; the GH-617 criterion itself is untouched.
+    // GH-1018: that occupation is bounded in time. `claim_standing` is the one
+    // admission rule, shared with the `edda dispatch --owns` guard, so the two
+    // verbs cannot answer differently about the same board on the same second.
     let mut unjudgeable: Vec<ClaimEntry> = Vec::new();
+    let now_epoch = peers::liveness::now_epoch();
     for c in claims {
-        let liveness = classify_session_liveness(&project_id, &c.session_id);
-        if liveness.is_live() {
-            live.push(c);
-        } else if is_bare_cli_session(&c.session_id) {
-            unjudgeable.push(c);
-        } else {
-            let age_secs = match liveness {
-                SessionLiveness::Stale { age_secs } => Some(age_secs),
-                _ => None, // NoHeartbeat: never heard from
-            };
-            stale_claims.push(StaleClaim {
-                label: c.label,
-                session_id: c.session_id,
-                age_secs,
-            });
+        match claim_standing(&project_id, &c, now_epoch) {
+            ClaimStanding::Live => live.push(c),
+            ClaimStanding::BareWithinTtl => unjudgeable.push(c),
+            ClaimStanding::Expired => {
+                let age_secs = if is_bare_cli_session(&c.session_id) {
+                    // Nothing ever heartbeated for it; what expired is the
+                    // claim, so the claim's own age is what to report.
+                    Some(peers::liveness::claim_age_secs_at(&c.ts, now_epoch))
+                } else {
+                    match classify_session_liveness_at(&project_id, &c.session_id, now_epoch) {
+                        SessionLiveness::Stale { age_secs } => Some(age_secs),
+                        _ => None, // NoHeartbeat: never heard from
+                    }
+                };
+                stale_claims.push(StaleClaim {
+                    label: c.label,
+                    session_id: c.session_id,
+                    age_secs,
+                });
+            }
         }
     }
 
@@ -263,16 +273,6 @@ fn exit_code_for(report: &CheckReport) -> i32 {
     } else {
         1
     }
-}
-
-/// Session ids minted by `cmd_bridge::resolve_session_id` tier 4 for bare
-/// CLI invocations (`cli-<label>`). Such a session is a one-shot process:
-/// it wrote its claim and exited, and no hook ever refreshes a heartbeat
-/// for it, so heartbeat age carries no liveness information (GH-705). The
-/// same shape is already classified in `cmd_bridge` when it names the
-/// actor of a `cli-*` session.
-pub(crate) fn is_bare_cli_session(session_id: &str) -> bool {
-    session_id.starts_with("cli-")
 }
 
 fn print_standing_bare_claims(standing: &[StandingBareClaim]) {
