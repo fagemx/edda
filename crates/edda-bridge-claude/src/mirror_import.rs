@@ -254,4 +254,120 @@ mod tests {
         let line = render_line(&r, "?").expect("import is visible");
         assert!(line.contains("stale"), "{line}");
     }
+
+    /// Write the smallest mirror the importer accepts. Full export/import
+    /// fidelity is proved against the real `edda export md` writer in
+    /// `edda-cli`'s `cmd_sync` tests; what this exercises is the glue —
+    /// resolve root, read stamp, open ledger, import, record state.
+    fn write_mirror(dir: &Path, stamp: &str, key: &str, value: &str, event_id: &str) {
+        let decisions = dir.join("decisions");
+        std::fs::create_dir_all(&decisions).expect("mirror dir");
+        std::fs::write(
+            dir.join("INDEX.md"),
+            format!("# Ledger\n\n- **Exported at**: {stamp}\n- **Exporting machine**: 4090\n"),
+        )
+        .expect("index");
+        let domain = key.split('.').next().expect("domain");
+        std::fs::write(
+            decisions.join(format!("{domain}.md")),
+            format!(
+                "# Domain: `{domain}`\n\n## `{key}`\n\n\
+                 - **Value**: `{value}`\n\
+                 - **Reason**: recorded on the source machine\n\
+                 - **Branch/ts**: `main` · 2026-09-07T02:00:00Z\n\
+                 - **Governance**: unratified (agent)\n\
+                 - **Scope**: local\n\
+                 - **Authority**: agent\n\
+                 - **Reversibility**: medium\n\
+                 - **event_id**: `{event_id}`\n"
+            ),
+        )
+        .expect("domain file");
+    }
+
+    /// The wiring the trigger exists for: SessionStart pulls what another
+    /// machine decided, and says so — then stays out of the way.
+    #[test]
+    fn session_start_imports_the_mirror_once_and_is_a_no_op_after() {
+        let _store = crate::isolated_store();
+        let project_id = "mirror_import_session_start";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        edda_ledger::Ledger::open_or_init(&repo).expect("ledger");
+        let cwd = repo.to_str().expect("utf-8 path");
+
+        // A project with no mirror is the single-machine case, and must cost
+        // nothing and say nothing.
+        assert_eq!(import_on_session_start(cwd, project_id), None);
+
+        write_mirror(
+            &repo.join("docs").join("decisions"),
+            "2026-09-07T02:00:00Z",
+            "fleet.merge-authority",
+            "controller-merges-on-current-head-lgtm",
+            "evt_from_machine_a",
+        );
+
+        let line = import_on_session_start(cwd, project_id).expect("first session imports");
+        assert!(line.contains("Imported 1 decision(s)"), "{line}");
+        assert!(line.contains("4090"), "the source machine is named: {line}");
+
+        // The decision is actually in this ledger, not merely announced.
+        let ledger = edda_ledger::Ledger::open(&repo).expect("ledger");
+        let row = ledger
+            .find_active_decision("main", "fleet.merge-authority")
+            .expect("query")
+            .expect("imported decision is visible");
+        assert_eq!(row.value, "controller-merges-on-current-head-lgtm");
+
+        // Second session, unchanged stamp: silent, and no second import.
+        assert_eq!(
+            import_on_session_start(cwd, project_id),
+            None,
+            "an unchanged stamp must not re-announce or re-import"
+        );
+        assert_eq!(
+            ledger
+                .iter_events_by_type("decision_import")
+                .expect("events")
+                .len(),
+            1
+        );
+    }
+
+    /// A mirror the importer cannot read must cost the session nothing —
+    /// property 3. Before this, a malformed domain file would have propagated
+    /// out of `sync_from_mirror` and up through SessionStart.
+    #[test]
+    fn a_broken_mirror_does_not_fail_session_start() {
+        let _store = crate::isolated_store();
+        let project_id = "mirror_import_broken";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        edda_ledger::Ledger::open_or_init(&repo).expect("ledger");
+
+        let mirror = repo.join("docs").join("decisions");
+        let decisions = mirror.join("decisions");
+        std::fs::create_dir_all(&decisions).expect("mirror dir");
+        std::fs::write(
+            mirror.join("INDEX.md"),
+            "# Ledger\n\n- **Exported at**: 2026-09-07T02:00:00Z\n",
+        )
+        .expect("index");
+        // A decision section with no `event_id` line — `finish_mirror_decision`
+        // rejects the whole run.
+        std::fs::write(
+            decisions.join("fleet.md"),
+            "# Domain: `fleet`\n\n## `fleet.broken`\n\n- **Value**: `x`\n",
+        )
+        .expect("domain file");
+
+        assert_eq!(
+            import_on_session_start(repo.to_str().expect("utf-8 path"), project_id),
+            None,
+            "a broken mirror is silence, never a failed session start"
+        );
+    }
 }
