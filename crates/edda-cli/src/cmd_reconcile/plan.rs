@@ -57,6 +57,11 @@ pub(super) fn plan_actions(
     // under its current attempt and one another reconciler has claimed but not
     // yet started, whose lease names the next attempt. Either way the task is
     // owned, so it yields no action and still holds a slot and its scope.
+    // The cost of reading `Ready` and `Failed` this way is that a task whose
+    // lease outlived its attempt — `finish_runner` appends `task.failed` and
+    // only then deletes, so a failed delete leaves one behind — waits out the
+    // lease instead of being retried on the next pass. Bounded by the TTL, and
+    // the alternative is a second reconciler dispatching a claimed task.
     let is_live = |view: &TaskView| {
         matches!(
             view.status,
@@ -207,14 +212,31 @@ struct ClaimedAction {
     task: TaskView,
     /// Attempt named by the claim lease — the attempt this action will start.
     attempt: u32,
+    /// Owner written with the claim lease, unique to this claim. Phase 3 and
+    /// the rollback both re-read it before writing, because a claim taken under
+    /// an earlier lock hold can be gone by then.
+    owner: String,
+}
+
+/// The claim phase 1 wrote for this action, if the ledger still holds it under
+/// this reconciler's owner. One lease row exists per task (`upsert_task_lease`
+/// conflicts on `task_id`), so a peer that took the task over replaced the
+/// owner: a mismatch — or a missing row — means the claim is no longer ours,
+/// neither to commit on nor to delete.
+fn claim_still_ours(ledger: &Ledger, entry: &ClaimedAction) -> anyhow::Result<Option<TaskLease>> {
+    Ok(ledger
+        .task_lease(entry.task.task_id)?
+        .filter(|lease| lease.attempt == entry.attempt && lease.owner == entry.owner))
 }
 
 /// Reconcile in three phases so the workspace lock never spans `git worktree
 /// add`, which measured 27.99 s of a 28.02 s critical section and 64.8 s on
 /// another run (GH-1047). Serialization no longer comes from the length of the
-/// hold but from the claim leases phase 1 writes: a live lease means owned, so
-/// a concurrent reconciler plans nothing for that task and does not spend its
-/// slot or scope on it.
+/// hold but from the claim leases phase 1 writes, in two halves that only work
+/// together: a live claim means owned, so a concurrent reconciler plans nothing
+/// for that task and spends neither a slot nor its scope on it — and phase 3
+/// re-reads the claim before it writes, because the claim can expire and be
+/// taken over while phase 2 runs unlocked.
 pub(super) fn persist_reconciliation(
     repo_root: &Path,
     config: &ReconcileConfig,
@@ -236,8 +258,16 @@ pub(super) fn persist_reconciliation(
     let prepared = match prepare_attempt_worktrees(repo_root, &claimed) {
         Ok(prepared) => prepared,
         Err(error) => {
-            release_claims(&ledger, &claimed);
-            return Err(error);
+            // The git refusal is the failure to report, but a claim this pass
+            // could not roll back hides its task from every reconciler until
+            // the lease expires. That travels with the refusal instead of being
+            // dropped with the `errors` this pass had already collected.
+            errors.extend(release_claims(&ledger, &claimed));
+            return Err(if errors.is_empty() {
+                error
+            } else {
+                error.context(errors.join("; "))
+            });
         }
     };
     let (plans, commit_errors) = commit_claimed_attempts(&ledger, config, claimed, prepared)?;
@@ -299,11 +329,12 @@ fn claim_attempt(
         ReconcileAction::Requeue { next_attempt, .. } => *next_attempt,
         ReconcileAction::Fail { .. } => task.attempts,
     };
-    replace_lease(ledger, task.task_id, attempt, config.lease_ttl_s)?;
+    let owner = replace_lease(ledger, task.task_id, attempt, config.lease_ttl_s)?;
     Ok(ClaimedAction {
         action,
         task,
         attempt,
+        owner,
     })
 }
 
@@ -324,15 +355,43 @@ fn prepare_attempt_worktrees(
         .collect()
 }
 
-/// Undo phase 1's claims after a refused batch. The advisory lock is taken when
-/// it is available but is not required: a single lease delete is atomic in
-/// SQLite, and a lease left behind would only expire on its own anyway.
-fn release_claims(ledger: &Ledger, claimed: &[ClaimedAction]) {
-    let lock = acquire_workspace_lock(&ledger.paths).ok();
+/// Undo phase 1's claims after a refused batch, reporting whatever it could not
+/// undo. The advisory lock is taken when it is available but is not required: a
+/// single lease delete is atomic in SQLite. A delete that fails is not silent,
+/// though — that lease hides its task from every reconciler for the rest of
+/// `--lease-ttl-s`, where before the phase split a refused batch left no lease
+/// at all and the next pass re-planned immediately.
+fn release_claims(ledger: &Ledger, claimed: &[ClaimedAction]) -> Vec<String> {
+    let mut errors = Vec::new();
+    let lock = match acquire_workspace_lock(&ledger.paths) {
+        Ok(lock) => Some(lock),
+        Err(error) => {
+            errors.push(format!(
+                "claim rollback ran without the workspace lock: {error:#}"
+            ));
+            None
+        }
+    };
     for entry in claimed {
-        let _ = ledger.delete_task_lease(entry.task.task_id, entry.attempt);
+        let released = match claim_still_ours(ledger, entry) {
+            // Deleting by task and attempt alone would take a peer's claim with
+            // it; a claim that is no longer ours is already released as far as
+            // this pass is concerned.
+            Ok(None) => Ok(()),
+            Ok(Some(_)) => ledger
+                .delete_task_lease(entry.task.task_id, entry.attempt)
+                .map(|_| ()),
+            Err(error) => Err(error),
+        };
+        if let Err(error) = released {
+            errors.push(format!(
+                "task #{} stays claimed until its lease expires because releasing attempt {} failed: {error:#}",
+                entry.task.task_id, entry.attempt
+            ));
+        }
     }
     drop(lock);
+    errors
 }
 
 /// Phase 3, under the workspace lock: append the dispatch truth the claims
@@ -344,13 +403,33 @@ fn commit_claimed_attempts(
     prepared: Vec<Option<PathBuf>>,
 ) -> anyhow::Result<(Vec<RunnerPlan>, Vec<String>)> {
     let lock = acquire_workspace_lock(&ledger.paths)?;
+    let now = clock_now();
     let mut plans = Vec::new();
     let mut errors = Vec::new();
     for (entry, worktree) in claimed.into_iter().zip(prepared) {
-        match commit_claimed_attempt(ledger, config, &entry, worktree) {
-            Ok(Some(plan)) => plans.push(plan),
-            Ok(None) => {}
-            Err(error) => errors.push(format!("task action persistence failed: {error:#}")),
+        // Phase 2 ran unlocked and unbounded, so the claim that authorises this
+        // write may have expired and been taken over meanwhile. Commit only
+        // what a concurrent planner would still read as claimed by us — the
+        // same re-check `record_session_if_current` and `finish_runner` make
+        // before they write on a lease they took earlier.
+        match claim_still_ours(ledger, &entry) {
+            Ok(Some(claim)) if claim.expires_at > now => {
+                match commit_claimed_attempt(ledger, config, &entry, worktree) {
+                    Ok(Some(plan)) => plans.push(plan),
+                    Ok(None) => {}
+                    Err(error) => {
+                        errors.push(format!("task action persistence failed: {error:#}"));
+                    }
+                }
+            }
+            Ok(_) => errors.push(format!(
+                "task #{} lost its claim on attempt {} while its worktree was prepared and was not dispatched; raise --lease-ttl-s above the cost of `git worktree add`",
+                entry.task.task_id, entry.attempt
+            )),
+            Err(error) => errors.push(format!(
+                "task #{} claim re-check failed: {error:#}",
+                entry.task.task_id
+            )),
         }
     }
     let branch = ledger.head_branch()?;
@@ -359,7 +438,31 @@ fn commit_claimed_attempts(
     Ok((plans, errors))
 }
 
+/// Append the dispatch truth one claim reserved. Every failure releases that
+/// claim, so no lease outlives an attempt that never started — the requeue and
+/// failure appends included, whose errors used to return with the claim still
+/// in the ledger and the task hidden until its TTL expired.
 fn commit_claimed_attempt(
+    ledger: &Ledger,
+    config: &ReconcileConfig,
+    entry: &ClaimedAction,
+    worktree: Option<PathBuf>,
+) -> anyhow::Result<Option<RunnerPlan>> {
+    match append_claimed_truth(ledger, config, entry, worktree) {
+        Ok(plan) => Ok(plan),
+        Err(error) => Err(
+            match ledger.delete_task_lease(entry.task.task_id, entry.attempt) {
+                Ok(_) => error,
+                Err(rollback) => error.context(format!(
+                    "task #{} stays claimed until its lease expires because releasing attempt {} failed: {rollback:#}",
+                    entry.task.task_id, entry.attempt
+                )),
+            },
+        ),
+    }
+}
+
+fn append_claimed_truth(
     ledger: &Ledger,
     config: &ReconcileConfig,
     entry: &ClaimedAction,
@@ -386,7 +489,7 @@ fn commit_claimed_attempt(
         append_requeued(ledger, task_id, attempt)?;
     }
     if start {
-        start_claimed_attempt(ledger, config, task_id, attempt)?;
+        append_started(ledger, task_id, attempt, config.lease_ttl_s)?;
     }
     Ok(Some(RunnerPlan {
         task: entry.task.clone(),
@@ -395,26 +498,12 @@ fn commit_claimed_attempt(
     }))
 }
 
-/// Append the dispatch truth the claim reserved, releasing the claim if that
-/// append fails, so no lease outlives an attempt that never started.
-fn start_claimed_attempt(
-    ledger: &Ledger,
-    config: &ReconcileConfig,
-    task_id: u64,
-    attempt: u32,
-) -> anyhow::Result<()> {
-    append_started(ledger, task_id, attempt, config.lease_ttl_s).inspect_err(|_| {
-        let _ = ledger.delete_task_lease(task_id, attempt);
-    })
-}
-
 // A concurrent reconciler waits out a busy workspace rather than bailing early
 // (GH-524). The budget is no longer the only thing standing between a correct
 // run and a false failure: since GH-1047 the critical section holds no git I/O,
 // so what it bounds is SQLite reads and appends measured under 10 ms, not a
 // `git worktree add` measured at 27.99 s and 64.8 s on the same workstation.
-pub(super) const WORKSPACE_LOCK_WAIT_BUDGET: std::time::Duration =
-    std::time::Duration::from_secs(30);
+const WORKSPACE_LOCK_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(test)]
 thread_local! {

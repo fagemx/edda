@@ -2,6 +2,23 @@ use super::*;
 use edda_ledger::lock::WorkspaceLock;
 use std::sync::atomic::Ordering;
 
+fn event_kinds(ledger: &edda_ledger::Ledger) -> anyhow::Result<Vec<String>> {
+    Ok(ledger
+        .task_events()?
+        .into_iter()
+        .map(|event| event.event_type)
+        .collect())
+}
+
+/// Block until another thread opens `gate`, bounded so a wedged test fails
+/// instead of hanging the suite.
+fn await_gate(gate: &std::sync::atomic::AtomicBool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !gate.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 #[test]
 pub(super) fn git_preparation_failure_leaves_no_phantom_dispatch() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
@@ -231,13 +248,16 @@ pub(super) fn slow_worktree_preparation_never_times_out_a_concurrent_reconciler(
     // workspace lock is held and not on this host's `git worktree add` speed.
     // With preparation inside the critical section the peer waits out its whole
     // budget and reports the workspace permanently locked (GH-1047).
-    let gate: WorktreePrepGate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let handles: Vec<_> = (0..2)
         .map(|_| {
             let repo = repo.clone();
             let gate = gate.clone();
             std::thread::spawn(move || {
-                WORKTREE_PREP_GATE.with(|slot| *slot.borrow_mut() = Some(gate.clone()));
+                let stall = gate.clone();
+                WORKTREE_PREP_HOOK.with(|slot| {
+                    *slot.borrow_mut() = Some(Box::new(move || await_gate(&stall)));
+                });
                 LOCK_WAIT_BUDGET_OVERRIDE
                     .with(|budget| budget.set(Some(std::time::Duration::from_secs(2))));
                 let outcome = persist_reconciliation(&repo, &ReconcileConfig::test_defaults())
@@ -264,6 +284,142 @@ pub(super) fn slow_worktree_preparation_never_times_out_a_concurrent_reconciler(
         1
     );
     assert_eq!(ledger.task_lease(1)?.expect("lease").attempt, 1);
+    Ok(())
+}
+
+#[test]
+pub(super) fn a_claim_lost_while_unlocked_never_commits_its_dispatch() -> anyhow::Result<()> {
+    // Preparation runs with no lock held and no bound, so the claim that
+    // authorises the dispatch can stop being ours before phase 3 writes on it:
+    // a peer takes the task over, or the claim simply expires because
+    // `--lease-ttl-s` is shorter than `git worktree add`. Committing either
+    // would put two `task.started` events on one attempt — exactly the
+    // serialization the lock hold used to provide (GH-1047).
+    for stolen in [true, false] {
+        let dir = tempfile::tempdir()?;
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo)?;
+        init_git(&repo)?;
+        edda_ledger::Ledger::ensure_initialized(&repo)?;
+        let ledger = edda_ledger::Ledger::open(&repo)?;
+        create_task(&ledger, 1, &["src/contended.rs".into()])?;
+        let peer_repo = repo.clone();
+        WORKTREE_PREP_HOOK.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                let peer = edda_ledger::Ledger::open(&peer_repo).expect("peer ledger");
+                let mut claim = peer.task_lease(1).expect("claim read").expect("claim");
+                if stolen {
+                    claim.owner = "peer-reconciler".into();
+                } else {
+                    claim.expires_at = "2026-08-16T00:00:00Z".into();
+                }
+                peer.upsert_task_lease(&claim).expect("peer claim");
+            }));
+        });
+
+        let outcome = persist_reconciliation(&repo, &ReconcileConfig::test_defaults())?;
+
+        assert!(outcome.plans.is_empty());
+        assert_eq!(outcome.errors.len(), 1);
+        assert!(outcome.errors[0].contains("lost its claim on attempt 1"));
+        assert!(ledger
+            .task_events()?
+            .iter()
+            .all(|event| event.event_type != "task.started"));
+        // A claim that is no longer ours is not ours to delete either.
+        assert_eq!(
+            ledger.task_lease(1)?.expect("surviving claim").owner == "peer-reconciler",
+            stolen
+        );
+    }
+    Ok(())
+}
+
+#[test]
+pub(super) fn a_retiring_attempt_is_claimed_before_the_batch_is_prepared() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    init_git(&repo)?;
+    edda_ledger::Ledger::ensure_initialized(&repo)?;
+    let ledger = edda_ledger::Ledger::open(&repo)?;
+    create_task(&ledger, 1, &["src/retired.rs".into()])?;
+    create_task(&ledger, 2, &["src/fresh.rs".into()])?;
+    append_started(&ledger, 1, 1, 300)?;
+    ledger.upsert_task_lease(&lease(1, 1, "2026-08-16T00:00:00Z"))?;
+    // A retirement is claimed like every other planned action: preparation now
+    // sits between reading the rail and appending `task.failed`, so a peer that
+    // read the rail in that window would otherwise append a second one. Only
+    // the claims exist while preparation runs, which is where this reads them.
+    let observed: std::sync::Arc<std::sync::Mutex<Option<TaskLease>>> = Default::default();
+    let seen = observed.clone();
+    let peer_repo = repo.clone();
+    WORKTREE_PREP_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            let peer = edda_ledger::Ledger::open(&peer_repo).expect("peer ledger");
+            *seen.lock().expect("observed claim") = peer.task_lease(1).expect("claim read");
+        }));
+    });
+
+    let outcome = persist_reconciliation(
+        &repo,
+        &ReconcileConfig {
+            max_attempts: 1,
+            ..ReconcileConfig::test_defaults()
+        },
+    )?;
+
+    let claim = observed
+        .lock()
+        .expect("observed claim")
+        .clone()
+        .expect("the retiring task is claimed while the batch is prepared");
+    assert_eq!(claim.attempt, 1);
+    assert!(claim.expires_at > clock_now());
+    assert!(outcome.errors.is_empty());
+    assert_eq!(
+        outcome
+            .plans
+            .iter()
+            .map(|plan| plan.task.task_id)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert!(ledger.task_lease(1)?.is_none());
+    assert_eq!(
+        ledger
+            .task_views()?
+            .iter()
+            .find(|view| view.task_id == 1)
+            .expect("retired task")
+            .status,
+        TaskStatus::Failed
+    );
+    Ok(())
+}
+
+#[test]
+pub(super) fn a_failed_requeue_append_releases_the_claim_it_reserved() -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    init_git(&repo)?;
+    edda_ledger::Ledger::ensure_initialized(&repo)?;
+    let ledger = edda_ledger::Ledger::open(&repo)?;
+    create_task(&ledger, 1, &["src/retry.rs".into()])?;
+    append_started(&ledger, 1, 1, 300)?;
+    append_failed(&ledger, 1, "crash")?;
+    let rail_before = event_kinds(&ledger)?;
+    FAIL_NEXT_REQUEUED.with(|flag| flag.set(true));
+
+    let outcome = persist_reconciliation(&repo, &ReconcileConfig::test_defaults())?;
+
+    assert!(outcome.plans.is_empty());
+    assert_eq!(outcome.errors.len(), 1);
+    assert_eq!(event_kinds(&ledger)?, rail_before);
+    // The claim named the replacement attempt 2. Left behind, it would hide the
+    // task from every reconciler until the lease expired.
+    assert!(ledger.task_lease(1)?.is_none());
     Ok(())
 }
 
