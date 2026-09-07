@@ -422,8 +422,25 @@ pub fn sync_from_mirror(
     Ok(result)
 }
 
-/// Replay a mirror ratification: an append-only `decision_ratify` event on
-/// the target, attributed to the original ratifier and noting the mirror.
+/// Replay a mirror ratification as an append-only fact, attributed to the
+/// **mirror** rather than to the name the markdown claimed.
+///
+/// The line this comes from is `- **Governance**: ratified by <who> at <ts>`
+/// in a text file. Nothing about it is authenticated: no hash chain, no source
+/// event hash, no operator present. Passing `<who>` through would mint a local
+/// `decision_ratify` indistinguishable from one an operator actually issued
+/// here — and `edda_core::event::new_decision_ratify_event` exists precisely
+/// so that "operator authority is conferred by an event and can never be
+/// self-declared on write". A file declaring itself ratified is a self-declared
+/// write. It matters more since GH-671's SessionStart trigger: the import runs
+/// unattended on every session, so the forged name would spread with nobody
+/// looking.
+///
+/// So the ratification is preserved — doneWhen requires the ratified *state*
+/// to survive the round trip — but recorded under the typed prefix
+/// `mirror:<machine>` per `ratify.authority=typed-prefix`. A reader and
+/// `edda ratify --by-rule` can both tell a replayed ratification from a local
+/// operator act, which a free-text name can never be told apart from.
 fn append_mirror_ratification(
     target: &Ledger,
     branch: &str,
@@ -432,12 +449,12 @@ fn append_mirror_ratification(
     source_name: &str,
 ) -> anyhow::Result<()> {
     let parent_hash = target.last_event_hash()?;
-    let note = format!("imported from committed mirror (machine {source_name})");
+    let note = format!("ratified by {ratified_by} on {source_name}; replayed from its committed mirror, not an operator act on this machine");
     let event = edda_core::event::new_decision_ratify_event(
         branch,
         parent_hash.as_deref(),
         key,
-        ratified_by,
+        &format!("mirror:{source_name}"),
         Some(&note),
     )?;
     target.append_event(&event)?;
@@ -462,11 +479,18 @@ fn parse_index_meta(text: &str) -> MirrorIndexMeta {
         exported_at: None,
         machine: None,
     };
+    // Prefixes carry no trailing space, and every value is trimmed: the
+    // SessionStart trigger reads the same stamp line to decide whether the
+    // mirror moved (`edda_bridge_claude::mirror_import::read_stamp`). If one
+    // reader demanded the space and the other did not, a hand-touched INDEX
+    // would give the trigger a stamp while freshness read "unknown" — and
+    // unknown freshness is treated as stale, so the mirror would import and
+    // then warn about itself.
     for line in text.lines() {
-        if let Some(v) = line.strip_prefix("- **Exported at**: ") {
-            meta.exported_at = Some(v.trim().to_string());
-        } else if let Some(v) = line.strip_prefix("- **Exporting machine**: ") {
-            meta.machine = Some(v.trim().to_string());
+        if let Some(v) = line.strip_prefix("- **Exported at**:") {
+            meta.exported_at = Some(v.trim().to_string()).filter(|v| !v.is_empty());
+        } else if let Some(v) = line.strip_prefix("- **Exporting machine**:") {
+            meta.machine = Some(v.trim().to_string()).filter(|v| !v.is_empty());
         }
     }
     meta

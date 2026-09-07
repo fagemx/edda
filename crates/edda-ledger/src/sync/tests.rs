@@ -541,13 +541,17 @@ fn mirror_import_round_trip_then_dedups_on_second_run() {
     assert_eq!(lane.source_event_id.as_deref(), Some("evt_01lane"));
 
     // Ratified/unratified is preserved: the mirror's ratification becomes
-    // a ratify event on the target, so standard derivation sees it.
+    // a ratify event on the target, so standard derivation sees it. The
+    // ratifier, however, is the MIRROR, not the name the markdown claimed —
+    // that name is unauthenticated text and the import now runs unattended at
+    // SessionStart. This assertion previously demanded "operator", which is
+    // exactly the forgery `append_mirror_ratification` documents.
     let ratified = target.ratified_decisions_map().unwrap();
     assert!(
         ratified.contains_key(&lane.event_id),
         "imported ratification must bind"
     );
-    assert_eq!(ratified[&lane.event_id].ratified_by, "operator");
+    assert_eq!(ratified[&lane.event_id].ratified_by, "mirror:4090");
 
     let merge = target
         .sqlite

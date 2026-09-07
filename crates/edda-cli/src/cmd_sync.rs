@@ -352,7 +352,10 @@ mod tests {
         // 3. Ratified/unratified preserved through standard derivation.
         let ratified = b.ratified_decisions_map().unwrap();
         assert!(ratified.contains_key(&lane.event_id));
-        assert_eq!(ratified[&lane.event_id].ratified_by, "operator");
+        // Attributed to the mirror, never to the name the markdown claimed:
+        // the ratified STATE survives (doneWhen), the operator authority does
+        // not travel. See `append_mirror_ratification`.
+        assert_eq!(ratified[&lane.event_id].ratified_by, "mirror:4090");
 
         // 4. The other acceptance keys round trip too.
         assert!(b
@@ -377,7 +380,7 @@ mod tests {
             .expect("ask must see the imported decision");
         assert_eq!(hit.value, LANE_PROFILE_VALUE);
         assert_eq!(hit.governance.status, "ratified");
-        assert_eq!(hit.governance.ratified_by.as_deref(), Some("operator"));
+        assert_eq!(hit.governance.ratified_by.as_deref(), Some("mirror:4090"));
     }
 
     /// #394 through the mirror: same key, different value → merge, never
@@ -677,5 +680,180 @@ mod tests {
             .expect("ask sees the local decision");
         assert!(hit.mirror.is_none());
         assert!(!edda_ask::format_human(&result).contains("stale-mirror"));
+    }
+    /// Round 2, f3 — the mesh has to converge. Exporting the LOCAL row id
+    /// gave an imported decision a fresh identity on every hop, so A would
+    /// re-import its own ruling from B's mirror as if B had decided it, once
+    /// per wave, forever. Export carries the ORIGIN id instead.
+    #[test]
+    fn a_decision_does_not_come_home_as_an_import_of_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_root = dir.path().join("machine-a");
+        let b_root = dir.path().join("machine-b");
+        fs::create_dir_all(&a_root).unwrap();
+        fs::create_dir_all(&b_root).unwrap();
+
+        let a = Ledger::open_or_init(&a_root).unwrap();
+        decide_event(
+            &a,
+            "fleet.lane-profile",
+            LANE_PROFILE_VALUE,
+            LANE_PROFILE_REASON,
+        );
+        let origin_event_id = a
+            .find_active_decision("main", "fleet.lane-profile")
+            .unwrap()
+            .unwrap()
+            .event_id;
+        drop(a);
+
+        // A → B.
+        let a_mirror = a_root.join("docs").join("decisions");
+        crate::cmd_export::execute(&a_root, &a_mirror, false, Some("4090")).unwrap();
+        Ledger::open_or_init(&b_root).unwrap();
+        execute(&b_root, None, Some(a_mirror.to_str().unwrap()), false).unwrap();
+
+        // B re-exports what it imported. The identity it publishes must be
+        // A's, not the local `decision_import` id that carried it here.
+        let b_mirror = b_root.join("docs").join("decisions");
+        crate::cmd_export::execute(&b_root, &b_mirror, false, Some("docs-box")).unwrap();
+        let published = fs::read_to_string(b_mirror.join("decisions").join("fleet.md")).unwrap();
+        assert!(
+            published.contains(&format!("- **event_id**: `{origin_event_id}`")),
+            "B must republish A's origin id, not its own import id: {published}"
+        );
+
+        // B → A. A already holds that event, so the self-import guard fires.
+        execute(&a_root, None, Some(b_mirror.to_str().unwrap()), false).unwrap();
+        let a = Ledger::open(&a_root).unwrap();
+        assert!(
+            a.iter_events_by_type("decision_import").unwrap().is_empty(),
+            "A imported its own decision back from B"
+        );
+        let home = a
+            .find_active_decision("main", "fleet.lane-profile")
+            .unwrap()
+            .expect("still active on A");
+        assert_eq!(
+            home.event_id, origin_event_id,
+            "A's original row was superseded by a round trip through B"
+        );
+        assert_eq!(
+            home.source_event_id, None,
+            "A's own ruling must not end up stamped as imported from a peer"
+        );
+    }
+
+    /// Round 2, f2 — a `- **Governance**: ratified by <who>` line is
+    /// unauthenticated text, and since the SessionStart trigger the import
+    /// runs unattended. The ratified state must survive the round trip
+    /// (doneWhen) without the operator authority travelling with it.
+    #[test]
+    fn a_mirror_cannot_mint_local_operator_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_root = dir.path().join("machine-a");
+        let b_root = dir.path().join("machine-b");
+        fs::create_dir_all(&a_root).unwrap();
+        fs::create_dir_all(&b_root).unwrap();
+
+        let a = Ledger::open_or_init(&a_root).unwrap();
+        decide_event(
+            &a,
+            "fleet.lane-profile",
+            LANE_PROFILE_VALUE,
+            LANE_PROFILE_REASON,
+        );
+        ratify_event(&a, "fleet.lane-profile", "operator");
+        drop(a);
+
+        let mirror = a_root.join("docs").join("decisions");
+        crate::cmd_export::execute(&a_root, &mirror, false, Some("4090")).unwrap();
+        Ledger::open_or_init(&b_root).unwrap();
+        execute(&b_root, None, Some(mirror.to_str().unwrap()), false).unwrap();
+
+        let b = Ledger::open(&b_root).unwrap();
+        let row = b
+            .find_active_decision("main", "fleet.lane-profile")
+            .unwrap()
+            .expect("visible on B");
+        let ratified = b.ratified_decisions_map().unwrap();
+        let info = ratified
+            .get(&row.event_id)
+            .expect("ratified state survives the round trip");
+
+        // The whole point: a machine reading B's ledger can tell this from an
+        // operator act performed here, which a bare name never allows.
+        assert_eq!(info.ratified_by, "mirror:4090");
+        assert_ne!(
+            info.ratified_by, "operator",
+            "unauthenticated markdown minted local operator authority"
+        );
+
+        // And it reads that way, not just stores that way.
+        let opts = edda_ask::AskOptions {
+            limit: 10,
+            ..Default::default()
+        };
+        let result = edda_ask::ask(&b, "fleet.lane-profile", &opts, None).unwrap();
+        let human = edda_ask::format_human(&result);
+        assert!(human.contains("ratified on 4090 (via mirror)"), "{human}");
+    }
+
+    /// Round 2, f4 — `collect_cites` scanned only `note` events, so the
+    /// citation chain was dropped the first time a machine re-exported a
+    /// decision it had imported. One hop hid it; two hops show it.
+    #[test]
+    fn citations_survive_a_second_hop() {
+        let dir = tempfile::tempdir().unwrap();
+        let a_root = dir.path().join("machine-a");
+        let b_root = dir.path().join("machine-b");
+        let c_root = dir.path().join("machine-c");
+        for root in [&a_root, &b_root, &c_root] {
+            fs::create_dir_all(root).unwrap();
+        }
+
+        let a = Ledger::open_or_init(&a_root).unwrap();
+        decide_event_cites(
+            &a,
+            "fleet.merge-authority",
+            "controller-merges-on-current-head-lgtm",
+            "operator ruling 2026-09-02",
+            Some(vec![
+                "operator:2026-09-02".to_string(),
+                "issue:#671".to_string(),
+            ]),
+        );
+        drop(a);
+
+        let a_mirror = a_root.join("docs").join("decisions");
+        crate::cmd_export::execute(&a_root, &a_mirror, false, Some("4090")).unwrap();
+        Ledger::open_or_init(&b_root).unwrap();
+        execute(&b_root, None, Some(a_mirror.to_str().unwrap()), false).unwrap();
+
+        // B re-exports. This is the hop that used to lose the citations.
+        let b_mirror = b_root.join("docs").join("decisions");
+        crate::cmd_export::execute(&b_root, &b_mirror, false, Some("docs-box")).unwrap();
+        let republished = fs::read_to_string(b_mirror.join("decisions").join("fleet.md")).unwrap();
+        assert!(
+            republished.contains("- **Cites**: `operator:2026-09-02`, `issue:#671`"),
+            "citations dropped on re-export: {republished}"
+        );
+
+        // C is a machine that only ever sees B's mirror.
+        Ledger::open_or_init(&c_root).unwrap();
+        execute(&c_root, None, Some(b_mirror.to_str().unwrap()), false).unwrap();
+        let c = Ledger::open(&c_root).unwrap();
+        let row = c
+            .find_active_decision("main", "fleet.merge-authority")
+            .unwrap()
+            .expect("visible on C");
+        let import = c.get_event(&row.event_id).unwrap().unwrap();
+        let cites: Vec<&str> = import.payload["decision"]["cites"]
+            .as_array()
+            .expect("citations reached the second hop")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(cites, vec!["operator:2026-09-02", "issue:#671"]);
     }
 }

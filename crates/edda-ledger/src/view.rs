@@ -43,13 +43,26 @@ pub struct DecisionView {
     // Village scope
     #[serde(skip_serializing_if = "Option::is_none")]
     pub village_id: Option<String>,
+
+    /// The decision's identity **on the machine that first recorded it**, when
+    /// this row arrived by import; `None` for a locally-decided row.
+    ///
+    /// Carried rather than dropped because the committed mirror (GH-671) has
+    /// to export a *stable* identity: exporting the local row's `event_id`
+    /// gives an imported decision a new id on every hop, so machine A
+    /// re-imports its own ruling from B's mirror as if it were B's, forever.
+    /// The origin id makes the self-import guard in
+    /// `edda_ledger::sync::sync_from_mirror` fire and the mesh converge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<String>,
 }
 
 /// Convert a storage row into a delivery view.
 ///
 /// - Parses `affected_paths` and `tags` from JSON string → `Vec<String>`
 /// - Renames `scope` → `propagation`
-/// - Drops `is_active`, `source_project_id`, `source_event_id`
+/// - Drops `is_active` and `source_project_id`; keeps `source_event_id`, which
+///   is the mirror's stable cross-machine identity (GH-671)
 ///
 /// If `affected_paths` or `tags` JSON is invalid or missing, defaults to `vec![]`.
 pub fn to_view(row: &DecisionRow) -> DecisionView {
@@ -74,6 +87,7 @@ pub fn to_view(row: &DecisionRow) -> DecisionView {
         supersedes_id: row.supersedes_id.clone(),
         review_after: row.review_after.clone(),
         village_id: row.village_id.clone(),
+        source_event_id: row.source_event_id.clone(),
     }
 }
 

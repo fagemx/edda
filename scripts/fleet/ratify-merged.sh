@@ -61,8 +61,38 @@ case $pr in
 esac
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/ratify-merged.XXXXXX")
-cleanup() { rm -rf "$work"; }
-trap cleanup 0 HUP INT TERM
+
+# `projection()` below leaves two marks on the operator's own checkout: the
+# generated mirror in the working tree, and the scratch branch it commits on.
+# Undoing both belongs here and not at each call site, because the paths that
+# lose the operator their branch are the ones that never reach a call site —
+# a `set -e` abort, or an INT during `git push`.
+restore_branch=""
+
+# The mirror is generated, so discarding it costs nothing — but it has to go
+# all the way down to untracked files. `git checkout --` alone cannot: a
+# half-written export stays in the tree, and every later run then stops at the
+# clean-tree guard until someone clears it by hand. Path-limited throughout:
+# nothing outside the generated mirror is ever swept.
+reset_mirror() {
+    git reset --quiet -- docs/decisions 2>/dev/null || true
+    git checkout --quiet -- docs/decisions 2>/dev/null || true
+    git clean --quiet --force -d -- docs/decisions 2>/dev/null || true
+}
+
+cleanup() {
+    if [ -n "$restore_branch" ]; then
+        reset_mirror
+        git checkout --quiet "$restore_branch" 2>/dev/null || true
+        restore_branch=""
+    fi
+    rm -rf "$work"
+}
+trap cleanup 0
+# A signal has to stop the script. Left as a plain `trap cleanup INT`, the
+# shell resumes at the next command — which would run `gh pr create` on a
+# branch cleanup() has already switched away from.
+trap 'cleanup; exit 130' HUP INT TERM
 
 body=$work/body.md
 if [ -n "$body_file" ]; then
@@ -125,7 +155,10 @@ done
 #       stamp would open a chore commit after every merge, forever.
 #
 # Fail-soft throughout: every failure reports and returns 0, for the same
-# reason a failing `edda ratify` is not fatal.
+# reason a failing `edda ratify` is not fatal. Nothing below restores the
+# checkout or the tree itself — `cleanup()` at the top of the file owns that,
+# so the operator lands back on their branch whether this returns, aborts, or
+# is interrupted.
 projection() {
     if [ "${EDDA_PROJECTION:-on}" = off ]; then
         echo "ratify-merged: projection off (EDDA_PROJECTION=off)"
@@ -148,18 +181,29 @@ projection() {
         return 0
     fi
 
+    # From here the tree is dirty by our own hand and, shortly, the checkout
+    # is off $default; arming cleanup() before the export is what makes an
+    # interrupted export reversible too.
+    restore_branch=$default
+
     if ! edda export md --out docs/decisions >/dev/null; then
         echo "ratify-merged: projection skipped — edda export md failed" >&2
-        git checkout --quiet -- docs/decisions 2>/dev/null || true
         return 0
     fi
 
     # (b): the stamp line is excluded, so an export that moved nothing but
     # the clock counts as unchanged.
-    changed=$(git diff -U0 -- docs/decisions | grep '^[+-]' | grep -v '^[+-][+-]' | grep -v '^[+-]- \*\*Exported at\*\*:' | head -n 1)
+    #
+    # Drop ONLY the `+++ `/`--- ` file headers. The obvious-looking
+    # `grep -v '^[+-][+-]'` also eats every added or removed markdown bullet
+    # (`+- **Value**: …`, `-- **Value**: …`), and `render_domain` writes a
+    # decision's whole payload as those bullets — so editing a decision inside
+    # an already-tracked domain file produced a diff made of nothing else,
+    # `changed` came back empty, and the projection reported "unchanged" and
+    # never opened a PR. Only brand-new domains got through, via `added`.
+    changed=$(git diff -U0 -- docs/decisions | grep '^[+-]' | grep -v '^+++ ' | grep -v '^--- ' | grep -v '^[+-]- \*\*Exported at\*\*:' | head -n 1)
     added=$(git ls-files --others --exclude-standard -- docs/decisions | head -n 1)
     if [ -z "$changed" ] && [ -z "$added" ]; then
-        git checkout --quiet -- docs/decisions 2>/dev/null || true
         echo "ratify-merged: projection unchanged — no decision content moved"
         return 0
     fi
@@ -170,11 +214,13 @@ projection() {
         echo "ratify-merged: projection skipped — cannot branch" >&2
         return 0
     fi
-    git add -- docs/decisions
     # Path-limited: never sweeps anything outside the generated mirror.
+    if ! git add -- docs/decisions; then
+        echo "ratify-merged: projection skipped — cannot stage the mirror" >&2
+        return 0
+    fi
     if ! git commit --quiet -m "chore(ledger): export decision projection @ $ts" -- docs/decisions; then
         echo "ratify-merged: projection commit failed" >&2
-        git checkout --quiet "$default" || true
         return 0
     fi
     if git push --quiet origin "$work_branch" 2>/dev/null; then
@@ -188,7 +234,6 @@ PRBODY
     else
         echo "ratify-merged: projection pushed nothing — branch $work_branch is local" >&2
     fi
-    git checkout --quiet "$default" || true
     echo "ratify-merged: projection exported @ $ts on $work_branch"
 }
 

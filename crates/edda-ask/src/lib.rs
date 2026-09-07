@@ -836,6 +836,10 @@ fn render_authority(by: &str) -> String {
     match by.split_once(':') {
         Some(("evidence", what)) => format!("binding (evidence: {what})"),
         Some(("rule", what)) => format!("binding (rule: {what})"),
+        // GH-671: replayed from another machine's committed mirror, which is
+        // unauthenticated text. The state is real and worth showing; the
+        // authority is not this machine's, and must not read as if it were.
+        Some(("mirror", machine)) => format!("ratified on {machine} (via mirror)"),
         _ => format!("ratified (by {by})"),
     }
 }

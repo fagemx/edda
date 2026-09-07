@@ -266,9 +266,27 @@ network protocol:
   **inactive** — merge, never overwrite (the injected line names the count,
   because an inactive row is invisible to `edda ask` until someone resolves
   it). A decision whose original event already exists locally is skipped, so a
-  machine importing its own mirror is a no-op. Ratified decisions arrive
-  ratified: the mirror's ratification is replayed as an append-only
-  `decision_ratify` event.
+  machine importing its own mirror is a no-op.
+- **Identity is the origin's, so a mesh converges.** The export publishes the
+  event id of the machine that *first recorded* the decision
+  (`DecisionView::source_event_id`), never the local row id. Publishing the
+  local id would give an imported decision a fresh identity on every hop: A
+  decides, B imports, B re-exports under B's id, and A imports its own ruling
+  back as if B had made it — once per wave, forever, each time superseding A's
+  original row and stamping it as a peer's. The origin id is what the
+  importer's self-import guard tests, so the loop closes instead of running.
+- **Ratified state travels; operator authority does not.** A ratified decision
+  arrives ratified — the state is part of the round trip doneWhen — replayed as
+  an append-only `decision_ratify` event. But that ratification is read from a
+  `- **Governance**: ratified by <who> at <ts>` line in a text file: no hash
+  chain, no source event hash, and since the SessionStart trigger, no human in
+  the loop at all. So the replay is attributed to `mirror:<machine>` under
+  `ratify.authority=typed-prefix`, never to the name the markdown claimed, and
+  `edda ask` renders it `ratified on <machine> (via mirror)`. Anything else
+  would let a text file mint local operator authority on every machine that
+  pulls, against the invariant in `edda_core::event::new_decision_ratify_event`
+  that operator authority is conferred by an event and never self-declared on
+  write.
 - **Values are quoted, never paraphrased.** The mirror carries the verbatim
   value and reason of every decision; the import must never mint a value from
   an INDEX gloss (INDEX.md carries counts and freshness only). The
@@ -315,6 +333,9 @@ by **citing the decision key and the machine**:
    `docs/decisions/decisions/<domain>.md` in a checkout that carries machine's
    mirror push, or run `edda ask <key>` on the machine itself. The INDEX
    stamp tells you how fresh the evidence is (see the 24h threshold above).
+   That directory is generated, so it does not exist in a fresh clone: it
+   appears once the first projection PR merges. Its absence is "no wave has
+   closed yet", never "the decision was not made".
 3. **not-found is ledger locality, not an absent ruling.** If the key is not
    in *your* ledger or mirror, that means the ruling lives on another
    machine's ledger, or your mirror checkout is stale — re-export or

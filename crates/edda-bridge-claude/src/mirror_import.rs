@@ -51,6 +51,13 @@ pub fn import_on_session_start(cwd: &str, project_id: &str) -> Option<String> {
         return None;
     }
 
+    // Two sessions starting together both pass the stamp check, and the
+    // importer's `is_already_imported` test and its insert are not one
+    // transaction — so without this both would import, and the mirror's
+    // ratification replay would be appended twice. One claim wins; the loser
+    // is silent, which is correct: the winner is importing the same mirror.
+    let _claim = Claim::take(&state.with_extension("lock"))?;
+
     let ledger = edda_ledger::Ledger::open(&root).ok()?;
     let result = sync_from_mirror(&ledger, &MirrorSource { mirror_dir }, false).ok()?;
 
@@ -59,6 +66,46 @@ pub fn import_on_session_start(cwd: &str, project_id: &str) -> Option<String> {
     write_state(&state, &stamp);
 
     render_line(&result, &stamp)
+}
+
+/// How long a claim may sit before it is assumed to belong to a session that
+/// died holding it. A crashed import must not silence every later session
+/// forever — that would be a worse failure than the double import the claim
+/// prevents.
+const CLAIM_STALE_SECS: u64 = 300;
+
+/// An exclusive, self-releasing claim on the import for one project.
+///
+/// `create_new` is the atomic half: exactly one caller can create the file, so
+/// exactly one session imports. `Drop` is the release half, which covers the
+/// early `?` returns above as well as the happy path.
+struct Claim(PathBuf);
+
+impl Claim {
+    fn take(path: &Path) -> Option<Self> {
+        if let Ok(age) = std::fs::metadata(path).and_then(|m| m.modified()) {
+            if age.elapsed().map(|d| d.as_secs()).unwrap_or(0) > CLAIM_STALE_SECS {
+                // swallow-ok: a claim we cannot clear is retried next session.
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .ok()?;
+        Some(Claim(path.to_path_buf()))
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        // swallow-ok: a leaked claim is reclaimed by the staleness check.
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// The `- **Exported at**:` stamp, which is the mirror's identity for

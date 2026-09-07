@@ -107,17 +107,25 @@ fn collect_cites(
     let wanted: std::collections::BTreeSet<&str> =
         rows.iter().map(|r| r.event_id.as_str()).collect();
     let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for e in ledger.iter_events_by_type("note")? {
-        if !wanted.contains(e.event_id.as_str()) {
-            continue;
-        }
-        if let Some(list) = e.payload["decision"]["cites"].as_array() {
-            let cites: Vec<String> = list
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect();
-            if !cites.is_empty() {
-                out.insert(e.event_id.clone(), cites);
+    // Both event types that can back an active decision row. A locally
+    // recorded decision is a `note`; one that arrived over a mirror is a
+    // `decision_import` carrying the same `payload["decision"]["cites"]`.
+    // Scanning only `note` would drop the citation chain the first time a
+    // machine re-exports something it imported — the lie by omission this
+    // whole field exists to prevent, moved one hop away instead of fixed.
+    for kind in ["note", "decision_import"] {
+        for e in ledger.iter_events_by_type(kind)? {
+            if !wanted.contains(e.event_id.as_str()) {
+                continue;
+            }
+            if let Some(list) = e.payload["decision"]["cites"].as_array() {
+                let cites: Vec<String> = list
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect();
+                if !cites.is_empty() {
+                    out.insert(e.event_id.clone(), cites);
+                }
             }
         }
     }
@@ -222,7 +230,17 @@ fn render_domain(
                     .join(", ")
             ));
         }
-        out.push_str(&format!("- **event_id**: `{}`\n\n", row.event_id));
+        // The ORIGIN id, not this machine's row id (GH-671). An imported row's
+        // local `event_id` is the `decision_import` event that carried it
+        // here, so exporting that would hand every hop a fresh identity: A
+        // decides, B imports (new id), B exports (B's id), A imports its own
+        // ruling back as if it were B's — forever, one round per wave. The
+        // origin id is what the importer's self-import guard tests, so
+        // exporting it is what makes a mesh of machines converge.
+        out.push_str(&format!(
+            "- **event_id**: `{}`\n\n",
+            row.source_event_id.as_deref().unwrap_or(&row.event_id)
+        ));
     }
     out
 }
@@ -368,6 +386,7 @@ mod tests {
             supersedes_id: None,
             review_after: None,
             village_id: None,
+            source_event_id: None,
         }
     }
 
