@@ -26,8 +26,12 @@
 //! it first arrived, forever, and the hint's own remedy — re-export and pull —
 //! could not clear it. So freshness is taken from the mirror **in this
 //! checkout at query time**, which is what "讀端過期" names and what pulling a
-//! fresh mirror actually changes. The frozen stamp is the fallback for a
-//! checkout that has no mirror to read.
+//! fresh mirror actually changes — but only when that mirror is the *same
+//! machine's*. A checkout's `docs/decisions/` is rewritten by whichever machine
+//! last ran the wave-close export, routinely this one, and that says nothing
+//! about how current a peer's rulings are. So the frozen stamp is not a rare
+//! fallback: it stands for every decision whose origin machine is not the one
+//! the local mirror belongs to, which in a fleet is most of them.
 
 use crate::DecisionHit;
 use edda_ledger::sync::DEFAULT_MIRROR_STALE_HOURS;
@@ -57,8 +61,10 @@ pub struct MirrorOrigin {
     /// when the stamp named none.
     pub machine: String,
     /// The `- **Exported at**:` stamp freshness was judged against: the mirror
-    /// in this checkout when there is one, otherwise the stamp this row was
-    /// imported under. Absent when neither could be read.
+    /// in this checkout **when that mirror is [`Self::machine`]'s own**,
+    /// otherwise the stamp this row was imported under. Another machine's
+    /// mirror — including this box's own re-export — never speaks for a peer's
+    /// rulings. Absent when neither could be read.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exported_at: Option<String>,
     /// Age of that stamp in hours at query time; `None` when unparseable.

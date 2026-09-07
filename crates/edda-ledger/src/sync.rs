@@ -749,9 +749,13 @@ fn backtick_list(s: &str) -> Vec<String> {
 /// Inverse of `edda-cli::cmd_export::escape_field` — a left-to-right scan so
 /// `\\n` (escaped backslash followed by `n`) never collapses into a newline.
 ///
-/// Safe to apply to fields that older mirrors wrote raw: an unknown escape is
-/// passed through unchanged (`\p` stays `\p`), so a Windows path in a
-/// pre-GH-671 `- **Scope**:` line reads back byte-identically.
+/// Older mirrors wrote some fields raw. An *unknown* escape is passed through
+/// unchanged (`\p` stays `\p`), so most raw text survives — but this is not
+/// lossless in general: a raw `C:\notes` decodes to `C:` + newline + `otes`,
+/// and a raw `\\` halves. Reachability is narrow (the fields that carried
+/// backslashes in practice — `affected_paths`, tags — were already unescaped
+/// before the encoding was made total), which is why the round trip is
+/// preferred over a version-tagged mirror format.
 fn unescape_field(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
