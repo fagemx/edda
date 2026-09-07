@@ -170,7 +170,13 @@ pub(crate) fn history(repo: &Path, pr: u64) -> Result<History> {
         }
         let payload: ReviewVerdictPayload = serde_json::from_value(event.payload.clone())
             .with_context(|| format!("review_verdict event {}", event.event_id))?;
-        if payload.verdict == "unreviewed" {
+        // The raw gate above is a cheap pre-filter, not the decision. A
+        // verdict with no `refs.pr` at all — what `edda review --base X --head
+        // Y` writes when no PR is named — reaches here, and counting it as
+        // this PR's history would attribute another subject's rounds, cost and
+        // resume session to it, and raise `last_verdict_at` enough to answer a
+        // genuine Review Response with `SKIP reviewed`.
+        if payload.verdict == "unreviewed" || payload.refs.pr != Some(pr) {
             continue;
         }
         history.rounds += 1;
@@ -186,8 +192,11 @@ pub(crate) fn history(repo: &Path, pr: u64) -> Result<History> {
         // present is the best available resume target; answering "no session"
         // would send a continuing review back to round-1 price for want of an
         // event this machine never received.
+        // A verdict that records no round at all still names a reviewer worth
+        // resuming; `u32::MAX` would leave `first_session` empty for a ledger
+        // where no event carries a round.
         let round = payload.refs.round.unwrap_or(u32::MAX);
-        if round < history.first_round {
+        if round < history.first_round || history.first_session.is_none() {
             history.first_round = round;
             history.first_session = Some(payload.reviewer.session_id.clone());
         }
@@ -636,6 +645,44 @@ mod tests {
         );
         assert_eq!(history.rounds, 2);
         assert_eq!(history.resume_suffix(), " --resume round-1-session");
+    }
+
+    #[test]
+    fn a_verdict_with_no_pr_belongs_to_no_pr() {
+        // `edda review --base X --head Y` with no --pr writes a verdict whose
+        // refs.pr is absent. Counting it here would attribute another
+        // subject's rounds, cost and resume session to this PR — and raise
+        // last_verdict_at enough to answer a real Review Response with
+        // "reviewed", which is the under-review failure this policy exists to
+        // avoid.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().to_path_buf();
+        let ledger = edda_ledger::Ledger::open_or_init(&root).expect("ledger");
+        let mut value = verdict_payload(42, 1, "orphan", "orphan-session");
+        value["refs"] = serde_json::json!({ "round": 1 });
+        let payload: edda_core::ReviewVerdictPayload =
+            serde_json::from_value(value).expect("payload");
+        let event = edda_core::event::new_review_verdict_event(
+            "main",
+            ledger.last_event_hash().expect("hash").as_deref(),
+            &payload,
+            None,
+            None,
+            &[],
+        )
+        .expect("event");
+        ledger.append_event(&event).expect("append");
+
+        let history = history(&root, 42).expect("history");
+        assert_eq!(
+            history.rounds, 0,
+            "a PR-less verdict is not this PR's round"
+        );
+        assert_eq!(history.resume_suffix(), "");
+        assert!(
+            history.last_ts.is_none(),
+            "and it cannot age this PR's verdict"
+        );
     }
 
     #[test]

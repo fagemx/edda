@@ -140,7 +140,7 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 
 | 檔案 | 內容 |
 |---|---|
-| `review-state.tsv` | `pr<TAB>reviewed_sha<TAB>round`——每張 PR 已審到哪個 head |
+| `review-state.tsv` | `pr<TAB>reviewed_sha<TAB>round<TAB>reviewed_at`——每張 PR 已審到哪個 head，以及那一輪的時間（`edda review due` 用它分辨 Review Response 是回應這一輪還是更早那輪；早期沒有這欄的列讀成「沒有記錄」）|
 | `review-pending.tsv` | `pr<TAB>round<TAB>sha<TAB>attempts<TAB>launched<TAB>postfails`——在途審查（attempts 0=首次派審，1=重試；postfails=判決貼文失敗次數）；**只在排程任務確認 Running 後才會寫入** |
 | `review-acks.tsv` | `pr<TAB>sha<TAB>attempts<TAB>status`——已啟動但 ack 未貼出的 head；成功即移除；3 次失敗 → 加 `review:post-failed`，條目標記 `post-failed`（終態）；label 呼叫也失敗則條目保留、下一輪重試 |
 | `review-fails.tsv` | `pr<TAB>sha<TAB>count`——連續啟動失敗次數（連續 3 次 → `review:unreviewed` 並停） |
