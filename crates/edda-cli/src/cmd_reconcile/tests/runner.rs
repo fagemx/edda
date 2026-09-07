@@ -217,6 +217,57 @@ pub(super) fn simultaneous_reconciles_create_one_attempt_and_release_the_lock() 
 }
 
 #[test]
+pub(super) fn slow_worktree_preparation_never_times_out_a_concurrent_reconciler(
+) -> anyhow::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    init_git(&repo)?;
+    edda_ledger::Ledger::ensure_initialized(&repo)?;
+    let ledger = edda_ledger::Ledger::open(&repo)?;
+    create_task(&ledger, 1, &["src/slow.rs".into()])?;
+    // Whichever reconciler plans the attempt stalls inside worktree preparation
+    // until the other one has returned, so the outcome depends on where the
+    // workspace lock is held and not on this host's `git worktree add` speed.
+    // With preparation inside the critical section the peer waits out its whole
+    // budget and reports the workspace permanently locked (GH-1047).
+    let gate: WorktreePrepGate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handles: Vec<_> = (0..2)
+        .map(|_| {
+            let repo = repo.clone();
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                WORKTREE_PREP_GATE.with(|slot| *slot.borrow_mut() = Some(gate.clone()));
+                LOCK_WAIT_BUDGET_OVERRIDE
+                    .with(|budget| budget.set(Some(std::time::Duration::from_secs(2))));
+                let outcome = persist_reconciliation(&repo, &ReconcileConfig::test_defaults())
+                    .map(|outcome| outcome.plans.len());
+                gate.store(true, Ordering::SeqCst);
+                outcome
+            })
+        })
+        .collect();
+    let dispatched: usize = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("reconcile thread"))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .sum();
+
+    assert_eq!(dispatched, 1);
+    assert_eq!(
+        ledger
+            .task_events()?
+            .iter()
+            .filter(|event| event.event_type == "task.started")
+            .count(),
+        1
+    );
+    assert_eq!(ledger.task_lease(1)?.expect("lease").attempt, 1);
+    Ok(())
+}
+
+#[test]
 pub(super) fn attempt_worktree_reuses_matching_state_and_refuses_dirty_state() -> anyhow::Result<()>
 {
     let dir = tempfile::tempdir()?;

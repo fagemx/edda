@@ -9,7 +9,7 @@ use edda_ledger::{Ledger, TaskLease};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::plan::WORKSPACE_LOCK_WAIT_BUDGET;
+use super::plan::workspace_lock_wait_budget;
 use super::ReconcileConfig;
 
 #[cfg(test)]
@@ -18,17 +18,36 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(test)]
 pub(super) static DOORBELL_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Test handle: worktree preparation stalls until this gate is opened.
+#[cfg(test)]
+pub(super) type WorktreePrepGate = std::sync::Arc<std::sync::atomic::AtomicBool>;
+
 #[cfg(test)]
 thread_local! {
     pub(super) static FAIL_NEXT_STARTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_NEXT_LEASE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(super) static FAIL_TASK_ID: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// Stalls this thread's worktree preparation, standing in for a slow
+    /// `git worktree add` without depending on how fast the host runs git.
+    pub(super) static WORKTREE_PREP_GATE: std::cell::RefCell<Option<WorktreePrepGate>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn await_worktree_prep_gate() {
+    let Some(gate) = WORKTREE_PREP_GATE.with(|slot| slot.borrow().clone()) else {
+        return;
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !gate.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 pub(super) fn acquire_workspace_lock(
     paths: &edda_ledger::EddaPaths,
 ) -> anyhow::Result<WorkspaceLock> {
-    let deadline = std::time::Instant::now() + WORKSPACE_LOCK_WAIT_BUDGET;
+    let deadline = std::time::Instant::now() + workspace_lock_wait_budget();
     loop {
         match WorkspaceLock::acquire(paths) {
             Ok(lock) => return Ok(lock),
@@ -157,6 +176,8 @@ pub(super) fn ensure_attempt_worktree(
     attempt: u32,
     allow_existing_resume_state: bool,
 ) -> anyhow::Result<PathBuf> {
+    #[cfg(test)]
+    await_worktree_prep_gate();
     let branch = attempt_branch(task.task_id, attempt);
     let worktree = attempt_worktree_path(repo_root, task.task_id, attempt)?;
     git(repo_root, ["rev-parse", "--is-inside-work-tree"])
