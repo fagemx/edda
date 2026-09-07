@@ -17,6 +17,24 @@ pub struct Claim {
 /// able to answer differently. Why the bare-CLI arm is bounded, and why by its
 /// own window rather than the heartbeat one, is recorded there and in
 /// `peers::liveness`; it is not restated here.
+///
+/// ## Same-session concurrent dispatch
+///
+/// The predicate this replaced carried the note that a second dispatch from
+/// the *same* session is a second writer too. It still is: [`acquire`] refuses
+/// a session that already stands on the board, so two concurrent
+/// `edda dispatch --owns` runs under one session id cannot both start, even
+/// when their path sets are disjoint (`same_session_disjoint_writer_is_refused_\
+/// without_releasing_the_first`).
+///
+/// GH-1049 made that guard **conditional**, and deliberately so. `acquire`
+/// tests membership against the list this predicate has already filtered, so
+/// once a session's own claim stops standing — a dead heartbeat, or a bare-CLI
+/// claim past `claim_ttl_secs` — the session is admitted again. Before the
+/// bound existed, a `cli-*` session that never released was refused *by its
+/// own claim* forever, which is one of the shapes GH-1018 found on a
+/// long-lived board. The guard protects a writer that is still there; it is
+/// not a permanent lock on a session id.
 fn claim_still_stands(project: &str, claim: &peers::ClaimEntry, now_epoch: u64) -> bool {
     crate::claim_standing::claim_standing(project, claim, now_epoch)
         != crate::claim_standing::ClaimStanding::Expired

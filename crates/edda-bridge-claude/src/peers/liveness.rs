@@ -27,11 +27,10 @@
 //! | Is this claim fresh? (display) | [`claim_is_stale_at`] | [`stale_secs`] |
 //! | May it still refuse a writer? | [`claim_guard_expired_at`] | [`claim_ttl_secs`] |
 //!
-//! Collapsing those into one threshold is not simplification, it is a bug:
-//! [`stale_secs`] is calibrated for something refreshed every 30 seconds, and
-//! a claim is written once. The rule against parallel criteria is about
-//! answering one question two ways — not about refusing to notice that these
-//! are two questions.
+//! Collapsing those into one threshold is not simplification, it is a bug —
+//! [`claim_guard_expired_at`] records why. The rule against parallel criteria
+//! is about answering one question two ways, not about refusing to notice that
+//! these are two questions.
 
 use serde::Serialize;
 

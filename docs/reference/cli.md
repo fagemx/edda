@@ -374,13 +374,18 @@ session replaces its previous label and complete path list; it does not add a
 second claim. Pass each path pattern with its own `--paths` flag; comma-separated
 values are not split.
 
-How long a claim keeps refusing writers depends on what can be known about
-its claimant:
+A claim keeps refusing writers while **either** of two things is true, so a
+`cli-*` claim can outlive its own stale heartbeat:
 
-| Claim | Stops refusing when |
+| A claim stands while | Window |
 |---|---|
-| A session with a heartbeat | that heartbeat goes stale — 120 s (`EDDA_PEER_STALE_SECS`). A running session keeps refreshing it, so it is protected for as long as it runs. |
-| A bare-CLI claim (`cli-*`, a one-shot `edda claim` with no session) | the claim's own timestamp is 24 h old (`EDDA_CLAIM_TTL_SECS`). Nothing ever refreshes a heartbeat for a one-shot process, so there is no heartbeat to judge. |
+| its session has a fresh heartbeat | 120 s (`EDDA_PEER_STALE_SECS`). A running session keeps refreshing it, so it is protected for as long as it runs. |
+| **or** it is a bare-CLI claim (`cli-*`) young enough by its own timestamp | 24 h (`EDDA_CLAIM_TTL_SECS`). Nothing refreshes a heartbeat for a one-shot process, so the claim's own age is what is judged. |
+
+Neither true, and the claim stops refusing. That has an edge worth knowing:
+a claim from a session that is **not** `cli-*` and has never written a
+heartbeat refuses nobody, from the moment it is recorded — the board entry
+alone is not evidence such a session exists (GH-617).
 
 The second window is deliberately not the first. A heartbeat is refreshed every
 30 seconds; a claim is written once, so measuring it against a

@@ -304,9 +304,9 @@ fn e2e_bare_cli_claim_with_an_aged_heartbeat_still_conflicts() {
     // moment the command returns, so a heartbeat written at claim time
     // ages with nothing to refresh it. Backdating it past stale_secs
     // (120s by default — the round-1 probe) must NOT return the surface
-    // to clear: the claim stands on the board until it is unclaimed, so
-    // the gate keeps counting it (fail-closed) instead of dismissing it
-    // as a dead session's claim.
+    // to clear: the claim still stands on its own timestamp, so the gate
+    // keeps counting it (fail-closed) instead of dismissing it as a dead
+    // session's claim.
     //
     // The variable here is the *heartbeat* age; the claim itself is fresh.
     let repo = e2e_repo();

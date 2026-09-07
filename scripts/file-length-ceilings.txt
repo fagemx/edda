@@ -21,6 +21,7 @@ crates/edda-cli/src/cmd_gc.rs 1117
 crates/edda-cli/src/cmd_plan.rs 1022
 crates/edda-cli/src/cmd_prs/merge_gate.rs 1295
 crates/edda-cli/src/main.rs 1463
+crates/edda-cli/tests/claim_e2e_contract.rs 1050
 crates/edda-conductor/src/agent/codex_app_server.rs 1062
 crates/edda-conductor/src/agent/codex_rpc.rs 1378
 crates/edda-conductor/src/agent/pi_rpc.rs 1480
@@ -36,4 +37,3 @@ crates/edda-mcp/src/lib.rs 1199
 crates/edda-pack/src/lib.rs 1186
 crates/edda-search-fts/src/indexer.rs 1461
 crates/edda-serve/src/tests.rs 5378
-crates/edda-cli/tests/claim_e2e_contract.rs 1050
