@@ -1,6 +1,8 @@
 //! Cross-vendor review: the host owns evidence and policy, the engine judges.
 mod args;
 mod brief;
+mod config;
+mod due;
 mod evidence;
 mod gate;
 mod git;
@@ -20,6 +22,7 @@ use crate::agent_kind::{
 use crate::cmd_dispatch::{build_phase, CapabilityOptions};
 use anyhow::{bail, Result};
 pub use args::ReviewArgs;
+pub use due::DueArgs;
 use edda_conductor::agent::launcher::{AgentLauncher, PhaseResult};
 use edda_core::{
     ReviewBrief, ReviewCost, ReviewFinding, ReviewReviewer, ReviewSubject, ReviewVerdictPayload,
@@ -35,6 +38,13 @@ use tokio_util::sync::CancellationToken;
 /// today, and a subcommand layer must not move them.
 #[derive(clap::Subcommand)]
 pub enum ReviewCmd {
+    /// Is this PR worth reviewing again? The trigger policy (GH-763)
+    ///
+    /// Reads only. Exit: 0 due, 1 not due, 2 cannot judge.
+    Due {
+        #[command(flatten)]
+        args: DueArgs,
+    },
     /// Union rule and window check over the verdicts standing on a SHA
     ///
     /// Reads only. Exit: 0 pass, 1 fail, 2 cannot judge.
@@ -46,6 +56,7 @@ pub enum ReviewCmd {
 
 pub fn run_cmd(cmd: ReviewCmd, cwd: &Path) -> Result<()> {
     match cmd {
+        ReviewCmd::Due { args } => due::run(args, cwd),
         ReviewCmd::Gate { args } => gate::run(args, cwd),
     }
 }

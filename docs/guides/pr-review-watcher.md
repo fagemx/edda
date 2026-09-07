@@ -157,6 +157,29 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 | `review:unreviewed` | 同運輸重試一次後仍無判決（或連續 3 次啟動失敗）；**per head**——只擋被記錄的那個 head，新 head 會自動摘 label 重審 |
 | `review:post-failed` | 判決或 ack 連續多次貼不出去（判決 5 次／ack 3 次）；判決檔留在 scratch 目錄，人工補貼後照 `review:unreviewed` 的救法收尾 |
 
+## 觸發與成本
+
+「這張 PR 值不值得再審一輪」是本系統的**主成本開關**，規則住在
+`edda review due`（GH-763），daemon 只蒐集事實。#754 實測：round 1 的 Opus 審查
+$1.28–$2.57，同一張 PR 續談的 delta 輪 $0.22 → $0.02。舊規則是「head 變了就審」，
+一張 PR push 五次就是五次 round 1 的價錢。
+
+| 觸發 | 是否 debounce | 說明 |
+|---|---|---|
+| `draft` | — | 草稿不是審查對象，最先擋掉，任何設定都打不開 |
+| `ready` | 否 | 離開草稿是一次性事件，操作者正在等 |
+| `response` | 否 | `## Review Response: Round N` 晚於上一則判決才算 |
+| `push` | **是** | 只有 push 會重複，所以只有它要等 head 靜下來 |
+
+預設 debounce 600 秒。改 `.edda/review/due.json`：
+
+```json
+{ "debounce_seconds": 600, "triggers": ["ready", "response", "push"] }
+```
+
+每次判斷都會在 `watch.log` 留一行 `prN review cost so far: …`，缺量測印
+`unmeasured` 而不是 `$0.00`。
+
 ## 離線測試
 
 `sh scripts/test-pr-review-watch.sh`（移植自 PR #639，Round 2–4 擴充）：**完全離線**——
@@ -166,11 +189,13 @@ sh scripts/test-pr-review-watch.sh         # 離線測試：審/跳過決策 + v
 `~/.edda/fleet/watch.log` 在整輪測試前後大小不變」；每個場景都包
 `timeout`，卡住＝FAIL，不會吊住呼叫端。實況：
 
-- `decide` 子命令吃的是 `gh pr list --jq '… \| @tsv'` 產出的 **TSV** 行（draft 在
-  `--jq` 的 `select(.isDraft\|not)` 就被濾掉，套件中沒有 draft fixture）：新 PR → 審、
-  同 SHA 已審 → 跳過、push 新 head → 再審、label 逐 PR 判讀（無 label 的 PR 1 不被
-  PR 2 的 `review:unreviewed` 壓住）、`review:unreviewed` per head（同 head 擋、
-  新 head 摘 label 重審、無記錄 head 保守擋）、空佇列、缺 head SHA。
+- `decide` 子命令吃的是 `gh pr list --jq '… \| @tsv'` 產出的 **TSV** 行，逐 PR 蒐集
+  forge 事實後呼叫 `edda review due`（GH-763）。套件測的是**接線**，不是規則：
+  exit 0 → 入審查佇列、1 → 帶著 verb 自己的理由跳過、其他 → 記 log 並跳過（絕不
+  因為判斷不了就去審）。另外斷言 daemon 確實把 `--head`／`--pr`／`--last-reviewed`／
+  `--unreviewed-label` 交出去，以及 `decide()` 內不再有任何 SHA 或時間比較。
+  規則本身（draft、ready、response、debounce）在 `cmd_review::due` 的單元測試裡驗，
+  因為只有那裡能注入時鐘。
 - `verdict-label`：判決文字 → label，後者贏。
 - `label-verdict`：verdict label 只在「目前 head == 被審 SHA」時套用；head 未知也跳過。
 - `ack-try`（stub gh）：失敗記 "launched, ack pending" → 成功才清；3 次都失敗且

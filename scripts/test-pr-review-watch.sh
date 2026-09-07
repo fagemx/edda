@@ -217,25 +217,6 @@ reset_stubs() {
 
 # --- decide: PR queue triage from `gh pr list --jq @tsv` rows -----------------
 # Each input line: number<TAB>headRefOid<TAB>labels(joined by ",")<TAB>updatedAt
-expect_decide() {
-    name=$1
-    expected=$2
-    state_lines=$3
-    rows=$4
-    case_number=$((case_number + 1))
-    state="$tmp/state-$case_number"
-    printf '%b' "$state_lines" >"$state"
-    if ! actual=$(printf '%b' "$rows" | \
-        PR_REVIEW_WATCH_STATE="$state" timeout 60 sh "$root/scripts/pr-review-watch.sh" decide); then
-        printf '%s: decide exited non-zero\n' "$name" >&2
-        return 1
-    fi
-    if [ "$actual" != "$expected" ]; then
-        printf '%s: expected\n  %s\ngot\n  %s\n' "$name" "$expected" "$actual" >&2
-        return 1
-    fi
-}
-
 # --- verdict-label: verdict text to review label ------------------------------
 
 expect_label() {
@@ -308,69 +289,124 @@ pending_get() { cat "$EDDA_FLEET_SCRATCH/review-pending.tsv" 2>/dev/null || true
 state_get()   { cat "$EDDA_FLEET_SCRATCH/review-state.tsv" 2>/dev/null || true; }
 
 # --- decide -------------------------------------------------------------------
+# GH-763 moved the trigger rule into `edda review due`, so what the daemon owns
+# here — and all these cases can now assert — is the wiring: it gathers the
+# forge facts, hands them to the verb, and turns the verb's exit code into a
+# queue decision. The rule itself (draft, ready, response, debounce, the
+# review:unreviewed release) is proven in `cmd_review::due`'s unit tests, which
+# can inject a clock; a shell fixture cannot.
 
-expect_decide \
-    'new PR is queued for review' \
+# A fake `edda` whose `review due` returns a fixed exit code and body, and which
+# records the argv it was handed so the fact-gathering can be asserted.
+stub_due() { # $1=exit code  $2=stdout body
+    dir=$(mktemp -d "$tmp/due.XXXXXX")
+    {
+        printf '#!/bin/sh\n'
+        printf 'printf "%%s\\n" "$*" >>"%s/argv"\n' "$dir"
+        printf 'printf "%%b" %s\n' "'$2'"
+        printf 'exit %s\n' "$1"
+    } >"$dir/edda"
+    chmod +x "$dir/edda"
+    printf '%s' "$dir"
+}
+
+expect_decide_wired() { # name expected-stdout exit body state rows
+    name=$1; expected=$2; code=$3; body=$4; state_lines=$5; rows=$6
+    case_number=$((case_number + 1))
+    state="$tmp/state-$case_number"
+    printf '%b' "$state_lines" >"$state"
+    dir=$(stub_due "$code" "$body")
+    actual=$(printf '%b' "$rows" | EDDA_BIN="$dir/edda" \
+        PR_REVIEW_WATCH_STATE="$state" timeout 60 \
+        sh "$root/scripts/pr-review-watch.sh" decide)
+    DUE_ARGV="$dir/argv"
+    if [ "$actual" != "$expected" ]; then
+        printf '%s: expected\n  %s\ngot\n  %s\n' "$name" "$expected" "$actual" >&2
+        return 1
+    fi
+}
+
+expect_decide_wired \
+    'exit 0 queues the PR for review' \
     'REVIEW 42 abc123' \
+    0 'REVIEW push\nreview cost so far: $0.00 over 0 rounds\n' \
     '' \
     '42\tabc123\t\t2026-09-02T00:00:00Z'
 
-expect_decide \
-    'same SHA already reviewed is skipped' \
-    'SKIP 42 already-reviewed' \
-    '42\tabc123\n' \
-    '42\tabc123\t\t2026-09-02T00:00:00Z'
-
-expect_decide \
-    'new head SHA after push is reviewed again' \
-    'REVIEW 42 def456' \
+expect_decide_wired \
+    "exit 1 skips it, carrying the verb's own reason" \
+    'SKIP 42 debounce 540s' \
+    1 'SKIP debounce 540s\nreview cost so far: $1.28 over 1 round\n' \
     '42\tabc123\n' \
     '42\tdef456\t\t2026-09-02T00:00:00Z'
 
-expect_decide \
-    'labels are scoped per PR: unlabeled PR 1 is REVIEW while PR 2 has review:unreviewed' \
-    'REVIEW 1 aaa111
-SKIP 2 review-unreviewed' \
+expect_decide_wired \
+    'a verb that cannot judge skips rather than reviews' \
+    'SKIP 42 due-unknown' \
+    2 'edda review due: unreadable ledger\n' \
     '' \
-    '1\taaa111\t\t2026-09-02T00:00:00Z\n2\tbbb222\treview:unreviewed\t2026-09-02T00:00:00Z'
+    '42\tabc123\t\t2026-09-02T00:00:00Z'
 
-expect_decide \
-    'review:unreviewed blocks the head it was recorded for' \
-    'SKIP 42 review-unreviewed' \
-    '42\tabc123\t2\n' \
-    '42\tabc123\treview:unreviewed\t2026-09-02T00:00:00Z'
+expect_decide_wired \
+    'an unexpected exit is also not a review' \
+    'SKIP 42 due-unknown' \
+    127 '' \
+    '' \
+    '42\tabc123\t\t2026-09-02T00:00:00Z'
 
-expect_decide \
-    'a new head after review:unreviewed is reviewed again and drops the stale label' \
+# The daemon's own reviewed-head record and the label are facts it must hand
+# over — the verb cannot see either. A round published through the §7 comment
+# path writes no ledger event, so `--last-reviewed` is the only evidence it
+# happened.
+expect_decide_wired \
+    'the recorded head and the unreviewed label are handed to the verb' \
     'REVIEW 42 def456 drop-unreviewed-label' \
+    0 'REVIEW push\n' \
     '42\tabc123\t2\n' \
     '42\tdef456\treview:unreviewed\t2026-09-02T00:00:00Z'
+argv=$(cat "$DUE_ARGV" 2>/dev/null)
+for flag in '--head def456' '--pr 42' '--last-reviewed abc123' '--unreviewed-label'; do
+    case "$argv" in
+        *"$flag"*) ;;
+        *) printf 'decide: the verb was not handed %s, got:\n  %s\n' "$flag" "$argv" >&2; exit 1 ;;
+    esac
+done
 
-expect_decide \
-    'review:unreviewed with no recorded head still blocks' \
-    'SKIP 42 review-unreviewed' \
-    '' \
-    '42\tabc123\treview:unreviewed\t2026-09-02T00:00:00Z'
-
-expect_decide \
-    'empty open-PR queue decides nothing' \
-    '' \
-    '' \
-    ''
-
-expect_decide \
-    'missing head SHA is skipped, not queued' \
+expect_decide_wired \
+    'a PR with no head is refused before the verb is asked' \
     'SKIP 42 missing-head' \
+    0 'REVIEW push\n' \
     '' \
     '42\t\t\t2026-09-02T00:00:00Z'
 
-expect_decide \
-    'decisions are independent per PR' \
-    'SKIP 7 already-reviewed
-REVIEW 8 beefff
-SKIP 9 review-unreviewed' \
-    '7\tcccccc\n' \
-    '7\tcccccc\t\t2026-09-02T00:00:00Z\n8\tbeefff\t\t2026-09-02T00:00:00Z\n9\tdddddd\treview:unreviewed\t2026-09-02T00:00:00Z'
+expect_decide_wired \
+    'an empty queue decides nothing' \
+    '' \
+    0 'REVIEW push\n' \
+    '' \
+    ''
+
+expect_decide_wired \
+    'each PR in the queue is decided on its own' \
+    'REVIEW 7 cccccc
+REVIEW 8 beefff' \
+    0 'REVIEW push\n' \
+    '' \
+    '7\tcccccc\t\t2026-09-02T00:00:00Z\n8\tbeefff\t\t2026-09-02T00:00:00Z'
+
+# doneWhen: no trigger judgement is left in the shell. `decide()` may branch on
+# whether a field is present and on the verb's exit code; it may not compare a
+# SHA or a timestamp, because that comparison is the cost switch.
+decide_body=$(sed -n '/^decide()/,/^}/p' "$root/scripts/pr-review-watch.sh")
+if printf '%s\n' "$decide_body" | grep -qE '\$(prev|sha|pushed_at|response_at)"? *(=|!=|-eq|-ne|-lt|-gt|<|>)'; then
+    printf 'decide: a SHA or timestamp comparison is back in the shell:\n%s\n' \
+        "$(printf '%s\n' "$decide_body" | grep -nE '\$(prev|sha|pushed_at|response_at)"? *(=|!=|-eq|-ne|-lt|-gt|<|>)')" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$decide_body" | grep -q 'review due'; then
+    printf 'decide: the trigger policy is no longer asked\n' >&2
+    exit 1
+fi
 
 # --- verdict-label ------------------------------------------------------------
 # The label comes from the Verdict line of REVIEW.md §7, not from the last

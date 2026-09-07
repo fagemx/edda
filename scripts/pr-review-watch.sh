@@ -113,37 +113,94 @@ log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >> "$WATCHLOG"; }
 #     --jq '.[] | select(.isDraft|not) | [.number, .headRefOid, ([.labels[].name]|join(",")), .updatedAt] | @tsv'
 # (row: number<TAB>sha<TAB>labels<TAB>updatedAt; drafts are filtered by the --jq).
 # Output per PR: "REVIEW <n> <sha>" (+" drop-unreviewed-label" when a stale
-# review:unreviewed label must be removed) or "SKIP <n> <reason>". Pure: no
-# network, no state mutation; the state file is read-only here.
+# review:unreviewed label must be removed) or "SKIP <n> <reason>".
+#
+# GH-763: this function gathers forge facts and asks `edda review due` whether
+# each PR is worth a round; it decides nothing itself. Nothing here compares a
+# SHA or a timestamp, because "is this worth reviewing again" is the main cost
+# switch in the system — a round-1 Opus review measured $1.28-$2.57 on #754 —
+# and that judgement belongs in the binary (#766 D8). Exit 0 launches, 1
+# skips with the verb's own reason, anything else is logged and skipped.
+# The state file is still read-only here; the cost line is logged per PR.
 decide() {
   state=${PR_REVIEW_WATCH_STATE:-$SCRATCH/review-state.tsv}
-  # Pass the state path via the environment, not -v: gawk processes escape
-  # sequences in -v values, which mangles Windows paths (C:\Users\...).
-  PR_REVIEW_STATE_TMP="$state" awk -F'\t' '
-    BEGIN {
-      sf = ENVIRON["PR_REVIEW_STATE_TMP"]
-      if (sf != "") {
-        while ((getline line < sf) > 0) {
-          split(line, s, "\t")
-          rev[s[1]] = s[2]
-        }
-        close(sf)
-      }
-    }
-    {
-      num = $1; sha = $2; labels = $3
-      if (num !~ /^[0-9]+$/) next
-      if (sha == "") { print "SKIP " num " missing-head"; next }
-      if (("," labels ",") ~ /,review:unreviewed,/) {
-        if (rev[num] == sha || rev[num] == "") {
-          print "SKIP " num " review-unreviewed"; next
-        }
-        print "REVIEW " num " " sha " drop-unreviewed-label"; next
-      }
-      if (rev[num] == sha) { print "SKIP " num " already-reviewed"; next }
-      print "REVIEW " num " " sha
-    }
-  '
+  # `|| [ -n "$row" ]` because a final line with no trailing newline makes
+  # `read` return non-zero after it has already assigned; awk, which this
+  # replaced, never had that edge and the fixtures feed exactly that shape.
+  while IFS= read -r row || [ -n "${row:-}" ]; do
+    # Split on tabs by hand. `IFS=<tab> read a b c` collapses runs of tabs,
+    # because tab is IFS whitespace — so a row whose head SHA is empty arrives
+    # with its timestamp sitting in the SHA field, and the daemon would queue a
+    # review of a timestamp. awk's -F'\t' never did that.
+    num=${row%%"$TAB"*}
+    rest=${row#*"$TAB"}
+    [ "$rest" = "$row" ] && rest=
+    sha=${rest%%"$TAB"*}
+    rest=${rest#*"$TAB"}
+    [ "$rest" = "$sha" ] && rest=
+    labels=${rest%%"$TAB"*}
+    case "$num" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$sha" ]; then
+      printf 'SKIP %s missing-head\n' "$num"
+      continue
+    fi
+
+    # ---- facts, and only facts ------------------------------------------
+    # The reviewed head THIS daemon recorded. Deliberately not the ledger's:
+    # a round published through the §7 comment path writes no review_verdict
+    # event, so the daemon's own state is the only record that it happened.
+    prev=$(awk -F'\t' -v n="$num" '$1 == n { last = $2 } END { print last }' \
+      "$state" 2>/dev/null)
+
+    unreviewed=""
+    case ",$labels," in *,review:unreviewed,*) unreviewed=--unreviewed-label ;; esac
+
+    facts=$(gh pr view "$num" --repo "$REPO" --json isDraft,commits,comments \
+      --jq '[
+        (if .isDraft then "draft" else "" end),
+        ((.commits // []) | last | .committedDate // ""),
+        ((.comments // [])
+          | map(select(.body | test("(?m)^## Review Response: Round [0-9]+")))
+          | last | .createdAt // "")
+      ] | @tsv' 2>/dev/null) || facts=""
+    draft=$(printf '%s' "$facts" | cut -f1)
+    pushed_at=$(printf '%s' "$facts" | cut -f2)
+    response_at=$(printf '%s' "$facts" | cut -f3)
+    if [ "$draft" = draft ]; then draft=--draft; else draft=""; fi
+
+    # ---- the judgement is the product's ----------------------------------
+    out=$SCRATCH/due.$num
+    "${EDDA_BIN:-edda}" review due --head "$sha" --pr "$num" \
+      ${prev:+--last-reviewed "$prev"} \
+      ${pushed_at:+--pushed-at "$pushed_at"} \
+      ${response_at:+--response-at "$response_at"} \
+      ${draft:+$draft} ${unreviewed:+$unreviewed} >"$out" 2>&1
+    rc=$?
+
+    cost=$(sed -n "s/^review cost so far/pr$num review cost so far/p" "$out" | head -1)
+    [ -n "$cost" ] && log "$cost"
+
+    case $rc in
+      0)
+        # The stale review:unreviewed label is dropped by whoever launches;
+        # reaching here at all means the policy released it.
+        if [ -n "$unreviewed" ]; then
+          printf 'REVIEW %s %s drop-unreviewed-label\n' "$num" "$sha"
+        else
+          printf 'REVIEW %s %s\n' "$num" "$sha"
+        fi
+        ;;
+      1)
+        printf 'SKIP %s %s\n' "$num" \
+          "$(sed -n 's/^SKIP //p' "$out" | head -1)"
+        ;;
+      *)
+        log "pr$num due check could not judge: $(head -2 "$out" | tr '\n' ' ')"
+        printf 'SKIP %s due-unknown\n' "$num"
+        ;;
+    esac
+    rm -f "$out"
+  done
 }
 
 # label-verdict: should the verdict label be applied? Only when the PR's
