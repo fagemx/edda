@@ -33,7 +33,8 @@ fn two_tier_splits_ratified_from_unratified() {
 
     let out = render_decisions_two_tier(&decisions, &ratified).unwrap();
     // Ratified section names the binding key; unratified section names the other.
-    // "### Ratified" and not bare "Ratified": the unratified heading contains it.
+    // "### Ratified" and not bare "Ratified": anchoring on the heading keeps the
+    // assertion off any decision line whose own key or reason carries the word.
     assert!(out.contains("### Ratified"));
     assert!(out.contains("db.engine"));
     assert!(out.contains("Unratified"));

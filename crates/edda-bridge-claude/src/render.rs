@@ -199,10 +199,17 @@ pub fn writeback() -> String {
      Two paths confer binding authority. The operator ratifies a key directly: \
      `edda ratify \"<key>\"`.\n  \
      Or the cited-authority rule sweep does — `edda ratify --by-rule cited-authority` ratifies \
-     every unratified, unsuperseded decision that carries a citation, so record yours as you \
-     decide: `edda decide \"k=v\" --reason \"why\" --cite operator:<when>` \
+     every unratified decision that carries a citation and is neither superseded nor a held \
+     domain, so record yours as you decide: \
+     `edda decide \"k=v\" --reason \"why\" --cite operator:<when>` \
      (also `issue:#<n>`, `decision:<key>`).\n  \
-     Uncited decisions, and `product.` / `commercial.` / `spend.` keys, wait for the operator.\n  \
+     Without `--cite` the sweep reads the citation out of the reason: an issue number \
+     (`#<n>` / `GH-<n>`), the key of an already-binding decision, or the word `operator` \
+     (「操作者」) each count as one. A decision citing none of these is held until it cites \
+     one.\n  \
+     The held domains are `product.` / `commercial.` / `spend.` — those keys always wait for \
+     the operator. Superseded means a later decision's reason names this key, which today also \
+     holds a decision that a later one merely mentions (GH-1066).\n  \
      Do not ratify your own decisions — the session that records and the session that \
      ratifies are different (`governance.scribe-pass`).\n\
      \n\

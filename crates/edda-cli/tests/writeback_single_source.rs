@@ -126,7 +126,8 @@ fn writeback_teaches_both_binding_paths() {
         "path 1: operator ratification"
     );
     // Path 2 — the cited-authority rule sweep (decision.auto-ratify; PR #1016),
-    // which reads the structured citation, not the free-text reason.
+    // which prefers the structured citation and falls back to reading the reason
+    // (`cmd_ratify::rule::citation`).
     assert!(
         text.contains("edda ratify --by-rule cited-authority"),
         "path 2: the cited-authority rule sweep"
@@ -134,6 +135,14 @@ fn writeback_teaches_both_binding_paths() {
     assert!(
         text.contains("--cite operator:"),
         "the sweep matches --cite values, so the protocol must teach the flag"
+    );
+    // The reason fallback is half of path 2's population: an uncited decision
+    // whose reason names an issue, a binding key, or the operator ratifies too
+    // (`rule.rs` `citation_from_reason`). Teaching the flag alone would
+    // re-install the operator gate GH-1063 exists to remove.
+    assert!(
+        text.contains("Without `--cite` the sweep reads the citation out of the reason"),
+        "path 2 must state the reason-based citation fallback the engine implements"
     );
     // Unratified is a stage with a route out, not a verdict.
     assert!(
