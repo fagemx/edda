@@ -12,24 +12,11 @@ pub struct Claim {
 
 /// Does this board claim still stand against a new writer?
 ///
-/// A bare-CLI claim (`cli-*`) never heartbeats — its claimant is a one-shot
-/// process — so the session criterion can only ever call it dead. GH-705
-/// answered that by treating every such claim as live, fail-closed, so a
-/// one-shot writer could not be stomped on mid-write. Unconditionally, though,
-/// "fail-closed" reads as "never expires": GH-1018 found 100 claims left from
-/// July and August still refusing September lanes, with no `unclaim` able to
-/// clear them, which made the guard something lanes had to route around rather
-/// than obey.
-///
-/// The claim's own timestamp is judgeable even when its session's heartbeat is
-/// not, so the bare-CLI arm is bounded by [`peers::liveness::claim_ttl_secs`]
-/// — a day, deliberately not the heartbeat window: a claim is written once and
-/// never refreshed, and an operator's claimed surface is occupied for the
-/// length of a working session, not for two minutes.
-///
-/// The rule itself is `claim_standing::claim_standing`, shared with `edda claim
-/// check`, because two verbs reading one board to decide one thing must not be
-/// able to answer differently.
+/// The rule is [`crate::claim_standing::claim_standing`], shared with `edda
+/// claim check` — two verbs reading one board to decide one thing must not be
+/// able to answer differently. Why the bare-CLI arm is bounded, and why by its
+/// own window rather than the heartbeat one, is recorded there and in
+/// `peers::liveness`; it is not restated here.
 fn claim_still_stands(project: &str, claim: &peers::ClaimEntry, now_epoch: u64) -> bool {
     crate::claim_standing::claim_standing(project, claim, now_epoch)
         != crate::claim_standing::ClaimStanding::Expired
@@ -260,10 +247,21 @@ mod tests {
             5,
             &["docs/seconds.md".to_owned()],
         );
+        // The load-bearing fixture: an hour sits past the heartbeat window and
+        // short of the guard's, so it is the only one of the three that can
+        // catch either verb measuring the claim against `stale_secs`. With
+        // only the 22-day and 5-second claims both rules agree everywhere and
+        // this test cannot fail.
+        crate::test_support::write_aged_claim(
+            &project,
+            "cli-an-hour",
+            3600,
+            &["docs/an-hour.md".to_owned()],
+        );
 
         let now_epoch = peers::liveness::now_epoch();
         let board = crate::cmd_claim::read_active_claims(&project).expect("read board");
-        assert_eq!(board.len(), 2, "both claims must be on the board");
+        assert_eq!(board.len(), 3, "every claim must be on the board");
 
         for claim in &board {
             let expired = crate::claim_standing::claim_standing(&project, claim, now_epoch)

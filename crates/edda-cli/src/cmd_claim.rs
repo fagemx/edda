@@ -9,10 +9,10 @@
 //!   holds no claims)
 //! - 1 — at least one active claim overlaps; the conflicting labels/sessions
 //!   are named on stdout. That includes a bare CLI claim (`cli-*`, minted by
-//!   `resolve_session_id` tier 4): its claimant is a one-shot process, so no
-//!   heartbeat age can prove it gone and its claim stands on the board until
-//!   `unclaim` (GH-705). Reading such an occupation as clear is the false
-//!   negative this verb exists to prevent.
+//!   `resolve_session_id` tier 4): no heartbeat age can prove a one-shot
+//!   claimant gone, so it stands on its own timestamp for `claim_ttl_secs`
+//!   (GH-705, bounded by GH-1018). Reading it as clear while it stands is
+//!   the false negative this verb exists to prevent.
 //! - 2 — the query could not be answered soundly: usage error, the board
 //!   cannot be read or parsed, a glob pattern is malformed, or a pair of
 //!   surfaces cannot be decided soundly (for example two tokens differing
@@ -22,7 +22,7 @@
 //!   meant to become the machine judgement GH-563's dispatch guard calls
 //!   before letting two lanes write the same file.
 
-use crate::claim_standing::{claim_standing, is_bare_cli_session, ClaimStanding};
+use crate::claim_standing::{claim_standing, ClaimStanding};
 use anyhow::Context;
 use edda_bridge_claude::peers::{self, classify_session_liveness_at, ClaimEntry, SessionLiveness};
 use serde::Serialize;
@@ -58,8 +58,13 @@ pub struct StaleClaim {
     /// report when the session has no heartbeat file at all (never heard
     /// from). The field is always serialized — GH-705: a consumer must be
     /// able to distinguish "expired heartbeat" from "no heartbeat file"
-    /// without guessing.
+    /// without guessing. A bare-CLI claim is the case that needs the `null`
+    /// most, so it keeps it: nothing writes a heartbeat for a one-shot
+    /// process, and what expires such a claim is reported below instead.
     pub age_secs: Option<u64>,
+    /// Seconds since the claim itself was recorded — always knowable, and for
+    /// a bare-CLI claim the fact that expired it (GH-1018).
+    pub claim_age_secs: u64,
 }
 
 /// A bare-CLI claim standing outside the queried surface (GH-780).
@@ -78,13 +83,11 @@ pub struct CheckReport {
     /// A bare CLI session is a one-shot process: no heartbeat writer ever
     /// refreshes for it, so heartbeat age carries no liveness information —
     /// an old heartbeat does not mean the claim is gone, and no heartbeat
-    /// does not mean it was never real. The claim stands on the board until
-    /// `unclaim` (board claims never expire), so the gate must never read
-    /// the surface as genuinely clear while it stands: these are counted
-    /// toward the exit code exactly like `conflicts`, separated only so a
-    /// consumer can tell a live peer from an occupation whose liveness
-    /// cannot be judged. Unlike the GH-617 liveness filter, this does not
-    /// decay with time.
+    /// does not mean it was never real. So these count toward the exit code
+    /// exactly like `conflicts`, separated only so a consumer can tell a live
+    /// peer from an occupation whose liveness cannot be judged. What bounds
+    /// them is the claim's own timestamp against `claim_ttl_secs`, not the
+    /// GH-617 heartbeat filter (GH-1018); past it they are reported stale.
     #[serde(default)]
     pub unjudgeable_claims: Vec<ClaimConflict>,
     /// Claims filtered out because their session is dead (GH-617). Reported
@@ -135,10 +138,10 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
     let mut stale_claims: Vec<StaleClaim> = Vec::new();
     // GH-705: a claim owned by a bare CLI session (`cli-*`, minted by
     // resolve_session_id tier 4) is an occupation whose liveness cannot be
-    // judged from a heartbeat. The claimant is a one-shot process; nothing
-    // ever refreshes a heartbeat for it; and the board claim never expires.
-    // Age therefore proves nothing, so instead of dismissing such a claim as
-    // stale when its heartbeat ages out, it is separated out here and
+    // judged from a heartbeat. The claimant is a one-shot process and nothing
+    // ever refreshes a heartbeat for it, so heartbeat age proves nothing:
+    // instead of dismissing such a claim as stale when its heartbeat ages
+    // out, it is separated out here and
     // counted toward the exit code when its surface intersects the query
     // (fail-closed). A session with a live heartbeat still conflicts
     // normally; the GH-617 criterion itself is untouched.
@@ -152,20 +155,17 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
             ClaimStanding::Live => live.push(c),
             ClaimStanding::BareWithinTtl => unjudgeable.push(c),
             ClaimStanding::Expired => {
-                let age_secs = if is_bare_cli_session(&c.session_id) {
-                    // Nothing ever heartbeated for it; what expired is the
-                    // claim, so the claim's own age is what to report.
-                    Some(peers::liveness::claim_age_secs_at(&c.ts, now_epoch))
-                } else {
+                let claim_age_secs = peers::liveness::claim_age_secs_at(&c.ts, now_epoch);
+                let age_secs =
                     match classify_session_liveness_at(&project_id, &c.session_id, now_epoch) {
                         SessionLiveness::Stale { age_secs } => Some(age_secs),
                         _ => None, // NoHeartbeat: never heard from
-                    }
-                };
+                    };
                 stale_claims.push(StaleClaim {
                     label: c.label,
                     session_id: c.session_id,
                     age_secs,
+                    claim_age_secs,
                 });
             }
         }
@@ -238,7 +238,8 @@ pub fn claim_check(repo_root: &Path, query: &[String], json: bool) -> anyhow::Re
         for conflict in &report.unjudgeable_claims {
             println!(
                 "CONFLICT with claim \"{}\" (session {}) — bare-CLI claim, liveness cannot be \
-                 judged; it counts until it is unclaimed",
+                 judged; it counts until it is unclaimed or outlives \
+                 EDDA_CLAIM_TTL_SECS",
                 conflict.label, conflict.session_id
             );
             for pair in &conflict.intersections {
@@ -307,16 +308,14 @@ fn print_stale_claims(stale: &[StaleClaim]) {
         stale.len()
     );
     for s in stale {
-        match s.age_secs {
-            Some(age) => eprintln!(
-                "  stale, not counted: claim \"{}\" (session {}) — heartbeat {}s ago",
-                s.label, s.session_id, age
-            ),
-            None => eprintln!(
-                "  stale, not counted: claim \"{}\" (session {}) — no heartbeat",
-                s.label, s.session_id
-            ),
-        }
+        let heartbeat = match s.age_secs {
+            Some(age) => format!("heartbeat {age}s ago"),
+            None => "no heartbeat".to_string(),
+        };
+        eprintln!(
+            "  stale, not counted: claim \"{}\" (session {}) — claimed {}s ago, {heartbeat}",
+            s.label, s.session_id, s.claim_age_secs
+        );
     }
 }
 
@@ -1723,6 +1722,7 @@ mod tests {
                 label: "ghost".into(),
                 session_id: "dead".into(),
                 age_secs: None,
+                claim_age_secs: 0,
             }],
             standing_bare_claims: vec![],
         };

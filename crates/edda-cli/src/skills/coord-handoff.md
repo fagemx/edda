@@ -131,11 +131,13 @@ $ edda peers
 > No active sessions
 ```
 
-A bare CLI claim is machine-visible for as long as it stands, not for a
-freshness window: the claimant is a one-shot process, so no heartbeat age can
-prove it gone, and `edda claim check` counts the claim — exit 1, and
-`unjudgeable_claims` in `--json` — until it is unclaimed (GH-705). That is
-deliberately fail-closed: the gate never reads an occupied surface as clear.
+A bare CLI claim is not judged by a freshness window: the claimant is a
+one-shot process, so no heartbeat age can prove it gone, and `edda claim check`
+counts the claim — exit 1, and `unjudgeable_claims` in `--json` — until it is
+unclaimed (GH-705). That is deliberately fail-closed: the gate never reads an
+occupied surface as clear. It is bounded by the claim's own timestamp, not by
+the heartbeat threshold: after `EDDA_CLAIM_TTL_SECS` (24h) it stops counting,
+so a machine that accumulates claims does not deadlock (GH-1018).
 
 ```bash edda-doctest
 $ edda claim "auth" --paths "src/auth/*"
