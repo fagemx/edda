@@ -1268,3 +1268,61 @@ Stdout is one line — `PASS <sha> verdicts=<n>`, `FAIL <sha> <reason>` or
 | 0 | Pass: the union rule is satisfied and the window is clear |
 | 1 | Fail: a non-qualifying verdict stands (`union`), or the base moved (`window`) |
 | 2 | No verdict on the SHA — an inability to judge, not a judgment |
+
+#### edda review due
+
+Is this PR worth reviewing again? Read-only: it launches nothing, writes no
+event, and never touches GitHub.
+
+```bash
+edda review due --head <sha> --pr 42 --pushed-at 2026-09-07T12:00:00Z
+edda review due --head <sha> --pr 42 --draft
+```
+
+This is the main cost switch in the review system. A round-1 Opus review
+measured $1.28-$2.57 on #754; the resumed delta round of the same PR measured
+$0.22 and then $0.02. Reviewing once per push therefore buys a round-1 price
+per push, which is what this verb exists to stop.
+
+The policy, in order — the first matching row wins:
+
+| Condition | Answer |
+|---|---|
+| `--draft` | `SKIP draft` |
+| `--unreviewed-label` and the head has not demonstrably moved | `SKIP review-unreviewed` |
+| `--ready` (the PR left draft this cycle) | `REVIEW ready` |
+| `--response-at` newer than the last verdict | `REVIEW response` |
+| head moved and the push has settled | `REVIEW push` |
+| head moved, still inside the debounce | `SKIP debounce <n>s` |
+| otherwise | `SKIP reviewed` |
+
+`ready` and `response` are one-time events the operator is waiting on, so
+neither is debounced; only `push` is, because only `push` repeats. A draft is
+refused first and cannot be enabled by any trigger.
+
+Facts come from the caller, and rounds from the ledger. `--last-reviewed`
+matters: a round published through the §7 comment path writes no
+`review_verdict` event, so the daemon's own record is the only evidence it
+happened, and without it every cycle would read as never-reviewed.
+
+Stdout is two lines — `REVIEW <reason>` or `SKIP <reason>`, then
+`review cost so far: $X over N rounds`. A round whose cost was never measured
+makes the whole total read `unmeasured` rather than contributing zero: a sum
+that silently drops a round reads cheaper than the truth. A second or later
+round appends ` --resume <session id>` naming round 1's reviewer session.
+
+Settings live in `.edda/review/due.json`, and absent means defaults:
+
+```json
+{ "debounce_seconds": 600, "triggers": ["ready", "response", "push"] }
+```
+
+A file that exists but cannot be parsed is an error, not a silent fallback —
+an operator who wrote a debounce and got the default one would be paying for a
+switch they believe they threw.
+
+| Exit | Meaning |
+|---|---|
+| 0 | Due: start a round |
+| 1 | Not due, for the printed reason |
+| 2 | Cannot judge — an unreadable ledger or a malformed argument, never a decision |
