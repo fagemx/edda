@@ -168,8 +168,9 @@ $1.28–$2.57，同一張 PR 續談的 delta 輪 $0.22 → $0.02。舊規則是�
 |---|---|---|
 | `draft` | — | 草稿不是審查對象，最先擋掉，任何設定都打不開 |
 | `ready` | 否 | 離開草稿是一次性事件，操作者正在等 |
-| `response` | 否 | `## Review Response: Round N` 晚於上一則判決才算 |
+| `response` | 否 | `## Review Response: Round N` 要**晚於每一份「審過了」的記錄**才算：帳本判決（§7 留言路徑不寫，且不跨機器）與 daemon 自己的 `--last-reviewed-at`。兩者都沒有就不算觸發，落到 push 規則 |
 | `push` | **是** | 只有 push 會重複，所以只有它要等 head 靜下來 |
+| `push`（拿不到 push 時間） | **是** | 呼叫端分不出「這張 PR 沒有 commit date」和「forge 呼叫失敗」，後者會一次關掉所有 PR 的開關，所以一律等：`SKIP debounce push-time-unknown` |
 
 預設 debounce 600 秒。改 `.edda/review/due.json`：
 
