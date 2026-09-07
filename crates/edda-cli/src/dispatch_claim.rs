@@ -24,17 +24,22 @@ pub struct Claim {
 /// the *same* session is a second writer too. It still is: [`acquire`] refuses
 /// a session that already stands on the board, so two concurrent
 /// `edda dispatch --owns` runs under one session id cannot both start, even
-/// when their path sets are disjoint (`same_session_disjoint_writer_is_refused_\
-/// without_releasing_the_first`).
+/// when their path sets are disjoint. The test is
+/// `same_session_disjoint_writer_is_refused_without_releasing_the_first`.
 ///
-/// GH-1049 made that guard **conditional**, and deliberately so. `acquire`
-/// tests membership against the list this predicate has already filtered, so
-/// once a session's own claim stops standing — a dead heartbeat, or a bare-CLI
-/// claim past `claim_ttl_secs` — the session is admitted again. Before the
-/// bound existed, a `cli-*` session that never released was refused *by its
-/// own claim* forever, which is one of the shapes GH-1018 found on a
-/// long-lived board. The guard protects a writer that is still there; it is
-/// not a permanent lock on a session id.
+/// The guard has always been conditional for a session that heartbeats:
+/// `acquire` tests membership against the list this predicate has already
+/// filtered, so a session whose own claim stops standing is admitted again.
+/// What changed is only the `cli-*` arm, and in two steps — GH-1018 bounded it
+/// at all (before that a `cli-*` session that never released was refused *by
+/// its own claim* forever, one of the shapes found on a long-lived board), and
+/// GH-1049 rechose the window it is bounded by. Neither introduced the
+/// conditionality; both narrowed a permanent lock into a bounded one.
+///
+/// For a `cli-*` claim, "stops standing" needs *both* to fail: no fresh
+/// heartbeat **and** a claim older than `claim_ttl_secs`. The rule is a
+/// disjunction, not a partition — a stale heartbeat alone does not open the
+/// surface.
 fn claim_still_stands(project: &str, claim: &peers::ClaimEntry, now_epoch: u64) -> bool {
     crate::claim_standing::claim_standing(project, claim, now_epoch)
         != crate::claim_standing::ClaimStanding::Expired

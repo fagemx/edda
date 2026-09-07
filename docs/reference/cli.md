@@ -379,7 +379,7 @@ A claim keeps refusing writers while **either** of two things is true, so a
 
 | A claim stands while | Window |
 |---|---|
-| its session has a fresh heartbeat | 120 s (`EDDA_PEER_STALE_SECS`). A running session keeps refreshing it, so it is protected for as long as it runs. |
+| its session has a fresh heartbeat | 120 s (`EDDA_PEER_STALE_SECS`), or 15× that for a sub-agent whose heartbeat records a parent — no hook events fire during a sub-agent's run, so a heartbeat written once at spawn would otherwise age out mid-run. A running session keeps refreshing it, so it is protected for as long as it runs. |
 | **or** it is a bare-CLI claim (`cli-*`) young enough by its own timestamp | 24 h (`EDDA_CLAIM_TTL_SECS`). Nothing refreshes a heartbeat for a one-shot process, so the claim's own age is what is judged. |
 
 Neither true, and the claim stops refusing. That has an edge worth knowing:
