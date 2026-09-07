@@ -429,7 +429,9 @@ expect_label_verdict \
 # re-implemented the union rule would be a third copy of it.
 
 stub_gate() { # $1=exit code the fake verb returns; echoes the stub's directory
-    dir=$(mktemp -d)
+    # Under the suite's own `trap 'rm -rf "$tmp"' 0`, so an aborted case
+    # (`set -eu`) leaks nothing.
+    dir=$(mktemp -d "$tmp/gate.XXXXXX")
     printf '#!/bin/sh
 exit %s
 ' "$1" > "$dir/edda"
@@ -445,13 +447,10 @@ expect_gate_state() {
     dir=$(stub_gate "$code")
     actual=$(printf 'LGTM	0	0
 ' |         EDDA_BIN="$dir/edda" timeout 60 sh "$root/scripts/pr-review-watch.sh"         gate-state 0000000000000000000000000000000000000000)
-    rc=$?
     rm -rf "$dir"
-    if [ "$rc" -ne 0 ]; then
-        printf '%s: gate-state exited non-zero
-' "$name" >&2
-        return 1
-    fi
+    # No exit-code guard here on purpose: under `set -e` a failing command
+    # substitution in an assignment aborts the script before any `$?` could be
+    # read, so such a check would be unreachable rather than protective.
     if [ "$actual" != "$expected" ]; then
         printf '%s: expected %s, got %s
 ' "$name" "$expected" "$actual" >&2
@@ -1033,9 +1032,14 @@ if [ "$(statuses_calls)" != "1" ]; then
 fi
 
 # an earlier Changes Requested on the same sha keeps the union at failure even
-# though this round's verdict is LGTM — the case the whole issue exists for
+# though this round's verdict is LGTM — the case the whole issue exists for.
+# The union RULE is `cmd_review::gate`'s; what the daemon still owns, and what
+# this case pins, is that both facts reach it: the prior comment's verdict and
+# this round's, on the reviewed sha, in the record shape the verb parses.
 reset_stubs
 export EDDA_GATE_EXIT=1   # the gate fails this sha (rule: cmd_review::gate)
+export EDDA_GATE_STDIN="$tmp/gate-stdin-union"
+: >"$EDDA_GATE_STDIN"
 pending_set 42 1 "$sha" 0 0
 printf 'TRANSPORT=edda-dispatch\nDISPATCH_EXIT=0\nFINAL_EXIT=0\nWORKTREE_CHECK=unchanged\nWORKTREE_CLEANUP=removed\nTASK_CLEANUP=not-applicable\nTERMINAL_RECEIPT=complete\n' >"$EDDA_FLEET_SCRATCH/review-pr42-r1.done"
 verdict_log_fixture
@@ -1053,6 +1057,26 @@ if ! grep -qF -- '--add-label review:lgtm' "$GH_STUB_LOG"; then
     printf 'live: the label still reflects the current LGTM verdict\n' >&2
     exit 1
 fi
+# What the daemon handed the gate: the standing Changes Requested from the
+# comment list AND this round's LGTM. Drop either one and the rule upstream
+# has nothing to rule on.
+if ! grep -qF "$(printf 'Changes Requested\t0\t3')" "$EDDA_GATE_STDIN"; then
+    printf 'live: the prior Changes Requested never reached the gate, got:\n%s\n' \
+        "$(cat "$EDDA_GATE_STDIN")" >&2
+    exit 1
+fi
+if ! grep -qF "$(printf 'LGTM\t0\t0')" "$EDDA_GATE_STDIN"; then
+    printf "live: this round's LGTM never reached the gate, got:\n%s\n" \
+        "$(cat "$EDDA_GATE_STDIN")" >&2
+    exit 1
+fi
+# And the subject it was asked about is the reviewed sha, not the current head.
+if ! grep -qF "gate $sha exit 1" "$PR_REVIEW_WATCH_LOG"; then
+    printf 'live: the gate was not asked about the reviewed sha, log tail:\n%s\n' \
+        "$(tail -4 "$PR_REVIEW_WATCH_LOG")" >&2
+    exit 1
+fi
+unset EDDA_GATE_STDIN
 
 # posting the status is not best-effort: the comment path\'s bounded retry,
 # and no label until the status is out

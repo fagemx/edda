@@ -1211,7 +1211,7 @@ Answer whether a reviewed SHA has passed. Read-only: it launches no review,
 writes no event, and never touches GitHub.
 
 ```bash
-edda review gate 3306c1a2d9a0... --base origin/main
+edda review gate <sha> --base origin/main
 edda review gate <sha> --json
 printf 'LGTM\t0\t0\n' | edda review gate <sha> --verdicts -
 ```
@@ -1233,7 +1233,8 @@ Verdicts come from the ledger's `review_verdict` events for that SHA;
 reads them from the caller instead, one `verdict<TAB>p0<TAB>p1` record per
 line — the shape `scripts/pr-review-watch.sh` derives from §7 comments while
 the ledger does not yet carry verdicts across machines. The SHA must be a full
-40-character hex value.
+lowercase 40-hex value — the same shape `pr-review-watch.sh`'s `is_full_sha`
+and REVIEW.md R5 require.
 
 Stdout is one line — `PASS <sha> verdicts=<n>`, `FAIL <sha> <reason>` or
 `NONE <sha>`. `--json` adds each verdict's `reviewer_model`, `round` and

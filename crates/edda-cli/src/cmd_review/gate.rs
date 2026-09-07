@@ -131,15 +131,35 @@ pub(crate) fn union(standing: &[Standing]) -> Union {
 ///
 /// Both arguments are resolved commits, not refs: two `git` calls read `base`
 /// here, and a name that moved between them would compare two different trees.
+///
+/// The file list is read with `-z` and split on NUL because the check feeds
+/// its own output back as pathspecs. With `core.quotePath` at its default git
+/// C-quotes any path holding non-ASCII, a quote or a backslash — `réponse.txt`
+/// comes back as `"r\303\251ponse.txt"`, which matches nothing as a pathspec,
+/// so the second diff is empty and the window reads *clear* for exactly the
+/// case the rule exists to catch. `--literal-pathspecs` closes the other half:
+/// a filename containing `*` or `[` is a filename here, never a glob.
 fn window_moved(repo: &Path, sha: &str, base: &str) -> Result<bool> {
-    let changed = git(repo, &["diff", "--name-only", &format!("{base}...{sha}")])?;
-    let files: Vec<&str> = changed.lines().filter(|line| !line.is_empty()).collect();
+    let changed = git(
+        repo,
+        &["diff", "--name-only", "-z", &format!("{base}...{sha}")],
+    )?;
+    let files: Vec<&str> = changed
+        .split('\0')
+        .filter(|name| !name.is_empty())
+        .collect();
     if files.is_empty() {
         return Ok(false);
     }
     let merge_base = git(repo, &["merge-base", sha, base])?;
     let range = format!("{merge_base}..{base}");
-    let mut args = vec!["diff", "--name-only", range.as_str(), "--"];
+    let mut args = vec![
+        "--literal-pathspecs",
+        "diff",
+        "--name-only",
+        range.as_str(),
+        "--",
+    ];
     args.extend(files);
     Ok(!git(repo, &args)?.trim().is_empty())
 }
@@ -245,9 +265,35 @@ fn report(sha: &str, standing: &[Standing], outcome: Union, reason: Option<&str>
 }
 
 /// CLI entry point. Exit: 0 pass, 1 fail, 2 cannot judge.
+///
+/// Every internal failure — an unreadable ledger, an undeserializable
+/// `review_verdict`, an unresolvable `--base` — leaves through exit **2**, not
+/// through the caller's error path. `main` exits 1 on an `Err`, and the
+/// watcher reads 1 as `failure`: a definitive "this SHA did not pass". Not
+/// being able to judge is not a judgement, so this verb never returns its
+/// errors upward.
 pub fn run(args: GateArgs, cwd: &Path) -> Result<()> {
-    if args.sha.len() != 40 || !args.sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        eprintln!("edda review gate: expected a full 40-character SHA");
+    match judge(args, cwd) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            eprintln!("edda review gate: {error:#}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn judge(args: GateArgs, cwd: &Path) -> Result<()> {
+    // Lowercase only, matching `is_full_sha` in the watcher and REVIEW.md R5.
+    // An uppercase SHA would otherwise pass the guard, match no ledger event,
+    // and be reported as "no verdict" — the wrong diagnosis for a malformed
+    // argument.
+    if args.sha.len() != 40
+        || !args
+            .sha
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        eprintln!("edda review gate: expected a full lowercase 40-hex SHA");
         std::process::exit(2);
     }
     // The repo is resolved only where it is needed: `--verdicts` judges facts
@@ -390,6 +436,30 @@ mod tests {
         // Blank lines and CRLF are not records.
         assert_eq!(union(&from_lines("\r\n\nLGTM\t0\t0\r\n")), Union::Pass);
         assert_eq!(union(&from_lines("   \n")), Union::None);
+        // Deliberate, and wider than the awk this replaced: surrounding
+        // whitespace on a field is not a malformed record. The tolerance stops
+        // at the label — a padded verdict word is still that word, an unknown
+        // one still cannot qualify.
+        assert_eq!(union(&from_lines(" LGTM \t 0 \t 0 \n")), Union::Pass);
+        assert_eq!(union(&from_lines(" lgtm \t0\t0\n")), Union::Fail);
+    }
+
+    #[test]
+    fn a_path_git_would_quote_is_still_seen_by_the_window() {
+        // The check feeds its own file list back as pathspecs, and git
+        // C-quotes anything non-ASCII by default: `réponse.txt` returns as
+        // `"r\303\251ponse.txt"`, which matches nothing. Before `-z` this
+        // read as *window clear* — a fail-open on the whole rule.
+        let (_temp, root) = testrepo::init();
+        testrepo::commit_file(&root, "réponse.txt", "base\n", "quoted path");
+        testrepo::run(&root, &["checkout", "-q", "-b", "subject"]);
+        let sha = testrepo::commit_file(&root, "réponse.txt", "subject\n", "subject edit");
+        testrepo::run(&root, &["checkout", "-q", "main"]);
+        testrepo::commit_file(&root, "réponse.txt", "moved\n", "base advance");
+        assert!(
+            window_moved(&root, &sha, "main").unwrap(),
+            "a quoted path must not read as an untouched file"
+        );
     }
 
     #[test]
@@ -416,7 +486,19 @@ mod tests {
     /// Build a `review_verdict` payload through serde so the fixture cannot
     /// drift from the struct the product actually writes.
     fn payload(head: &str, verdict: &str, qualified: bool) -> ReviewVerdictPayload {
+        payload_with(head, verdict, qualified, serde_json::json!([]))
+    }
+
+    /// The same fixture, carrying findings — the half of `from_ledger` that
+    /// decides whether a verdict is clean.
+    fn payload_with(
+        head: &str,
+        verdict: &str,
+        qualified: bool,
+        findings: serde_json::Value,
+    ) -> ReviewVerdictPayload {
         serde_json::from_value(serde_json::json!({
+            "findings": findings,
             "schema": "review_verdict/0",
             "subject": {
                 "base_sha": "base", "head_sha": head,
@@ -481,6 +563,42 @@ mod tests {
             Some("openai-codex/gpt-5.6-sol")
         );
         assert_eq!(union(&standing), Union::Pass);
+    }
+
+    #[test]
+    fn the_ledger_source_counts_findings_and_keeps_the_qualification() {
+        let (_temp, root) = testrepo::init();
+        let ledger = edda_ledger::Ledger::open_or_init(&root).expect("ledger");
+        let sha = "c".repeat(40);
+        let finding = |severity: &str| {
+            serde_json::json!({
+                "id": format!("{severity}-1"), "severity": severity,
+                "file": "a.rs", "line": 1, "claim": "c",
+                "evidence": "a.rs:1", "rule": "core", "status": "open",
+            })
+        };
+        // One P0, two P1s, and a P2 that is not blocking and must not be
+        // counted into either.
+        append(
+            &ledger,
+            &payload_with(
+                &sha,
+                "lgtm",
+                false,
+                serde_json::json!([finding("P0"), finding("P1"), finding("P1"), finding("P2")]),
+            ),
+        );
+
+        let standing = from_ledger(&root, &sha).expect("read ledger");
+        assert_eq!(standing.len(), 1, "{standing:?}");
+        assert_eq!(standing[0].p0, Some(1));
+        assert_eq!(standing[0].p1, Some(2));
+        assert!(
+            !standing[0].qualified,
+            "qualification must survive the read"
+        );
+        assert!(!standing[0].clean());
+        assert_eq!(union(&standing), Union::Fail);
     }
 
     #[test]
