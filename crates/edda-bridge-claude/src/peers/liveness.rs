@@ -10,9 +10,31 @@
 //!
 //! There is one liveness surface — the heartbeat file — and one criterion —
 //! [`liveness_from_heartbeat`]. Do not add a parallel one.
+//!
+//! ## Claims are a second fact, not a second criterion
+//!
+//! A board claim carries its own timestamp, and for a bare CLI session
+//! (`cli-*`) that timestamp is the only judgeable thing about it: nothing ever
+//! refreshes a heartbeat for a one-shot process, so the criterion above can
+//! only ever call it dead (GH-705, GH-1018). [`claim_age_secs_at`] is the one
+//! place that age is computed.
+//!
+//! Two questions are asked of that one age, and they take **different**
+//! thresholds on purpose:
+//!
+//! | Question | Function | Threshold |
+//! |---|---|---|
+//! | Is this claim fresh? (display) | [`claim_is_stale_at`] | [`stale_secs`] |
+//! | May it still refuse a writer? | [`claim_guard_expired_at`] | [`claim_ttl_secs`] |
+//!
+//! Collapsing those into one threshold is not simplification, it is a bug —
+//! [`claim_guard_expired_at`] records why. The rule against parallel criteria
+//! is about answering one question two ways, not about refusing to notice that
+//! these are two questions.
 
 use serde::Serialize;
 
+use super::claim_ttl_secs;
 use super::read_heartbeat;
 use super::stale_secs;
 use crate::parse::now_rfc3339;
@@ -108,11 +130,34 @@ pub fn claim_age_secs_at(claim_ts: &str, now_epoch: u64) -> u64 {
 ///
 /// The rule `edda peers --json` publishes for every claim (GH-569): older
 /// than [`stale_secs`] is stale, so a 55-day-old zombie claim and a
-/// 37-second-old live one are distinguishable to a program. It lives here,
-/// beside the session criterion, because a caller asking "does this claim
-/// still stand?" must share one rule rather than grow a second (GH-1018).
+/// 37-second-old live one are distinguishable to a program.
+///
+/// This answers a **display** question — "is this claim still fresh?" — and it
+/// is not the question a write guard asks. See [`claim_guard_expired_at`].
 pub fn claim_is_stale_at(claim_ts: &str, now_epoch: u64) -> bool {
     claim_age_secs_at(claim_ts, now_epoch) > stale_secs()
+}
+
+/// Has this board claim outlived the window in which it may refuse a writer?
+///
+/// Two questions look alike here and are not the same:
+///
+/// - *Is this claim fresh?* — [`claim_is_stale_at`], measured against
+///   [`stale_secs`] (120s), the window a **heartbeat** is refreshed inside
+///   (every 30s). Past it, nobody has been heard from lately.
+/// - *May this claim still refuse a writer?* — this function. A board claim is
+///   written **once** and never refreshed, so measuring it against a
+///   refresh-calibrated window would expire a claim its owner is still working
+///   under. An `edda claim` + `edda conduct run` session from the operator
+///   runbook occupies its surface for minutes to hours; two minutes in, the
+///   surface would silently open.
+///
+/// So the guard gets its own window, [`claim_ttl_secs`]. Both questions share
+/// one age computation ([`claim_age_secs_at`]) and one place to read the
+/// difference from; what they must not share is a threshold calibrated for the
+/// other one's fact (GH-1018).
+pub fn claim_guard_expired_at(claim_ts: &str, now_epoch: u64) -> bool {
+    claim_age_secs_at(claim_ts, now_epoch) > claim_ttl_secs()
 }
 
 #[cfg(test)]
@@ -222,5 +267,37 @@ mod tests {
         // date must not be able to stand forever by being unreadable.
         assert!(claim_is_stale_at("not a timestamp", 1_000_000));
         assert!(claim_is_stale_at("", 1_000_000));
+    }
+
+    #[test]
+    fn the_guard_window_is_not_the_display_window() {
+        // The two questions this module answers about one claim age take
+        // different thresholds on purpose, and the gap between them is where
+        // the bug lives: a claim two minutes old is no longer *fresh*, and it
+        // must still refuse a writer. Collapsing them opens an operator's
+        // claimed surface two minutes after they claimed it (GH-1018).
+        let t0 = parse_rfc3339_to_epoch("2026-09-02T12:00:00Z").unwrap();
+        let ts = "2026-09-02T12:00:00Z";
+        assert!(claim_is_stale_at(ts, t0 + stale_secs() + 1));
+        assert!(!claim_guard_expired_at(ts, t0 + stale_secs() + 1));
+    }
+
+    #[test]
+    fn the_guard_shares_the_boundary_every_criterion_here_uses() {
+        // `age > threshold`, same edge as the session criterion and the
+        // display rule: at exactly the TTL the claim still stands.
+        let t0 = parse_rfc3339_to_epoch("2026-09-02T12:00:00Z").unwrap();
+        let ts = "2026-09-02T12:00:00Z";
+        assert!(!claim_guard_expired_at(ts, t0 + claim_ttl_secs()));
+        assert!(claim_guard_expired_at(ts, t0 + claim_ttl_secs() + 1));
+    }
+
+    #[test]
+    fn an_undateable_claim_cannot_refuse_a_writer_forever() {
+        // The guard fails the same direction the display rule does. A claim
+        // nobody can date is the one shape that could otherwise hold a
+        // surface permanently — exactly the standstill GH-1018 found.
+        assert!(claim_guard_expired_at("not a timestamp", 1_000_000));
+        assert!(claim_guard_expired_at("", 1_000_000));
     }
 }

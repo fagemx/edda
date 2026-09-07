@@ -17,6 +17,22 @@ pub fn stale_secs() -> u64 {
         .unwrap_or(120)
 }
 
+/// How long a board claim may keep refusing a writer.
+///
+/// Deliberately **not** [`stale_secs`]. That threshold is calibrated for a
+/// heartbeat, which is refreshed every 30s; a claim is written once and never
+/// refreshed, so measuring it against a refresh window opens an occupied
+/// surface two minutes after its owner claimed it (GH-1018). The default is a
+/// day: long enough to cover any single working session an operator claims a
+/// surface for, short enough that the months-old claims a long-lived machine
+/// accumulates stop refusing lanes.
+pub fn claim_ttl_secs() -> u64 {
+    std::env::var("EDDA_CLAIM_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(86_400)
+}
+
 /// Dead-letter horizon: unacked requests older than this are expired.
 ///
 /// Requests are addressed by label, and a label can go away — the session

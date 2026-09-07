@@ -1,5 +1,6 @@
 mod agent_kind;
 mod claim_guard;
+mod claim_standing;
 mod cmd_actor;
 mod cmd_ask;
 mod cmd_blob;

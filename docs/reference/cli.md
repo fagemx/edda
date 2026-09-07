@@ -374,6 +374,29 @@ session replaces its previous label and complete path list; it does not add a
 second claim. Pass each path pattern with its own `--paths` flag; comma-separated
 values are not split.
 
+A claim keeps refusing writers while **either** of two things is true, so a
+`cli-*` claim can outlive its own stale heartbeat:
+
+| A claim stands while | Window |
+|---|---|
+| its session has a fresh heartbeat | 120 s (`EDDA_PEER_STALE_SECS`), or 15× that for a sub-agent whose heartbeat records a parent — no hook events fire during a sub-agent's run, so a heartbeat written once at spawn would otherwise age out mid-run. A running session keeps refreshing it, so it is protected for as long as it runs. |
+| **or** it is a bare-CLI claim (`cli-*`) young enough by its own timestamp | 24 h (`EDDA_CLAIM_TTL_SECS`). Nothing refreshes a heartbeat for a one-shot process, so the claim's own age is what is judged. |
+
+Neither true, and the claim stops refusing. That has an edge worth knowing:
+a claim from a session that is **not** `cli-*` and has never written a
+heartbeat refuses nobody, from the moment it is recorded — the board entry
+alone is not evidence such a session exists (GH-617).
+
+The second window is deliberately not the first. A heartbeat is refreshed every
+30 seconds; a claim is written once, so measuring it against a
+refresh-calibrated window would open a surface two minutes after its owner
+claimed it. Before the bare-CLI case was bounded at all, claims from
+months-gone sessions refused every new lane and no `unclaim` could reach them
+(GH-1018).
+
+`edda claim check` and the `edda dispatch --owns` admission guard read one
+rule, so they cannot answer differently about the same board.
+
 ### `edda request`
 
 Send a request to another active session.
