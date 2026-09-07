@@ -55,6 +55,16 @@ case "$1" in
         ;;
       view)
         case "$*" in
+          *"--json isDraft,commits,comments"*)
+            # decide()'s facts query (GH-763). Without this arm the stub falls
+            # through to a bare `exit 0`, decide() reads three empty fields,
+            # and every assertion about --draft/--pushed-at/--response-at
+            # passes whether or not the wiring exists.
+            [ -n "${GH_FAIL_FACTS:-}" ] && exit 1
+            printf '%s\t%s\t%s\n' "${GH_FACTS_DRAFT:-}" \
+                "${GH_FACTS_PUSHED_AT:-}" "${GH_FACTS_RESPONSE_AT:-}"
+            exit 0
+            ;;
           *"--json comments"*)
             [ -n "${GH_FAIL_COMMENTS:-}" ] && exit 1
             [ -n "${GH_COMMENTS_FILE:-}" ] && cat "$GH_COMMENTS_FILE"
@@ -371,6 +381,45 @@ for flag in '--head def456' '--pr 42' '--last-reviewed abc123' '--unreviewed-lab
         *) printf 'decide: the verb was not handed %s, got:\n  %s\n' "$flag" "$argv" >&2; exit 1 ;;
     esac
 done
+
+# The three facts the debounce runs on must reach the verb. Round 1 of #1070
+# found the suite could not see them go missing: with the entire `gh pr view`
+# block replaced by `facts=""` it still passed, byte-identical.
+export GH_FACTS_DRAFT=draft
+export GH_FACTS_PUSHED_AT=2026-09-02T00:00:00Z
+export GH_FACTS_RESPONSE_AT=2026-09-03T00:00:00Z
+expect_decide_wired \
+    'the draft, push-time and response facts are handed to the verb' \
+    'SKIP 42 draft' \
+    1 'SKIP draft\n' \
+    '42\tabc123\t2\n' \
+    '42\tdef456\t\t2026-09-02T00:00:00Z'
+argv=$(cat "$DUE_ARGV" 2>/dev/null)
+for flag in '--draft' '--pushed-at 2026-09-02T00:00:00Z' '--response-at 2026-09-03T00:00:00Z'; do
+    case "$argv" in
+        *"$flag"*) ;;
+        *) printf 'decide: the verb was not handed %s, got:\n  %s\n' "$flag" "$argv" >&2; exit 1 ;;
+    esac
+done
+unset GH_FACTS_DRAFT GH_FACTS_PUSHED_AT GH_FACTS_RESPONSE_AT
+
+# A failed facts query is logged and does not stop the row. Round 1: every
+# other gh failure in this script logs; this one degraded silently, and it is
+# the one that removes the debounce's inputs.
+: >"$PR_REVIEW_WATCH_LOG"
+export GH_FAIL_FACTS=1
+expect_decide_wired \
+    'a failed facts query is logged and the row still reaches the verb' \
+    'SKIP 42 debounce push-time-unknown' \
+    1 'SKIP debounce push-time-unknown\n' \
+    '42\tabc123\t2\n' \
+    '42\tdef456\t\t2026-09-02T00:00:00Z'
+case "$(cat "$PR_REVIEW_WATCH_LOG" 2>/dev/null)" in
+    *"gh pr view failed"*) ;;
+    *) printf 'decide: a failed facts query was not logged, got:\n  %s\n' \
+        "$(cat "$PR_REVIEW_WATCH_LOG" 2>/dev/null)" >&2; exit 1 ;;
+esac
+unset GH_FAIL_FACTS
 
 expect_decide_wired \
     'a PR with no head is refused before the verb is asked' \

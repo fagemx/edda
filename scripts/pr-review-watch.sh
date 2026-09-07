@@ -9,7 +9,7 @@
 # no status, no label), and posts its own receipts to the log, not the comment.
 #
 # usage: pr-review-watch.sh [--once] [--dry-run]
-#        pr-review-watch.sh decide                 (offline helper; TSV on stdin)
+#        pr-review-watch.sh decide                 (TSV on stdin; calls gh + edda)
 #        pr-review-watch.sh label-verdict <reviewed-sha> <current-head>
 #        pr-review-watch.sh ack-try <pr> <sha> <attempts>
 #        pr-review-watch.sh gate-state <sha>            (offline helper; verdict TSV on stdin)
@@ -106,7 +106,7 @@ WATCHLOG=${PR_REVIEW_WATCH_LOG:-$SCRATCH/watch.log}   # set early: offline
                      # subcommands log gh failures too, not just the main loop
 log() { echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') $*" >> "$WATCHLOG"; }
 
-# ---- offline helpers (unit-tested by scripts/test-pr-review-watch.sh) --------
+# ---- helpers (unit-tested by scripts/test-pr-review-watch.sh) ----------------
 
 # decide: PR queue triage. Input: one TSV row per open non-draft PR from
 #   gh pr list --repo R --state open --json number,headRefOid,isDraft,labels,updatedAt \
@@ -155,14 +155,24 @@ decide() {
     unreviewed=""
     case ",$labels," in *,review:unreviewed,*) unreviewed=--unreviewed-label ;; esac
 
-    facts=$(gh pr view "$num" --repo "$REPO" --json isDraft,commits,comments \
+    # A failure here — rate limit, expired token, network — must be visible.
+    # Losing these facts does not stop the cycle, but it does remove the
+    # inputs the debounce runs on, and the verb holds rather than proceeding
+    # when it cannot see a push time. Silently degrading to "no facts" hid
+    # both halves: the outage, and the reason the answers changed.
+    if facts=$(gh pr view "$num" --repo "$REPO" --json isDraft,commits,comments \
       --jq '[
         (if .isDraft then "draft" else "" end),
         ((.commits // []) | last | .committedDate // ""),
         ((.comments // [])
           | map(select(.body | test("(?m)^## Review Response: Round [0-9]+")))
           | last | .createdAt // "")
-      ] | @tsv' 2>/dev/null) || facts=""
+      ] | @tsv' 2>/dev/null); then
+      :
+    else
+      log "pr$num gh pr view failed; deciding without draft/push/response facts"
+      facts=""
+    fi
     draft=$(printf '%s' "$facts" | cut -f1)
     pushed_at=$(printf '%s' "$facts" | cut -f2)
     response_at=$(printf '%s' "$facts" | cut -f3)
@@ -179,6 +189,11 @@ decide() {
 
     cost=$(sed -n "s/^review cost so far/pr$num review cost so far/p" "$out" | head -1)
     [ -n "$cost" ] && log "$cost"
+    # The decision line carries `--resume <session>` from round 2 on. Logging
+    # it is what makes the published id observable at all: nothing downstream
+    # parses it, and without this the id was written and deleted unread.
+    decision=$(sed -n '1{/^REVIEW /p;}' "$out")
+    [ -n "$decision" ] && log "pr$num $decision"
 
     case $rc in
       0)
@@ -416,7 +431,9 @@ ack_try() { # $1=pr $2=sha $3=attempts — one attempt.
 
 # ---- offline subcommand dispatch (after all definitions) ---------------------
 case "${1:-}" in
-  decide) decide; exit 0 ;;
+  # decide writes a per-row scratch file, so it needs $SCRATCH the way
+  # ack-try does. The daemon path creates it below; this one runs before that.
+  decide) mkdir -p "$SCRATCH"; decide; exit 0 ;;
   label-verdict) label_verdict "${2:-}" "${3:-}"; exit 0 ;;
   gate-state) gate_state "${2:-}"; exit 0 ;;
   collect-verdicts)

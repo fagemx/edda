@@ -127,15 +127,29 @@ pub(crate) fn history(repo: &Path, pr: u64) -> Result<History> {
         ..Default::default()
     };
     for event in ledger.iter_events_by_type("review_verdict")? {
+        // Scope by PR *before* deserializing. A `review_verdict` this build
+        // cannot read is fatal for the PR it belongs to — a policy that
+        // silently drops the event it cannot parse is a policy that decides
+        // while blind — but it must not be fatal for every other PR. Reading
+        // `refs.pr` from the raw JSON keeps one malformed event from turning
+        // the whole daemon into `SKIP due-unknown` until the ledger is
+        // repaired.
+        if event.payload.pointer("/refs/pr").and_then(|v| v.as_u64()) != Some(pr) {
+            continue;
+        }
         let payload: ReviewVerdictPayload = serde_json::from_value(event.payload.clone())
             .with_context(|| format!("review_verdict event {}", event.event_id))?;
-        if payload.verdict == "unreviewed" || payload.refs.pr != Some(pr) {
+        if payload.verdict == "unreviewed" {
             continue;
         }
         history.rounds += 1;
         history.last_sha = Some(payload.subject.head_sha.clone());
         history.last_ts = Some(event.ts.clone());
-        if history.first_session.is_none() {
+        // Round 1's reviewer is the one to resume, and the payload says which
+        // round it is. Taking the first event seen would name whichever round
+        // happens to sit earliest in this ledger — not the same thing on a
+        // machine that only imported later rounds.
+        if payload.refs.round == Some(1) {
             history.first_session = Some(payload.reviewer.session_id.clone());
         }
         match (payload.cost.measured, payload.cost.usd) {
@@ -199,12 +213,21 @@ pub(crate) fn decide(facts: &Facts, config: &DueConfig) -> Due {
     // A Review Response is the implementer saying "look again", and it counts
     // only if it arrived after the verdict it answers. An older one is the
     // previous round's, already answered.
+    //
+    // A response with **no** verdict to compare against is not a trigger. It
+    // reads like one — the comment is right there — but this branch is not
+    // debounced and nothing records that a response was acted on, so answering
+    // "review" to an uncomparable response answers it again on the next poll,
+    // and every poll after that, each at round-1 price. Verdicts do not cross
+    // machines yet (GH-671: `review_verdict` is not among the event types the
+    // committed mirror imports) and a round published only through the §7
+    // comment path writes no event at all, so "no verdict in this ledger" is
+    // the common case rather than the exotic one. Such a PR falls through to
+    // the push rule below, which is debounced and reads the daemon's own
+    // recorded head — the record that actually exists.
     if config.enabled("response") {
-        if let Some(response_at) = facts.response_at {
-            let after_verdict = facts
-                .last_verdict_at
-                .is_none_or(|verdict_at| response_at > verdict_at);
-            if after_verdict {
+        if let (Some(response_at), Some(verdict_at)) = (facts.response_at, facts.last_verdict_at) {
+            if response_at > verdict_at {
                 return Due::Review("response".into());
             }
         }
@@ -221,13 +244,19 @@ pub(crate) fn decide(facts: &Facts, config: &DueConfig) -> Due {
     // The debounce is the cost switch. A head that moved 20 seconds ago is
     // usually mid-sequence — the fixup, the second thought, the CI-driven
     // amend — and reviewing it buys a round-1 price for a tree about to
-    // change again. Without `--pushed-at` there is nothing to wait on, so the
-    // moved head is due at once rather than silently held.
+    // change again.
+    //
+    // An unknown push time waits rather than proceeding. The caller cannot
+    // tell "this PR has no commit date" from "the forge call failed", and the
+    // second is the dangerous one: a rate limit or an expired token would
+    // otherwise turn the cost switch off for every PR at once, which is
+    // exactly when the daemon is polling hardest. Holding costs one cycle;
+    // proceeding costs a round.
+    let debounce = i64::try_from(config.debounce_seconds).unwrap_or(i64::MAX);
     let Some(pushed_at) = facts.pushed_at else {
-        return Due::Review("push".into());
+        return Due::Skip("debounce push-time-unknown".into());
     };
     let settled_for = facts.now.saturating_sub(pushed_at);
-    let debounce = config.debounce_seconds as i64;
     if settled_for >= debounce {
         Due::Review("push".into())
     } else {
@@ -364,6 +393,86 @@ mod tests {
     }
 
     #[test]
+    fn a_response_with_no_verdict_to_answer_is_not_a_trigger() {
+        // Round 1's P1: `is_none_or` read a missing verdict as "the response
+        // is newer", so a PR carrying a Review Response and no ledger verdict
+        // was due on every poll, forever, at round-1 price. Verdicts do not
+        // cross machines (GH-671) and a §7-comment round writes no event, so
+        // this is the ordinary shape, not an exotic one.
+        let config = DueConfig::default();
+        let mut f = facts();
+        f.response_at = Some(9_000);
+        f.last_verdict_at = None;
+        f.last_sha = Some(HEAD); // head unmoved: nothing else can make it due
+        assert_eq!(decide(&f, &config), Due::Skip("reviewed".into()));
+    }
+
+    #[test]
+    fn a_response_still_opens_the_next_round_when_a_verdict_exists() {
+        // The trigger itself is unchanged for the case it was written for.
+        let config = DueConfig::default();
+        let mut f = facts();
+        f.last_sha = Some(HEAD);
+        f.last_verdict_at = Some(9_000);
+        f.response_at = Some(9_001);
+        assert_eq!(decide(&f, &config), Due::Review("response".into()));
+        // ...and an older response is the previous round's, already answered.
+        f.response_at = Some(8_999);
+        assert_eq!(decide(&f, &config), Due::Skip("reviewed".into()));
+    }
+
+    #[test]
+    fn an_unverdicted_response_falls_through_to_the_debounced_push_rule() {
+        // Falling through is the point: the PR is still reviewable, but by the
+        // rule that has a cost switch on it rather than the one that does not.
+        let config = DueConfig::default();
+        let mut f = facts();
+        f.response_at = Some(9_000);
+        f.last_verdict_at = None;
+        f.last_sha = Some(OLD);
+        f.pushed_at = Some(f.now - 10);
+        assert_eq!(
+            decide(&f, &config),
+            Due::Skip(format!("debounce {}s", config.debounce_seconds - 10))
+        );
+        f.pushed_at = Some(f.now - config.debounce_seconds as i64);
+        assert_eq!(decide(&f, &config), Due::Review("push".into()));
+    }
+
+    #[test]
+    fn an_unknown_push_time_waits_rather_than_opening_the_switch() {
+        // Round 1's other P1: the caller cannot tell "no commit date" from
+        // "the forge call failed", and a rate limit would otherwise disable
+        // the debounce for every PR at once — precisely when the daemon is
+        // polling hardest. Holding costs a cycle; proceeding costs a round.
+        let config = DueConfig::default();
+        let mut f = facts();
+        f.last_sha = Some(OLD);
+        f.pushed_at = None;
+        assert_eq!(
+            decide(&f, &config),
+            Due::Skip("debounce push-time-unknown".into())
+        );
+    }
+
+    #[test]
+    fn an_enormous_configured_debounce_does_not_wrap_the_switch_open() {
+        // `as i64` turned a debounce >= 2^63 negative, so `settled_for >=
+        // debounce` always held and the switch was permanently open.
+        let config = DueConfig {
+            debounce_seconds: u64::MAX,
+            ..DueConfig::default()
+        };
+        let mut f = facts();
+        f.last_sha = Some(OLD);
+        f.pushed_at = Some(f.now - 1);
+        assert!(
+            matches!(decide(&f, &config), Due::Skip(reason) if reason.starts_with("debounce ")),
+            "a saturating debounce must hold, never open"
+        );
+    }
+
+    #[test]
     fn a_draft_is_not_a_subject() {
         let config = DueConfig::default();
         let mut f = facts();
@@ -444,16 +553,6 @@ mod tests {
     }
 
     #[test]
-    fn a_moved_head_with_no_push_time_is_due_at_once() {
-        // Nothing to wait on, so holding it would be an indefinite hold, not
-        // a debounce.
-        let config = DueConfig::default();
-        let mut f = facts();
-        f.last_sha = Some(OLD);
-        assert_eq!(decide(&f, &config), Due::Review("push".into()));
-    }
-
-    #[test]
     fn an_unreviewed_label_is_released_only_by_a_head_that_demonstrably_moved() {
         let config = DueConfig::default();
 
@@ -477,9 +576,13 @@ mod tests {
         );
 
         // Recorded, and different: the label is stale and the PR is due.
+        // The push time is settled so this asserts the label rule rather than
+        // the debounce — without one the answer would be "wait", which is
+        // true but about a different rule.
         let mut moved = facts();
         moved.unreviewed_label = true;
         moved.last_sha = Some(OLD);
+        moved.pushed_at = Some(moved.now - config.debounce_seconds as i64);
         assert_eq!(decide(&moved, &config), Due::Review("push".into()));
 
         // A draft still wins over everything.
