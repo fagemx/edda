@@ -296,7 +296,8 @@ pending_set() { # pr round sha attempts postfails
 }
 
 pending_get() { cat "$EDDA_FLEET_SCRATCH/review-pending.tsv" 2>/dev/null || true; }
-state_get()   { cat "$EDDA_FLEET_SCRATCH/review-state.tsv" 2>/dev/null || true; }
+state_get()   { cut -f1-3 "$EDDA_FLEET_SCRATCH/review-state.tsv" 2>/dev/null || true; }
+state_get_at() { cut -f4 "$EDDA_FLEET_SCRATCH/review-state.tsv" 2>/dev/null || true; }
 
 # --- decide -------------------------------------------------------------------
 # GH-763 moved the trigger rule into `edda review due`, so what the daemon owns
@@ -415,11 +416,49 @@ expect_decide_wired \
     '42\tabc123\t2\n' \
     '42\tdef456\t\t2026-09-02T00:00:00Z'
 case "$(cat "$PR_REVIEW_WATCH_LOG" 2>/dev/null)" in
-    *"gh pr view failed"*) ;;
+    *"gh pr view failed; without a push time the verb holds this row"*) ;;
     *) printf 'decide: a failed facts query was not logged, got:\n  %s\n' \
         "$(cat "$PR_REVIEW_WATCH_LOG" 2>/dev/null)" >&2; exit 1 ;;
 esac
 unset GH_FAIL_FACTS
+
+# The documented `decide` subcommand must work on a cold machine: the dispatch
+# runs before the daemon path creates $SCRATCH, so without its own mkdir the
+# redirect fails and every row prints an empty reason.
+rm -rf "$EDDA_FLEET_SCRATCH"
+expect_decide_wired     '''decide works when the scratch directory does not exist yet'''     '''REVIEW 42 def456'''     0 '''REVIEW push
+'''     ''''''     '''42	def456		2026-09-02T00:00:00Z'''
+
+# The decision line is the resume id's only consumer: the verb publishes
+# ` --resume <session>` on it from round 2 on, and nothing downstream parses
+# it. If the daemon stops logging the line, the id is written and deleted
+# unread — which is what round 1 filed (GH-763).
+: >"$PR_REVIEW_WATCH_LOG"
+expect_decide_wired \
+    'the decision line, carrying the resume id, is logged' \
+    'REVIEW 42 def456' \
+    0 'REVIEW response --resume round-1-session\n' \
+    '42\tabc123\t2\n' \
+    '42\tdef456\t\t2026-09-02T00:00:00Z'
+case "$(cat "$PR_REVIEW_WATCH_LOG" 2>/dev/null)" in
+    *"pr42 REVIEW response --resume round-1-session"*) ;;
+    *) printf 'decide: the decision line was not logged, got:\n  %s\n' \
+        "$(cat "$PR_REVIEW_WATCH_LOG" 2>/dev/null)" >&2; exit 1 ;;
+esac
+
+# The state row's review time reaches the verb, which is what lets it tell a
+# response that answers this round from one that predates it.
+expect_decide_wired \
+    'the recorded review time is handed to the verb' \
+    'REVIEW 42 def456' \
+    0 'REVIEW push\n' \
+    '42\tabc123\t2\t2026-09-01T00:00:00Z\n' \
+    '42\tdef456\t\t2026-09-02T00:00:00Z'
+case "$(cat "$DUE_ARGV" 2>/dev/null)" in
+    *"--last-reviewed-at 2026-09-01T00:00:00Z"*) ;;
+    *) printf 'decide: the verb was not handed --last-reviewed-at, got:\n  %s\n' \
+        "$(cat "$DUE_ARGV" 2>/dev/null)" >&2; exit 1 ;;
+esac
 
 expect_decide_wired \
     'a PR with no head is refused before the verb is asked' \
@@ -784,6 +823,14 @@ fi
 unset GH_FAIL_HEAD
 export GH_HEAD="$sha"
 run_watch_once >/dev/null 2>&1 || { printf 'live: watcher cycle failed (head recovered)\n' >&2; exit 1; }
+# Field 4 is what `--last-reviewed-at` is derived from: without it a Review
+# Response older than this round still reads as unanswered and re-fires every
+# poll (GH-763 round 2).
+case "$(state_get_at)" in
+    ????-??-??T??:??:??Z) ;;
+    *) printf 'live: the recorded review time is not RFC3339, got: %s\n' \
+        "$(state_get_at)" >&2; exit 1 ;;
+esac
 if [ "$(state_get)" != "$(printf '42\t%s\t1' "$sha")" ]; then
     printf 'live: head recovered should record reviewed, got:\n%s\n' "$(state_get)" >&2
     exit 1
